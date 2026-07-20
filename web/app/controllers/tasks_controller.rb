@@ -121,7 +121,7 @@ class TasksController < ApplicationController
   private
 
   # An unbounded `git diff` from a huge or wedged worktree would pin one of
-  # the box's few Puma threads and buffer the whole diff in memory. Same
+  # Hive web's few Puma threads and buffer the whole diff in memory. Same
   # discipline as ReposController#clone!: own process group, hard wall-clock
   # deadline, output to a tempfile, and only the first DIFF_MAX_BYTES are
   # rendered (with an explicit truncation flag).
@@ -129,7 +129,7 @@ class TasksController < ApplicationController
   DIFF_MAX_BYTES = 512 * 1024
 
   def bounded_diff(worktree)
-    log = Tempfile.create("hivebox-diff")
+    log = Tempfile.create("hive-web-diff")
     pid = Process.spawn("git", "-C", worktree, "diff", "--",
                         pgroup: true, out: log.path, err: log.path)
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + DIFF_TIMEOUT_SEC
@@ -207,7 +207,7 @@ class TasksController < ApplicationController
     # The row belongs to @project, but a custom workflow is registered only in
     # ITS project's overlay. Load that overlay under the lock before fetching:
     # without it the fetch reads whatever overlay the StatusFeed poller last
-    # left active, so on a multi-project box every project but the active one
+    # left active, so on a multi-project instance every project but the active one
     # raises UnknownWorkflow → falls back to coding ARTIFACT_ORDER and renders
     # an empty artifact list for the custom-workflow task. The lock holds the
     # load and the fetch together so a concurrent swap can't race between them.

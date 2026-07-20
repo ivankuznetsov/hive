@@ -1,6 +1,6 @@
 require "test_helper"
 
-# The box's primary authz gate: the REAL GithubAuth logic runs unstubbed —
+# Hive web's primary authz gate: the REAL GithubAuth logic runs unstubbed —
 # only Net::HTTP is replaced via the `http:` DI seam (the same seam the
 # gem's unit suite uses): start → wait-page poll → grant/denial.
 class SessionsFlowTest < ActionDispatch::IntegrationTest
@@ -112,7 +112,7 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     get "/"
     assert_response :success
 
-    # The box changes hands (config edit / re-claim): alice's session must
+    # The Hive web instance changes hands (config edit / re-claim): alice's session must
     # die with her ownership — it holds a repo-scoped token.
     configure_owner!(owner: "bob")
     get "/"
@@ -120,23 +120,23 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     assert_nil session[:github_token], "the evicted session must not keep the grant"
   end
 
-  test "a fresh box is claimed by its first successful login" do
+  test "a fresh Hive web instance is claimed by its first successful login" do
     configure_owner!(owner: "")
     install_auth(login: "firstcomer")
     begin_device_flow
 
     get "/auth/github/wait"
 
-    assert_redirected_to "/", "the first login claims an ownerless box"
+    assert_redirected_to "/", "the first login claims an ownerless Hive web instance"
     config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
     assert_equal "firstcomer", config.dig("web", "github", "owner"),
-                 "the claim must be persisted — it IS the box's auth gate from now on"
+                 "the claim must be persisted — it IS Hive web's auth gate from now on"
 
     get "/"
     assert_response :success, "the claimer is the owner; their session must work"
   end
 
-  test "a claimed box refuses every later non-owner login" do
+  test "a claimed Hive web instance refuses every later non-owner login" do
     configure_owner!(owner: "")
     install_auth(login: "firstcomer")
     begin_device_flow
@@ -150,14 +150,19 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
 
     assert_response :forbidden
     assert_match "not the configured owner", response.body,
-                 "claiming is once — a claimed box is gated exactly like a configured one"
+                 "claiming is once — a claimed Hive web instance is gated exactly like a configured one"
   end
 
-  test "the login page explains claiming on a fresh box" do
+  test "the login page explains claiming on a fresh Hive web instance" do
     configure_owner!(owner: "")
     get "/login"
     assert_response :success
+    assert_select "title", text: "Hive web — sign in"
+    assert_select "meta[name='application-name'][content='Hive web']", 1
+    assert_select "a.brand", text: "Hive web"
+    assert_select "h1", text: "Hive web"
     assert_match "first GitHub sign-in becomes its owner", response.body
+    refute_match(/hivebox/i, response.body)
     assert_select "form[action='/auth/github']", 1,
                   "the claim path must be one button, not a config-editing instruction"
   end

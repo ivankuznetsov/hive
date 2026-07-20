@@ -1,4 +1,4 @@
-<% content_for(:title, "hivebox — telegram") %>
+<% content_for(:title, "Hive web — telegram") %>
 <h1>Telegram</h1>
 <p class="muted">Connect the hive bot so you can drive the pipeline from Telegram. The token is validated against the real API before anything is saved.</p>
 
@@ -29,7 +29,7 @@
     </li>
   </ol>
   <p class="muted">No webhook, public URL, or tunnel — the bot long-polls
-  Telegram from inside the box.</p>
+  Telegram from the same Hive runtime.</p>
 </details>
 
 <%= form_with url: update_telegram_path, class: "form-grid" do |f| %>

@@ -1,7 +1,7 @@
 require "application_system_test_case"
 require "open3"
 
-# The hivebox golden path, end to end, in a real browser — deliberately NOT
+# The Hive web golden path, end to end, in a real browser — deliberately NOT
 # named *_test.rb so the default suites skip it; run it explicitly:
 #
 #   cd web && bin/rails test test/e2e/golden_path_e2e.rb
@@ -36,7 +36,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
   end
 
   setup do
-    configure_owner!(owner: "") # claimable box
+    configure_owner!(owner: "") # claimable Hive web instance
     speed_up_daemon!
     @project = create_hive_project!("golden-app")
     force_headless_claude!(@project)
@@ -91,7 +91,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
     end
   end
 
-  test "claim the box, drop an idea, answer the brainstorm, reach the PR gate" do
+  test "claim Hive web, drop an idea, answer the brainstorm, reach the PR gate" do
     # --- Claim: the first device-flow login becomes the owner -------------
     visit "/login"
     assert_text "first GitHub sign-in becomes its owner"
@@ -103,7 +103,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
     assert_selector "#projects", wait: 15
     config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
     assert_equal "goldenpath", config.dig("web", "github", "owner"),
-                 "the claim must be persisted as the box's owner"
+                 "the claim must be persisted as the Hive web owner"
 
     # --- Sample idea -------------------------------------------------------
     fill_in "New idea", with: "Golden path sample idea"

@@ -87,7 +87,7 @@ module AuthTestHelper
     follow_redirect! if response.redirect?
   end
 
-  # owner: "" writes a CLAIMABLE box (the key is omitted — the config
+  # owner: "" writes a CLAIMABLE instance (the key is omitted — the config
   # validator rejects empty strings; claimable means absent).
   def configure_owner!(owner: "alice")
     path = File.join(ENV["HIVE_HOME"], "config.yml")

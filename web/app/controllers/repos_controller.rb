@@ -61,7 +61,7 @@ class ReposController < ApplicationController
     name = File.basename(name)
     raise Hive::Error, "invalid repo name" if name.empty? || name == "." || name == ".."
 
-    # The container sets HIVEBOX_REPOS_DIR=/data/repos; a host run (dev
+    # The Hivebox container sets HIVEBOX_REPOS_DIR=/data/repos; a host run (dev
     # checkout) keeps clones under hive's data home instead of assuming a
     # /data mount exists.
     root = ENV["HIVEBOX_REPOS_DIR"] || File.join(Hive::Paths.data_home, "repos")
@@ -146,12 +146,12 @@ class ReposController < ApplicationController
   end
 
   # A hung clone (slow network, wedged gh) would otherwise hold a Puma
-  # worker forever; the box has few. Env-overridable for tests.
+  # worker forever; Hive web has few. Env-overridable for tests.
   CLONE_TIMEOUT_SEC = Integer(Hive::Web::Environment.value("HIVE_WEB_CLONE_TIMEOUT_SEC"))
 
   # Clone via `gh` with the operator's device-flow token in GH_TOKEN, so
-  # private repos clone with the session grant — the box needs no separate
-  # `gh auth login` for repos the operator owns. Falls back to the box's own
+  # private repos clone with the session grant — the runtime needs no separate
+  # `gh auth login` for repos the operator owns. Falls back to the runtime's
   # gh auth when no session token exists (e.g. token-less curl admin).
   # Runs in its own process group with a hard deadline; a timed-out or
   # failed clone removes the partial target so a retry starts clean.
@@ -162,7 +162,7 @@ class ReposController < ApplicationController
     raise Hive::Error, "clone target already exists: #{File.basename(target)}" if File.exist?(target)
 
     env = session[:github_token] ? { "GH_TOKEN" => session[:github_token] } : {}
-    log = Tempfile.create("hivebox-clone")
+    log = Tempfile.create("hive-web-clone")
     pid = Process.spawn(env, "gh", "repo", "clone", url, target,
                         pgroup: true, out: log.path, err: log.path)
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + CLONE_TIMEOUT_SEC
@@ -189,7 +189,7 @@ class ReposController < ApplicationController
   end
 
   # Registered repos must push over https: at push time git's credential
-  # helper reads the box's `gh auth login` (the device-flow session token
+  # helper reads the runtime's `gh auth login` (the device-flow session token
   # only powers clone-time GH_TOKEN and is never persisted), while SSH is a
   # dead end here — the
   # container ships no keys, and a host daemon can't answer an interactive
@@ -209,9 +209,9 @@ class ReposController < ApplicationController
     if https == url
       # Non-github ssh remotes survive the rewrite (the allowlist only admits
       # github.com sources, but a pre-existing dir can point anywhere) — and
-      # the box only ships push credentials for https://github.com.
+      # Hive's unattended push path uses credentials for https://github.com.
       unless url.start_with?("https://github.com/")
-        Rails.logger.warn("origin for #{target} is #{url.inspect} — the box can only push to https://github.com remotes")
+        Rails.logger.warn("origin for #{target} is #{url.inspect} — Hive can only push to https://github.com remotes")
       end
       return
     end

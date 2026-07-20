@@ -27,7 +27,7 @@ Rails.application.configure do
   config.active_storage.service = :local
 
   # Assume all access to the app is happening through a SSL-terminating reverse proxy.
-  # hivebox serves plain HTTP; TLS is the operator's reverse proxy / tunnel
+  # Hive web serves plain HTTP; TLS is the operator's reverse proxy / tunnel
   # (documented posture since the Sinatra tier). Cookies stay Secure-less so
   # local-network and tunnel deployments work.
   config.assume_ssl = false

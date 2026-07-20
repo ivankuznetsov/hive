@@ -43,7 +43,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
   test "login gate, composer with image, live stream update, approve" do
     # Unauthenticated → login page, nothing leaks.
     visit "/"
-    assert_selector "h1", text: "hivebox", wait: 5
+    assert_selector "h1", text: "Hive web", wait: 5
     assert_button "Continue with GitHub"
     assert_no_selector ".task-row", wait: 0
 
@@ -189,9 +189,9 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert folder.join("assets", "image2.png").file?
   end
 
-  test "an ownerless box offers the claim flow, not config-editing homework" do
-    # No web config at all: the shipped client_id default makes the box
-    # CLAIMABLE out of the box — the first sign-in becomes the owner.
+  test "an ownerless Hive web instance offers the claim flow, not config-editing homework" do
+    # No web config at all: the shipped client_id default makes the instance
+    # immediately claimable — the first sign-in becomes the owner.
     path = File.join(ENV["HIVE_HOME"], "config.yml")
     data = YAML.safe_load_file(path) || {}
     data.delete("web")

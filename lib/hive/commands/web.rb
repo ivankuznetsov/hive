@@ -85,7 +85,7 @@ module Hive
         # Only the MANAGED bundle resolves the hive-cli path gem via
         # HIVE_CLI_ROOT — its ".." holds no gem, and its bundle was installed
         # with this same export. A source checkout or a HIVE_WEB_APP_DIR
-        # override (e.g. the hivebox image's baked /app/web) was
+        # override (e.g. the Hivebox image's baked /app/web) was
         # bundle-installed against its own ".."; re-pointing the path source
         # at runtime invalidates that prebuilt bundle (the v0.3.4/v0.3.5
         # image-smoke db:prepare failure).

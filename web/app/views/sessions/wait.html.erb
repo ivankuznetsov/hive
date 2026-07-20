@@ -1,4 +1,4 @@
-<% content_for(:title, "hivebox — finish signing in") %>
+<% content_for(:title, "Hive web — finish signing in") %>
 <%# Native timed refresh — each render polls GitHub at most once. %>
 <% content_for(:head) { tag.meta("http-equiv": "refresh", content: @device["interval"].to_i.clamp(1, 60)) } %>
 <div class="card auth-card">

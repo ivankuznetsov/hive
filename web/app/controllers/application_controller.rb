@@ -69,7 +69,7 @@ class ApplicationController < ActionController::Base
     return redirect_to login_path unless current_login
 
     # Sessions must track the CURRENT owner, not the owner at sign-in time:
-    # rotating web.github.owner (or re-claiming a box) would otherwise leave
+    # rotating web.github.owner (or re-claiming an instance) would otherwise leave
     # old sessions alive with repo-scoped credentials. The dev/test seam
     # signs in arbitrary logins, so it is exempt only where real GitHub auth
     # is (local envs).
@@ -78,7 +78,7 @@ class ApplicationController < ActionController::Base
     return if Rails.env.local? && session[:github_token].blank?
 
     reset_session
-    redirect_to login_path, alert: "Signed out: this box's owner changed."
+    redirect_to login_path, alert: "Signed out: this Hive web instance's owner changed."
   end
 
   # Hive::Web::Loopback is the same test the CLI bind policy uses, so the

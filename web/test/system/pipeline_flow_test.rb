@@ -40,6 +40,43 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
   # --- tests ---------------------------------------------------------------
 
+  test "mobile status keeps composer controls inside the viewport" do
+    create_hive_project!("topgreendeals.co.uk")
+    create_hive_project!("architecture")
+    sign_in!
+    page.current_window.resize_to(390, 844)
+    visit "/"
+
+    metrics = page.evaluate_script(<<~JS)
+      (() => {
+        const viewportWidth = document.documentElement.clientWidth
+        const selectors = [
+          ".composer",
+          ".composer select[name='project']",
+          ".composer-attach",
+          ".composer input[type='submit']",
+          ".daemon-panel"
+        ]
+        return {
+          pageWidth: document.documentElement.scrollWidth,
+          viewportWidth,
+          controls: selectors.map((selector) => {
+            const rect = document.querySelector(selector).getBoundingClientRect()
+            return { selector, left: rect.left, right: rect.right }
+          })
+        }
+      })()
+    JS
+
+    assert_equal metrics.fetch("viewportWidth"), metrics.fetch("pageWidth"),
+                 "the status page must not overflow the mobile viewport"
+    metrics.fetch("controls").each do |control|
+      assert_operator control.fetch("left"), :>=, 0, "#{control.fetch('selector')} starts off-screen"
+      assert_operator control.fetch("right"), :<=, metrics.fetch("viewportWidth"),
+                      "#{control.fetch('selector')} ends off-screen"
+    end
+  end
+
   test "login gate, composer with image, live stream update, approve" do
     # Unauthenticated → login page, nothing leaks.
     visit "/"

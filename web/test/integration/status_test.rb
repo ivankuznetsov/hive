@@ -19,13 +19,33 @@ class StatusTest < ActionDispatch::IntegrationTest
     get "/"
 
     assert_response :success
-    assert_select ".daemon-panel .task-meta", text: "running"
+    assert_select ".daemon-panel.daemon-panel-running"
+    assert_select ".daemon-summary", text: "Daemon running"
+    assert_select ".daemon-panel", { text: /service installed/, count: 0 }
     assert_select ".daemon-panel", { text: /daemon is down/, count: 0 },
                   "a live hivebox supervisor intentionally has no platform service unit"
   ensure
     StatusBroadcaster.define_singleton_method(:snapshot, original_snapshot) if original_snapshot
     if original_report_new
       Hive::Daemon::StatusReport.define_singleton_method(:new, original_report_new)
+    end
+  end
+
+  test "a running daemon with binary drift presents one compact repair warning" do
+    sign_in!
+    with_daemon_status(
+      "running" => true,
+      "service_installed" => true,
+      "binary_drift" => "path"
+    ) do
+      get "/"
+
+      assert_response :success
+      assert_select ".daemon-panel.daemon-panel-warning"
+      assert_select ".daemon-summary", text: "Daemon running"
+      assert_select ".daemon-warning", text: "Binary path differs"
+      assert_select "form button", text: "Repair"
+      assert_select ".daemon-panel", { text: /binary drift|service installed/, count: 0 }
     end
   end
 

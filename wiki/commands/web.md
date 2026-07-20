@@ -148,14 +148,21 @@ origin also prints the Host-header/reverse-proxy warning.
   refreshes on other clients continue normally);
   the selected project remains as working context, so the next idea cannot
   accidentally resubmit the completed draft even when Turbo moves the
-  permanent node during rendering. No polling JS, no SSE. The daemon strip uses
+  permanent node during rendering. At mobile widths the composer toolbar
+  becomes a two-row grid: the project selector owns the first row and the
+  image/submit actions share the second, so long registered-project names
+  cannot widen the document beyond the viewport. The horizontal project rail
+  keeps edge padding while it scrolls. No polling JS, no SSE. The daemon strip uses
   `Hive::Daemon::StatusReport.safe_payload` directly instead of constructing a
   `Hive::Commands::Daemon` CLI object; the view also reads
   `StatusReport::BINARY_DRIFT_ACTIONABLE` for the Repair affordance, so CLI
   JSON and web drift handling share the same producer constants.
-  A running supervised hivebox daemon intentionally has no separate platform
-  service unit; the strip therefore shows CLI recovery guidance only when the
-  daemon is actually down, not merely when `service_installed` is false. A
+  It presents one compact state banner (running, warning, or stopped), hides
+  internal service-installation fields, and surfaces binary drift as the
+  human-facing “Binary path differs” repair action. A running supervised
+  hivebox daemon intentionally has no separate platform service unit; the
+  strip therefore shows CLI recovery guidance only when the daemon is actually
+  down, not merely when `service_installed` is false. A
   stopped, otherwise healthy daemon points to `hive daemon start --detach`;
   a missing or drifted service points to `hive daemon install --force`.
 - **Task page** — state-driven actions (Retry stage for red

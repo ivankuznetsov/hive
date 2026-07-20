@@ -47,10 +47,10 @@ module Hive
             if web_bundle["ok"]
               install_web_service
             else
-              add_phase(
-                "web_service", false,
-                "mutation" => "blocked",
-                "message" => "web service not installed because web_bundle failed"
+              observe_web_service(
+                mutation: "blocked",
+                ok: false,
+                message: "web service not installed because web_bundle failed"
               )
             end
           else
@@ -117,6 +117,9 @@ module Hive
 
       def bootstrap_web_bundle
         phase("web_bundle") do
+          @web_bundle_refreshed = !Hive::Web::AppBundle.present? ||
+                                  Hive::Web::AppBundle.stale? ||
+                                  !Hive::Web::AppBundle.assets_ready?
           Hive::Web::AppBundle.ensure!
           [ true, { "path" => Hive::Web::AppBundle.app_dir } ]
         end
@@ -149,21 +152,34 @@ module Hive
       end
 
       def install_web_service
-        phase("web_service") do
-          require "hive/commands/web/service_installer"
-          # Pass the same resolved binary as install_daemon so both managed
-          # services point at one hive binary (R8 same-binary guarantee).
-          installer = Hive::Commands::Web::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
+        require "hive/commands/web/service_installer"
+        installer = nil
+        begin
+          installer = Hive::Commands::Web::ServiceInstaller.new(
+            binary_path: Hive::InvokedBinary.path,
+            environment: @environment,
+            config: web_config
+          )
+          lifecycle = if installer.respond_to?(:service_lifecycle_state)
+            installer.service_lifecycle_state
+          else
+            installer.service_state
+          end
+          was_running = lifecycle["service_running"]
           # Ordinary setup is intentionally drift-safe. A customized unit is
           # observed and preserved; explicit `hive web install --force` owns
           # the backup-producing repair path.
           outcome = installer.install!(autostart: true, force: false)
-          state = Hive::Web::ServiceStatus.snapshot(installer: installer, config: web_config)
+          restarted = @web_bundle_refreshed && was_running && outcome.success? ? installer.restart! : false
+          state = Hive::Web::ServiceStatus.snapshot(
+            installer: installer, config: web_config, environment: @environment
+          )
           @web_service = state
           ok = outcome.success? && service_available?(state)
           data = {
             "mutation" => "attempted",
             "outcome" => outcome.wire_outcome,
+            "restarted" => restarted,
             "target_path" => installer.target_path,
             "messages" => installer.messages
           }.merge(state)
@@ -174,17 +190,47 @@ module Hive
               "web service did not reach installed, enabled, running, and ready state"
             end
           end
-          [ ok, data ]
+          add_phase("web_service", ok, data)
+        rescue StandardError => e
+          state = Hive::Web::ServiceStatus.snapshot(
+            installer: installer, config: web_config, environment: @environment
+          )
+          @web_service = state
+          add_phase(
+            "web_service", false,
+            {
+              "mutation" => "attempted",
+              "message" => "#{e.class}: #{e.message}",
+              "messages" => installer&.messages || []
+            }.merge(state)
+          )
         end
       end
 
-      def observe_web_service
-        phase("web_service") do
+      def observe_web_service(mutation: "opted_out", ok: true, message: nil)
+        begin
           require "hive/commands/web/service_installer"
-          installer = Hive::Commands::Web::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
-          state = Hive::Web::ServiceStatus.snapshot(installer: installer, config: web_config)
+          installer = Hive::Commands::Web::ServiceInstaller.new(
+            binary_path: Hive::InvokedBinary.path,
+            environment: @environment,
+            config: web_config
+          )
+          state = Hive::Web::ServiceStatus.snapshot(
+            installer: installer, config: web_config, environment: @environment
+          )
           @web_service = state
-          [ true, { "mutation" => "opted_out", "messages" => installer.messages }.merge(state) ]
+          data = { "mutation" => mutation, "messages" => installer.messages }.merge(state)
+          data["message"] = message if message
+          add_phase("web_service", ok, data)
+        rescue StandardError => e
+          state = Hive::Web::ServiceStatus.snapshot(
+            installer: nil, config: web_config, environment: @environment
+          )
+          @web_service = state
+          add_phase(
+            "web_service", false,
+            { "mutation" => mutation, "message" => "#{e.class}: #{e.message}", "messages" => [] }.merge(state)
+          )
         end
       end
 
@@ -209,7 +255,7 @@ module Hive
       end
 
       def web_url
-        Hive::Web::ServiceStatus.effective_url(web_config)
+        Hive::Web::ServiceStatus.effective_url(web_config, environment: @environment)
       end
 
       def web_config
@@ -268,11 +314,22 @@ module Hive
         else
           @phases.each do |phase|
             @output.puts "hive setup: #{phase["name"]} #{phase["ok"] ? "ok" : "needs attention"}"
+            @output.puts "hive setup: #{phase["name"]} mutation=#{phase["mutation"]}" if phase["mutation"]
+            @output.puts "hive setup: #{phase["name"]} #{phase["message"]}" if phase["message"]
           end
           diagnostics.results.each do |row|
             next if row.ok? || row.bootstrappable || row.fix_command.to_s.empty?
 
             @output.puts "fix #{row.name}: #{row.fix_command}"
+          end
+          if @web_service
+            @output.puts "hive setup: Hive web service " \
+                         "manager_available=#{@web_service["service_manager_available"]} " \
+                         "installed=#{@web_service["service_installed"]} " \
+                         "enabled=#{@web_service["service_enabled"]} " \
+                         "running=#{@web_service["service_running"]} " \
+                         "ready=#{@web_service["ready"]} " \
+                         "readiness=#{@web_service["readiness"]}"
           end
           if @web_service && @web_service["ready"]
             @output.puts "hive setup: Hive web ready at #{@web_service["url"]}"

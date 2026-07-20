@@ -294,6 +294,80 @@ class HiveBotLoggerTest < Minitest::Test
     end
   end
 
+  def test_event_degrades_in_flight_line_when_rotation_and_reopen_fail
+    with_tmp_dir do |dir|
+      path = File.join(dir, "double-failure.log")
+      logger = Hive::Bot::Logger.new(path: path, max_bytes: 1, max_files: 2)
+      logger.event(:bot_started, padding: "x" * 100)
+      original_open = File.method(:open)
+      failing_open = lambda do |target, *args, &block|
+        raise Errno::ENOSPC, "full" if target == path && args.first == "a"
+
+        original_open.call(target, *args, &block)
+      end
+
+      err = capture_stderr do
+        with_replaced_singleton_method(File, :rename, ->(*) { raise Errno::EACCES, "blocked" }) do
+          with_replaced_singleton_method(File, :open, failing_open) do
+            logger.event(:poll_failure, message: "in-flight")
+          end
+        end
+      end
+
+      assert logger.stderr_fallback?
+      line = err.lines.find { |entry| entry.include?('"event":"poll_failure"') }
+      refute_nil line
+      assert_equal "in-flight", JSON.parse(line).fetch("message")
+      logger.close
+    end
+  end
+
+  def test_event_serializes_rotation_and_write_across_workers
+    with_tmp_dir do |dir|
+      logger = Hive::Bot::Logger.new(path: File.join(dir, "concurrent.log"))
+      logger.close
+      lock = Mutex.new
+      puts_calls = 0
+      release = Queue.new
+      fake_file = Object.new
+      fake_file.define_singleton_method(:size) { 0 }
+      fake_file.define_singleton_method(:puts) do |_line|
+        lock.synchronize { puts_calls += 1 }
+        release.pop
+      end
+      fake_file.define_singleton_method(:flush) { }
+      fake_file.define_singleton_method(:close) { }
+      logger.instance_variable_set(:@file, fake_file)
+
+      ready = Queue.new
+      start = Queue.new
+      workers = 3.times.map do
+        Thread.new do
+          ready << true
+          start.pop
+          logger.event(:notification_sent)
+        end
+      end
+      3.times { ready.pop }
+      3.times { start << true }
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      until lock.synchronize { puts_calls == 1 }
+        flunk "first logger worker did not enter write" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+        Thread.pass
+      end
+      sleep 0.01
+      assert_equal 1, lock.synchronize { puts_calls }
+
+      3.times { release << true }
+      workers.each(&:value)
+      assert_equal 3, lock.synchronize { puts_calls }
+      logger.close
+    ensure
+      3.times { release << true } if release
+      workers&.each { |worker| worker.join(1) }
+    end
+  end
+
   def test_file_size_warning_is_emitted_once_when_stat_fails
     with_log do |logger, _path|
       fake_file = Object.new

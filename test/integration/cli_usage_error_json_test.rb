@@ -145,6 +145,11 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
       assert_match(/Usage: "hive setup"/, payload["message"])
+      assert_equal "managed_service", payload["mode"]
+      assert_kind_of String, payload["url"]
+      assert_kind_of Hash, payload["service"]
+      assert payload.dig("service", "readiness")
+      assert_kind_of Array, payload["warnings"]
       assert_match(/^hive: ERROR: /, err.lines.first)
     end
   end

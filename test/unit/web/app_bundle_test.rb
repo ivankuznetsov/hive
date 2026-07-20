@@ -59,7 +59,12 @@ class WebAppBundleTest < Minitest::Test
       captured_env = nil
       with_env("GEM_HOME" => "/installed/gems", "GEM_PATH" => "/installed/gems:/system/gems") do
         Hive::Web::AppBundle.ensure!(bundle_url: source, output: nil,
-                                     runner: ->(_argv, env) { captured_env = env; ran = true })
+                                     runner: lambda { |argv, env|
+                                       captured_env = env
+                                       ran = true
+                                       write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
+                                       true
+                                     })
       end
       assert ran, "bundle install runner should have run"
       # The managed bundle's Gemfile resolves the hive-cli path gem through
@@ -68,13 +73,79 @@ class WebAppBundleTest < Minitest::Test
       # bundle-install, so `hive setup`/`hive web install` would fail on
       # every non-source-checkout install.
       assert_equal Hive::Web::AppBundle.hive_cli_root, captured_env["HIVE_CLI_ROOT"]
-      assert_equal "/installed/gems", captured_env["GEM_HOME"]
-      assert_equal "/installed/gems:/system/gems", captured_env["GEM_PATH"]
+      assert_nil captured_env["GEM_HOME"]
+      assert_nil captured_env["GEM_PATH"]
+      assert_equal Hive::Web::AppBundle.dependency_dir, captured_env["BUNDLE_PATH"]
+      assert Hive::Web::AppBundle.dependency_dir.start_with?(Hive::Paths.data_home),
+             "packaged users must install dependencies beneath their writable data home"
       assert File.file?(File.join(Hive::Web::AppBundle.hive_cli_root, "hive.gemspec")),
              "HIVE_CLI_ROOT must point at the gem root (hive.gemspec present)"
       assert Hive::Web::AppBundle.present?
       assert_equal Hive::VERSION, Hive::Web::AppBundle.installed_version
       refute Hive::Web::AppBundle.stale?
+    end
+  end
+
+  def test_ensure_precompiles_and_validates_assets_before_stamping
+    with_hive_home do
+      calls = []
+      Hive::Web::AppBundle.ensure!(
+        bundle_url: seed_source_app,
+        output: nil,
+        runner: lambda { |argv, env|
+          calls << [ argv, env, Dir.pwd ]
+          write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
+          true
+        }
+      )
+
+      assert_equal [ %w[bundle install], %w[bin/rails assets:precompile] ], calls.map(&:first)
+      assert calls.all? { |_argv, _env, dir| dir.include?(".tmp.") }
+      assert_equal "production", calls.last[1]["RAILS_ENV"]
+      assert Hive::Web::AppBundle.assets_ready?
+      assert_equal Hive::VERSION, Hive::Web::AppBundle.installed_version
+    end
+  end
+
+  def test_same_version_install_with_missing_assets_is_repaired
+    with_hive_home do
+      app = Hive::Web::AppBundle.app_dir
+      FileUtils.mkdir_p(File.join(app, "config"))
+      File.write(File.join(app, "config", "application.rb"), "# broken\n")
+      File.write(File.join(app, Hive::Web::AppBundle::VERSION_FILE), "#{Hive::VERSION}\n")
+
+      calls = []
+      Hive::Web::AppBundle.ensure!(
+        bundle_url: seed_source_app,
+        output: nil,
+        runner: lambda { |argv, _env|
+          calls << argv
+          write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
+          true
+        }
+      )
+
+      assert_includes calls, %w[bin/rails assets:precompile]
+      assert Hive::Web::AppBundle.assets_ready?
+    end
+  end
+
+  def test_asset_precompile_without_output_preserves_previous_bundle
+    with_hive_home do
+      app = Hive::Web::AppBundle.app_dir
+      FileUtils.mkdir_p(File.join(app, "config"))
+      File.write(File.join(app, "config", "application.rb"), "# old\n")
+      File.write(File.join(app, Hive::Web::AppBundle::VERSION_FILE), "old\n")
+
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.ensure!(
+          bundle_url: seed_source_app, output: nil, runner: ->(_argv, _env) { true }
+        )
+      end
+
+      assert_match(/asset precompile produced no usable/, error.message)
+      assert_equal "# old\n", File.read(File.join(app, "config", "application.rb"))
+      assert_equal "old", Hive::Web::AppBundle.installed_version
     end
   end
 
@@ -126,7 +197,7 @@ class WebAppBundleTest < Minitest::Test
       # detect that layout and hoist the wrapper's children to the app root.
       source = seed_nested_source_app
       Hive::Web::AppBundle.ensure!(bundle_url: source, output: nil,
-                                   runner: ->(_argv, _env) { true })
+                                   runner: successful_prepare_runner)
       assert Hive::Web::AppBundle.present?,
              "a bundle wrapped in a single versioned dir must unwrap to the app root"
       assert_equal "# app\n",
@@ -202,7 +273,11 @@ class WebAppBundleTest < Minitest::Test
       }) do
         Hive::Web::AppBundle.ensure!(bundle_url: "https://example.test/bundle.tar.gz",
                                      bundle_sha256: Digest::SHA256.hexdigest(gz_bytes),
-                                     output: nil, runner: ->(_argv, _env) { ran = true })
+                                     output: nil, runner: lambda { |argv, _env|
+                                       ran = true
+                                       write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
+                                       true
+                                     })
       end
 
       assert_equal "https://example.test/bundle.tar.gz", opened_url,
@@ -297,7 +372,7 @@ class WebAppBundleTest < Minitest::Test
         downloader: downloader,
         verifier: verifier,
         output: nil,
-        runner: ->(*) { true }
+        runner: successful_prepare_runner
       )
     end
 
@@ -400,22 +475,20 @@ class WebAppBundleTest < Minitest::Test
 
     _stdout, stderr = capture_io do
       with_replaced_singleton_method(Hive::InvokedBinary, :which, ->(_name) { "/usr/bin/cosign" }) do
-        with_replaced_singleton_method(Open3, :capture3, lambda { |*argv|
-          captured = argv
+        runner = lambda { |*argv, timeout_sec:|
+          captured = [ *argv, timeout_sec ]
           [ "", "identity mismatch", status ]
-        }) do
-          refute Hive::Web::AppBundle.verify_manifest_signature(
-            manifest: "manifest",
-            signature: "signature",
-            certificate: "certificate",
-            identity: "identity"
-          )
-        end
+        }
+        refute Hive::Web::AppBundle.verify_manifest_signature(
+          manifest: "manifest", signature: "signature", certificate: "certificate",
+          identity: "identity", runner: runner
+        )
       end
     end
 
     assert_equal "/usr/bin/cosign", captured.first
     assert_includes captured, "--certificate-identity-regexp"
+    assert_equal Hive::Web::AppBundle::COSIGN_TIMEOUT_SEC, captured.last
     assert_includes stderr, "identity mismatch"
   end
 
@@ -424,15 +497,23 @@ class WebAppBundleTest < Minitest::Test
     status.define_singleton_method(:success?) { true }
 
     with_replaced_singleton_method(Hive::InvokedBinary, :which, ->(_name) { "/usr/bin/cosign" }) do
-      with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { [ "", "", status ] }) do
-        assert Hive::Web::AppBundle.verify_manifest_signature(
-          manifest: "manifest",
-          signature: "signature",
-          certificate: "certificate",
-          identity: "identity"
-        )
-      end
+      assert Hive::Web::AppBundle.verify_manifest_signature(
+        manifest: "manifest", signature: "signature", certificate: "certificate",
+        identity: "identity", runner: ->(*_argv, timeout_sec:) { [ "", "", status ] }
+      )
     end
+  end
+
+  def test_bounded_capture_terminates_a_stuck_verifier
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    error = assert_raises(Hive::Error) do
+      Hive::Web::AppBundle.capture3_bounded(
+        RbConfig.ruby, "-e", "sleep 30", timeout_sec: 0.05
+      )
+    end
+
+    assert_match(/timed out/, error.message)
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 3
   end
 
   private
@@ -468,6 +549,27 @@ class WebAppBundleTest < Minitest::Test
     File.write(File.join(src, "config", "application.rb"), "# app\n")
     File.write(File.join(src, "Gemfile"), "source 'https://rubygems.org'\n")
     src
+  end
+
+  def successful_prepare_runner
+    lambda do |argv, _env|
+      write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
+      true
+    end
+  end
+
+  def write_compiled_assets(dir)
+    assets = File.join(dir, "public", "assets")
+    FileUtils.mkdir_p(assets)
+    File.write(File.join(assets, "application-test.css"), "body {}\n")
+    File.write(File.join(assets, "application-test.js"), "export {}\n")
+    File.write(
+      File.join(assets, ".manifest.json"),
+      JSON.generate(
+        "application.css" => { "digested_path" => "application-test.css" },
+        "application.js" => { "digested_path" => "application-test.js" }
+      )
+    )
   end
 
   def with_hive_home

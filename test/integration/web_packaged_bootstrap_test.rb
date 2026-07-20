@@ -34,7 +34,20 @@ class WebPackagedBootstrapTest < Minitest::Test
         Hive::Web::AppBundle.ensure!(
           bundle_url: source,
           output: nil,
-          runner: ->(_argv, env) { captured = env; true }
+          runner: lambda do |argv, env|
+            captured = env
+            if argv == %w[bin/rails assets:precompile]
+              assets = File.join(Dir.pwd, "public", "assets")
+              FileUtils.mkdir_p(assets)
+              File.write(File.join(assets, "application.css"), "body {}")
+              File.write(File.join(assets, "application.js"), "export {}")
+              File.write(File.join(assets, ".manifest.json"), JSON.generate(
+                "application.css" => { "digested_path" => "application.css" },
+                "application.js" => { "digested_path" => "application.js" }
+              ))
+            end
+            true
+          end
         )
         root = Hive::Web::AppBundle.hive_cli_root
         abort "wrong root" unless root == ARGV.fetch(1)
@@ -121,6 +134,14 @@ class WebPackagedBootstrapTest < Minitest::Test
         end
 
         def target_path = "/fixture/hive-#{@label}.service"
+        def service_lifecycle_state
+          {
+            "platform" => "linux", "unit_path" => target_path,
+            "service_installed" => true, "service_enabled" => true,
+            "service_running" => true, "service_manager_available" => true
+          }
+        end
+        def restart! = true
       end
 
       Hive::Setup::Diagnostics.define_singleton_method(:new) { PackagedSetupDiagnostics.new }
@@ -136,18 +157,29 @@ class WebPackagedBootstrapTest < Minitest::Test
       Hive::Web::ServiceStatus.define_singleton_method(:snapshot) do |**|
         {
           "url" => "http://127.0.0.1:4567",
+          "platform" => "linux",
+          "unit_path" => "/fixture/hive-web.service",
           "service_installed" => true,
           "service_enabled" => true,
           "service_running" => true,
+          "service_manager_available" => true,
           "ready" => true,
           "readiness" => "ready"
         }
       end
-      Hive::Web::AppBundle.define_singleton_method(:bundle_install!) do |dir:, **|
+      Hive::Web::AppBundle.define_singleton_method(:prepare!) do |dir:, **|
         root = hive_cli_root
         abort "wrong packaged root" unless root == ENV.fetch("HIVE_EXPECTED_CLI_ROOT")
         abort "missing packaged gemspec" unless File.file?(File.join(root, "hive.gemspec"))
         File.open(ENV.fetch("HIVE_PACKAGE_CAPTURE"), "a") { |file| file.puts(root) }
+        assets = File.join(dir, "public", "assets")
+        FileUtils.mkdir_p(assets)
+        File.write(File.join(assets, "application.css"), "body {}")
+        File.write(File.join(assets, "application.js"), "export {}")
+        File.write(File.join(assets, ".manifest.json"), JSON.generate(
+          "application.css" => { "digested_path" => "application.css" },
+          "application.js" => { "digested_path" => "application.js" }
+        ))
         dir
       end
     RUBY

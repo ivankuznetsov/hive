@@ -87,7 +87,7 @@ class ApplicationController < ActionController::Base
   def local_loopback_request?
     return false unless Hive::Web::Environment.boolean("HIVE_WEB_LOCAL_LOOPBACK")
 
-    Hive::Web::Loopback.address?(request.remote_ip)
+    Hive::Web::Loopback.address?(request.get_header("REMOTE_ADDR"))
   end
 
   # A loopback socket peer is necessary but not sufficient for the no-auth

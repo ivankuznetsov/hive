@@ -131,12 +131,12 @@ After version verification, run the shared setup command and parse its
 versioned envelope:
 
 ```bash
-"$hive_cmd" setup --json
+"$hive_cmd" setup --no-init --json
 ```
 
 On supported Linux/macOS this bootstraps the authenticated managed Rails
 bundle, installs/enables/starts the daemon and Hive web services, optionally
-enrolls the current project, probes bounded readiness, and reports the effective
+enrolls the current project only after separate explicit consent, probes bounded readiness, and reports the effective
 URL. Report `service_installed`, `service_enabled`, `service_running`, `ready`,
 and `readiness` separately; never describe the URL as available when `ready` is
 false. If a customized web unit is drifted, leave it byte-identical and report

@@ -84,6 +84,33 @@ module Hive
         SETTINGS.map(&:legacy)
       end
 
+      def resolved_for_service(config:, environment: ENV, managed_app_dir:)
+        origin_default = config["origin"].to_s.strip
+        origin_default = "http://#{config.fetch('bind')}:#{config.fetch('port')}" if origin_default.empty?
+        {
+          "HIVE_WEB_APP_DIR" => value(
+            "HIVE_WEB_APP_DIR", environment: environment, default: managed_app_dir
+          ),
+          "HIVE_WEB_ORIGIN" => value(
+            "HIVE_WEB_ORIGIN", environment: environment, default: origin_default
+          ),
+          "HIVE_WEB_STORAGE_DIR" => value(
+            "HIVE_WEB_STORAGE_DIR", environment: environment
+          ),
+          "HIVE_WEB_LOCAL_LOOPBACK" => boolean(
+            "HIVE_WEB_LOCAL_LOOPBACK",
+            environment: environment,
+            default: config.fetch("local_loopback", true)
+          ) ? "1" : "0",
+          "HIVE_WEB_DIFF_TIMEOUT_SEC" => value(
+            "HIVE_WEB_DIFF_TIMEOUT_SEC", environment: environment
+          ).to_s,
+          "HIVE_WEB_CLONE_TIMEOUT_SEC" => value(
+            "HIVE_WEB_CLONE_TIMEOUT_SEC", environment: environment
+          ).to_s
+        }.freeze
+      end
+
       def setting!(canonical)
         SETTINGS_BY_NAME.fetch(canonical) do
           raise ArgumentError, "unknown Hive web environment setting #{canonical.inspect}"

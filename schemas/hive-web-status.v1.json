@@ -10,11 +10,12 @@
     "SuccessPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "ok", "platform", "unit_path", "service_installed", "service_enabled", "service_running", "service_manager_available", "url", "ready", "readiness", "warnings"],
+      "required": ["schema", "schema_version", "ok", "mode", "platform", "unit_path", "service_installed", "service_enabled", "service_running", "service_manager_available", "url", "ready", "readiness", "warnings"],
       "properties": {
         "schema": { "const": "hive-web-status" },
         "schema_version": { "const": 1 },
         "ok": { "const": true },
+        "mode": { "const": "managed_service" },
         "platform": { "enum": ["linux", "macos", "unsupported"] },
         "unit_path": { "type": ["string", "null"] },
         "service_installed": { "type": "boolean" },
@@ -23,22 +24,48 @@
         "service_manager_available": { "type": "boolean" },
         "url": { "type": "string" },
         "ready": { "type": "boolean" },
-        "readiness": { "type": "string" },
-        "warnings": { "type": "array", "items": { "type": "object" } }
+        "readiness": { "$ref": "#/$defs/Readiness" },
+        "warnings": { "type": "array", "items": { "$ref": "#/$defs/Warning" } }
       }
     },
     "ErrorPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message", "mode", "platform", "unit_path", "service_installed", "service_enabled", "service_running", "service_manager_available", "url", "ready", "readiness", "warnings"],
       "properties": {
         "schema": { "const": "hive-web-status" },
         "schema_version": { "const": 1 },
         "ok": { "const": false },
-        "error_class": { "type": "string" },
-        "error_kind": { "type": "string" },
+        "error_class": { "type": "string", "minLength": 1 },
+        "error_kind": { "const": "invalid_task_path" },
         "exit_code": { "type": "integer" },
-        "message": { "type": "string" }
+        "message": { "type": "string", "minLength": 1 },
+        "mode": { "const": "managed_service" },
+        "platform": { "enum": ["linux", "macos", "unsupported"] },
+        "unit_path": { "type": ["string", "null"] },
+        "service_installed": { "type": "boolean" },
+        "service_enabled": { "type": "boolean" },
+        "service_running": { "type": "boolean" },
+        "service_manager_available": { "type": "boolean" },
+        "url": { "type": "string" },
+        "ready": { "type": "boolean" },
+        "readiness": { "$ref": "#/$defs/Readiness" },
+        "warnings": { "type": "array", "items": { "$ref": "#/$defs/Warning" } }
+      }
+    },
+    "Readiness": {
+      "enum": ["ready", "manager_unavailable", "not_installed", "disabled", "inactive", "active_not_ready", "invalid_url"]
+    },
+    "Warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "alias", "replacement", "ignored", "message"],
+      "properties": {
+        "kind": { "const": "deprecated_environment_alias" },
+        "alias": { "type": "string", "minLength": 1 },
+        "replacement": { "type": "string", "minLength": 1 },
+        "ignored": { "type": "boolean" },
+        "message": { "type": "string", "minLength": 1 }
       }
     }
   }

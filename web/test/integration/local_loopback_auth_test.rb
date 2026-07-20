@@ -50,6 +50,18 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
     assert_redirected_to "/login", "a non-loopback request must require login even with the bypass enabled"
   end
 
+  test "loopback proxy remains local when forwarding the real client address" do
+    ENV["HIVE_WEB_LOCAL_LOOPBACK"] = "1"
+
+    get "/", headers: {
+      "Host" => "localhost",
+      "REMOTE_ADDR" => "127.0.0.1",
+      "HTTP_X_FORWARDED_FOR" => "100.105.122.109"
+    }
+
+    assert_response :success
+  end
+
   test "bypass disabled requires login even from loopback" do
     get "/"
     assert_redirected_to "/login", "without HIVE_WEB_LOCAL_LOOPBACK every request must authenticate"
@@ -60,6 +72,20 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
     get "/", headers: { "Host" => "attacker.example" }
 
     assert_response :forbidden
+  end
+
+  test "attacker controlled Host cannot create an idea" do
+    ENV["HIVE_WEB_LOCAL_LOOPBACK"] = "1"
+    project = create_hive_project!("host-authorization-mutation")
+    inbox = stage_dir(project, "1-inbox")
+    before = inbox.children.map { |child| child.basename.to_s }
+
+    post "/ideas", params: { project: project, text: "must not be created" },
+                   headers: { "Host" => "attacker.example", "REMOTE_ADDR" => "127.0.0.1" }
+
+    assert_response :forbidden
+    assert_equal before, inbox.children.map { |child| child.basename.to_s },
+                 "Host authorization must reject the mutation before the controller has a side effect"
   end
 
   test "loopback peer accepts the explicitly configured origin host" do

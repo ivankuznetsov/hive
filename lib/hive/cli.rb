@@ -1569,16 +1569,19 @@ module Hive
       if options[:json]
         unless %w[install status].include?(subcommand.to_s)
           require "json"
+          require "hive/commands/web"
           message = "hive web has no JSON output for foreground server commands. " \
                     "Use 'hive web status --json' or 'hive status --json'."
+          error = Hive::InvalidTaskPath.new(message)
           puts JSON.generate(
-            "ok" => false,
-            "error_class" => "InvalidTaskPath",
-            "error_kind" => "invalid_task_path",
-            "exit_code" => Hive::ExitCodes::USAGE,
-            "message" => message
+            Hive::Schemas::ErrorEnvelope.build(
+              schema: "hive-web-status",
+              error: error,
+              error_kind: "invalid_task_path",
+              extras: Hive::Commands::Web.error_context(environment: ENV)
+            )
           )
-          raise Hive::InvalidTaskPath, message
+          raise error
         end
       end
 

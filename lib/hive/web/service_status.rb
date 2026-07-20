@@ -1,6 +1,8 @@
 require "json"
 require "net/http"
 require "uri"
+require "hive/web/environment"
+require "hive/web/loopback"
 
 module Hive
   module Web
@@ -11,11 +13,17 @@ module Hive
     module ServiceStatus
       module_function
 
-      def snapshot(installer:, config:, probe: nil)
-        state = if installer.respond_to?(:service_lifecycle_state)
+      READINESS = %w[
+        ready manager_unavailable not_installed disabled inactive active_not_ready invalid_url
+      ].freeze
+
+      def snapshot(installer:, config:, environment: ENV, probe: nil)
+        state = if installer&.respond_to?(:service_lifecycle_state)
           installer.service_lifecycle_state
-        else
+        elsif installer
           installer.service_state
+        else
+          {}
         end
         state = {
           "platform" => "unsupported",
@@ -25,8 +33,8 @@ module Hive
           "service_running" => false,
           "service_manager_available" => false
         }.merge(state)
-        url = effective_url(config)
-        readiness = readiness_for(state, url, probe: probe)
+        url = effective_url(config, environment: environment)
+        readiness = readiness_for(state, local_url(config), probe: probe)
         state.merge(
           "url" => url,
           "ready" => readiness == "ready",
@@ -34,11 +42,23 @@ module Hive
         )
       end
 
-      def effective_url(config)
-        origin = config["origin"].to_s.strip
+      def effective_url(config, environment: ENV)
+        origin = Hive::Web::Environment.value(
+          "HIVE_WEB_ORIGIN", environment: environment, default: config["origin"]
+        ).to_s.strip
         return origin.sub(%r{/+\z}, "") unless origin.empty?
 
-        "http://#{config.fetch("bind")}:#{config.fetch("port")}"
+        endpoint_url(config.fetch("bind"), config.fetch("port"))
+      end
+
+      def local_url(config)
+        bind = config.fetch("bind").to_s
+        bind = "127.0.0.1" if %w[0.0.0.0 ::].include?(bind)
+        endpoint_url(bind, config.fetch("port"))
+      end
+
+      def endpoint_url(host, port)
+        URI::HTTP.build(host: host.to_s, port: Integer(port)).to_s.sub(%r{/\z}, "")
       end
 
       def health_url(url)

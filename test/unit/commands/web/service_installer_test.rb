@@ -19,8 +19,15 @@ class WebServiceInstallerTest < Minitest::Test
       installer.install!(autostart: false)
       unit = File.join(dir, ".config/systemd/user/hive-web.service")
       assert File.exist?(unit)
-      assert_includes File.read(unit), "ExecStart=#{hive} web"
-      assert_includes File.read(unit), "Environment=HIVE_BIN=#{hive}"
+      rendered = File.read(unit)
+      assert_includes rendered, "ExecStart=#{hive} web"
+      assert_includes rendered, "Environment=HIVE_BIN=#{hive}"
+      assert_includes rendered, "StartLimitBurst=3"
+      assert_includes rendered, "StartLimitIntervalSec=300"
+      %w[
+        HIVE_WEB_APP_DIR HIVE_WEB_ORIGIN HIVE_WEB_STORAGE_DIR HIVE_WEB_LOCAL_LOOPBACK
+        HIVE_WEB_DIFF_TIMEOUT_SEC HIVE_WEB_CLONE_TIMEOUT_SEC
+      ].each { |name| assert_includes rendered, "Environment=#{name}=" }
     end
   end
 
@@ -35,7 +42,14 @@ class WebServiceInstallerTest < Minitest::Test
       installer.install!(autostart: true)
       plist = File.join(dir, "Library/LaunchAgents/local.hive-web.plist")
       assert File.exist?(plist)
-      assert_includes File.read(plist), "<string>/opt/hive/bin/hive</string>"
+      rendered = File.read(plist)
+      assert_includes rendered, "<string>/opt/hive/bin/hive</string>"
+      assert_includes rendered, '<string>[ -x "$0" ] || exit 0; exec "$0" "$@"</string>'
+      assert_match(/<key>SuccessfulExit<\/key>\s*<false\/>/, rendered)
+      %w[
+        HIVE_WEB_APP_DIR HIVE_WEB_ORIGIN HIVE_WEB_STORAGE_DIR HIVE_WEB_LOCAL_LOOPBACK
+        HIVE_WEB_DIFF_TIMEOUT_SEC HIVE_WEB_CLONE_TIMEOUT_SEC
+      ].each { |name| assert_includes rendered, "<key>#{name}</key>" }
       assert_equal [ [ "launchctl", "load", plist ] ], commands
     end
   end

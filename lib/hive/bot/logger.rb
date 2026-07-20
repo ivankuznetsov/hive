@@ -97,6 +97,7 @@ module Hive
         @path = path
         @max_bytes = max_bytes
         @max_files = max_files
+        @mutex = Mutex.new
         @stderr_fallback = false
         FileUtils.mkdir_p(File.dirname(path))
         @file = File.open(path, "a")
@@ -129,29 +130,40 @@ module Hive
         payload[:category] = category.to_s unless category.nil?
 
         line = JSON.generate(payload)
-        if @stderr_fallback
-          warn line
-          return
-        end
+        @mutex.synchronize do
+          if @stderr_fallback
+            warn line
+            return
+          end
 
-        rotate_if_needed!
-        @file.puts(line)
-        @file.flush
+          rotate_if_needed_locked!
+          if @stderr_fallback
+            warn line
+            return
+          end
+
+          @file.puts(line)
+          @file.flush
+        end
       end
 
       def close
-        @file&.close
+        @mutex.synchronize { @file&.close }
       end
 
       def stderr_fallback?
-        @stderr_fallback
+        @mutex.synchronize { @stderr_fallback }
       end
 
       private
 
       def rotate_if_needed!
+        @mutex.synchronize { rotate_if_needed_locked! }
+      end
+
+      def rotate_if_needed_locked!
         return if @file.nil?
-        return if file_size_for_rotation < @max_bytes
+        return if file_size_for_rotation_locked < @max_bytes
 
         @file.close
         (@max_files - 2).downto(0) do |i|
@@ -175,6 +187,10 @@ module Hive
       end
 
       def file_size_for_rotation
+        @mutex.synchronize { file_size_for_rotation_locked }
+      end
+
+      def file_size_for_rotation_locked
         @file.size
       rescue StandardError => e
         unless @file_size_warned

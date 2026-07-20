@@ -26,6 +26,32 @@ class WebServiceStatusTest < Minitest::Test
     assert_equal "ready", result["readiness"]
   end
 
+  def test_snapshot_advertises_environment_origin_but_probes_local_service
+    state = {
+      "platform" => "linux", "unit_path" => "/unit", "service_installed" => true,
+      "service_enabled" => true, "service_running" => true, "service_manager_available" => true
+    }
+    probed = nil
+    result = Hive::Web::ServiceStatus.snapshot(
+      installer: installer(state), config: config,
+      environment: { "HIVE_WEB_ORIGIN" => "https://hive.example.test" },
+      probe: ->(url) { probed = url; true }
+    )
+
+    assert_equal "https://hive.example.test", result["url"]
+    assert_equal "http://127.0.0.1:4567/health", probed
+  end
+
+  def test_canonical_origin_precedes_legacy_alias
+    environment = {
+      "HIVE_WEB_ORIGIN" => "https://canonical.example",
+      "HIVEBOX_ORIGIN" => "https://legacy.example"
+    }
+
+    assert_equal "https://canonical.example",
+                 Hive::Web::ServiceStatus.effective_url(config, environment: environment)
+  end
+
   def test_inactive_service_does_not_probe_or_claim_readiness
     state = {
       "platform" => "linux", "unit_path" => "/unit", "service_installed" => true,

@@ -33,10 +33,24 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
 
   setup do
     configure_owner!(owner: "alice")
+    @prior_local_loopback = ENV["HIVE_WEB_LOCAL_LOOPBACK"]
+    @prior_web_origin = ENV["HIVE_WEB_ORIGIN"]
+    ENV.delete("HIVE_WEB_LOCAL_LOOPBACK")
+    ENV.delete("HIVE_WEB_ORIGIN")
   end
 
   teardown do
     SessionsController.http_client = Net::HTTP
+    if @prior_local_loopback.nil?
+      ENV.delete("HIVE_WEB_LOCAL_LOOPBACK")
+    else
+      ENV["HIVE_WEB_LOCAL_LOOPBACK"] = @prior_local_loopback
+    end
+    if @prior_web_origin.nil?
+      ENV.delete("HIVE_WEB_ORIGIN")
+    else
+      ENV["HIVE_WEB_ORIGIN"] = @prior_web_origin
+    end
   end
 
   def http_ok(body)
@@ -134,6 +148,22 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
 
     get "/"
     assert_response :success, "the claimer is the owner; their session must work"
+  end
+
+  test "optional GitHub connection from local mode does not claim ownership" do
+    ENV["HIVE_WEB_LOCAL_LOOPBACK"] = "1"
+    ENV["HIVE_WEB_ORIGIN"] = "http://www.example.com"
+    configure_owner!(owner: "")
+    install_auth(login: "local-user")
+    begin_device_flow
+
+    get "/auth/github/wait"
+
+    assert_redirected_to "/"
+    config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
+    assert_nil config.dig("web", "github", "owner"),
+               "connecting GitHub locally must not change future access policy"
+    assert_equal "gho_test", session[:github_token]
   end
 
   test "a claimed Hive web instance refuses every later non-owner login" do

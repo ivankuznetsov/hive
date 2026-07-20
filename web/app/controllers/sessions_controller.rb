@@ -98,10 +98,12 @@ class SessionsController < ApplicationController
 
   def admit!(result)
     login = result[:login]
-    claim_ownership!(login) if github_auth.claimable?
-    unless github_auth.owner?(login)
-      return render "errors/show", status: :forbidden,
-                    locals: { heading: "Not allowed", message: "#{login} is not the configured owner." }
+    unless local_loopback_request?
+      claim_ownership!(login) if github_auth.claimable?
+      unless github_auth.owner?(login)
+        return render "errors/show", status: :forbidden,
+                      locals: { heading: "Not allowed", message: "#{login} is not the configured owner." }
+      end
     end
 
     # Rotate the session at the auth boundary; carry the grant into the

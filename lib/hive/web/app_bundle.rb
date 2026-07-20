@@ -1,5 +1,6 @@
 require "digest"
 require "fileutils"
+require "json"
 require "open3"
 require "open-uri"
 require "rubygems/package"
@@ -14,6 +15,8 @@ module Hive
   module Web
     module AppBundle
       VERSION_FILE = ".hive-web-version".freeze
+      REQUIRED_ASSETS = %w[application.css application.js].freeze
+      COSIGN_TIMEOUT_SEC = 60
 
       module_function
 
@@ -43,9 +46,27 @@ module Hive
         present? && installed_version != Hive::VERSION
       end
 
+      def assets_ready?(dir = app_dir)
+        assets_dir = File.join(dir, "public", "assets")
+        assets_root = File.expand_path(assets_dir)
+        manifest = JSON.parse(File.read(File.join(assets_dir, ".manifest.json")))
+        return false unless manifest.is_a?(Hash)
+        return false unless REQUIRED_ASSETS.all? { |logical_path| manifest.key?(logical_path) }
+
+        manifest.values.all? do |entry|
+          digested_path = entry["digested_path"] if entry.is_a?(Hash)
+          next false unless digested_path.is_a?(String) && !digested_path.empty?
+
+          asset_path = File.expand_path(digested_path, assets_dir)
+          asset_path.start_with?("#{assets_root}/") && File.file?(asset_path)
+        end
+      rescue ArgumentError, JSON::ParserError, SystemCallError, TypeError
+        false
+      end
+
       def ensure!(bundle_url: default_bundle_url, bundle_sha256: default_bundle_sha256,
                   runner: nil, output: $stderr, downloader: nil, verifier: nil)
-        return app_dir if present? && !stale?
+        return app_dir if present? && !stale? && assets_ready?
 
         if bundle_url.to_s.empty?
           raise Hive::Error,
@@ -72,14 +93,10 @@ module Hive
           raise Hive::Error, "hive web: downloaded web bundle does not contain config/application.rb"
         end
 
-        # Run `bundle install` against the staged tmp bundle BEFORE swapping it
-        # into place. A transient Bundler / native-extension failure then leaves
-        # the previous working install untouched instead of replacing it with an
-        # unstamped broken bundle. Only after Bundler succeeds do we swap and
-        # stamp the version (the stamp is last so a crash between swap and stamp
-        # leaves `installed_version` nil → `stale?` true → next `ensure!`
-        # re-bootstraps rather than trusting a half-provisioned bundle).
-        bundle_install!(dir: tmp, runner: runner, output: output)
+        # Prepare dependencies and production assets in the staged bundle
+        # before swapping it into place. A failed refresh leaves the previous
+        # working install untouched, and the version stamp is written last.
+        prepare!(dir: tmp, runner: runner, output: output)
         FileUtils.rm_rf(app_dir)
         FileUtils.mkdir_p(File.dirname(app_dir))
         FileUtils.mv(tmp, app_dir)
@@ -90,7 +107,9 @@ module Hive
       end
 
       def bundle_install!(dir: app_dir, runner: nil, output: $stderr)
-        return dir unless File.file?(File.join(dir, "Gemfile"))
+        unless File.file?(File.join(dir, "Gemfile"))
+          raise Hive::Error, "hive web: downloaded web bundle does not contain a Gemfile"
+        end
 
         unless File.file?(File.join(hive_cli_root, "hive.gemspec"))
           raise Hive::Error,
@@ -101,16 +120,48 @@ module Hive
         runner ||= ->(argv, env) { system(env, *argv) }
         env = {
           "BUNDLE_GEMFILE" => File.join(dir, "Gemfile"),
+          "BUNDLE_PATH" => dependency_dir,
+          "GEM_HOME" => nil,
+          "GEM_PATH" => nil,
           "HIVE_CLI_ROOT" => hive_cli_root
         }
-        %w[GEM_HOME GEM_PATH].each do |name|
-          env[name] = ENV[name] unless ENV[name].to_s.empty?
+        ok = Dir.chdir(dir) do
+          runner.call(%w[bundle install], env)
         end
-        ok = runner.call(%w[bundle install], env)
         raise Hive::Error, "hive web: bundle install failed in #{dir}" unless ok
 
         output.puts "hive web: installed Rails bundle in #{dir}" if output
         dir
+      end
+
+      def prepare!(dir: app_dir, runner: nil, output: $stderr)
+        runner ||= ->(argv, env) { system(env, *argv) }
+        bundle_install!(dir: dir, runner: runner, output: nil)
+        asset_storage = File.join(dir, "tmp", "assets-build-storage")
+        asset_env = {
+          "BUNDLE_GEMFILE" => File.join(dir, "Gemfile"),
+          "BUNDLE_PATH" => dependency_dir,
+          "GEM_HOME" => nil,
+          "GEM_PATH" => nil,
+          "HIVE_CLI_ROOT" => hive_cli_root,
+          "RAILS_ENV" => "production",
+          "SECRET_KEY_BASE" => "hive-managed-web-assets-build",
+          "HIVE_WEB_STORAGE_DIR" => asset_storage
+        }
+        ok = Dir.chdir(dir) { runner.call(%w[bin/rails assets:precompile], asset_env) }
+        raise Hive::Error, "hive web: asset precompile failed in #{dir}" unless ok
+        unless assets_ready?(dir)
+          raise Hive::Error, "hive web: asset precompile produced no usable CSS/JavaScript in #{dir}"
+        end
+
+        output.puts "hive web: installed Rails bundle and compiled assets in #{dir}" if output
+        dir
+      ensure
+        FileUtils.rm_rf(asset_storage) if asset_storage
+      end
+
+      def dependency_dir
+        File.join(Hive::Paths.data_home, "web-gems")
       end
 
       def default_bundle_url
@@ -214,7 +265,7 @@ module Hive
         verify_digest!(archive_path, matches.fetch(0))
       end
 
-      def verify_manifest_signature(manifest:, signature:, certificate:, identity:)
+      def verify_manifest_signature(manifest:, signature:, certificate:, identity:, runner: nil)
         cosign = Hive::InvokedBinary.which("cosign")
         unless cosign
           raise Hive::Error,
@@ -222,16 +273,45 @@ module Hive
                 "install cosign and retry"
         end
 
-        _out, err, status = Open3.capture3(
+        runner ||= method(:capture3_bounded)
+        _out, err, status = runner.call(
           cosign, "verify-blob",
           "--certificate", certificate,
           "--signature", signature,
           "--certificate-identity-regexp", identity,
           "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com",
-          manifest
+          manifest,
+          timeout_sec: COSIGN_TIMEOUT_SEC
         )
         warn "hive web: cosign: #{err.strip}" unless status.success? || err.to_s.strip.empty?
         status.success?
+      end
+
+      def capture3_bounded(*argv, timeout_sec:)
+        Open3.popen3(*argv, pgroup: true) do |stdin, stdout, stderr, wait_thread|
+          stdin.close
+          stdout_reader = Thread.new { stdout.read }
+          stderr_reader = Thread.new { stderr.read }
+          unless wait_thread.join(timeout_sec)
+            terminate_process_group(wait_thread.pid, wait_thread)
+            raise Hive::Error, "hive web: cosign verification timed out after #{timeout_sec}s"
+          end
+
+          [ stdout_reader.value, stderr_reader.value, wait_thread.value ]
+        ensure
+          stdout_reader&.join(1)
+          stderr_reader&.join(1)
+        end
+      end
+
+      def terminate_process_group(pid, wait_thread)
+        Process.kill("TERM", -pid)
+        return if wait_thread.join(2)
+
+        Process.kill("KILL", -pid)
+        wait_thread.join(2)
+      rescue Errno::ESRCH, Errno::ECHILD
+        nil
       end
 
       def verify_digest!(path, expected)

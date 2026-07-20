@@ -52,8 +52,11 @@ starts that service and reloads systemd-user first on Linux so a unit written
 while systemd-user was unavailable becomes visible. Foreground
 `hive web start` is equivalent to `hive web`. `status --json` emits
 `hive-web-status.v1`; `install --json` emits `hive-web-install.v1`. Both carry
-deduplicated environment migration warnings, and status separates installed,
-enabled, running, manager availability, URL, and readiness.
+`mode: "managed_service"`, deduplicated environment migration warnings, and
+separate installed, enabled, running, manager availability, URL, and readiness
+state on success and pre-dispatch/runtime errors. Readiness probes the local
+managed Rails endpoint even when the advertised origin points at DNS or a
+reverse proxy.
 
 ## Environment compatibility
 
@@ -68,6 +71,9 @@ including invalid canonical values, and old-only or both-set input warns with
 the replacement and next-major support window. Warnings are deduplicated on
 stderr, included in setup/web JSON, and exposed as doctor warning rows.
 Container-only Hivebox variables are deliberately outside this deprecated set.
+Foreground Rails receives resolved canonical timeout values even when the
+operator supplied an alias, and managed systemd/launchd units persist all six
+resolved settings so foreground and service-manager launches agree.
 
 ## Auth
 
@@ -94,17 +100,23 @@ usable. The local dev/test seam is exempt only for tokenless local sessions.
 Local loopback mode is a deliberate no-auth bypass for local foreground use:
 when the CLI bind address is `localhost`, `::1`, or any `127.0.0.0/8` address
 and `web.local_loopback` is not `false`, it exports `HIVE_WEB_LOCAL_LOOPBACK=1`.
-Rails checks both the request peer and authorized normalized Host before
-skipping login; an attacker-controlled Host is rejected even over a loopback
-socket.
+Rails checks the actual socket peer (`REMOTE_ADDR`) and authorized normalized
+Host before skipping login; an attacker-controlled Host is rejected before
+both reads and mutations even over a loopback socket. This preserves local
+access through a localhost proxy such as Tailscale Serve even when that proxy
+forwards the real remote client address.
 That connection-authenticated operator sees the complete primary navigation
 and is labelled `Local`; GitHub-dependent repository browsing stays behind an
 explicit **Connect GitHub** action instead of making the rest of Hive web look
-signed out.
+signed out. Completing that optional connection stores the session token but
+does not claim or rewrite `web.github.owner`.
 Non-loopback binds require either `--unsafe` or a configured `web.github.owner`;
 when an owner gate authorizes a non-loopback bind, the CLI warns that
 `web.github.owner` is the only login gate, and `0.0.0.0` without an HTTPS
 origin also prints the Host-header/reverse-proxy warning.
+The production loopback allowlist is active only with the local bypass;
+deliberately non-loopback owner-gated launches accept LAN hosts and machine IPs
+so the login gate can run.
 
 ## Surfaces
 

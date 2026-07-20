@@ -79,6 +79,8 @@ class SetupOrchestratorTest < Minitest::Test
       "service_running" => true, "service_manager_available" => true
     }
     installer.define_singleton_method(:service_state) { observed }
+    installer.define_singleton_method(:service_lifecycle_state) { observed }
+    installer.define_singleton_method(:restart!) { true }
     installer
   end
 
@@ -104,7 +106,10 @@ class SetupOrchestratorTest < Minitest::Test
     with_replaced_singleton_method(Hive::Setup::Diagnostics, :new, ->(*) { fake_diag }) do
       with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!, ->(*) { "/bundle" }) do
         with_replaced_singleton_method(Hive::Web::AppBundle, :app_dir, ->(*) { "/bundle" }) do
-          with_replaced_singleton_method(Hive::InvokedBinary, :path, ->(*) { "/usr/bin/hive" }) do
+          with_replaced_singleton_method(Hive::Web::AppBundle, :present?, ->(*) { true }) do
+            with_replaced_singleton_method(Hive::Web::AppBundle, :stale?, ->(*) { false }) do
+              with_replaced_singleton_method(Hive::Web::AppBundle, :assets_ready?, ->(*) { true }) do
+                with_replaced_singleton_method(Hive::InvokedBinary, :path, ->(*) { "/usr/bin/hive" }) do
             with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new,
               ->(**_kw) { daemon_installer }) do
               with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
@@ -116,6 +121,9 @@ class SetupOrchestratorTest < Minitest::Test
                 with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot,
                   ->(**_kw) { status }) do
                   stub_web_config { yield }
+                end
+              end
+            end
                 end
               end
             end
@@ -319,10 +327,21 @@ class SetupOrchestratorTest < Minitest::Test
       with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!, ->(*) { raise Hive::Error, "bad bundle" }) do
         with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new,
           ->(**) { fake_installer }) do
+          observed = fake_installer(state: {
+            "platform" => "linux", "unit_path" => "/tmp/unit.service",
+            "service_installed" => true, "service_enabled" => true,
+            "service_running" => true, "service_manager_available" => true
+          })
+          observed.define_singleton_method(:install!) { |**| flunk "blocked setup must not mutate service" }
           with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
-            ->(**) { flunk "service installer must not be constructed after bundle failure" }) do
+            ->(**) { observed }) do
             stub_web_config do
-              Hive::Commands::Setup.new(json: true, no_init: true, output: output).call
+              state = observed.service_state.merge(
+                "ready" => true, "readiness" => "ready", "url" => "http://127.0.0.1:4567"
+              )
+              with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot, ->(**) { state }) do
+                Hive::Commands::Setup.new(json: true, no_init: true, output: output).call
+              end
             end
           end
         end
@@ -334,6 +353,8 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal false, phase["ok"]
     assert_equal "blocked", phase["mutation"]
     assert_match(/web_bundle/, phase["message"])
+    assert_equal true, phase["service_running"]
+    assert_equal true, payload.dig("service", "ready")
   end
 
   def test_web_service_failure_records_message_and_fails_exit
@@ -396,6 +417,28 @@ class SetupOrchestratorTest < Minitest::Test
     phase = setup.instance_variable_get(:@phases).last
     assert_equal false, phase["ok"]
     assert_match(/did not reach installed, enabled, running, and ready state/, phase["message"])
+  end
+
+  def test_refreshed_bundle_restarts_an_already_running_service
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    setup.instance_variable_set(:@web_bundle_refreshed, true)
+    installer = fake_installer(success: true, wire: "unchanged")
+    restart_calls = 0
+    installer.define_singleton_method(:restart!) { restart_calls += 1; true }
+    state = installer.service_state.merge(
+      "ready" => true, "readiness" => "ready", "url" => "http://127.0.0.1:4567"
+    )
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/usr/bin/hive" }) do
+      with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new, ->(**) { installer }) do
+        with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot, ->(**) { state }) do
+          stub_web_config { setup.send(:install_web_service) }
+        end
+      end
+    end
+
+    assert_equal 1, restart_calls
+    assert_equal true, setup.instance_variable_get(:@phases).last["restarted"]
   end
 
   # ── bootstrap_qmd_if_missing ─────────────────────────────────────────
@@ -664,13 +707,18 @@ class SetupOrchestratorTest < Minitest::Test
     output = StringIO.new
     setup = Hive::Commands::Setup.new(json: false, output: output)
     setup.instance_variable_set(:@web_service, {
+      "platform" => "linux", "unit_path" => "/tmp/hive-web.service",
+      "service_manager_available" => true, "service_installed" => true,
+      "service_enabled" => true, "service_running" => true,
       "ready" => true,
+      "readiness" => "ready",
       "url" => "http://127.0.0.1:4567"
     })
 
     stub_web_config { setup.send(:emit, diag(ok_row)) }
 
     assert_includes output.string, "Hive web ready at http://127.0.0.1:4567"
+    assert_includes output.string, "manager_available=true installed=true enabled=true running=true ready=true"
   end
 
   def test_emit_human_reports_foreground_path_when_service_opted_out

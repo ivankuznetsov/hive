@@ -158,6 +158,8 @@ class WebCommandTest < Minitest::Test
         # db:prepare failure). Only the managed bundle gets the export.
         refute caught.env.key?("HIVE_CLI_ROOT"),
                "an operator-managed app dir must not have its path-gem source re-pointed"
+        refute caught.env.key?("BUNDLE_PATH"),
+               "an operator-managed app must keep the dependencies it was built against"
       end
     end
   end
@@ -208,6 +210,14 @@ class WebCommandTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, "config"))
       File.write(File.join(dir, "config", "application.rb"), "# rails app marker")
       File.write(File.join(dir, Hive::Web::AppBundle::VERSION_FILE), "#{Hive::VERSION}\n")
+      assets = File.join(dir, "public", "assets")
+      FileUtils.mkdir_p(assets)
+      File.write(File.join(assets, "application.css"), "body {}")
+      File.write(File.join(assets, "application.js"), "export {}")
+      File.write(File.join(assets, ".manifest.json"), JSON.generate(
+        "application.css" => { "digested_path" => "application.css" },
+        "application.js" => { "digested_path" => "application.js" }
+      ))
       FileUtils.mkdir_p(File.join(dir, "bin"))
       File.write(File.join(dir, "bin", "rails"), "#!/usr/bin/env bash\nexit 0\n")
       FileUtils.chmod(0o755, File.join(dir, "bin", "rails"))
@@ -228,6 +238,7 @@ class WebCommandTest < Minitest::Test
 
       refute_nil caught, "the command must end in Kernel.exec of the rails server"
       assert_equal Hive::Web::AppBundle.hive_cli_root, caught.env["HIVE_CLI_ROOT"]
+      assert_equal Hive::Web::AppBundle.dependency_dir, caught.env["BUNDLE_PATH"]
     end
   end
 
@@ -241,7 +252,7 @@ class WebCommandTest < Minitest::Test
     require "hive/commands/service_installer/outcome"
     outcome = Hive::Commands::ServiceInstaller::Outcome.new(outcome_kind)
     fake = Class.new do
-      define_method(:initialize) { |binary_path: nil| }
+      define_method(:initialize) { |**_kwargs| }
       define_method(:install!) { |autostart:, force:| outcome }
       define_method(:messages) { [ "installed note" ] }
       define_method(:target_path) { "/tmp/local.hive-web.plist" }
@@ -295,6 +306,7 @@ class WebCommandTest < Minitest::Test
         assert_equal "hive-web-install", payload["schema"]
         assert_equal 1, payload["schema_version"]
         assert_equal true, payload["ok"]
+        assert_equal "managed_service", payload["mode"]
         assert_equal "written", payload["outcome"]
         assert_equal "macos", payload["platform"]
         assert_equal "/tmp/local.hive-web.plist", payload["target_path"]
@@ -303,6 +315,40 @@ class WebCommandTest < Minitest::Test
         assert_kind_of Array, payload["messages"]
       end
     end
+  end
+
+  def test_install_bootstrap_failure_emits_versioned_json_error
+    context = {
+      "mode" => "managed_service", "warnings" => [], "platform" => "linux",
+      "unit_path" => "/tmp/hive-web.service", "service_installed" => true,
+      "service_enabled" => true, "service_running" => false,
+      "service_manager_available" => true, "url" => "http://127.0.0.1:4567",
+      "ready" => false, "readiness" => "inactive"
+    }
+    output = StringIO.new
+    original_stdout = $stdout
+    error = nil
+    begin
+      $stdout = output
+      error = assert_raises(Hive::Error) do
+        with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!, ->(*) { raise Hive::Error, "download failed" }) do
+          with_replaced_singleton_method(Hive::Commands::Web, :error_context, ->(**) { context }) do
+            Hive::Commands::Web.new("install", json: true).call
+          end
+        end
+      end
+    ensure
+      $stdout = original_stdout
+    end
+
+    assert_match(/download failed/, error.message)
+    payload = JSON.parse(output.string)
+    assert_equal "hive-web-install", payload["schema"]
+    assert_equal 1, payload["schema_version"]
+    assert_equal false, payload["ok"]
+    assert_equal "bootstrap_failed", payload["error_kind"]
+    assert_equal "managed_service", payload["mode"]
+    assert_equal "inactive", payload["readiness"]
   end
 
   def test_install_json_and_stderr_include_legacy_alias_guidance_once
@@ -333,7 +379,7 @@ class WebCommandTest < Minitest::Test
   # `call` sets HIVE_WEB_LOCAL_LOOPBACK=1 only when the bind is loopback AND
   # web.local_loopback is still true; the Rails side trusts that env var to
   # enable the no-auth bypass, so the CLI must export it exactly in that case.
-  def captured_exec_env(bind:, unsafe: false, web_config: nil)
+  def captured_exec_env(bind:, unsafe: false, web_config: nil, environment: nil)
     caught = nil
     with_tmp_global_config do |dir|
       if web_config
@@ -341,10 +387,16 @@ class WebCommandTest < Minitest::Test
                    { "registered_projects" => [], "web" => web_config }.to_yaml)
       end
       with_stub_rails_app(prepare_exit: 0) do
+        app_dir = ENV.fetch("HIVE_WEB_APP_DIR")
+        child_environment = environment&.merge("HIVE_WEB_APP_DIR" => app_dir) || ENV
         original = Kernel.method(:exec)
         Kernel.define_singleton_method(:exec) { |env, *argv| raise ExecCaught.new(env, argv) }
         begin
-          capture_io { Hive::Commands::Web.new(bind: bind, unsafe: unsafe).call }
+          capture_io do
+            Hive::Commands::Web.new(
+              bind: bind, unsafe: unsafe, environment: child_environment
+            ).call
+          end
         rescue ExecCaught => e
           caught = e
         ensure
@@ -360,15 +412,36 @@ class WebCommandTest < Minitest::Test
                  "a loopback bind with local_loopback enabled must signal the no-auth bypass"
   end
 
-  def test_loopback_env_omitted_on_non_loopback_bind
-    refute captured_exec_env(bind: "0.0.0.0", unsafe: true).key?("HIVE_WEB_LOCAL_LOOPBACK"),
-           "a non-loopback bind must never signal the loopback bypass"
+  def test_non_loopback_bind_clears_inherited_loopback_bypass
+    env = captured_exec_env(
+      bind: "0.0.0.0", unsafe: true,
+      environment: { "HIVE_WEB_LOCAL_LOOPBACK" => "1" }
+    )
+    assert env.key?("HIVE_WEB_LOCAL_LOOPBACK")
+    assert_nil env["HIVE_WEB_LOCAL_LOOPBACK"],
+               "the exec environment must actively remove a parent's loopback bypass"
+  end
+
+  def test_legacy_timeout_aliases_reach_child_under_canonical_names
+    env = captured_exec_env(
+      bind: "127.0.0.1",
+      environment: {
+        "HIVEBOX_DIFF_TIMEOUT_SEC" => "41",
+        "HIVEBOX_CLONE_TIMEOUT_SEC" => "242"
+      }
+    )
+
+    assert_equal "41", env["HIVE_WEB_DIFF_TIMEOUT_SEC"]
+    assert_equal "242", env["HIVE_WEB_CLONE_TIMEOUT_SEC"]
+    assert_nil env["HIVEBOX_DIFF_TIMEOUT_SEC"]
+    assert_nil env["HIVEBOX_CLONE_TIMEOUT_SEC"]
   end
 
   def test_loopback_env_omitted_when_config_opts_out
-    refute captured_exec_env(bind: "127.0.0.1", web_config: { "local_loopback" => false })
-           .key?("HIVE_WEB_LOCAL_LOOPBACK"),
-           "web.local_loopback:false must suppress the bypass even on a loopback bind"
+    env = captured_exec_env(bind: "127.0.0.1", web_config: { "local_loopback" => false })
+    assert env.key?("HIVE_WEB_LOCAL_LOOPBACK")
+    assert_nil env["HIVE_WEB_LOCAL_LOOPBACK"],
+               "web.local_loopback:false must clear the bypass even on a loopback bind"
   end
 
   # ── service subcommand routing (install|start|stop|status) ──────────
@@ -482,10 +555,15 @@ class WebCommandTest < Minitest::Test
 
   def test_status_service_text_reports_installed_state
     command = Hive::Commands::Web.new("status")
-    out, = with_fake_service_installer(platform: "linux", state: { "service_installed" => true }) do
+    state = {
+      "service_installed" => true, "service_enabled" => false,
+      "service_running" => false, "service_manager_available" => true
+    }
+    out, = with_fake_service_installer(platform: "linux", state: state) do
       capture_io { command.call }
     end
-    assert_match(/service installed/, out)
+    assert_match(/manager_available=true installed=true enabled=false running=false ready=false/, out)
+    assert_match(/readiness=disabled/, out)
   end
 
   def test_status_service_json_emits_status_envelope
@@ -501,6 +579,7 @@ class WebCommandTest < Minitest::Test
     assert_equal "hive-web-status", payload["schema"]
     assert_equal 1, payload["schema_version"]
     assert_equal true, payload["ok"]
+    assert_equal "managed_service", payload["mode"]
     assert_equal true, payload["service_installed"], "the installer's service_state must be merged into the envelope"
     assert_equal false, payload["service_running"]
     assert_equal false, payload["ready"]

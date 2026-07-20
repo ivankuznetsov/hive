@@ -8,6 +8,7 @@
   <meta name="turbo-refresh-scroll" content="preserve">
 <% end %>
 <%= turbo_stream_from StatusBroadcaster::CHANNEL %>
+<% project_names = @projects.map { |project| project["name"] } %>
 
 <%# TUI left-pane parity: the rail filters the grid client-side (buttons,
     not links — a navigation would discard the permanent composer's typed
@@ -17,7 +18,7 @@
   <aside class="project-nav" aria-label="Project filter">
     <button type="button" class="project-nav-item" data-project-filter-target="button"
             data-action="project-filter#choose" data-project-filter-name-param="">All projects</button>
-    <% registered_project_names.each do |name| %>
+    <% project_names.each do |name| %>
       <button type="button" class="project-nav-item" data-project-filter-target="button"
               data-action="project-filter#choose" data-project-filter-name-param="<%= name %>"><%= name %></button>
     <% end %>
@@ -38,7 +39,7 @@
           aria: { label: "New idea" } %>
     <div class="attachment-chips" data-composer-target="chips"></div>
     <div class="composer-toolbar">
-      <% names = registered_project_names %>
+      <% names = project_names %>
       <%# The placeholder is a disabled+hidden option: it reads as the closed
           value, but is not an entry in the open list (a selectable
           "Project…" row is noise). required + value="" still blocks submit

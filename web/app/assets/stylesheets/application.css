@@ -247,8 +247,6 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .composer-toolbar .spacer { flex: 1; }
 .composer select { max-width: 220px; }
 
-/* Operational status belongs in one glanceable row. Internal installation
-   fields stay behind the status report instead of leaking into the UI. */
 .daemon-panel {
   display: flex;
   align-items: center;

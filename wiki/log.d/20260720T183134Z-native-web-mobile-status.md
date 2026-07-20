@@ -16,3 +16,9 @@ recovery command.
 
 Focused Rails integration and Playwright system coverage pin the banner
 contract and prove a 390px status page has no document or control overflow.
+
+The status page also orders projects by active task count, so the busiest
+projects appear first in the filter rail, composer selector, and project grid.
+Projects with the same count keep their registry order, avoiding unnecessary
+movement between live updates. The permanent composer reconciles its project
+options after those updates while preserving the operator's current choice.

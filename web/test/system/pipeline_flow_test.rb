@@ -263,8 +263,15 @@ class PipelineFlowTest < ApplicationSystemTestCase
     create_task!(second, "Second task two")
     assert_selector ".project-section[data-project-name='second-app'][hidden]",
                     visible: :hidden, wait: 10
+    assert_selector ".task-row", text: "Second task two", visible: :hidden, wait: 10
     assert_selector ".task-row", text: "Demo task one",
                     count: 1
+    assert_selector ".project-nav button:nth-of-type(2)", text: "second-app", wait: 10
+    assert_equal [ "second-app", @project ],
+                 all(".composer select[name='project'] option:not([disabled])").map(&:value),
+                 "the permanent composer must adopt the live activity order"
+    assert_equal @project, find(".composer select[name='project']").value,
+                 "reordering projects must preserve the operator's selection"
 
     click_button "All projects"
     assert_selector ".project-section[data-project-name='second-app']"

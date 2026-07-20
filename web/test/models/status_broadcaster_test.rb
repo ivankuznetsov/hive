@@ -26,6 +26,20 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     StatusBroadcaster.feed = nil
   end
 
+  test "projects are ordered by active task count with stable ties" do
+    payload = {
+      "projects" => [
+        { "name" => "idle", "tasks" => [] },
+        { "name" => "busy-first", "tasks" => [ {}, {} ] },
+        { "name" => "busy-second", "tasks" => [ {}, {} ] },
+        { "name" => "active", "tasks" => [ {} ] }
+      ]
+    }
+
+    assert_equal %w[busy-first busy-second active idle],
+                 StatusBroadcaster.projects(payload).map { |project| project["name"] }
+  end
+
   test "a raising broadcast does not permanently stop live updates" do
     feed = FakeFeed.new
     StatusBroadcaster.feed = feed

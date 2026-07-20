@@ -117,6 +117,9 @@ origin also prints the Host-header/reverse-proxy warning.
 
 - **Status grid (`/`)** — a TUI-left-pane-parity project rail filters the
   grid client-side ("All projects" + one button per registered project;
+  projects are ordered by descending in-flight task count, preserving registry
+  order for ties, and the grid plus permanent composer selector stay in that
+  same order across live updates without losing the current selection;
   buttons not links so the permanent composer's typed text survives; a
   `+ Add project` link navigates to Repos because adding a project is a real
   page change; choice mirrored to `?project=` via replaceState; explicit

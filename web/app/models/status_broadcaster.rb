@@ -21,6 +21,13 @@ class StatusBroadcaster
       feed.snapshot
     end
 
+    def projects(payload)
+      payload.fetch("projects", [])
+             .each_with_index
+             .sort_by { |(project, index)| [ -project.fetch("tasks", []).size, index ] }
+             .map(&:first)
+    end
+
     # Self-healing by construction: a raising broadcast (a solid_cable
     # hiccup, one bad row blowing up the partial render) must not silently
     # freeze live updates forever — the first version logged once and let
@@ -63,7 +70,7 @@ class StatusBroadcaster
         CHANNEL,
         target: "projects",
         partial: "status/projects",
-        locals: { projects: payload.fetch("projects", []) }
+        locals: { projects: projects(payload) }
       )
     end
   end

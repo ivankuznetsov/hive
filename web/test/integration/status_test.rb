@@ -49,6 +49,38 @@ class StatusTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "projects with more active tasks appear first everywhere on status" do
+    sign_in!
+    projects = [
+      { "name" => "xbookmark", "tasks" => [] },
+      { "name" => "hive", "tasks" => [ { "slug" => "one" }, { "slug" => "two" } ] },
+      { "name" => "webmail.sh", "tasks" => [ { "slug" => "three" } ] }
+    ]
+    with_daemon_status(
+      "running" => true,
+      "service_installed" => true,
+      "binary_drift" => "none"
+    ) do
+      with_status_snapshot("projects" => projects) do
+        get "/"
+
+        assert_response :success
+        assert_select ".project-nav button" do |buttons|
+          assert_equal [ "All projects", "hive", "webmail.sh", "xbookmark" ],
+                       buttons.map { |button| button.text.strip }
+        end
+        assert_select ".project-section" do |sections|
+          assert_equal [ "hive", "webmail.sh", "xbookmark" ],
+                       sections.map { |section| section["data-project-name"] }
+        end
+        assert_select ".composer select[name='project'] option:not([disabled])" do |options|
+          assert_equal [ "hive", "webmail.sh", "xbookmark" ],
+                       options.map { |option| option["value"] }
+        end
+      end
+    end
+  end
+
 
   test "a stopped installed daemon shows the command that resumes it" do
     sign_in!
@@ -91,5 +123,13 @@ class StatusTest < ActionDispatch::IntegrationTest
   ensure
     StatusBroadcaster.define_singleton_method(:snapshot, original_snapshot) if original_snapshot
     Hive::Daemon::StatusReport.define_singleton_method(:new, original_report_new) if original_report_new
+  end
+
+  def with_status_snapshot(payload)
+    original_snapshot = StatusBroadcaster.method(:snapshot)
+    StatusBroadcaster.define_singleton_method(:snapshot) { payload }
+    yield
+  ensure
+    StatusBroadcaster.define_singleton_method(:snapshot, original_snapshot) if original_snapshot
   end
 end

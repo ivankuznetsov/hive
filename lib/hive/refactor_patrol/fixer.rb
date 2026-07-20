@@ -481,20 +481,19 @@ module Hive
         stdout, stderr, status = Open3.capture3(
           "git", "-C", path, "diff", "--cached", "--check"
         )
+        command = Hive::Patrol::Validator::CommandResult.new(
+          name: "built_in_docs",
+          command: "git diff --cached --check",
+          exit_code: status.exitstatus,
+          signal: status.signaled? ? status.termsig : nil,
+          stdout: stdout,
+          stderr: stderr,
+          timed_out: false,
+          output_truncated: stdout.to_s.length > 4000 || stderr.to_s.length > 4000
+        )
         {
           "passed" => status.success?,
-          "commands" => [
-            {
-              "name" => "built_in_docs",
-              "command" => "git diff --cached --check",
-              "exit_code" => status.exitstatus,
-              "signal" => status.signaled? ? status.termsig : nil,
-              "stdout" => stdout.to_s[-4000..].to_s,
-              "stderr" => stderr.to_s[-4000..].to_s,
-              "timed_out" => false,
-              "output_truncated" => stdout.to_s.length > 4000 || stderr.to_s.length > 4000
-            }
-          ]
+          "commands" => [ command.to_h ]
         }
       rescue SystemCallError => e
         {

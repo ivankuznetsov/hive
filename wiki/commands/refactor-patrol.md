@@ -357,8 +357,11 @@ fallback, so ambiguous equality keeps the blocker visible.
 
 ## Fix and issue routing
 
-Only accepted, unflagged theses from a job whose enqueue-time policy allowed
-auto-fix can reach `Fixer`. The current config may revoke or narrow that
+Current accepted, unflagged theses can reach `Fixer`. For upgrade recovery,
+an admissible persisted row whose complete reason set contains only the retired
+`exceeds_max_files` / `exceeds_max_diff_lines` flags receives the same current
+action authority while its stored historical disposition remains immutable.
+The job's enqueue-time policy must have allowed auto-fix. The current config may revoke or narrow that
 snapshot; it cannot relax captured contract/dependency guards, lower
 confidence/leverage thresholds, add a validation command, switch agents, or
 otherwise broaden an old job.
@@ -378,10 +381,15 @@ by default because useful refactoring commonly consolidates ownership across
 components. File count and diff size are recorded as
 publication evidence but never accept, reject, truncate, or reroute a thesis;
 the normal review workflow judges whether the resulting PR is meaningful and
-coherent. Unknown source languages
+coherent. The reviewer receives only bounded owned content plus a fixed-size
+list of mapper-selected context and test paths for its one follow-up inspection
+round; cross-feature discovery does not grant repository-wide search. Unknown source languages
 remain discoverable but fail automatic mutation when no public-contract guard
 can prove safety. Documentation-only fixes prefer an explicit `docs` command;
 without one, Hive runs `git diff --cached --check` as a deterministic minimum
+only for inert documentation extensions and named documentation files;
+executable documentation formats such as MDX remain report-only without a
+configured `docs` command
 and sends the resulting PR through the normal review workflow.
 When `refactor_patrol.commands.public_contract` is configured, it is an
 authoritative executable guard and runs for every automatic fix that changes a

@@ -101,8 +101,9 @@ Rules:
   in parallel where possible. The first entrypoint remains listed when it alone
   exceeds that budget, so cap each Read at 400 lines rather than loading a whole large file.
   Only when they show a
-  concrete architecture-cost hypothesis, use one follow-up round for direct
-  ownership or dependency evidence. Never run a repository-wide search or
+  concrete architecture-cost hypothesis, use one follow-up round for the
+  listed context/test paths or other direct ownership or dependency evidence.
+  Never run a repository-wide search or
   return a broad file list; the complete component is used for deterministic
   measurement while this smaller view controls agent context. Return zero
   theses when the bounded evidence is
@@ -173,18 +174,20 @@ Rules:
   and name the affected boundaries in `cross_feature_details`; scope alone is
   not a reason to omit the thesis. Hive applies contract, dependency, secret,
   protected-path, and validation guards before any fix can publish.
+<% if feature.documentation? %>
+- This is a documentation slice. Include `docs` in
+  required_validation.commands when that configured command is available.
+  Characterization tests are not a substitute for docs validation. Without a
+  configured `docs` command, leave the command list empty and explain the
+  documentation check needed; Hive may apply inert documentation formats using
+  its built-in diff safety check before the normal PR review workflow.
+<% else %>
 - Include required_validation.commands using the available command names. An
   automatic fix requires at least one executable project command. If this
   slice lacks useful tests, set characterization_first true, explain the test
   needed before refactoring, and include a broader configured behavior command
   when one is genuinely applicable. With no applicable command the thesis is
   report-only, so emit it only when the architecture cost is still material.
-<% if feature.documentation? %>
-- This is a documentation slice. Use the configured `docs` validation command
-  when it is available. Characterization tests are not a substitute for docs
-  validation; without `docs`, explain the documentation check needed. Hive may
-  still apply a bounded docs-only patch using its built-in diff safety check,
-  followed by the normal PR review workflow.
 <% end %>
 - This is reporting only. Do not propose applying code, opening PRs, or
   enqueueing review tasks.

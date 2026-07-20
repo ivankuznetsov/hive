@@ -3,6 +3,10 @@ require "ripper"
 module Hive
   module RefactorPatrol
     class Caps
+      BUILT_IN_DOCUMENTATION_EXTENSIONS = %w[.adoc .asciidoc .markdown .md .rst].freeze
+      BUILT_IN_DOCUMENTATION_BASENAMES = %w[
+        README CHANGELOG CONTRIBUTING SECURITY CODE_OF_CONDUCT
+      ].freeze
       NON_PRODUCTION_SURFACE_PATTERN = %r{(?:\A|/)(?:fixtures?|node_modules|specs?|tests?|vendor)(?:/|\z)}i
       JAVASCRIPT_ENTRYPOINT_EXTENSIONS = %w[cjs js jsx mjs ts tsx].join("|").freeze
       PUBLIC_API_PATTERNS = [
@@ -329,10 +333,12 @@ module Hive
 
       def self.documentation_path?(path)
         normalized = normalize_path(path)
-        return true if normalized.match?(%r{\A(?:docs?|wiki)(?:/|\z)}i)
-        return true if normalized.match?(%r{(?:\A|/)(?:README|CHANGELOG|CONTRIBUTING|SECURITY|CODE_OF_CONDUCT)(?:\.[^/]*)?\z}i)
+        extension = File.extname(normalized).downcase
+        basename = File.basename(normalized, extension).upcase
+        return true if BUILT_IN_DOCUMENTATION_BASENAMES.include?(basename) &&
+                       (extension.empty? || BUILT_IN_DOCUMENTATION_EXTENSIONS.include?(extension))
 
-        %w[.adoc .asciidoc .markdown .md .mdx .rst].include?(File.extname(normalized).downcase)
+        BUILT_IN_DOCUMENTATION_EXTENSIONS.include?(extension)
       end
 
       def self.without_legacy_size_flags(values)

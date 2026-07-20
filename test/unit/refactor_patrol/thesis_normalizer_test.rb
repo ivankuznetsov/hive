@@ -461,6 +461,25 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     refute thesis.required_validation.fetch("characterization_first")
   end
 
+  def test_executable_documentation_format_without_configured_command_is_report_only
+    raw = valid_raw_thesis.merge(
+      "evidence" => [
+        { "file" => "docs/guide.mdx", "line" => 3, "snippet" => "Setup", "claim" => "setup guidance is duplicated" }
+      ],
+      "required_validation" => { "commands" => [], "characterization_first" => false, "notes" => "" }
+    )
+    thesis = normalize(
+      raw,
+      feature: documentation_feature(path: "docs/guide.mdx"),
+      commands: { "test" => "rake test" }
+    )
+
+    assert thesis.admissible
+    assert_includes thesis.risk.fetch("flags"), "missing_docs_validation"
+    assert_empty thesis.required_validation.fetch("commands")
+    assert_includes thesis.required_validation.fetch("notes"), "Configure an executable docs validation command"
+  end
+
   private
 
   def normalize(raw, feature: self.feature(tests: [ "test/checkout_test.rb" ]), leverage: feature_leverage,
@@ -474,12 +493,12 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     end
   end
 
-  def documentation_feature
+  def documentation_feature(path: "docs/guide.md")
     Hive::Patrol::Feature.new(
       id: "documentation-docs-root",
       kind: "documentation",
-      entrypoints: [ "docs/guide.md" ],
-      owned_files: [ "docs/guide.md" ],
+      entrypoints: [ path ],
+      owned_files: [ path ],
       context_files: [ "README.md" ],
       tests: []
     )

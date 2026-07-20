@@ -388,6 +388,36 @@ class RefactorPatrolFixerTest < Minitest::Test
       assert_equal "validation_failed", patch.outcome
       assert_equal "built_in_docs", patch.validation.dig("commands", 0, "name")
       refute_equal 0, patch.validation.dig("commands", 0, "exit_code")
+      diagnostic = [
+        patch.validation.dig("commands", 0, "stdout"),
+        patch.validation.dig("commands", 0, "stderr")
+      ].join("\n")
+      assert_includes diagnostic, "trailing whitespace"
+    end
+  end
+
+  def test_built_in_documentation_validation_rejects_executable_and_mdx_paths
+    {
+      "docs/build.rb" => "value = 1\n",
+      "wiki/plugin.js" => "const value = 1;\n",
+      "docs/.vitepress/config.mts" => "const value = 1;\n",
+      "pages/index.mdx" => "export const value = 1\n"
+    }.each do |changed_path, content|
+      with_repo do |repo, analysis_sha|
+        item = thesis(boundary_file: changed_path)
+        item.required_validation = { "commands" => [], "notes" => "Use built-in documentation safety checks." }
+        agent = lambda do |worktree_path:, **|
+          full_path = File.join(worktree_path, changed_path)
+          FileUtils.mkdir_p(File.dirname(full_path))
+          File.write(full_path, content)
+          { status: :ok }
+        end
+
+        patch = fixer(repo, agent: agent)
+                .attempt(thesis: item, job_id: "job-7", analysis_sha: analysis_sha)
+
+        assert_equal "missing_validation", patch.outcome, changed_path
+      end
     end
   end
 

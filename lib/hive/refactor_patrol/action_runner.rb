@@ -480,6 +480,7 @@ module Hive
           return finish_local_issue(aggregate, action, route.fetch(:outcome)) if route.fetch(:outcome)
         end
 
+        remote_continuation = remote_continuation_evidence?(action)
         token = claim_action(aggregate, action)
         unless token
           current = @job_store.read_job(aggregate.fetch("job_id"))
@@ -514,7 +515,10 @@ module Hive
         if action.fetch("kind") == "fix"
           process_fix(token, aggregate, action, entry.fetch(:thesis))
         else
-          process_issue(token, aggregate, action, entry.fetch(:thesis), route.fetch(:reasons))
+          process_issue(
+            token, aggregate, action, entry.fetch(:thesis), route.fetch(:reasons),
+            remote_continuation: remote_continuation
+          )
         end
       rescue JobStore::StaleClaim
         raise
@@ -634,7 +638,7 @@ module Hive
         settle(token, result, adapter: :pr)
       end
 
-      def process_issue(token, aggregate, action, thesis, reasons)
+      def process_issue(token, aggregate, action, thesis, reasons, remote_continuation: false)
         if (denial = transition_denial_reason(token, "issue", aggregate))
           release(token, denial)
           return
@@ -655,7 +659,8 @@ module Hive
           reasons: reasons,
           record_intent: publication_intent_callback(token, "issue", aggregate, action),
           authorize_create: external_effect_fence(token, "issue"),
-          creation_attempted: publication.any? || remote_continuation_evidence?(fresh_action),
+          creation_attempted: publication.any? || remote_continuation ||
+            remote_continuation_evidence?(fresh_action),
           publication_state: publication
         )
         settle(token, result, adapter: :issue)
@@ -954,7 +959,11 @@ module Hive
                             patch.changed_paths.all? { |path| valid_patch_path?(path) }
         return false unless patch.diff_lines.is_a?(Integer) && patch.diff_lines.positive?
         return false unless patch.details.is_a?(Hash)
-        caps = aggregate.dig("policy", "action", "caps")
+        # A persisted patch receipt may outlive the configuration that allowed
+        # it to cross the mapped feature boundary. Revalidate publication
+        # against the captured/current intersection prepared for this run so a
+        # live revocation still fences an already-generated patch.
+        caps = @policy_result&.config&.dig("refactor_patrol", "caps")
         if caps.is_a?(Hash) && caps["allow_cross_feature"] == true
           return true
         end

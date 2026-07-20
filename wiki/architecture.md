@@ -74,7 +74,9 @@ zero signals cannot be mistaken for evidence that a component has no leverage.
 The reviewer starts from affected feature slices from the merge manifest, but a
 refactoring thesis may span mapped features when it removes duplicated ownership
 or an unstable dependency direction. Cross-feature scope is recorded rather than
-treated as a risk by itself. The reviewer runs under provider-specific read-only
+treated as a risk by itself. The prompt retains a fixed-size list of mapped
+dependency, peer-entrypoint, and test paths so the agent can inspect the relevant
+neighboring boundary without broad repository search. The reviewer runs under provider-specific read-only
 enforcement and must leave the registered checkout byte-for-byte unchanged. A strict run-wide thesis
 budget leaves later slices resumable, and every cited file/line/snippet is
 verified against the pinned checkout's real bytes before a thesis is admissible.
@@ -82,7 +84,8 @@ The mutation boundary is intentionally narrower. Each accepted thesis is
 processed in an isolated worktree only when certified public-contract guards,
 root confinement, `.hive-state` control-plane protection, secret scanning,
 dependency guards, applicable
-configured validation (or the built-in docs-only diff check), and the
+configured validation (or the built-in diff check for inert documentation
+formats), and the
 independently enabled `auto_fix` policy all pass. Cross-feature patches remain
 eligible regardless of file count or diff size, and every changed path
 participates in trunk-overlap reanalysis. Contract-changing,

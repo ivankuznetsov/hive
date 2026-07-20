@@ -243,7 +243,7 @@ module Hive
       end
 
       def enforce_behavior_guidance!(feature, hash)
-        return enforce_documentation_guidance!(hash) if feature.documentation?
+        return enforce_documentation_guidance!(feature, hash) if feature.documentation?
 
         validation = hash.fetch("required_validation")
         known_commands = @commands.keys
@@ -276,18 +276,29 @@ module Hive
         hash["confidence"] = "medium" if !has_tests && validation["characterization_first"] && hash["confidence"] == "high"
       end
 
-      def enforce_documentation_guidance!(hash)
+      def enforce_documentation_guidance!(feature, hash)
         validation = hash.fetch("required_validation")
         docs_command = @commands["docs"]
         if docs_command
           validation["commands"] = [ "docs" ]
           validation["characterization_first"] = false
           validation["notes"] = "Run the configured documentation validation before publishing a fix."
-        else
+        elsif built_in_documentation_validation_available?(feature)
           validation["commands"] = []
           validation["characterization_first"] = false
           validation["notes"] = "Use Hive's built-in documentation safety checks before normal PR review."
+        else
+          validation["commands"] = []
+          validation["characterization_first"] = false
+          validation["notes"] = "Configure an executable docs validation command before automatic refactoring."
+          hash.fetch("risk").fetch("flags") << "missing_docs_validation"
+          hash.fetch("risk")["flags"].uniq!
         end
+      end
+
+      def built_in_documentation_validation_available?(feature)
+        paths = Array(feature.owned_files) + Array(feature.entrypoints)
+        paths.any? && paths.all? { |path| Caps.documentation_path?(path) }
       end
 
       def enforce_admissibility!(hash)

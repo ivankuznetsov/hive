@@ -18,6 +18,7 @@ module Hive
     # ReviewAgentRunner's.
     class Reviewer
       MAX_PROMPT_OWNED_FILES = 4
+      MAX_PROMPT_CONTEXT_FILES = 4
       MAX_PROMPT_SOURCE_BYTES = 32 * 1024
       TemplateBindings = Struct.new(
         :project_root, :feature, :leverage, :commands, :output_path,
@@ -197,9 +198,13 @@ module Hive
       def bounded_prompt_feature(feature)
         feature.dup.tap do |bounded|
           bounded.owned_files = bounded_owned_files(feature.owned_files)
-          bounded.context_files = []
-          bounded.tests = []
+          bounded.context_files = bounded_context_paths(feature.context_files)
+          bounded.tests = bounded_context_paths(feature.tests)
         end
+      end
+
+      def bounded_context_paths(paths)
+        Array(paths).map(&:to_s).reject(&:empty?).uniq.first(MAX_PROMPT_CONTEXT_FILES)
       end
 
       def bounded_owned_files(paths)

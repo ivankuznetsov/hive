@@ -2298,6 +2298,52 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_reconciles_initialized_legacy_size_issue_from_outcome_only_evidence
+    with_tmp_dir do |dir|
+      item = thesis(
+        id: "legacy-size-outcome", fingerprint: "fp-legacy-size-outcome",
+        flags: [ "exceeds_max_files" ]
+      )
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
+        dispositions: dispositions(flagged: [
+          disposition(item, reasons: [ "exceeds_max_files" ])
+        ])
+      )
+      family_id = Hive::RefactorPatrol::SemanticFamily.id_for(
+        Hive::RefactorPatrol::SemanticDescriptor.call(thesis: item, source: source(7))
+      )
+      initialized = store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => item.id, "kind" => "issue", "family_id" => family_id }
+        ],
+        now: T0
+      )
+      action = initialized.fetch("actions").fetch(0)
+      token = store.claim_action!(
+        "job-1", action.fetch("canonical_action_id"), owner: "legacy-runner", now: T0
+      )
+      store.release_action!(
+        token, outcome: "remote_outcome_unknown", now: T0, backoff_sec: 0
+      )
+      issue_url = "https://github.com/acme/polyglot/issues/99"
+      filer = FakeIssueFiler.new(
+        Hive::RefactorPatrol::IssueFiler::Result.new(
+          outcome: "issue_linked_open", terminal: true, issue_url: issue_url,
+          receipts: { "issue_url" => issue_url }
+        )
+      )
+
+      result = build_runner(dir, store: store, issue_filer: filer).run(job_id: "job-1")
+
+      assert result.complete?
+      assert_equal "issue_linked_open", result.actions.fetch(0).fetch("outcome")
+      assert_equal true, filer.calls.fetch(0).fetch(:creation_attempted)
+    end
+  end
+
   def test_reconstructs_persisted_legacy_size_row_with_nil_risk
     with_tmp_dir do |dir|
       item = thesis(id: "legacy-nil-risk", fingerprint: "fp-legacy-nil-risk")
@@ -2524,26 +2570,26 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_cross_feature_patch_receipt_is_valid_when_captured_policy_allows_it
+  def test_cross_feature_patch_receipt_uses_effective_policy_and_observes_live_revocation
     with_tmp_dir do |dir|
-      runner = build_runner(dir, store: Hive::RefactorPatrol::JobStore.new(dir))
+      current_cfg = config
+      current_cfg.dig("refactor_patrol", "caps")["allow_cross_feature"] = true
+      runner = build_runner(
+        dir, store: Hive::RefactorPatrol::JobStore.new(dir), cfg: current_cfg
+      )
       item = thesis(id: "accepted", fingerprint: "fp-accepted")
       patch = validated_patch(fingerprint: item.fingerprint)
       patch.changed_paths = [ "src/orders/service.ts" ]
       policy = snapshot_policy
+      policy.fetch("action").fetch("caps")["allow_cross_feature"] = true
       aggregate = {
         "analysis_sha" => patch.analysis_sha,
         "policy" => policy
       }
-      aggregate.fetch("policy").fetch("action").fetch("caps")["allow_cross_feature"] = true
       action = { "canonical_action_id" => patch.branch.delete_prefix("hive-refactor/") }
+      runner.send(:prepare_policy, aggregate)
 
       assert runner.send(:valid_patch?, patch, aggregate, action, item)
-
-      aggregate.fetch("policy").fetch("action").fetch("caps")["allow_cross_feature"] = false
-      refute runner.send(:valid_patch?, patch, aggregate, action, item)
-
-      aggregate.fetch("policy").fetch("action").fetch("caps")["allow_cross_feature"] = true
       patch.changed_paths = [ "../outside.rb" ]
       refute runner.send(:valid_patch?, patch, aggregate, action, item)
 
@@ -2553,6 +2599,10 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       patch.changed_paths = [ "src/orders/service.ts" ]
       patch.diff_lines = 401
       assert runner.send(:valid_patch?, patch, aggregate, action, item)
+
+      current_cfg.dig("refactor_patrol", "caps")["allow_cross_feature"] = false
+      runner.send(:prepare_policy, aggregate)
+      refute runner.send(:valid_patch?, patch, aggregate, action, item)
     end
   end
 

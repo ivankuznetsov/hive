@@ -45,8 +45,13 @@ class RefactorPatrolCapsTest < Minitest::Test
 
   def test_documentation_paths_cover_named_root_docs_and_document_extensions
     assert Hive::RefactorPatrol::Caps.documentation_path?("README")
-    assert Hive::RefactorPatrol::Caps.documentation_path?("guides/migration.mdx")
+    assert Hive::RefactorPatrol::Caps.documentation_path?("docs/README.md")
+    assert Hive::RefactorPatrol::Caps.documentation_path?("guides/migration.rst")
     refute Hive::RefactorPatrol::Caps.documentation_path?("lib/migration.rb")
+    refute Hive::RefactorPatrol::Caps.documentation_path?("docs/build.rb")
+    refute Hive::RefactorPatrol::Caps.documentation_path?("wiki/plugin.js")
+    refute Hive::RefactorPatrol::Caps.documentation_path?("guides/migration.mdx")
+    refute Hive::RefactorPatrol::Caps.documentation_path?("README.rb")
   end
 
   # A thesis is behavior-preserving by contract: working inside files that

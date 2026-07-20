@@ -330,6 +330,74 @@ class HiveBotLoggerTest < Minitest::Test
     end
   end
 
+  def test_event_serializes_rotation_check_and_write_across_workers
+    with_tmp_dir do |dir|
+      path = File.join(dir, "concurrent.log")
+      logger = Hive::Bot::Logger.new(path: path)
+      logger.close
+
+      state_lock = Mutex.new
+      size_calls = 0
+      puts_calls = 0
+      lines = []
+      write_release = Queue.new
+      fake_file = Object.new
+      fake_file.define_singleton_method(:size) do
+        state_lock.synchronize { size_calls += 1 }
+        0
+      end
+      fake_file.define_singleton_method(:puts) do |line|
+        state_lock.synchronize { puts_calls += 1 }
+        write_release.pop
+        state_lock.synchronize { lines << line }
+      end
+      fake_file.define_singleton_method(:flush) { }
+      fake_file.define_singleton_method(:close) { }
+      logger.instance_variable_set(:@file, fake_file)
+
+      worker_count = 3
+      ready = Queue.new
+      start = Queue.new
+      attempting = Queue.new
+      workers = Array.new(worker_count) do |worker|
+        Thread.new do
+          ready << true
+          start.pop
+          attempting << true
+          logger.event(:notification_sent, worker: worker)
+        end
+      end
+
+      worker_count.times { ready.pop }
+      worker_count.times { start << true }
+      worker_count.times { attempting.pop }
+
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      until workers.all? { |worker| worker.status == "sleep" }
+        if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+          flunk "workers did not all reach the logger synchronization point"
+        end
+
+        Thread.pass
+      end
+
+      state_lock.synchronize do
+        assert_equal 1, size_calls,
+                     "a blocked write must prevent another worker from entering rotation"
+        assert_equal 1, puts_calls,
+                     "only one worker may write through the shared file at a time"
+      end
+
+      worker_count.times { write_release << true }
+      workers.each(&:value)
+      assert_equal worker_count, lines.size
+      logger.close
+    ensure
+      worker_count&.times { write_release << true } if write_release
+      workers&.each { |worker| worker.join(1) }
+    end
+  end
+
   def test_file_size_warning_is_emitted_once_when_stat_fails
     with_log do |logger, _path|
       fake_file = Object.new

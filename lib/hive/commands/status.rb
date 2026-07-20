@@ -1,4 +1,5 @@
 require "json"
+require "digest"
 require "time"
 require "hive/agent_limit"
 require "hive/config"
@@ -145,10 +146,13 @@ module Hive
       # non-breaking; removing or renaming keys must bump a documented
       # version. `tasks[].marker` is the lowercased symbol name as a string;
       # `tasks[].attrs` is the marker's attribute map.
-      def json_payload(projects, stages: nil, exclude_archived: false, admission_context: nil)
-        admission_context ||= build_admission_context(
-          projects, exclude_archived: exclude_archived
-        )
+      def json_payload(projects, stages: nil, exclude_archived: false, admission_context: nil,
+                       retained_only: false)
+        unless admission_context || retained_only
+          admission_context = build_admission_context(
+            projects, exclude_archived: exclude_archived
+          )
+        end
         queue_index = pending_queue_index
         {
           "schema" => "hive-status",
@@ -162,7 +166,8 @@ module Hive
               stages: stages,
               exclude_archived: exclude_archived,
               admission_context: admission_context,
-              queue_index: queue_index
+              queue_index: queue_index,
+              retained_only: retained_only
             )
           end
         }
@@ -173,7 +178,11 @@ module Hive
       # second interpretation of markers, dependencies, or workflow overlays.
       def task_card(project:, slug:)
         project_name = project.respond_to?(:fetch) ? project.fetch("name") : project.to_s
-        payload = json_payload(Hive::Config.registered_projects)
+        project_entry = project.respond_to?(:fetch) ? project : Hive::Config.find_project(project_name)
+        raise Hive::InvalidTaskPath, "unknown project #{project_name}" unless project_entry
+
+        admission_context = Hive::DependencySnapshot.admission_context_for_project(project_entry)
+        payload = json_payload([ project_entry ], admission_context: admission_context)
         project_payload = payload.fetch("projects", []).find { |entry| entry["name"] == project_name }
         card = project_payload&.fetch("tasks", [])&.find { |task| task["slug"] == slug.to_s }
         card || raise(Hive::InvalidTaskPath, "unknown task #{slug} in project #{project_name}")
@@ -188,14 +197,15 @@ module Hive
       # daemon.log) so the rest of the fleet keeps advancing. The fallback
       # entry still validates against the published hive-status schema.
       def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false,
-                                      admission_context: nil, queue_index: nil)
+                                      admission_context: nil, queue_index: nil, retained_only: false)
         project_payload(
           project,
           project_count: project_count,
           stages: stages,
           exclude_archived: exclude_archived,
           admission_context: admission_context,
-          queue_index: queue_index
+          queue_index: queue_index,
+          retained_only: retained_only
         )
       rescue StandardError => e
         warn "hive: status: project #{project['name'].inspect} payload failed " \
@@ -212,7 +222,7 @@ module Hive
       end
 
       def project_payload(project, project_count:, stages: nil, exclude_archived: false,
-                          admission_context: nil, queue_index: nil)
+                          admission_context: nil, queue_index: nil, retained_only: false)
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {
@@ -237,18 +247,35 @@ module Hive
             # external consumers (TUI, daemon, bots) read `diagnostic` off
             # every row. Schema mandates the field.
             config = task_action_config(path)
+            configured_default_workflow = config && config.fetch(
+              "default_workflow", Hive::Config::DEFAULTS.fetch("default_workflow")
+            ).to_s.strip
+            configured_default_workflow = Hive::Config::DEFAULTS.fetch("default_workflow") if configured_default_workflow == ""
             rows = annotate_implementation_identities(
-              collect_rows(hive_state, stages: stages, exclude_archived: exclude_archived), config
+              collect_rows(
+                hive_state, stages: stages, exclude_archived: exclude_archived,
+                retained_only: retained_only,
+                project_default_workflow: configured_default_workflow,
+                workflow_loaded: true
+              ),
+              config
             )
             rows = annotate_actions(
               rows,
               project, project_count, config: config, with_diagnostic: true
             )
             rows = annotate_dependencies(
-              rows, project, admission_context: admission_context
+              rows, project, admission_context: admission_context,
+              project_scoped: retained_only
             )
             rows = annotate_queued_requests(rows, project, queue_index || {})
             rows = archive_rows(rows) if @archive
+            # Web day-to-day surfaces use the same canonical retention rule as
+            # StatusVisibility, but apply it before card enrichment. Default
+            # CLI/daemon JSON remains lossless; only explicit retained
+            # projections avoid review/CI artifact I/O for cards the board
+            # cannot render.
+            rows = rows.reject { |row| hide_archived_row?(row) } if retained_only
             out = base.merge(
               "workflows" => workflow_payloads,
               "tasks" => rows.map { |r| task_payload(r) }
@@ -474,9 +501,10 @@ module Hive
       def operational_chips(row)
         chips = []
         chips << disk_pr_chip(row) if row[:pr_url]
-        reviews = disk_review_chip(row)
+        review_artifacts = disk_review_artifacts(row)
+        reviews = disk_review_chip(review_artifacts)
         chips << reviews if reviews
-        ci = disk_ci_chip(row)
+        ci = disk_ci_chip(row, review_artifacts)
         chips << ci if ci
         chips << {
           "kind" => "queue", "status" => "pending", "source" => "dispatch_request",
@@ -495,9 +523,14 @@ module Hive
         }
       end
 
-      def disk_review_chip(row)
-        files = Dir.glob(File.join(row[:folder].to_s, "reviews", "*.{md,json}"))
+      def disk_review_artifacts(row)
+        Dir.glob(File.join(row[:folder].to_s, "reviews", "*.{md,json}"))
           .select { |path| File.file?(path) }
+      rescue SystemCallError
+        []
+      end
+
+      def disk_review_chip(files)
         return nil if files.empty?
 
         latest = files.max_by { |path| File.mtime(path) }
@@ -511,9 +544,9 @@ module Hive
         nil
       end
 
-      def disk_ci_chip(row)
-        blocked = Dir.glob(File.join(row[:folder].to_s, "reviews", "ci-blocked*.md"))
-          .select { |path| File.file?(path) }
+      def disk_ci_chip(row, review_artifacts = disk_review_artifacts(row))
+        blocked = review_artifacts
+          .select { |path| File.basename(path).start_with?("ci-blocked") && File.extname(path) == ".md" }
           .max_by { |path| File.mtime(path) }
         if blocked
           return {
@@ -984,19 +1017,35 @@ module Hive
         exclude_archived ? dirs - [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ] : dirs
       end
 
-      def collect_rows(hive_state, stages: nil, exclude_archived: false)
+      def collect_rows(hive_state, stages: nil, exclude_archived: false, retained_only: false,
+                       project_default_workflow: nil, workflow_loaded: false)
         rows = []
+        terminal_state_files = retained_only ? unambiguous_terminal_state_files : {}
+        workflow_semantics = {}
         Array(stages || default_stage_dirs(exclude_archived)).each do |stage|
           stage_dir = File.join(hive_state, "stages", stage)
           next unless File.directory?(stage_dir)
 
           stage_task_entries(stage_dir).each do |entry|
             next unless File.directory?(entry)
+            if terminal_state_files.key?(stage) &&
+               retained_entry_hidden?(entry, terminal_state_files.fetch(stage))
+              next
+            end
 
             slug = File.basename(entry)
             begin
               begin
-                task = Hive::Task.new(entry)
+                # project_payload can tell the scan that it holds the workflow
+                # monitor and already loaded this project's overlay. Avoid
+                # re-fingerprinting the workflow directory for every card in
+                # that lock-safe path; direct collect_rows callers retain the
+                # constructor's normal self-loading behavior.
+                task = Hive::Task.new(
+                  entry,
+                  workflow_loaded: workflow_loaded,
+                  project_default_workflow: project_default_workflow
+                )
               rescue Hive::InvalidTaskPath => e
                 # U6 widened this rescue's blast radius: a typo'd
                 # `meta.yml workflow:` / `config.yml default_workflow:` or a
@@ -1030,12 +1079,18 @@ module Hive
                 rescue StandardError
                   nil
                 end
+              workflow = task.workflow
+              workflow_key = [ workflow.id, workflow.object_id ]
+              resolved_workflow_semantics = workflow_semantics.fetch(workflow_key) do
+                workflow_semantics[workflow_key] = Hive::TaskFingerprint.workflow_semantics(workflow)
+              end
               rows << {
                 stage: stage,
                 slug: slug,
                 id: task.id,
                 display_name: task.display_name,
-                workflow: task.workflow.id,
+                workflow: workflow.id,
+                workflow_semantics: resolved_workflow_semantics,
                 depends_on: task.depends_on,
                 folder: entry,
                 state_file: task.state_file,
@@ -1045,7 +1100,7 @@ module Hive
                 marker_name: marker.name,
                 marker_attrs: marker.attrs,
                 projection: projection,
-                projection_data: projection.to_h,
+                projection_data: status_projection_data(projection),
                 icon: icon,
                 state_label: state_label,
                 mtime: mtime,
@@ -1107,7 +1162,47 @@ module Hive
         drop_transient_stage_moves(rows)
       end
 
+      # Retained web projections can discard a descriptor-known terminal row
+      # before constructing Task, parsing markers/projections, or enumerating
+      # review artifacts. Descriptor ambiguity and missing/unreadable canonical
+      # state files deliberately fail open into the full retention check.
+      def unambiguous_terminal_state_files
+        candidates = Hash.new { |hash, key| hash[key] = [] }
+        Hive::Workflows::Registry.all.each do |workflow|
+          terminal = workflow.stages.last
+          candidates[terminal.dir] << terminal.state_file.to_s
+        end
+        candidates.filter_map do |stage, files|
+          unique = files.reject(&:empty?).uniq
+          [ stage, unique.first ] if unique.one?
+        end.to_h
+      end
+
+      def retained_entry_hidden?(folder, state_file)
+        state_path = File.join(folder, state_file)
+        state_stat = File.stat(state_path)
+        return false unless state_stat.file?
+
+        Hive::ArchiveFilter.hide?(
+          stage: File.basename(File.dirname(folder)), terminal: true,
+          mtime: state_stat.mtime
+        )
+      rescue SystemCallError
+        false
+      end
+
       def status_projection(task, marker)
+        snapshot_path = File.join(task.folder, Hive::TaskProjection::Store::SNAPSHOT_BASENAME)
+        journal_path = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+        unless File.exist?(snapshot_path) || File.exist?(journal_path) || durable_handoff_marker?(marker)
+          key = [ marker.name.to_s, Hive::TaskProjection.canonical_json(marker.attrs.to_h) ]
+          @empty_projection_cache ||= {}
+          projection = @empty_projection_cache[key] ||= Hive::TaskProjection.project(
+            records: [], cursor: 0, journal_hash: ::Digest::SHA256.hexdigest(""), marker: marker
+          )
+          return [ marker, projection ]
+        end
+
         projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
         [ marker, projection ]
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
@@ -1125,8 +1220,41 @@ module Hive
         [ error_marker, Hive::TaskProjection.project(records: [], marker: error_marker) ]
       end
 
-      def annotate_dependencies(rows, project, admission_context: nil)
-        context = admission_context || build_admission_context([ project ])
+      def status_projection_data(projection)
+        @status_projection_data ||= {}
+        @status_projection_data[projection.object_id] ||= projection.to_h
+      end
+
+      # The projection store must still enforce its missing-journal invariant
+      # after a durable handoff. Legacy tasks with neither a snapshot nor a
+      # journal have no authoritative records to read, so projecting that
+      # empty input directly avoids two exception-driven filesystem reads per
+      # retained card without changing the resulting projection.
+      def durable_handoff_marker?(marker)
+        return false unless marker.name.to_s.start_with?("execute_")
+
+        attempt_id = marker.attrs.to_h["attempt_id"] || marker.attrs.to_h[:attempt_id]
+        !attempt_id.to_s.empty? && attempt_id != Hive::TaskJournal::LEGACY_ATTEMPT_ID
+      end
+
+      def annotate_dependencies(rows, project, admission_context: nil, project_scoped: false)
+        if admission_context.nil? && project_scoped && rows.none? { |row| row[:depends_on].to_s.strip != "" }
+          rows.each do |row|
+            row[:blocked_by] = nil
+            row[:dependency_stage] = nil
+            row[:blocked] = false
+            row[:admission_error] = nil
+          end
+          return rows
+        end
+
+        context = admission_context || (
+          if project_scoped
+            Hive::DependencySnapshot.admission_context_for_project(project)
+          else
+            build_admission_context([ project ])
+          end
+        )
         rows.each { |row| apply_dependency_verdict(row, context, project) }
         rows
       end

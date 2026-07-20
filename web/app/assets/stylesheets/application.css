@@ -14,13 +14,13 @@
   --panel: #ffffff;
   --ink: #1f1e1d;
   --ink-muted: #6e6b63;
-  --ink-faint: #9b978c;
+  --ink-faint: #706d65;
   --line: #e6e3da;
   --line-strong: #d6d2c6;
 
   /* Terracotta accent + states */
-  --accent: #c96442;
-  --accent-strong: #b3522f;
+  --accent: #b85435;
+  --accent-strong: #994525;
   --accent-soft: #f5e3db;
   --ok: #5f7e5a;
   --ok-soft: #e4ecdf;

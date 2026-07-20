@@ -67,7 +67,17 @@ export default class extends Controller {
           ...confirmation
         })
       })
-      const payload = await response.json().catch(() => ({}))
+      const contentType = response.headers.get("Content-Type")?.toLowerCase() || ""
+      if (!contentType.includes("application/json")) {
+        throw new TransitionError("Move failed (unexpected response)", {})
+      }
+
+      let payload
+      try {
+        payload = await response.json()
+      } catch (_error) {
+        throw new TransitionError("Move failed (invalid JSON response)", {})
+      }
       if (!response.ok) throw new TransitionError(payload.message || `Move failed (${response.status})`, payload)
 
       this.announce(payload.state === "queued" ? "Move queued" : "Task moved")

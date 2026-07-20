@@ -127,6 +127,56 @@ class CommandsRunTest < Minitest::Test
     end
   end
 
+  def test_web_operator_audit_exists_before_the_run_commit
+    with_tmp_dir do |dir|
+      t = task(folder: dir, hive_state_path: File.join(dir, ".hive-state"))
+      File.write(t.state_file, "# state\n")
+      committed_event = nil
+      ops = Object.new
+      ops.define_singleton_method(:hive_commit) do |**|
+        committed_event = JSON.parse(File.readlines(File.join(dir, "events.jsonl")).last)
+        "committed"
+      end
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { ops }) do
+        with_replaced_singleton_method(Hive::Lock, :with_commit_lock, ->(_path, &block) { block.call }) do
+          command(audit: { actor: "alice", request_id: "web-1" }).send(
+            :commit_after, t, { commit: "brainstorm_complete", status: :complete }
+          )
+        end
+      end
+
+      assert_equal "operator_action", committed_event.fetch("event_type")
+      assert_equal "alice", committed_event.fetch("actor")
+      assert_equal "web-1", committed_event.fetch("request_id")
+      assert_equal "run", committed_event.fetch("direction")
+    end
+  end
+
+  def test_failed_run_commit_rolls_back_operator_audit_files
+    with_tmp_dir do |dir|
+      t = task(folder: dir, hive_state_path: File.join(dir, ".hive-state"))
+      File.write(t.state_file, "# state\n")
+      File.write(File.join(dir, "events.jsonl"), "before\n")
+      File.write(File.join(dir, "status.md"), "before status\n")
+      ops = Object.new
+      ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { ops }) do
+        with_replaced_singleton_method(Hive::Lock, :with_commit_lock, ->(_path, &block) { block.call }) do
+          assert_raises(Hive::GitError) do
+            command(audit: { actor: "alice", request_id: "web-2" }).send(
+              :commit_after, t, { commit: "brainstorm_complete", status: :complete }
+            )
+          end
+        end
+      end
+
+      assert_equal "before\n", File.read(File.join(dir, "events.jsonl"))
+      assert_equal "before status\n", File.read(File.join(dir, "status.md"))
+    end
+  end
+
   def test_report_checks_execute_transition_before_emitting_completion
     with_tmp_dir do |dir|
       t = task(folder: dir, stage_name: "execute", stage_index: 4)

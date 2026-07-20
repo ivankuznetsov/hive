@@ -4,6 +4,7 @@
 # the same snapshot synchronously on first paint, so the stream only ever
 # *updates* what the server already rendered.
 require "securerandom"
+require "monitor"
 
 class StatusBroadcaster
   CHANNEL = "status".freeze
@@ -11,6 +12,7 @@ class StatusBroadcaster
 
   # Seconds to back off after the subscriber loop dies before resubscribing.
   RETRY_SEC = 5
+  STREAM_MONITOR = Monitor.new
 
   class << self
     # Injectable for tests; one feed per process in production.
@@ -24,10 +26,16 @@ class StatusBroadcaster
       feed.snapshot
     end
 
+    def snapshot_with_cursor
+      STREAM_MONITOR.synchronize { [ snapshot, stream_cursor ] }
+    end
+
     def stream_cursor
-      @stream_epoch ||= SecureRandom.uuid
-      @stream_generation ||= 0
-      { epoch: @stream_epoch, generation: @stream_generation }
+      STREAM_MONITOR.synchronize do
+        @stream_epoch ||= SecureRandom.uuid
+        @stream_generation ||= 0
+        { epoch: @stream_epoch, generation: @stream_generation }
+      end
     end
 
     # Self-healing by construction: a raising broadcast (a solid_cable
@@ -70,25 +78,22 @@ class StatusBroadcaster
     private
 
     def broadcast(payload)
-      cursor = advance_stream!
-      refresh_required = broadcast_board_changes(@last_payload, payload)
-      Turbo::StreamsChannel.broadcast_replace_to(
-        CHANNEL,
-        target: "projects",
-        partial: "status/projects",
-        locals: { projects: StatusVisibility.projects(payload) }
-      )
-      Turbo::StreamsChannel.broadcast_refresh_to(CHANNEL) if refresh_required
-      # Emit the cursor last so it acknowledges all targeted patches ahead of
-      # it. Refresh generations stay pending until a new page render replaces
-      # this controller; a dropped refresh is therefore still a detectable gap.
-      Turbo::StreamsChannel.broadcast_replace_to(
-        CHANNEL,
-        target: "board_sync",
-        partial: "board/sync",
-        locals: cursor.merge(refresh_required: refresh_required)
-      )
-      @last_payload = payload
+      STREAM_MONITOR.synchronize do
+        cursor = advance_stream!
+        broadcast_board_changes(@last_payload, payload)
+        # A refresh action is constant-sized and lets URL-filtered boards,
+        # classic grids, task pages, and open drawers each rebuild from their
+        # own current URL without shipping the complete projects grid over
+        # Cable for every changed card.
+        Turbo::StreamsChannel.broadcast_refresh_to(CHANNEL)
+        Turbo::StreamsChannel.broadcast_replace_to(
+          CHANNEL,
+          target: "board_sync",
+          partial: "board/sync",
+          locals: cursor.merge(refresh_required: true)
+        )
+        @last_payload = payload
+      end
     end
 
     def broadcast_board_changes(previous, current)
@@ -171,6 +176,7 @@ class StatusBroadcaster
       Turbo::StreamsChannel.broadcast_replace_to(
         CHANNEL,
         target: dom_id("card", project.fetch("name"), task.fetch("slug")),
+        method: :morph,
         partial: "board/card",
         locals: { project: project, task: task }
       )
@@ -190,8 +196,10 @@ class StatusBroadcaster
     end
 
     def reset_stream!
-      @stream_epoch = SecureRandom.uuid
-      @stream_generation = 0
+      STREAM_MONITOR.synchronize do
+        @stream_epoch = SecureRandom.uuid
+        @stream_generation = 0
+      end
     end
 
     def advance_stream!

@@ -42,6 +42,10 @@ module Hive
     # legacy stderr + exit-code contract.
     class_option :json, type: :boolean, default: false,
                         desc: "emit a single JSON document on stdout (commands that support it)"
+    class_option :audit_actor, type: :string, hide: true,
+                               desc: "internal web operator audit actor"
+    class_option :audit_request_id, type: :string, hide: true,
+                                    desc: "internal web operator audit request id"
 
     FINDING_SEVERITY_ENUM = %w[high medium low nit].freeze
 
@@ -568,14 +572,16 @@ module Hive
                        desc: "skip the auto-rebase pre-step for this run only (one-off override of cfg.rebase.enabled)"
     def run_task(target)
       require "hive/commands/run"
-      Hive::Commands::Run.new(
-        target,
+      kwargs = {
         project: options[:project],
         stage: options[:stage],
         json: options[:json],
         no_rebase: options[:no_rebase],
         durable: true
-      ).call
+      }
+      audit = web_operator_audit
+      kwargs[:audit] = audit if audit
+      Hive::Commands::Run.new(target, **kwargs).call
     end
     map "run" => :run_task
 
@@ -1699,6 +1705,8 @@ module Hive
           from: options[:from],
           json: options[:json]
         }
+        audit = web_operator_audit
+        kwargs[:audit] = audit if audit
         reason = options[:recover_merged_error_reason]
         kwargs[:recover_merged_error_reason] = reason unless reason.nil?
 
@@ -1708,6 +1716,14 @@ module Hive
           **kwargs,
           durable: true
         ).call
+      end
+
+      def web_operator_audit
+        actor = options[:audit_actor].to_s
+        request_id = options[:audit_request_id].to_s
+        return nil if actor.empty? || request_id.empty?
+
+        { actor: actor, request_id: request_id }
       end
     end
   end

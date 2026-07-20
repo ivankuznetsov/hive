@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock
 created: 2026-04-25
-updated: 2026-07-19
+updated: 2026-07-20
 tags: [dependencies, gems, runtime]
 ---
 
@@ -22,7 +22,8 @@ bundle now resolves Brakeman 8.0.5. Its current primary runtime locks are Rails
 Stimulus Rails 1.3.4, Jbuilder 2.15.1, Solid Cable 4.0.0, Solid Cache 1.0.10,
 Solid Queue 1.4.0, Bootsnap 1.24.6, Thruster 0.1.21, Image Processing 1.14.0,
 and Redcarpet 3.6.1. Its browser/test locks include Capybara 3.40.0,
-capybara-playwright-driver 0.5.9, playwright-ruby-client 1.60.0, rack-test
+capybara-playwright-driver 0.5.9, playwright-ruby-client 1.60.0,
+axe-core-api 4.12.0, rack-test
 2.2.0, bundler-audit 0.9.3, and rubocop-rails-omakase 1.1.0.
 
 ## Runtime gems
@@ -66,7 +67,8 @@ and the result is sanitized by Rails with an explicit allowlist. See
 
 Direct web development/test dependencies include `debug`,
 `bundler-audit`, `brakeman`, `rubocop-rails-omakase`, `web-console`,
-`capybara`, and `capybara-playwright-driver`. `rack-test` is not a direct
+`capybara`, `capybara-playwright-driver`, and `axe-core-api` (`~> 4.12`) for
+the real-browser serious/critical accessibility gate. `rack-test` is not a direct
 `web/Gemfile` entry, but the web lock resolves it transitively through
 Rails/Capybara and the web integration upload tests use
 `Rack::Test::UploadedFile`.

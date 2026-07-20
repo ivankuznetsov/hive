@@ -1,5 +1,6 @@
 require "test_helper"
 require "capybara-playwright-driver"
+require "axe/configuration"
 
 # The composer labels its controls via aria-label (placeholder-only inputs
 # fail screen readers); Capybara must match them the way assistive tech does.
@@ -33,29 +34,27 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
   end
 
   def assert_no_serious_accessibility_violations
-    violations = page.evaluate_script(<<~JS)
-      (() => {
-        const visible = (element) => !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length)
-        const labelText = (element) => {
-          const explicit = element.id && document.querySelector(`label[for="${CSS.escape(element.id)}"]`)
-          return [element.getAttribute("aria-label"), element.getAttribute("aria-labelledby"),
-                  element.closest("label")?.textContent, explicit?.textContent,
-                  element.textContent, element.getAttribute("title"), element.getAttribute("value")]
-            .some((value) => value && value.trim().length > 0)
-        }
-        const violations = []
-        const ids = [...document.querySelectorAll("[id]")].map((element) => element.id)
-        const duplicates = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))]
-        if (duplicates.length) violations.push(`duplicate ids: ${duplicates.join(", ")}`)
-        document.querySelectorAll("button, input:not([type=hidden]), select, textarea, a[href]").forEach((element) => {
-          if (visible(element) && !labelText(element)) violations.push(`unnamed ${element.tagName.toLowerCase()}`)
-        })
-        document.querySelectorAll("img").forEach((image) => {
-          if (!image.hasAttribute("alt")) violations.push(`image without alt: ${image.src}`)
-        })
-        return violations
-      })()
+    page.execute_script(Axe::Configuration.instance.jslib)
+    results = page.evaluate_async_script(<<~JS)
+      const done = arguments[arguments.length - 1]
+      axe.run(document, { resultTypes: ["violations"] })
+        .then(done)
+        .catch((error) => done({ error: error.message, violations: [] }))
     JS
-    assert_empty violations, "serious accessibility violations: #{violations.join('; ')}"
+    assert_nil results["error"], "axe-core failed: #{results['error']}"
+
+    violations = results.fetch("violations").select { |violation| %w[serious critical].include?(violation["impact"]) }
+    message = violations.flat_map do |violation|
+      violation.fetch("nodes").map do |node|
+        "#{violation['id']} (#{violation['impact']}) at #{Array(node['target']).join(', ')}: #{violation['help']}"
+      end
+    end.join("\n")
+    assert_empty violations, "serious accessibility violations:\n#{message}"
+  end
+
+  def emulate_reduced_motion!(reduced)
+    capybara_browser = page.driver.send(:browser)
+    playwright_page = capybara_browser.instance_variable_get(:@playwright_page)
+    playwright_page.emulate_media(reducedMotion: reduced ? "reduce" : "no-preference")
   end
 end

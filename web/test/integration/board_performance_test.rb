@@ -1,5 +1,4 @@
 require "test_helper"
-require "digest"
 
 class BoardPerformanceTest < ActionDispatch::IntegrationTest
   PROJECTS = 20
@@ -11,41 +10,39 @@ class BoardPerformanceTest < ActionDispatch::IntegrationTest
 
   setup do
     sign_in!
-    @original_snapshot = StatusBroadcaster.method(:snapshot)
-    @payload = synthetic_payload
-    payload = @payload
-    StatusBroadcaster.define_singleton_method(:snapshot) { payload }
   end
 
-  teardown do
-    StatusBroadcaster.define_singleton_method(:snapshot, @original_snapshot)
-  end
+  test "production 20 by 500 scan renders retained cards and broadcasts within budget" do
+    Dir.mktmpdir("hive-board-production-performance") do |root|
+      projects = real_scan_fixture(root, projects: PROJECTS, tasks_per_project: SCANNED_PER_PROJECT)
+      with_registered_projects(projects) do
+        started = Process.clock_gettime(Process::CLOCK_PROCESS_CPUTIME_ID)
+        get board_path
+        elapsed = Process.clock_gettime(Process::CLOCK_PROCESS_CPUTIME_ID) - started
 
-  test "retained 20 by 500 snapshot renders at most one thousand cards within budget" do
-    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    get board_path
-    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+        assert_response :success
+        visible = PROJECTS * VISIBLE_PER_PROJECT
+        assert_select ".board-card", visible
 
-    assert_response :success
-    visible = PROJECTS * VISIBLE_PER_PROJECT
-    assert_select ".board-card", visible
-    assert_operator elapsed, :<, MAX_RENDER_SECONDS,
-                    "initial board render took #{elapsed.round(3)}s (budget #{MAX_RENDER_SECONDS}s)"
-    projects = StatusVisibility.projects(@payload)
-    cards = projects.flat_map { |project| project.fetch("tasks") }
-    assert_equal visible, cards.size
-    samples = projects.flat_map do |project|
-      project.fetch("tasks").map { |card| [ project, card ] }
-    end.first(101)
-    sizes = samples.map do |project, card|
-      html = ApplicationController.render(
-        partial: "board/card", locals: { task: card, project: project }
-      )
-      %(<turbo-stream action="replace"><template>#{html}</template></turbo-stream>).bytesize
-    end.sort
-    median = sizes.fetch(sizes.size / 2)
-    assert_operator median, :<, MAX_CARD_BYTES,
-                    "median rendered Turbo card payload was #{median} bytes (budget #{MAX_CARD_BYTES})"
+        old_payload = StatusBroadcaster.snapshot
+        changed_file = Dir[File.join(root, "disk-00", ".hive-state", "stages", "1-inbox", "*", "idea.md")].first
+        File.write(changed_file, "# changed\n\n<!-- WAITING -->\n")
+        changed_payload = StatusBroadcaster.snapshot
+        messages = capture_cable_payloads do
+          StatusBroadcaster.instance_variable_set(:@last_payload, old_payload)
+          StatusBroadcaster.send(:broadcast, changed_payload)
+        end
+        card_sizes = messages.grep(/target="card_/).map(&:bytesize).sort
+        refute_empty card_sizes, "the performance gate must exercise the real targeted broadcaster"
+        median = card_sizes.fetch(card_sizes.size / 2)
+        assert_operator median, :<, MAX_CARD_BYTES,
+                        "median rendered Turbo card payload was #{median} bytes (budget #{MAX_CARD_BYTES})"
+        refute messages.any? { |message| message.include?('target="projects"') },
+               "steady card updates must not broadcast the complete projects grid"
+        assert_operator elapsed, :<, MAX_RENDER_SECONDS,
+                        "production scan-to-render used #{elapsed.round(3)}s CPU (budget #{MAX_RENDER_SECONDS}s)"
+      end
+    end
   end
 
   test "filesystem scan and card assembly stay within twice the scan baseline" do
@@ -73,64 +70,27 @@ class BoardPerformanceTest < ActionDispatch::IntegrationTest
 
   private
 
-  def synthetic_payload
-    now = Time.now.utc
-    old = (now - 5.days).iso8601
-    recent = now.iso8601
-    {
-      "projects" => PROJECTS.times.map do |project_index|
-        project = format("scale-%02d", project_index)
-        {
-          "name" => project,
-          "path" => "/tmp/#{project}",
-          "hive_state_path" => "/tmp/#{project}/.hive-state",
-          "workflows" => [ workflow ],
-          "tasks" => SCANNED_PER_PROJECT.times.map do |task_index|
-            terminal = task_index >= VISIBLE_PER_PROJECT
-            card(project, task_index, terminal: terminal, observed_at: terminal ? old : recent)
-          end
-        }
-      end
-    }
+  def with_registered_projects(projects)
+    original = Hive::Config.method(:registered_projects)
+    Hive::Config.define_singleton_method(:registered_projects) { projects }
+    StatusBroadcaster.stop!
+    yield
+  ensure
+    StatusBroadcaster.stop!
+    Hive::Config.define_singleton_method(:registered_projects, original) if original
   end
 
-  def workflow
-    {
-      "id" => "coding",
-      "dependency_gate_stage" => "9-done",
-      "stages" => [
-        { "name" => "inbox", "dir" => "1-inbox", "index" => 1, "kind" => nil },
-        { "name" => "done", "dir" => "9-done", "index" => 2, "kind" => nil }
-      ]
-    }
-  end
-
-  def card(project, index, terminal:, observed_at:)
-    slug = format("scale-task-%02d-%03d", project.delete_prefix("scale-").to_i, index)
-    {
-      "slug" => slug,
-      "display_name" => "Scale task #{index}",
-      "workflow" => "coding",
-      "stage" => terminal ? "9-done" : "1-inbox",
-      "terminal" => terminal,
-      "marker" => terminal ? "complete" : "waiting",
-      "action" => terminal ? "archived" : "ready_to_brainstorm",
-      "action_label" => terminal ? "Archived" : "Ready to brainstorm",
-      "dominant_state" => terminal ? "idle" : "ready",
-      "state_rank" => terminal ? 6 : 5,
-      "fingerprint" => "tfp1:#{Digest::SHA256.hexdigest(slug)}",
-      "card_digest" => "card1:#{Digest::SHA256.hexdigest("card:#{slug}")}",
-      "allowed_transitions" => terminal ? [] : [ {
-        "destination" => "9-done", "verb" => "approve", "direction" => "forward",
-        "confirmation" => "none", "label" => "Move to Done"
-      } ],
-      "depends_on" => nil,
-      "blocked_by" => nil,
-      "operational_chips" => [],
-      "age_seconds" => terminal ? 5.days.to_i : index,
-      "mtime" => observed_at,
-      "folder_mtime" => observed_at
-    }
+  def capture_cable_payloads
+    server = ActionCable.server
+    original = server.method(:broadcast)
+    messages = []
+    server.define_singleton_method(:broadcast) do |_stream, content|
+      messages << content.to_s
+    end
+    yield
+    messages
+  ensure
+    server.define_singleton_method(:broadcast, original) if original
   end
 
   def real_scan_fixture(root, projects:, tasks_per_project:)

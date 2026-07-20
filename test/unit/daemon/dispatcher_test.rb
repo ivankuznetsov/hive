@@ -3684,6 +3684,75 @@ end
     Hive::Commands::Status.define_singleton_method(:new, original_new) if original_new
   end
 
+  def test_guarded_web_recovery_revalidates_the_logical_recover_verb
+    dispatcher, = make_dispatcher(rows: [])
+    request = Q::Request.new(
+      request_id: "WEB-RECOVER", project: "p1", slug: "s1",
+      argv: %w[hive markers clear s1], trigger: "web_recover",
+      requestor: "web", actor: "alice", expected_fingerprint: "tfp1:expected",
+      transition_destination: "6-review"
+    )
+    status = Object.new
+    status.define_singleton_method(:task_card) do |**|
+      {
+        "fingerprint" => "tfp1:expected",
+        "allowed_transitions" => [ { "destination" => "6-review", "verb" => "recover" } ]
+      }
+    end
+    original_new = Hive::Commands::Status.method(:new)
+    Hive::Commands::Status.define_singleton_method(:new) { status }
+
+    assert dispatcher.send(:guarded_transition_current?, request)
+  ensure
+    Hive::Commands::Status.define_singleton_method(:new, original_new) if original_new
+  end
+
+  def test_guarded_dispatch_rechecks_under_commit_lock_before_spawn
+    dispatcher, = make_dispatcher(rows: [])
+    request = Q::Request.new(
+      request_id: "WEB-LOCK", project: "p1", slug: "s1", argv: %w[hive run s1],
+      expected_fingerprint: "tfp1:expected"
+    )
+    checks = 0
+    dispatched = false
+    dispatcher.define_singleton_method(:guarded_transition_current?) do |_request|
+      checks += 1
+      false
+    end
+    dispatcher.define_singleton_method(:dispatch_request!) { |*, **| dispatched = true }
+    project = { "name" => "p1", "hive_state_path" => "/tmp/p1-state" }
+    locked = false
+    locked_path = nil
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { project }) do
+      with_replaced_singleton_method(Hive::Lock, :with_commit_lock, lambda { |path, &block|
+        locked_path = path
+        locked = true
+        block.call
+      }) do
+        dispatcher.send(:dispatch_guarded_request!, request, now: T0)
+      end
+    end
+
+    assert locked
+    assert_equal "/tmp/p1-state", locked_path
+    assert_equal 1, checks
+    refute dispatched
+  end
+
+  def test_web_request_carries_audit_identity_into_spawned_command
+    dispatcher, = make_dispatcher(rows: [])
+    request = Q::Request.new(
+      request_id: "WEB-AUDIT", project: "p1", slug: "s1", argv: %w[hive run s1],
+      requestor: "web", actor: "alice"
+    )
+
+    audited = dispatcher.send(:request_with_web_audit, request)
+
+    assert_equal %w[hive run s1 --audit-actor alice --audit-request-id WEB-AUDIT], audited.argv
+    assert_equal %w[hive run s1], request.argv
+  end
+
   def restore_find_project!
     if Hive::Config.singleton_class.method_defined?(:__orig_find_project)
       Hive::Config.define_singleton_method(:find_project, Hive::Config.method(:__orig_find_project))
@@ -4285,17 +4354,8 @@ end
     end
   end
 
-  def test_queued_web_audit_runs_only_after_successful_completion
+  def test_reap_does_not_append_operator_audit_after_child_completion
     dispatcher, supervisor, = make_dispatcher
-    audited = []
-    dispatcher.define_singleton_method(:claimed_dispatch_request) do |request_id|
-      Q::Request.new(
-        request_id: request_id, requestor: "web", actor: "alice",
-        project: "p1", slug: "s1", argv: %w[hive run s1 --stage 2-work],
-        transition_destination: "2-work"
-      )
-    end
-    dispatcher.define_singleton_method(:audit_web_dispatch!) { |request| audited << request.request_id }
     supervisor.next_exits = [
       ChildExit.new(pid: 1, exit_code: 1, project: "p1", slug: "s1", stage: nil,
                     command: "hive run s1", started_at: T0, finished_at: T0,
@@ -4315,7 +4375,7 @@ end
 
     dispatcher.send(:reap_completed, now: T0 + 1)
 
-    assert_equal [ "succeeded" ], audited
+    refute dispatcher.respond_to?(:audit_web_dispatch!, true)
   end
 
   def test_dispatch_request_rejected_when_project_unknown

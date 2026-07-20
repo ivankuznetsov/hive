@@ -39,4 +39,42 @@ class KanbanBoardTest < ApplicationSystemTestCase
     assert_selector ".board-column[data-stage='2-brainstorm']:not([hidden])", visible: true
     assert_selector ".board-column[data-stage='1-inbox'][hidden]", visible: :hidden
   end
+
+  test "refresh-required generations and cable reconnects reconcile authoritatively" do
+    page.execute_script(<<~JS)
+      document.documentElement.dataset.boardVisits = "0"
+      document.addEventListener("turbo:before-visit", (event) => {
+        const root = document.documentElement
+        root.dataset.boardVisits = String(Number(root.dataset.boardVisits) + 1)
+        event.preventDefault()
+      })
+      const sync = document.querySelector("#board_sync")
+      const replacement = sync.cloneNode(true)
+      replacement.dataset.generation = String(Number(sync.dataset.generation) + 1)
+      replacement.dataset.refreshRequired = "true"
+      sync.replaceWith(replacement)
+    JS
+    assert_selector "html[data-board-visits='1']"
+    assert_text "Board update requires a full refresh"
+
+    page.execute_script(<<~JS)
+      document.dispatchEvent(new CustomEvent("turbo:fetch-request-error"))
+      const sync = document.querySelector("#board_sync")
+      const replacement = sync.cloneNode(true)
+      replacement.dataset.generation = String(Number(sync.dataset.generation) + 2)
+      replacement.dataset.refreshRequired = "false"
+      sync.replaceWith(replacement)
+    JS
+    assert_selector "html[data-board-visits='2']"
+
+    page.execute_script(<<~JS)
+      document.dispatchEvent(new CustomEvent("turbo:fetch-request-error"))
+      const source = document.querySelector("turbo-cable-stream-source")
+      source.setAttribute("connected", "")
+      source.removeAttribute("connected")
+      source.setAttribute("connected", "")
+    JS
+    assert_selector "html[data-board-visits='3']"
+    assert_text "Board reconnected; refreshing current state"
+  end
 end

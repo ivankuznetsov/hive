@@ -78,6 +78,8 @@ class BoardTransitionsTest < ActionDispatch::IntegrationTest
 
   test "destructive transition requires the exact task slug" do
     card = current_card
+    hive_state = stage_dir(@project, "1-inbox").join("..", "..").cleanpath
+    before_commit = `git -C #{Shellwords.escape(hive_state.to_s)} rev-parse HEAD`.strip
 
     post task_transition_path(@project, @slug), params: {
       destination: "__delete__", expected_fingerprint: card.fetch("fingerprint"),
@@ -85,6 +87,8 @@ class BoardTransitionsTest < ActionDispatch::IntegrationTest
     }, as: :json
     assert_response :unprocessable_entity
     assert File.directory?(card.fetch("folder"))
+    assert_equal before_commit, `git -C #{Shellwords.escape(hive_state.to_s)} rev-parse HEAD`.strip,
+                 "a refused drop must not commit an operator audit"
 
     post task_transition_path(@project, @slug), params: {
       destination: "__delete__", expected_fingerprint: card.fetch("fingerprint"),
@@ -92,6 +96,29 @@ class BoardTransitionsTest < ActionDispatch::IntegrationTest
     }, as: :json
     assert_response :success
     refute File.exist?(card.fetch("folder"))
+  end
+
+  test "destructive transition revalidates the fingerprint after acquiring the project lock" do
+    card = current_card
+    original_lock = Hive::Lock.method(:with_commit_lock)
+    changed = false
+    Hive::Lock.define_singleton_method(:with_commit_lock) do |path, &block|
+      unless changed
+        changed = true
+        File.write(card.fetch("state_file"), "# Changed while waiting for lock\n\n<!-- ERROR reason=race -->\n")
+      end
+      original_lock.call(path, &block)
+    end
+
+    post task_transition_path(@project, @slug), params: {
+      destination: "__delete__", expected_fingerprint: card.fetch("fingerprint"),
+      confirmation_slug: @slug
+    }, as: :json
+
+    assert_response :conflict
+    assert File.directory?(card.fetch("folder"))
+  ensure
+    Hive::Lock.define_singleton_method(:with_commit_lock, original_lock) if original_lock
   end
 
   test "recovery uses the guarded transition queue identity" do
@@ -165,8 +192,34 @@ class BoardTransitionsTest < ActionDispatch::IntegrationTest
       destination: "2-brainstorm", expected_fingerprint: card.fetch("fingerprint")
     }, as: :json
 
-    anonymous.assert_response :redirect
+    anonymous.assert_response :unauthorized
+    assert_equal "authentication_required", anonymous.response.parsed_body.fetch("error")
     assert_equal before, Hive::Daemon::DispatchRequestQueue.pending.size
+  end
+
+  test "destructive transition records its guard and operator audit in the drop commit" do
+    card = current_card
+
+    post task_transition_path(@project, @slug), params: {
+      destination: "__delete__", expected_fingerprint: card.fetch("fingerprint"),
+      confirmation_slug: @slug
+    }, as: :json
+
+    assert_response :success
+    hive_state = stage_dir(@project, "1-inbox").join("..", "..").cleanpath
+    commit_body = `git -C #{Shellwords.escape(hive_state.to_s)} log -1 --format=%B`
+    audit = commit_body.lines.filter_map do |line|
+      parsed = JSON.parse(line)
+      parsed if parsed["event_type"] == "operator_action"
+    rescue JSON::ParserError
+      nil
+    end.first
+    refute_nil audit
+    assert_equal "alice", audit.fetch("actor")
+    assert_equal request.request_id, audit.fetch("request_id")
+    assert_equal "1-inbox", audit.fetch("from")
+    assert_equal "__delete__", audit.fetch("to")
+    assert_equal "delete", audit.fetch("direction")
   end
 
   private

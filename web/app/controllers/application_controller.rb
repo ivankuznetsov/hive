@@ -71,7 +71,7 @@ class ApplicationController < ActionController::Base
 
   def require_login
     return if local_loopback_request?
-    return redirect_to login_path unless current_login
+    return authentication_denied unless current_login
 
     # Sessions must track the CURRENT owner, not the owner at sign-in time:
     # rotating web.github.owner (or re-claiming a box) would otherwise leave
@@ -83,7 +83,15 @@ class ApplicationController < ActionController::Base
     return if Rails.env.local? && session[:github_token].blank?
 
     reset_session
-    redirect_to login_path, alert: "Signed out: this box's owner changed."
+    authentication_denied(message: "Signed out: this box's owner changed.")
+  end
+
+  def authentication_denied(message: "Sign in to continue.")
+    if request.format.json?
+      render json: { error: "authentication_required", message: message }, status: :unauthorized
+    else
+      redirect_to login_path, alert: message
+    end
   end
 
   # Hive::Web::Loopback is the same test the CLI bind policy uses, so the

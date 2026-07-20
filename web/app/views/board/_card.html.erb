@@ -3,7 +3,7 @@
 <article class="board-card state-<%= task["dominant_state"] %>" id="card_<%= dom_id_for(project["name"], task["slug"]) %>"
          data-controller="card-menu"
          data-card-slug="<%= task["slug"] %>" data-state="<%= task["dominant_state"] %>"
-         data-card-digest="<%= task["card_digest"] %>" data-board-navigation-target="card" tabindex="-1"
+         data-card-digest="<%= task["card_digest"] %>" data-board-navigation-target="card" tabindex="0"
          data-card-menu-url-value="<%= task_transition_path(project["name"], task["slug"]) %>"
          data-card-menu-fingerprint-value="<%= task["fingerprint"] %>"
          data-board-dnd-transitions="<%= drag_transitions.to_json %>"
@@ -21,10 +21,12 @@
       <summary class="btn btn-ghost btn-sm">Move to</summary>
       <div class="card-menu-items" role="menu" aria-label="Move <%= task_title(task) %>">
         <% transitions.each do |transition| %>
-          <%= form_with url: task_transition_path(project["name"], task["slug"]), method: :post,
-                data: { action: "submit->card-menu#submit" } do |form| %>
-            <%= form.hidden_field :destination, value: transition["destination"], id: nil %>
-            <%= form.hidden_field :expected_fingerprint, value: task["fingerprint"], id: nil %>
+          <% @board_authenticity_token ||= form_authenticity_token %>
+          <form action="<%= task_transition_path(project["name"], task["slug"]) %>" method="post"
+                data-action="submit->card-menu#submit">
+            <input type="hidden" name="authenticity_token" value="<%= @board_authenticity_token %>" autocomplete="off">
+            <input type="hidden" name="destination" value="<%= transition["destination"] %>">
+            <input type="hidden" name="expected_fingerprint" value="<%= task["fingerprint"] %>">
             <% confirmation_id = dom_id_for("card", project["name"], task["slug"],
                                             transition["verb"], "confirmation") %>
             <% case transition["confirmation"] %>
@@ -41,13 +43,11 @@
                     id: confirmation_id, placeholder: task["slug"],
                     aria: { label: "Type #{task['slug']} to confirm" } %>
             <% end %>
-            <%= form.button transition["label"], type: "submit", role: "menuitem",
-                  class: "card-menu-item", data: { card_menu_target: "item",
-                    destination: transition["destination"],
-                    confirmation: transition["confirmation"],
-                    transition_label: transition["label"]
-                  } %>
-          <% end %>
+            <button type="submit" role="menuitem" class="card-menu-item"
+                    data-card-menu-target="item" data-destination="<%= transition["destination"] %>"
+                    data-confirmation="<%= transition["confirmation"] %>"
+                    data-transition-label="<%= transition["label"] %>"><%= transition["label"] %></button>
+          </form>
         <% end %>
       </div>
     </details>

@@ -665,8 +665,6 @@ module Hive
               entry.request_id, state_home: dispatch_request_state_home
             )
             continuation = promote_dispatch_sequence(entry, meta, now: now) if entry.exit_code == 0
-            request = claimed_dispatch_request(entry.request_id)
-            audit_web_dispatch!(request) if entry.exit_code == 0 && request && !continuation
             Hive::Daemon::DispatchRequestQueue.discard_sequence(
               entry.request_id, state_home: dispatch_request_state_home
             ) unless entry.exit_code == 0
@@ -1668,7 +1666,7 @@ module Hive
           return
         end
 
-        dispatch_request!(req, now: now)
+        dispatch_guarded_request!(req, now: now)
       end
 
       # Marker repair is deliberately exempt: clearing a corrupt/stale marker
@@ -1686,7 +1684,7 @@ module Hive
         valid = card["fingerprint"] == req.expected_fingerprint &&
                 Array(card["allowed_transitions"]).any? do |transition|
                   transition["destination"] == req.transition_destination &&
-                    transition["verb"] == req.argv[1]
+                    transition["verb"] == guarded_transition_verb(req)
                 end
         return true if valid
 
@@ -1697,47 +1695,41 @@ module Hive
         false
       end
 
-      def audit_web_dispatch!(req)
-        return unless req.requestor == "web" && !req.actor.to_s.empty?
-
-        task = Hive::TaskResolver.new(req.slug, project_filter: req.project).resolve
-        return if operator_audit_recorded?(task.folder, req.request_id)
-
-        from = request_stage_guard(req) || "#{task.stage_index}-#{task.stage_name}"
-        current_stage = "#{task.stage_index}-#{task.stage_name}"
-        Hive::Events.emit!(
-          task_folder: task.folder, slug: task.slug, stage: current_stage,
-          event_type: :operator_action, agent: "web:#{req.actor}",
-          message: "completed #{req.argv[1]} for #{req.transition_destination}",
-          metadata: {
-            actor: req.actor, request_id: req.request_id, from: from,
-            to: req.transition_destination,
-            direction: from == req.transition_destination ? "run" : "forward"
-          }
-        )
+      # The web recovery sequence intentionally queues `markers clear` first,
+      # while the transition tuple exposed by the board is the logical
+      # `recover` action. Revalidate that logical verb before clearing the
+      # marker; the promoted stage command carries the already-admitted actor
+      # identity but not the now-obsolete pre-clear fingerprint.
+      def guarded_transition_verb(req)
+        req.trigger == "web_recover" ? "recover" : req.argv[1]
       end
 
-      def request_stage_guard(req)
-        option = Array(req.argv).index { |value| %w[--from --stage].include?(value) }
-        option && req.argv[option + 1]
-      end
+      # Capacity checks are advisory and can take time. Re-enter the owning
+      # commit lock and repeat the complete card/transition check immediately
+      # before the at-most-once claim and spawn, closing the consume-time TOCTOU
+      # window with CLI and synchronous web mutations.
+      def dispatch_guarded_request!(req, now:)
+        return dispatch_request!(req, now: now) if req.expected_fingerprint.to_s.empty?
 
-      def operator_audit_recorded?(folder, request_id)
-        path = File.join(folder, "events.jsonl")
-        return false unless File.file?(path)
+        project = Hive::Config.find_project(req.project) ||
+                  raise(Hive::InvalidTaskPath, "unknown project #{req.project}")
+        Hive::Lock.with_commit_lock(project.fetch("hive_state_path")) do
+          return unless guarded_transition_current?(req)
 
-        File.foreach(path).any? do |line|
-          event = JSON.parse(line)
-          event["event_type"] == "operator_action" && event["request_id"] == request_id
-        rescue JSON::ParserError
-          false
+          dispatch_request!(req, now: now)
         end
       end
 
-      def claimed_dispatch_request(request_id)
-        Hive::Daemon::DispatchRequestQueue.claimed(
-          state_home: dispatch_request_state_home
-        ).find { |delivery| delivery.request.request_id == request_id }&.request
+      def request_with_web_audit(req)
+        return req unless req.requestor == "web" && !req.actor.to_s.empty?
+        return req if %w[markers daemon].include?(req.argv[1].to_s)
+
+        audited = req.dup
+        audited.argv = Array(req.argv) + [
+          "--audit-actor", req.actor.to_s,
+          "--audit-request-id", req.request_id.to_s
+        ]
+        audited
       end
 
       # Host-global maintenance request (project == "__global__"): not tied to
@@ -1774,6 +1766,7 @@ module Hive
       # `recover_dispatch_claims` cleans up at next start instead of
       # re-running the work. The claimed file is unlinked on reap.
       def dispatch_request!(req, now:)
+        req = request_with_web_audit(req)
         command = Shellwords.join(req.argv)
         state_file_path = resolve_request_state_file_path(req)
         preclaim_dispatch_request(req, now: now)
@@ -1882,7 +1875,11 @@ module Hive
           chat_id: meta && meta[:chat_id],
           update_id: meta && meta[:update_id],
           actor: meta && meta[:actor],
-          expected_fingerprint: meta && meta[:expected_fingerprint],
+          # The first recovery step was lock-revalidated against the board's
+          # fingerprint. Clearing that marker necessarily changes the
+          # fingerprint, so carrying it into the continuation would reject the
+          # admitted retry solely because step one succeeded.
+          expected_fingerprint: nil,
           transition_destination: meta && meta[:transition_destination],
           state_home: dispatch_request_state_home,
           now: now
@@ -2010,7 +2007,7 @@ module Hive
               chat_id: request.chat_id,
               update_id: request.update_id,
               actor: request.actor,
-              expected_fingerprint: request.expected_fingerprint,
+              expected_fingerprint: nil,
               transition_destination: request.transition_destination,
               state_home: dispatch_request_state_home,
               now: now
@@ -2021,7 +2018,6 @@ module Hive
             )
             nil
           end
-          audit_web_dispatch!(request) if receipt["exit_status"].zero? && !continuation
           write_attempt_dispatch_result(request, attempt, receipt, now: now) unless continuation
           Hive::Daemon::DispatchRequestQueue.remove(
             request.request_id, state_home: dispatch_request_state_home

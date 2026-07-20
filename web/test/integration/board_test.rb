@@ -23,7 +23,7 @@ class BoardTest < ActionDispatch::IntegrationTest
     assert_select "#board_sync[data-epoch][data-generation]", 1
     assert_select "[aria-live='polite']", 1
     assert_select ".stage-pager select[aria-label='Stage for alpha']", 1
-    assert_select "[data-board-navigation-target='card'][tabindex='-1']", minimum: 1
+    assert_select "[data-board-navigation-target='card'][tabindex='0']", minimum: 1
     assert_select "[data-controller~='card-menu'][data-card-menu-fingerprint-value]", minimum: 1
     assert_select "form[action='#{task_transition_path("alpha", "ship-board-260718-abcd")}'][method='post']", minimum: 1 do
       assert_select "input[name='destination'][value='3-done']", 1
@@ -44,6 +44,18 @@ class BoardTest < ActionDispatch::IntegrationTest
     assert_select "[data-board-band='alpha:coding'] [data-stage='2-work']", 1
     assert_select "[data-board-band='beta:coding'] [data-stage='2-draft']", 1
     assert_select "[data-board-band='alpha:coding'] [data-stage='2-draft']", 0
+  end
+
+  test "malformed canonical status does not synthesize a Rails workflow" do
+    payload = BoardTest.payload
+    payload.dig("projects", 0, "workflows").clear
+    StatusBroadcaster.define_singleton_method(:snapshot) { payload }
+
+    get board_path
+
+    assert_response :success
+    assert_select "[data-board-band='alpha:coding']", 0
+    assert_select "[data-card-slug='ship-board-260718-abcd']", 0
   end
 
   test "filters and grouping round trip through the query string" do

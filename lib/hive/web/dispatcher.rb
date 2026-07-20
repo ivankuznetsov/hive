@@ -92,7 +92,11 @@ module Hive
           return { ok: true, state: "queued", request_id: queued_request_id, transition: transition }
         end
         if verb == "drop"
-          result = drop(slug: slug, project: project, from: card.fetch("stage"))
+          result = guarded_drop!(
+            slug: slug, project: project, transition: transition,
+            expected_fingerprint: expected_fingerprint, actor: actor,
+            request_id: request_id, reason: reason
+          )
           return { ok: true, state: "applied", request_id: request_id, transition: transition, result: result }
         end
 
@@ -427,6 +431,33 @@ module Hive
         end
       rescue ArgumentError => e
         raise Hive::Error, "cannot queue this transition: #{e.message}"
+      end
+
+      def guarded_drop!(slug:, project:, transition:, expected_fingerprint:, actor:, request_id:, reason:)
+        project_entry = Hive::Config.find_project(project) ||
+                        raise(Hive::InvalidTaskPath, "unknown project #{project}")
+        Hive::Lock.with_commit_lock(project_entry.fetch("hive_state_path")) do
+          fresh = current_card(project: project, slug: slug)
+          exact = exact_transition!(
+            fresh,
+            destination: transition.fetch("destination"),
+            expected_fingerprint: expected_fingerprint
+          )
+          unless exact["verb"] == "drop" && exact["verb"] == transition["verb"]
+            raise Hive::StaleTask.new(
+              "the destructive transition changed while the request was being admitted",
+              expected_fingerprint: expected_fingerprint, current_card: fresh
+            )
+          end
+
+          Hive::Commands::Drop.new(
+            slug, project: project, from: fresh.fetch("stage"),
+            audit: {
+              actor: actor, request_id: request_id, from: fresh.fetch("stage"),
+              to: exact.fetch("destination"), direction: exact.fetch("direction"), reason: reason
+            }
+          ).call_under_lock
+        end
       end
 
       def outstanding_transition_request(project:, slug:, expected_fingerprint:, destination:, verb:)

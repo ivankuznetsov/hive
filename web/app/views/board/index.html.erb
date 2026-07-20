@@ -41,7 +41,7 @@
   <% end %>
 
   <div id="board_live" data-controller="board-live announce"
-       data-action="board:announce->announce#speak"
+       data-action="board:announce->announce#speak board:reconcile-request->board-live#requested"
        data-board-live-epoch-value="<%= @stream_cursor[:epoch] %>"
        data-board-live-generation-value="<%= @stream_cursor[:generation] %>">
     <%= render "board/sync", epoch: @stream_cursor[:epoch], generation: @stream_cursor[:generation] %>

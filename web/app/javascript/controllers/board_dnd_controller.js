@@ -94,11 +94,20 @@ export default class extends Controller {
   }
 
   failed(event) {
-    if (event.detail.source !== "drag") return
-
     const failedCard = event.target.closest(".board-card")
     const settlement = failedCard && this.pending.get(failedCard)
-    if (!settlement) return
+    if (event.detail.card) {
+      failedCard?.classList.remove("is-dragging", "is-transition-pending")
+      if (settlement) {
+        this.clearColumns(settlement.band)
+        this.pending.delete(failedCard)
+      }
+      this.element.dispatchEvent(new CustomEvent("board:reconcile-request", {
+        bubbles: true, detail: { message: "Task changed; refreshing current state" }
+      }))
+      return
+    }
+    if (event.detail.source !== "drag" || !settlement) return
 
     const { card, parent, next, band } = settlement
     next?.parentNode === parent ? parent.insertBefore(card, next) : parent.append(card)

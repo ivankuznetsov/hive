@@ -78,7 +78,7 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     after = StatusBroadcaster.stream_cursor
     assert_equal before[:epoch], after[:epoch]
     assert_equal before[:generation] + 1, after[:generation]
-    assert_equal %w[projects board_sync], replacements.map { |_args, kwargs| kwargs.fetch(:target) }
+    assert_equal %w[board_sync], replacements.map { |_args, kwargs| kwargs.fetch(:target) }
     assert_equal 1, refreshes.size
 
     StatusBroadcaster.stop!
@@ -90,7 +90,7 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     Turbo::StreamsChannel.define_singleton_method(:broadcast_refresh_to, original_refresh) if original_refresh
   end
 
-  test "card digests drive targeted patches without an unconditional refresh" do
+  test "card digests drive focus-safe targeted patches and a small reconciliation refresh" do
     replacements = []
     refreshes = []
     old_payload = payload_with_cards(1)
@@ -104,9 +104,20 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
 
     targets = replacements.map { |_args, kwargs| kwargs.fetch(:target) }
     assert_includes targets, "card_project_task-0"
-    assert_empty refreshes
+    refute_includes targets, "projects"
+    card_patch = replacements.find { |_args, kwargs| kwargs[:target] == "card_project_task-0" }.last
+    assert_equal :morph, card_patch[:method]
+    assert_equal 1, refreshes.size
     sync = replacements.find { |_args, kwargs| kwargs[:target] == "board_sync" }.last
-    assert_equal false, sync.dig(:locals, :refresh_required)
+    assert_equal true, sync.dig(:locals, :refresh_required)
+  end
+
+  test "snapshot and cursor are exposed through one atomic read" do
+    StatusBroadcaster.send(:reset_stream!)
+    payload, cursor = StatusBroadcaster.snapshot_with_cursor
+
+    assert_kind_of Array, payload.fetch("projects")
+    assert_equal StatusBroadcaster.stream_cursor, cursor
   end
 
   test "ten changed cards fall back to one whole band patch" do

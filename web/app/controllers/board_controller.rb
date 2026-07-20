@@ -9,7 +9,7 @@ class BoardController < ApplicationController
   protected
 
   def prepare_board
-    @payload = StatusBroadcaster.snapshot
+    @payload, @stream_cursor = StatusBroadcaster.snapshot_with_cursor
     @projects = StatusVisibility.projects(@payload)
     @filters = normalized_filters
     @bands = build_bands
@@ -21,7 +21,6 @@ class BoardController < ApplicationController
     @agent_options = @projects.flat_map { |project| project.fetch("tasks", []).filter_map { |task| task_agent(task) } }
       .uniq.sort
     @daemon_status = daemon_status
-    @stream_cursor = StatusBroadcaster.stream_cursor
   end
 
   private
@@ -48,7 +47,8 @@ class BoardController < ApplicationController
       tasks.group_by { |task| task["workflow"].presence || "coding" }.filter_map do |workflow_id, workflow_tasks|
         next if @filters["workflow"].present? && @filters["workflow"] != workflow_id
 
-        workflow = definitions[workflow_id] || inferred_workflow(workflow_id, workflow_tasks)
+        workflow = definitions[workflow_id]
+        next unless workflow
         filtered = workflow_tasks.select { |task| matches_filters?(task) }
         next if filtered.empty?
 
@@ -68,17 +68,6 @@ class BoardController < ApplicationController
 
     haystack = [ task["display_name"], task["slug"], task["action_label"] ].compact.join(" ").downcase
     haystack.include?(@filters["q"].downcase)
-  end
-
-  def inferred_workflow(workflow_id, tasks)
-    stages = tasks.map { |task| task["stage"].to_s }.uniq.sort_by { |stage| stage.to_i }
-    {
-      "id" => workflow_id,
-      "dependency_gate_stage" => stages.last,
-      "stages" => stages.each_with_index.map do |dir, index|
-        { "name" => dir.split("-", 2).last, "dir" => dir, "index" => index + 1, "kind" => nil }
-      end
-    }
   end
 
   def task_agent(task)

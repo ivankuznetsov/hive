@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-19
+updated: 2026-07-20
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -115,13 +115,16 @@ origin also prints the Host-header/reverse-proxy warning.
   `generated_at` and `age_seconds` removed while keeping `mtime` /
   `folder_mtime` as liveness signals. The broadcaster compares assembled
   `card_digest` values and sends targeted card replacements for small in-column
-  changes; structural changes and bands with ten or more changed cards use an
-  authoritative morph refresh, with a whole-band patch as the bounded payload
-  fallback. It replaces the grid's `projects` frame independently, then emits
-  the board generation cursor last so the cursor acknowledges every preceding
-  patch. Board streams carry an in-process epoch and monotonic generation; a
-  restart, gap, duplicate, out-of-order frame, or unacknowledged refresh
-  generation causes a fresh reconciliation. Dependency, queue, lock/PID,
+  changes. Structural, grouping, and URL-filter membership changes converge
+  through a constant-size Turbo refresh instead of broadcasting the complete
+  projects grid; large in-band changes may also use one bounded band patch.
+  The generation cursor is emitted after those messages so it acknowledges
+  every preceding patch. Board streams carry an in-process epoch and monotonic
+  generation; the initial snapshot/cursor pair is read atomically, and a
+  restart, Cable reconnect, gap, duplicate, out-of-order frame, or
+  `refresh_required` generation starts a fresh reconciliation. Failed or
+  cancelled visits release the reconciliation guard so a later generation can
+  recover. Dependency, queue, lock/PID,
   retry, and on-disk PR/review/CI changes therefore render even when the mutation
   fingerprint is unchanged. Both views
   opt refreshes into Turbo morphing with scroll preservation; the composer form
@@ -241,10 +244,13 @@ Task Drop is routed as `POST /tasks/:project/:slug/drop` →
 `TasksController#drop` → `Hive::Web::Dispatcher#drop` →
 `Hive::Commands::Drop`. It is intentionally in-process, not a daemon dispatch:
 the task is gone after success, so the controller redirects to the selected
-work view. The
-form posts the row's rendered `stage` as `from`; if the task moved after the
-page rendered, `Commands::Drop` raises `Hive::WrongStage`, Rails renders the
-typed 422 error page, and the moved task folder is left intact.
+work view. The dispatcher acquires the owning project commit lock before it
+re-resolves the card, compares the submitted semantic fingerprint, and checks
+the exact Drop transition. The command then re-resolves the folder under that
+same lock before deleting it. Because task-local `events.jsonl` is removed
+with the task, a successful Drop records structured `operator_action` metadata
+in the same `hive/state` deletion commit message. Any stale stage, fingerprint,
+or transition is refused before destructive cleanup.
 
 Task recovery is routed as `POST /tasks/:project/:slug/recover` →
 `TasksController#recover` → `Hive::Web::Dispatcher#recover`. The controller
@@ -266,9 +272,12 @@ appending `operator_action`, and committing. Commit or audit failure restores
 the folder and audit files together. Run-class moves write a v3 dispatch
 request with `requestor=web`, actor, request id, expected fingerprint, and
 destination; duplicate submissions for the same fingerprint/destination reuse
-the pending or claimed request. The daemon revalidates those fields before
-spawn and appends the strict `operator_action` audit only after the requested
-mutation succeeds. Confirmation tiers are enforced again by the dispatcher:
+the pending or claimed request. The daemon reacquires the project commit lock
+and revalidates those fields immediately before claim/spawn. The child carries
+the audit identity into `Run`/`Approve`, which strictly appends
+`operator_action` before the state commit; there is no post-success audit
+window. Recovery sequences validate their logical `recover` verb even though
+queued argv begins with `markers clear`. Confirmation tiers are enforced again by the dispatcher:
 ordinary moves require none, confirm-tier moves require an explicit confirmation,
 forced moves require a reason, and destructive moves require the exact task
 slug. Denials write
@@ -287,7 +296,9 @@ Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
 404) — never a blank 500. Stage-run posts validate the action map before
 writing a daemon request, and `Hive::Web::Dispatcher#dispatch` wraps queue
 writer `ArgumentError`s (for example the queue's stricter slug grammar) as
-typed 422s instead of surfacing an opaque 500. CSRF is Rails-default (per-form
+typed 422s instead of surfacing an opaque 500. JSON/fetch authentication
+failures return a JSON 401 instead of a followed HTML login redirect, and
+mutation clients reject non-JSON success bodies. CSRF is Rails-default (per-form
 tokens); every route except `/health`, `/up`, `/login`, `/logout`,
 `/auth/github*`, and the dev/test-only `/dev_login` is behind the owner gate.
 
@@ -309,8 +320,9 @@ plain-vs-deep health semantics, the oversized diff cap/truncation notice,
 media route streaming/refusal cases, and captured/skipped/failed Demo
 rendering. Board coverage pins the route/default-setting matrix, project-scoped
 workflow bands, combined filters, shared terminal retention, guarded transition
-responses, non-JavaScript forms, and the 20-project × 500-scanned-task render
-budget. Repos coverage pins the workflow select's built-in fresh list and
+responses, non-JavaScript forms, and the production-path 20-project ×
+500-scanned-task scan-to-render budget with actual targeted Cable payloads.
+Repos coverage pins the workflow select's built-in fresh list and
 that posting `settings[workflow]` writes the same real `default_workflow` that
 CLI init writes.
 `web/test/system/` runs Capybara +
@@ -328,8 +340,11 @@ repo setup workflow selection (fresh `content` writes config, re-run lists a
 project-authored workflow and preselects the current default), plus
 browser-visible Demo gallery images and failed-capture banner states. Board
 system coverage adds roving keyboard navigation, mobile stage paging, a
-focus-safe full-screen drawer, keyboard Move-to, authoritative queued-state
-reconciliation, and legal/illegal desktop drag behavior. CI runs
+focus-safe full-screen drawer and targeted card replacement, keyboard Move-to,
+authoritative queued-state reconciliation, and legal/illegal desktop drag
+behavior. The accessibility gate injects the maintained axe-core ruleset and
+also pins keyboard reachability, focus restoration, ARIA state, and reduced
+motion. CI runs
 both in the `web` job (`.github/workflows/ci.yml`) plus the web app's own
 rubocop, and it explicitly runs `web/test/e2e/golden_path_e2e.rb`; the golden
 path's daemon/Turbo row-replacement retry contract is covered in [[testing]].

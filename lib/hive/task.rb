@@ -40,7 +40,7 @@ module Hive
     def workflow_manifest_digest = meta[:workflow_manifest_digest]
     def managed_workflow? = !workflow_commit.nil? && !workflow_manifest_digest.nil?
 
-    def initialize(folder)
+    def initialize(folder, workflow_loaded: false, project_default_workflow: nil)
       folder = File.expand_path(folder)
       m = PATH_RE.match(folder)
       raise InvalidTaskPath, "task path must match <project>/.hive-state/stages/<N>-<name>/<slug>/: #{folder}" unless m
@@ -52,6 +52,8 @@ module Hive
       @stage_index = m[:stage_idx].to_i
       @stage_name = m[:stage_name]
       @slug = m[:slug]
+      @workflow_loaded = workflow_loaded
+      @resolved_project_default_workflow = project_default_workflow
       @workflow = resolve_workflow
       validate_workflow_stage!(m[:stage_dir], @workflow)
     end
@@ -156,11 +158,11 @@ module Hive
       end
 
       Hive::Workflows::Project.synchronize do
-        Hive::Workflows::Project.load!(@project_root)
+        Hive::Workflows::Project.load!(@project_root) unless @workflow_loaded
         selector = meta[:workflow]
         # TaskMeta.read normalizes blank → nil, so a missing/blank selector is
         # always nil here (no .empty? branch needed).
-        selector ||= project_default_workflow
+        selector ||= @resolved_project_default_workflow || project_default_workflow
         # A per-task `workflow:` pin to a descriptor that was SKIPPED at load
         # (bad YAML, invalid stage, id collision) must surface its REAL
         # ConfigError instead of a misleading UnknownWorkflow — the same

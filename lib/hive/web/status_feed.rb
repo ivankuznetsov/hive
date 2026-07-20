@@ -37,7 +37,7 @@ module Hive
       # `/` route, `task_row`, `find_project!`). The SSE path goes through the
       # shared poller instead so it never pays this cost per connection.
       def snapshot
-        @status_command.json_payload(Hive::Config.registered_projects)
+        @status_command.json_payload(Hive::Config.registered_projects, retained_only: true)
       end
 
       # json_payload regenerates `generated_at` (and per-task `age_seconds`)

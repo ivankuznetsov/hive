@@ -1,4 +1,5 @@
 require "json"
+require "fileutils"
 require "hive/config"
 require "hive/task"
 require "hive/markers"
@@ -14,6 +15,7 @@ require "hive/dependency_snapshot"
 require "hive/attempts/context"
 require "hive/conditions/transition_guard"
 require "hive/attempts/entrypoint"
+require "hive/events"
 
 module Hive
   module Commands
@@ -34,7 +36,7 @@ module Hive
       OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
 
       def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false,
-                     durable: false, attempt_entrypoint: nil)
+                     durable: false, attempt_entrypoint: nil, audit: nil)
         @target = target
         @project_filter = project
         @stage_filter = stage
@@ -43,6 +45,7 @@ module Hive
         @no_rebase = no_rebase
         @durable = durable
         @attempt_entrypoint = attempt_entrypoint
+        @audit = audit&.to_h
       end
 
       def call
@@ -126,6 +129,11 @@ module Hive
         argv = [ "hive", "run", task.folder ]
         argv << "--json" if @json
         argv << "--no-rebase" if @no_rebase
+        if @audit
+          audit = @audit.transform_keys(&:to_s)
+          argv.concat([ "--audit-actor", audit["actor"].to_s,
+                        "--audit-request-id", audit["request_id"].to_s ])
+        end
         argv
       end
 
@@ -194,14 +202,48 @@ module Hive
       end
 
       def commit_after(task, result)
-        return unless result && result[:commit]
+        return unless result
+        return if [ :error, :review_error ].include?(result[:status])
+        return unless result[:commit] || @audit
 
         ops = Hive::GitOps.new(task.project_root)
         Hive::Lock.with_commit_lock(task.hive_state_path) do
+          audit_snapshot = snapshot_operator_audit(task.folder) if @audit
+          append_operator_audit!(task) if @audit
           ops.hive_commit(stage_name: "#{task.stage_index}-#{task.stage_name}",
                           slug: task.slug,
-                          action: result[:commit])
+                          action: result[:commit] || "web_operator_run")
+        rescue StandardError
+          restore_operator_audit(audit_snapshot) if audit_snapshot
+          raise
         end
+      end
+
+      def snapshot_operator_audit(folder)
+        %w[events.jsonl status.md].to_h do |name|
+          path = File.join(folder, name)
+          [ path, File.file?(path) ? File.binread(path) : nil ]
+        end
+      end
+
+      def restore_operator_audit(snapshot)
+        snapshot.each do |path, content|
+          content.nil? ? FileUtils.rm_f(path) : File.binwrite(path, content)
+        end
+      end
+
+      def append_operator_audit!(task)
+        audit = @audit.transform_keys(&:to_s)
+        stage = "#{task.stage_index}-#{task.stage_name}"
+        Hive::Events.emit!(
+          task_folder: task.folder, slug: task.slug, stage: stage,
+          event_type: :operator_action, agent: "web:#{audit['actor']}",
+          message: "ran #{stage}",
+          metadata: {
+            actor: audit["actor"], request_id: audit["request_id"],
+            from: stage, to: stage, direction: "run"
+          }
+        )
       end
 
       def report(task, result)

@@ -20,7 +20,7 @@ class StatusFeedTest < Minitest::Test
       @mutex = Mutex.new
     end
 
-    def json_payload(_projects)
+    def json_payload(_projects, **)
       @mutex.synchronize do
         @calls += 1
         # Hold the last scripted payload once exhausted so the poller keeps
@@ -38,6 +38,19 @@ class StatusFeedTest < Minitest::Test
       assert_equal "hive-status", payload["schema"]
       assert_equal [], payload["projects"]
     end
+  end
+
+  def test_snapshot_requests_the_retained_card_projection
+    options = nil
+    status = Object.new
+    status.define_singleton_method(:json_payload) do |_projects, **kwargs|
+      options = kwargs
+      { "projects" => [] }
+    end
+
+    Hive::Web::StatusFeed.new(status_command: status).snapshot
+
+    assert_equal true, options.fetch(:retained_only)
   end
 
   def test_snapshot_preserves_content_workflow_rows
@@ -218,7 +231,7 @@ class StatusFeedTest < Minitest::Test
       @mutex = Mutex.new
     end
 
-    def json_payload(_projects)
+    def json_payload(_projects, **)
       @mutex.synchronize do
         @calls += 1
         raise Hive::ConfigError, "config.yml is mid-edit" if @calls == 2

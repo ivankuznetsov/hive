@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, .github/workflows/release.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-19
+updated: 2026-07-20
 tags: [test, minitest, fixtures, honeycomb]
 ---
 
@@ -237,15 +237,20 @@ repos/agents/Telegram, plus the equal `/board` and `/grid` route/default-setting
 matrix. Board integration pins project-scoped workflow bands, combined URL
 filters, descriptor-aware shared retention, lazy drawer responses, guarded
 JSON and plain-HTML transitions, stale-card responses, denial metrics, and a
-20-project × 500-scanned-task fixture that renders at most 1,000 retained cards
-under 1.5 seconds. A separate real-filesystem 5,000-task scan/card-assembly gate
-compares the full snapshot cost with the scan baseline, while rendered Turbo
-card payload samples must stay under 8 KiB/card. `web/test/system/*`
+20-project × 500-scanned-task production fixture that performs the real
+filesystem scan, renders at most 1,000 retained cards under 1.5 CPU seconds,
+and captures the actual targeted Action Cable payload. A separate
+real-filesystem 5,000-task scan/card-assembly gate compares the full snapshot
+cost with the scan baseline, while rendered Turbo card payloads must stay under
+8 KiB/card and steady changes must not contain a full `projects` replacement.
+`web/test/system/*`
 uses Capybara + Playwright for grid pipeline regressions and for board keyboard
 navigation, mobile stage paging, focus-safe drawer behavior, live
 reconciliation, keyboard Move-to, and legal/illegal fine-pointer drag. The board
-system gate also checks the rendered page for zero serious accessibility
-violations (duplicate ids, unnamed visible controls, and missing image alt text).
+system gate injects `axe-core-api` into the real browser and requires zero
+serious/critical axe violations. Separate assertions cover keyboard-only card
+and menu reachability, focus preservation, ARIA state, and reduced-motion
+behavior rather than relying on a three-rule DOM smoke check.
 CI runs
 the Rails job plus `web/test/e2e/golden_path_e2e.rb`, with the root bundle
 pinned through `GOLDEN_E2E_BUNDLE_PATH` so daemon preflight failures surface

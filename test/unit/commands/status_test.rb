@@ -219,6 +219,80 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_retained_json_skips_card_enrichment_for_hidden_terminal_rows
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      active = File.join(hive_state, "stages", "1-inbox", "active-card-260720-abcd")
+      hidden = File.join(hive_state, "stages", "9-done", "hidden-card-260701-abcd")
+      refreshed = File.join(hive_state, "stages", "9-done", "refreshed-card-260701-abcd")
+      FileUtils.mkdir_p(active)
+      FileUtils.mkdir_p(hidden)
+      FileUtils.mkdir_p(refreshed)
+      File.write(File.join(active, "idea.md"), "# active\n")
+      File.write(File.join(hidden, "task.md"), "# hidden\n\n<!-- COMPLETE -->\n")
+      File.write(File.join(refreshed, "task.md"), "# recently changed\n\n<!-- COMPLETE -->\n")
+      old = Time.now - (5 * 86_400)
+      File.utime(old, old, File.join(hidden, "task.md"))
+      File.utime(old, old, hidden)
+      File.utime(old, old, refreshed)
+
+      command = Hive::Commands::Status.new
+      original_projection = command.method(:status_projection)
+      command.define_singleton_method(:status_projection) do |task, marker|
+        if task.slug == "hidden-card-260701-abcd"
+          raise "hidden terminal card reached task projection"
+        end
+
+        original_projection.call(task, marker)
+      end
+      original = command.method(:disk_review_artifacts)
+      command.define_singleton_method(:disk_review_artifacts) do |row|
+        if row[:slug] == "hidden-card-260701-abcd"
+          raise "hidden terminal card reached operational-chip enrichment"
+        end
+
+        original.call(row)
+      end
+      command.define_singleton_method(:build_admission_context) do |*|
+        raise "retained projection built a dependency context for dependency-free cards"
+      end
+      project = { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+
+      tasks = command.json_payload([ project ], retained_only: true)
+        .fetch("projects").first.fetch("tasks")
+
+      assert_equal %w[active-card-260720-abcd refreshed-card-260701-abcd],
+                   tasks.map { |task| task.fetch("slug") }.sort
+    end
+  end
+
+  def test_project_scan_loads_workflow_overlay_once_instead_of_per_task
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      write_status_task(
+        hive_state, "1-inbox", "first-overlay-task-260720-abcd",
+        state_file: "idea.md", marker: "NONE"
+      )
+      write_status_task(
+        hive_state, "1-inbox", "second-overlay-task-260720-bcde",
+        state_file: "idea.md", marker: "NONE"
+      )
+      project = status_project(project_root, hive_state)
+      original_load = Hive::Workflows::Project.method(:load!)
+      calls = 0
+
+      with_replaced_singleton_method(
+        Hive::Workflows::Project, :load!,
+        ->(root) { calls += 1; original_load.call(root) }
+      ) do
+        payload = Hive::Commands::Status.new.json_payload([ project ], retained_only: true)
+        assert_equal 2, payload.fetch("projects").first.fetch("tasks").size
+      end
+
+      assert_equal 1, calls
+    end
+  end
+
   def test_json_payload_default_path_matches_explicit_full_stage_inputs
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -906,6 +980,65 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_operational_chips_enumerate_review_artifacts_once
+    Dir.mktmpdir("hive-status-review-chip") do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "codex.md"), "Approved\n")
+      File.write(File.join(reviews, "ci-blocked.md"), "CI failed\n")
+      calls = 0
+      original = Dir.method(:glob)
+      replacement = lambda do |pattern, *args, **kwargs, &block|
+        calls += 1 if pattern.to_s.include?(File.join(folder, "reviews"))
+        original.call(pattern, *args, **kwargs, &block)
+      end
+
+      chips = with_replaced_singleton_method(Dir, :glob, replacement) do
+        Hive::Commands::Status.new.send(
+          :operational_chips,
+          folder: folder, pr_url: nil, queued_request: nil,
+          marker_name: :review_ci_stale, state_file: File.join(folder, "task.md"),
+          mtime: Time.at(1)
+        )
+      end
+
+      assert_equal 1, calls
+      assert_equal %w[ci review], chips.map { |chip| chip.fetch("kind") }.sort
+    end
+  end
+
+  def test_task_card_builds_only_the_owning_project_payload
+    command = Hive::Commands::Status.new
+    target = { "name" => "target", "path" => "/target", "hive_state_path" => "/target/.hive-state" }
+    unrelated = { "name" => "other", "path" => "/other", "hive_state_path" => "/other/.hive-state" }
+    seen = []
+    admission_entries = []
+    context = Object.new
+    command.define_singleton_method(:json_payload) do |projects, admission_context:|
+      seen << [ projects, admission_context ]
+      {
+        "projects" => [
+          { "name" => "target", "tasks" => [ { "slug" => "task", "fingerprint" => "tfp1:x" } ] }
+        ]
+      }
+    end
+
+    card = with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { target }) do
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ target, unrelated ] }) do
+        with_replaced_singleton_method(
+          Hive::DependencySnapshot, :admission_context_for_project,
+          ->(entry) { admission_entries << entry; context }
+        ) do
+          command.task_card(project: "target", slug: "task")
+        end
+      end
+    end
+
+    assert_equal "tfp1:x", card.fetch("fingerprint")
+    assert_equal [ target ], admission_entries
+    assert_equal [ [ [ target ], context ] ], seen
+  end
+
   # The `same_task?` self-reference branch runs in production via `task: row`
   # but was asserted only at the resolver level. A task depending on its own
   # slug must surface as blocked with no blocked_by through the JSON path.
@@ -1172,6 +1305,7 @@ class CommandsStatusTest < Minitest::Test
       )
       task = Hive::Task.new(folder)
       marker = Hive::Markers.current(task.state_file)
+      File.write(File.join(folder, Hive::TaskJournal::JOURNAL_BASENAME), "")
       broken_store = Object.new
       broken_store.define_singleton_method(:read) { |**| raise Errno::EACCES, "blocked" }
 
@@ -1188,6 +1322,41 @@ class CommandsStatusTest < Minitest::Test
         end
       end
       assert_match(/condition projection failed/, err)
+    end
+  end
+
+  def test_empty_legacy_projection_skips_store_without_changing_binding
+    with_tmp_dir do |dir|
+      task = Struct.new(:folder).new(dir)
+      marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+      command = Hive::Commands::Status.new
+
+      projection = with_replaced_singleton_method(
+        Hive::TaskProjection::Store, :new,
+        ->(**) { flunk "empty legacy task opened projection store" }
+      ) do
+        command.send(:status_projection, task, marker).last
+      end
+
+      data = projection.to_h
+      assert_equal 0, data.dig("journal", "cursor")
+      assert_equal ::Digest::SHA256.hexdigest(""), data.dig("journal", "hash")
+      assert_equal({ "name" => "none", "attrs" => {} }, data.dig("compatibility", "marker"))
+    end
+  end
+
+  def test_durable_handoff_projection_still_requires_authoritative_journal
+    with_tmp_dir do |dir|
+      task = Struct.new(:folder).new(dir)
+      marker = Hive::Markers::State.new(
+        name: :execute_waiting, attrs: { "attempt_id" => "attempt-1" }, raw: nil
+      )
+
+      projected_marker, = Hive::Commands::Status.new.send(:status_projection, task, marker)
+
+      assert_equal :error, projected_marker.name
+      assert_equal "condition_projection_invalid", projected_marker.attrs.fetch("reason")
+      assert_match(/journal is missing/, projected_marker.attrs.fetch("message"))
     end
   end
 

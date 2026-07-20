@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-07-19
+updated: 2026-07-20
 tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive, dependencies, pr]
 ---
 
@@ -45,8 +45,12 @@ Board-capable rows add a descriptor-derived `terminal` boolean, semantic
 `fingerprint`, assembled `card_digest`, dominant state/rank, allowed
 transitions, blocked explanation, lock/dependency/queue/retry objects, and
 on-disk operational chips for PR, review, queued work, and CI state.
-`fingerprint` changes only for mutation-relevant
-task content; `card_digest` also changes for cross-task and runtime facts. The
+`fingerprint` changes only for mutation-relevant task content, including a
+versioned digest of the fully resolved workflow descriptor so same-id changes
+to verbs or gates invalidate stale cards. `card_digest` changes for the
+card-visible, filter/grouping, cross-task, and runtime facts that can alter a
+targeted board patch; detail-only condition history converges through the live
+refresh without bloating that digest. The
 workflow definitions are nested per project because project overlays may use
 the same workflow id with different stage lists.
 
@@ -112,6 +116,15 @@ TUI grid, web board, and web grid. Default `hive status --json` stays
 unfiltered so bots, daemons, and agents continue to see every task row. Text
 status prints `… and N archived >3d ago (hive archive to view)` when rows were
 hidden. There is no web-only count cap or fallback policy.
+
+`StatusFeed` explicitly requests a retained projection. For descriptor-known
+terminal directories with one unambiguous canonical state filename, status
+checks that state file's mtime before constructing `Task`, replaying condition
+state, or enumerating review artifacts; ambiguity or read failure keeps the row
+visible and falls back to the canonical policy. Retained dependency-free
+projects skip the fleet admission snapshot, while `task_card` builds only the
+owning project's snapshot plus the transitive projects named by explicit
+dependencies. Full CLI and daemon JSON remain lossless.
 
 `hive archive` with no target reuses Status in archive mode (`Hive::Commands::Status.new(archive: true)`): it lists descriptor-terminal tasks, with no age cutoff and no hidden-count summary. Empty archive projects print `no archived tasks`. Text rows are sorted newest-first by `mtime` and use the same id/PR/display-name identity column as daily status. `hive archive --json` emits a focused `hive-status` payload whose project task arrays contain only terminal rows. `hive archive <slug>` still runs the workflow verb that advances a completed finalize task into done.
 

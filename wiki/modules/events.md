@@ -3,7 +3,7 @@ title: Hive::Events
 type: module
 source: lib/hive/events.rb
 created: 2026-05-23
-updated: 2026-07-19
+updated: 2026-07-20
 tags: [module, events, observability, status, append-only]
 ---
 
@@ -62,10 +62,13 @@ contracts also use separate files: fail-soft operational telemetry stays in
 state transaction. Guarded synchronous web moves append `operator_action`
 after the folder move but before the `hive/state` commit; an append or commit
 failure restores `events.jsonl`, `status.md`, and the task folder together.
-Queued web moves retain the same actor/request identity and emit only after the
-daemon child completes the guarded mutation successfully. Their audit uses the
-strict append path, so a persistence failure leaves the durable request claimed
-and surfaces instead of recording a false success. Stale, blocked, illegal, unauthenticated,
+Queued web moves retain the same actor/request identity and pass it into the
+mutation child. `Run`/`Approve` append the strict audit before the same
+`hive/state` commit that records the transition, restoring the audit files if
+that transaction fails; the daemon does not add a second post-completion audit.
+Drop is the deliberate storage exception: deletion removes the task-local
+journal, so its structured `operator_action` fields live in the same
+`hive/state` deletion commit message instead. Stale, blocked, illegal, unauthenticated,
 or otherwise denied requests never append `transition_denied` or any other
 task event; they are logged and counted outside canonical state.
 

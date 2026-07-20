@@ -32,7 +32,7 @@ module Hive
     class StageAction
       def initialize(verb, target, project: nil, from: nil, json: false,
                      recover_merged_error_reason: nil, durable: false,
-                     attempt_entrypoint: nil)
+                     attempt_entrypoint: nil, audit: nil)
         @verb = verb
         @target = target
         @project_filter = project
@@ -41,6 +41,7 @@ module Hive
         @recover_merged_error_reason = recover_merged_error_reason
         @durable = durable
         @attempt_entrypoint = attempt_entrypoint
+        @audit = audit&.to_h
       end
 
       def call
@@ -100,6 +101,7 @@ module Hive
         if @recover_merged_error_reason
           argv.concat([ "--recover-merged-error-reason", @recover_merged_error_reason ])
         end
+        append_audit_argv(argv)
         argv
       end
 
@@ -113,7 +115,7 @@ module Hive
         return emit_archive_noop(task) if archive_noop?(task, current_stage)
 
         if current_stage == target_stage
-          run_at(task.folder)
+          run_at(task.folder, audit: @audit)
           return emit_phase(task, "ran")
         end
 
@@ -129,7 +131,10 @@ module Hive
         validate_marker!(task, config)
         new_folder = File.join(task.hive_state_path, "stages", target_stage, task.slug)
         promote(task, target_stage, current_stage, config)
-        run_at(new_folder)
+        # The promotion commit already carries this operator action. The
+        # immediately-following stage runner is part of the same stage verb,
+        # not a second user gesture, so do not append a duplicate event.
+        run_at(new_folder, audit: nil)
         emit_phase(Hive::Task.new(new_folder), "promoted_and_ran")
       end
 
@@ -222,17 +227,27 @@ module Hive
             config
           ),
           json: false,
-          quiet: @json
+          quiet: @json,
+          audit: @audit
         ).call
       end
 
-      def run_at(folder)
+      def run_at(folder, audit:)
         Hive::Commands::Run.new(
           folder,
           project: @project_filter,
           json: false,
-          quiet: @json
+          quiet: @json,
+          audit: audit
         ).call
+      end
+
+      def append_audit_argv(argv)
+        return argv unless @audit
+
+        audit = @audit.transform_keys(&:to_s)
+        argv.concat([ "--audit-actor", audit["actor"].to_s,
+                      "--audit-request-id", audit["request_id"].to_s ])
       end
 
       # ── Reporting ───────────────────────────────────────────────────────

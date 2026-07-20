@@ -63,7 +63,10 @@ export default class extends Controller {
   }
 
   apply() {
-    this.syncComposerProjects()
+    const names = Array.from(this.element.querySelectorAll("[data-project-name]"))
+      .map((section) => section.dataset.projectName)
+    this.syncProjectNavigation(names)
+    this.syncComposerProjects(names)
 
     // A ghost deep link (?project= for a renamed/forgotten project) would
     // hide EVERY section with no active rail button — an empty grid with
@@ -85,12 +88,25 @@ export default class extends Controller {
     })
   }
 
-  syncComposerProjects() {
+  syncProjectNavigation(names) {
+    const rail = this.element.querySelector(".project-nav")
+    const addLink = rail?.querySelector(".project-nav-add")
+    if (!rail || !addLink) return
+
+    const buttons = new Map(this.buttonTargets.map((button) => [
+      button.dataset.projectFilterNameParam || "",
+      button
+    ]))
+    names.forEach((name) => {
+      const button = buttons.get(name)
+      if (button) rail.insertBefore(button, addLink)
+    })
+  }
+
+  syncComposerProjects(names) {
     const select = this.element.querySelector("#composer select[name='project']")
     if (!select) return
 
-    const names = Array.from(this.element.querySelectorAll("[data-project-name]"))
-      .map((section) => section.dataset.projectName)
     const desiredValues = names.length > 1 ? ["", ...names] : names
     if (Array.from(select.options).map((option) => option.value).join("\0") === desiredValues.join("\0")) return
 

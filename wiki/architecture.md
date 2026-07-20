@@ -351,6 +351,12 @@ config-backed workflow/default/daemon behavior, and the non-interactive
 project attributes instead of passing registry hashes around. Gem adapters can
 still call `fetch` at the explicit compatibility boundary.
 
+Repository admission is a separate `Repository` model: it validates GitHub
+source/name input, owns the clone target, bounds and cleans up `gh repo clone`,
+and normalizes origins before handing the checkout to `Project#setup!`.
+`ReposController` only selects between new admission and existing-project
+setup, then renders or redirects.
+
 A task page is a filesystem-backed `Task`, built from the matching status
 snapshot row and its `Project`. That model owns task
 reads and their invariants — workflow-aware artifact ordering, brainstorm

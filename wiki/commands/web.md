@@ -276,11 +276,11 @@ origin also prints the Host-header/reverse-proxy warning.
   `gh repo clone` with the session token in `GH_TOKEN`, in a separate process
   group with `HIVEBOX_CLONE_TIMEOUT_SEC` (default 180s) as a hard deadline; on
   failure or timeout the partial target is removed so retry starts clean. A
-  pre-existing directory is treated as a local checkout to re-init; a
-  pre-existing non-directory target (file/symlink/etc.) is a 422 refusal, and
-  `clone!` also refuses any existing target so its failure-path `rm_rf` only
-  deletes a partial clone it created. Every registration runs a
-  post-clone/post-existing-dir origin normalization pass:
+  pre-existing directory is treated as a local checkout to re-init; any
+  pre-existing symlink or non-directory target is a 422 refusal. The
+  `Repository` model also refuses any existing clone target so failure-path
+  cleanup only deletes a partial clone it created. Every registration runs a
+  post-clone/post-existing-dir `Repository` origin-normalization pass:
   absent or non-GitHub remotes are left alone, while GitHub SSH remotes
   (`git@github.com:owner/repo.git` or `ssh://git@github.com/owner/repo.git`)
   become `https://github.com/owner/repo.git`. The box can only push with

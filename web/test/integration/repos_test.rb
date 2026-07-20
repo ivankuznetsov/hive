@@ -280,7 +280,7 @@ class ReposTest < ActionDispatch::IntegrationTest
 
   test "a path-traversal workflow id is rejected before it reaches path resolution" do
     # The web workflow value flows into File.join(workflow_dir, "#{id}.yml"); a
-    # crafted `../…` must be refused at the controller (SAFE_SLUG) rather than
+    # crafted `../…` must be refused by InitSetup (SAFE_SLUG) rather than
     # walking that join in WorkflowSelection.
     name = create_hive_project!("rerun-traversal-app")
     sign_in!

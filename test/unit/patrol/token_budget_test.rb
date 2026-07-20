@@ -24,7 +24,8 @@ class PatrolTokenBudgetTest < Minitest::Test
         "max_agent_spawns_per_cycle" => 2,
         "max_agent_spawns_per_day" => 3,
         "max_budget_usd_per_agent" => 10,
-        "architecture_budget_multiplier" => 2
+        "architecture_budget_multiplier" => 2,
+        "fix_budget_multiplier" => 2
       }.merge(overrides.transform_keys(&:to_s))
     }
   end
@@ -53,6 +54,7 @@ class PatrolTokenBudgetTest < Minitest::Test
       assert_equal 100, snapshot.dig("cycle", "tokens")
       assert_equal 100, snapshot.dig("today", "tokens")
       assert_equal 2, snapshot.dig("limits", "architecture_budget_multiplier")
+      assert_equal 2, snapshot.dig("limits", "fix_budget_multiplier")
 
       refute budget.acquire
       assert_equal "cycle_token_limit", budget.last_exhaustion.fetch(:reason)
@@ -169,10 +171,12 @@ class PatrolTokenBudgetTest < Minitest::Test
     end
   end
 
-  def test_per_agent_token_limit_is_explicit_and_architecture_gets_a_larger_allowance
-    with_budget do |budget|
+  def test_per_agent_token_limit_gives_ordinary_fixes_and_architecture_more_headroom
+    with_budget(config(max_tokens_per_cycle: 200)) do |budget|
       assert_equal 60, budget.max_tokens(stage: "patrol-review")
+      assert_equal 120, budget.max_tokens(stage: "patrol-fix")
       assert_equal 120, budget.max_tokens(stage: "refactor-patrol-review")
+      assert_equal 120, budget.max_tokens(stage: "refactor-patrol-fix")
     end
   end
 

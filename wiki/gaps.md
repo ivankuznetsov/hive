@@ -374,8 +374,9 @@ Live Claude patrol sampling showed that provider-owned startup context can be
 charged before Hive receives its first measurable usage event. Hive now refuses
 a patrol launch unless the remaining allowance covers Claude's conservative
 20,000-token initial-context reserve plus one token per prompt byte, and a
-three-turn/output-complete boundary prevents an unnecessary follow-up after the
-artifact is written. This closes the previously observed unbounded pre-event
+four-turn/output-complete boundary prevents an unnecessary follow-up after the
+artifact is written; the fourth turn is emergency finalization only. This
+closes the previously observed unbounded pre-event
 launch and extra-response paths, but it cannot make provider telemetry
 continuous: a single usage event can still cross the configured token ceiling
 before Hive can send TERM. The exact provider context/tokenization is not a

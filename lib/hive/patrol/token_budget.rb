@@ -19,7 +19,8 @@ module Hive
         "max_agent_spawns_per_cycle" => 3,
         "max_agent_spawns_per_day" => 8,
         "max_budget_usd_per_agent" => 25,
-        "architecture_budget_multiplier" => 2
+        "architecture_budget_multiplier" => 2,
+        "fix_budget_multiplier" => 2
       }.freeze
 
       attr_reader :last_exhaustion
@@ -249,6 +250,7 @@ module Hive
 
       def token_headroom(activity, stage)
         per_agent = effective_limit("max_tokens_per_agent", stage)
+        per_agent *= @limits.fetch("fix_budget_multiplier") if ordinary_fix_stage?(stage)
         cycle_remaining = effective_limit("max_tokens_per_cycle", stage) - @cycle_tokens
         daily_remaining = @limits.fetch("max_tokens_per_day") - activity.fetch(:tokens)
         available = [ per_agent, cycle_remaining, daily_remaining ].min
@@ -277,6 +279,10 @@ module Hive
         return value unless architecture_stage?(stage)
 
         value * @limits.fetch("architecture_budget_multiplier")
+      end
+
+      def ordinary_fix_stage?(stage)
+        stage.to_s == "patrol-fix"
       end
 
       def architecture_stage?(stage)

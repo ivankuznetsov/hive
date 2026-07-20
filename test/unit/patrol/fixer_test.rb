@@ -120,6 +120,18 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_default_validator_uses_the_configured_patrol_timeout
+    with_tmp_dir do |repo|
+      configured = cfg(repo)
+      configured["timeout_sec"]["patrol"] = 1234
+
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: configured)
+      validator = fixer.instance_variable_get(:@validator)
+
+      assert_equal 1234.0, validator.instance_variable_get(:@timeout_sec)
+    end
+  end
+
   def test_validation_failure_removes_worktree_and_opens_no_pr_path
     with_tmp_git_repo do |repo|
       File.write(File.join(repo, "app.rb"), "if\n")
@@ -417,6 +429,11 @@ class HivePatrolFixerTest < Minitest::Test
       prompt = fixer.send(:render_prompt, finding, File.join(repo, "fix.json"))
 
       assert_includes prompt, "smallest complete root-cause fix"
+      assert_includes prompt, "four bounded responses"
+      assert_match(/at most one\s+targeted Grep or Glob/, prompt)
+      assert_match(/In\s+the fourth response, write the JSON proof\s+immediately/, prompt)
+      assert_includes prompt, "Do not run tests"
+      assert_match(/simulate the\s+base checkout after editing/, prompt)
       assert_includes prompt, '"audited_paths"'
       assert_includes prompt, '"regression_paths"'
       assert_includes prompt, '"validation_key"'
@@ -1244,7 +1261,9 @@ class HivePatrolFixerTest < Minitest::Test
       agent_singleton.define_method(:new) { |**kwargs| captured = kwargs; fake_agent }
       assert_equal({ status: :ok },
                    fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo))
-      assert_equal 50_000, captured.fetch(:max_tokens)
+      assert_equal 100_000, captured.fetch(:max_tokens)
+      assert_equal File.join(repo, "fix.json"), captured.fetch(:expected_output)
+      assert_equal :output_file_exists, captured.fetch(:status_mode)
     ensure
       profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_lookup
       agent_singleton.define_method(:new, agent_new) if agent_new
@@ -1258,6 +1277,9 @@ class HivePatrolFixerTest < Minitest::Test
         minimum_tokens >= 0 && stage != "patrol-fix"
       end
       budget.define_singleton_method(:exhaustion_message) { "cycle exhausted" }
+      budget.define_singleton_method(:resource_exhaustion) do
+        { reason: "cycle_agent_spawn_limit", limit: 3, observed: 3 }
+      end
       fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), token_budget: budget)
       profile = Struct.new(:name, :initial_context_tokens) do
         def require_cli_capability!(name)
@@ -1273,6 +1295,7 @@ class HivePatrolFixerTest < Minitest::Test
 
       assert_equal :error, result.fetch(:status)
       assert_equal "cycle exhausted", result.fetch(:error_message)
+      assert_equal "cycle_agent_spawn_limit", result.dig(:resource_exhaustion, :reason)
     end
   end
 

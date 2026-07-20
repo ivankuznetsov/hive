@@ -147,7 +147,8 @@ also checks the selected `patrol.mode` token and launch ceilings. Architecture
 stages default to 2x the mode's per-cycle token/launch limits and per-agent
 streamed-token limit so broad boundary analysis is not constrained like a
 single ordinary slice; the native budget-equivalent guard and project/day token
-and launch ceilings stay shared.
+and launch ceilings stay shared. The ordinary `fix_budget_multiplier` does not
+compound architecture fix headroom.
 Usage is attributed to the TUI patrol row; absent provider counts are retained
 as unmetered launches and still consume quota. Budget exhaustion is an ordinary
 retryable incomplete result, so discovery checkpoints completed slices and
@@ -162,16 +163,16 @@ error. When every reported error is a shared daily token or launch limit,
 including positive daily token headroom too small for the next initial context,
 the daemon backs the job off until the next UTC day instead of retrying it every
 minute.
-The read-only runner accepts either bare JSON or one leading `json` code fence.
-Plain-text rationale may follow that single fence, but leading prose or another
-fence remains invalid so there is only one canonical structured result. The
-runner normalizes the accepted object into `theses.json` and retains the exact
-provider response as `final-message.txt` in the feature run directory for
+The read-only runner accepts either bare JSON or exactly one `json` code fence.
+Plain-text rationale may precede or follow that single fence, but another fence
+remains invalid so there is only one canonical structured result. The third
+response must finalize JSON; a fourth response is emergency finalization only.
+The runner normalizes the accepted object into `theses.json` and retains the
+exact provider response as `final-message.txt` in the feature run directory for
 quality audits. Real PR-mode run directories are durable and include a
 `review-context.json` binding the artifact to its job, analysis SHA, source PR,
 and feature; only an explicit `--dry-run` uses ephemeral scratch space.
-Leading prose, additional fences, malformed
-envelopes, null/scalar items, and
+Additional fences, malformed envelopes, null/scalar items, and
 schema-invalid records remain review errors rather than successful zero-result
 scans. Evidence is also checked against the pinned checkout's real,
 root-confined, 256 KiB-bounded bytes: cited
@@ -354,7 +355,8 @@ files are irrelevant. Default-branch history must still descend from the
 validated head. Before commit or push,
 Hive checks actual feature-boundary paths, file/diff caps, protected paths,
 secrets, dependency manifests, and public declarations across supported
-ecosystems, then runs every named validation command. Unknown source languages
+ecosystems, then runs every named validation command under
+`timeout_sec.patrol`. Unknown source languages
 remain discoverable but fail automatic mutation when no public-contract guard
 can prove safety. Documentation fixes need an explicit `docs` command; without
 one, an admissible material thesis may file an issue but cannot open a PR.

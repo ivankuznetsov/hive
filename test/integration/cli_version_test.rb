@@ -36,8 +36,8 @@ class CliVersionTest < Minitest::Test
 
   def test_bin_hive_accepts_json_before_status_command
     with_tmp_global_config do
-      leading = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "--json", "status"))
-      trailing = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "status", "--json"))
+      leading = run_status_json!("--json", "status")
+      trailing = run_status_json!("status", "--json")
 
       assert_equal without_generated_at(trailing), without_generated_at(leading)
     end
@@ -45,8 +45,8 @@ class CliVersionTest < Minitest::Test
 
   def test_bin_hive_accepts_leading_json_true_before_status_command
     with_tmp_global_config do
-      leading = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "--json=true", "status"))
-      trailing = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "status", "--json=true"))
+      leading = run_status_json!("--json=true", "status")
+      trailing = run_status_json!("status", "--json=true")
 
       assert_equal without_generated_at(trailing), without_generated_at(leading)
     end
@@ -174,6 +174,12 @@ class CliVersionTest < Minitest::Test
       { "HIVE_BIN" => "/nonexistent/hive" },
       RbConfig.ruby, "-Ilib", "bin/hive", *args
     )
+  end
+
+  def run_status_json!(*args)
+    out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", "bin/hive", *args)
+    assert status.success?, "bin/hive #{args.join(" ")} should exit 0, stderr was: #{err}"
+    JSON.parse(out)
   end
 
   def assert_new_idea_includes(dir, text)

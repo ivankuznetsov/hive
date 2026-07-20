@@ -292,10 +292,12 @@ patrol:
   # Bound expensive fix-agent work even when findings are stale or fail validation.
   max_fix_attempts_per_cycle: 6
   max_prs_per_cycle: 3
-  # Streamed usage stops each ordinary agent at the mode's per-agent token
-  # allowance. Architecture gets 2x that allowance plus 2x the per-cycle
-  # token/launch envelope, while UTC-day and native budget guards stay shared.
+  # Streamed usage stops ordinary review agents at the mode's per-agent token
+  # allowance. Fix agents get 2x per-agent headroom for edit/test/proof turns,
+  # while architecture gets 2x the ordinary allowance plus 2x the per-cycle
+  # token/launch envelope. UTC-day and native budget guards stay shared.
   # max_tokens_per_agent: 50000
+  # fix_budget_multiplier: 2
   # architecture_budget_multiplier: 2
   # Open ready (non-draft) PRs by default so the babysitter — which skips
   # draft PRs — picks them up. Set true to open draft PRs instead.

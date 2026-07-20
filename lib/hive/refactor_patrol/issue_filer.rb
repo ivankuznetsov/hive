@@ -27,6 +27,7 @@ module Hive
       ].freeze
       DETERMINISTIC_NONFIXABLE_REASONS = %w[
         agent_control_plane_violation
+        auto_fix_disabled
         boundary_violation
         caps_exceeded
         closed_without_merge
@@ -473,6 +474,7 @@ module Hive
           Thesis: `#{thesis.id}`
           Semantic family: `#{family_id}`
           Occurrence fingerprint: `#{thesis.fingerprint}`
+          Follow-up approval: pending
 
           ### Problem and cost
 

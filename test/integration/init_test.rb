@@ -10,9 +10,15 @@ require "hive/reviewers/agent"
 require "hive/task"
 require "hive/task_meta"
 require "hive/workflows/descriptor_parser"
+require "hive/workflows/project"
 
 class InitTest < Minitest::Test
   include HiveTestHelper
+
+  def teardown
+    Hive::Workflows::Project.reset!
+    super
+  end
 
   def test_init_persists_canonical_origin_identity_in_registry
     with_tmp_global_config do
@@ -1957,7 +1963,7 @@ class InitTest < Minitest::Test
     end
   end
 
-  def test_init_renders_recommended_refactor_patrol_discovery_with_side_effects_disabled
+  def test_init_renders_recommended_refactor_patrol_with_auto_fix_and_issue_output
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         out, _err = capture_io { Hive::Commands::Init.new(dir).call }
@@ -1965,9 +1971,9 @@ class InitTest < Minitest::Test
         resolved = Hive::Config.load(dir)
 
         assert_equal true, raw.dig("refactor_patrol", "enabled")
-        assert_equal false, raw.dig("refactor_patrol", "auto_fix", "enabled")
+        assert_equal true, raw.dig("refactor_patrol", "auto_fix", "enabled")
         assert_nil raw.dig("refactor_patrol", "commands", "public_contract")
-        assert_equal false, raw.dig("refactor_patrol", "issue_filing", "enabled")
+        assert_equal true, raw.dig("refactor_patrol", "issue_filing", "enabled")
         assert_equal true, resolved.dig("refactor_patrol", "enabled")
         assert_nil resolved.dig("refactor_patrol", "commands", "public_contract")
         assert_includes out, "architecture patrol"

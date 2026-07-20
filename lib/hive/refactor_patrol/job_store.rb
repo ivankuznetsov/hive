@@ -1493,7 +1493,10 @@ module Hive
       def action_authorized_for?(aggregate)
         policy = aggregate.fetch("policy")
         (policy.fetch("auto_fix") && aggregate.dig("dispositions", "accepted").any?) ||
-          (policy.fetch("issue_filing") && aggregate.dig("dispositions", "flagged").any? { |item| item["admissible"] == true })
+          (policy.fetch("issue_filing") && (
+            aggregate.dig("dispositions", "accepted").any? ||
+            aggregate.dig("dispositions", "flagged").any? { |item| item["admissible"] == true }
+          ))
       end
 
       def source_from_manifest(manifest)

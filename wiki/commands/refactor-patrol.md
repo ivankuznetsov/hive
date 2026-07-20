@@ -3,7 +3,7 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-07-19
+updated: 2026-07-20
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
@@ -41,11 +41,13 @@ hive refactor-patrol my-project --show JOB_ID --full --json
 ```
 
 Fresh terminal and web init recommend discovery (`refactor_patrol.enabled:
-true`) with a default-yes choice. Missing configuration in an existing project
-still resolves to false. The two external-effect gates never inherit discovery
-consent and default off. Fresh headless init can resolve the discovery choice
-before any project-state write with `hive init --refactor-patrol` or
-`hive init --no-refactor-patrol`; omitting both keeps the enabled default.
+true`) with a default-yes choice and explicitly enable confined auto-fix/PR
+attempts plus reviewable, deduplicated issue fallback. Missing configuration in
+an existing project still resolves all three gates to false, and older
+discovery-only configs do not inherit external-effect authority. Fresh headless
+init can resolve the whole architecture-patrol choice before any project-state write
+with `hive init --refactor-patrol` or `hive init --no-refactor-patrol`;
+omitting both keeps the enabled default.
 
 ```yaml
 refactor_patrol:
@@ -55,10 +57,10 @@ refactor_patrol:
   min_leverage_score: 0.25
   max_theses_per_feature: 1
   auto_fix:
-    enabled: false
+    enabled: true
     agent: codex
   issue_filing:
-    enabled: false
+    enabled: true
     min_leverage_score: 0.25
   min_confidence: medium
   commands:
@@ -143,35 +145,44 @@ the smaller of its configured patrol timeout and the whole-run time remaining.
 Once either budget is exhausted, later slices stay incomplete for a future
 resume instead of multiplying one agent timeout by every mapped feature.
 Before each architecture review or fix spawn, the shared project patrol budget
-also checks the selected `patrol.mode` token and launch ceilings. Architecture
-stages default to 2x the mode's per-cycle token/launch limits and per-agent
-streamed-token limit so broad boundary analysis is not constrained like a
-single ordinary slice; the native budget-equivalent guard and project/day token
-and launch ceilings stay shared.
+also checks the selected `patrol.mode` token and cycle-launch ceilings.
+Architecture stages default to 2x the mode's per-cycle token/launch limits and
+per-agent streamed-token limit so broad boundary analysis is not constrained
+like a single ordinary slice. Post-merge architecture launch count does not use
+the ordinary `max_agent_spawns_per_day` ceiling: every merged occurrence stays
+eligible even after ordinary patrol reaches, for example, 8/8 launches, and
+architecture launches cannot consume that ordinary quota. The shared daily
+token pool, architecture per-cycle launch bound, per-agent token cap,
+one-agent-at-a-time lock, and native budget-equivalent guard remain in force.
+The ordinary `fix_budget_multiplier` does not compound architecture fix
+headroom. A separate `max_architecture_unmetered_spawns_per_day` backstop
+(default `96`) applies only after architecture providers omit usable token
+counts, retaining a durable anti-runaway limit without restoring 8/day.
 Usage is attributed to the TUI patrol row; absent provider counts are retained
-as unmetered launches and still consume quota. Budget exhaustion is an ordinary
-retryable incomplete result, so discovery checkpoints completed slices and
+as unmetered launches and consume that separate quota. Budget exhaustion is an
+ordinary retryable incomplete result, so discovery checkpoints completed slices and
 actions retain their exact durable receipts rather than starting new work. PR
 discovery bounds each command to the tighter remaining architecture-cycle or
-shared UTC-day launch headroom. It stops after the first failed feature and
+unmetered daily safety headroom. It stops after the first failed feature and
 leaves later slices unattempted rather than manufacturing one failure per
 slice. A fully reviewed bounded batch returns clean partial progress: completed
 feature results are checkpointed, `complete` stays false, and the next command
 resumes the untouched suffix without exposing ordinary scheduling as a review
-error. When every reported error is a shared daily token or launch limit,
+error. When every reported error is a daily token or
+unmetered-architecture limit,
 including positive daily token headroom too small for the next initial context,
 the daemon backs the job off until the next UTC day instead of retrying it every
 minute.
-The read-only runner accepts either bare JSON or one leading `json` code fence.
-Plain-text rationale may follow that single fence, but leading prose or another
-fence remains invalid so there is only one canonical structured result. The
-runner normalizes the accepted object into `theses.json` and retains the exact
-provider response as `final-message.txt` in the feature run directory for
+The read-only runner accepts either bare JSON or exactly one `json` code fence.
+Plain-text rationale may precede or follow that single fence, but another fence
+remains invalid so there is only one canonical structured result. The third
+response must finalize JSON; a fourth response is emergency finalization only.
+The runner normalizes the accepted object into `theses.json` and retains the
+exact provider response as `final-message.txt` in the feature run directory for
 quality audits. Real PR-mode run directories are durable and include a
 `review-context.json` binding the artifact to its job, analysis SHA, source PR,
 and feature; only an explicit `--dry-run` uses ephemeral scratch space.
-Leading prose, additional fences, malformed
-envelopes, null/scalar items, and
+Additional fences, malformed envelopes, null/scalar items, and
 schema-invalid records remain review errors rather than successful zero-result
 scans. Evidence is also checked against the pinned checkout's real,
 root-confined, 256 KiB-bounded bytes: cited
@@ -354,7 +365,8 @@ files are irrelevant. Default-branch history must still descend from the
 validated head. Before commit or push,
 Hive checks actual feature-boundary paths, file/diff caps, protected paths,
 secrets, dependency manifests, and public declarations across supported
-ecosystems, then runs every named validation command. Unknown source languages
+ecosystems, then runs every named validation command under
+`timeout_sec.patrol`. Unknown source languages
 remain discoverable but fail automatic mutation when no public-contract guard
 can prove safety. Documentation fixes need an explicit `docs` command; without
 one, an admissible material thesis may file an issue but cannot open a PR.
@@ -426,11 +438,16 @@ successful only after that mandatory handoff; an externally CLOSED-unmerged PR
 terminates as `closed_without_merge`. Patrol never merges the PR itself.
 
 Issue filing is limited to admissible strategic/cap-blocked theses or accepted
-theses that become deterministically non-fixable, and also requires material
-proposal-specific leverage. Semantic families deduplicate reworded occurrences
-across jobs. A successful fix in any thesis of a family suppresses the family
-issue. Family JSON is a rebuildable projection from authoritative job
-aggregates, not independent completion state.
+theses without a reviewable fix result, and also requires material
+proposal-specific leverage. When an accepted thesis has no fix because
+auto-fix is disabled, `auto_fix_disabled` routes it to an issue instead of
+terminating as JSON-only output. The issue records follow-up approval as
+pending and includes the source PR, thesis, evidence, proposed refactor,
+leverage, strategic reasons, and required validation. Semantic families
+deduplicate reworded occurrences across jobs. A successful fix in any thesis
+of a family suppresses the family issue. Family JSON is a rebuildable
+projection from authoritative job aggregates, not independent completion
+state.
 
 Reconciliation reads the complete paginated open-and-closed issue inventory
 for the exact host/repository. It checks the current v2 marker first. Only when

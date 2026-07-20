@@ -1178,6 +1178,18 @@ class RefactorPatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_default_validator_uses_the_configured_patrol_timeout
+    with_tmp_dir do |repo|
+      configured = cfg(repo, "timeout_sec" => { "patrol" => 1234 })
+      subject = Hive::RefactorPatrol::Fixer.new(repo, cfg: configured)
+      factory = subject.instance_variable_get(:@validator_factory)
+
+      validator = factory.call("test" => "true")
+
+      assert_equal 1234.0, validator.instance_variable_get(:@timeout_sec)
+    end
+  end
+
   private
 
   def with_repo

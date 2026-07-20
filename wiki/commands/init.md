@@ -3,11 +3,11 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-07-19
+updated: 2026-07-20
 tags: [command, bootstrap, git, prompts, llm-wiki, provisioning]
 ---
 
-**TLDR**: `hive init [PATH]` bootstraps a project for Hive and `--json` emits the resolved bootstrap contract. Alongside workflow, agents, review, patrol cadence, and daemon settings, fresh terminal and web setup recommend post-merge architecture-patrol discovery with an explicit default-yes answer. Headless callers can choose the same value before any write with `--refactor-patrol` or `--no-refactor-patrol`; auto-fixing and issue filing remain separate default-off gates. After the project transaction succeeds, interactive init diagnoses enabled manifest-managed agent skills and can delegate an accepted offer to the same setup engine as `hive setup-agents`; decline, non-TTY, and JSON flows only report remediation.
+**TLDR**: `hive init [PATH]` bootstraps a project for Hive and `--json` emits the resolved bootstrap contract. Alongside workflow, agents, review, patrol cadence, and daemon settings, fresh terminal and web setup recommend post-merge architecture patrol with an explicit default-yes answer. Headless callers can choose the same value before any write with `--refactor-patrol` or `--no-refactor-patrol`; enabling it also enables confined auto-fix/PR attempts and deduplicated GitHub issues as the fallback review surface. After the project transaction succeeds, interactive init diagnoses enabled manifest-managed agent skills and can delegate an accepted offer to the same setup engine as `hive setup-agents`; decline, non-TTY, and JSON flows only report remediation.
 
 ## Usage
 
@@ -21,11 +21,13 @@ hive init --new-workflow ID [PROJECT_PATH]
 On a fresh init, `--refactor-patrol` and `--no-refactor-patrol` explicitly
 select `refactor_patrol.enabled` before Hive creates or writes project state.
 The flag skips the architecture-discovery question on TTY and overrides the
-recommended non-TTY default; omitting both keeps discovery enabled. Neither
-form authorizes side effects: `refactor_patrol.auto_fix.enabled` and
-`refactor_patrol.issue_filing.enabled` are still written as `false`.
+recommended non-TTY default; omitting both keeps architecture patrol enabled.
+Enabling it writes both `refactor_patrol.auto_fix.enabled: true` and
+`refactor_patrol.issue_filing.enabled: true`; accepted findings attempt a
+confined fix/PR first and fall back to a human-reviewable GitHub issue. Disabling
+it writes all three gates false.
 An existing project rejects either selector before a workflow rebind or custom
-workflow scaffold can write anything; edit `refactor_patrol.enabled` in its
+workflow scaffold can write anything; edit the `refactor_patrol` gates in its
 project config when changing an established policy.
 
 For a project created with the former project-local `bench.yml`, run
@@ -76,7 +78,7 @@ or migrated manually.
 4. **Collect prompt answers** — `Hive::Commands::Init::Prompts.new(input: $stdin, output: $stderr, summary_io: $stdout).collect`. Prompt UI (intro / menus / re-prompts / confirmation) goes to **stderr**; the non-TTY one-line summary goes to **stdout** so scripted callers can `summary=$(hive init)` cleanly. On TTY this opens the interactive flow described below; on non-TTY (CI, pipes, test harness) it short-circuits to recommended defaults. An explicit architecture-patrol boolean is injected into this collection step, so it is reflected in the summary/config without first writing and then editing state. Two abort paths exit **64** (`Hive::ExitCodes::USAGE`, distinct from generic crashes at 1) with **zero disk side effects** — no orphan branch, no worktree, no master gitignore commit:
    - Operator answers `n` at the final confirmation prompt.
    - Input stream closes mid-flow (Ctrl-D / EOF / disconnected pipe). `Prompts#read_line` distinguishes `nil` (closed stream) from `""` (blank line for default) and raises `Aborted`. Treating EOF as a blank confirmation would silently write disk state with whatever was already collected.
-5. **Validate/render config content in memory** from `templates/project_config.yml.erb`, threading the answers hash from step 4 through `ProjectConfigBinding` before any disk side effects. `ProjectConfigBinding` bare-fetches every `Prompts#collect` key, including `refactor_patrol_enabled`, and every nested budget/timeout entry so prompt-refactor drift fails fast. The template writes the discovery boolean explicitly and writes both side-effect gates false. The rendered config includes quoted `default_workflow: "NAME"` only when the selected default is non-coding.
+5. **Validate/render config content in memory** from `templates/project_config.yml.erb`, threading the answers hash from step 4 through `ProjectConfigBinding` before any disk side effects. `ProjectConfigBinding` bare-fetches every `Prompts#collect` key, including `refactor_patrol_enabled`, and every nested budget/timeout entry so prompt-refactor drift fails fast. The template writes the discovery boolean explicitly and gives the same choice to both side-effect gates. The rendered config includes quoted `default_workflow: "NAME"` only when the selected default is non-coding.
 6. **Create orphan worktree** via `Hive::GitOps#hive_state_init` (`lib/hive/git_ops.rb:65`):
    - `git worktree add --no-checkout --detach <path>/.hive-state <default_branch>`
    - `git -C .hive-state checkout --orphan hive/state`
@@ -115,7 +117,7 @@ On TTY input streams the prompt walks the operator through the following section
 9. **Patrol mode** (`patrol.mode`): `ultrapatrol`, `high`, `medium` (default), `low`, or `off`. Fresh config writes this single key and omits explicit `enabled`/`trigger`/`poll_interval_sec` so [[modules/config]] derives the scheduler knobs.
 10. **Triage bias** (`review.triage.bias`): `courageous` (default) or `safetyist`. Picks the bias preset used by the 6-review autonomous loop.
 11. **Ad-hoc PR auto-fix** (`review.adhoc.fix`): whether `hive review --pr` should enter the fix loop for existing GitHub PRs. Default no keeps the workflow review-only: Hive publishes reviewer/escalation comments to GitHub when `review.github_publish.enabled` is true, but does not prepare local fix commits for someone else's PR. Answer `y` only when accepted ad-hoc findings should be eligible for local fix commits.
-12. **Architecture patrol discovery** (`refactor_patrol.enabled`): review each future merged PR for high-leverage architecture refactors. Fresh terminal and web setup default to yes and persist the answer explicitly. `--refactor-patrol` or `--no-refactor-patrol` preselects this value and skips the question, including for non-TTY automation. Existing projects without the block remain disabled. This answer grants discovery only; `auto_fix.enabled` and `issue_filing.enabled` remain false until separately edited by the operator.
+12. **Architecture patrol** (`refactor_patrol.enabled`): review each future merged PR for high-leverage architecture refactors. Fresh terminal and web setup default to yes and persist the answer explicitly. `--refactor-patrol` or `--no-refactor-patrol` preselects this value and skips the question, including for non-TTY automation. Existing projects without the block remain inert because discovery remains disabled, and older discovery-only configs keep both external-effect gates off. A yes answer also writes `auto_fix.enabled: true` and `issue_filing.enabled: true`, attempting confined fixes/PRs first and using deduplicated GitHub issues as the fallback review surface.
 13. **Per-stage limits**: budget+timeout for each of 10 effective keys (`brainstorm`, `plan`, `execute_implementation`, `open_pr`, `artifacts`, `finalize`, `review_ci`, `review_triage`, `review_fix`, `review_browser`). Defaults are generous sanity caps — most tasks finish well within them.
 14. **Daemon enrollment** (`daemon.enabled`): whether to opt this project into the auto-advance daemon (default yes).
 15. **Babysitter enrollment** (`babysitter.enabled`): whether to opt this project into the experimental open-PR babysitter (default yes). It is a separate process from `hive daemon`; start it with `hive babysit start`.
@@ -169,7 +171,7 @@ This branch is what the orphan worktree is initially based on, and what feature 
 
 - `test/integration/init_test.rb` covers all five preconditions, the `--force` path, `--json` success payload validation including workflow-authoring `hints`, non-default answer mirroring, and legacy precondition failures, partial-init rollback after orphan-state creation and later main-checkout side effects, the idempotent double-init, rendered stage-agent/runtime blocks, managed llm-wiki bootstrap, prompt behavior, workflow authoring, and post-init agent-skill offer/decline/non-TTY delegation boundaries.
 - `test/unit/commands/init_test.rb` covers small init collaborators, including the `ProjectConfigBinding` complete-answer path, top-level and nested missing-key fail-fast contracts, rollback helper behavior, daemon-registration warning paths, and JSON summary EPIPE handling.
-- `test/unit/commands/init/prompts_test.rb` covers prompt defaults and parsing, including the explicit default-yes architecture-patrol discovery answer and the non-TTY summary. `test/integration/init_test.rb` and the hivebox setup tests pin terminal/web parity, explicit pre-write architecture-patrol selection, rejection of fresh-only selectors on every existing-project re-init path, config rendering, default-off auto-fix and issue gates, and legacy missing-block behavior. `test/unit/schema_files_test.rb` pins the current `schemas/hive-init.v2.json` projection, including `refactor_patrol_enabled`; v1 remains a compatibility schema.
+- `test/unit/commands/init/prompts_test.rb` covers prompt defaults and parsing, including the explicit default-yes architecture-patrol answer and the non-TTY summary. `test/integration/init_test.rb` and the hivebox setup tests pin terminal/web parity, explicit pre-write architecture-patrol selection, rejection of fresh-only selectors on every existing-project re-init path, config rendering, default-on fresh auto-fix/issue gates, explicit disablement, and inert legacy missing-block behavior. `test/unit/schema_files_test.rb` pins the current `schemas/hive-init.v2.json` projection, including `refactor_patrol_enabled`; v1 remains a compatibility schema.
 
 ## Backlinks
 

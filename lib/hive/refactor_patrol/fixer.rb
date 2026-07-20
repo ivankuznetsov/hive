@@ -50,7 +50,10 @@ module Hive
         @cfg = cfg
         @worktree_factory = worktree_factory || method(:build_worktree)
         @agent_runner = agent_runner || method(:run_agent)
-        @validator_factory = validator_factory || ->(commands) { Hive::Patrol::Validator.new(commands) }
+        validation_timeout = cfg.dig("timeout_sec", "patrol") || Hive::Patrol::Validator::DEFAULT_TIMEOUT_SEC
+        @validator_factory = validator_factory || lambda do |commands|
+          Hive::Patrol::Validator.new(commands, timeout_sec: validation_timeout)
+        end
         @public_contract_guard = public_contract_guard
         @token_budget = token_budget || Hive::Patrol::TokenBudget.new(@project_root, cfg: cfg)
       end

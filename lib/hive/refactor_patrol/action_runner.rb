@@ -333,12 +333,7 @@ module Hive
         return [] unless policy.fetch("issue_filing")
 
         flagged = entries.fetch("flagged").select { |entry| strategic_flagged?(entry) }
-        accepted = if policy.fetch("auto_fix")
-          entries.fetch("accepted")
-        else
-          []
-        end
-        flagged + accepted
+        flagged + entries.fetch("accepted")
       end
 
       def strategic_flagged?(entry)
@@ -681,6 +676,9 @@ module Hive
           return { outcome: nil, reasons: Array(entry.dig(:item, "reasons")) }
         end
         if fixes.empty?
+          if aggregate.dig("policy", "auto_fix") == false
+            return { outcome: nil, reasons: [ "auto_fix_disabled" ] }
+          end
           return { outcome: "issue_not_needed", reasons: [] }
         end
 

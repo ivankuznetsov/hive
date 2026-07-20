@@ -374,8 +374,9 @@ Live Claude patrol sampling showed that provider-owned startup context can be
 charged before Hive receives its first measurable usage event. Hive now refuses
 a patrol launch unless the remaining allowance covers Claude's conservative
 20,000-token initial-context reserve plus one token per prompt byte, and a
-three-turn/output-complete boundary prevents an unnecessary follow-up after the
-artifact is written. This closes the previously observed unbounded pre-event
+four-turn/output-complete boundary prevents an unnecessary follow-up after the
+artifact is written; the fourth turn is emergency finalization only. This
+closes the previously observed unbounded pre-event
 launch and extra-response paths, but it cannot make provider telemetry
 continuous: a single usage event can still cross the configured token ceiling
 before Hive can send TERM. The exact provider context/tokenization is not a
@@ -531,6 +532,15 @@ meaningful `invert-usage-error-contract-ownership` thesis above the configured
 0.25 discovery floor. Automation correctly rejected it for unverified evidence,
 multi-feature scope, and file/diff limits. Durable architecture review run
 directories still have no automatic retention policy, so long-running
-installations should monitor `.hive-state/refactor_patrol/runs/` growth. Retain
-this gap only until the installed v0.6.4 package repeats both patrol modes
-without dirty-checkout, quota-churn, or response-envelope errors.
+installations should monitor `.hive-state/refactor_patrol/runs/` growth.
+
+Exact-source dogfood on 2026-07-20 replayed merged PR 785 through 13
+architecture reviews while ordinary launch accounting remained at zero,
+crossing the ordinary eight-launch ceiling without consuming it. The accepted
+theses became review issues 811 and 812. A separate non-dry ordinary patrol run
+found a reachable bot logger crash, independently proved fail-before and
+pass-after, opened pull request 814, and entered 6-review. This closes the local
+delivery-path uncertainty, but the installed package is still v0.6.4 and has
+not exercised the proposed split accounting or default issue-filing behavior;
+keep the rollout portion of this gap until a later explicitly authorized
+release is installed and monitored.

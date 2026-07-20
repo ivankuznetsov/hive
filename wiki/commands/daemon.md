@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-07-12
+updated: 2026-07-20
 tags: [command, daemon, automation, json]
 ---
 
@@ -155,9 +155,11 @@ every external effect and mandatory review handoff.
 The three gates are independent. `refactor_patrol.enabled` permits discovery
 only; `refactor_patrol.auto_fix.enabled` permits confined fix/PR attempts; and
 `refactor_patrol.issue_filing.enabled` permits deduplicated issues. Fresh init
-recommends discovery with a default-yes answer, while both external-effect gates
-remain default off. Missing `refactor_patrol` config in an existing project is
-still disabled. See [[commands/refactor-patrol]] for the job and policy model.
+recommends the full workflow with a default-yes answer and writes both
+external-effect gates on; choosing no writes all three gates off. Missing
+`refactor_patrol` config in an existing project remains inert because discovery
+is still disabled, and older discovery-only configs do not inherit mutation or
+issue-filing authority. See [[commands/refactor-patrol]] for the job and policy model.
 
 ## Per-project enrollment
 

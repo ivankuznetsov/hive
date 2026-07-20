@@ -349,7 +349,7 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_leaves_refactor_patrol_disabled_when_no_config
+  def test_load_keeps_refactor_patrol_inert_when_no_config
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
 
@@ -376,6 +376,22 @@ class ConfigTest < Minitest::Test
       assert_equal 0.0, cfg.dig("refactor_patrol", "leverage", "weights", "coverage_gap")
       assert_equal 6, cfg.dig("refactor_patrol", "review", "max_owned_files")
       assert_equal 6, cfg.dig("refactor_patrol", "review", "max_context_files")
+    end
+  end
+
+  def test_load_does_not_grant_auto_fix_to_legacy_discovery_only_config
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          enabled: true
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal true, cfg.dig("refactor_patrol", "enabled")
+      assert_equal false, cfg.dig("refactor_patrol", "auto_fix", "enabled")
+      assert_equal false, cfg.dig("refactor_patrol", "issue_filing", "enabled")
     end
   end
 
@@ -827,8 +843,10 @@ class ConfigTest < Minitest::Test
         assert_equal agent_tokens, cfg.dig("patrol", "max_tokens_per_agent")
         assert_equal cycle_spawns, cfg.dig("patrol", "max_agent_spawns_per_cycle")
         assert_equal daily_spawns, cfg.dig("patrol", "max_agent_spawns_per_day")
+        assert_equal 96, cfg.dig("patrol", "max_architecture_unmetered_spawns_per_day")
         assert_equal agent_budget, cfg.dig("patrol", "max_budget_usd_per_agent")
         assert_equal 2, cfg.dig("patrol", "architecture_budget_multiplier")
+        assert_equal 2, cfg.dig("patrol", "fix_budget_multiplier")
         assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix"),
                      "#{mode} must not change the confidence gate"
       end
@@ -944,7 +962,9 @@ class ConfigTest < Minitest::Test
       "max_tokens_per_agent: 0",
       "max_agent_spawns_per_cycle: 0",
       "max_agent_spawns_per_day: 1.5",
+      "max_architecture_unmetered_spawns_per_day: 0",
       "architecture_budget_multiplier: 0",
+      "fix_budget_multiplier: 0",
       "max_budget_usd_per_agent: 0",
       "poll_interval_sec: 30",
       "commands: []",

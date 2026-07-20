@@ -380,6 +380,7 @@ class RefactorPatrolReviewerTest < Minitest::Test
       assert_includes captured, "leverage floor is 0.2500"
       assert_includes captured, "current consequence evidence"
       assert_includes captured, "added indirection, not leverage"
+      assert_match(/fourth\s+response as an emergency finalization turn/, captured)
     end
   end
 

@@ -258,16 +258,17 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         store: store,
         cfg: cfg,
         family_store: family_store,
-        issue_filer: FakeIssueFiler.new(issue_result)
+        issue_filer: FakeIssueFiler.new(issue_result, issue_result)
       )
 
       result = runner.run(job_id: "job-1")
 
       assert result.complete?
-      assert_equal [ "issue" ], result.actions.map { |action| action.fetch("kind") }
-      assert_equal [ "ts-issue" ], family_store.calls.map { |call| call.fetch(:thesis).id }
+      assert_equal %w[issue issue], result.actions.map { |action| action.fetch("kind") }
+      assert_equal %w[go-fix ts-issue], family_store.calls.map { |call| call.fetch(:thesis).id }.sort
+      orders = family_store.calls.find { |call| call.fetch(:thesis).id == "ts-issue" }
       assert_equal %w[src/orders/index.ts src/orders/service.ts],
-                   family_store.calls.first.fetch(:thesis).feature_boundary.fetch("owned_files")
+                   orders.fetch(:thesis).feature_boundary.fetch("owned_files")
       assert_empty runner.fixer.calls, "current auto-fix must not broaden a false snapshot"
     end
   end
@@ -2326,8 +2327,18 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
                           { thesis: item, disposition: "accepted", item: {} })
       assert_nil route.fetch(:outcome)
       assert_equal "failed", route.fetch(:reasons).first
+      route = runner.send(
+        :issue_route,
+        { "actions" => [], "policy" => snapshot_policy("auto_fix" => false) },
+        issue_action,
+        { thesis: item, disposition: "accepted", item: {} }
+      )
+      assert_nil route.fetch(:outcome)
+      assert_equal [ "auto_fix_disabled" ], route.fetch(:reasons)
       assert_equal "issue_not_needed",
-                   runner.send(:issue_route, { "actions" => [] }, issue_action,
+                   runner.send(:issue_route,
+                               { "actions" => [], "policy" => snapshot_policy("auto_fix" => true) },
+                               issue_action,
                                { thesis: item, disposition: "accepted", item: {} }).fetch(:outcome)
 
       runner.define_singleton_method(:claim_action) { |*| token }

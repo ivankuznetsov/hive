@@ -1765,6 +1765,9 @@ class RefactorPatrolCommandTest < Minitest::Test
             "default_branch" => "master",
             "refactor_patrol" => {
               "enabled" => true,
+              # Most command tests exercise discovery/checkpoint semantics.
+              # Tests that exercise actions enable this gate explicitly.
+              "auto_fix" => { "enabled" => false },
               "commands" => { "test" => "true" }
             }
           }

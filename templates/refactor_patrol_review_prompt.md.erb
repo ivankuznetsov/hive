@@ -110,11 +110,17 @@ Rules:
 <% if output_mode == "final_message" %>
 - Response contract: your first response may read the listed paths; your second
   may perform the one bounded follow-up; your third response MUST return the
-  JSON object and MUST NOT call Read, Grep, or Glob.
+  JSON object and MUST NOT call Read, Grep, or Glob. Hive permits a fourth
+  response as an emergency finalization turn only when the provider failed to
+  honor that third-response contract; that fourth response MUST return the
+  JSON object immediately and MUST NOT call Read, Grep, or Glob.
 <% else %>
 - Response contract: your first response may read the listed paths; your second
   may perform the one bounded follow-up; your third response MUST call `Write`
-  for the JSON output and MUST NOT call Read, Grep, or Glob.
+  for the JSON output and MUST NOT call Read, Grep, or Glob. Hive permits a
+  fourth response as an emergency finalization turn only when the provider
+  failed to honor that third-response contract; that fourth response MUST call
+  `Write` immediately and MUST NOT call Read, Grep, or Glob.
 <% end %>
 - The allowance is a hard ceiling, not a target. The deterministic proposal
   leverage floor is <%= format("%.4f", min_leverage_score) %>. Before emitting,

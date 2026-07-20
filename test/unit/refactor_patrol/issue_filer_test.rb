@@ -53,6 +53,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     assert_includes created.fetch(:body), "Problem evidence"
     assert_includes created.fetch(:body), "Expected leverage score: 0.4"
     assert_includes created.fetch(:body), "isolate repeated edits"
+    assert_includes created.fetch(:body), "Follow-up approval: pending"
     assert_includes created.fetch(:body), marker
   end
 
@@ -79,6 +80,20 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
       assert result.terminal
       assert_empty gh.creates
     end
+  end
+
+  def test_issue_body_does_not_trust_the_model_authored_approval_state
+    gh = FakeGh.new
+
+    result = filer(gh).publish(
+      thesis: thesis(flags: [ "exceeds_max_files" ], follow_up_approval_state: "approved"),
+      family_id: family_id, canonical_action_id: action_id,
+      job_id: "job-7", source: source, record_intent: successful_intent
+    )
+
+    assert_equal "issue_created", result.outcome
+    assert_includes gh.creates.first.fetch(:body), "Follow-up approval: pending"
+    refute_includes gh.creates.first.fetch(:body), "Follow-up approval: approved"
   end
 
   def test_prior_creation_intent_never_blindly_retries_create
@@ -506,6 +521,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
   def test_deterministic_nonfixable_outcomes_are_issue_eligible
     %w[
       agent_control_plane_violation
+      auto_fix_disabled
       boundary_violation
       dependency_change
       fix_guardrail
@@ -639,7 +655,8 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
 
   def thesis(flags:, confidence: "medium", admissible: true, score: 0.4,
              feature_id: "architecture-services-checkout",
-             boundary_file: "services/checkout/core.ts", validation_commands: [ "test" ])
+             boundary_file: "services/checkout/core.ts", validation_commands: [ "test" ],
+             follow_up_approval_state: "pending")
     Hive::RefactorPatrol::Thesis.new(
       id: "extract", feature_id: feature_id, feature: "Checkout",
       problem: "Checkout mixes validation and payment policy",
@@ -669,7 +686,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
         "notes" => "Run the checkout tests"
       },
       admissible: admissible, admissibility_reason: admissible ? "anchored" : "missing anchor",
-      follow_up_approval_state: "pending", fingerprint: "fp-1"
+      follow_up_approval_state: follow_up_approval_state, fingerprint: "fp-1"
     )
   end
 

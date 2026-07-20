@@ -290,6 +290,10 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # The default implementer is codex; this E2E fakes only claude, so every
     # stage must run through it.
     data["execute"] = (data["execute"] || {}).merge("agent" => "claude")
+    # This scenario verifies the interactive coding pipeline. Keep both patrol
+    # schedulers from taking the daemon's single child slot before brainstorm.
+    data["patrol"] = (data["patrol"] || {}).merge("mode" => "off")
+    data["refactor_patrol"] = (data["refactor_patrol"] || {}).merge("enabled" => false)
     # Keep worktrees inside the sandbox (the config default would put them
     # in the operator's real ~/Dev; config beats HIVE_WORKTREE_BASE).
     data["worktree_root"] = File.join(ENV["HIVE_TEST_HOME_ROOT"], "worktrees")

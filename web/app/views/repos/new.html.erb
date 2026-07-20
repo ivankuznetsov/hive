@@ -127,11 +127,12 @@
         <label class="check">
           <%= hidden_field_tag "settings[refactor_patrol_enabled]", "0" %>
           <%= check_box_tag "settings[refactor_patrol_enabled]", "1", @defaults["refactor_patrol_enabled"] %>
-          Architecture patrol discovery (recommended)
+          Architecture patrol (recommended)
         </label>
         <p class="muted">
           Reviews future merged PRs for architectural refactor opportunities.
-          Discovery is read-only; auto-fixing and GitHub issue filing stay disabled.
+          Accepted findings attempt confined fixes and pull requests; GitHub issues
+          remain the fallback review surface when no safe fix ships.
         </p>
       <% end %>
     </div>

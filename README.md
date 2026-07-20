@@ -113,11 +113,14 @@ setup:
 /hive setup
 ```
 
-The guided setup installs the Hive CLI through the documented platform channel,
-verifies `hive`/`hv`, runs `hive daemon install`, and optionally initializes the
-current project. After setup, pass Hive CLI commands through `/hive ...`, for
-example `/hive status --operational --json`, `/hive new . "build this feature"`, and
-`/hive review <task-slug>`.
+The guided setup keeps package-manager confirmation visible, verifies
+`hive`/`hv`, and—after approval—runs
+`hive setup --no-init --yes --json` for core provisioning. Project enrollment
+is a separate `hive init .` in the user's real terminal so patrol, architecture,
+daemon, and babysitter defaults can be reviewed before confirmation. After
+setup, pass Hive CLI commands through `/hive ...`, for example
+`/hive status --operational --json`, `/hive watch <project>:<task>`,
+`/hive new . "build this feature"`, and `/hive review <task-slug>`.
 
 For local checkout testing, run `openclaw skills install ./openclaw/skills/hive
 --as hive`. See [openclaw/README.md](openclaw/README.md) for the publish

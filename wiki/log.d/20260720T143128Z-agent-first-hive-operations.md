@@ -14,6 +14,11 @@ publication for Claude/Codex/Pi, read-only OpenClaw/ClawHub diagnosis, and
 agent-skills-first normal setup with one consent boundary. JSON/non-TTY setup
 without `--yes` now refuses before diagnostics or native discovery, preventing
 nominally read-only upstream probes from initializing user state.
+The canonical progressive setup reference preserves the current OpenClaw
+v0.1.3 consent rules: package-manager confirmation remains interactive, core
+provisioning uses approved `setup --no-init`, project enrollment stays in the
+user's real terminal, and agents never patch installed runtimes or service
+overrides directly.
 
 **Release proof:** Added a protected exact-SHA workflow that builds the
 candidate gem/source/four-platform skill archive once, requires authenticated

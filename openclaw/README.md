@@ -75,7 +75,10 @@ credentials were unavailable; it is not release evidence. See
 
 Publishing is a release action. Do not run these commands without a separate explicit release request and version direction.
 
-Read the authoritative skill version instead of copying a literal into documentation:
+ClawHub versions are immutable. Do not reuse a published version for changed
+bytes; the separate release request must provide the new version direction and
+update `skills/hive/skill.json` before this checklist runs. Read that
+authoritative value instead of copying a literal into documentation:
 
 ```bash
 skill_version="$(ruby -rjson -e 'print JSON.parse(File.read("skills/hive/skill.json")).fetch("version")')"

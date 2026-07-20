@@ -22,6 +22,19 @@ Preserve the task folder, worktree, attempt records, queue entries, locks, marke
 - Known bounded healer cases should remain with the healer while its retry budget remains. If the daemon is not running and background automation is expected, `hive daemon start --detach` is the normal start form.
 - Exhausted recovery, malformed hold data, foreign worktree state, and terminal manual errors require operator judgment.
 
+Keep these commonly confused cases separate:
+
+- `REVIEW_ERROR phase=fix reason=fix_failed` with a Claude stop-hook completion
+  failure can be healer-managed while its bounded retry budget remains. Other
+  `fix_failed` reasons require diagnosis instead of a blind clear.
+- `limits_reached` with a valid `retry_after` is scheduler-owned. A missing or
+  malformed retry timestamp needs repair evidence, not a forced provider call.
+- Stale `agent_working` with a verified live PID/lock is still running. An
+  orphan may be healer-managed; a dead worker rewritten to
+  `ERROR reason=agent_died` is a manual recovery condition.
+- A terminal/manual `ERROR` remains operator-owned until its reason is
+  understood and the exact mutation is approved.
+
 Use `hive status --json` only when detailed compatibility evidence such as marker attributes is needed. Prefer the operational contract for owner and reason classification.
 
 ## Guard manual recovery

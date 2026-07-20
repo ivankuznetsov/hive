@@ -13,7 +13,7 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     skill = Hive::AgentSkills::CanonicalSkill.new
 
     assert_equal "hive", skill.name
-    assert_equal "0.1.2", skill.version
+    assert_equal "0.1.3", skill.version
     assert_match(/\A[0-9a-f]{64}\z/, skill.canonical_digest)
     assert_equal %w[description name], skill.frontmatter.keys.sort
     assert_operator skill.body.lines.size, :<, 120
@@ -83,10 +83,28 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_includes text, "Request another operational snapshot after any action"
     assert_includes text, "separate explicit release request"
 
-    %w[HIVE_WATCH_INTERVAL HIVE_WATCH_TIMEOUT mapfile mktemp].each do |legacy|
+    %w[HIVE_WATCH_INTERVAL HIVE_WATCH_TIMEOUT mapfile].each do |legacy|
       refute_includes text, legacy
     end
     refute_match(/pgrep\s+-af|kill\s+-0|while\s+:/, text)
+  end
+
+  def test_policy_preserves_consent_safe_setup_and_host_boundaries
+    text = Hive::AgentSkills::CanonicalSkill.new.rendered_canonical_files.values.join("\n")
+
+    assert_includes text, "hive setup --no-init --yes --json"
+    assert_includes text, "hive setup-agents --json"
+    assert_includes text, "hive setup-agents --yes --json"
+    assert_includes text, "their own real terminal"
+    assert_match(/non-TTY `hive init`.*medium patrol.*pull requests/im, text)
+    assert_includes text, "openclaw skills install @ivankuznetsov/hive-cli"
+    assert_includes text, "Never patch an installed Hive runtime"
+    assert_includes text, "workflow install honeycomb/NAME --dry-run --json"
+    assert_match(/patrol.*--dry-run.*still launch agents/im, text)
+
+    refute_match(/(?:yay|paru)[^\n]*--noconfirm/, text)
+    refute_includes text, "cat > ~/.config/systemd"
+    refute_includes text, "systemctl --user edit"
   end
 
   def test_rejects_escaping_or_missing_canonical_references

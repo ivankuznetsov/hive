@@ -19,6 +19,26 @@ hive archive SLUG --project PROJECT --json
 
 Hive can also run project-authored workflows. Inspect them with `hive workflow list --json`; do not assume every task uses the coding stage names.
 
+For reviewed Honeycomb workflows, preview the exact no-write operation first:
+
+```bash
+hive workflow install honeycomb/NAME --dry-run --json
+hive workflow update NAME --dry-run --json
+hive workflow remove NAME --dry-run --json
+```
+
+Only after the user approves that output, run the matching operation with
+`--yes --json`. Permission growth or another high-risk change requires separate
+approval before `--allow-escalation`; ordinary install/update consent does not
+authorize escalation.
+
+Patrol is different: `hive patrol ... --dry-run` and
+`hive refactor-patrol ... --dry-run` still launch agents, consume provider
+subscription capacity, and may persist scan state. Show the project, configured
+patrol mode, and PR-creation potential, then obtain confirmation before a manual
+patrol start. A previously approved daemon schedule carries its existing
+consent; observe it without re-confirming each tick.
+
 ## Execute a closed routine recommendation
 
 An operational task row may contain an `action` with:

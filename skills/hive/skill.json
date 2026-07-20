@@ -3,7 +3,7 @@
   "schema": "hive-canonical-skill",
   "schema_version": 1,
   "name": "hive",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "references": [
     "references/status-and-watch.md",
     "references/workflow-actions.md",

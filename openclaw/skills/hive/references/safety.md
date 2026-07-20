@@ -9,8 +9,18 @@ Explain scope, affected state, and recovery before running:
 - Killing workers, deleting or moving worktrees, rewriting task folders, changing destinations, replacing user-global configuration, or overwriting a foreign skill.
 - Foreground or unbounded streams such as daemon or bot tails when a bounded native status/watch answer is sufficient.
 - Any external message, PR mutation beyond the user’s request, publication, deployment, tag, package release, or version change.
+- Workflow install/update/remove/publish, `setup-agents`, manual patrol starts,
+  and outbound `digest` or `bench submit` operations.
 
 Routine read-only inspection, `hive watch`, `hive doctor`, and a fresh `hive act` descriptor with `confirmation_required: false` do not require another prompt.
+
+No-write Honeycomb workflow previews (`workflow install|update|remove` with
+`--dry-run --json`) are read-only. Do not generalize that exemption: patrol
+and refactor-patrol dry-runs still launch agents and remain consent-gated.
+
+Prefer `hive daemon start --detach` for startup. Before a foreground daemon or
+bot start, or a live daemon/bot tail, explain that it can hold the session and
+obtain confirmation.
 
 ## Release boundary
 

@@ -1,7 +1,7 @@
 ---
 name: hive
 description: "Operate Hive task pipelines through its native CLI. Use when an agent needs to answer current Hive or Hive-bench status, identify the exact active task and blocker owner, follow work through bounded transitions, advance a fresh routine recommendation, diagnose recovery state, initialize or configure Hive, or explain what requires operator action across registered projects."
-version: "0.1.2"
+version: "0.1.3"
 user-invocable: true
 metadata:
   openclaw:
@@ -16,8 +16,8 @@ metadata:
 <!-- hive-managed: canonical-skill-projection/v1
 platform: openclaw
 invocation: /hive
-skill-version: 0.1.2
-canonical-digest: 992d2686e504213f75c09c81db3cff2beb4df011fac8ae1ff44dd3e03d1d0265
+skill-version: 0.1.3
+canonical-digest: 07fdbc0761bcc0646e57119d59160c4fadbf34c84d8f1d0f5de8d0ef500421e7
 hive-version: 0.6.4
 -->
 

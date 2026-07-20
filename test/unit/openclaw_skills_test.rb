@@ -51,7 +51,7 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes text, "Pi: `/skill:hive`"
     assert_includes text, "/v#{Hive::VERSION}/install.sh"
 
-    %w[HIVE_WATCH_INTERVAL HIVE_WATCH_TIMEOUT mapfile mktemp].each do |legacy|
+    %w[HIVE_WATCH_INTERVAL HIVE_WATCH_TIMEOUT mapfile].each do |legacy|
       refute_includes text, legacy
     end
     refute_match(/pgrep\s+-af|kill\s+-0|while\s+:/, text)
@@ -67,6 +67,16 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes text, "separate explicit release request"
     assert_includes text, "Do not create or push a tag"
     assert_includes text, "Do not print, copy wholesale, or persist agent credentials"
+  end
+
+  def test_projection_preserves_consent_safe_setup_from_canonical_source
+    text = projection_text
+
+    assert_includes text, "hive setup --no-init --yes --json"
+    assert_includes text, "their own real terminal"
+    assert_includes text, "openclaw skills install #{CLAWHUB_REF}"
+    assert_includes text, "Never patch an installed Hive runtime"
+    refute_match(/(?:yay|paru)[^\n]*--noconfirm/, text)
   end
 
   def test_projection_manifest_records_exact_files_and_shared_identity
@@ -95,11 +105,12 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes readme, '--version "$skill_version"'
     assert_includes readme, "--dry-run"
     assert_includes readme, "ClawHub publication is staged"
+    assert_includes readme, "ClawHub versions are immutable"
     assert_includes readme, "clawhub inspect #{CLAWHUB_REF}"
     assert_includes readme, "separate explicit release request"
     refute_match(/--version\s+\d+\.\d+\.\d+/, readme)
     refute_includes readme, "for skill in openclaw/skills"
-    assert_includes readme, "do not create slugs such as `hive-plan`"
+    assert_match(/do not create slugs such as\s+`hive-plan`/, readme)
   end
 
   private

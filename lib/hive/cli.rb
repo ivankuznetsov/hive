@@ -867,69 +867,59 @@ module Hive
       ).call
     end
 
-    desc "digest", "Generate and send the daily shipped digest"
+    desc "digest", "Generate and send the daily merged-PR changelist"
     # wrap: false so the Examples / Exit codes blocks keep their line breaks
     # instead of being reflowed into one paragraph.
     long_desc <<~DESC, wrap: false
-      Collects tasks that shipped on the requested local calendar date
-      across all registered projects, asks the configured digest agent to
-      write friendly changelog lines, and sends a Telegram MarkdownV2 message
-      (split into multiple messages when it exceeds Telegram's length limit)
-      to the configured digest chat.
+      Collects every pull request merged during the requested Europe/London
+      calendar day across registered project repositories. It fetches complete
+      PR body and diff evidence, asks the configured digest agent for exhaustive
+      project context and change bullets, and sends one Telegram MarkdownV2
+      changelist. Hive tasks and stage folders never affect inclusion.
 
-      Without --date, uses the local calendar day that just ended. Use
-      --dry-run to print the composed message instead of sending Telegram.
+      Without --date, uses the Europe/London calendar day that just ended.
+      Repeat --repo owner/name to filter the registered repository set; unknown
+      or unregistered repositories fail instead of expanding scope. Use
+      --dry-run to print the exact composed message without Telegram credentials.
 
-      The run reports one of three outcomes (the `status` field with
-      --json): `empty` — nothing shipped that day, so no agent runs and a
-      short "nothing shipped" notice is sent; `sent` — a normal digest was
-      categorized and delivered; `failed_notice` — the categorizer agent
-      failed, so a short failure notice is sent instead (`ok` is false).
+      Collection failures and incomplete statistics are visible as scoped
+      warnings. An honestly collected day with no qualifying PRs still sends the
+      normal `PRs 0` digest without running the agent. Empty repository scope,
+      total GitHub collection failure, incomplete generation, or delivery
+      failure exits nonzero and sends no successful changelist.
 
-      With --json, emits the hive-digest (v1) envelope: a SuccessPayload
-      (ok/status/date/dry_run/chat_id/message) for empty/sent/failed_notice,
-      or an ErrorPayload (ok:false/error_kind/exit_code/message) for a bad
-      --date (error_kind=config) or bad flags (error_kind=usage).
-
-      The default source is the shipped-task digest described above. Use
-      --source merged-prs to build a read-only GitHub report of pull requests
-      merged on the requested local day. That source never mutates Hive state
-      and uses a mechanical renderer instead of the digest agent. Add --repo
-      owner/name to restrict the merged-PR report to one or more explicit
-      repositories; --repo implies --source merged-prs.
+      With --json, emits the sole live hive-digest v2 envelope, including
+      repository/project/PR counts, project descriptions, every PR link and
+      bullet, known metrics, and structured warnings.
 
       Examples:
         hive digest                          # yesterday, send to Telegram
-        hive digest --date 2026-06-13        # a specific local day
+        hive digest --date 2026-06-13        # a specific London day
         hive digest --dry-run                # print the composed message, send nothing
         hive digest --date 2026-06-13 --json # machine-readable hive-digest envelope
-        hive digest --source merged-prs --dry-run
         hive digest --repo owner/name --repo other/repo --json
 
       Exit codes:
-        0  empty / sent / failed_notice (a notice was delivered)
-        78 bad --date or missing chat config (Hive::ConfigError)
+        0  empty / sent (the complete or honestly partial changelist was delivered)
+        78 bad --date/filter or missing chat config (Hive::ConfigError)
         64 bad flags / malformed --json (Thor usage error)
-        70 unexpected internal error
+        70 generation or unexpected internal error
     DESC
-    option :date, type: :string, desc: "local calendar date to digest (YYYY-MM-DD)"
+    option :date, type: :string, desc: "Europe/London calendar date to digest (YYYY-MM-DD)"
     option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"
-    option :source, type: :string,
-                    desc: "digest data source: 'merged-prs' for a GitHub merged-PR report (default: shipped Hive tasks)"
     # repeatable: true so a repeated `--repo a/b --repo c/d` accumulates
     # (Thor collects each occurrence into a nested array) instead of the last
     # flag silently overwriting the earlier ones — the space-listed form
     # `--repo a/b c/d` still works too. `.flatten` collapses both forms to a
     # flat list of owner/name slugs for the command.
     option :repo, type: :array, default: [], repeatable: true,
-                  desc: "restrict merged-PR source to explicit owner/name repos (repeatable); implies --source merged-prs"
+                  desc: "filter registered GitHub repositories by owner/name (repeatable)"
     def digest
       require "hive/commands/digest"
       Hive::Commands::Digest.new(
         date: options[:date],
         dry_run: options[:dry_run],
         json: options[:json],
-        source: options[:source],
         repos: options[:repo].flatten
       ).call
     end

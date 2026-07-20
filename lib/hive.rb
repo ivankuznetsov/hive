@@ -60,20 +60,15 @@ module Hive
       "hive-workflow-remove" => 1,
       "hive-workflow-update" => 2,
       "hive-workflow-publish" => 1,
-      # Global daily shipped digest (`hive digest --json`). The success
-      # envelope carries the delivery outcome (status/date/message); hard
-      # failures use stderr + exit code, and the Thor-usage error path
-      # emits the shared error envelope (see JSON_USAGE_ERROR_CONTRACTS).
-      "hive-digest" => 1,
+      # Europe/London daily merged-PR changelist (`hive digest --json`). V2
+      # replaces both the shipped-task v1 and the temporary merged-PR identity.
+      "hive-digest" => 2,
       # Daily digest of tasks waiting on human input (`hive answer-digest
       # --json`). The success envelope reports the send outcome plus the full
       # waiting set (count/tasks); the Thor-usage error path emits the shared
       # error envelope via JSON_USAGE_ERROR_CONTRACTS, and a bad --date / status
       # outage emit the in-command error envelope.
       "hive-answer-digest" => 1,
-      # Read-only GitHub merged-pull-request digest source
-      # (`hive digest --source merged-prs --json`).
-      "hive-merged-pr-digest" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1,

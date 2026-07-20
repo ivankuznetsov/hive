@@ -1,44 +1,24 @@
-require "date"
 require "json"
 require "hive/digest"
-require "hive/digest/merged_pr"
 
 module Hive
   module Commands
     class Digest
-      MERGED_PRS_SOURCE = "merged-prs".freeze
-
       def initialize(date: nil, dry_run: false, json: false, runner: Hive::Digest,
-                     merged_runner: Hive::Digest::MergedPr, output: $stdout,
-                     source: nil, repos: [])
+                     output: $stdout, repos: [])
         @date = date
         @dry_run = dry_run
         @json = json
         @runner = runner
-        @merged_runner = merged_runner
         @output = output
-        @source = source
         @repos = Array(repos)
       end
 
       def call
-        local_date = parse_date
-        result =
-          if merged_pr_source?
-            @merged_runner.run(date: local_date, dry_run: @dry_run, repos: @repos)
-          else
-            validate_source!
-            @runner.run(date: local_date, dry_run: @dry_run)
-          end
+        result = @runner.run(date: parse_date, dry_run: @dry_run, repos: @repos)
         emit(result)
         result
       rescue Hive::Error => e
-        # A bad --date raises Hive::ConfigError, which Thor never sees (it is
-        # not a Thor::Error), so bin/hive's JSON_USAGE_ERROR_CONTRACTS path
-        # never fires for it. Emit the in-command JSON error envelope here —
-        # mirroring ~10 sibling commands — before re-raising, so an agent
-        # parsing --json stdout gets a structured error on the most common
-        # usage mistake. Non-JSON output and the exit code are unchanged.
         emit_error_envelope(e) if @json
         raise
       end
@@ -46,106 +26,79 @@ module Hive
       private
 
       def parse_date
-        # No --date: defer to Hive::Digest.run, which owns the single
-        # "local day that just ended" default (and its injectable clock).
-        # Computing it here too would duplicate that default across two
-        # sites that could drift.
         return nil if @date.to_s.empty?
 
         unless @date.to_s.match?(/\A\d{4}-\d{2}-\d{2}\z/)
           raise Hive::ConfigError, "hive digest: --date must be YYYY-MM-DD; got #{@date.inspect}"
         end
 
-        Hive::Digest::Window.parse_date(@date)
+        Hive::Digest::LondonWindow.parse_date(@date)
       rescue ArgumentError
         raise Hive::ConfigError, "hive digest: --date must be YYYY-MM-DD; got #{@date.inspect}"
-      end
-
-      def normalized_source
-        source = @source.to_s.strip
-        return MERGED_PRS_SOURCE if source.empty? && @repos.any?
-        return nil if source.empty?
-
-        source
-      end
-
-      def merged_pr_source?
-        normalized_source == MERGED_PRS_SOURCE
-      end
-
-      def validate_source!
-        return if normalized_source.nil?
-
-        raise Hive::ConfigError, "hive digest: --source must be 'merged-prs'; got #{@source.inspect}"
       end
 
       def emit(result)
         if @json
           @output.puts JSON.generate(json_payload(result))
-        elsif merged_pr_source?
-          emit_merged_pr_human(result)
         elsif @dry_run
           @output.puts result.message
         else
-          @output.puts "hive digest: #{result.status} for #{result.date.iso8601}"
+          @output.puts "hive digest: #{result.status} for #{result.date.iso8601} " \
+                       "(#{result.projects.size} projects, #{result.pr_count} PRs)"
         end
       end
 
       def json_payload(result)
-        return merged_pr_json_payload(result) if merged_pr_source?
-
-        {
-          # Derive from status so a machine consumer can tell a delivered
-          # digest from one that fell back to a failure notice.
-          "ok" => result.status != :failed_notice,
+        payload = {
+          "ok" => true,
           "schema" => "hive-digest",
-          # Versioned like every other --json envelope; fetched from the
-          # single SCHEMA_VERSIONS registry so the two can't drift.
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-digest"),
           "date" => result.date.iso8601,
           "status" => result.status.to_s,
-          "dry_run" => @dry_run,
-          # The recipient the send actually resolved (nil on a dry-run, which
-          # resolves none) — surfaced for post-send auditability. Optional in
-          # the schema, so older consumers that ignore it stay compatible.
+          "dry_run" => result.dry_run,
+          "resolved_repository_count" => result.resolved_repository_count,
+          "collected_repository_count" => result.collected_repository_count,
+          "project_count" => result.projects.size,
+          "pr_count" => result.pr_count,
+          "projects" => result.projects.map { |project| project_payload(project, result.stats) },
+          "warnings" => result.warnings.map(&:to_h),
           "chat_id" => result.delivery&.chat_id,
-          "message" => @dry_run ? result.message : nil
+          "message" => result.dry_run ? result.message : nil
         }
+        add_known_metrics(payload, result.stats.overall)
       end
 
-      def merged_pr_json_payload(result)
-        {
-          "ok" => true,
-          "schema" => "hive-merged-pr-digest",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-merged-pr-digest"),
-          "date" => result.date.iso8601,
-          "source" => MERGED_PRS_SOURCE,
-          "dry_run" => @dry_run,
-          "repos" => result.repos,
-          "count" => result.count,
-          "prs" => result.prs.map(&:to_h),
-          "chat_id" => result.delivery&.chat_id,
-          "message" => @dry_run ? result.message : nil
+      def project_payload(project, stats)
+        repository = project.repository.target.repository
+        aggregate = stats.by_repository.fetch(repository)
+        payload = {
+          "repository" => repository,
+          "description" => project.significance,
+          "pr_count" => project.pull_requests.size,
+          "prs" => project.pull_requests.map do |generated_pr|
+            pr_payload(generated_pr)
+          end
         }
+        add_known_metrics(payload, aggregate)
       end
 
-      def emit_merged_pr_human(result)
-        if @dry_run
-          @output.puts result.message
-        elsif result.count.zero?
-          # A zero-count digest is still delivered (a "Total: 0 PRs" message is
-          # sent); say so explicitly so the line doesn't read as "sent nothing".
-          @output.puts "hive digest: sent empty digest (0 merged PRs) for #{result.date.iso8601}"
-        else
-          @output.puts "hive digest: sent #{result.count} merged PRs for #{result.date.iso8601}"
+      def pr_payload(generated_pr)
+        pr = generated_pr.pull_request
+        pr.to_h.merge("bullets" => generated_pr.bullets.map(&:text))
+      end
+
+      def add_known_metrics(payload, aggregate)
+        Hive::Digest::PR_METRICS.each do |metric|
+          value = aggregate.metric(metric).value
+          payload[metric.to_s] = value unless value.nil?
         end
+        payload
       end
 
       def emit_error_envelope(error)
-        schema = merged_pr_source? ? "hive-merged-pr-digest" : "hive-digest"
         @output.puts JSON.generate(
-          "schema" => schema,
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(schema),
+          "schema" => "hive-digest",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-digest"),
           "ok" => false,
           "error_class" => error.class.name.split("::").last,
           "error_kind" => error.is_a?(Hive::ConfigError) ? "config" : "internal",

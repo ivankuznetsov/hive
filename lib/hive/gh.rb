@@ -384,35 +384,6 @@ module Hive
     end
     private_class_method :remote_identity
 
-    def list_merged_prs(repo, since:, until_date:, cfg: nil)
-      fields = %w[
-        number
-        title
-        url
-        mergedAt
-        author
-        headRefName
-        isCrossRepository
-      ].join(",")
-      out, err, status = capture3("gh", "pr", "list",
-                                  "--repo", repo.to_s,
-                                  "--state", "merged",
-                                  "--search", "merged:#{since}..#{until_date}",
-                                  "--limit", "1000",
-                                  "--json", fields,
-                                  cfg: cfg)
-      unless status.success?
-        raise Hive::GhError, "`gh pr list` failed for #{repo}: #{err.to_s.strip.empty? ? out : err.strip}"
-      end
-
-      list = JSON.parse(out)
-      raise Hive::GhError, "`gh pr list` returned #{list.class} for #{repo}; expected Array" unless list.is_a?(Array)
-
-      list
-    rescue JSON::ParserError => e
-      raise Hive::GhError, "`gh pr list` returned unparseable JSON for #{repo}: #{e.message}"
-    end
-
     # Digest discovery deliberately uses the REST pulls listing rather than
     # Search API or `gh pr list`: both cap results at 1,000. Pages are ordered
     # newest-updated first, and merge itself updates a PR, so once every row on

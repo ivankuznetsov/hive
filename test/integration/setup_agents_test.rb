@@ -191,7 +191,10 @@ class SetupAgentsIntegrationTest < Minitest::Test
         "PATH" => [ File.join(dir, "bin"), ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR),
         "CLAUDE_CONFIG_DIR" => File.join(dir, "claude"),
         "CODEX_HOME" => File.join(dir, "codex"),
-        "PI_CODING_AGENT_DIR" => File.join(dir, "pi")
+        "PI_CODING_AGENT_DIR" => File.join(dir, "pi"),
+        "HIVE_CLAUDE_BIN" => nil,
+        "HIVE_CODEX_BIN" => nil,
+        "HIVE_PI_BIN" => nil
       }
       with_env(env) { yield dir, config_for(bins) }
     end

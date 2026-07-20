@@ -11,7 +11,8 @@ class ApplicationController < ActionController::Base
 
   before_action :require_login
 
-  helper_method :current_login, :operator_access?, :operator_label
+  helper_method :current_login, :operator_access?, :operator_label,
+                :local_web_mode?, :web_product_name
 
   # Hive's typed errors are operator-readable by design ("task not in stage",
   # "invalid clone URL"). Render them on an error page instead of a blank
@@ -60,6 +61,14 @@ class ApplicationController < ActionController::Base
     current_login.presence || "Local"
   end
 
+  def local_web_mode?
+    ENV["HIVEBOX_LOCAL_LOOPBACK"] == "1"
+  end
+
+  def web_product_name
+    local_web_mode? ? "hive" : "hivebox"
+  end
+
   def require_login
     return if local_loopback_request?
     return redirect_to login_path unless current_login
@@ -81,9 +90,13 @@ class ApplicationController < ActionController::Base
   # "which addresses count as loopback" rule can't drift between the tier
   # that sets HIVEBOX_LOCAL_LOOPBACK and the tier that honors it.
   def local_loopback_request?
-    return false unless ENV["HIVEBOX_LOCAL_LOOPBACK"] == "1"
+    return false unless local_web_mode?
 
-    Hive::Web::Loopback.address?(request.remote_ip)
+    # Trust the socket peer, not ActionDispatch's proxy-expanded remote_ip.
+    # Tailscale Serve connects from localhost but forwards the tailnet client's
+    # address; treating that forwarded address as the peer wrongly turns the
+    # local control plane into hivebox's GitHub owner gate.
+    Hive::Web::Loopback.address?(request.get_header("REMOTE_ADDR"))
   end
 
   def registered_projects

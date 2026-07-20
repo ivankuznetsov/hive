@@ -5,6 +5,7 @@ module Hive
     class Reporter
       V1_SCHEMA_VERSION = 1
       V2_SCHEMA_VERSION = 2
+      V3_SCHEMA_VERSION = 3
       CONFIDENCE_ORDER = { "low" => 0, "medium" => 1, "high" => 2 }.freeze
       ZERO_REASONS = %w[no_mapped_slice no_theses all_suppressed].freeze
 
@@ -39,11 +40,11 @@ module Hive
         }
       end
 
-      # PR-scoped discovery uses a deliberately separate v2 contract. Analysis
+      # PR-scoped discovery uses a deliberately separate current contract. Analysis
       # disposition is computed once here and action outcomes are copied into a
       # sibling collection; a later fixer/issue result cannot reclassify a
       # thesis.
-      def v2_envelope(job_id:, project:, project_root:, dry_run:, source_pr:, analysis_sha:,
+      def v3_envelope(job_id:, project:, project_root:, dry_run:, source_pr:, analysis_sha:,
                       features:, theses:, suppressed:, complete:, review_errors:, actions:,
                       attempts:, zero_reason: nil, feature_results: nil)
         dispositions = classify(theses, suppressed)
@@ -54,7 +55,7 @@ module Hive
 
         {
           "schema" => "hive-refactor-patrol",
-          "schema_version" => V2_SCHEMA_VERSION,
+          "schema_version" => V3_SCHEMA_VERSION,
           "ok" => true,
           "job_id" => job_id.to_s,
           "project" => project.to_s,
@@ -76,7 +77,7 @@ module Hive
       end
 
       def self.error_envelope(error, version:, error_kind:, job_id: nil, source_pr: nil)
-        unless [ V1_SCHEMA_VERSION, V2_SCHEMA_VERSION ].include?(version)
+        unless [ V1_SCHEMA_VERSION, V2_SCHEMA_VERSION, V3_SCHEMA_VERSION ].include?(version)
           raise ArgumentError, "unsupported refactor patrol report version #{version}"
         end
 

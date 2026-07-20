@@ -2147,6 +2147,178 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_snapshot_reconstruction_promotes_legacy_size_only_findings
+    with_tmp_dir do |dir|
+      item = thesis(
+        id: "formerly-oversized", fingerprint: "fp-formerly-oversized",
+        flags: [ "exceeds_max_files", "exceeds_max_diff_lines" ]
+      )
+      stored = disposition(
+        item, reasons: [ "exceeds_max_files", "exceeds_max_diff_lines" ]
+      )
+      store = write_classified_job(
+        dir, policy: snapshot_policy,
+        dispositions: dispositions(flagged: [ stored ])
+      )
+
+      entries, errors = build_runner(dir, store: store).send(
+        :reconstruct_entries, store.read_job("job-1")
+      )
+
+      assert_empty errors
+      assert_empty entries.fetch("flagged")
+      recovered = entries.fetch("accepted").fetch(0)
+      assert_equal "accepted", recovered.fetch(:disposition)
+      assert_empty recovered.dig(:item, "reasons")
+      assert_empty recovered.fetch(:thesis).risk.fetch("flags")
+
+      guarded = thesis(
+        id: "still-guarded", fingerprint: "fp-still-guarded",
+        flags: [ "exceeds_max_files", "public_api_impact" ]
+      )
+      aggregate = store.read_job("job-1")
+      aggregate.fetch("dispositions").fetch("flagged") << disposition(
+        guarded, reasons: [ "exceeds_max_files", "public_api_impact" ]
+      )
+      entries, errors = build_runner(dir, store: store).send(:reconstruct_entries, aggregate)
+
+      assert_empty errors
+      assert_equal [ "public_api_impact" ], entries.fetch("flagged").fetch(0).dig(:item, "reasons")
+      assert_equal [ "public_api_impact" ], entries.fetch("flagged").fetch(0).fetch(:thesis).risk.fetch("flags")
+    end
+  end
+
+  def test_runs_fix_for_persisted_legacy_size_only_flagged_job
+    with_tmp_dir do |dir|
+      item = thesis(
+        id: "legacy-size-fix", fingerprint: "fp-legacy-size-fix",
+        flags: [ "exceeds_max_files", "exceeds_max_diff_lines" ]
+      )
+      stored = disposition(
+        item, reasons: [ "exceeds_max_files", "exceeds_max_diff_lines" ]
+      )
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy("auto_fix" => true),
+        dispositions: dispositions(flagged: [ stored ])
+      )
+      fixer = FakeFixer.new(fix_result("no_diff", terminal: true))
+
+      result = build_runner(dir, store: store, fixer: fixer).run(job_id: "job-1")
+
+      assert result.complete?
+      assert_equal 1, fixer.calls.size
+      assert_equal "no_diff", result.actions.fetch(0).fetch("outcome")
+      assert_equal "fix", result.actions.fetch(0).fetch("kind")
+      assert_equal [ "exceeds_max_files", "exceeds_max_diff_lines" ],
+                   result.aggregate.dig("dispositions", "flagged", 0, "reasons")
+    end
+  end
+
+  def test_does_not_run_fix_when_legacy_size_row_or_thesis_is_inadmissible
+    with_tmp_dir do |dir|
+      %w[item thesis].each do |inadmissible_source|
+        root = File.join(dir, inadmissible_source)
+        item = thesis(
+          id: "inadmissible-#{inadmissible_source}",
+          fingerprint: "fp-inadmissible-#{inadmissible_source}",
+          flags: [ "exceeds_max_files" ]
+        )
+        stored = disposition(item, reasons: [ "exceeds_max_files" ])
+        if inadmissible_source == "item"
+          stored["admissible"] = false
+        else
+          stored.fetch("thesis")["admissible"] = false
+        end
+        store = write_classified_job(
+          root,
+          policy: snapshot_policy("auto_fix" => true),
+          dispositions: dispositions(flagged: [ stored ])
+        )
+        fixer = FakeFixer.new(fix_result("no_diff", terminal: true))
+
+        result = build_runner(root, store: store, fixer: fixer).run(job_id: "job-1")
+
+        assert result.complete?, inadmissible_source
+        assert_empty result.actions, inadmissible_source
+        assert_empty fixer.calls, inadmissible_source
+        assert_equal [ "exceeds_max_files" ],
+                     result.aggregate.dig("dispositions", "flagged", 0, "reasons")
+      end
+    end
+  end
+
+  def test_reconciles_initialized_legacy_size_issue_with_remote_intent
+    with_tmp_dir do |dir|
+      item = thesis(
+        id: "legacy-size-issue", fingerprint: "fp-legacy-size-issue",
+        flags: [ "exceeds_max_files" ]
+      )
+      stored = disposition(item, reasons: [ "exceeds_max_files" ])
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
+        dispositions: dispositions(flagged: [ stored ])
+      )
+      family_id = Hive::RefactorPatrol::SemanticFamily.id_for(
+        Hive::RefactorPatrol::SemanticDescriptor.call(thesis: item, source: source(7))
+      )
+      initialized = store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => item.id, "kind" => "issue", "family_id" => family_id }
+        ],
+        now: T0
+      )
+      action = initialized.fetch("actions").fetch(0)
+      token = store.claim_action!(
+        "job-1", action.fetch("canonical_action_id"), owner: "legacy-runner", now: T0
+      )
+      store.record_creation_intent!(
+        token,
+        intent: Hive::RefactorPatrol::IssueFiler.create_intent_payload(
+          canonical_action_id: action.fetch("canonical_action_id"),
+          repository: source(7).fetch("repository"),
+          family_id: family_id,
+          thesis_fingerprint: item.fingerprint
+        ),
+        now: T0
+      )
+      store.release_action!(
+        token, outcome: "remote_outcome_unknown", now: T0, backoff_sec: 0
+      )
+      filer = FakeIssueFiler.new(issue_result)
+
+      result = build_runner(dir, store: store, issue_filer: filer).run(job_id: "job-1")
+
+      assert result.complete?
+      assert_equal "issue_created", result.actions.fetch(0).fetch("outcome")
+      assert_equal 1, filer.calls.size
+      assert_equal true, filer.calls.fetch(0).fetch(:creation_attempted)
+    end
+  end
+
+  def test_reconstructs_persisted_legacy_size_row_with_nil_risk
+    with_tmp_dir do |dir|
+      item = thesis(id: "legacy-nil-risk", fingerprint: "fp-legacy-nil-risk")
+      stored = disposition(item, reasons: [ "exceeds_max_files" ])
+      stored.fetch("thesis")["risk"] = nil
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy,
+        dispositions: dispositions(flagged: [ stored ])
+      )
+
+      entries, errors = build_runner(dir, store: store).send(
+        :reconstruct_entries, store.read_job("job-1")
+      )
+
+      assert_empty errors
+      assert_empty entries.fetch("flagged")
+      assert_equal({ "flags" => [] }, entries.fetch("accepted").fetch(0).fetch(:thesis).risk)
+    end
+  end
+
   def test_resume_preview_distinguishes_terminal_linked_authorized_and_revoked_actions
     with_tmp_dir do |dir|
       store = write_classified_job(dir, policy: snapshot_policy, dispositions: dispositions)
@@ -2376,11 +2548,11 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       refute runner.send(:valid_patch?, patch, aggregate, action, item)
 
       patch.changed_paths = 9.times.map { |index| "src/shared/#{index}.rb" }
-      refute runner.send(:valid_patch?, patch, aggregate, action, item)
+      assert runner.send(:valid_patch?, patch, aggregate, action, item)
 
       patch.changed_paths = [ "src/orders/service.ts" ]
       patch.diff_lines = 401
-      refute runner.send(:valid_patch?, patch, aggregate, action, item)
+      assert runner.send(:valid_patch?, patch, aggregate, action, item)
     end
   end
 
@@ -2689,8 +2861,6 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
           "single_feature_only" => true,
           "allow_dependency_bumps" => false,
           "allow_public_api_changes" => false,
-          "max_files" => 8,
-          "max_diff_lines" => 400,
           "allow_cross_feature" => false
         }
       }

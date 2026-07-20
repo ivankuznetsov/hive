@@ -381,6 +381,8 @@ class RefactorPatrolReviewerTest < Minitest::Test
       assert_includes captured, "current consequence evidence"
       assert_includes captured, "added indirection, not leverage"
       assert_match(/fourth\s+response as an emergency finalization turn/, captured)
+      assert_includes captured, "complete coherent refactoring"
+      assert_includes captured, "Do not reject, down-rank, truncate, or split"
     end
   end
 
@@ -548,13 +550,13 @@ class RefactorPatrolReviewerTest < Minitest::Test
     with_tmp_dir do |dir|
       reviewer = reviewer_for(dir, [ valid_raw_thesis ])
       invalid = Hive::RefactorPatrol::ThesisNormalizer::Invalid.new(
-        errors: [ "expected /risk/caps/est_files to be an integer" ]
+        errors: [ "expected /confidence to match an allowed value" ]
       )
       reviewer.instance_variable_set(:@normalizer, ->(**) { invalid })
 
       assert_empty reviewer.call([ feature ], leverage_by_feature: leverage_by_feature)
       assert_equal "schema_invalid", reviewer.review_errors.first.fetch("error")
-      assert_includes reviewer.review_errors.first.fetch("message"), "est_files"
+      assert_includes reviewer.review_errors.first.fetch("message"), "confidence"
     end
   end
 

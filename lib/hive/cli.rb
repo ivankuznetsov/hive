@@ -797,10 +797,10 @@ module Hive
       Use --pr with a merged PR number or URL to analyze only its immutable
       changed-path manifest from a clean registered default-branch checkout.
       PR mode requires --json, cannot be combined with legacy scope hints, and
-      emits hive-refactor-patrol.v2 through an enforceable read-only agent.
+      emits hive-refactor-patrol.v3 through an enforceable read-only agent.
 
       The daemon uses --actions with --job-manifest to resume the immutable
-      per-thesis action ledger after discovery. It emits the same v2 contract.
+      per-thesis action ledger after discovery. It emits the same v3 contract.
 
       Use --list or --show JOB_ID to inspect the authoritative durable job
       ledger without enqueueing, claiming, replaying, or resuming work. With
@@ -814,7 +814,7 @@ module Hive
     option :entrypoint, type: :string, desc: "only review the feature owning this entrypoint"
     option :path, type: :string, desc: "only review features with owned files under this path"
     option :changed_since, type: :string, desc: "git ref used for changed-feature ranking/filtering"
-    option :pr, type: :string, desc: "analyze one merged PR number or URL with the v2 read-only contract"
+    option :pr, type: :string, desc: "analyze one merged PR number or URL with the v3 read-only contract"
     option :job_manifest, type: :string,
                           desc: "analyze one immutable merge-intake manifest (daemon/internal)"
     option :actions, type: :boolean, default: false,

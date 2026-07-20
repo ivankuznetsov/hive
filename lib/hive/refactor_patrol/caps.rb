@@ -335,6 +335,10 @@ module Hive
         %w[.adoc .asciidoc .markdown .md .mdx .rst].include?(File.extname(normalized).downcase)
       end
 
+      def self.without_legacy_size_flags(values)
+        Array(values).map(&:to_s) - LEGACY_SIZE_FLAGS
+      end
+
       def self.normalize_path(path)
         path.to_s.tr("\\", "/").sub(%r{\A(?:\./)+}, "")
       end
@@ -347,6 +351,7 @@ module Hive
       private_class_method :go_private_package?, :normalize_path
 
       Result = Struct.new(:thesis, :blocked, :flags, keyword_init: true)
+      LEGACY_SIZE_FLAGS = %w[exceeds_max_files exceeds_max_diff_lines].freeze
 
       def initialize(cfg)
         @cfg = cfg
@@ -354,7 +359,7 @@ module Hive
 
       def apply(thesis)
         risk = thesis.risk ||= {}
-        risk["flags"] = Array(risk["flags"]).map(&:to_s)
+        risk["flags"] = self.class.without_legacy_size_flags(risk["flags"])
         risk["advisories"] = Array(risk["advisories"]).map(&:to_s)
         risk["public_api_details"] = Array(risk["public_api_details"])
         risk["cross_feature_details"] = Array(risk["cross_feature_details"])
@@ -375,8 +380,6 @@ module Hive
         declared = thesis.risk.fetch("caps", {})
         caps_cfg = caps
 
-        flags << "exceeds_max_files" if declared["est_files"].to_i > caps_cfg.fetch("max_files", 8).to_i
-        flags << "exceeds_max_diff_lines" if declared["est_diff_lines"].to_i > caps_cfg.fetch("max_diff_lines", 400).to_i
         if caps_cfg.fetch("single_feature_only", true) && declared.key?("single_feature") && declared["single_feature"] != true
           flags << "not_single_feature"
         end

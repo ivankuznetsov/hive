@@ -2,6 +2,7 @@ require "json_schemer"
 require "pathname"
 require "hive"
 require "hive/patrol/source_reader"
+require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/fingerprint"
 require "hive/refactor_patrol/leverage"
 require "hive/refactor_patrol/thesis"
@@ -231,15 +232,13 @@ module Hive
         caps = risk["caps"].is_a?(Hash) ? risk["caps"] : {}
         {
           "caps" => {
-            "est_files" => caps["est_files"].to_i,
-            "est_diff_lines" => caps["est_diff_lines"].to_i,
             "single_feature" => caps.key?("single_feature") ? caps["single_feature"] == true : true
           },
           "public_api_impact" => risk["public_api_impact"] == true,
           "public_api_details" => Array(risk["public_api_details"]),
           "cross_feature_impact" => risk["cross_feature_impact"] == true,
           "cross_feature_details" => Array(risk["cross_feature_details"]),
-          "flags" => Array(risk["flags"])
+          "flags" => Caps.without_legacy_size_flags(risk["flags"])
         }
       end
 

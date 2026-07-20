@@ -37,7 +37,7 @@ refactor is expected to relieve:
       ],
       "confidence": "medium",
       "risk": {
-        "caps": { "est_files": 5, "est_diff_lines": 180, "single_feature": false },
+        "caps": { "single_feature": false },
         "public_api_impact": false,
         "cross_feature_impact": true,
         "cross_feature_details": ["the duplicated policy is owned by three mapped service boundaries"]
@@ -129,6 +129,10 @@ Rules:
 - Returning zero theses is the correct result when the slice shows no material,
   recurring architecture cost. Do not manufacture a proposal to fill the
   allowance.
+- Propose the complete coherent refactoring needed to resolve one evidenced
+  architecture problem. Do not reject, down-rank, truncate, or split a valuable
+  thesis merely because it may touch many files or produce a large diff. Keep
+  unrelated cleanup and multi-problem campaigns out of the proposal.
 - A current architecture cost needs current consequence evidence: confirmed
   behavioral divergence, three or more independently owned copies of the same
   decision, repeated co-change visible in history, caller branching caused by
@@ -167,8 +171,8 @@ Rules:
 - Cross-feature scope is normal when a refactor removes duplicated ownership
   or reverses an unstable dependency direction. Set `cross_feature_impact`
   and name the affected boundaries in `cross_feature_details`; scope alone is
-  not a reason to omit the thesis. Hive applies actual file/diff and contract
-  guards before any fix can publish.
+  not a reason to omit the thesis. Hive applies contract, dependency, secret,
+  protected-path, and validation guards before any fix can publish.
 - Include required_validation.commands using the available command names. An
   automatic fix requires at least one executable project command. If this
   slice lacks useful tests, set characterization_first true, explain the test

@@ -6,6 +6,7 @@ require "uri"
 require "hive/gh"
 require "hive/lock"
 require "hive/refactor_patrol/canonical_action_catalog"
+require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/family_store"
 require "hive/refactor_patrol/fixer"
 require "hive/refactor_patrol/issue_filer"
@@ -297,8 +298,9 @@ module Hive
 
       def reconstruct_entries(aggregate)
         errors = []
-        entries = JobStore::DISPOSITIONS.to_h do |name|
-          reconstructed = aggregate.dig("dispositions", name).filter_map do |item|
+        entries = JobStore::DISPOSITIONS.to_h { |name| [ name, [] ] }
+        JobStore::DISPOSITIONS.each do |name|
+          aggregate.dig("dispositions", name).each do |item|
             snapshot = item["thesis"]
             unless snapshot.is_a?(Hash)
               errors << event(
@@ -310,11 +312,8 @@ module Hive
               next
             end
 
-            {
-              disposition: name,
-              item: item,
-              thesis: Thesis.from_h(json_copy(snapshot))
-            }
+            entry = reconstructed_entry(name, item, snapshot)
+            entries.fetch(entry.fetch(:disposition)) << entry
           rescue KeyError, ArgumentError => e
             errors << event(
               "invalid_thesis_snapshot",
@@ -322,11 +321,20 @@ module Hive
               disposition: name,
               error: e.message
             )
-            nil
           end
-          [ name, reconstructed ]
         end
         [ entries, errors ]
+      end
+
+      def reconstructed_entry(disposition, item, snapshot)
+        disposition = @job_store.effective_disposition(disposition, item)
+        thesis = Thesis.from_h(json_copy(snapshot))
+        normalized_item = json_copy(item)
+        normalized_item["reasons"] = Caps.without_legacy_size_flags(normalized_item["reasons"])
+        thesis.risk ||= {}
+        thesis.risk["flags"] = Caps.without_legacy_size_flags(thesis.risk["flags"])
+        normalized_item["thesis"] = thesis.to_h
+        { disposition: disposition, item: normalized_item, thesis: thesis }
       end
 
       def issue_candidates(entries, policy)
@@ -647,13 +655,17 @@ module Hive
           reasons: reasons,
           record_intent: publication_intent_callback(token, "issue", aggregate, action),
           authorize_create: external_effect_fence(token, "issue"),
-          creation_attempted: publication.any?,
+          creation_attempted: publication.any? || remote_continuation_evidence?(fresh_action),
           publication_state: publication
         )
         settle(token, result, adapter: :issue)
       end
 
       def issue_route(aggregate, action, entry)
+        if remote_continuation_evidence?(action)
+          return { outcome: nil, reasons: Array(entry.dig(:item, "reasons")) }
+        end
+
         family_id = action["family_id"]
         fixes = aggregate.fetch("actions").select do |candidate|
           next false unless candidate.fetch("kind") == "fix"
@@ -944,9 +956,6 @@ module Hive
         return false unless patch.details.is_a?(Hash)
         caps = aggregate.dig("policy", "action", "caps")
         if caps.is_a?(Hash) && caps["allow_cross_feature"] == true
-          return false if patch.changed_paths.size > caps.fetch("max_files").to_i
-          return false if patch.diff_lines > caps.fetch("max_diff_lines").to_i
-
           return true
         end
 
@@ -1088,11 +1097,7 @@ module Hive
             snapshot = item["thesis"]
             next unless snapshot.is_a?(Hash)
 
-            index[item.fetch("id")] = {
-              disposition: name,
-              item: item,
-              thesis: Thesis.from_h(json_copy(snapshot))
-            }
+            index[item.fetch("id")] = reconstructed_entry(name, item, snapshot)
           end
         end
       end
@@ -1250,7 +1255,8 @@ module Hive
         receipts = action.fetch("receipts")
         receipts["creation_intent"].is_a?(Hash) || nonempty?(receipts["pr_url"]) ||
           nonempty?(receipts["issue_url"]) || nonempty?(receipts["review_task_path"]) ||
-          publication_phase_evidence?(receipts)
+          publication_phase_evidence?(receipts) ||
+          action["outcome"].to_s.match?(/remote_outcome_unknown|pr_opened|handoff|merged/)
       end
 
       def publication_phase_evidence?(receipts)

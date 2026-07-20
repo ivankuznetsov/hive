@@ -3,20 +3,15 @@ require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/thesis"
 
 class RefactorPatrolCapsTest < Minitest::Test
-  def test_exceeds_max_files_is_flagged_not_blocked
-    thesis = sample_thesis(risk_hash: default_risk(est_files: 12))
+  def test_legacy_size_estimates_and_flags_do_not_disqualify_a_thesis
+    risk = default_risk(est_files: 12, est_diff_lines: 2_000)
+    risk["flags"] = %w[exceeds_max_files exceeds_max_diff_lines]
+    thesis = sample_thesis(risk_hash: risk)
 
-    result = Hive::RefactorPatrol::Caps.new(cfg("max_files" => 8)).apply(thesis)
+    result = Hive::RefactorPatrol::Caps.new(cfg).apply(thesis)
 
     refute result.blocked
-    assert_includes thesis.risk.fetch("flags"), "exceeds_max_files"
-  end
-
-  def test_in_budget_diff_lines_are_not_flagged
-    thesis = sample_thesis(risk_hash: default_risk(est_diff_lines: 300))
-
-    Hive::RefactorPatrol::Caps.new(cfg("max_diff_lines" => 400)).apply(thesis)
-
+    refute_includes thesis.risk.fetch("flags"), "exceeds_max_files"
     refute_includes thesis.risk.fetch("flags"), "exceeds_max_diff_lines"
   end
 
@@ -418,8 +413,6 @@ class RefactorPatrolCapsTest < Minitest::Test
           "single_feature_only" => true,
           "allow_dependency_bumps" => false,
           "allow_public_api_changes" => false,
-          "max_files" => 8,
-          "max_diff_lines" => 400,
           "allow_cross_feature" => false
         }.merge(overrides)
       }
@@ -447,9 +440,12 @@ class RefactorPatrolCapsTest < Minitest::Test
     )
   end
 
-  def default_risk(est_files: 2, est_diff_lines: 80)
+  def default_risk(est_files: nil, est_diff_lines: nil)
+    declared = { "single_feature" => true }
+    declared["est_files"] = est_files unless est_files.nil?
+    declared["est_diff_lines"] = est_diff_lines unless est_diff_lines.nil?
     {
-      "caps" => { "est_files" => est_files, "est_diff_lines" => est_diff_lines, "single_feature" => true },
+      "caps" => declared,
       "public_api_impact" => false,
       "public_api_details" => [],
       "cross_feature_impact" => false,

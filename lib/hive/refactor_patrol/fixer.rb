@@ -38,7 +38,6 @@ module Hive
 
       TemplateBindings = Struct.new(
         :worktree_path, :thesis, :user_supplied_tag, :allow_cross_feature,
-        :max_files, :max_diff_lines,
         keyword_init: true
       ) do
         def binding_for_erb = binding
@@ -206,10 +205,9 @@ module Hive
       end
 
       # Every audit diff disables rename detection: a detected rename reports
-      # only its destination path and a near-zero line count, which would let
-      # the vacated source path slip past the boundary, contract, and cap
-      # guards below. With --no-renames both endpoints surface as a deletion
-      # plus an addition and enter every guard.
+      # only its destination path, which would let the vacated source path slip
+      # past the boundary and contract guards below. With --no-renames both
+      # endpoints surface as a deletion plus an addition and enter every guard.
       def audit_and_validate(thesis, path, base_sha, validation_pass: 0)
         git_output!(path, "add", "-A")
         paths = nul_paths(git_output!(path, "diff", "--cached", "--no-renames", "--name-only", "-z", base_sha))
@@ -232,9 +230,6 @@ module Hive
         end
 
         diff_lines = diff_line_count!(path, base_sha)
-        if paths.size > caps.fetch("max_files", 8).to_i || diff_lines > caps.fetch("max_diff_lines", 400).to_i
-          return audit_failure("caps_exceeded", paths, diff_lines: diff_lines)
-        end
         if !caps.fetch("allow_dependency_bumps", false) &&
            paths.any? { |changed| Caps.dependency_manifest?(changed) }
           return audit_failure("dependency_change", paths, diff_lines: diff_lines)
@@ -520,9 +515,7 @@ module Hive
           TemplateBindings.new(
             worktree_path: worktree_path, thesis: thesis,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
-            allow_cross_feature: @cfg.dig("refactor_patrol", "caps", "allow_cross_feature") == true,
-            max_files: @cfg.dig("refactor_patrol", "caps", "max_files") || 8,
-            max_diff_lines: @cfg.dig("refactor_patrol", "caps", "max_diff_lines") || 400
+            allow_cross_feature: @cfg.dig("refactor_patrol", "caps", "allow_cross_feature") == true
           )
         )
       end

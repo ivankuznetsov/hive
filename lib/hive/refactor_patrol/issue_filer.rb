@@ -17,8 +17,6 @@ module Hive
       MAX_BODY_BYTES = 20_000
       CONFIDENCE_ORDER = { "low" => 0, "medium" => 1, "high" => 2 }.freeze
       ANALYSIS_GUARD_REASONS = %w[
-        exceeds_max_files
-        exceeds_max_diff_lines
         not_single_feature
         public_api_impact
         cross_feature_impact
@@ -29,7 +27,6 @@ module Hive
         agent_control_plane_violation
         auto_fix_disabled
         boundary_violation
-        caps_exceeded
         closed_without_merge
         dependency_change
         fix_guardrail

@@ -81,13 +81,14 @@ verified against the pinned checkout's real bytes before a thesis is admissible.
 The mutation boundary is intentionally narrower. Each accepted thesis is
 processed in an isolated worktree only when certified public-contract guards,
 root confinement, `.hive-state` control-plane protection, secret scanning,
-dependency and patch caps, applicable
+dependency guards, applicable
 configured validation (or the built-in docs-only diff check), and the
 independently enabled `auto_fix` policy all pass. Cross-feature patches remain
-bounded by actual file and diff caps, and every changed path participates in
-trunk-overlap reanalysis. Oversized, contract-changing, dependency-changing, or
-otherwise high-risk work may instead become one deduplicated strategic issue
-when issue filing is independently enabled. Architecture patrol never
+eligible regardless of file count or diff size, and every changed path
+participates in trunk-overlap reanalysis. Contract-changing,
+dependency-changing, or otherwise high-risk work may instead become one
+deduplicated strategic issue when issue filing is independently enabled.
+Architecture patrol never
 merges its own PRs; an OPEN or MERGED publication succeeds only after entering
 the normal `6-review` flow.
 

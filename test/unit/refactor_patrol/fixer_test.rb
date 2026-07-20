@@ -148,6 +148,8 @@ class RefactorPatrolFixerTest < Minitest::Test
       )
 
       assert_includes captured, "isolated git\nworktree"
+      assert_includes captured, "complete, coherent"
+      assert_includes captured, "Do not truncate or split"
     end
   end
 
@@ -630,12 +632,14 @@ class RefactorPatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_actual_diff_caps_are_enforced_before_validation
+  def test_legacy_size_limit_configuration_does_not_truncate_a_valid_refactor
     with_repo do |repo, analysis_sha|
       agent = lambda do |worktree_path:, **|
         File.write(
           File.join(worktree_path, "lib/checkout.rb"),
-          "module Checkout\n  def one = 1\n  def two = 2\nend\n"
+          "module Checkout\n  # Internal orchestration remains behavior-preserving.\n" \
+          "  # The complete refactor is intentionally larger than the legacy limit.\n" \
+          "  def self.call = :old\nend\n"
         )
         { status: :ok }
       end
@@ -645,8 +649,30 @@ class RefactorPatrolFixerTest < Minitest::Test
         cfg_overrides: { "refactor_patrol" => { "caps" => { "max_diff_lines" => 1 } } }
       ).attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
 
-      assert_equal "caps_exceeded", patch.outcome
-      assert patch.terminal
+      assert_equal "validated", patch.outcome
+      refute patch.terminal
+      assert_operator patch.diff_lines, :>, 1
+    end
+  end
+
+  def test_legacy_file_limit_configuration_does_not_gate_a_valid_multifile_refactor
+    with_repo do |repo, analysis_sha|
+      paths = %w[docs/checkout.md docs/payments.md]
+      agent = lambda do |worktree_path:, **|
+        FileUtils.mkdir_p(File.join(worktree_path, "docs"))
+        paths.each { |path| File.write(File.join(worktree_path, path), "Consolidated architecture notes.\n") }
+        { status: :ok }
+      end
+
+      patch = fixer(
+        repo, agent: agent,
+        cfg_overrides: { "refactor_patrol" => { "caps" => { "max_files" => 1 } } }
+      ).attempt(
+        thesis: thesis(boundary_files: paths), job_id: "job-7", analysis_sha: analysis_sha
+      )
+
+      assert_equal "validated", patch.outcome
+      assert_operator patch.changed_paths.length, :>, 1
     end
   end
 
@@ -1336,7 +1362,7 @@ class RefactorPatrolFixerTest < Minitest::Test
         "worktree_root" => "#{repo}-worktrees",
         "refactor_patrol" => {
           "commands" => { "test" => "ruby -c lib/checkout.rb" },
-          "caps" => { "max_files" => 4, "max_diff_lines" => 80 }
+          "caps" => {}
         }
       }.then { |base| Hive::Config.deep_merge(base, overrides) }
     )
@@ -1359,7 +1385,7 @@ class RefactorPatrolFixerTest < Minitest::Test
       feature_boundary: { "owned_files" => files, "entrypoints" => [ files.first ] },
       expected_leverage: { "score" => 0.8, "breakdown" => { "churn" => 0.8 } },
       confidence: "medium",
-      risk: { "flags" => [], "caps" => { "est_files" => 1, "est_diff_lines" => 10 } },
+      risk: { "flags" => [], "caps" => { "single_feature" => true } },
       required_validation: { "commands" => [ "test" ] }, admissible: true,
       admissibility_reason: "", follow_up_approval_state: "pending",
       fingerprint: "abcdef1234567890"

@@ -37,7 +37,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     intents = 0
 
     result = filer(gh).publish(
-      thesis: thesis(flags: [ "exceeds_max_files" ]), family_id: family_id,
+      thesis: thesis(flags: [ "public_api_impact" ]), family_id: family_id,
       canonical_action_id: action_id, job_id: "job-7", source: source,
       record_intent: -> { intents += 1; true }
     )
@@ -86,7 +86,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     gh = FakeGh.new
 
     result = filer(gh).publish(
-      thesis: thesis(flags: [ "exceeds_max_files" ], follow_up_approval_state: "approved"),
+      thesis: thesis(flags: [ "public_api_impact" ], follow_up_approval_state: "approved"),
       family_id: family_id, canonical_action_id: action_id,
       job_id: "job-7", source: source, record_intent: successful_intent
     )
@@ -240,7 +240,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     }
 
     result = filer(gh).publish(
-      thesis: thesis(flags: [ "exceeds_max_files" ]), family_id: family_id,
+      thesis: thesis(flags: [ "public_api_impact" ]), family_id: family_id,
       canonical_action_id: action_id, job_id: "job-7", source: enterprise_source,
       record_intent: successful_intent
     )
@@ -496,9 +496,9 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
 
   def test_low_confidence_inadmissible_and_non_strategic_theses_are_report_only
     cases = [
-      thesis(flags: [ "exceeds_max_files" ], confidence: "low"),
-      thesis(flags: [ "exceeds_max_files" ], admissible: false),
-      thesis(flags: [ "exceeds_max_files" ], score: 0.1),
+      thesis(flags: [ "public_api_impact" ], confidence: "low"),
+      thesis(flags: [ "public_api_impact" ], admissible: false),
+      thesis(flags: [ "public_api_impact" ], score: 0.1),
       thesis(flags: [ "collision_patrol_pr" ]),
       thesis(flags: [ "incomplete_leverage_measurement" ], admissible: false)
     ]
@@ -571,7 +571,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
   def test_issue_disabled_and_secret_content_make_no_remote_call
     disabled_gh = FakeGh.new
     disabled = filer(disabled_gh, enabled: false).publish(
-      thesis: thesis(flags: [ "exceeds_max_files" ]), family_id: family_id,
+      thesis: thesis(flags: [ "public_api_impact" ]), family_id: family_id,
       canonical_action_id: action_id, job_id: "job-7", source: source,
       record_intent: successful_intent
     )
@@ -579,7 +579,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     assert_empty disabled_gh.lookups
 
     secret_gh = FakeGh.new
-    item = thesis(flags: [ "exceeds_max_files" ])
+    item = thesis(flags: [ "public_api_impact" ])
     item.problem = "credential sk-#{'a' * 48}"
     secret = filer(secret_gh).publish(
       thesis: item, family_id: family_id, canonical_action_id: action_id,
@@ -594,7 +594,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     gh = FakeGh.new
 
     result = filer(gh).publish(
-      thesis: thesis(flags: [ "exceeds_max_files" ]), family_id: family_id,
+      thesis: thesis(flags: [ "public_api_impact" ]), family_id: family_id,
       canonical_action_id: action_id, job_id: "job-7", source: source,
       record_intent: -> { nil }
     )
@@ -608,7 +608,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     gh = FakeGh.new
     receipts = []
     created = filer(gh).publish(
-      thesis: thesis(flags: [ "exceeds_max_files" ]), family_id: family_id,
+      thesis: thesis(flags: [ "public_api_impact" ]), family_id: family_id,
       canonical_action_id: action_id, job_id: "job-7", source: source,
       record_intent: ->(**kwargs) { receipts << kwargs; true }
     )
@@ -618,7 +618,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     assert_equal "create_issue", receipts.first.dig(:payload, "operation")
 
     failed = filer(FakeGh.new).publish(
-      thesis: thesis(flags: [ "exceeds_max_files" ]), family_id: family_id,
+      thesis: thesis(flags: [ "public_api_impact" ]), family_id: family_id,
       canonical_action_id: action_id, job_id: "job-7", source: source,
       record_intent: ->(**) { raise IOError, "state unavailable" }
     )
@@ -628,7 +628,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
 
   def test_family_and_canonical_action_identity_must_be_durable_ids
     gh = FakeGh.new
-    item = thesis(flags: [ "exceeds_max_files" ])
+    item = thesis(flags: [ "public_api_impact" ])
 
     invalid_family = filer(gh).publish(
       thesis: item, family_id: "family", canonical_action_id: action_id,
@@ -677,7 +677,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
       },
       confidence: confidence,
       risk: {
-        "flags" => flags, "caps" => { "est_files" => 9, "est_diff_lines" => 200 },
+        "flags" => flags, "caps" => { "single_feature" => true },
         "public_api_impact" => false, "public_api_details" => [],
         "cross_feature_impact" => false, "cross_feature_details" => []
       },
@@ -704,7 +704,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
 
   def dry_run_thesis
     item = thesis(
-      flags: [ "exceeds_max_files" ], feature_id: "command-bin-hive",
+      flags: [ "public_api_impact" ], feature_id: "command-bin-hive",
       boundary_file: "bin/hive-babysitter-stub-git"
     )
     item.feature = "Babysitter dry-run boundary"
@@ -731,7 +731,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
 
   def wrapper_thesis
     item = thesis(
-      flags: [ "exceeds_max_files" ], feature_id: "command-bin-hive", boundary_file: "bin/hive"
+      flags: [ "public_api_impact" ], feature_id: "command-bin-hive", boundary_file: "bin/hive"
     )
     item.feature = "CLI wrapper argv contract"
     item.problem = "The CLI wrappers repeat a scattered argv, JSON, help, and encoding contract."

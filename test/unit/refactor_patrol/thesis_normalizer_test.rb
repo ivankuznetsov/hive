@@ -338,7 +338,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
 
   def test_schema_invalid_normalization_returns_error_details
     raw = valid_raw_thesis
-    raw["risk"]["caps"]["est_files"] = -1
+    raw["risk"]["public_api_details"] = [ 1 ]
     result = normalize(raw)
 
     assert_instance_of Hive::RefactorPatrol::ThesisNormalizer::Invalid, result
@@ -365,14 +365,36 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     end
   end
 
-  def test_v2_schema_strictly_rejects_signal_and_value_on_evidence
+  def test_v3_schema_strictly_rejects_signal_and_value_on_evidence
     thesis = normalize(valid_raw_thesis)
     payload = thesis.to_h
     payload.fetch("evidence").first["signal"] = "churn"
     payload.fetch("evidence").first["value"] = 10
 
     refute thesis_schemer.valid?(payload)
-    assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol-thesis")
+    assert_equal 3, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol-thesis")
+  end
+
+  def test_historical_v1_and_v2_thesis_fixtures_remain_valid_while_v3_omits_size_estimates
+    current = normalize(valid_raw_thesis).to_h
+    refute current.dig("risk", "caps").key?("est_files")
+    refute current.dig("risk", "caps").key?("est_diff_lines")
+    assert thesis_schemer.valid?(current), thesis_schemer.validate(current).map { |error| error["error"] }.inspect
+
+    legacy_v2 = JSON.parse(JSON.generate(current))
+    legacy_v2.fetch("risk").fetch("caps").merge!("est_files" => 8, "est_diff_lines" => 400)
+    v2_schemer = JSONSchemer.schema(
+      Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 2))
+    )
+    assert v2_schemer.valid?(legacy_v2), v2_schemer.validate(legacy_v2).map { |error| error["error"] }.inspect
+
+    legacy_v1 = JSON.parse(JSON.generate(legacy_v2))
+    legacy_v1.delete("feature_hotspot")
+    legacy_v1.fetch("expected_leverage").delete("drivers")
+    v1_schemer = JSONSchemer.schema(
+      Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 1))
+    )
+    assert v1_schemer.valid?(legacy_v1), v1_schemer.validate(legacy_v1).map { |error| error["error"] }.inspect
   end
 
   def test_slice_without_tests_prescribes_characterization_and_lowers_high_confidence

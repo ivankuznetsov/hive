@@ -324,7 +324,7 @@ module Hive
       def build_payload(entry, project_root, cfg, state, features, theses, suppressed, reviewer,
                         feature_results: nil, complete: nil)
         @reporter = Hive::RefactorPatrol::Reporter.new(cfg)
-        return build_v2_payload(
+        return build_v3_payload(
           entry, project_root, features, theses, suppressed, reviewer,
           feature_results: feature_results, complete: complete
         ) if pr_mode?
@@ -834,7 +834,7 @@ module Hive
       def lifecycle_payload(entry, project_root, aggregate)
         {
           "schema" => "hive-refactor-patrol",
-          "schema_version" => Hive::RefactorPatrol::Reporter::V2_SCHEMA_VERSION,
+          "schema_version" => Hive::RefactorPatrol::Reporter::V3_SCHEMA_VERSION,
           "ok" => true,
           "job_id" => aggregate.fetch("job_id"),
           "project" => entry.fetch("name"),
@@ -898,7 +898,7 @@ module Hive
         end
       end
 
-      def build_v2_payload(entry, project_root, features, theses, suppressed, reviewer,
+      def build_v3_payload(entry, project_root, features, theses, suppressed, reviewer,
                            feature_results: nil, complete: nil)
         progress = Array(feature_results)
         errors = if progress.empty? && features.empty?
@@ -914,7 +914,7 @@ module Hive
         current_theses = theses.reject { |thesis| completed_ids.include?(thesis.feature_id.to_s) }
         current_thesis_ids = current_theses.to_h { |thesis| [ thesis.id.to_s, true ] }
         current_suppressions = suppressed.select { |item| current_thesis_ids[item.fetch("id").to_s] }
-        payload = @reporter.v2_envelope(
+        payload = @reporter.v3_envelope(
           job_id: @manifest.fetch("job_id"),
           project: entry.fetch("name"),
           project_root: project_root,
@@ -969,7 +969,7 @@ module Hive
         dispositions = aggregate.fetch("dispositions")
         {
           "schema" => "hive-refactor-patrol",
-          "schema_version" => Hive::RefactorPatrol::Reporter::V2_SCHEMA_VERSION,
+          "schema_version" => Hive::RefactorPatrol::Reporter::V3_SCHEMA_VERSION,
           "ok" => true,
           "job_id" => aggregate.fetch("job_id"),
           "project" => entry.fetch("name"),
@@ -1148,7 +1148,7 @@ module Hive
         else
           Hive::RefactorPatrol::Reporter.error_envelope(
             error,
-            version: pr_mode? ? Hive::RefactorPatrol::Reporter::V2_SCHEMA_VERSION : Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION,
+            version: pr_mode? ? Hive::RefactorPatrol::Reporter::V3_SCHEMA_VERSION : Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION,
             error_kind: error.is_a?(Hive::ConfigError) ? "config" : "error",
             job_id: @manifest && @manifest["job_id"],
             source_pr: @manifest && source_pr_context

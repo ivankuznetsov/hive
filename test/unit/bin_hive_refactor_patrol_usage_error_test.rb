@@ -17,7 +17,7 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
     refute payload.key?("complete")
   end
 
-  def test_pr_job_manifest_and_actions_usage_errors_are_schema_valid_v2
+  def test_pr_job_manifest_and_actions_usage_errors_are_schema_valid_v3
     selectors = [
       [ "--pr", "7" ],
       [ "--job-manifest", "/tmp/job.json" ],
@@ -29,8 +29,8 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
         "refactor-patrol", "demo", "extra", *selector, "--json"
       )
 
-      assert_equal 2, payload.fetch("schema_version"), selector.inspect
-      assert schema(2).valid?(payload), "#{selector.inspect}: #{validation_errors(2, payload)}"
+      assert_equal 3, payload.fetch("schema_version"), selector.inspect
+      assert schema(3).valid?(payload), "#{selector.inspect}: #{validation_errors(3, payload)}"
       assert_equal "", payload.fetch("job_id")
       assert_nil payload.fetch("source_pr")
       assert_equal false, payload.fetch("complete")

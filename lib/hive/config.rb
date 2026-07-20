@@ -543,12 +543,16 @@ module Hive
           "test" => nil
         },
         "caps" => {
-          "single_feature_only" => true,
+          # Refactoring often removes duplicated ownership across mapped
+          # feature boundaries. Keep the patch bounded by files/diff size and
+          # contract guards instead of treating cross-feature scope as risky
+          # by itself.
+          "single_feature_only" => false,
           "allow_dependency_bumps" => false,
           "allow_public_api_changes" => false,
           "max_files" => 8,
           "max_diff_lines" => 400,
-          "allow_cross_feature" => false
+          "allow_cross_feature" => true
         },
         "leverage" => {
           "weights" => {

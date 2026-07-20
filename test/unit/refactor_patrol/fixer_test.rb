@@ -296,12 +296,96 @@ class RefactorPatrolFixerTest < Minitest::Test
         { status: :ok }
       end
 
-      patch = fixer(repo, agent: agent, validator: validator)
+      patch = fixer(
+        repo, agent: agent, validator: validator,
+        cfg_overrides: { "refactor_patrol" => { "caps" => { "allow_cross_feature" => false } } }
+      )
               .attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
 
       assert_equal "boundary_violation", patch.outcome
       assert patch.terminal
       refute validator_called
+    end
+  end
+
+  def test_bounded_cross_feature_change_is_publishable_when_policy_allows_it
+    with_repo do |repo, analysis_sha|
+      agent = lambda do |worktree_path:, **|
+        FileUtils.mkdir_p(File.join(worktree_path, "docs"))
+        File.write(File.join(worktree_path, "docs", "checkout.md"), "# Checkout\n")
+        { status: :ok }
+      end
+
+      patch = fixer(
+        repo, agent: agent,
+        cfg_overrides: {
+          "refactor_patrol" => {
+            "caps" => { "single_feature_only" => false, "allow_cross_feature" => true }
+          }
+        }
+      ).attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert patch.publishable?, patch.to_h.inspect
+      assert_equal [ "docs/checkout.md" ], patch.changed_paths
+    end
+  end
+
+  def test_documentation_only_change_without_project_command_uses_built_in_validation
+    with_repo do |repo, analysis_sha|
+      item = thesis(boundary_file: "docs/checkout.md")
+      item.required_validation = { "commands" => [], "notes" => "Use built-in documentation safety checks." }
+      agent = lambda do |worktree_path:, **|
+        FileUtils.mkdir_p(File.join(worktree_path, "docs"))
+        File.write(File.join(worktree_path, "docs", "checkout.md"), "# Checkout\n")
+        { status: :ok }
+      end
+
+      patch = fixer(
+        repo, agent: agent,
+        cfg_overrides: { "refactor_patrol" => { "caps" => { "allow_cross_feature" => false } } }
+      )
+              .attempt(thesis: item, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert patch.publishable?, patch.to_h.inspect
+      assert_equal "built_in_docs", patch.validation.dig("commands", 0, "name")
+      assert_equal 0, patch.validation.dig("commands", 0, "exit_code")
+    end
+  end
+
+  def test_cross_feature_policy_never_allows_hive_state_changes
+    with_repo do |repo, analysis_sha|
+      item = thesis(boundary_file: ".hive-state/notes.md")
+      item.required_validation = { "commands" => [], "notes" => "Use built-in documentation safety checks." }
+      agent = lambda do |worktree_path:, **|
+        FileUtils.mkdir_p(File.join(worktree_path, ".hive-state"))
+        File.write(File.join(worktree_path, ".hive-state", "notes.md"), "unsafe\n")
+        { status: :ok }
+      end
+
+      patch = fixer(repo, agent: agent)
+              .attempt(thesis: item, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert_equal "protected_path", patch.outcome
+      assert_equal [ ".hive-state/notes.md" ], patch.details.fetch("protected_paths")
+    end
+  end
+
+  def test_built_in_documentation_validation_rejects_whitespace_errors
+    with_repo do |repo, analysis_sha|
+      item = thesis(boundary_file: "docs/checkout.md")
+      item.required_validation = { "commands" => [], "notes" => "Use built-in documentation safety checks." }
+      agent = lambda do |worktree_path:, **|
+        FileUtils.mkdir_p(File.join(worktree_path, "docs"))
+        File.write(File.join(worktree_path, "docs", "checkout.md"), "# Checkout  \n")
+        { status: :ok }
+      end
+
+      patch = fixer(repo, agent: agent)
+              .attempt(thesis: item, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert_equal "validation_failed", patch.outcome
+      assert_equal "built_in_docs", patch.validation.dig("commands", 0, "name")
+      refute_equal 0, patch.validation.dig("commands", 0, "exit_code")
     end
   end
 
@@ -317,7 +401,10 @@ class RefactorPatrolFixerTest < Minitest::Test
         { status: :ok }
       end
 
-      patch = fixer(repo, agent: agent)
+      patch = fixer(
+        repo, agent: agent,
+        cfg_overrides: { "refactor_patrol" => { "caps" => { "allow_cross_feature" => false } } }
+      )
               .attempt(thesis: item, job_id: "job-7", analysis_sha: analysis_sha)
 
       assert_equal "boundary_violation", patch.outcome, patch.to_h.inspect
@@ -930,6 +1017,31 @@ class RefactorPatrolFixerTest < Minitest::Test
                    patch.publication_base_sha
       assert_equal true, patch.details.fetch("reanalyzed_after_trunk_overlap")
       assert_equal [ "lib/checkout.rb" ], patch.details.fetch("overlap")
+    end
+  end
+
+  def test_cross_feature_trunk_overlap_reanalyzes_the_actual_patch_path
+    with_repo do |repo, _analysis_sha|
+      analysis_sha = commit_file(repo, "docs/shared.md", "base\n")
+      calls = 0
+      agent = lambda do |worktree_path:, **|
+        calls += 1
+        File.write(File.join(worktree_path, "docs", "shared.md"), "fixed #{calls}\n")
+        if calls == 1
+          File.write(File.join(repo, "docs", "shared.md"), "advanced\n")
+          run!("git", "-C", repo, "add", "docs/shared.md")
+          run!("git", "-C", repo, "commit", "-m", "advance shared docs", "--quiet")
+        end
+        { status: :ok }
+      end
+
+      patch = fixer(repo, agent: agent)
+              .attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert patch.publishable?, patch.to_h.inspect
+      assert_equal 2, calls
+      assert_equal true, patch.details.fetch("reanalyzed_after_trunk_overlap")
+      assert_equal [ "docs/shared.md" ], patch.details.fetch("overlap")
     end
   end
 

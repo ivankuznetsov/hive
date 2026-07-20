@@ -409,7 +409,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     assert_includes thesis.required_validation.fetch("notes"), "Name explicit validation commands"
   end
 
-  def test_documentation_thesis_without_docs_validation_is_flagged_report_only
+  def test_documentation_thesis_without_configured_command_uses_built_in_validation
     raw = valid_raw_thesis.merge(
       "evidence" => [
         { "file" => "docs/guide.md", "line" => 3, "snippet" => "Setup", "claim" => "setup guidance is duplicated" }
@@ -419,10 +419,10 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     thesis = normalize(raw, feature: documentation_feature, commands: { "test" => "rake test" })
 
     assert thesis.admissible
-    assert_includes thesis.risk.fetch("flags"), "missing_docs_validation"
+    refute_includes thesis.risk.fetch("flags"), "missing_docs_validation"
     assert_empty thesis.required_validation.fetch("commands")
     refute thesis.required_validation.fetch("characterization_first")
-    assert_includes thesis.required_validation.fetch("notes"), "documentation validation"
+    assert_includes thesis.required_validation.fetch("notes"), "built-in documentation safety checks"
   end
 
   def test_documentation_thesis_uses_configured_docs_validation

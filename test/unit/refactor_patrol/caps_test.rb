@@ -29,6 +29,25 @@ class RefactorPatrolCapsTest < Minitest::Test
     assert_includes thesis.risk.fetch("flags"), "not_single_feature"
   end
 
+  def test_cross_feature_refactor_is_recorded_without_becoming_a_risk_flag
+    thesis = sample_thesis(
+      evidence: [ { "file" => "lib/other.rb", "line" => 1, "claim" => "the same decision is duplicated" } ],
+      risk_hash: default_risk.merge(
+        "caps" => default_risk.fetch("caps").merge("single_feature" => false),
+        "cross_feature_impact" => true
+      )
+    )
+
+    Hive::RefactorPatrol::Caps.new(
+      cfg("single_feature_only" => false, "allow_cross_feature" => true)
+    ).apply(thesis)
+
+    assert_equal true, thesis.risk.fetch("cross_feature_impact")
+    assert_includes thesis.risk.fetch("cross_feature_details"), "lib/other.rb"
+    refute_includes thesis.risk.fetch("flags"), "not_single_feature"
+    refute_includes thesis.risk.fetch("flags"), "cross_feature_impact"
+  end
+
   # A thesis is behavior-preserving by contract: working inside files that
   # host public surface is an advisory, not an API change, so it must not
   # disqualify the thesis (no flag, public_api_impact stays false).

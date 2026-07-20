@@ -939,13 +939,28 @@ module Hive
         return false unless patch.validation.is_a?(Hash) && patch.validation["passed"] == true
         return false unless patch.changed_paths.is_a?(Array) && patch.changed_paths.any? &&
                             patch.changed_paths == patch.changed_paths.uniq &&
-                            patch.changed_paths.all? { |path| nonempty?(path) }
+                            patch.changed_paths.all? { |path| valid_patch_path?(path) }
         return false unless patch.diff_lines.is_a?(Integer) && patch.diff_lines.positive?
         return false unless patch.details.is_a?(Hash)
+        caps = aggregate.dig("policy", "action", "caps")
+        if caps.is_a?(Hash) && caps["allow_cross_feature"] == true
+          return false if patch.changed_paths.size > caps.fetch("max_files").to_i
+          return false if patch.diff_lines > caps.fetch("max_diff_lines").to_i
+
+          return true
+        end
 
         boundary = Array(thesis.feature_boundary && thesis.feature_boundary["owned_files"]) +
                    Array(thesis.feature_boundary && thesis.feature_boundary["entrypoints"])
         (patch.changed_paths - boundary).empty?
+      end
+
+      def valid_patch_path?(value)
+        return false unless nonempty?(value) && !value.include?("\\")
+
+        path = Pathname.new(value)
+        path.relative? && path.cleanpath.to_s == value &&
+          path.each_filename.none? { |part| part == ".." }
       end
 
       def expected_fix_branch(canonical_action_id)

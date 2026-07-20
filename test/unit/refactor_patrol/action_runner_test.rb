@@ -2352,6 +2352,38 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_cross_feature_patch_receipt_is_valid_when_captured_policy_allows_it
+    with_tmp_dir do |dir|
+      runner = build_runner(dir, store: Hive::RefactorPatrol::JobStore.new(dir))
+      item = thesis(id: "accepted", fingerprint: "fp-accepted")
+      patch = validated_patch(fingerprint: item.fingerprint)
+      patch.changed_paths = [ "src/orders/service.ts" ]
+      policy = snapshot_policy
+      aggregate = {
+        "analysis_sha" => patch.analysis_sha,
+        "policy" => policy
+      }
+      aggregate.fetch("policy").fetch("action").fetch("caps")["allow_cross_feature"] = true
+      action = { "canonical_action_id" => patch.branch.delete_prefix("hive-refactor/") }
+
+      assert runner.send(:valid_patch?, patch, aggregate, action, item)
+
+      aggregate.fetch("policy").fetch("action").fetch("caps")["allow_cross_feature"] = false
+      refute runner.send(:valid_patch?, patch, aggregate, action, item)
+
+      aggregate.fetch("policy").fetch("action").fetch("caps")["allow_cross_feature"] = true
+      patch.changed_paths = [ "../outside.rb" ]
+      refute runner.send(:valid_patch?, patch, aggregate, action, item)
+
+      patch.changed_paths = 9.times.map { |index| "src/shared/#{index}.rb" }
+      refute runner.send(:valid_patch?, patch, aggregate, action, item)
+
+      patch.changed_paths = [ "src/orders/service.ts" ]
+      patch.diff_lines = 401
+      refute runner.send(:valid_patch?, patch, aggregate, action, item)
+    end
+  end
+
   def test_publication_callbacks_ownership_fences_and_policy_fallbacks_fail_closed
     with_tmp_dir do |dir|
       released = []

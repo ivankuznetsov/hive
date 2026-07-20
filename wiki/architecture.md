@@ -71,17 +71,23 @@ without treating tests, docs, assets, generated files, or chunk boundaries as
 architectural coupling. Fixture/test manifests never become review slices. A
 mapper failure is retained as an incomplete-measurement diagnostic, so fallback
 zero signals cannot be mistaken for evidence that a component has no leverage.
-The reviewer sees only affected feature slices from the
-merge manifest, runs under provider-specific read-only enforcement, and must
-leave the registered checkout byte-for-byte unchanged. A strict run-wide thesis
+The reviewer starts from affected feature slices from the merge manifest, but a
+refactoring thesis may span mapped features when it removes duplicated ownership
+or an unstable dependency direction. Cross-feature scope is recorded rather than
+treated as a risk by itself. The reviewer runs under provider-specific read-only
+enforcement and must leave the registered checkout byte-for-byte unchanged. A strict run-wide thesis
 budget leaves later slices resumable, and every cited file/line/snippet is
 verified against the pinned checkout's real bytes before a thesis is admissible.
 The mutation boundary is intentionally narrower. Each accepted thesis is
-processed in an isolated worktree only when a certified public-contract guard,
-feature-boundary checks, configured validation, secret scanning, dependency
-and patch caps, and the independently enabled `auto_fix` policy all pass.
-Otherwise an independently enabled issue policy may publish one deduplicated
-strategic issue, or the action is durably suppressed. Architecture patrol never
+processed in an isolated worktree only when certified public-contract guards,
+root confinement, `.hive-state` control-plane protection, secret scanning,
+dependency and patch caps, applicable
+configured validation (or the built-in docs-only diff check), and the
+independently enabled `auto_fix` policy all pass. Cross-feature patches remain
+bounded by actual file and diff caps, and every changed path participates in
+trunk-overlap reanalysis. Oversized, contract-changing, dependency-changing, or
+otherwise high-risk work may instead become one deduplicated strategic issue
+when issue filing is independently enabled. Architecture patrol never
 merges its own PRs; an OPEN or MERGED publication succeeds only after entering
 the normal `6-review` flow.
 

@@ -287,9 +287,7 @@ module Hive
         else
           validation["commands"] = []
           validation["characterization_first"] = false
-          validation["notes"] = "No documentation validation command is configured; this thesis is report-only."
-          hash.fetch("risk").fetch("flags") << "missing_docs_validation"
-          hash.fetch("risk")["flags"].uniq!
+          validation["notes"] = "Use Hive's built-in documentation safety checks before normal PR review."
         end
       end
 

@@ -36,7 +36,11 @@ module Hive
         def head_sha = commit_sha
       end
 
-      TemplateBindings = Struct.new(:worktree_path, :thesis, :user_supplied_tag, keyword_init: true) do
+      TemplateBindings = Struct.new(
+        :worktree_path, :thesis, :user_supplied_tag, :allow_cross_feature,
+        :max_files, :max_diff_lines,
+        keyword_init: true
+      ) do
         def binding_for_erb = binding
       end
 
@@ -214,13 +218,20 @@ module Hive
         symlinked = paths.select { |changed| symlinked_path?(path, changed) }.sort
         return audit_failure("symlinked_path", paths, symlinked_paths: symlinked) if symlinked.any?
 
+        protected_paths = paths.select { |changed| protected_control_path?(changed) }.sort
+        if protected_paths.any?
+          return audit_failure("protected_path", paths, protected_paths: protected_paths)
+        end
+
         boundary = Array(thesis.feature_boundary && thesis.feature_boundary["owned_files"]) +
                    Array(thesis.feature_boundary && thesis.feature_boundary["entrypoints"])
         outside = paths - boundary
-        return audit_failure("boundary_violation", paths, outside: outside) unless outside.empty?
+        caps = @cfg.dig("refactor_patrol", "caps") || {}
+        unless caps.fetch("allow_cross_feature", false) || outside.empty?
+          return audit_failure("boundary_violation", paths, outside: outside)
+        end
 
         diff_lines = diff_line_count!(path, base_sha)
-        caps = @cfg.dig("refactor_patrol", "caps") || {}
         if paths.size > caps.fetch("max_files", 8).to_i || diff_lines > caps.fetch("max_diff_lines", 400).to_i
           return audit_failure("caps_exceeded", paths, diff_lines: diff_lines)
         end
@@ -265,13 +276,18 @@ module Hive
 
         names = Array(thesis.required_validation && thesis.required_validation["commands"]).map(&:to_s).uniq
         names << "public_contract" if configured_contract_guard && contract_paths.any?
-        return audit_failure("missing_validation", paths, diff_lines: diff_lines) if names.empty?
-        unless (names - VALIDATION_NAMES).empty? && names.all? { |name| configured_commands[name].to_s.strip != "" }
+        if names.empty?
+          return audit_failure("missing_validation", paths, diff_lines: diff_lines) unless documentation_only?(paths)
+        elsif !(names - VALIDATION_NAMES).empty? || names.any? { |name| configured_commands[name].to_s.strip == "" }
           return audit_failure("missing_validation", paths, diff_lines: diff_lines, required: names)
         end
 
         validation_head = git_output!(path, "rev-parse", "HEAD").strip
-        validation = @validator_factory.call(configured_commands).validate(path, names: names)
+        validation = if names.empty?
+          built_in_documentation_validation(path)
+        else
+          @validator_factory.call(configured_commands).validate(path, names: names)
+        end
         unless validation["passed"]
           return audit_failure("validation_failed", paths, diff_lines: diff_lines, validation: validation)
         end
@@ -326,9 +342,10 @@ module Hive
         drift_paths = nul_paths(
           git_output!(@project_root, "diff", "--no-renames", "--name-only", "-z", "#{analysis_sha}..#{current}")
         )
-        boundary = Array(thesis.feature_boundary && thesis.feature_boundary["owned_files"]) +
-                   Array(thesis.feature_boundary && thesis.feature_boundary["entrypoints"])
-        overlap = drift_paths & boundary
+        patch_paths = nul_paths(
+          git_output!(worktree.path, "diff", "--no-renames", "--name-only", "-z", "#{patch_base}..HEAD")
+        )
+        overlap = drift_paths & patch_paths
         unless overlap.empty?
           cleanup(worktree)
           return Result.new(
@@ -456,12 +473,56 @@ module Hive
         @cfg.dig("refactor_patrol", "commands") || {}
       end
 
+      def documentation_only?(paths)
+        paths.any? && paths.all? { |changed| Caps.documentation_path?(changed) }
+      end
+
+      def protected_control_path?(path)
+        normalized = path.to_s.tr("\\", "/").sub(%r{\A(?:\./)+}, "")
+        normalized == ".hive-state" || normalized.start_with?(".hive-state/")
+      end
+
+      def built_in_documentation_validation(path)
+        stdout, stderr, status = Open3.capture3(
+          "git", "-C", path, "diff", "--cached", "--check"
+        )
+        {
+          "passed" => status.success?,
+          "commands" => [
+            {
+              "name" => "built_in_docs",
+              "command" => "git diff --cached --check",
+              "exit_code" => status.exitstatus,
+              "signal" => status.signaled? ? status.termsig : nil,
+              "stdout" => stdout.to_s[-4000..].to_s,
+              "stderr" => stderr.to_s[-4000..].to_s,
+              "timed_out" => false,
+              "output_truncated" => stdout.to_s.length > 4000 || stderr.to_s.length > 4000
+            }
+          ]
+        }
+      rescue SystemCallError => e
+        {
+          "passed" => false,
+          "commands" => [
+            {
+              "name" => "built_in_docs", "command" => "git diff --cached --check",
+              "exit_code" => 127, "signal" => nil, "stdout" => "", "stderr" => e.message,
+              "timed_out" => false, "output_truncated" => false
+            }
+          ]
+        }
+      end
+
       def render_prompt(thesis, worktree_path)
         Hive::Stages::Base.render(
           "refactor_patrol_fix_prompt.md.erb",
           TemplateBindings.new(
             worktree_path: worktree_path, thesis: thesis,
-            user_supplied_tag: Hive::Stages::Base.user_supplied_tag
+            user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
+            allow_cross_feature: @cfg.dig("refactor_patrol", "caps", "allow_cross_feature") == true,
+            max_files: @cfg.dig("refactor_patrol", "caps", "max_files") || 8,
+            max_diff_lines: @cfg.dig("refactor_patrol", "caps", "max_diff_lines") || 400
           )
         )
       end

@@ -164,8 +164,11 @@ Rules:
   `mechanism`. Use each signal at most once. Hive ignores agent-authored scores
   and deterministically derives score and breakdown from hotspot contribution *
   bounded relief.
-- Copy the feature boundary from the mapped feature unless you have a concrete
-  reason to flag a cross-feature risk.
+- Cross-feature scope is normal when a refactor removes duplicated ownership
+  or reverses an unstable dependency direction. Set `cross_feature_impact`
+  and name the affected boundaries in `cross_feature_details`; scope alone is
+  not a reason to omit the thesis. Hive applies actual file/diff and contract
+  guards before any fix can publish.
 - Include required_validation.commands using the available command names. An
   automatic fix requires at least one executable project command. If this
   slice lacks useful tests, set characterization_first true, explain the test
@@ -175,8 +178,9 @@ Rules:
 <% if feature.documentation? %>
 - This is a documentation slice. Use the configured `docs` validation command
   when it is available. Characterization tests are not a substitute for docs
-  validation; without `docs`, explain the documentation check needed and expect
-  the thesis to remain report-only rather than auto-fix eligible.
+  validation; without `docs`, explain the documentation check needed. Hive may
+  still apply a bounded docs-only patch using its built-in diff safety check,
+  followed by the normal PR review workflow.
 <% end %>
 - This is reporting only. Do not propose applying code, opening PRs, or
   enqueueing review tasks.

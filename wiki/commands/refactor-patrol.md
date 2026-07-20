@@ -68,6 +68,13 @@ refactor_patrol:
     # Optional project-owned compatibility check for source/public surfaces.
     public_contract: null
     test: bin/test
+  caps:
+    # Cross-feature scope is normal for architecture refactoring. Actual
+    # patches remain bounded and contract/dependency changes stay gated.
+    single_feature_only: false
+    allow_cross_feature: true
+    max_files: 8
+    max_diff_lines: 400
 ```
 
 ## Discovery modes
@@ -363,13 +370,17 @@ handoffs. Hive fetches and validates the committed default-branch ref before
 the fix and at publication fences; the operator's checked-out branch and dirty
 files are irrelevant. Default-branch history must still descend from the
 validated head. Before commit or push,
-Hive checks actual feature-boundary paths, file/diff caps, protected paths,
-secrets, dependency manifests, and public declarations across supported
-ecosystems, then runs every named validation command under
-`timeout_sec.patrol`. Unknown source languages
+Hive checks actual feature-boundary paths, root confinement, `.hive-state`
+control-plane protection, protected paths, secrets, dependency manifests, and
+public declarations across supported ecosystems, then runs every named
+validation command under `timeout_sec.patrol`. Cross-feature scope is allowed
+by default because useful refactoring commonly consolidates ownership across
+components. File count and diff size are publication evidence, not acceptance
+or mutation gates. Unknown source languages
 remain discoverable but fail automatic mutation when no public-contract guard
-can prove safety. Documentation fixes need an explicit `docs` command; without
-one, an admissible material thesis may file an issue but cannot open a PR.
+can prove safety. Documentation-only fixes prefer an explicit `docs` command;
+without one, Hive runs `git diff --cached --check` as a deterministic minimum
+and sends the resulting PR through the normal review workflow.
 When `refactor_patrol.commands.public_contract` is configured, it is an
 authoritative executable guard and runs for every automatic fix that changes a
 source or known public-surface path. Built-in declaration guards still enforce
@@ -380,9 +391,17 @@ type's visibility from hiding a later type's public contract. Extensionless
 scripts are recognized from either current or pinned-base shebang bytes and
 remain report-only unless a configured public-contract command certifies them.
 Disjoint trunk movement rebases only the isolated
-patch and repeats the full audit; overlapping feature movement reruns the fix
+patch and repeats the full audit; movement overlapping any actual patch path reruns the fix
 from current clean trunk. Registered trunk is never reset, pulled, edited, or
 committed by patrol.
+
+Issue routing is intentionally exceptional rather than the normal destination
+for architectural findings. Oversized patches, dependency changes,
+public-contract changes, and deterministic validation or safety failures are
+the cases where human design participation is likely to help. Bounded,
+behavior-preserving theses—including cross-feature and docs-only work—prefer an
+automatic fix PR when that separate consent gate is enabled, leaving acceptance
+to normal review rather than requiring a pre-implementation issue discussion.
 
 `PrOpener` reconciles the complete same-branch PR set by exact action marker,
 head SHA, base, repository, and GitHub host. Each validated patch generation

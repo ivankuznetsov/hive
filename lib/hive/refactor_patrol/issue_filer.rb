@@ -34,6 +34,7 @@ module Hive
         dependency_change
         fix_guardrail
         missing_validation
+        protected_path
         public_contract_change
         public_contract_safety_unavailable
         secret_detected

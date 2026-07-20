@@ -529,8 +529,11 @@ exposed a valid leading JSON fence followed by plain-text rationale that v0.6.2
 rejected. The v0.6.3 parser accepts that canonical document shape; exact-main
 dogfood then completed clean PR-scoped reviews and a full scan produced the
 meaningful `invert-usage-error-contract-ownership` thesis above the configured
-0.25 discovery floor. Automation correctly rejected it for unverified evidence,
-multi-feature scope, and file/diff limits. Durable architecture review run
+0.25 discovery floor. Automation correctly rejected it for unverified evidence
+and file/diff limits. Cross-feature scope is no longer independently
+disqualifying: exact replays of the two bounded PR 785 documentation findings
+under the revised policy are admissible and auto-fix eligible, with built-in
+docs diff validation before normal PR review. Durable architecture review run
 directories still have no automatic retention policy, so long-running
 installations should monitor `.hive-state/refactor_patrol/runs/` growth.
 

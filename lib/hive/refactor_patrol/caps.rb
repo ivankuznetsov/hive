@@ -327,6 +327,14 @@ module Hive
           DEPENDENCY_MANIFEST_PATTERNS.any? { |pattern| normalized.match?(pattern) }
       end
 
+      def self.documentation_path?(path)
+        normalized = normalize_path(path)
+        return true if normalized.match?(%r{\A(?:docs?|wiki)(?:/|\z)}i)
+        return true if normalized.match?(%r{(?:\A|/)(?:README|CHANGELOG|CONTRIBUTING|SECURITY|CODE_OF_CONDUCT)(?:\.[^/]*)?\z}i)
+
+        %w[.adoc .asciidoc .markdown .md .mdx .rst].include?(File.extname(normalized).downcase)
+      end
+
       def self.normalize_path(path)
         path.to_s.tr("\\", "/").sub(%r{\A(?:\./)+}, "")
       end
@@ -398,8 +406,6 @@ module Hive
       end
 
       def detect_cross_feature(thesis)
-        return [] if caps.fetch("allow_cross_feature", false)
-
         boundary = thesis.feature_boundary || {}
         # A feature's own entrypoints are part of its boundary; only paths
         # outside both owned_files and entrypoints count as cross-feature.
@@ -412,7 +418,7 @@ module Hive
 
         thesis.risk["cross_feature_impact"] = true
         thesis.risk["cross_feature_details"] |= out_of_boundary
-        [ "cross_feature_impact" ]
+        caps.fetch("allow_cross_feature", false) ? [] : [ "cross_feature_impact" ]
       end
 
       def detect_dependency_bumps(thesis)

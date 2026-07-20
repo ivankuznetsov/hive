@@ -4,7 +4,7 @@ This directory contains the OpenClaw skill for driving the `hive` CLI from an
 OpenClaw agent. The published ClawHub surface is intentionally one skill:
 
 ```bash
-openclaw skills install hive-cli
+openclaw skills install @ivankuznetsov/hive-cli
 ```
 
 That listing installs a skill whose frontmatter name is `hive`, so users invoke
@@ -41,11 +41,12 @@ The ClawHub slug is `hive-cli` because the public `hive` slug is already owned
 by another publisher. The installed slash command is still `/hive` because
 OpenClaw reads `name: hive` from `SKILL.md`.
 
-Public listing: <https://clawhub.ai/ivankuznetsov/hive-cli>.
+Public listing: <https://clawhub.ai/ivankuznetsov/skills/hive-cli>.
 
 ## Setup Model
 
-`openclaw skills install hive-cli` installs the OpenClaw skill folder. It does
+`openclaw skills install @ivankuznetsov/hive-cli` installs the OpenClaw skill
+folder. It does
 not run arbitrary setup commands during the install itself. The `/hive` skill is
 always visible, even before the Hive CLI is installed, and guides first use:
 
@@ -54,8 +55,14 @@ always visible, even before the Hive CLI is installed, and guides first use:
 ```
 
 That guided setup asks for confirmation, installs the Hive CLI through the
-documented platform channel, verifies `hive`/`hv`, runs `hive daemon install`,
-and optionally initializes the current project with non-interactive defaults.
+documented platform channel, verifies `hive`/`hv`, and runs
+`hive setup --no-init --json` for local web/daemon provisioning without project
+enrollment. Enrollment is a separate `hive init .` run in the user's terminal,
+where patrol, architecture discovery, daemon, and babysitter defaults are shown
+before confirmation. The skill also covers machine-readable preview/approval
+flows for managed agent provisioning and reviewed Honeycomb workflows,
+ordinary and architecture patrol limits, digest/bench commands, status
+monitoring, and guarded recovery.
 The macOS Skills UI can also use the skill's Homebrew installer metadata to
 install the `hive` binary.
 
@@ -71,19 +78,33 @@ Then run `/hive setup` from OpenClaw.
 
 ## Publish Checklist
 
-Publish exactly the umbrella skill:
+Publish exactly the umbrella skill. Preview the resolved payload first:
 
 ```bash
 clawhub login
 clawhub whoami
 
-clawhub skill publish openclaw/skills/hive \
+skill_dir="$(pwd)/openclaw/skills/hive"
+clawhub skill publish "$skill_dir" \
   --slug hive-cli \
   --name "Hive CLI" \
   --owner ivankuznetsov \
-  --version 0.1.1 \
-  --changelog "Improve ClawHub listing summary and setup guidance"
+  --version 0.1.3 \
+  --changelog "Refresh for Hive 0.6.4, add current workflow and patrol guidance, and require reviewable consent for host changes" \
+  --dry-run \
+  --json
 ```
+
+ClawHub v0.23 resolves relative publish paths under its configured skills
+directory, so the checklist uses an absolute path from the repository root.
+If the preview contains one file from `openclaw/skills/hive/` and the intended
+metadata, repeat the command without `--dry-run`. After publication, inspect
+`@ivankuznetsov/hive-cli` and its security audit. A `Review` audit is not a
+malware verdict, but every finding should be resolved or explicitly explained.
+
+Keep host mutations reviewable: do not suppress package-manager confirmation,
+patch installed Hive files, or write service-manager overrides from the public
+skill. Prefer Hive's diagnose/preview/consent commands.
 
 Do not run `clawhub sync` for this repository, and do not publish folders such
 as `openclaw/skills/plan` or slugs such as `hive-plan`. Those shortcut listings

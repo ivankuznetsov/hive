@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-07-12
+updated: 2026-07-20
 tags: [commands, api, skills, provisioning]
 ---
 
@@ -138,26 +138,43 @@ and clears it. See [[commands/screenote]].
 ### OpenClaw / ClawHub
 
 `openclaw/skills/hive/SKILL.md` is the only checked-in OpenClaw skill source
-published through ClawHub. The ClawHub slug is `hive-cli`, the public listing is
-`https://clawhub.ai/ivankuznetsov/hive-cli`, and the installed slash command is
-still `/hive` because OpenClaw reads `name: hive` from the skill frontmatter.
+published through ClawHub. The ClawHub reference is
+`@ivankuznetsov/hive-cli`, the canonical public listing is
+`https://clawhub.ai/ivankuznetsov/skills/hive-cli`, and the installed slash
+command is still `/hive` because OpenClaw reads `name: hive` from the skill
+frontmatter.
 
-The checked-in skill version is `0.1.1`. Its frontmatter `description` is the
+The checked-in skill version is `0.1.3`. Its frontmatter `description` is the
 public listing/search summary, while the opening markdown body documents the
 install and common workflow paths. `/hive setup`, `/hive install`, and
 `/hive bootstrap` enter the guided setup flow: verify or install the Hive CLI,
-run strict `hive`/`hv` version detection, install/enable the per-user daemon,
-and optionally run non-interactive `hive init` for the current repository.
+run strict `hive`/`hv` version detection, and use
+`hive setup --no-init --json` for per-user web/daemon provisioning without
+project enrollment. Enrollment is then a separate user-run interactive
+`hive init .`, so the medium patrol, architecture discovery, daemon, and
+babysitter defaults are disclosed before confirmation. Package-manager
+confirmation is preserved; Arch transactions are handed to the user's real
+terminal and the skill does not use unattended install flags.
 
 For normal use, the slash-command text after `/hive` is treated as arguments
 for the detected Hive CLI binary. Examples in the skill include
 `/hive status --json`, `/hive new . "build this feature"`, `/hive plan
 <task-slug>`, `/hive develop <task-slug>`, `/hive review <task-slug>`,
-`/hive web`, and `/hive wiki compile-log --check`. The skill tells agents to
-pass arguments safely rather than interpolate raw user text into a shell string,
-to prefer `--json` when structured output is useful, to use `--check` when
-verifying a compiled wiki changelog, and to confirm before destructive or
-foreground/blocking admin commands.
+`/hive web`, `/hive tui`, `/hive setup-agents`, reviewed Honeycomb workflow
+lifecycle commands, ordinary and architecture patrol, digest/bench, and
+`/hive wiki compile-log --check`. The patrol section distinguishes subscription
+use from additional payment, documents the higher architecture allowance plus
+shared daily ceiling, and hands exact token-total inspection to the human-only
+TUI. `setup-agents` uses a consent-required `--json` preview followed by an
+approved `--yes --json` execution; Honeycomb install/update/remove use their
+supported `--dry-run --json` previews, with permission escalation approved
+separately. Patrol and architecture-patrol dry-runs remain consent-gated because
+they launch subscription-backed agents. The skill tells agents to pass
+arguments safely, prefer `--json` for inspection, preserve daemon auto-advance
+only inside previously approved enrollment, and confirm before persistent,
+destructive, foreground, publishing, or outbound actions.
+It explicitly forbids patching installed Hive files or writing service-manager
+overrides and instead routes repair through Hive-native diagnose/consent flows.
 
 OpenClaw does not introduce Ruby routes, HTTP handlers, controllers, resolvers,
 or new executable entrypoints. It is an agent-facing wrapper over the existing

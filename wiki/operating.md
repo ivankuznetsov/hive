@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, lib/hive/commands/setup_agents.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-07-18
+updated: 2026-07-20
 tags: [operating, daemon, bot, systemd, launchd, install, skills]
 ---
 
@@ -154,15 +154,22 @@ after correcting the scoped remediation printed by doctor.
 
 OpenClaw support now lives in-tree under `openclaw/skills/hive/`. It is one
 skill, not a TypeScript plugin and not a multi-listing bundle: the ClawHub slug
-is `hive-cli`, the public listing is
-`https://clawhub.ai/ivankuznetsov/hive-cli`, and the installed slash command is
-`/hive`. The checked-in skill is version `0.1.1`. ClawHub uses the skill
+is `hive-cli`, the install reference is `@ivankuznetsov/hive-cli`, the public
+listing is `https://clawhub.ai/ivankuznetsov/skills/hive-cli`, and the installed
+slash command is `/hive`. The checked-in skill is version `0.1.3`. ClawHub uses the skill
 frontmatter `description` as the public page summary and search text, so listing
 copy belongs in that field and in the opening `SKILL.md` body for the single
 umbrella skill. `/hive setup` guides confirmed Hive install, strict `hive`/`hv`
-version verification, `hive daemon install`, and optional non-interactive
-`hive init`; after setup, users pass normal CLI verbs as
+version verification, and `hive setup --no-init --json` for web/daemon
+provisioning without enrollment. Initial enrollment is a separate interactive
+`hive init .` in the user's real terminal so subscription-consuming patrol,
+architecture discovery, daemon dispatch, and babysitter defaults are reviewed;
+after setup, users pass normal CLI verbs as
 `/hive status --json`, `/hive plan <slug>`, `/hive develop <slug>`, and so on.
+The current skill also covers `setup-agents`, Honeycomb workflow lifecycle,
+dependency/permission runtime guarantees, ordinary versus architecture patrol
+and subscription-backed token ceilings, digest/bench, TUI/web status, and
+bounded monitoring.
 The skill also documents `/hive wiki compile-log --check` as the read-only
 aggregate-changelog verification path and tells agents to reserve mutating
 `hive wiki compile-log` runs for merge/rebase cleanup or explicit user requests.
@@ -171,6 +178,16 @@ Its marker-recovery guidance mirrors [[modules/daemon]]: inspect first with
 healer-managed cooldown/retry signatures, start a stopped daemon with
 `hive daemon start --detach`, and treat manual `hive markers clear` as guarded
 mutation under the skill's Safety Boundaries.
+Host mutations remain reviewable: package-manager confirmation is never
+suppressed; direct installed-runtime patches and service-manager override
+writes are prohibited; Hive-native diagnosis, dry-run, preview, and repair
+commands are preferred. Agent-skill setup uses its structured consent-required
+preview before `--yes --json`; Honeycomb lifecycle changes use supported
+`--dry-run --json` previews and separately approved permission escalation.
+Patrol dry-runs still require consent because they launch agents, and exact
+token totals remain a human-only TUI view. Daemon auto-advance is allowed only
+within previously approved enrollment, and printed `next:` commands remain
+optional recovery actions rather than implicit execution requests.
 The naked `hive` ClawHub slug is already owned by another publisher, so it is
 intentionally not used.
 

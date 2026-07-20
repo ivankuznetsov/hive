@@ -15,6 +15,7 @@ module Hive
     SCHEMA_VERSIONS = {
       "hive-status" => 6,
       "hive-operational-status" => 1,
+      "hive-watch-event" => 1,
       "hive-act" => 1,
       "hive-init" => 2,
       "hive-setup-agents" => 1,

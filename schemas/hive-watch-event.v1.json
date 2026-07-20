@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:watch-event:v1",
+  "title": "hive watch event (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "ok", "event", "sequence",
+    "observed_at", "reason", "message", "selected_count", "targets"
+  ],
+  "properties": {
+    "schema": { "const": "hive-watch-event" },
+    "schema_version": { "const": 1 },
+    "ok": { "type": "boolean" },
+    "event": {
+      "type": "string",
+      "enum": ["initial", "transition", "source_warning", "final"]
+    },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "reason": {
+      "enum": [
+        null, "source_failure", "task_disappeared", "settled", "completion",
+        "timeout", "event_cap", "status_unavailable", "interrupted", "terminated"
+      ]
+    },
+    "message": { "type": ["string", "null"] },
+    "selected_count": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "targets": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/Target" }
+    }
+  },
+  "$defs": {
+    "State": {
+      "enum": [
+        null, "unknown", "running", "needs_repair", "waiting_on_you",
+        "waiting_on_provider_or_scheduler", "completion_ready", "idle"
+      ]
+    },
+    "Target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target", "project", "slug", "present", "archived", "state",
+        "blocker_owner", "reason", "reason_codes", "position", "provider",
+        "freshness", "liveness_status", "terminality", "action_policy"
+      ],
+      "properties": {
+        "target": { "type": "string", "pattern": "^.+:.+$" },
+        "project": { "type": "string", "minLength": 1 },
+        "slug": { "type": "string", "minLength": 1 },
+        "present": { "type": "boolean" },
+        "archived": { "type": "boolean" },
+        "state": { "$ref": "#/$defs/State" },
+        "blocker_owner": {
+          "enum": [null, "agent", "operator", "provider", "scheduler", "hive", "none", "unknown"]
+        },
+        "reason": { "type": ["string", "null"] },
+        "reason_codes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "position": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["stage", "marker"],
+              "properties": {
+                "stage": { "type": ["string", "null"] },
+                "marker": { "type": ["string", "null"] }
+              }
+            }
+          ]
+        },
+        "provider": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "retry_after"],
+              "properties": {
+                "name": { "type": ["string", "null"] },
+                "retry_after": { "type": ["string", "null"], "format": "date-time" }
+              }
+            }
+          ]
+        },
+        "freshness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scheduler_status"],
+          "properties": {
+            "scheduler_status": {
+              "type": "string",
+              "enum": ["not_applicable", "unavailable", "current", "stale", "invalid"]
+            }
+          }
+        },
+        "liveness_status": {
+          "enum": [null, "running", "not_running", "stale"]
+        },
+        "terminality": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["settled", "completion"],
+          "properties": {
+            "settled": { "type": "boolean" },
+            "completion": { "type": "boolean" }
+          }
+        },
+        "action_policy": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["action_id", "risk_class", "confirmation_required"],
+              "properties": {
+                "action_id": { "type": "string" },
+                "risk_class": { "type": "string" },
+                "confirmation_required": { "type": "boolean" }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

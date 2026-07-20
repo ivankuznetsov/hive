@@ -39,7 +39,8 @@ module Hive
     # emitting commands produce a typed JSON document on success and a
     # structured error envelope on every failure path; init currently
     # publishes the success envelope while precondition failures keep the
-    # legacy stderr + exit-code contract.
+    # legacy stderr + exit-code contract. `watch` deliberately rejects this
+    # document mode because it is a stream; use its --json-lines option.
     class_option :json, type: :boolean, default: false,
                         desc: "emit a single JSON document on stdout (commands that support it)"
 
@@ -1033,6 +1034,53 @@ module Hive
         force: options[:force],
         operational: options[:operational],
         full: options[:full]
+      ).call
+    end
+
+    desc "watch [TARGET...]", "Observe bounded semantic task transitions"
+    long_desc <<~DESC
+      Watches one or more tasks without mutating workflow state. TARGET may be
+      PROJECT:SLUG, a globally unique bare slug, or a slug scoped by --project.
+      With --project and no TARGET, the active task set is selected once at
+      startup. Selection never expands while the command runs and is capped at
+      100 tasks.
+
+      The default human stream prints the initial state, meaningful transitions,
+      source warnings, and exactly one final record. --json-lines emits one
+      independently valid hive-watch-event.v1 object per line. The global
+      --json option is rejected because it promises one JSON document.
+
+      --until settled returns when every selected task needs operator attention,
+      needs repair, or is ready for completion. --until completion is stricter:
+      every task must be observed in the full status graph as archived. A task
+      disappearing from status is never treated as completion.
+
+      The observer is bounded by --timeout and --max-events. Three consecutive
+      source failures or unexplained task absences fail with exit 69. SIGINT and
+      SIGTERM emit a final record before preserving exit 130 or 143.
+    DESC
+    option :project, type: :string, desc: "scope bare slugs, or select this project's active tasks"
+    option :until, type: :string, default: "settled", enum: %w[settled completion],
+                   desc: "terminal condition: settled or verified completion"
+    option :timeout, type: :numeric, default: 1_800,
+                     desc: "maximum watch duration in seconds"
+    option :max_events, type: :numeric, default: 100,
+                        desc: "maximum non-final events; one final event is always reserved"
+    option :interval, type: :numeric, default: 15,
+                      desc: "status polling interval in seconds"
+    option :json_lines, type: :boolean, default: false,
+                        desc: "emit one hive-watch-event.v1 JSON object per line"
+    def watch(*targets)
+      require "hive/commands/watch"
+      Hive::Commands::Watch.new(
+        targets: targets,
+        project: options[:project],
+        until_condition: options[:until],
+        timeout: options[:timeout],
+        max_events: options[:max_events],
+        interval: options[:interval],
+        json_lines: options[:json_lines],
+        json: options[:json]
       ).call
     end
 

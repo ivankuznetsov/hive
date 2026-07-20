@@ -2496,8 +2496,8 @@ class SchemaFilesTest < Minitest::Test
 
   # ── agent-first operational contracts ─────────────────────────────────
 
-  def test_operational_status_and_act_schemas_are_published_at_v1
-    %w[hive-operational-status hive-act].each do |name|
+  def test_operational_status_watch_and_act_schemas_are_published_at_v1
+    %w[hive-operational-status hive-watch-event hive-act].each do |name|
       path = Hive::Schemas.schema_path(name)
       assert File.file?(path), "schema file missing: #{path}"
       document = JSON.parse(File.read(path))

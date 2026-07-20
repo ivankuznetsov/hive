@@ -103,6 +103,17 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_watch_rejects_single_document_json_with_stream_guidance
+    with_tmp_global_config do |home|
+      out, err, status = run_hive(home, "watch", "demo:task", "--json")
+
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      assert_empty out
+      assert_match(/--json-lines/, err)
+      assert_match(/stream/, err)
+    end
+  end
+
   def test_screenote_commands_json_usage_errors_emit_unversioned_envelopes
     with_tmp_global_config do |home|
       [

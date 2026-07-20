@@ -25,6 +25,7 @@ require "hive/pr"
 require "hive/process_kill"
 require "hive/operational_status"
 require "hive/daemon/operational_snapshot"
+require "hive/terminal_text"
 require "hive/tui/views/hyperlink"
 
 module Hive
@@ -271,11 +272,7 @@ module Hive
       end
 
       def terminal_safe(value)
-        value.to_s
-             .encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "�")
-             .gsub(/[\u0000-\u001f\u007f-\u009f]/) do |character|
-               character.codepoints.map { |codepoint| format("\\x%02X", codepoint) }.join
-             end
+        Hive::TerminalText.escape(value)
       end
 
       def operational_project_context(projects)

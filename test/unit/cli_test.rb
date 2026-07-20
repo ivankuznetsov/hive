@@ -17,6 +17,7 @@ require "hive/commands/rebase_status"
 require "hive/commands/stage_action"
 require "hive/commands/adhoc_review"
 require "hive/commands/status"
+require "hive/commands/watch"
 require "hive/commands/act"
 require "hive/commands/approve"
 require "hive/commands/findings"
@@ -559,6 +560,28 @@ class HiveCliTest < Minitest::Test
     assert_match(/concise operational snapshot/, out)
     assert_match(/--full/, out)
     assert_match(/--operational/, out)
+  end
+
+  def test_watch_passes_bounded_stream_options_and_documents_json_lines
+    with_command_new_stub(Hive::Commands::Watch) do |calls|
+      Hive::CLI.start([
+        "watch", "alpha:first", "second", "--project", "alpha",
+        "--until", "completion", "--timeout", "90", "--max-events", "7",
+        "--interval", "2.5", "--json-lines"
+      ])
+
+      assert_equal({
+        targets: [ "alpha:first", "second" ], project: "alpha",
+        until_condition: "completion", timeout: 90, max_events: 7,
+        interval: 2.5, json_lines: true, json: false
+      }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    out, = capture_io { Hive::CLI.start([ "help", "watch" ]) }
+    assert_match(/--json-lines/, out)
+    assert_match(/hive-watch-event\.v1/, out)
+    assert_match(/never treated as completion/, out)
   end
 
   def test_patrol_markers_daemon_bot_and_metrics_pass_options

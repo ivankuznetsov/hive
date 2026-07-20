@@ -3,6 +3,8 @@ require "hive/gh/repository_identity"
 
 module Hive
   module Digest
+    PR_METRICS = %i[additions deletions commits].freeze
+
     RepositoryTarget = Data.define(:project_name, :path, :repository, :host) do
       def initialize(project_name:, path:, repository:, host:)
         project = project_name.to_s.strip
@@ -40,6 +42,84 @@ module Hive
       end
 
       def key = "#{repository.downcase}##{number}"
+    end
+
+    PullRequest = Data.define(
+      :target, :number, :title, :url, :merged_at, :body, :diff, :files,
+      :additions, :deletions, :commits
+    ) do
+      def initialize(target:, number:, title:, url:, merged_at:, body:, diff:, files:,
+                     additions: nil, deletions: nil, commits: nil)
+        identity = PullRequestIdentity.new(
+          repository: target.repository, number: number, url: url, merged_at: merged_at
+        )
+        raise ArgumentError, "digest PR title must not be blank" if title.to_s.strip.empty?
+
+        metrics = { additions: additions, deletions: deletions, commits: commits }.transform_values do |value|
+          next nil if value.nil?
+
+          parsed = Integer(value)
+          raise ArgumentError, "digest PR metrics must be non-negative" if parsed.negative?
+
+          parsed
+        end
+        super(
+          target: target,
+          number: identity.number,
+          title: title.to_s.strip,
+          url: identity.url,
+          merged_at: identity.merged_at,
+          body: body.to_s,
+          diff: diff.to_s,
+          files: Array(files).map(&:to_s).freeze,
+          **metrics
+        )
+      end
+
+      def repository = target.repository
+      def project_name = target.project_name
+      def identity = PullRequestIdentity.new(repository: repository, number: number, url: url, merged_at: merged_at)
+
+      def to_h
+        {
+          "number" => number,
+          "url" => url,
+          "title" => title,
+          "merged_at" => merged_at.utc.iso8601,
+          "additions" => additions,
+          "deletions" => deletions,
+          "commits" => commits
+        }.compact
+      end
+    end
+
+    RepositoryCollection = Data.define(:target, :metadata, :pull_requests) do
+      def initialize(target:, metadata:, pull_requests:)
+        rows = Array(pull_requests)
+        unless rows.all? { |pr| pr.target == target }
+          raise ArgumentError, "digest repository collection contains a PR for another target"
+        end
+
+        super(target: target, metadata: metadata, pull_requests: rows.freeze)
+      end
+    end
+
+    CollectionReport = Data.define(:resolved_count, :repositories, :failures, :warnings) do
+      def initialize(resolved_count:, repositories:, failures:, warnings:)
+        count = Integer(resolved_count)
+        raise ArgumentError, "digest resolved repository count must not be negative" if count.negative?
+
+        super(
+          resolved_count: count,
+          repositories: Array(repositories).freeze,
+          failures: Array(failures).freeze,
+          warnings: Array(warnings).freeze
+        )
+      end
+
+      def collected_count = repositories.size
+      def pull_requests = repositories.flat_map(&:pull_requests)
+      def all_failed? = repositories.empty?
     end
 
     Warning = Data.define(:kind, :message, :repository, :pr_number, :metrics) do

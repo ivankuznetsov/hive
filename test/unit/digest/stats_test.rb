@@ -108,6 +108,54 @@ class HiveDigestStatsTest < Minitest::Test
     end
   end
 
+  def test_canonical_totals_preserve_true_zero_and_complete_values
+    repository = canonical_repository([
+      canonical_pr(number: 1, additions: 0, deletions: 2, commits: 1),
+      canonical_pr(number: 2, additions: 5, deletions: 0, commits: 2)
+    ])
+
+    report = Hive::Digest::Stats.new(logger: nil).for_repositories([ repository ])
+
+    assert_equal 2, report.overall.pr_count
+    assert_equal 5, report.overall.metric(:additions).value
+    assert report.overall.metric(:additions).complete?
+    assert_equal 2, report.by_repository.fetch("owner/repo").metric(:deletions).known_count
+    assert_empty report.warnings
+  end
+
+  def test_canonical_partial_totals_sum_only_measured_values_and_warn
+    repository = canonical_repository([
+      canonical_pr(number: 1, additions: 5, deletions: nil, commits: 1),
+      canonical_pr(number: 2, additions: nil, deletions: nil, commits: 0)
+    ])
+
+    report = Hive::Digest::Stats.new(logger: nil).for_repositories([ repository ])
+
+    additions = report.overall.metric(:additions)
+    assert_equal 5, additions.value
+    assert additions.partial?
+    deletions = report.overall.metric(:deletions)
+    assert_nil deletions.value
+    assert deletions.unavailable?
+    assert_equal 2, report.warnings.size
+    first = report.warnings.find { |warning| warning.pr_number == 1 }
+    assert_equal [ "deletions" ], first.metrics
+    second = report.warnings.find { |warning| warning.pr_number == 2 }
+    assert_equal %w[additions deletions], second.metrics
+  end
+
+  def test_canonical_empty_scope_has_pr_count_only_and_no_invented_metrics
+    report = Hive::Digest::Stats.new(logger: nil).for_repositories([ canonical_repository([]) ])
+
+    assert_equal 0, report.overall.pr_count
+    Hive::Digest::PR_METRICS.each do |metric|
+      total = report.overall.metric(metric)
+      assert_nil total.value
+      assert total.complete?
+    end
+    assert_empty report.warnings
+  end
+
   private
 
   class CapturingLogger
@@ -132,6 +180,38 @@ class HiveDigestStatsTest < Minitest::Test
       pr_title: "Task #{pr_number}",
       pr_body: "body",
       shipped_at: Time.utc(2026, 6, 13, 12)
+    )
+  end
+
+  def canonical_repository(prs)
+    Hive::Digest::RepositoryCollection.new(
+      target: canonical_target,
+      metadata: Hive::Digest::RepositoryMetadata.new(
+        name: "owner/repo", description: "Description", url: "https://github.com/owner/repo"
+      ),
+      pull_requests: prs
+    )
+  end
+
+  def canonical_pr(number:, additions:, deletions:, commits:)
+    Hive::Digest::PullRequest.new(
+      target: canonical_target,
+      number: number,
+      title: "PR #{number}",
+      url: "https://github.com/owner/repo/pull/#{number}",
+      merged_at: Time.utc(2026, 6, 13, 12, number),
+      body: "Body",
+      diff: "diff --git a/a b/a",
+      files: [ "a" ],
+      additions: additions,
+      deletions: deletions,
+      commits: commits
+    )
+  end
+
+  def canonical_target
+    @canonical_target ||= Hive::Digest::RepositoryTarget.new(
+      project_name: "Project", path: "/tmp/project", repository: "owner/repo", host: "github.com"
     )
   end
 end

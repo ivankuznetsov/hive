@@ -1,168 +1,198 @@
 require "test_helper"
-require "stringio"
-require "logger"
 require "hive/digest/collector"
 
 class HiveDigestCollectorTest < Minitest::Test
   include HiveTestHelper
 
-  FakeShipTimes = Struct.new(:times) do
-    def shipped_at(hive_state_path:, slug:)
-      times.fetch([ hive_state_path, slug ], nil)
+  FakeGh = Struct.new(:data, :calls) do
+    def digest_repository_metadata(repository:, host:, cfg: nil)
+      fetch(:metadata, repository, { repository: repository, host: host, cfg: cfg })
+    end
+
+    def digest_merged_pr_candidates(repository:, host:, window_start:, cfg: nil)
+      fetch(:candidates, repository, { repository: repository, host: host, window_start: window_start, cfg: cfg })
+    end
+
+    def digest_pr_detail(repository:, host:, number:, cfg: nil)
+      fetch(:detail, "#{repository}##{number}", { repository: repository, host: host, number: number, cfg: cfg })
+    end
+
+    def digest_pr_files(repository:, host:, number:, cfg: nil)
+      fetch(:files, "#{repository}##{number}", { repository: repository, host: host, number: number, cfg: cfg })
+    end
+
+    def digest_pr_diff(repository:, host:, number:, cfg: nil)
+      fetch(:diff, "#{repository}##{number}", { repository: repository, host: host, number: number, cfg: cfg })
+    end
+
+    private
+
+    def fetch(kind, key, call)
+      calls << call.merge(kind: kind)
+      value = data.fetch(kind).fetch(key)
+      raise value if value.is_a?(Exception)
+
+      value
     end
   end
 
-  RaisingShipTimes = Class.new do
-    def shipped_at(hive_state_path:, slug:)
-      raise Hive::GitError, "git log exploded for #{slug}"
-    end
-  end
-
-  def test_groups_shipped_items_by_project_and_omits_empty_projects
-    with_tmp_dir do |root|
-      project_a = project(root, "alpha")
-      project_b = project(root, "beta")
-      inside = Time.utc(2026, 6, 13, 12)
-      outside = Time.utc(2026, 6, 12, 12)
-
-      create_done_task(project_a, "feature-260613-abcd", display_name: "Feature work", pr_number: 10)
-      create_done_task(project_a, "old-260612-abcd", display_name: "Old work", pr_number: 11)
-      create_done_task(project_b, "empty-260613-abcd", display_name: "Other work", pr_number: 12)
-
-      ship_times = FakeShipTimes.new(
-        {
-          [ project_a.fetch("hive_state_path"), "feature-260613-abcd" ] => inside,
-          [ project_a.fetch("hive_state_path"), "old-260612-abcd" ] => outside
-        }
+  def test_collects_complete_pr_evidence_redacts_secrets_and_cleans_raw_scratch
+    with_tmp_dir do |scratch|
+      secret = "ghp_#{'a' * 36}"
+      gh = fake_gh(
+        body: "Implements migration with #{secret}",
+        diff: diff_fixture("lib/change.rb", "+token=#{secret}")
       )
-      grouped = collector([ project_a, project_b ], ship_times).for_date(Date.new(2026, 6, 13))
+      collector = Hive::Digest::Collector.new(gh: gh, cfg: { "x" => 1 }, logger: nil, scratch_root: scratch)
 
-      assert_equal [ "alpha" ], grouped.keys
-      assert_equal [ "feature-260613-abcd" ], grouped.fetch("alpha").map(&:slug)
-      assert_equal "Feature work", grouped.fetch("alpha").first.display_name
-      assert_equal "https://example.test/pulls/10", grouped.fetch("alpha").first.pr_url
-      # The boilerplate "## Summary" heading carries no signal, so pr_title
-      # falls back to the display name instead of the literal "Summary".
-      assert_equal "Feature work", grouped.fetch("alpha").first.pr_title
-      assert_match(/full body/, grouped.fetch("alpha").first.pr_body)
+      report = collector.for_date(Date.new(2026, 6, 13), targets: [ target ])
+
+      assert_equal 1, report.collected_count
+      assert_equal 1, report.pull_requests.size
+      pr = report.pull_requests.first
+      assert_includes pr.body, "[REDACTED:github_token]"
+      assert_includes pr.diff, "[REDACTED:github_token]"
+      refute_includes pr.body, secret
+      assert_equal [ "lib/change.rb" ], pr.files
+      assert_equal 4, pr.additions
+      assert_equal 2, pr.deletions
+      assert_equal 3, pr.commits
+      assert report.warnings.any? { |warning| warning.kind == "evidence_redacted" }
+      assert_empty Dir.children(scratch), "raw and redacted per-run scratch must be ephemeral"
+      assert gh.calls.all? { |call| call.fetch(:host) == "github.example.com" }
     end
   end
 
-  def test_git_error_drops_item_and_logs_the_slug
-    with_tmp_dir do |root|
-      entry = project(root, "alpha")
-      create_done_task(entry, "boom-260613-abcd", display_name: "Boom", pr_number: 30)
-      buf = StringIO.new
+  def test_successful_empty_repository_is_distinct_from_failed_repository
+    good = target(repository: "owner/good", project_name: "Good")
+    bad = target(repository: "owner/bad", project_name: "Bad")
+    gh = fake_gh(repository: "owner/good", candidates: [])
+    gh.data[:metadata]["owner/bad"] = Hive::GhError.new("provider unavailable")
 
-      grouped = collector([ entry ], RaisingShipTimes.new, logger: Logger.new(buf))
-                .for_date(Date.new(2026, 6, 13))
+    report = Hive::Digest::Collector.new(gh: gh, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ bad, good ]
+    )
 
-      assert_empty grouped, "a git failure must drop the item, not crash the whole digest"
-      assert_includes buf.string, "boom-260613-abcd"
-    end
+    assert_equal 2, report.resolved_count
+    assert_equal [ "owner/good" ], report.repositories.map { |repo| repo.target.repository }
+    assert_empty report.pull_requests
+    assert_equal [ "owner/bad" ], report.failures.map(&:repository)
+    refute report.all_failed?
   end
 
-  def test_pr_body_degraded_read_logs_and_returns_blank
-    with_tmp_dir do |root|
-      # File.read on a directory raises Errno::EISDIR (a SystemCallError).
-      dir_as_file = File.join(root, "pr.md")
-      FileUtils.mkdir_p(dir_as_file)
-      buf = StringIO.new
-      collector = collector([], FakeShipTimes.new({}), logger: Logger.new(buf))
+  def test_all_failed_report_is_mechanically_detectable
+    gh = fake_gh
+    gh.data[:metadata]["owner/repo"] = Hive::GhError.new("outage")
 
-      assert_equal "", collector.send(:pr_body, dir_as_file)
-      assert_includes buf.string, "degraded pr.md read"
-    end
+    report = Hive::Digest::Collector.new(gh: gh, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+
+    assert report.all_failed?
+    assert_equal 1, report.failures.size
+    assert_equal "repository_collection_failed", report.warnings.first.kind
   end
 
-  def test_truncate_body_is_a_noop_within_the_cap
-    collector = collector([], FakeShipTimes.new({}))
-    body = "x" * Hive::Digest::Collector::MAX_PR_BODY_LENGTH
+  def test_one_missing_required_diff_fails_the_whole_repository
+    gh = fake_gh(diff: "")
 
-    assert_equal body, collector.send(:truncate_body, body)
+    report = Hive::Digest::Collector.new(gh: gh, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+
+    assert report.all_failed?
+    assert_match(/raw diff is empty/, report.failures.first.message)
   end
 
-  def test_truncate_body_caps_a_pathological_pr_body
-    collector = collector([], FakeShipTimes.new({}))
-    over = "y" * (Hive::Digest::Collector::MAX_PR_BODY_LENGTH + 100)
+  def test_changed_file_identity_mismatch_fails_the_repository
+    gh = fake_gh(diff: diff_fixture("other.rb", "+change"))
 
-    truncated = collector.send(:truncate_body, over)
+    report = Hive::Digest::Collector.new(gh: gh, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
 
-    assert truncated.length < over.length,
-           "a pathological pr.md body must be bounded so it can't blow the model context window"
-    assert_includes truncated, "[... pr.md body truncated for digest ...]"
-    assert truncated.start_with?("y" * 100), "the cap must preserve the leading body content"
+    assert report.all_failed?
+    assert_match(/identity mismatch/, report.failures.first.message)
   end
 
-  def test_pr_title_extracts_heading_and_skips_summary_boilerplate
-    collector = collector([], FakeShipTimes.new({}))
+  def test_safety_ceiling_breach_is_a_repository_failure
+    gh = fake_gh(body: "large body", diff: diff_fixture("lib/change.rb", "+change"))
+    collector = Hive::Digest::Collector.new(
+      gh: gh,
+      logger: nil,
+      limits: { per_pr: 5, per_repository: 100, per_digest: 100 }
+    )
 
-    assert_equal "Real heading", collector.send(:pr_title, "## Real heading\n\nbody", "fallback")
-    assert_equal "Display name", collector.send(:pr_title, "## Summary\n\nbody", "Display name")
-    assert_equal "Display name", collector.send(:pr_title, "no heading at all", "Display name")
+    report = collector.for_date(Date.new(2026, 6, 13), targets: [ target ])
+
+    assert report.all_failed?
+    assert_match(/safety ceiling/, report.failures.first.message)
   end
 
-  def test_missing_meta_and_pr_file_degrade_to_blank_fields
-    with_tmp_dir do |root|
-      entry = project(root, "alpha")
-      folder = File.join(entry.fetch("hive_state_path"), "stages", "9-done", "raw-260613-abcd")
-      FileUtils.mkdir_p(folder)
-      ship_times = FakeShipTimes.new(
-        { [ entry.fetch("hive_state_path"), "raw-260613-abcd" ] => Time.utc(2026, 6, 13, 12) }
-      )
+  def test_optional_malformed_metric_is_preserved_as_unknown
+    gh = fake_gh
+    gh.data[:detail]["owner/repo#7"]["commits"] = "unknown"
 
-      grouped = collector([ entry ], ship_times).for_date(Date.new(2026, 6, 13))
-      item = grouped.fetch("alpha").first
+    pr = Hive::Digest::Collector.new(gh: gh, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    ).pull_requests.first
 
-      assert_equal "raw-260613-abcd", item.slug
-      assert_equal "raw-260613-abcd", item.display_name
-      assert_equal "", item.pr_url
-      assert_equal "", item.pr_body
-    end
-  end
-
-  def test_local_window_membership_uses_host_timezone
-    with_env("TZ" => "America/New_York") do
-      with_tmp_dir do |root|
-        entry = project(root, "alpha")
-        create_done_task(entry, "late-260613-abcd", display_name: "Late", pr_number: 13)
-        ship_times = FakeShipTimes.new(
-          { [ entry.fetch("hive_state_path"), "late-260613-abcd" ] => Time.utc(2026, 6, 14, 3, 59, 59) }
-        )
-
-        grouped = collector([ entry ], ship_times).for_date(Date.new(2026, 6, 13))
-
-        assert_equal [ "late-260613-abcd" ], grouped.fetch("alpha").map(&:slug)
-      end
-    end
+    assert_nil pr.commits
+    assert_equal 4, pr.additions
   end
 
   private
 
-  def collector(entries, ship_times, logger: nil)
-    Hive::Digest::Collector.new(registry: -> { entries }, ship_times: ship_times, logger: logger)
+  def target(repository: "owner/repo", project_name: "Project")
+    Hive::Digest::RepositoryTarget.new(
+      project_name: project_name,
+      path: "/tmp/#{project_name.downcase}",
+      repository: repository,
+      host: "github.example.com"
+    )
   end
 
-  def project(root, name)
-    path = File.join(root, name)
-    hive_state_path = File.join(path, ".hive-state")
-    FileUtils.mkdir_p(File.join(hive_state_path, "stages", "9-done"))
-    { "name" => name, "path" => path, "hive_state_path" => hive_state_path }
+  def fake_gh(repository: "owner/repo", candidates: nil, body: "Body", diff: nil)
+    merged_at = "2026-06-13T12:00:00Z"
+    candidates ||= [ { "number" => 7, "updated_at" => merged_at, "merged_at" => merged_at } ]
+    FakeGh.new(
+      {
+        metadata: {
+          repository => {
+            "full_name" => repository,
+            "html_url" => "https://github.example.com/#{repository}",
+            "description" => "Repository description"
+          }
+        },
+        candidates: { repository => candidates },
+        detail: {
+          "#{repository}#7" => {
+            "number" => 7,
+            "html_url" => "https://github.example.com/#{repository}/pull/7",
+            "title" => "Ship the change",
+            "body" => body,
+            "merged_at" => merged_at,
+            "changed_files" => 1,
+            "additions" => 4,
+            "deletions" => 2,
+            "commits" => 3
+          }
+        },
+        files: { "#{repository}#7" => [ { "filename" => "lib/change.rb" } ] },
+        diff: { "#{repository}#7" => diff || diff_fixture("lib/change.rb", "+change") }
+      },
+      []
+    )
   end
 
-  def create_done_task(entry, slug, display_name:, pr_number:)
-    folder = File.join(entry.fetch("hive_state_path"), "stages", "9-done", slug)
-    FileUtils.mkdir_p(folder)
-    Hive::TaskMeta.write(folder, id: pr_number, slug: slug, display_name: display_name)
-    File.write(File.join(folder, "pr.md"), <<~MD)
-      ---
-      pr_url: https://example.test/pulls/#{pr_number}
-      pr_number: #{pr_number}
-      ---
-
-      ## Summary
-
-      This is the full body for #{slug}.
-    MD
+  def diff_fixture(path, change)
+    <<~DIFF
+      diff --git a/#{path} b/#{path}
+      index 1111111..2222222 100644
+      --- a/#{path}
+      +++ b/#{path}
+      @@ -1 +1 @@
+      #{change}
+    DIFF
   end
 end

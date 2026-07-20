@@ -413,6 +413,186 @@ module Hive
       raise Hive::GhError, "`gh pr list` returned unparseable JSON for #{repo}: #{e.message}"
     end
 
+    # Digest discovery deliberately uses the REST pulls listing rather than
+    # Search API or `gh pr list`: both cap results at 1,000. Pages are ordered
+    # newest-updated first, and merge itself updates a PR, so once every row on
+    # a page predates the requested window no qualifying merge can remain.
+    def digest_merged_pr_candidates(repository:, host:, window_start:, cfg: nil, max_pages: 10_000)
+      repo = RepositoryIdentity.validated_repository_slug(repository)
+      github_host = RepositoryIdentity.validated_github_host(host)
+      start_at = parse_digest_time(window_start, "window start")
+      pages = []
+      page_number = 1
+      previous_updated_at = nil
+
+      loop do
+        if page_number > Integer(max_pages)
+          raise Hive::GhError, "GitHub merged-PR pagination exceeded #{max_pages} pages for #{repo}"
+        end
+
+        endpoint = "repos/#{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=#{page_number}"
+        page = digest_api_json(endpoint, host: github_host, cfg: cfg, context: "listing pull requests for #{repo}")
+        unless page.is_a?(Array) && page.all? { |row| row.is_a?(Hash) }
+          raise Hive::GhError, "GitHub returned an incomplete pull-request page for #{repo}"
+        end
+        break if page.empty?
+
+        updated_times = page.map do |row|
+          number = row["number"]
+          unless number.is_a?(Integer) && number.positive? && row.key?("updated_at") && row.key?("merged_at")
+            raise Hive::GhError, "GitHub returned malformed pull-request metadata for #{repo}"
+          end
+
+          updated_at = parse_digest_time(row["updated_at"], "updated_at for #{repo}##{number}")
+          if previous_updated_at && updated_at > previous_updated_at
+            raise Hive::GhError, "GitHub returned pull requests out of updated_at order for #{repo}"
+          end
+          previous_updated_at = updated_at
+          updated_at
+        end
+        pages << page
+        break if updated_times.all? { |updated_at| updated_at < start_at }
+
+        page_number += 1
+      end
+
+      pages.flatten.uniq { |row| row.fetch("number") }
+    rescue ArgumentError, TypeError => e
+      raise Hive::GhError, "invalid merged-PR pagination input: #{e.message}"
+    end
+
+    def digest_repository_metadata(repository:, host:, cfg: nil)
+      repo = RepositoryIdentity.validated_repository_slug(repository)
+      github_host = RepositoryIdentity.validated_github_host(host)
+      doc = digest_api_json(
+        "repos/#{repo}", host: github_host, cfg: cfg,
+        context: "fetching repository metadata for #{repo}"
+      )
+      unless doc.is_a?(Hash) && doc["full_name"].to_s.casecmp?(repo) &&
+             !doc["html_url"].to_s.empty? && doc.key?("description")
+        raise Hive::GhError, "GitHub returned malformed repository metadata for #{repo}"
+      end
+
+      doc
+    end
+
+    def digest_pr_detail(repository:, host:, number:, cfg: nil)
+      repo = RepositoryIdentity.validated_repository_slug(repository)
+      github_host = RepositoryIdentity.validated_github_host(host)
+      pr_number = Integer(number)
+      raise Hive::GhError, "pull request number must be positive" unless pr_number.positive?
+
+      doc = digest_api_json(
+        "repos/#{repo}/pulls/#{pr_number}", host: github_host, cfg: cfg,
+        context: "fetching pull request #{repo}##{pr_number}"
+      )
+      required = %w[number html_url title body merged_at changed_files]
+      missing = required.reject { |key| doc.is_a?(Hash) && doc.key?(key) }
+      unless doc.is_a?(Hash) && missing.empty? && doc["number"] == pr_number &&
+             doc["title"].is_a?(String) && !doc["title"].strip.empty? &&
+             doc["changed_files"].is_a?(Integer) && !doc["changed_files"].negative?
+        raise Hive::GhError, "GitHub returned malformed pull-request detail for #{repo}##{pr_number}"
+      end
+      validate_digest_pr_url!(doc.fetch("html_url"), repository: repo, host: github_host, number: pr_number)
+      parse_digest_time(doc.fetch("merged_at"), "merged_at for #{repo}##{pr_number}")
+      doc
+    rescue ArgumentError, TypeError => e
+      raise Hive::GhError, "invalid pull-request detail input: #{e.message}"
+    end
+
+    def digest_pr_diff(repository:, host:, number:, cfg: nil)
+      repo = RepositoryIdentity.validated_repository_slug(repository)
+      github_host = RepositoryIdentity.validated_github_host(host)
+      pr_number = Integer(number)
+      raise Hive::GhError, "pull request number must be positive" unless pr_number.positive?
+
+      args = [
+        "gh", "api", "--hostname", github_host,
+        "-H", "Accept: application/vnd.github.diff",
+        "repos/#{repo}/pulls/#{pr_number}"
+      ]
+      out, err, status = capture3(*args, cfg: cfg)
+      unless status.success?
+        raise Hive::GhError,
+              "`gh api` failed while fetching the diff for #{repo}##{pr_number}: #{digest_error_text(out, err)}"
+      end
+
+      out
+    rescue ArgumentError, TypeError => e
+      raise Hive::GhError, "invalid pull-request diff input: #{e.message}"
+    end
+
+    def digest_pr_files(repository:, host:, number:, cfg: nil)
+      repo = RepositoryIdentity.validated_repository_slug(repository)
+      github_host = RepositoryIdentity.validated_github_host(host)
+      pr_number = Integer(number)
+      raise Hive::GhError, "pull request number must be positive" unless pr_number.positive?
+
+      args = [
+        "gh", "api", "--hostname", github_host,
+        "repos/#{repo}/pulls/#{pr_number}/files?per_page=100",
+        "--paginate", "--slurp"
+      ]
+      out, err, status = capture3(*args, cfg: cfg)
+      unless status.success?
+        raise Hive::GhError,
+              "`gh api` failed while listing files for #{repo}##{pr_number}: #{digest_error_text(out, err)}"
+      end
+      pages = JSON.parse(out)
+      unless pages.is_a?(Array) && pages.all? { |page| page.is_a?(Array) }
+        raise Hive::GhError, "GitHub returned incomplete file pages for #{repo}##{pr_number}"
+      end
+      files = pages.flatten
+      unless files.all? { |file| file.is_a?(Hash) && !file["filename"].to_s.empty? }
+        raise Hive::GhError, "GitHub returned malformed file metadata for #{repo}##{pr_number}"
+      end
+
+      files
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "GitHub file metadata was unparseable for #{repo}##{pr_number}: #{e.message}"
+    rescue ArgumentError, TypeError => e
+      raise Hive::GhError, "invalid pull-request files input: #{e.message}"
+    end
+
+    def digest_api_json(endpoint, host:, cfg:, context:)
+      out, err, status = capture3("gh", "api", "--hostname", host, endpoint, cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`gh api` failed while #{context}: #{digest_error_text(out, err)}"
+      end
+
+      JSON.parse(out)
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "GitHub response was unparseable while #{context}: #{e.message}"
+    end
+    private_class_method :digest_api_json
+
+    def parse_digest_time(value, label)
+      raise ArgumentError, "#{label} is missing" if value.nil? || value.to_s.empty?
+
+      value.is_a?(Time) ? value : Time.iso8601(value.to_s)
+    rescue ArgumentError => e
+      raise Hive::GhError, "GitHub #{label} is invalid: #{e.message}"
+    end
+    private_class_method :parse_digest_time
+
+    def validate_digest_pr_url!(value, repository:, host:, number:)
+      uri = URI.parse(value.to_s)
+      match = uri.path.match(%r{\A/([^/]+/[^/]+)/pull/([1-9]\d*)\z})
+      valid = uri.is_a?(URI::HTTPS) && uri.host&.casecmp?(host) && match &&
+              match[1].casecmp?(repository) && match[2].to_i == number &&
+              uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
+      raise Hive::GhError, "GitHub pull-request URL does not match #{repository}##{number}" unless valid
+    rescue URI::InvalidURIError => e
+      raise Hive::GhError, "GitHub pull-request URL is invalid: #{e.message}"
+    end
+    private_class_method :validate_digest_pr_url!
+
+    def digest_error_text(out, err)
+      value = err.to_s.strip.empty? ? out.to_s : err.to_s
+      Hive::SecretPatterns.redact(value).lines.first.to_s.strip
+    end
+    private_class_method :digest_error_text
+
     def pr_status_rollup(worktree_path, number, cfg: nil)
       out, err, status = capture3("gh", "pr", "view", number.to_s,
                                   "--json", "mergeable,mergeStateStatus,statusCheckRollup,headRefOid,url",

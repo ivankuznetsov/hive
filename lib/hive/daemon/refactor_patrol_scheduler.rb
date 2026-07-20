@@ -480,7 +480,10 @@ module Hive
         reasons = errors.filter_map do |error|
           error.dig("details", "resource_exhaustion", "reason") if error.is_a?(Hash)
         end
-        daily = %w[daily_agent_spawn_limit daily_token_headroom daily_token_limit]
+        daily = %w[
+          daily_agent_spawn_limit daily_architecture_unmetered_spawn_limit
+          daily_token_headroom daily_token_limit
+        ]
         return RETRY_BACKOFF_SEC unless errors.any? && reasons.size == errors.size && (reasons - daily).empty?
 
         next_day = Time.utc(now.utc.year, now.utc.month, now.utc.day) + 86_400

@@ -447,9 +447,13 @@ module Hive
         "max_tokens_per_agent" => 50_000,
         "max_agent_spawns_per_cycle" => 3,
         "max_agent_spawns_per_day" => 8,
+        # Metered architecture launches follow merge demand and do not consume
+        # the ordinary daily count. Keep a separate durable backstop for a
+        # provider that repeatedly returns no usable token totals.
+        "max_architecture_unmetered_spawns_per_day" => 96,
         "max_budget_usd_per_agent" => 25,
         # Architecture discovery/fixing may use a wider per-cycle and
-        # per-agent envelope, but still shares the mode's daily ceilings.
+        # per-agent envelope, but still shares the mode's daily token ceiling.
         "architecture_budget_multiplier" => 2,
         # Ordinary fix agents need edit/test/proof turns after inspection;
         # widen only their per-agent stream cap while preserving cycle/day
@@ -495,13 +499,13 @@ module Hive
           ]
         }
       },
-      # Refactor patrol is opt-in and reporting-only in v1. Keep its config
-      # and state independent from patrol so the two commands can diverge.
+      # Refactor patrol remains effect-free for legacy/missing configuration.
+      # Fresh initialization renders issue output alongside discovery, while
+      # automatic code mutation remains a separate authority gate.
       "refactor_patrol" => {
         "enabled" => false,
-        # Discovery consent never grants mutation authority. These two gates
-        # are intentionally independent and default off for fresh and legacy
-        # projects alike.
+        # Discovery consent never grants mutation or remote-write authority in
+        # a legacy/missing block. Fresh init opts into issue output explicitly.
         "auto_fix" => {
           "enabled" => false,
           # Fix agents need a real root-confined write sandbox. Discovery may
@@ -2733,6 +2737,7 @@ module Hive
       [ "max_tokens_per_agent", 1 ],
       [ "max_agent_spawns_per_cycle", 1 ],
       [ "max_agent_spawns_per_day", 1 ],
+      [ "max_architecture_unmetered_spawns_per_day", 1 ],
       [ "architecture_budget_multiplier", 1 ],
       [ "fix_budget_multiplier", 1 ]
     ].freeze

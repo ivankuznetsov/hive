@@ -122,12 +122,14 @@ class InitPromptsTest < Minitest::Test
     assert_equal all_defaults, answers
   end
 
-  def test_non_tty_recommends_refactor_patrol_discovery_without_enabling_side_effects
+  def test_non_tty_recommends_refactor_patrol_discovery_without_enabling_mutation
     prompts, _output = make_prompts("", tty: false)
     answers = prompts.collect
 
     assert_equal true, answers["refactor_patrol_enabled"]
     assert_equal false, Hive::Config::DEFAULTS.dig("refactor_patrol", "auto_fix", "enabled")
+    # The legacy/missing-config default remains effect-free. The fresh config
+    # renderer explicitly enables issue output with the discovery answer.
     assert_equal false, Hive::Config::DEFAULTS.dig("refactor_patrol", "issue_filing", "enabled")
   end
 
@@ -514,6 +516,16 @@ class InitPromptsTest < Minitest::Test
       assert_equal true, prompts.collect["refactor_patrol_enabled"],
                    "#{answer.inspect} should enable refactor patrol discovery"
     end
+  end
+
+  def test_interactive_refactor_patrol_discloses_default_issue_output_and_disabled_mutation
+    prompts, output = make_prompts(interactive_input(refactor_patrol: ""))
+
+    prompts.collect
+
+    assert_match(/reviewable findings become GitHub issues/, output.string)
+    assert_match(/Automatic code changes remain disabled/, output.string)
+    refute_match(/GitHub issue filing remain/, output.string)
   end
 
   def test_interactive_refactor_patrol_no_disables_discovery

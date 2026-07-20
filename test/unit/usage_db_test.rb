@@ -197,6 +197,10 @@ class UsageDbTest < Minitest::Test
       assert_equal 16, activity.fetch(:tokens)
       assert_equal 2, activity.fetch(:agent_spawns)
       assert_equal 1, activity.fetch(:unmetered_spawns)
+      assert_equal 1, activity.fetch(:ordinary_agent_spawns)
+      assert_equal 1, activity.fetch(:architecture_agent_spawns)
+      assert_equal 0, activity.fetch(:ordinary_unmetered_spawns)
+      assert_equal 1, activity.fetch(:architecture_unmetered_spawns)
     end
   end
 

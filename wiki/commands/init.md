@@ -3,11 +3,11 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-07-19
+updated: 2026-07-20
 tags: [command, bootstrap, git, prompts, llm-wiki, provisioning]
 ---
 
-**TLDR**: `hive init [PATH]` bootstraps a project for Hive and `--json` emits the resolved bootstrap contract. Alongside workflow, agents, review, patrol cadence, and daemon settings, fresh terminal and web setup recommend post-merge architecture-patrol discovery with an explicit default-yes answer. Headless callers can choose the same value before any write with `--refactor-patrol` or `--no-refactor-patrol`; auto-fixing and issue filing remain separate default-off gates. After the project transaction succeeds, interactive init diagnoses enabled manifest-managed agent skills and can delegate an accepted offer to the same setup engine as `hive setup-agents`; decline, non-TTY, and JSON flows only report remediation.
+**TLDR**: `hive init [PATH]` bootstraps a project for Hive and `--json` emits the resolved bootstrap contract. Alongside workflow, agents, review, patrol cadence, and daemon settings, fresh terminal and web setup recommend post-merge architecture-patrol discovery with an explicit default-yes answer. Headless callers can choose the same value before any write with `--refactor-patrol` or `--no-refactor-patrol`; enabling discovery also enables deduplicated GitHub issues as its human review surface, while auto-fixing remains off. After the project transaction succeeds, interactive init diagnoses enabled manifest-managed agent skills and can delegate an accepted offer to the same setup engine as `hive setup-agents`; decline, non-TTY, and JSON flows only report remediation.
 
 ## Usage
 
@@ -21,9 +21,10 @@ hive init --new-workflow ID [PROJECT_PATH]
 On a fresh init, `--refactor-patrol` and `--no-refactor-patrol` explicitly
 select `refactor_patrol.enabled` before Hive creates or writes project state.
 The flag skips the architecture-discovery question on TTY and overrides the
-recommended non-TTY default; omitting both keeps discovery enabled. Neither
-form authorizes side effects: `refactor_patrol.auto_fix.enabled` and
-`refactor_patrol.issue_filing.enabled` are still written as `false`.
+recommended non-TTY default; omitting both keeps discovery enabled. Enabling
+it writes `refactor_patrol.issue_filing.enabled: true` so accepted findings
+have a human-reviewable GitHub issue, while disabling it writes false.
+`refactor_patrol.auto_fix.enabled` remains false in both cases.
 An existing project rejects either selector before a workflow rebind or custom
 workflow scaffold can write anything; edit `refactor_patrol.enabled` in its
 project config when changing an established policy.
@@ -115,7 +116,7 @@ On TTY input streams the prompt walks the operator through the following section
 9. **Patrol mode** (`patrol.mode`): `ultrapatrol`, `high`, `medium` (default), `low`, or `off`. Fresh config writes this single key and omits explicit `enabled`/`trigger`/`poll_interval_sec` so [[modules/config]] derives the scheduler knobs.
 10. **Triage bias** (`review.triage.bias`): `courageous` (default) or `safetyist`. Picks the bias preset used by the 6-review autonomous loop.
 11. **Ad-hoc PR auto-fix** (`review.adhoc.fix`): whether `hive review --pr` should enter the fix loop for existing GitHub PRs. Default no keeps the workflow review-only: Hive publishes reviewer/escalation comments to GitHub when `review.github_publish.enabled` is true, but does not prepare local fix commits for someone else's PR. Answer `y` only when accepted ad-hoc findings should be eligible for local fix commits.
-12. **Architecture patrol discovery** (`refactor_patrol.enabled`): review each future merged PR for high-leverage architecture refactors. Fresh terminal and web setup default to yes and persist the answer explicitly. `--refactor-patrol` or `--no-refactor-patrol` preselects this value and skips the question, including for non-TTY automation. Existing projects without the block remain disabled. This answer grants discovery only; `auto_fix.enabled` and `issue_filing.enabled` remain false until separately edited by the operator.
+12. **Architecture patrol discovery** (`refactor_patrol.enabled`): review each future merged PR for high-leverage architecture refactors. Fresh terminal and web setup default to yes and persist the answer explicitly. `--refactor-patrol` or `--no-refactor-patrol` preselects this value and skips the question, including for non-TTY automation. Existing projects without the block remain disabled. A yes answer also writes `issue_filing.enabled: true`, making deduplicated GitHub issues the human review surface; `auto_fix.enabled` stays false until separately edited by the operator.
 13. **Per-stage limits**: budget+timeout for each of 10 effective keys (`brainstorm`, `plan`, `execute_implementation`, `open_pr`, `artifacts`, `finalize`, `review_ci`, `review_triage`, `review_fix`, `review_browser`). Defaults are generous sanity caps — most tasks finish well within them.
 14. **Daemon enrollment** (`daemon.enabled`): whether to opt this project into the auto-advance daemon (default yes).
 15. **Babysitter enrollment** (`babysitter.enabled`): whether to opt this project into the experimental open-PR babysitter (default yes). It is a separate process from `hive daemon`; start it with `hive babysit start`.

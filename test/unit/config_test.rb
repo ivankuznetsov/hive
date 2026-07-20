@@ -827,6 +827,7 @@ class ConfigTest < Minitest::Test
         assert_equal agent_tokens, cfg.dig("patrol", "max_tokens_per_agent")
         assert_equal cycle_spawns, cfg.dig("patrol", "max_agent_spawns_per_cycle")
         assert_equal daily_spawns, cfg.dig("patrol", "max_agent_spawns_per_day")
+        assert_equal 96, cfg.dig("patrol", "max_architecture_unmetered_spawns_per_day")
         assert_equal agent_budget, cfg.dig("patrol", "max_budget_usd_per_agent")
         assert_equal 2, cfg.dig("patrol", "architecture_budget_multiplier")
         assert_equal 2, cfg.dig("patrol", "fix_budget_multiplier")
@@ -945,6 +946,7 @@ class ConfigTest < Minitest::Test
       "max_tokens_per_agent: 0",
       "max_agent_spawns_per_cycle: 0",
       "max_agent_spawns_per_day: 1.5",
+      "max_architecture_unmetered_spawns_per_day: 0",
       "architecture_budget_multiplier: 0",
       "fix_budget_multiplier: 0",
       "max_budget_usd_per_agent: 0",

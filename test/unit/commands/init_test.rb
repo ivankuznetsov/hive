@@ -124,7 +124,7 @@ class HiveCommandsInitTest < Minitest::Test
 
     assert_equal true, enabled_raw.fetch("enabled")
     assert_equal false, enabled_raw.dig("auto_fix", "enabled")
-    assert_equal false, enabled_raw.dig("issue_filing", "enabled")
+    assert_equal true, enabled_raw.dig("issue_filing", "enabled")
 
     disabled = render_fresh_config(
       :coding,

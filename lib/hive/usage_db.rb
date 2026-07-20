@@ -109,9 +109,10 @@ module Hive
     end
 
     # Current-day patrol consumption used by the runtime budget gate. Both
-    # ordinary and architecture patrol stages share the same project budget;
-    # an "-unmetered" row represents a real agent launch whose CLI returned
-    # no trustworthy positive token totals.
+    # ordinary and architecture patrol stages share the same project token
+    # budget, while their durable launch counts remain separate. An
+    # "-unmetered" row represents a real agent launch whose CLI returned no
+    # trustworthy positive token totals.
     def patrol_activity(scope:, now: Time.now.utc)
       # Unlike the read-only TUI aggregate, enforcement deliberately creates
       # the empty store before the first spawn. That distinguishes a genuine
@@ -120,17 +121,27 @@ module Hive
         ensure_schema!(db)
         since = bucket_starts(now).fetch(:today)
         sql = +"SELECT SUM(input), SUM(output), SUM(cached), COUNT(*), " \
-               "SUM(CASE WHEN stage LIKE '%-unmetered' THEN 1 ELSE 0 END) FROM token_usage"
+               "SUM(CASE WHEN stage LIKE '%-unmetered' THEN 1 ELSE 0 END), " \
+               "SUM(CASE WHEN stage LIKE 'patrol%' THEN 1 ELSE 0 END), " \
+               "SUM(CASE WHEN stage LIKE 'refactor-patrol%' THEN 1 ELSE 0 END), " \
+               "SUM(CASE WHEN stage LIKE 'patrol%-unmetered' THEN 1 ELSE 0 END), " \
+               "SUM(CASE WHEN stage LIKE 'refactor-patrol%-unmetered' THEN 1 ELSE 0 END) " \
+               "FROM token_usage"
         clauses, binds = aggregate_clauses(scope || {}, since)
         append_patrol_clause!(clauses, binds)
         sql << " WHERE #{clauses.join(' AND ')}"
-        input, output, cached, spawns, unmetered = db.execute(sql, binds).first
+        input, output, cached, spawns, unmetered, ordinary_spawns, architecture_spawns,
+          ordinary_unmetered, architecture_unmetered = db.execute(sql, binds).first
         usage = { input: integer(input), output: integer(output), cached: integer(cached) }
         usage.merge(
           available: true,
           tokens: usage.values.sum,
           agent_spawns: integer(spawns),
-          unmetered_spawns: integer(unmetered)
+          unmetered_spawns: integer(unmetered),
+          ordinary_agent_spawns: integer(ordinary_spawns),
+          architecture_agent_spawns: integer(architecture_spawns),
+          ordinary_unmetered_spawns: integer(ordinary_unmetered),
+          architecture_unmetered_spawns: integer(architecture_unmetered)
         )
       end
     rescue StandardError => e
@@ -160,7 +171,9 @@ module Hive
 
     def zero_patrol_activity(available: true)
       zero_usage.merge(
-        available: available, tokens: 0, agent_spawns: 0, unmetered_spawns: 0
+        available: available, tokens: 0, agent_spawns: 0, unmetered_spawns: 0,
+        ordinary_agent_spawns: 0, architecture_agent_spawns: 0,
+        ordinary_unmetered_spawns: 0, architecture_unmetered_spawns: 0
       )
     end
 

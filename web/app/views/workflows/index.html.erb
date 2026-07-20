@@ -19,48 +19,47 @@
 <% end %>
 
 <% if @selected_project %>
-  <% if @preview %>
+  <% if @workflow_change %>
     <%= render "workflows/preview",
-          preview: @preview, operation: @preview_operation,
-          token: @preview_token, project: @selected_project %>
+          change: @workflow_change, project: @selected_project %>
   <% end %>
 
   <section aria-labelledby="project-workflows-heading">
     <h2 id="project-workflows-heading"><%= @selected_project.name %> workflows</h2>
     <div class="workflow-list">
-      <% @workflows.each do |row| %>
-        <article class="workflow-row" data-workflow-origin="<%= row["origin"] %>"
-                 data-workflow-selection="<%= row["selection"] %>">
+      <% @workflows.each do |workflow| %>
+        <article class="workflow-row" data-workflow-origin="<%= workflow.origin %>"
+                 data-workflow-selection="<%= workflow.selection %>">
           <div>
             <div class="workflow-title">
-              <strong><%= row.fetch("name") %></strong>
-              <span class="tag"><%= row.fetch("origin").humanize %></span>
-              <% if row["default"] %><span class="tag tag-registered">default</span><% end %>
-              <% if row["selection"] %><span class="tag tag-registered"><%= row["selection"] %></span><% end %>
-              <% if row["integrity"] %>
-                <span class="tag <%= "tag-health-conflicting" unless row["integrity"] == "verified" %>"><%= row["integrity"] %></span>
+              <strong><%= workflow.name %></strong>
+              <span class="tag"><%= workflow.origin.humanize %></span>
+              <% if workflow.default? %><span class="tag tag-registered">default</span><% end %>
+              <% if workflow.selection %><span class="tag tag-registered"><%= workflow.selection %></span><% end %>
+              <% if workflow.integrity %>
+                <span class="tag <%= "tag-health-conflicting" unless workflow.verified? %>"><%= workflow.integrity %></span>
               <% end %>
             </div>
             <p class="workflow-meta">
-              <% if row["version"] %>version <%= row["version"] %><% end %>
-              <% if row["source_commit"] %>
-                <span title="<%= row["source_commit"] %>">commit <%= row["source_commit"].to_s[0, 10] %></span>
+              <% if workflow.version %>version <%= workflow.version %><% end %>
+              <% if workflow.source_commit %>
+                <span title="<%= workflow.source_commit %>">commit <%= workflow.source_commit.to_s[0, 10] %></span>
               <% end %>
-              <% if row["catalog_visibility"] %><span><%= row["catalog_visibility"].humanize %></span><% end %>
+              <% if workflow.catalog_visibility %><span><%= workflow.catalog_visibility.humanize %></span><% end %>
             </p>
           </div>
-          <% if row["origin"] == "managed" && row["selection"] == "selected" && row["integrity"] == "verified" %>
+          <% if workflow.managed? && workflow.selected? && workflow.verified? %>
             <div class="workflow-actions">
               <%= button_to "Check update", preview_workflow_update_path,
-                    params: { project: @selected_project.name, name: row.fetch("name") },
+                    params: { project: @selected_project.name, name: workflow.name },
                     class: "btn-ghost btn-sm", data: { turbo_submits_with: "Checking…" },
                     form: { data: { turbo: false } } %>
               <%= button_to "Review removal", preview_workflow_remove_path,
-                    params: { project: @selected_project.name, name: row.fetch("name") },
+                    params: { project: @selected_project.name, name: workflow.name },
                     class: "btn-ghost btn-sm", data: { turbo_submits_with: "Reviewing…" },
                     form: { data: { turbo: false } } %>
             </div>
-          <% elsif row["origin"] == "managed" && row["selection"] == "selected" %>
+          <% elsif workflow.managed? && workflow.selected? %>
             <span class="faint">Repair the malformed or tampered selection from the project checkout before changing it.</span>
           <% end %>
         </article>

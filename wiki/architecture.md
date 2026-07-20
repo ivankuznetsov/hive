@@ -357,6 +357,18 @@ and normalizes origins before handing the checkout to `Project#setup!`.
 `ReposController` only selects between new admission and existing-project
 setup, then renders or redirects.
 
+Workflow list rows are typed `Workflow` models rather than anonymous adapter
+hashes. The model owns the shared `Hive::Web::WorkflowLifecycle` boundary for
+listing and scaffolding. Reviewed install/update/remove state is represented by
+`WorkflowChange`: it creates the dry-run, signs the operation/project/identity
+receipt, verifies consent and expiry, preserves the separate escalation gate,
+and applies only the reviewed identity. Existing workflow URLs now enter
+`Workflows::PreviewsController#create` or
+`Workflows::ChangesController#create`; route defaults supply the operation from
+the matched route rather than accepting an operator-controlled action name.
+`WorkflowsController` is left with the collection page and authored-workflow
+creation.
+
 A task page is a filesystem-backed `Task`, built from the matching status
 snapshot row and its `Project`. That model owns task
 reads and their invariants — workflow-aware artifact ordering, brainstorm

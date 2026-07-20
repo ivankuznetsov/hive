@@ -250,8 +250,13 @@ origin also prints the Host-header/reverse-proxy warning.
   layers recheck the selected baseline, so stale or incomplete receipts fail
   before mutation. Security expansion has a second, non-composable checkbox.
   Receipt tests cover cross-operation replay, real expiry, and missing consent
-  for every mutation. A fixture-backed integration test runs the real workflow
-  commands through the adapter for the full preview/apply lifecycle.
+  for every mutation. Rails represents lifecycle list rows as `Workflow`
+  models and preview/application state as `WorkflowChange`; the established
+  URLs route to standard `create` actions for preview and change resources.
+  The operation comes from the matched route's path parameters, so a submitted
+  `operation` field cannot redirect an install preview into another lifecycle
+  action. A fixture-backed integration test runs the real workflow commands
+  through the adapter for the full preview/apply lifecycle.
   The known legacy-vs-v2 `workflow publish` gap is stated in the page instead
   of exposing a button that opens an unusable registry PR. At mobile widths the
   primary header wraps to a second full-width row, keeping all five sections

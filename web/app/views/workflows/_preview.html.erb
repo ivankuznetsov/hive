@@ -1,26 +1,26 @@
 <section class="card workflow-preview" aria-labelledby="workflow-preview-heading">
-  <% if operation == "install" %>
-    <h2 id="workflow-preview-heading">Review install: <%= preview.fetch("name") %> <%= preview.fetch("version") %></h2>
-    <p class="muted">Verified package at source commit <code><%= preview.fetch("source_commit") %></code>, catalog commit <code><%= preview.fetch("catalog_commit") %></code>, and manifest <code><%= preview.fetch("manifest_digest") %></code>.</p>
+  <% if change.operation == "install" %>
+    <h2 id="workflow-preview-heading">Review install: <%= change.fetch("name") %> <%= change.fetch("version") %></h2>
+    <p class="muted">Verified package at source commit <code><%= change.fetch("source_commit") %></code>, catalog commit <code><%= change.fetch("catalog_commit") %></code>, and manifest <code><%= change.fetch("manifest_digest") %></code>.</p>
     <h3>Runtime permissions</h3>
     <dl class="permission-grid">
-      <% preview.fetch("permissions").each do |key, value| %>
+      <% change.fetch("permissions").each do |key, value| %>
         <dt><%= key.humanize %></dt>
         <dd><%= value.is_a?(Array) ? (value.any? ? value.join(", ") : "none") : value %></dd>
       <% end %>
     </dl>
     <%= form_with url: install_workflow_path, class: "preview-confirm-form" do |f| %>
-      <%= hidden_field_tag :preview_token, token %>
+      <%= hidden_field_tag :preview_token, change.token %>
       <label class="check">
         <%= check_box_tag :consent, "workflow_install", false, required: true %>
         Install this exact verified package with the permissions above
       </label>
       <p><%= f.submit "Install workflow", data: { turbo_submits_with: "Installing…" } %></p>
     <% end %>
-  <% elsif operation == "update" %>
-    <% diff = preview.fetch("diff") %>
-    <h2 id="workflow-preview-heading">Review update: <%= preview.fetch("name") %></h2>
-    <p class="muted">Commit <code><%= preview.fetch("from_commit")[0, 10] %></code> → <code><%= preview.fetch("to_commit")[0, 10] %></code>. Prompt content is represented by hashes, never copied into this page.</p>
+  <% elsif change.operation == "update" %>
+    <% diff = change.fetch("diff") %>
+    <h2 id="workflow-preview-heading">Review update: <%= change.fetch("name") %></h2>
+    <p class="muted">Commit <code><%= change.fetch("from_commit")[0, 10] %></code> → <code><%= change.fetch("to_commit")[0, 10] %></code>. Prompt content is represented by hashes, never copied into this page.</p>
     <div class="workflow-diff-summary">
       <span><strong><%= diff.dig("files", "added").length %></strong> files added</span>
       <span><strong><%= diff.dig("files", "removed").length %></strong> removed</span>
@@ -74,7 +74,7 @@
       <p class="muted">No security capability escalation detected.</p>
     <% end %>
     <%= form_with url: update_workflow_path, class: "preview-confirm-form" do |f| %>
-      <%= hidden_field_tag :preview_token, token %>
+      <%= hidden_field_tag :preview_token, change.token %>
       <label class="check">
         <%= check_box_tag :consent, "workflow_update", false, required: true %>
         Apply the exact update reviewed above
@@ -87,21 +87,21 @@
       <% end %>
       <p><%= f.submit "Update workflow", data: { turbo_submits_with: "Updating…" } %></p>
     <% end %>
-  <% elsif operation == "remove" %>
-    <h2 id="workflow-preview-heading">Review removal: <%= preview.fetch("name") %></h2>
+  <% elsif change.operation == "remove" %>
+    <h2 id="workflow-preview-heading">Review removal: <%= change.fetch("name") %></h2>
     <p>New tasks will stop using this managed workflow. Existing task pins remain runnable.</p>
     <div class="workflow-diff-summary">
-      <span><strong><%= preview.fetch("retained_commits").length %></strong> generations retained</span>
-      <span><strong><%= preview.fetch("deletable_commits").length %></strong> unreferenced generations deleted</span>
+      <span><strong><%= change.fetch("retained_commits").length %></strong> generations retained</span>
+      <span><strong><%= change.fetch("deletable_commits").length %></strong> unreferenced generations deleted</span>
     </div>
-    <% if preview.fetch("retained_commits").any? %>
-      <p class="muted">Retained: <code><%= preview.fetch("retained_commits").join(", ") %></code></p>
+    <% if change.fetch("retained_commits").any? %>
+      <p class="muted">Retained: <code><%= change.fetch("retained_commits").join(", ") %></code></p>
     <% end %>
-    <% if preview.fetch("deletable_commits").any? %>
-      <p class="muted">Deleted after removal: <code><%= preview.fetch("deletable_commits").join(", ") %></code></p>
+    <% if change.fetch("deletable_commits").any? %>
+      <p class="muted">Deleted after removal: <code><%= change.fetch("deletable_commits").join(", ") %></code></p>
     <% end %>
     <%= form_with url: remove_workflow_path, class: "preview-confirm-form" do |f| %>
-      <%= hidden_field_tag :preview_token, token %>
+      <%= hidden_field_tag :preview_token, change.token %>
       <label class="check">
         <%= check_box_tag :consent, "workflow_remove", false, required: true %>
         Remove this selection for new tasks with the retention shown above

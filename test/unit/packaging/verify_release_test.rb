@@ -45,6 +45,17 @@ class PackagingVerifyReleaseTest < Minitest::Test
     refute_includes body, "platforms: linux/amd64,linux/arm64"
   end
 
+
+  def test_release_verifier_authenticates_managed_web_before_extraction
+    body = File.read(SCRIPT)
+
+    assert_includes body, 'WEB_BUNDLE="hive-web-${HIVE_VERSION#v}.tar.gz"'
+    assert_includes body, "cosign verify-blob"
+    assert_includes body, "--certificate-identity-regexp '^https://github\\.com/ivankuznetsov/hive/'"
+    assert_includes body, "sha256sum -c -"
+    assert_operator body.index("cosign verify-blob"), :<, body.index("sha256sum -c -")
+  end
+
   def test_hivebox_smoke_rejects_one_transient_deep_health_success
     Dir.mktmpdir("hivebox-smoke-stubs") do |dir|
       bin = File.join(dir, "bin")

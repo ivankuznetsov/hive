@@ -133,7 +133,7 @@ jobs:
       - name: Build checksums
         run: |
           cd dist
-          sha256sum hive-cli-*.gem > SHA256SUMS
+          sha256sum hive-cli-*.gem hive-web-*.tar.gz > SHA256SUMS
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
       - name: Sign checksums

@@ -18,4 +18,12 @@ class InstallScriptTest < Minitest::Test
 
     refute_includes script, 'mv "${gem_home}/bin/hv" "${gem_home}/shims/hv"'
   end
+
+
+  def test_installer_requires_cosign_for_release_identity_verification
+    script = File.read(INSTALL_SCRIPT)
+
+    assert_includes script, 'command -v cosign >/dev/null 2>&1 || die "missing installer prerequisite \'cosign\''
+    refute_includes script, "install cosign for additional keyless signature verification"
+  end
 end

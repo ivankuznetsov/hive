@@ -68,6 +68,10 @@ jobs:
         with:
           ruby-version: "3.4"
 
+      - name: Install cosign (bash channel)
+        if: ${{ matrix.channel == 'bash' }}
+        uses: sigstore/cosign-installer@v3
+
       - name: Verify channel
         if: ${{ matrix.channel != 'aur' }}
         run: bash packaging/verify-channel.sh --channel "$CHANNEL" --version "$VERSION"

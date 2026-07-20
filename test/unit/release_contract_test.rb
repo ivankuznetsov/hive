@@ -27,6 +27,13 @@ class ReleaseContractTest < Minitest::Test
     refute_includes step.fetch("run"), "gem install hive-cli"
   end
 
+  def test_signed_checksum_manifest_covers_the_managed_web_bundle
+    workflow = read(".github/workflows/release.yml")
+
+    assert_match(/sha256sum hive-cli-\*\.gem hive-web-\*\.tar\.gz > SHA256SUMS/, workflow)
+    assert_includes workflow, "hive-web-${version}.tar.gz"
+  end
+
   private
 
   def read(path)

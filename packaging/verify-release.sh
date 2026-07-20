@@ -28,7 +28,7 @@
 #   0   all verifications passed
 #   1   a verification step failed (script preserves the tmp prefix)
 #   2   bad arguments
-#   3   prerequisite missing (curl, ruby, jq, git)
+#   3   prerequisite missing (curl, ruby, jq, git, cosign)
 
 set -euo pipefail
 
@@ -57,7 +57,7 @@ EXIT CODES:
   0   all verifications passed
   1   a verification step failed (script preserves the tmp prefix)
   2   bad arguments
-  3   prerequisite missing (curl, ruby, jq, git)
+  3   prerequisite missing (curl, ruby, jq, git, cosign)
 HELP
 }
 
@@ -100,7 +100,7 @@ INSTALL_SH="$REPO_ROOT/install.sh"
 
 # ─── prerequisites ───────────────────────────────────────────────────
 
-for cmd in curl ruby jq git; do
+for cmd in curl ruby jq git cosign; do
   command -v "$cmd" >/dev/null 2>&1 || {
     echo "verify-release: missing prerequisite: $cmd" >&2
     exit 3
@@ -310,6 +310,37 @@ case "$INSTALL_RC" in
        fail "install.sh failed (rc=$INSTALL_RC)"
        exit 1 ;;
 esac
+
+# Authenticate and checksum the managed web archive independently of the gem
+# installer. This catches release-manifest drift before the installed setup
+# command downloads or extracts persistent user-level code.
+step "authenticate managed web bundle"
+WEB_BUNDLE="hive-web-${HIVE_VERSION#v}.tar.gz"
+WEB_TRUST_DIR="$PREFIX/web-trust"
+RELEASE_BASE="https://github.com/ivankuznetsov/hive/releases/download/${HIVE_VERSION}"
+mkdir -p "$WEB_TRUST_DIR"
+curl -fsSL "$RELEASE_BASE/$WEB_BUNDLE" -o "$WEB_TRUST_DIR/$WEB_BUNDLE"
+curl -fsSL "$RELEASE_BASE/SHA256SUMS" -o "$WEB_TRUST_DIR/SHA256SUMS"
+curl -fsSL "$RELEASE_BASE/SHA256SUMS.sig" -o "$WEB_TRUST_DIR/SHA256SUMS.sig"
+curl -fsSL "$RELEASE_BASE/SHA256SUMS.pem" -o "$WEB_TRUST_DIR/SHA256SUMS.pem"
+cosign verify-blob \
+  --certificate "$WEB_TRUST_DIR/SHA256SUMS.pem" \
+  --signature "$WEB_TRUST_DIR/SHA256SUMS.sig" \
+  --certificate-identity-regexp '^https://github\.com/ivankuznetsov/hive/' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  "$WEB_TRUST_DIR/SHA256SUMS"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  (
+    cd "$WEB_TRUST_DIR"
+    grep -E "^[a-f0-9]{64}  (\\./)?${WEB_BUNDLE}$" SHA256SUMS | sha256sum -c -
+  )
+else
+  EXPECTED_WEB_SHA="$(grep -E "^[a-f0-9]{64}  (\\./)?${WEB_BUNDLE}$" "$WEB_TRUST_DIR/SHA256SUMS" | awk '{print $1}')"
+  ACTUAL_WEB_SHA="$(shasum -a 256 "$WEB_TRUST_DIR/$WEB_BUNDLE" | awk '{print $1}')"
+  [[ -n "$EXPECTED_WEB_SHA" && "$ACTUAL_WEB_SHA" == "$EXPECTED_WEB_SHA" ]]
+fi
+ok "managed web bundle signature, identity, and checksum verified"
 
 if [[ -x "$XDG_BIN_HOME/hive" ]]; then
   ok "binary at \$XDG_BIN_HOME/hive is executable"

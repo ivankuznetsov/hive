@@ -7,6 +7,7 @@ class Hive < Formula
   license "MIT"
 
   depends_on "ruby"
+  depends_on "cosign"
 
   def install
     # Vendor hive-cli and its runtime deps into the formula's libexec

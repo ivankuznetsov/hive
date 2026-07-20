@@ -33,6 +33,13 @@ class GemspecTest < Minitest::Test
     assert_includes spec.files, "config/agent-skills.yml"
   end
 
+  def test_gem_package_includes_metadata_for_managed_web_path_dependency
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+
+    assert_includes spec.files, "hive.gemspec",
+                    "an installed hive-cli root must remain a valid Bundler path dependency"
+  end
+
   def test_gem_executables_exclude_bash_hv_launcher
     spec = Gem::Specification.load(GEMSPEC_PATH)
 

@@ -74,6 +74,7 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
+      - uses: sigstore/cosign-installer@v3
       - name: Check pinned release exists
         id: release
         env:
@@ -113,6 +114,7 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
+      - uses: sigstore/cosign-installer@v3
       - name: Check pinned release exists
         id: release
         env:

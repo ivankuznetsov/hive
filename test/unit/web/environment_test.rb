@@ -89,6 +89,41 @@ class WebEnvironmentTest < Minitest::Test
     assert_includes output.string, "HIVE_WEB_STORAGE_DIR"
   end
 
+  def test_boolean_accepts_documented_forms_and_rejects_invalid_canonical_value
+    %w[1 true yes on].each do |selected|
+      assert_equal true, Hive::Web::Environment.boolean(
+        "HIVE_WEB_LOCAL_LOOPBACK", environment: { "HIVE_WEB_LOCAL_LOOPBACK" => selected }
+      )
+    end
+    %w[0 false no off].each do |selected|
+      assert_equal false, Hive::Web::Environment.boolean(
+        "HIVE_WEB_LOCAL_LOOPBACK", environment: { "HIVE_WEB_LOCAL_LOOPBACK" => selected }
+      )
+    end
+    assert_equal true, Hive::Web::Environment.boolean(
+      "HIVE_WEB_LOCAL_LOOPBACK", environment: {}, default: true
+    )
+
+    error = assert_raises(Hive::Error) do
+      Hive::Web::Environment.boolean(
+        "HIVE_WEB_LOCAL_LOOPBACK",
+        environment: {
+          "HIVE_WEB_LOCAL_LOOPBACK" => "invalid",
+          "HIVEBOX_LOCAL_LOOPBACK" => "true"
+        }
+      )
+    end
+    assert_match(/HIVE_WEB_LOCAL_LOOPBACK must be one of/, error.message)
+  end
+
+  def test_unknown_canonical_setting_is_rejected
+    error = assert_raises(ArgumentError) do
+      Hive::Web::Environment.value("HIVE_WEB_UNKNOWN", environment: {})
+    end
+
+    assert_match(/unknown Hive web environment setting/, error.message)
+  end
+
   def test_shared_app_runtime_has_no_deprecated_direct_reads_outside_resolver
     root = File.expand_path("../../..", __dir__)
     files = Dir[

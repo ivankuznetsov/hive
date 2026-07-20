@@ -32,7 +32,8 @@ class ServiceInstallerBaseTest < Minitest::Test
     def render_launchd = UNIT_BODY
 
     # Expose private mechanics for direct unit testing.
-    public :write_if_safe, :atomic_write, :ruby_shim_dir, :build_path_line
+    public :write_if_safe, :atomic_write, :ruby_shim_dir, :build_path_line,
+           :read_status, :service_manager_available?
   end
 
   def build(dir, **opts)
@@ -271,6 +272,28 @@ class ServiceInstallerBaseTest < Minitest::Test
     end
   end
 
+  def test_linux_manager_availability_probes_show_environment_when_not_injected
+    with_tmp_dir do |dir|
+      seen = []
+      installer = TestInstaller.new(host_os: "linux", home: dir, runner: ->(argv) { seen << argv; true })
+      installer.define_singleton_method(:systemctl_available?) { true }
+
+      assert installer.service_manager_available?
+      assert_includes seen, %w[systemctl --user show-environment]
+    end
+  end
+
+  def test_linux_manager_availability_stops_when_systemctl_is_missing
+    with_tmp_dir do |dir|
+      called = false
+      installer = TestInstaller.new(host_os: "linux", home: dir, runner: ->(_argv) { called = true })
+      installer.define_singleton_method(:systemctl_available?) { false }
+
+      refute installer.service_manager_available?
+      refute called
+    end
+  end
+
   def test_service_state_macos_uses_launchctl_list
     with_tmp_dir do |dir|
       seen = []
@@ -352,6 +375,18 @@ class ServiceInstallerBaseTest < Minitest::Test
     refute state["service_enabled"]
     refute state["service_running"]
     refute state["service_manager_available"]
+  end
+
+  def test_read_status_uses_real_argv_capture_and_handles_missing_binary
+    installer = TestInstaller.new(host_os: "linux")
+
+    output, ok = installer.read_status([ RbConfig.ruby, "-e", "print 'ready'" ])
+    assert_equal "ready", output
+    assert ok
+
+    output, ok = installer.read_status([ "/definitely/missing/hive-status-probe" ])
+    assert_equal "", output
+    refute ok
   end
 
   def test_launchd_label_matches_service_name

@@ -356,6 +356,48 @@ class SetupOrchestratorTest < Minitest::Test
     assert_match(/Errno::EACCES/, phase["message"], "the raised class+message must be recorded")
   end
 
+  def test_drifted_web_service_is_preserved_with_explicit_repair_guidance
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    installer = fake_installer(success: false, wire: "drifted")
+    state = installer.service_state.merge(
+      "ready" => false, "readiness" => "inactive", "url" => "http://127.0.0.1:4567"
+    )
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/usr/bin/hive" }) do
+      with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new, ->(**) { installer }) do
+        with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot, ->(**) { state }) do
+          stub_web_config { setup.send(:install_web_service) }
+        end
+      end
+    end
+
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal false, phase["ok"]
+    assert_equal "drifted", phase["outcome"]
+    assert_match(/customized web service preserved/, phase["message"])
+    assert_match(/hive web install --force/, phase["message"])
+  end
+
+  def test_active_but_not_ready_web_service_uses_truthful_failure_guidance
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    installer = fake_installer(success: true, wire: "unchanged")
+    state = installer.service_state.merge(
+      "ready" => false, "readiness" => "active_not_ready", "url" => "http://127.0.0.1:4567"
+    )
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/usr/bin/hive" }) do
+      with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new, ->(**) { installer }) do
+        with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot, ->(**) { state }) do
+          stub_web_config { setup.send(:install_web_service) }
+        end
+      end
+    end
+
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal false, phase["ok"]
+    assert_match(/did not reach installed, enabled, running, and ready state/, phase["message"])
+  end
+
   # ── bootstrap_qmd_if_missing ─────────────────────────────────────────
 
   def test_qmd_bootstrap_success_records_ok_phase_with_prefix
@@ -616,6 +658,29 @@ class SetupOrchestratorTest < Minitest::Test
     refute_includes text, "fix qmd", "a bootstrappable row must not print a fix hint"
     refute_includes text, "fix ruby", "an ok row must not print a fix hint"
     assert_includes text, "Hive web is not ready at http://127.0.0.1:4567"
+  end
+
+  def test_emit_human_reports_observed_ready_url
+    output = StringIO.new
+    setup = Hive::Commands::Setup.new(json: false, output: output)
+    setup.instance_variable_set(:@web_service, {
+      "ready" => true,
+      "url" => "http://127.0.0.1:4567"
+    })
+
+    stub_web_config { setup.send(:emit, diag(ok_row)) }
+
+    assert_includes output.string, "Hive web ready at http://127.0.0.1:4567"
+  end
+
+  def test_emit_human_reports_foreground_path_when_service_opted_out
+    output = StringIO.new
+    setup = Hive::Commands::Setup.new(json: false, service: false, output: output)
+
+    stub_web_config { setup.send(:emit, diag(ok_row)) }
+
+    assert_includes output.string, "Hive web configured at http://127.0.0.1:4567"
+    assert_includes output.string, "foreground command: `hive web`"
   end
 
   def test_emit_json_matches_successful_predicate

@@ -1,6 +1,7 @@
 require "test_helper"
 require "rubygems/package"
 require "zlib"
+require "hive/digest"
 require "hive/web/app_bundle"
 
 class WebAppBundleTest < Minitest::Test
@@ -160,6 +161,20 @@ class WebAppBundleTest < Minitest::Test
     end
   end
 
+  def test_bundle_install_rejects_package_root_without_gemspec
+    Dir.mktmpdir("hive-web-app") do |app|
+      Dir.mktmpdir("hive-cli-root") do |root|
+        File.write(File.join(app, "Gemfile"), "source 'https://rubygems.org'\n")
+        with_replaced_singleton_method(Hive::Web::AppBundle, :hive_cli_root, -> { root }) do
+          error = assert_raises(Hive::Error) do
+            Hive::Web::AppBundle.bundle_install!(dir: app, output: nil, runner: ->(*) { flunk })
+          end
+          assert_match(/has no hive\.gemspec/, error.message)
+        end
+      end
+    end
+  end
+
   def test_default_bundle_url_prefers_env_override_then_falls_back_to_release_url
     with_env("HIVE_WEB_BUNDLE_URL" => "https://example.test/custom-bundle.tar.gz") do
       assert_equal "https://example.test/custom-bundle.tar.gz", Hive::Web::AppBundle.default_bundle_url
@@ -217,6 +232,19 @@ class WebAppBundleTest < Minitest::Test
       assert_match(/HIVE_WEB_BUNDLE_SHA256/, error.message)
       refute opened, "missing digest must fail before untrusted bytes are downloaded"
     end
+  end
+
+  def test_custom_remote_rejects_invalid_url
+    error = assert_raises(Hive::Error) do
+      Hive::Web::AppBundle.ensure!(
+        bundle_url: "https://exa mple.test/bundle.tar.gz",
+        bundle_sha256: "0" * 64,
+        output: nil,
+        runner: ->(*) { flunk }
+      )
+    end
+
+    assert_match(/invalid managed bundle URL/, error.message)
   end
 
   def test_custom_remote_digest_mismatch_fails_before_extraction_or_bundler
@@ -310,6 +338,47 @@ class WebAppBundleTest < Minitest::Test
     end
   end
 
+  def test_default_release_requires_exactly_one_manifest_row
+    Dir.mktmpdir("hive-web-manifest") do |dir|
+      archive = File.join(dir, "hive-web-#{Hive::VERSION}.tar.gz")
+      File.binwrite(archive, "archive")
+      downloader = lambda do |_url, path|
+        content = File.basename(path) == "SHA256SUMS" ? "no matching row\n" : "fixture"
+        File.binwrite(path, content)
+      end
+
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.verify_default_release!(
+          bundle_url: Hive::Web::AppBundle.github_release_url,
+          archive_path: archive,
+          download_dir: dir,
+          downloader: downloader,
+          verifier: ->(**) { true }
+        )
+      end
+      assert_match(/exactly one digest/, error.message)
+    end
+  end
+
+  def test_default_release_rejects_failed_signature_verification
+    Dir.mktmpdir("hive-web-signature") do |dir|
+      archive = File.join(dir, "hive-web-#{Hive::VERSION}.tar.gz")
+      File.binwrite(archive, "archive")
+      downloader = ->(_url, path) { File.binwrite(path, "fixture") }
+
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.verify_default_release!(
+          bundle_url: Hive::Web::AppBundle.github_release_url,
+          archive_path: archive,
+          download_dir: dir,
+          downloader: downloader,
+          verifier: ->(**) { false }
+        )
+      end
+      assert_match(/signed release manifest verification failed/, error.message)
+    end
+  end
+
   def test_default_signature_verification_requires_cosign
     with_replaced_singleton_method(Hive::InvokedBinary, :which, ->(_name) { }) do
       error = assert_raises(Hive::Error) do
@@ -321,6 +390,48 @@ class WebAppBundleTest < Minitest::Test
         )
       end
       assert_match(/cosign is required/, error.message)
+    end
+  end
+
+  def test_default_signature_verification_runs_cosign_and_reports_failure_stderr
+    status = Object.new
+    status.define_singleton_method(:success?) { false }
+    captured = nil
+
+    _stdout, stderr = capture_io do
+      with_replaced_singleton_method(Hive::InvokedBinary, :which, ->(_name) { "/usr/bin/cosign" }) do
+        with_replaced_singleton_method(Open3, :capture3, lambda { |*argv|
+          captured = argv
+          [ "", "identity mismatch", status ]
+        }) do
+          refute Hive::Web::AppBundle.verify_manifest_signature(
+            manifest: "manifest",
+            signature: "signature",
+            certificate: "certificate",
+            identity: "identity"
+          )
+        end
+      end
+    end
+
+    assert_equal "/usr/bin/cosign", captured.first
+    assert_includes captured, "--certificate-identity-regexp"
+    assert_includes stderr, "identity mismatch"
+  end
+
+  def test_default_signature_verification_accepts_cosign_success
+    status = Object.new
+    status.define_singleton_method(:success?) { true }
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :which, ->(_name) { "/usr/bin/cosign" }) do
+      with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { [ "", "", status ] }) do
+        assert Hive::Web::AppBundle.verify_manifest_signature(
+          manifest: "manifest",
+          signature: "signature",
+          certificate: "certificate",
+          identity: "identity"
+        )
+      end
     end
   end
 

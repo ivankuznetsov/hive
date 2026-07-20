@@ -1,27 +1,7 @@
 ---
 name: hive
-description: "Operate Hive task pipelines through its native CLI. Use when an agent needs to answer current Hive or Hive-bench status, identify the exact active task and blocker owner, follow work through bounded transitions, advance a fresh routine recommendation, diagnose recovery state, initialize or configure Hive, or explain what requires operator action across registered projects."
-version: "0.1.2"
-user-invocable: true
-metadata:
-  openclaw:
-    homepage: "https://github.com/ivankuznetsov/hive"
-    always: true
-    install:
-      - id: homebrew
-        kind: brew
-        formula: ivankuznetsov/hive/hive
-        bins: [hive]
+description: Operate Hive task pipelines through its native CLI. Use when an agent needs to answer current Hive or Hive-bench status, identify the exact active task and blocker owner, follow work through bounded transitions, advance a fresh routine recommendation, diagnose recovery state, initialize or configure Hive, or explain what requires operator action across registered projects.
 ---
-<!-- hive-managed: canonical-skill-projection/v1
-platform: openclaw
-invocation: /hive
-skill-version: 0.1.2
-canonical-digest: 1c8926b2e6a731eb430ea393443c5ce53b9ad6a4385adbb8acf970a79fb01acf
-hive-version: 0.6.4
--->
-
-Invoke this projection as `/hive`.
 
 # Hive Operations
 

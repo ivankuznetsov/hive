@@ -6,10 +6,10 @@ class OpenClawSkillsTest < Minitest::Test
   ROOT = Pathname.new(__dir__).join("../../openclaw/skills").expand_path
   HOMEPAGE = "https://github.com/ivankuznetsov/hive"
   CLAWHUB_SLUG = "hive-cli"
-  CLAWHUB_DESCRIPTION = "Run Hive's folder-based coding-agent pipeline from OpenClaw: " \
-                        "guided CLI setup, project init, task creation, " \
-                        "plan/develop/review workflows, status, daemon, " \
-                        "and guarded admin commands."
+  CLAWHUB_REF = "@ivankuznetsov/#{CLAWHUB_SLUG}"
+  CLAWHUB_DESCRIPTION = "Operate Hive's folder-based coding-agent workflows from OpenClaw: " \
+                        "guided CLI setup, reviewed workflow packages, task pipelines, " \
+                        "patrols, web/TUI status, and consent-gated administration."
 
   def test_only_umbrella_skill_is_published_through_clawhub
     actual = ROOT.glob("*/SKILL.md").map { |path| path.dirname.basename.to_s }.sort
@@ -23,7 +23,7 @@ class OpenClawSkillsTest < Minitest::Test
 
     assert_equal "hive", metadata.fetch("name")
     assert_equal CLAWHUB_DESCRIPTION, metadata.fetch("description")
-    assert_equal "0.1.2", metadata.fetch("version")
+    assert_equal "0.1.3", metadata.fetch("version")
     assert_equal true, metadata.fetch("user-invocable")
     assert_equal HOMEPAGE, openclaw_metadata.fetch("homepage")
     assert_equal true, openclaw_metadata.fetch("always"), "umbrella skill must remain visible for setup"
@@ -42,34 +42,87 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes body, "/hive setup"
     assert_includes body, "/hive install"
     assert_includes body, "/hive bootstrap"
-    assert_includes body, "openclaw skills install #{CLAWHUB_SLUG}"
+    assert_includes body, "openclaw skills install #{CLAWHUB_REF}"
     assert_includes body, "/hive new ."
     assert_includes body, "/hive plan <task-slug>"
     assert_includes body, "/hive develop <task-slug>"
     assert_includes body, "/hive review <task-slug>"
     assert_includes body, "/hive web"
+    assert_includes body, "/hive tui"
+    assert_includes body, "/hive setup-agents"
+    assert_includes body, "/hive workflow install"
+    assert_includes body, "/hive patrol"
+    assert_includes body, "/hive refactor-patrol"
+    assert_includes body, "/hive digest"
+    assert_includes body, "/hive bench submit"
     assert_includes body, "/hive wiki compile-log --check"
     assert_includes body, "wiki/log.d/<timestamp>-<slug>.md"
     assert_includes body, "hive --version"
     assert_includes body, "hv --version"
     assert_includes body, "brew install ivankuznetsov/hive/hive"
-    assert_includes body, "yay -S --noconfirm --needed hive-bin"
-    assert_includes body, "v0.2.0/install.sh"
+    assert_includes body, "yay -S --needed hive-bin"
+    assert_includes body, "paru -S --needed hive-bin"
+    assert_includes body, "v0.6.4/install.sh"
+    refute_match(/(?:yay|paru)[^\n]*--noconfirm/, body)
     assert_includes body, "daemon install"
-    assert_includes body, "setup --json"
+    assert_includes body, "setup --no-init --json"
     assert_includes body, "slash-command text after `/hive` as arguments for `hive_cmd`"
     assert_includes body, '"${hive_cmd}" --help'
     assert_includes body, "Pass arguments safely"
   end
 
+  def test_umbrella_skill_keeps_package_install_and_initial_enrollment_interactive
+    _metadata, body = read_skill("hive")
+    guided_setup = section(body, "## Guided Setup")
+
+    assert_includes guided_setup, "yay -S --needed hive-bin"
+    assert_includes guided_setup, "paru -S --needed hive-bin"
+    assert_includes guided_setup, '"${hive_cmd}" setup --no-init --json'
+    assert_match(/run in their own real terminal/i, guided_setup)
+    assert_match(/Do not execute it through a non-TTY tool\s+call/i, guided_setup)
+    assert_match(/Initial project enrollment.*separate, consent-gated step/im, guided_setup)
+    assert_match(/hive init \..*their own real terminal/im, guided_setup)
+    assert_match(/non-TTY.*defaults/im, guided_setup)
+    assert_match(/subscription.*(?:pull requests?|PRs)|(?:pull requests?|PRs).*subscription/im, guided_setup)
+    refute_match(/(?:yay|paru)[^\n]*--noconfirm/, guided_setup)
+  end
+
   def test_umbrella_skill_documents_custom_workflows
     _metadata, body = read_skill("hive")
+    workflows = section(body, "## Custom Workflows")
 
-    assert_includes body, "Custom Workflows"
-    assert_includes body, "--workflow"
-    assert_includes body, "writing"
-    assert_includes body, "feedback triage"
-    assert_includes body, "hive workflow new"
+    assert_includes workflows, "--workflow"
+    assert_includes workflows, "writing"
+    assert_includes workflows, "feedback triage"
+    assert_includes workflows, "hive workflow new"
+    assert_includes workflows, "hive workflow install honeycomb/<name> --dry-run --json"
+    assert_includes workflows, "hive workflow install honeycomb/<name> --yes --json"
+    assert_includes workflows, "hive workflow list --json"
+    assert_includes workflows, "hive workflow update <name> --dry-run --json"
+    assert_includes workflows, "hive workflow update <name> --yes --json"
+    assert_includes workflows, "hive workflow remove <name> --dry-run --json"
+    assert_includes workflows, "hive workflow remove <name> --yes --json"
+    assert_match(/explicit(?: user approval|ly approves)/i, workflows)
+    assert_includes workflows, "--allow-escalation"
+    assert_match(/do not infer (?:that|escalation) authorization/i, workflows)
+
+    preview_index = workflows.index("hive workflow install honeycomb/<name> --dry-run --json")
+    approval_index = workflows.match(/explicit(?: user approval|ly approves)/i).begin(0)
+    execution_index = workflows.index("hive workflow install honeycomb/<name> --yes --json")
+    assert_operator preview_index, :<, approval_index
+    assert_operator approval_index, :<, execution_index
+  end
+
+  def test_umbrella_skill_documents_machine_readable_setup_agents_approval
+    _metadata, body = read_skill("hive")
+
+    assert_includes body, "hive setup-agents --json"
+    assert_includes body, "hive setup-agents --yes --json"
+    assert_match(
+      /hive setup-agents --json.*(?:approves?|approval).*hive setup-agents --yes --json/im,
+      body
+    )
+    assert_match(/consent-required response and nonzero\s+exit are expected/im, body)
   end
 
   def test_umbrella_skill_documents_daemon_auto_advance
@@ -77,11 +130,11 @@ class OpenClawSkillsTest < Minitest::Test
 
     [
       "auto-advance",
-      "normal OpenClaw setups",
+      "previously approved enrollment",
       "hive daemon status --json",
       "next:",
       "manual fallback or recovery command",
-      "do not ask before ordinary stage advancement",
+      "do not execute the printed command",
       "needs_input",
       "Safety Boundaries"
     ].each do |literal|
@@ -89,8 +142,36 @@ class OpenClawSkillsTest < Minitest::Test
     end
   end
 
+  def test_umbrella_skill_documents_bounded_patrol_tiers
+    _metadata, body = read_skill("hive")
+    patrol = section(body, "## Patrol And Architecture Patrol")
+
+    [
+      "opt-in",
+      "subscription",
+      "patrol.mode",
+      "low",
+      "medium",
+      "high",
+      "ultrapatrol",
+      "2x",
+      "shared daily ceiling",
+      "hive tui",
+      "token",
+      "human-only"
+    ].each do |literal|
+      assert_includes patrol, literal
+    end
+
+    assert_includes patrol, "explicit user confirmation"
+    assert_match(/human-only interactive handoff/i, patrol)
+    assert_match(/must not claim exact\s+token totals/im, patrol)
+    assert_match(/no machine-readable token-stat\s+command/im, patrol)
+  end
+
   def test_umbrella_skill_guards_destructive_and_blocking_commands
     _metadata, body = read_skill("hive")
+    safety = section(body, "## Safety Boundaries")
 
     %w[
       drop
@@ -99,10 +180,11 @@ class OpenClawSkillsTest < Minitest::Test
       forget
       prune
       migrate
-      metrics
     ].each do |verb|
-      assert_includes body, verb
+      assert_includes safety, verb
     end
+
+    assert_match(/Read-only inspection includes[^.]*`metrics`/m, safety)
 
     [
       "daemon stop",
@@ -113,15 +195,23 @@ class OpenClawSkillsTest < Minitest::Test
       "markers clear",
       "approve --force"
     ].each do |command|
-      assert_includes body, command
+      assert_includes safety, command
     end
 
-    assert_includes body, "restate the effect"
-    assert_includes body, "explicit user confirmation"
-    assert_includes body, "hive daemon start --detach"
-    assert_includes body, "hive daemon tail"
-    assert_includes body, "hive bot start --foreground"
-    assert_includes body, "hive bot tail"
+    assert_includes safety, "workflow install/update/remove/publish"
+    assert_includes safety, "`setup-agents`"
+    assert_includes safety, "hive patrol ... --dry-run"
+    assert_includes safety, "hive refactor-patrol ... --dry-run"
+    assert_match(/Both remain consent-gated patrol starts/i, safety)
+    assert_includes safety, "outbound `digest`/`bench submit`"
+    refute_match(/Read-only inspection includes[^.]*patrol/im, safety)
+
+    assert_includes safety, "restate the effect"
+    assert_includes safety, "explicit user confirmation"
+    assert_includes safety, "hive daemon start --detach"
+    assert_includes safety, "hive daemon tail"
+    assert_includes safety, "hive bot start --foreground"
+    assert_includes safety, "hive bot tail"
   end
 
   def test_umbrella_skill_classifies_recovery_markers
@@ -161,37 +251,17 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes safety, "explicit user confirmation"
   end
 
-  def test_umbrella_skill_documents_local_dogfood_workflow
+  def test_umbrella_skill_avoids_direct_runtime_and_service_mutation
     _metadata, body = read_skill("hive")
-    dogfood = section(body, "## Local Dogfood")
-    safety = section(body, "## Safety Boundaries")
 
-    assert_operator body.index(/^## Local Dogfood$/), :<, body.index(/^## Safety Boundaries$/)
-
-    [
-      "gh pr view <number> --json state,mergedAt,baseRefName,statusCheckRollup",
-      "command -v hive",
-      'readlink -f "$(command -v hive)"',
-      "hive daemon status --json",
-      "systemctl --user status hive-daemon.service --no-pager",
-      "preserve dirty worktree",
-      "do not bump or release",
-      "rollback",
-      # Pin the numbered Rollback step heading, not just the prose "rollback"
-      # token, so a future prose reword cannot silently drop the section.
-      "8. Rollback:"
-    ].each do |literal|
-      assert_includes dogfood, literal
-    end
-
-    # The dogfood restart guidance must not weaken or relocate the Safety
-    # Boundaries confirmation contract, so pin these literals to that section.
-    [
-      "restate the effect",
-      "daemon stop"
-    ].each do |literal|
-      assert_includes safety, literal
-    end
+    assert_includes body, "Never patch an installed Hive runtime"
+    assert_includes body, "Hive-native setup and repair commands"
+    refute_includes body, "patch-in-place"
+    refute_includes body, "cat > ~/.config/systemd"
+    refute_includes body, "systemctl --user edit"
+    refute_includes body, "mkdir -p ~/.config/systemd"
+    refute_includes body, "systemctl --user daemon-reload"
+    refute_includes body, "systemctl --user restart hive-daemon.service"
   end
 
   def test_umbrella_skill_documents_status_bundle_playbook
@@ -231,15 +301,10 @@ class OpenClawSkillsTest < Minitest::Test
     [
       "## Watch Selected Tasks",
       "hive status --json",
-      "jq",
-      "HIVE_WATCH_INTERVAL",
-      "HIVE_WATCH_TIMEOUT",
-      "claude_pid_alive",
-      "retry_after",
-      "pr_url",
+      "bounded polling",
+      "timeout",
       "7-artifacts",
       "8-finalize",
-      "trap",
       "Ctrl-C is safe",
       "never kills Hive agents",
       "never clears markers",
@@ -262,21 +327,10 @@ class OpenClawSkillsTest < Minitest::Test
 
     [
       "systemctl --user cat hive-daemon.service",
-      "systemctl --user show hive-daemon.service -p Environment",
       "command -v hive",
-      "HIVE_BIN",
-      "/usr/bin/hive",
-      "~/.local/bin/hive",
-      "GEM_HOME",
-      "GEM_PATH",
-      "PATH",
-      "cannot load such file -- erb (LoadError)",
-      "ruby-erb",
-      "sudo pacman -S ruby-erb",
-      "gem install --user-install erb",
-      "systemctl --user edit hive-daemon.service",
-      "systemctl --user daemon-reload",
-      "systemctl --user restart hive-daemon.service",
+      "hive doctor --json",
+      "hive setup --no-init --json",
+      "hive daemon install --force --json",
       "hive daemon status --json"
     ].each do |literal|
       assert_includes diagnostics, literal
@@ -286,9 +340,15 @@ class OpenClawSkillsTest < Minitest::Test
   def test_openclaw_docs_publish_only_the_single_hive_cli_slug
     readme = Pathname.new(__dir__).join("../../openclaw/README.md").expand_path.read
 
-    assert_includes readme, "openclaw skills install #{CLAWHUB_SLUG}"
-    assert_includes readme, "clawhub skill publish openclaw/skills/hive"
+    assert_includes readme, "openclaw skills install #{CLAWHUB_REF}"
+    assert_includes readme, 'skill_dir="$(pwd)/openclaw/skills/hive"'
+    assert_includes readme, 'clawhub skill publish "$skill_dir"'
     assert_includes readme, "--slug #{CLAWHUB_SLUG}"
+    assert_includes readme, "--version 0.1.3"
+    assert_includes readme, "ClawHub publication is staged"
+    assert_includes readme, "Do not republish, delete, or increment"
+    assert_includes readme, "clawhub inspect #{CLAWHUB_REF}"
+    assert_includes readme, "cmp openclaw/skills/hive/SKILL.md"
     assert_includes readme, "do not publish folders"
     assert_includes readme, "hive-plan"
     refute_includes readme, "for skill in openclaw/skills"

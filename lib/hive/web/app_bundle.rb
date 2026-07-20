@@ -1,4 +1,5 @@
 require "fileutils"
+require "json"
 require "open-uri"
 require "rubygems/package"
 require "zlib"
@@ -10,6 +11,7 @@ module Hive
   module Web
     module AppBundle
       VERSION_FILE = ".hive-web-version".freeze
+      REQUIRED_ASSETS = %w[application.css application.js].freeze
 
       module_function
 
@@ -39,8 +41,26 @@ module Hive
         present? && installed_version != Hive::VERSION
       end
 
+      def assets_ready?(dir = app_dir)
+        assets_dir = File.join(dir, "public", "assets")
+        assets_root = File.expand_path(assets_dir)
+        manifest = JSON.parse(File.read(File.join(assets_dir, ".manifest.json")))
+        return false unless manifest.is_a?(Hash)
+        return false unless REQUIRED_ASSETS.all? { |logical_path| manifest.key?(logical_path) }
+
+        manifest.values.all? do |entry|
+          digested_path = entry["digested_path"] if entry.is_a?(Hash)
+          next false unless digested_path.is_a?(String) && !digested_path.empty?
+
+          asset_path = File.expand_path(digested_path, assets_dir)
+          asset_path.start_with?("#{assets_root}/") && File.file?(asset_path)
+        end
+      rescue ArgumentError, JSON::ParserError, SystemCallError, TypeError
+        false
+      end
+
       def ensure!(bundle_url: default_bundle_url, runner: nil, output: $stderr)
-        return app_dir if present? && !stale?
+        return app_dir if present? && !stale? && assets_ready?
 
         if bundle_url.to_s.empty?
           raise Hive::Error,
@@ -62,14 +82,11 @@ module Hive
           raise Hive::Error, "hive web: downloaded web bundle does not contain config/application.rb"
         end
 
-        # Run `bundle install` against the staged tmp bundle BEFORE swapping it
-        # into place. A transient Bundler / native-extension failure then leaves
-        # the previous working install untouched instead of replacing it with an
-        # unstamped broken bundle. Only after Bundler succeeds do we swap and
-        # stamp the version (the stamp is last so a crash between swap and stamp
-        # leaves `installed_version` nil → `stale?` true → next `ensure!`
-        # re-bootstraps rather than trusting a half-provisioned bundle).
-        bundle_install!(dir: tmp, runner: runner, output: output)
+        # Prepare dependencies and production assets in the staged bundle
+        # BEFORE swapping it into place. A failed refresh then leaves the
+        # previous working install untouched. The version stamp remains last,
+        # so an interrupted swap is retried rather than trusted.
+        prepare!(dir: tmp, runner: runner, output: output)
         FileUtils.rm_rf(app_dir)
         FileUtils.mkdir_p(File.dirname(app_dir))
         FileUtils.mv(tmp, app_dir)
@@ -79,17 +96,37 @@ module Hive
         FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
       end
 
-      def bundle_install!(dir: app_dir, runner: nil, output: $stderr)
-        return dir unless File.file?(File.join(dir, "Gemfile"))
+      def prepare!(dir: app_dir, runner: nil, output: $stderr)
+        unless File.file?(File.join(dir, "Gemfile"))
+          raise Hive::Error, "hive web: downloaded web bundle does not contain a Gemfile"
+        end
 
         runner ||= ->(argv, env) { system(env, *argv) }
-        ok = runner.call(%w[bundle install],
-                         { "BUNDLE_GEMFILE" => File.join(dir, "Gemfile"),
-                           "HIVE_CLI_ROOT" => hive_cli_root })
-        raise Hive::Error, "hive web: bundle install failed in #{dir}" unless ok
+        env = {
+          "BUNDLE_GEMFILE" => File.join(dir, "Gemfile"),
+          "HIVE_CLI_ROOT" => hive_cli_root
+        }
+        asset_storage = File.join(dir, "tmp", "assets-build-storage")
+        Dir.chdir(dir) do
+          raise Hive::Error, "hive web: bundle install failed in #{dir}" unless runner.call(%w[bundle install], env)
 
-        output.puts "hive web: installed Rails bundle in #{dir}" if output
+          asset_env = env.merge(
+            "RAILS_ENV" => "production",
+            "SECRET_KEY_BASE" => "hive-managed-web-assets-build",
+            "HIVEBOX_STORAGE_DIR" => asset_storage
+          )
+          unless runner.call(%w[bin/rails assets:precompile], asset_env)
+            raise Hive::Error, "hive web: asset precompile failed in #{dir}"
+          end
+        end
+        unless assets_ready?(dir)
+          raise Hive::Error, "hive web: asset precompile produced no usable CSS/JavaScript in #{dir}"
+        end
+
+        output.puts "hive web: installed Rails bundle and compiled assets in #{dir}" if output
         dir
+      ensure
+        FileUtils.rm_rf(asset_storage) if asset_storage
       end
 
       def default_bundle_url

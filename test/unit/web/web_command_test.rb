@@ -172,6 +172,17 @@ class WebCommandTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, "bin"))
       File.write(File.join(dir, "bin", "rails"), "#!/usr/bin/env bash\nexit 0\n")
       FileUtils.chmod(0o755, File.join(dir, "bin", "rails"))
+      assets = File.join(dir, "public", "assets")
+      FileUtils.mkdir_p(assets)
+      File.write(File.join(assets, "application-test.css"), "body {}\n")
+      File.write(File.join(assets, "application-test.js"), "export {}\n")
+      File.write(
+        File.join(assets, ".manifest.json"),
+        JSON.generate(
+          "application.css" => { "digested_path" => "application-test.css" },
+          "application.js" => { "digested_path" => "application-test.js" }
+        )
+      )
 
       original = Kernel.method(:exec)
       Kernel.define_singleton_method(:exec) do |env, *argv|

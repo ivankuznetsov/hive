@@ -76,12 +76,18 @@ hive web
 QMD, SQLite, and the Rails bundle. It installs Hive-owned pieces it can
 manage, installs the daemon service, and enrolls the current project. Bare
 `hive web` serves `http://127.0.0.1:4567` in the foreground with
-loopback-only no-auth mode (set `web.local_loopback: false` to require GitHub
-login even on a loopback bind — see [wiki/commands/web.md](wiki/commands/web.md)).
+loopback-only no-auth mode over the same local project registry and workflow
+state as the TUI. GitHub is an optional connection for repository browsing and
+cloning, not a prerequisite or ownership claim. An authenticated, access-
+restricted local reverse proxy such as Tailscale Serve (with tailnet ACLs) can
+forward to that loopback listener. Because Hive trusts the proxy's localhost
+connection, do not expose an unrestricted forwarder to it. Set
+`web.local_loopback: false` to require GitHub login even there (see
+[wiki/commands/web.md](wiki/commands/web.md)).
 For autostart, run `hive setup --service` or
 `hive web install` and `hive web start --detach`; the web service is separate
-from the daemon service. Docker/hivebox remains supported for container-first
-installs.
+from the daemon service. Docker/hivebox is the separate owner-gated,
+container-first deployment mode.
 
 ### Install via a coding agent
 
@@ -92,10 +98,10 @@ To have Claude Code, Codex, or another agent CLI install Hive for you (with OS d
 Hive publishes one OpenClaw skill through ClawHub:
 
 ```bash
-openclaw skills install hive-cli
+openclaw skills install @ivankuznetsov/hive-cli
 ```
 
-Public listing: <https://clawhub.ai/ivankuznetsov/hive-cli>.
+Public listing: <https://clawhub.ai/ivankuznetsov/skills/hive-cli>.
 
 That listing installs the `/hive` slash command. Ask OpenClaw to run the guided
 setup:

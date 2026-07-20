@@ -135,6 +135,13 @@ module Hive
         end
 
         rotate_if_needed!
+        # rotate_if_needed! enters the stderr fallback itself when both the
+        # rename and the reopen fail, so re-check before touching @file.
+        if @stderr_fallback
+          warn line
+          return
+        end
+
         @file.puts(line)
         @file.flush
       end

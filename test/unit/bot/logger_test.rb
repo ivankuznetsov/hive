@@ -294,6 +294,42 @@ class HiveBotLoggerTest < Minitest::Test
     end
   end
 
+  # Regression: when rotation's rename AND reopen both fail, rotate_if_needed!
+  # sets @file = nil and @stderr_fallback = true mid-call; event previously
+  # fell through to @file.puts(line) and raised NoMethodError on nil instead
+  # of degrading the in-flight line (and all subsequent lines) to stderr.
+  def test_event_degrades_in_flight_line_to_stderr_when_rotation_and_reopen_both_fail
+    with_tmp_dir do |dir|
+      path = File.join(dir, "double-failure.log")
+      logger = Hive::Bot::Logger.new(path: path, max_bytes: 1, max_files: 2)
+      logger.event(:bot_started, padding: "x" * 100)
+      original_open = File.method(:open)
+      failing_open = lambda do |target, *args, &block|
+        raise Errno::ENOSPC, "full" if target == path && args.first == "a"
+
+        original_open.call(target, *args, &block)
+      end
+
+      err = capture_stderr do
+        with_replaced_singleton_method(File, :rename, ->(*_args) { raise Errno::EACCES, "blocked" }) do
+          with_replaced_singleton_method(File, :open, failing_open) do
+            logger.event(:poll_failure, message: "in-flight line")
+          end
+        end
+        logger.event(:poll_unhealthy, message: "subsequent line")
+      end
+
+      assert logger.stderr_fallback?
+      assert_includes err, "falling back to stderr"
+      in_flight = err.lines.find { |l| l.include?('"event":"poll_failure"') }
+      refute_nil in_flight, "in-flight event should be warned to stderr, not raise"
+      assert_equal "in-flight line", JSON.parse(in_flight).fetch("message")
+      assert(err.lines.any? { |l| l.include?('"event":"poll_unhealthy"') },
+             "subsequent events should keep taking the stderr path")
+      logger.close
+    end
+  end
+
   def test_file_size_warning_is_emitted_once_when_stat_fails
     with_log do |logger, _path|
       fake_file = Object.new

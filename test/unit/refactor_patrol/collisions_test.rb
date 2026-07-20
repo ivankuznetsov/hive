@@ -147,7 +147,7 @@ class RefactorPatrolCollisionsTest < Minitest::Test
       expected_leverage: { "score" => 0.5, "breakdown" => { "churn" => 0.5 } },
       confidence: "medium",
       risk: {
-        "caps" => { "est_files" => 2, "est_diff_lines" => 80, "single_feature" => true },
+        "caps" => { "single_feature" => true },
         "public_api_impact" => false,
         "public_api_details" => [],
         "cross_feature_impact" => false,

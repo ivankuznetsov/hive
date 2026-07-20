@@ -1101,7 +1101,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   def complete_zero_envelope(entry)
     aggregate = Hive::RefactorPatrol::JobStore.new(entry.fetch("path")).read_job("job-7")
     {
-      "schema" => "hive-refactor-patrol", "schema_version" => 2, "ok" => true,
+      "schema" => "hive-refactor-patrol", "schema_version" => 3, "ok" => true,
       "job_id" => "job-7", "project" => entry.fetch("name"), "project_root" => entry.fetch("path"),
       "dry_run" => false, "source_pr" => aggregate.fetch("source"), "analysis_sha" => "head",
       "complete" => true, "features_mapped" => 1,
@@ -1115,6 +1115,8 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
 
   def action_envelope(entry, aggregate)
     {
+      # A child launched before an upgrade may still return the frozen v2
+      # contract. The scheduler must accept that in-flight result.
       "schema" => "hive-refactor-patrol", "schema_version" => 2, "ok" => true,
       "job_id" => aggregate.fetch("job_id"), "project" => entry.fetch("name"),
       "project_root" => entry.fetch("path"), "dry_run" => false,

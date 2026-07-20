@@ -368,10 +368,10 @@ class ConfigTest < Minitest::Test
       assert_nil cfg.dig("refactor_patrol", "commands", "docs")
       assert cfg.dig("refactor_patrol", "commands").key?("public_contract")
       assert_nil cfg.dig("refactor_patrol", "commands", "public_contract")
-      assert_equal 8, cfg.dig("refactor_patrol", "caps", "max_files")
-      assert_equal 400, cfg.dig("refactor_patrol", "caps", "max_diff_lines")
-      assert_equal true, cfg.dig("refactor_patrol", "caps", "single_feature_only")
-      assert_equal false, cfg.dig("refactor_patrol", "caps", "allow_cross_feature")
+      refute cfg.dig("refactor_patrol", "caps").key?("max_files")
+      refute cfg.dig("refactor_patrol", "caps").key?("max_diff_lines")
+      assert_equal false, cfg.dig("refactor_patrol", "caps", "single_feature_only")
+      assert_equal true, cfg.dig("refactor_patrol", "caps", "allow_cross_feature")
       assert_equal 0.3, cfg.dig("refactor_patrol", "leverage", "weights", "churn")
       assert_equal 0.0, cfg.dig("refactor_patrol", "leverage", "weights", "coverage_gap")
       assert_equal 6, cfg.dig("refactor_patrol", "review", "max_owned_files")
@@ -415,8 +415,6 @@ class ConfigTest < Minitest::Test
           max_review_seconds_per_run: 600
           commands:
             test: bundle exec rake test
-          caps:
-            max_files: 4
           leverage:
             weights:
               churn: 0.9
@@ -435,8 +433,8 @@ class ConfigTest < Minitest::Test
       assert_equal 4, cfg.dig("refactor_patrol", "max_theses_per_run")
       assert_equal 600, cfg.dig("refactor_patrol", "max_review_seconds_per_run")
       assert_equal "bundle exec rake test", cfg.dig("refactor_patrol", "commands", "test")
-      assert_equal 4, cfg.dig("refactor_patrol", "caps", "max_files")
-      assert_equal 400, cfg.dig("refactor_patrol", "caps", "max_diff_lines")
+      refute cfg.dig("refactor_patrol", "caps").key?("max_files")
+      refute cfg.dig("refactor_patrol", "caps").key?("max_diff_lines")
       assert_equal 0.9, cfg.dig("refactor_patrol", "leverage", "weights", "churn")
       assert_equal 0.25, cfg.dig("refactor_patrol", "leverage", "weights", "fan_in")
     end
@@ -493,19 +491,6 @@ class ConfigTest < Minitest::Test
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_includes err.message, "refactor_patrol.caps.allow_cross_feature"
       assert_includes err.message, "must be a boolean"
-    end
-
-    with_tmp_dir do |dir|
-      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
-      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        refactor_patrol:
-          caps:
-            max_files: 0
-      YAML
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
-      assert_includes err.message, "refactor_patrol.caps.max_files"
-      assert_includes err.message, ">= 1"
     end
 
     with_tmp_dir do |dir|

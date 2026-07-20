@@ -9,7 +9,8 @@ tags: [command, refactor-patrol, architecture, json, daemon]
 
 **TLDR**: `hive refactor-patrol` is Hive's language-neutral architecture
 patrol. The original on-demand v1 report remains available, while merged-PR
-mode emits a durable v2 lifecycle: immutable PR scope, read-only discovery,
+mode emits the current v3 report over a durable v2 job lifecycle: immutable PR
+scope, read-only discovery,
 exhaustive dispositions, and separately authorized isolated fixes or
 deduplicated issues. It is not Ruby- or Hive-specific: discovery maps generic
 repositories and unfamiliar source languages. Automatic mutation is narrower
@@ -68,6 +69,11 @@ refactor_patrol:
     # Optional project-owned compatibility check for source/public surfaces.
     public_contract: null
     test: bin/test
+  caps:
+    # Cross-feature scope is normal for architecture refactoring. Contract and
+    # dependency changes remain gated independently of patch size.
+    single_feature_only: false
+    allow_cross_feature: true
 ```
 
 ## Discovery modes
@@ -351,10 +357,14 @@ fallback, so ambiguous equality keeps the blocker visible.
 
 ## Fix and issue routing
 
-Only accepted, unflagged theses from a job whose enqueue-time policy allowed
-auto-fix can reach `Fixer`. The current config may revoke or narrow that
-snapshot; it cannot raise caps, lower confidence/leverage thresholds, add a
-validation command, switch agents, or otherwise broaden an old job.
+Current accepted, unflagged theses can reach `Fixer`. For upgrade recovery,
+an admissible persisted row whose complete reason set contains only the retired
+`exceeds_max_files` / `exceeds_max_diff_lines` flags receives the same current
+action authority while its stored historical disposition remains immutable.
+The job's enqueue-time policy must have allowed auto-fix. The current config may revoke or narrow that
+snapshot; it cannot relax captured contract/dependency guards, lower
+confidence/leverage thresholds, add a validation command, switch agents, or
+otherwise broaden an old job.
 
 Fixes run with the Codex workspace-write profile in a deterministic isolated
 worktree on `hive-refactor/<canonical-action-id>`. The repository-global branch
@@ -363,13 +373,24 @@ handoffs. Hive fetches and validates the committed default-branch ref before
 the fix and at publication fences; the operator's checked-out branch and dirty
 files are irrelevant. Default-branch history must still descend from the
 validated head. Before commit or push,
-Hive checks actual feature-boundary paths, file/diff caps, protected paths,
-secrets, dependency manifests, and public declarations across supported
-ecosystems, then runs every named validation command under
-`timeout_sec.patrol`. Unknown source languages
+Hive checks actual feature-boundary paths, root confinement, `.hive-state`
+control-plane protection, protected paths, secrets, dependency manifests, and
+public declarations across supported ecosystems, then runs every named
+validation command under `timeout_sec.patrol`. Cross-feature scope is allowed
+by default because useful refactoring commonly consolidates ownership across
+components. File count and diff size are recorded as
+publication evidence but never accept, reject, truncate, or reroute a thesis;
+the normal review workflow judges whether the resulting PR is meaningful and
+coherent. The reviewer receives only bounded owned content plus a fixed-size
+list of mapper-selected context and test paths for its one follow-up inspection
+round; cross-feature discovery does not grant repository-wide search. Unknown source languages
 remain discoverable but fail automatic mutation when no public-contract guard
-can prove safety. Documentation fixes need an explicit `docs` command; without
-one, an admissible material thesis may file an issue but cannot open a PR.
+can prove safety. Documentation-only fixes prefer an explicit `docs` command;
+without one, Hive runs `git diff --cached --check` as a deterministic minimum
+only for inert documentation extensions and named documentation files;
+executable documentation formats such as MDX remain report-only without a
+configured `docs` command
+and sends the resulting PR through the normal review workflow.
 When `refactor_patrol.commands.public_contract` is configured, it is an
 authoritative executable guard and runs for every automatic fix that changes a
 source or known public-surface path. Built-in declaration guards still enforce
@@ -380,9 +401,17 @@ type's visibility from hiding a later type's public contract. Extensionless
 scripts are recognized from either current or pinned-base shebang bytes and
 remain report-only unless a configured public-contract command certifies them.
 Disjoint trunk movement rebases only the isolated
-patch and repeats the full audit; overlapping feature movement reruns the fix
+patch and repeats the full audit; movement overlapping any actual patch path reruns the fix
 from current clean trunk. Registered trunk is never reset, pulled, edited, or
 committed by patrol.
+
+Issue routing is intentionally exceptional rather than the normal destination
+for architectural findings. Dependency changes, public-contract changes, and
+deterministic validation or safety failures are the cases where human design
+participation is likely to help. Complete behavior-preserving theses—including
+cross-feature and docs-only work—prefer an automatic fix PR when that separate
+consent gate is enabled, leaving acceptance to normal review rather than
+requiring a pre-implementation issue discussion.
 
 `PrOpener` reconciles the complete same-branch PR set by exact action marker,
 head SHA, base, repository, and GitHub host. Each validated patch generation
@@ -522,14 +551,14 @@ includes `review_complete`, `review_errors`, and per-feature progress so a
 token-limited or failed review cannot look like a clean zero-thesis result.
 Structured cap evidence is retained under
 `review_errors[].details.resource_exhaustion`. PR discovery and action
-resume emit `hive-refactor-patrol.v2`, including source identity,
+resume emit `hive-refactor-patrol.v3`, including source identity,
 `analysis_sha`, completeness, per-feature progress,
 accepted/flagged/suppressed dispositions, review errors, attempts, and public
-action receipts. V2 thesis snapshots carry
+action receipts. V3 thesis snapshots carry
 the complete normalized thesis rather than only identity fields.
 Pre-dispatch `--json` usage errors follow the same mode: legacy argv receives a
 schema-valid v1 error, while `--pr`, `--job-manifest`, or enabled `--actions`
-argv receives a schema-valid v2 error with the required empty job/source and
+argv receives a schema-valid v3 error with the required empty job/source and
 `complete: false` projection.
 
 Read-only `--list` and `--show` use a separate
@@ -541,7 +570,7 @@ Their query-specific error arm preserves the requested `action` (`list` or
 `show`, or null for a selector-less query modifier) without falling through to
 either discovery reporter.
 
-Daemon children write their v2 document atomically to the job-bound internal
+Daemon children write their v3 document atomically to the job-bound internal
 result file. Stdout remains operator logging, so a valid snapshot larger than
 the supervisor's ordinary 64 KiB log tail is not truncated into a false retry.
 

@@ -8,6 +8,13 @@ class AgentSkillsManifestTest < Minitest::Test
     manifest = Hive::AgentSkills::Manifest.load
 
     assert_equal 1, manifest.schema_version
+    bundled = manifest.package("hive-operations")
+    assert bundled.bundled?
+    assert_equal Hive::AgentSkills::CanonicalSkill.new.version, bundled.version
+    assert_equal "skills/hive", bundled.native_for("claude").destination
+    assert_equal "/hive", manifest.capability("hive").agent("claude").invocation
+    assert_equal "/hive", manifest.capability("hive").agent("codex").invocation
+    assert_equal "/skill:hive", manifest.capability("hive").agent("pi").invocation
     assert_equal "compound-engineering@compound-engineering-plugin",
                  manifest.package("compound-engineering").native_for("claude").package
     assert_equal "pr-review-toolkit@claude-plugins-official",
@@ -101,6 +108,24 @@ class AgentSkillsManifestTest < Minitest::Test
       end
       refute_empty error.message
     end
+  end
+
+  def test_bundled_contract_rejects_copied_versions_and_projection_drift
+    base = YAML.safe_load(File.read(Hive::AgentSkills::Manifest.default_path))
+    bundled = base["packages"].find { |row| row["id"] == "hive-operations" }
+    bundled["version"] = "0.0.0"
+    error = assert_raises(Hive::AgentSkills::Manifest::ValidationError) do
+      Hive::AgentSkills::Manifest.parse(base, source: "copied bundled version")
+    end
+    assert_match(/derived from the canonical skill/, error.message)
+
+    base = YAML.safe_load(File.read(Hive::AgentSkills::Manifest.default_path))
+    base["capabilities"].find { |row| row["id"] == "hive" }
+      .dig("agents", "pi")["invocation"] = "/hive"
+    error = assert_raises(Hive::AgentSkills::Manifest::ValidationError) do
+      Hive::AgentSkills::Manifest.parse(base, source: "drifted bundled invocation")
+    end
+    assert_match(/must match bundled pi projection/, error.message)
   end
 
   def test_loader_wraps_missing_files_and_internal_missing_keys

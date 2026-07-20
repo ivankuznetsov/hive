@@ -206,12 +206,12 @@ class HiveCliTest < Minitest::Test
   def test_setup_wires_options_and_exits_with_command_status
     with_command_new_stub(Hive::Commands::Setup, return_value: 3) do |calls|
       _out, _err, status = with_captured_exit do
-        Hive::CLI.start([ "setup", "--json", "--service", "--no-bootstrap", "--no-init" ])
+        Hive::CLI.start([ "setup", "--json", "--yes", "--service", "--no-bootstrap", "--no-init" ])
       end
 
       assert_equal 3, status, "the CLI must exit with the Setup command's return value"
       assert_equal(
-        { json: true, service: true, no_bootstrap: true, no_init: true },
+        { json: true, service: true, no_bootstrap: true, no_init: true, yes: true },
         calls.first.fetch(:kwargs),
         "every setup flag must be forwarded to Hive::Commands::Setup.new"
       )
@@ -225,7 +225,7 @@ class HiveCliTest < Minitest::Test
 
       assert_equal 0, status
       assert_equal(
-        { json: false, service: false, no_bootstrap: false, no_init: false },
+        { json: false, service: false, no_bootstrap: false, no_init: false, yes: false },
         calls.first.fetch(:kwargs),
         "with no flags the CLI must pass the documented defaults"
       )

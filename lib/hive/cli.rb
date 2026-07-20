@@ -316,6 +316,7 @@ module Hive
     end
 
     desc "setup", "Provision local Hive web mode, daemon service, and project enrollment"
+    option :yes, type: :boolean, default: false, desc: "accept the aggregate agent-skill provisioning plan"
     option :service, type: :boolean, default: false, desc: "also install the managed web service"
     option :no_bootstrap, type: :boolean, default: false, desc: "diagnose only; do not install qmd or web bundle"
     option :no_init, type: :boolean, default: false, desc: "do not initialize or enroll the current project"
@@ -325,7 +326,8 @@ module Hive
         json: options[:json],
         service: options[:service],
         no_bootstrap: options[:no_bootstrap],
-        no_init: options[:no_init]
+        no_init: options[:no_init],
+        yes: options[:yes]
       ).call
     end
 

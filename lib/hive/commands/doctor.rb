@@ -79,7 +79,8 @@ module Hive
           config: @config,
           project_root: @project_root,
           runner: @inspector_runner,
-          environment: @environment
+          environment: @environment,
+          include_openclaw: true
         )
         inspector.inspect.map { |inspection| managed_row(inspection) }
       end

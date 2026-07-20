@@ -85,7 +85,7 @@ module Hive
                      workflow_input: $stdin, workflow_output: $stderr,
                      provisioning_input: $stdin, provisioning_output: $stdout,
                      provisioning_error: $stderr, preflight_inspector: nil,
-                     setup_agents_factory: nil)
+                     setup_agents_factory: nil, agent_skill_preflight: true)
         @project_path = File.expand_path(project_path)
         @force = force
         @json = json
@@ -101,6 +101,10 @@ module Hive
         @provisioning_output = provisioning_output
         @provisioning_error = provisioning_error
         @preflight_inspector = preflight_inspector
+        unless [ true, false ].include?(agent_skill_preflight)
+          raise ArgumentError, "agent_skill_preflight must be true or false"
+        end
+        @agent_skill_preflight = agent_skill_preflight
         @setup_agents_factory = setup_agents_factory || lambda do |**kwargs|
           Hive::Commands::SetupAgents.new(**kwargs)
         end
@@ -170,7 +174,7 @@ module Hive
           print_summary(entry: entry, ops: ops, answers: answers, workflow: workflow_choice.descriptor.id)
         end
         register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
-        run_init_preflight!
+        run_init_preflight! if @agent_skill_preflight
       rescue Hive::Commands::Init::Prompts::Aborted => e
         # The interactive WORKFLOW prompt (resolve_workflow_choice, which runs
         # before collect_prompt_answers) aborts on closed stdin. Mirror
@@ -219,7 +223,7 @@ module Hive
           print_summary(entry: entry, ops: ops, answers: answers, workflow: id, scaffold_paths: paths)
         end
         register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
-        run_init_preflight!
+        run_init_preflight! if @agent_skill_preflight
       end
 
       def scaffold_descriptor_commit!(ops, id)

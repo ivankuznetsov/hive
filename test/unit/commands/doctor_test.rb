@@ -14,7 +14,8 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
 
     def inspect
-      Hive::AgentSkills::TargetResolver.new(config: @config, project_root: @project_root).resolve.map do |target|
+      Hive::AgentSkills::TargetResolver.new(config: @config, project_root: @project_root).resolve
+        .reject { |target| target.capability_id == "hive" }.map do |target|
         if target.kind == "linter" || target.kind == "codex_review"
           health = "healthy"
           message = "kind '#{target.kind}' is not 'agent'; doctor only checks agent-kind reviewers"
@@ -951,6 +952,49 @@ class HiveCommandsDoctorTest < Minitest::Test
     assert_equal Hive::Commands::Doctor::EXIT_MISSING_SKILL, exit_code
     assert_includes out.string, "/repo/.claude/commands/plan.md"
     assert_includes out.string, "Hive will not replace it"
+  end
+
+  def test_doctor_requests_read_only_openclaw_evidence_from_default_inspector
+    captured = nil
+    fake = Struct.new(:rows) { def inspect = rows }.new([])
+    replacement = lambda do |**kwargs|
+      captured = kwargs
+      fake
+    end
+
+    with_replaced_singleton_method(Hive::AgentSkills::Inspector, :new, replacement) do
+      Hive::Commands::Doctor.new(
+        config: base_config, project_root: nil, output: StringIO.new
+      ).call
+    end
+
+    assert_equal true, captured.fetch(:include_openclaw)
+  end
+
+  def test_openclaw_drift_is_actionable_but_never_setup_managed
+    target = Hive::AgentSkills::Target.new(
+      surfaces: [ "hive.operations" ], kind: "openclaw", agent: "openclaw",
+      configured_skill: "hive", invocation: "/hive", capability_id: "hive",
+      package_id: "hive-operations", managed: false
+    )
+    row = Hive::AgentSkills::Inspection.new(
+      target: target,
+      expected: { "distribution" => "clawhub", "version" => "0.1.2" },
+      native: { "available" => true, "clawhub" => { "installedVersion" => "0.1.1" } },
+      resolution: { "path" => "/home/me/.openclaw/workspace/skills/hive-cli/SKILL.md" },
+      health: "stale", severity: "warning", explanation: "ClawHub Hive skill is stale",
+      remediation: "openclaw skills update @ivankuznetsov/hive-cli"
+    )
+    inspector = Struct.new(:rows) { def inspect = rows }.new([ row ])
+    output = StringIO.new
+
+    exit_code = Hive::Commands::Doctor.new(
+      config: base_config, project_root: nil, output: output, inspector: inspector
+    ).call
+
+    assert_equal Hive::Commands::Doctor::EXIT_MISSING_SKILL, exit_code
+    assert_includes output.string, "openclaw skills update @ivankuznetsov/hive-cli"
+    refute row.managed
   end
 
   def test_private_dependency_and_rendering_boundaries

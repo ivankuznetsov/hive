@@ -66,7 +66,7 @@ class AgentSkillsInspectorTest < Minitest::Test
       project_root: project,
       runner: runner,
       environment: { "HOME" => project, "PATH" => "" }.merge(environment)
-    ).inspect
+    ).inspect.reject { |row| row.capability_id == "hive" }
   end
 
   def test_target_resolver_derives_stages_reviewers_and_optional_browser_skill
@@ -76,7 +76,7 @@ class AgentSkillsInspectorTest < Minitest::Test
 
     targets = resolver.resolve
 
-    assert_equal %w[ce-brainstorm wiki-plan ce-code-review ce-test-browser].sort,
+    assert_equal %w[ce-brainstorm wiki-plan ce-code-review ce-test-browser hive hive hive].sort,
                  targets.select(&:managed).map(&:capability_id).sort
     assert_equal "/ce-code-review", targets.find { |t| t.capability_id == "ce-code-review" }.invocation
   end

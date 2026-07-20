@@ -145,7 +145,7 @@ module Hive
       end
 
       def resolve(agents: nil, skills: nil)
-        targets = []
+        targets = Manifest::AGENTS.map { |agent| operating_target(agent) }
         STAGES.each { |stage| targets << stage_target(stage) }
         Array(@config.dig("review", "reviewers")).each_with_index do |spec, index|
           name = spec["name"].to_s
@@ -169,6 +169,21 @@ module Hive
       end
 
       private
+
+      def operating_target(agent)
+        capability = @manifest.capability("hive")
+        contract = capability.agent(agent)
+        Target.new(
+          surfaces: [ "hive.operations" ].freeze,
+          kind: "operating",
+          agent: agent,
+          configured_skill: capability.id,
+          invocation: contract.invocation,
+          capability_id: capability.id,
+          package_id: capability.package_id,
+          managed: true
+        )
+      end
 
       def stage_target(stage)
         agent = (@config.dig(stage, "agent") || "claude").to_s

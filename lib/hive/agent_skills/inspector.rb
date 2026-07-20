@@ -2,6 +2,8 @@ require "json"
 require "rubygems/version"
 
 require "hive/agent_skills"
+require "hive/agent_skills/canonical_skill"
+require "hive/agent_skills/directory_publisher"
 require "hive/skill_check"
 
 module Hive
@@ -42,7 +44,8 @@ module Hive
       INVENTORY_TIMEOUT_SEC = 10
 
       def initialize(config:, project_root:, manifest: Manifest.load,
-                     resolver: nil, runner: CommandRunner.new, environment: ENV)
+                     resolver: nil, runner: CommandRunner.new, environment: ENV,
+                     include_openclaw: false, openclaw_adapter: nil)
         @config = config
         @project_root = project_root && File.expand_path(project_root)
         @manifest = manifest
@@ -51,6 +54,8 @@ module Hive
         )
         @runner = runner
         @environment = environment
+        @include_openclaw = include_openclaw
+        @openclaw_adapter = openclaw_adapter
         @native_cache = {}
       end
 
@@ -59,10 +64,39 @@ module Hive
         # post-provision verification must observe fresh native state rather
         # than the pre-execution cache.
         @native_cache = {}
-        @resolver.resolve(agents: agents, skills: skills).map { |target| inspect_target(target) }.freeze
+        rows = @resolver.resolve(agents: agents, skills: skills).map { |target| inspect_target(target) }
+        rows << inspect_openclaw if @include_openclaw && Array(agents).empty? && Array(skills).empty?
+        rows.freeze
       end
 
       private
+
+      def inspect_openclaw
+        require "hive/agent_skills/adapters/openclaw"
+        evidence = (@openclaw_adapter || Adapters::OpenClaw.new(
+          runner: @runner, environment: @environment
+        )).inspect
+        target = Target.new(
+          surfaces: [ "hive.operations" ].freeze,
+          kind: "openclaw",
+          agent: "openclaw",
+          configured_skill: "hive",
+          invocation: "/hive",
+          capability_id: "hive",
+          package_id: "hive-operations",
+          managed: false
+        ).freeze
+        Inspection.new(
+          target: target,
+          expected: evidence.expected,
+          native: evidence.native,
+          resolution: evidence.resolution,
+          health: evidence.health,
+          severity: evidence.health == "healthy" ? "info" : "warning",
+          explanation: evidence.explanation,
+          remediation: evidence.remediation
+        ).freeze
+      end
 
       def inspect_target(target)
         return inspect_unmanaged(target) unless target.managed
@@ -70,6 +104,8 @@ module Hive
         capability = @manifest.capability(target.capability_id)
         package = @manifest.package(capability.package_id)
         contract = capability.agent(target.agent)
+        return inspect_bundled_target(target, package, contract) if package.bundled?
+
         native_spec = package.native_for(target.agent)
         expected = {
           "package" => native_spec.package,
@@ -111,6 +147,137 @@ module Hive
           resolution: resolution.reject { |key, _| key == "issues" }.freeze,
           issues: issues
         )
+      end
+
+      def inspect_bundled_target(target, package, contract)
+        bundled_spec = package.native_for(target.agent)
+        projection = CanonicalSkill.new.render(target.agent)
+        root = config_root_for(bundled_spec)
+        destination = File.join(root, projection.destination_relative)
+        expected = {
+          "distribution" => "bundled",
+          "package" => package.id,
+          "package_id" => package.id,
+          "version" => projection.skill_version,
+          "canonical_digest" => projection.canonical_digest,
+          "source" => "hive-gem",
+          "marketplace" => nil,
+          "destination" => destination,
+          "invocation" => contract.invocation,
+          "probe" => contract.probe,
+          "files" => projection.files.keys.sort.to_h do |path|
+            [ path, ::Digest::SHA256.hexdigest(projection.files.fetch(path)) ]
+          end.freeze,
+          "alias" => nil
+        }.freeze
+
+        profile = Hive::AgentProfiles.lookup(target.agent, cfg: @config)
+        bin = resolved_binary(profile)
+        unless bin
+          return build_inspection(
+            target: target,
+            expected: expected,
+            native: unavailable_native(profile),
+            resolution: empty_resolution,
+            issues: [ [ "unavailable", "#{profile.bin_default} is not executable or on PATH" ] ]
+          )
+        end
+
+        publisher = DirectoryPublisher.new(
+          root: root,
+          trusted_root: @environment["HOME"] || Dir.home,
+          projection: projection
+        )
+        report = publisher.report
+        cli = inspect_bundled_cli(profile: profile, bin: bin)
+        resolution = inspect_bundled_resolution(target, contract, destination)
+        issues = cli.fetch("issues").map(&:dup)
+        issues.concat(report.issues)
+        issues.concat(resolution.fetch("issues"))
+        native_package = if report.manifest
+          {
+            "id" => package.id,
+            "version" => report.manifest["skill_version"],
+            "enabled" => true,
+            "install_path" => destination,
+            "source" => "hive-gem",
+            "canonical_digest" => report.manifest["canonical_digest"]
+          }.freeze
+        end
+        native = cli.reject { |key, _| key == "issues" }.merge(
+          "package" => native_package,
+          "marketplace" => nil,
+          "projection" => {
+            "state" => report.state,
+            "destination" => report.destination,
+            "manifest" => report.manifest,
+            "files" => report.files,
+            "snapshot" => report.snapshot
+          }.freeze
+        ).freeze
+
+        build_inspection(
+          target: target,
+          expected: expected,
+          native: native,
+          resolution: resolution.reject { |key, _| key == "issues" }.freeze,
+          issues: issues
+        )
+      rescue DirectoryPublisher::Error => e
+        build_inspection(
+          target: target,
+          expected: expected || { "distribution" => "bundled", "package" => package.id }.freeze,
+          native: { "available" => true, "bin" => bin, "cli_version" => nil,
+                    "commands" => [], "package" => nil, "marketplace" => nil }.freeze,
+          resolution: empty_resolution,
+          issues: [ [ "conflicting", e.message ] ]
+        )
+      end
+
+      def inspect_bundled_cli(profile:, bin:)
+        commands = []
+        issues = []
+        version_result = run([ bin, profile.version_flag ], commands)
+        version = parse_version(version_result.stdout)
+        unless version_result.success? && version
+          issues << [ "incompatible", "#{profile.name} CLI version probe failed: #{command_failure(version_result, 'version output was not parseable')}" ]
+        end
+        if version && profile.min_version && Gem::Version.new(version) < Gem::Version.new(profile.min_version)
+          issues << [ "incompatible", "#{profile.name} CLI #{version} is below supported #{profile.min_version}" ]
+        end
+        {
+          "available" => true,
+          "bin" => bin,
+          "cli_version" => version,
+          "commands" => commands.freeze,
+          "issues" => issues.freeze
+        }
+      end
+
+      def inspect_bundled_resolution(target, contract, destination)
+        resolved = skill_module(target.agent).resolve(
+          contract.invocation, project_root: @project_root, environment: @environment
+        )
+        expected_path = File.join(destination, "SKILL.md")
+        issues = []
+        if resolved.path && File.expand_path(resolved.path) != File.expand_path(expected_path)
+          issues << [ "conflicting", "unexpected higher-precedence skill #{resolved.path} wins #{target.invocation}" ]
+        elsif resolved.status != :present && File.directory?(destination)
+          issues << [ "missing", "installed Hive operating skill does not resolve for #{target.invocation}" ]
+        end
+        resolution_hash(resolved).merge(
+          "invocation" => contract.invocation,
+          "alias_path" => nil,
+          "alias_owned" => nil,
+          "issues" => issues.freeze
+        )
+      rescue SystemCallError => e
+        {
+          "status" => "missing", "path" => nil, "message" => e.message,
+          "candidates" => [], "parse_errors" => [], "invocation" => contract.invocation,
+          "alias_path" => nil, "alias_owned" => nil,
+          "issues" => [ [ "conflicting", "could not inspect bundled skill resolution: #{e.message}" ] ].freeze
+        }
       end
 
       def inspect_unmanaged(target)

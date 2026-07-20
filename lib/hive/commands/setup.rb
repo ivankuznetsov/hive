@@ -6,17 +6,25 @@ require "hive/invoked_binary"
 require "hive/paths"
 require "hive/setup/diagnostics"
 require "hive/web/app_bundle"
+require "hive/commands/setup_agents"
 
 module Hive
   module Commands
     class Setup
       def initialize(json: false, service: false, no_bootstrap: false,
-                     no_init: false, output: $stdout)
+                     no_init: false, yes: false, input: $stdin, output: $stdout,
+                     error: $stderr, setup_agents_factory: nil)
         @json = json
         @service = service
         @no_bootstrap = no_bootstrap
         @no_init = no_init
+        @yes = yes
+        @input = input
         @output = output
+        @error = error
+        @setup_agents_factory = setup_agents_factory || lambda do |**kwargs|
+          Hive::Commands::SetupAgents.new(**kwargs)
+        end
         @phases = []
       end
 
@@ -29,11 +37,15 @@ module Hive
         # enrollment either. Otherwise a "diagnose" run silently force-installs
         # the daemon and enrolls the cwd.
         unless @no_bootstrap
-          bootstrap_qmd_if_missing(diagnostics)
-          bootstrap_web_bundle
-          install_daemon
-          enroll_project unless @no_init
-          install_web_service if @service
+          setup_agent_skills
+          require_unattended_consent! if unattended_without_yes?
+          unless agent_setup_refused?
+            bootstrap_qmd_if_missing(diagnostics)
+            bootstrap_web_bundle
+            install_daemon
+            enroll_project unless @no_init
+            install_web_service if @service
+          end
         end
         add_phase("web", true, "url" => web_url)
 
@@ -115,13 +127,88 @@ module Hive
         phase("enroll") do
           require "hive/commands/init"
           begin
-            Hive::Commands::Init.new(Dir.pwd, force: true, json: false).call
+            Hive::Commands::Init.new(
+              Dir.pwd, force: true, json: false, agent_skill_preflight: false
+            ).call
           rescue Hive::AlreadyInitialized
             require "hive/commands/daemon"
             Hive::Commands::Daemon.new("enable", current_project_name).call
           end
           [ true, { "path" => Dir.pwd } ]
         end
+      end
+
+      def setup_agent_skills
+        phase("agent_skills") do
+          config = Hive::Config.load(Dir.pwd)
+          coordinator = @setup_agents_factory.call(
+            config: config,
+            project_root: Dir.pwd,
+            yes: @yes,
+            json: @json,
+            input: @input,
+            output: @output,
+            error: @error
+          )
+          result = coordinator.run
+          @agent_setup_result = result
+          [ result.exit_code.zero?, {
+            "classification" => result.classification,
+            "consent" => result.consent,
+            "targets" => setup_target_states(result.preview),
+            "operation_results" => result.operation_results.map(&:to_h),
+            "final_health" => result.final_health.map(&:to_h),
+            "setup_agents_exit_code" => result.exit_code
+          } ]
+        end
+      end
+
+      def unattended_without_yes?
+        return false if @yes
+        return true if @json
+        !(@input.respond_to?(:tty?) && @input.tty?)
+      rescue IOError
+        true
+      end
+
+      def require_unattended_consent!
+        phase = @phases.reverse.find { |entry| entry["name"] == "agent_skills" }
+        return unless phase
+        phase["ok"] = false
+        phase["classification"] = "consent_required"
+        phase["consent"] = {
+          "granted" => false,
+          "provenance" => @json ? "json_requires_yes" : "non_tty"
+        }
+        phase["setup_agents_exit_code"] = Hive::ExitCodes::USAGE
+      end
+
+      def agent_setup_refused?
+        return true if unattended_without_yes?
+        @agent_setup_result&.classification == "refused"
+      end
+
+      def setup_target_states(plan)
+        plan.inspections.map do |row|
+          operation = plan.operations.find do |candidate|
+            candidate.agent == row.agent && candidate.capabilities.include?(row.capability_id)
+          end
+          state = case row.health
+          when "healthy" then "unchanged"
+          when "unavailable" then "unavailable"
+          when "stale" then "drifted"
+          when "missing" then operation ? "would_write" : "failed"
+          else "failed"
+          end
+          {
+            "agent" => row.agent,
+            "capability" => row.capability_id,
+            "state" => state,
+            "health" => row.health,
+            "operation_id" => operation&.id,
+            "message" => row.explanation
+          }.freeze
+        end.freeze
       end
 
       def install_web_service

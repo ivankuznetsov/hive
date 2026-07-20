@@ -121,7 +121,7 @@ module Hive
           "body" => normalize(body),
           "references" => references
         }
-        Digest::SHA256.hexdigest(JSON.generate(payload))
+        ::Digest::SHA256.hexdigest(JSON.generate(payload))
       end
 
       def render(platform)
@@ -212,7 +212,7 @@ module Hive
 
       def projection_manifest(platform, config, files)
         digests = files.keys.sort.to_h do |path|
-          [ path, Digest::SHA256.hexdigest(files.fetch(path)) ]
+          [ path, ::Digest::SHA256.hexdigest(files.fetch(path)) ]
         end
         JSON.pretty_generate(
           "schema" => "hive-managed-skill-projection",

@@ -142,6 +142,18 @@ class SetupAgentsCommandTest < Minitest::Test
     assert_equal "yes_flag", payload.dig("consent", "provenance")
   end
 
+  def test_shared_run_returns_typed_result_without_nested_json
+    output = StringIO.new
+    fake = FakeProvisioner.new(plan: plan)
+    result = command(
+      provisioner: fake, input: StringIO.new, output: output, json: true, yes: true
+    ).run
+
+    assert_instance_of Hive::AgentSkills::ProvisioningResult, result
+    assert_equal "success", result.classification
+    assert_empty output.string
+  end
+
   def test_revalidation_drift_prints_revised_plan_and_prompts_again
     first = plan(fingerprint: "one")
     revised = plan(operations: [ operation.with(id: "revised") ], fingerprint: "two")

@@ -4,6 +4,14 @@ schema_version: 1
 # satisfy several Hive workflow rows. Adapters interpret the closed `actions`
 # vocabulary; no value in this file is evaluated as a shell command.
 packages:
+  - id: hive-operations
+    distribution: bundled
+    prerequisites: []
+    agents:
+      claude: { provider: claude, config_home: CLAUDE_CONFIG_DIR }
+      codex: { provider: codex, config_home: CODEX_HOME }
+      pi: { provider: pi, config_home: PI_CODING_AGENT_DIR }
+
   - id: compound-engineering
     version: "~> 3.0"
     prerequisites: []
@@ -74,6 +82,13 @@ packages:
         actions: [package_install, package_update]
 
 capabilities:
+  - id: hive
+    package: hive-operations
+    agents:
+      claude: { invocation: /hive, probe: SKILL.md }
+      codex: { invocation: /hive, probe: SKILL.md }
+      pi: { invocation: "/skill:hive", probe: SKILL.md }
+
   - id: ce-brainstorm
     package: compound-engineering
     agents:

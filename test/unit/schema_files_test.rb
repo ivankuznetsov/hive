@@ -2492,4 +2492,35 @@ class SchemaFilesTest < Minitest::Test
                                             requests: [ request_hash ], malformed: [])
     assert_empty schemer.validate(prune).to_a, "prune envelope must validate"
   end
+
+
+  # ── agent-first operational contracts ─────────────────────────────────
+
+  def test_operational_status_and_act_schemas_are_published_at_v1
+    %w[hive-operational-status hive-act].each do |name|
+      path = Hive::Schemas.schema_path(name)
+      assert File.file?(path), "schema file missing: #{path}"
+      document = JSON.parse(File.read(path))
+      assert_equal "https://json-schema.org/draft/2020-12/schema", document.fetch("$schema")
+      assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS.fetch(name)
+    end
+  end
+
+  def test_hive_act_error_enum_matches_producer_and_common_envelope_validates
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-act")))
+    kinds = document.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum")
+    assert_equal Hive::Schemas::OperationalActionErrorKind::ALL.sort, kinds.sort
+    schemer = JSONSchemer.schema(document)
+
+    Hive::Schemas::OperationalActionErrorKind::ALL.each do |kind|
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: "hive-act",
+        error: Hive::OperationalActionUsageError.new("invalid recommendation"),
+        error_kind: kind,
+        extras: { "action_id" => "workflow.advance", "target" => "demo:task" }
+      )
+      assert schemer.valid?(payload),
+             "hive-act ErrorPayload must accept #{kind}: #{schemer.validate(payload).to_a.inspect}"
+    end
+  end
 end

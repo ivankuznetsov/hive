@@ -17,6 +17,7 @@ require "hive/commands/rebase_status"
 require "hive/commands/stage_action"
 require "hive/commands/adhoc_review"
 require "hive/commands/status"
+require "hive/commands/act"
 require "hive/commands/approve"
 require "hive/commands/findings"
 require "hive/commands/finding_toggle"
@@ -504,7 +505,21 @@ class HiveCliTest < Minitest::Test
   def test_status_approve_findings_and_finding_toggles_pass_options
     with_command_new_stub(Hive::Commands::Status) do |calls|
       Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "2-gather", "--write", "--force", "--json" ])
-      assert_equal({ json: true, diagnose: "slug", project: "proj", stage: "2-gather", write: true, force: true }, calls.first.fetch(:kwargs))
+      assert_equal({
+        json: true, diagnose: "slug", project: "proj", stage: "2-gather",
+        write: true, force: true, operational: false
+      }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::Status) do |calls|
+      Hive::CLI.start([ "status", "--operational", "--json" ])
+      assert_equal true, calls.first.dig(:kwargs, :operational)
+    end
+
+    with_command_new_stub(Hive::Commands::Act) do |calls|
+      Hive::CLI.start([ "act", "workflow.advance", "demo:slug", "--observation", "#{'a' * 64}", "--json" ])
+      assert_equal [ "workflow.advance", "demo:slug" ], calls.first.fetch(:args)
+      assert_equal({ observation: "a" * 64, json: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Approve) do |calls|

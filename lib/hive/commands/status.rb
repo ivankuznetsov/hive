@@ -23,6 +23,7 @@ require "hive/brainstorm_parser"
 require "hive/gh"
 require "hive/pr"
 require "hive/process_kill"
+require "hive/operational_status"
 require "hive/tui/views/hyperlink"
 
 module Hive
@@ -75,7 +76,8 @@ module Hive
         error: "⚠"
       }.freeze
 
-      def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false)
+      def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false,
+                     operational: false)
         @json = json
         @diagnose = diagnose
         @project = project
@@ -83,6 +85,7 @@ module Hive
         @write = write
         @force = force
         @archive = archive
+        @operational = operational
       end
 
       def call
@@ -113,11 +116,23 @@ module Hive
       # branch against `urn:hive:schema:status-diagnose:v1`. Plain
       # `hive status --json` stays on `hive-status`.
       def status_schema_for_call
-        @diagnose ? "hive-status-diagnose" : "hive-status"
+        return "hive-status-diagnose" if @diagnose
+
+        @operational ? "hive-operational-status" : "hive-status"
       end
 
       def do_call
         projects = Hive::Config.registered_projects
+        if @operational
+          payload = operational_payload(projects)
+          if @json
+            puts JSON.generate(payload)
+            @stdout_written = true
+          else
+            render_operational(payload)
+          end
+          return
+        end
         if @json
           puts JSON.generate(json_payload(projects))
           @stdout_written = true
@@ -140,6 +155,39 @@ module Hive
           warn "hive: status: project #{project['name'].inspect} failed to render " \
                "(#{e.class}: #{e.message}); skipping it so other projects still display"
           puts "#{project['name']}: failed to load (#{e.message})"
+        end
+      end
+
+      def operational_payload(projects, scheduler_snapshot: nil)
+        source = json_payload(projects)
+        Hive::OperationalStatus.new(
+          status_payload: source,
+          project_context: operational_project_context(projects),
+          scheduler_snapshot: scheduler_snapshot
+        ).to_h
+      end
+
+      def render_operational(payload)
+        summary = payload.fetch("summary")
+        puts "SNAPSHOT #{payload.fetch('completeness').upcase} — " \
+             "#{summary.fetch('active')} active · #{summary.fetch('archived')} archived"
+        payload.fetch("issues").each { |entry| puts "  ⚠ #{entry.fetch('message')}" }
+        payload.fetch("tasks").group_by { |row| row.fetch("state") }.each do |state, rows|
+          puts state.tr("_", " ").upcase
+          rows.each do |row|
+            puts "  #{row.dig('identity', 'project')}:#{row.dig('identity', 'slug')} — #{row.fetch('reason')}"
+          end
+        end
+      end
+
+      def operational_project_context(projects)
+        projects.to_h do |project|
+          enabled = begin
+            Hive::Config.load(project.fetch("path")).dig("daemon", "enabled") == true
+          rescue Hive::Error, SystemCallError
+            false
+          end
+          [ project.fetch("name"), { "daemon_enabled" => enabled } ]
         end
       end
 

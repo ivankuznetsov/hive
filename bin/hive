@@ -64,6 +64,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
   "status" => { schema: "hive-status", error_kind: "error" },
+  "act" => { schema: "hive-act", error_kind: "usage" },
   "prune" => { schema: "hive-prune", error_kind: "usage" },
   "forget" => { schema: "hive-forget", error_kind: "usage" },
   "metrics" => {
@@ -317,6 +318,10 @@ def json_usage_error_contract(argv)
       arg.valid_encoding? && (arg == "--diagnose" || arg.start_with?("--diagnose="))
     end
     return { schema: "hive-status-diagnose", error_kind: "error" } if diagnose
+    operational = option_argv.any? do |arg|
+      arg.valid_encoding? && (arg == "--operational" || arg.start_with?("--operational="))
+    end
+    return { schema: "hive-operational-status", error_kind: "error" } if operational
   when "web"
     subcommand = json_usage_subcommand(argv, command_index, value_options: %w[--bind --port])
     return unless %w[install status].include?(subcommand)

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:act:v1",
+  "title": "hive act output (v1)",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "action_id", "target",
+        "observation_token", "result"
+      ],
+      "properties": {
+        "schema": { "const": "hive-act" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "action_id": { "const": "workflow.advance" },
+        "target": { "type": "string", "pattern": "^.+:.+$" },
+        "observation_token": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["task_state", "stage", "marker"],
+          "properties": {
+            "task_state": { "type": "string" },
+            "stage": { "type": ["string", "null"] },
+            "marker": { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind",
+        "exit_code", "message", "action_id", "target"
+      ],
+      "properties": {
+        "schema": { "const": "hive-act" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "usage", "stale_observation", "ambiguous_target", "concurrent_run",
+            "dependency_wait", "admission_error", "config", "internal", "error"
+          ]
+        },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "action_id": { "type": "string" },
+        "target": { "type": "string" },
+        "candidates": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "current_stage": { "type": "string" },
+        "target_stage": { "type": "string" },
+        "reason_code": { "type": "string" },
+        "offending_ref": { "type": "string" },
+        "safe_correction": { "type": "string" },
+        "holder": { "type": ["object", "null"], "additionalProperties": true },
+        "lock_path": { "type": "string" }
+      }
+    }
+  }
+}

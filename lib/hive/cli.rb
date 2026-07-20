@@ -1017,6 +1017,8 @@ module Hive
                    desc: "with --diagnose, write diagnostics/red-status.md using the configured execute agent"
     option :force, type: :boolean, default: false,
                    desc: "with --diagnose --write, re-spawn the agent even when a fresh agent-written artifact already exists"
+    option :operational, type: :boolean, default: false,
+                         desc: "emit the agent-first operational status view (combine with --json for its v1 envelope)"
     def status
       require "hive/commands/status"
       Hive::Commands::Status.new(
@@ -1025,7 +1027,34 @@ module Hive
         project: options[:project],
         stage: options[:stage],
         write: options[:write],
-        force: options[:force]
+        force: options[:force],
+        operational: options[:operational]
+      ).call
+    end
+
+    desc "act ACTION_ID TARGET", "Execute a fresh confirmation-free action emitted by operational status"
+    long_desc <<~DESC
+      ACTION_ID and TARGET must come from the same fresh
+      `hive status --operational --json` task action. Pass its opaque token as
+      --observation. Hive resolves the task again and revalidates identity,
+      stage, marker, action, and task-generation evidence while holding the
+      normal mutation lock. Stale or elevated recommendations never mutate.
+
+      `hive act` accepts only Hive's closed confirmation-free routine action
+      registry. It never executes a command string or shell argv from status.
+      Destructive, administrative, destination-changing, release, and
+      publication actions must use their direct commands after operator
+      confirmation.
+    DESC
+    option :observation, type: :string, required: true,
+                         desc: "opaque observation token from operational status"
+    def act(action_id, target)
+      require "hive/commands/act"
+      Hive::Commands::Act.new(
+        action_id,
+        target,
+        observation: options[:observation],
+        json: options[:json]
       ).call
     end
 

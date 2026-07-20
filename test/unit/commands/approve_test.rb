@@ -11,6 +11,31 @@ class HiveCommandsApproveTest < Minitest::Test
     Hive::Commands::Approve.new("slug", **kwargs)
   end
 
+  def test_observation_guard_runs_under_commit_and_task_locks_before_move
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "2-brainstorm", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "brainstorm.md"), "# state\n<!-- COMPLETE -->\n")
+      current = task(folder: source, hive_state_path: state, project_root: root)
+      guarded = command(
+        observation_guard: lambda do |observed|
+          assert_same current, observed
+          assert File.exist?(File.join(state, ".commit-lock"))
+          assert File.exist?(File.join(source, ".lock"))
+          raise Hive::StaleOperationalObservation, "rotated"
+        end
+      )
+
+      assert_raises(Hive::StaleOperationalObservation) do
+        guarded.send(:perform_move_and_commit, current, "3-plan")
+      end
+      assert File.directory?(source), "guard failure must leave the source task in place"
+      refute File.exist?(File.join(source, ".lock")), "guard failure must release the task lock"
+      refute File.exist?(File.join(state, "stages", "3-plan", current.slug))
+    end
+  end
+
   def task(folder: "/tmp/task", hive_state_path: "/tmp/state", project_root: "/tmp/project",
            stage_index: 2, stage_name: "brainstorm", workflow: Hive::Workflows::Registry.default)
     FakeTask.new("slug-260522-abcd", stage_index, stage_name, folder, hive_state_path, project_root, workflow)

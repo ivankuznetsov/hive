@@ -68,7 +68,7 @@ module Hive
           value = field == "project" ? project : row[field]
           [ field, value ]
         end
-        Digest::SHA256.hexdigest(Hive::WorkflowPackage::CanonicalJSON.generate(fields))
+        ::Digest::SHA256.hexdigest(Hive::WorkflowPackage::CanonicalJSON.generate(fields))
       end
 
       def observed_row(task, project:)

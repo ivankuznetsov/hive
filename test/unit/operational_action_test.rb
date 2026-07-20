@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/status"
+require "hive/digest"
 require "hive/operational_action"
 
 class OperationalActionTest < Minitest::Test

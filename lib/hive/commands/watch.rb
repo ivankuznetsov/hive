@@ -490,7 +490,7 @@ module Hive
       end
 
       def semantic_fingerprint(targets)
-        Digest::SHA256.hexdigest(JSON.generate(targets))
+        ::Digest::SHA256.hexdigest(JSON.generate(targets))
       end
 
       def event_payload(event, sequence, targets, reason: nil, message: nil, ok: true)

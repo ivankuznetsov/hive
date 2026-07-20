@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "json_schemer"
 require "stringio"
+require "hive/commands/digest"
 require "hive/commands/watch"
 
 class CommandsWatchTest < Minitest::Test

@@ -34,6 +34,17 @@ class PackagingVerifyReleaseTest < Minitest::Test
     assert_operator body.rindex("/health?deep=1"), :>, body.index("unauthenticated / expected 302")
   end
 
+  def test_hivebox_smoke_fetches_every_stylesheet_and_javascript_advertised_by_login
+    body = File.read(HIVEBOX_SMOKE)
+
+    assert_includes body, "stylesheet_path="
+    assert_includes body, "javascript_path="
+    assert_includes body, "asset_paths="
+    assert_includes body, "for asset_path in $asset_paths"
+    assert_includes body, 'smoke_curl -fsS "http://127.0.0.1:${PORT}${asset_path}"'
+    assert_includes body, 'Hive::Web::AppBundle.assets_ready?("/app/web")'
+  end
+
   def test_release_promotes_only_the_two_native_smoked_digests
     body = File.read(RELEASE_WORKFLOW)
 

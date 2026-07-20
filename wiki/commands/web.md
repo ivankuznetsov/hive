@@ -3,13 +3,16 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-19
+updated: 2026-07-20
 tags: [command, web, hivebox, rails, turbo]
 ---
 
-**TLDR**: `hive web` boots the hivebox web UI — a vanilla **Rails 8** app
-(importmap, Turbo, Stimulus, propshaft, solid_cable) living in `web/` at the
-repo root, shipped in the Docker image at `/app/web`. The web tier adds no
+**TLDR**: `hive web` boots the local Hive browser UI — a vanilla **Rails 8**
+app (importmap, Turbo, Stimulus, propshaft, solid_cable) living in `web/` at
+the repo root. It is an advanced browser counterpart to the TUI over the same
+local registry and workflow state, with no mandatory sign-in. Hivebox is the
+separate owner-gated container deployment of this shared app at `/app/web`.
+The web tier adds no
 pipeline logic: status reads call `Hive::Commands::Status#json_payload` (via
 `Hive::Web::StatusFeed`), gate approval calls `Hive::Commands::Approve`
 in-process, task Drop calls `Hive::Commands::Drop` in-process, stage runs go
@@ -31,6 +34,11 @@ points at a real Rails app, the managed version-stamped app under
 `Hive::Paths.web_app_home` (refreshed when stale unless `--no-bootstrap` is
 passed), then a source checkout `web/` next to `lib/`; if none exists and
 bootstrap is allowed, it downloads/extracts the versioned web release bundle.
+Managed installation prepares a staging directory with `bundle install` and a
+production `assets:precompile`, requires usable `application.css` and
+`application.js` entrypoints, verifies every Propshaft manifest asset resolves
+to a contained file, and only then atomically activates it. Missing or corrupt
+assets make even a same-version bundle repair itself.
 Relative `HIVEBOX_WEB_APP_DIR` values are accepted but normalized before the
 Rails env is built, so `BUNDLE_GEMFILE` points at the real app Gemfile after
 the command changes into the app directory.
@@ -52,10 +60,10 @@ while systemd-user was unavailable becomes visible. Foreground
 `hive web start` is equivalent to `hive web`. `status --json` emits
 `hive-web-status`; `install --json` emits `hive-web-install`.
 
-## Auth
+## Access and GitHub connection
 
-GitHub **device flow** (RFC 8628, see [[decisions]] ADR-036), owner-only.
-An ownerless box is CLAIMABLE: the first successful device-flow login writes
+Hivebox uses an owner-only GitHub **device flow** (RFC 8628, see [[decisions]]
+ADR-036). An ownerless box is CLAIMABLE: the first successful device-flow login writes
 itself into `web.github.owner` (config-lock-guarded so concurrent first
 logins race safely; the claim is logged loudly) — the install path has no
 config-editing step.
@@ -77,11 +85,17 @@ usable. The local dev/test seam is exempt only for tokenless local sessions.
 Local loopback mode is a deliberate no-auth bypass for local foreground use:
 when the CLI bind address is `localhost`, `::1`, or any `127.0.0.0/8` address
 and `web.local_loopback` is not `false`, it exports `HIVEBOX_LOCAL_LOOPBACK=1`.
-Rails still checks that the request peer is loopback before skipping login.
+Rails still checks that the actual socket peer in `REMOTE_ADDR` is loopback
+before skipping login; it deliberately ignores proxy-expanded `remote_ip` for
+this decision. A local reverse proxy such as Tailscale Serve therefore retains
+local access even when it forwards the tailnet client's address. The proxy is
+part of the security boundary: restrict/authenticate clients (for example with
+tailnet ACLs), because an unrestricted forwarder exposes the no-auth local UI.
 That connection-authenticated operator sees the complete primary navigation
-and is labelled `Local`; GitHub-dependent repository browsing stays behind an
-explicit **Connect GitHub** action instead of making the rest of hivebox look
-signed out.
+under the `hive` product identity and is labelled `Local`; GitHub-dependent
+repository browsing stays behind an explicit **Connect GitHub** action.
+Completing that optional connection stores the login/token in the browser
+session but never claims or changes `web.github.owner`.
 Non-loopback binds require either `--unsafe` or a configured `web.github.owner`;
 when an owner gate authorizes a non-loopback bind, the CLI warns that
 `web.github.owner` is the only login gate, and `0.0.0.0` without an HTTPS
@@ -317,8 +331,10 @@ Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
 writing a daemon request, and `Hive::Web::Dispatcher#dispatch` wraps queue
 writer `ArgumentError`s (for example the queue's stricter slug grammar) as
 typed 422s instead of surfacing an opaque 500. CSRF is Rails-default (per-form
-tokens); every route except `/health`, `/up`, `/login`, `/logout`,
-`/auth/github*`, and the dev/test-only `/dev_login` is behind the owner gate.
+tokens). In Hivebox mode every route except `/health`, `/up`, `/login`,
+`/logout`, `/auth/github*`, and the dev/test-only `/dev_login` is behind the
+owner gate; a verified local loopback request bypasses that gate for the
+complete local UI.
 
 ## Tests
 
@@ -330,8 +346,13 @@ and the real `Commands::New`/`Approve`/`Drop` plus web recovery queue writes
 against a sandboxed `HIVE_HOME` (the suite NEVER touches the developer's real
 config — `test_helper.rb` sets the sandbox before the app loads). It pins that
 a loopback-authenticated local operator gets the full navigation and an
-explicit GitHub connection action, and that repository setup always invokes
-the CLI init adapter with non-TTY provisioning input. It also pins that
+explicit GitHub connection action. It also covers Tailscale-style forwarded
+client addresses over a loopback socket, local `hive` branding, optional
+GitHub connection without owner claim, and local logout returning to the
+usable dashboard. Managed-bundle tests pin staged dependency/asset preparation,
+same-version missing-asset repair, and preservation of the previous bundle on
+precompile failure. Repository setup always invokes the CLI init adapter with
+non-TTY provisioning input. It also pins that
 a red task page shows the diagnostic banner and Retry button, and that the
 route queues the marker-clear command plus the hidden rerun sequence. It also
 pins the Telegram first-run guide shape, strict token/chat-ID validation,
@@ -432,7 +453,10 @@ Colima cannot boot a Linux VM there. Current `.github/workflows/ci.yml` does
 not run a push/PR Docker image smoke; it covers Rails web tests, the
 golden-path browser E2E, and the Windows installer harness. The smoke covers
 web and daemon health plus the front door (`/health`, `/health?deep=1`,
-claimable `/login`, owner-gated `/`). The Windows workflow cannot run Linux
+claimable `/login`, owner-gated `/`) and fetches the exact digest-stamped CSS
+and JavaScript graph advertised by that page, then runs the managed-install
+manifest predicate against the real precompile output. The Windows workflow
+cannot run Linux
 containers on hosted runners, so it syntax-checks `install-box.ps1` and runs
 `packaging/docker/test-install-box.ps1` against a stubbed Docker CLI to pin the
 installer's diagnostics and pull/run argv shape.

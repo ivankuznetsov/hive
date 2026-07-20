@@ -3,15 +3,15 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-06-16
+updated: 2026-07-20
 tags: [decisions, adr]
 ---
 
 **TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records hivebox's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records hivebox's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit).
 
-## ADR-037: Hivebox web tier is a vanilla Rails 8 + Turbo app, replacing the Sinatra tier
+## ADR-037: Hive Web and Hivebox share a vanilla Rails 8 + Turbo app
 
-**Status:** Active (replaced the Sinatra/Puma tier during PR #300, 2026-06-10).
+**Status:** Active (replaced the Sinatra/Puma tier during PR #300, 2026-06-10; amended for the managed local runtime during PR #622 and its 2026-07-20 follow-up).
 
 **Context:** The first web tier was Sinatra + hand-rolled SSE + hand-written
 DOM-reconciliation JS. It worked, but live updates needed a bespoke
@@ -31,12 +31,26 @@ execs `bin/rails server` from the app dir; the gem does not package the app
 claude.com: warm ivory/charcoal surfaces, terracotta accent, serif display
 headings, hairline borders, calm dark mode.
 
+The Rails application has two deployment identities. `hive web` is a local
+browser/TUI counterpart over existing Hive state: verified loopback requests
+need no sign-in, use `hive` branding, and may optionally connect GitHub for
+repository actions without claiming an owner. Hivebox is the container-first,
+owner-gated product governed by ADR-036. Release installs stage the versioned
+web bundle outside the gem, install its dependencies, precompile production
+assets, verify the required entrypoints and full manifest graph, and atomically
+activate it.
+
 **Consequences:** SSE limiter, custom reconciliation JS, and the Sinatra
 route/view tree are gone (−sinatra, −rack-protection, −puma gem deps). The
 image gains a second bundle + asset precompile. Browser-level coverage moved
 to Capybara + Playwright system tests with a dev/test-only login seam.
 Authorization, device flow, and the no-new-pipeline-logic constraint are
-unchanged (ADR-036 still applies).
+unchanged for Hivebox (ADR-036 still applies). The local listener trusts the
+actual loopback socket peer rather than a reverse proxy's forwarded client IP,
+so localhost proxies do not accidentally switch the application into Hivebox.
+That makes the proxy part of the access boundary: Tailscale Serve must remain
+tailnet-restricted, and a generic forwarder must authenticate/restrict clients
+or local no-auth mode must be disabled.
 
 ## ADR-036: Hivebox operator sign-in uses GitHub OAuth device flow, not the callback web flow
 
@@ -77,6 +91,10 @@ secret. The UX cost is one extra step (entering a short code at
 github.com/login/device) — symmetrical with the agent relay. Operators
 overriding `client_id` must check "Enable Device Flow" on their app. Route
 behavior and tests: [[commands/web]].
+
+This owner-claim decision applies only to Hivebox. Local `hive web` loopback
+access requires no GitHub identity, and its optional repository connection
+must not write `web.github.owner`.
 
 ## ADR-035: Hivebox agent OAuth uses a PTY login relay, not provider-page proxying
 

@@ -7,7 +7,7 @@ updated: 2026-07-22
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: The `hive-cli` gem has eleven direct runtime gems; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or `gtimeout`) for their timeout-governed Git-ref, QMD, and provider operations.
+**TLDR**: The `hive-cli` gem has twelve direct runtime gems; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or `gtimeout`) for their timeout-governed Git-ref, QMD, and provider operations.
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
@@ -34,6 +34,7 @@ as of this refresh.
 | `json_schemer` | `~> 2.5` (locked 2.5.0) | Runtime JSON Schema validation for architecture-patrol manifests in daemon and hivebox supervisor processes; also reused by the e2e schema validator. |
 | `rexml` | `~> 3.2` | Launchd plist parsing for daemon install/status drift checks; explicit because Ruby 3.4 no longer guarantees it as a default gem. |
 | `sqlite3` | `~> 2.0` | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. |
+| `tzinfo` | `~> 2.0` (locked 2.0.6) | IANA timezone rules for the digest-only Europe/London calendar window, including spring-forward and fall-back days without changing the process timezone. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 
 `telegram-bot-ruby` also pulls Faraday and `faraday-multipart`, but

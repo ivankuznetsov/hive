@@ -102,7 +102,7 @@ class HiveDigestRepoResolverTest < Minitest::Test
     error = assert_raises(Hive::ConfigError) { registry_failure.resolve }
     assert_match(/repository discovery failed: registry unavailable/, error.message)
 
-    entries = [ {}, { "name" => "Working", "path" => "/tmp/working" } ]
+    entries = [ {}, { "name" => "", "path" => 123 }, { "name" => "Working", "path" => "/tmp/working" } ]
     resolver = Hive::Digest::RepoResolver.new(
       registry: -> { entries },
       gh: FakeGh.new([], {
@@ -111,7 +111,7 @@ class HiveDigestRepoResolverTest < Minitest::Test
       logger: nil
     )
     result = resolver.resolve
-    assert_equal "<malformed>", result.warnings.first.repository
+    assert_equal [ "<malformed>", "<malformed>" ], result.warnings.map(&:repository)
     assert_equal [ "owner/repo" ], result.targets.map(&:repository)
   end
 end

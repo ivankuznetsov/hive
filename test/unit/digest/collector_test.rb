@@ -21,8 +21,11 @@ class HiveDigestCollectorTest < Minitest::Test
       fetch(:files, "#{repository}##{number}", { repository: repository, host: host, number: number, cfg: cfg })
     end
 
-    def digest_pr_diff(repository:, host:, number:, cfg: nil)
-      fetch(:diff, "#{repository}##{number}", { repository: repository, host: host, number: number, cfg: cfg })
+    def digest_pr_diff(repository:, host:, number:, cfg: nil, max_bytes: nil)
+      fetch(
+        :diff, "#{repository}##{number}",
+        { repository: repository, host: host, number: number, cfg: cfg, max_bytes: max_bytes }
+      )
     end
 
     private
@@ -78,6 +81,20 @@ class HiveDigestCollectorTest < Minitest::Test
     assert_empty report.pull_requests
     assert_equal [ "owner/bad" ], report.failures.map(&:repository)
     refute report.all_failed?
+  end
+
+  def test_closed_unmerged_candidates_are_skipped_without_failing_collection
+    candidates = [
+      { "number" => 6, "updated_at" => "2026-06-13T13:00:00Z", "merged_at" => nil },
+      { "number" => 7, "updated_at" => "2026-06-13T12:00:00Z", "merged_at" => "2026-06-13T12:00:00Z" }
+    ]
+
+    report = Hive::Digest::Collector.new(gh: fake_gh(candidates: candidates), logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+
+    assert_equal [ 7 ], report.pull_requests.map(&:number)
+    assert_empty report.failures
   end
 
   def test_all_failed_report_is_mechanically_detectable
@@ -215,7 +232,32 @@ class HiveDigestCollectorTest < Minitest::Test
       Date.new(2026, 6, 13), targets: [ target ]
     )
     assert report.all_failed?
-    assert_match(/invalid file header/, report.failures.first.message)
+    assert_match(/unterminated quoted file path/, report.failures.first.message)
+  end
+
+  def test_raw_diff_identity_accepts_spaces_and_git_c_quoted_unicode_paths
+    spaced = fake_gh(diff: diff_fixture("lib/file with spaces.rb", "+change"))
+    spaced.data[:files]["owner/repo#7"] = [ { "filename" => "lib/file with spaces.rb" } ]
+    spaced_report = Hive::Digest::Collector.new(gh: spaced, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+    assert_equal [ "lib/file with spaces.rb" ], spaced_report.pull_requests.first.files
+
+    unicode_path = "lib/日本語 file.rb"
+    quoted = <<~DIFF
+      diff --git "a/lib/\\346\\227\\245\\346\\234\\254\\350\\252\\236 file.rb" "b/lib/\\346\\227\\245\\346\\234\\254\\350\\252\\236 file.rb"
+      index 1111111..2222222 100644
+      --- "a/lib/\\346\\227\\245\\346\\234\\254\\350\\252\\236 file.rb"
+      +++ "b/lib/\\346\\227\\245\\346\\234\\254\\350\\252\\236 file.rb"
+      @@ -1 +1 @@
+      +change
+    DIFF
+    unicode = fake_gh(diff: quoted)
+    unicode.data[:files]["owner/repo#7"] = [ { "filename" => unicode_path } ]
+    unicode_report = Hive::Digest::Collector.new(gh: unicode, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+    assert_equal [ unicode_path ], unicode_report.pull_requests.first.files
   end
 
   def test_redaction_verification_and_runtime_errors_fail_the_repository

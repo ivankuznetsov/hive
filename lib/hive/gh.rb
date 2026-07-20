@@ -12,6 +12,7 @@ module Hive
   module Gh
     NETWORK_TIMEOUT_SEC = 60
     POLL_INTERVAL_SEC = 0.05
+    DIGEST_PR_DIFF_MAX_BYTES = 64 * 1024 * 1024
 
     # Leading YAML frontmatter block of a hive-authored pr.md. Capture group
     # 1 is the YAML body (used by #pr_frontmatter); #pr_body strips the whole
@@ -427,7 +428,8 @@ module Hive
         page_number += 1
       end
 
-      pages.flatten.uniq { |row| row.fetch("number") }
+      pages.flatten.select { |row| !row.fetch("merged_at").nil? }
+           .uniq { |row| row.fetch("number") }
     rescue ArgumentError, TypeError => e
       raise Hive::GhError, "invalid merged-PR pagination input: #{e.message}"
     end
@@ -471,7 +473,7 @@ module Hive
       raise Hive::GhError, "invalid pull-request detail input: #{e.message}"
     end
 
-    def digest_pr_diff(repository:, host:, number:, cfg: nil)
+    def digest_pr_diff(repository:, host:, number:, cfg: nil, max_bytes: DIGEST_PR_DIFF_MAX_BYTES)
       repo = RepositoryIdentity.validated_repository_slug(repository)
       github_host = RepositoryIdentity.validated_github_host(host)
       pr_number = Integer(number)
@@ -480,7 +482,7 @@ module Hive
       digest_api_text(
         "repos/#{repo}/pulls/#{pr_number}", host: github_host, cfg: cfg,
         context: "fetching the diff for #{repo}##{pr_number}",
-        accept: "application/vnd.github.diff"
+        accept: "application/vnd.github.diff", max_bytes: max_bytes
       )
     rescue ArgumentError, TypeError => e
       raise Hive::GhError, "invalid pull-request diff input: #{e.message}"
@@ -519,12 +521,12 @@ module Hive
     end
     private_class_method :digest_api_json
 
-    def digest_api_text(endpoint, host:, cfg:, context:, accept: nil, paginate: false)
+    def digest_api_text(endpoint, host:, cfg:, context:, accept: nil, paginate: false, max_bytes: nil)
       args = [ "gh", "api", "--hostname", host ]
       args.concat([ "-H", "Accept: #{accept}" ]) if accept
       args << endpoint
       args.concat([ "--paginate", "--slurp" ]) if paginate
-      out, err, status = capture3(*args, cfg: cfg)
+      out, err, status = capture3(*args, cfg: cfg, max_stdout_bytes: max_bytes)
       unless status.success?
         raise Hive::GhError, "`gh api` failed while #{context}: #{digest_error_text(out, err)}"
       end
@@ -783,8 +785,12 @@ module Hive
       value.is_a?(Integer) && value.positive? ? value : NETWORK_TIMEOUT_SEC
     end
 
-    def capture3(*cmd, chdir: nil, cfg: nil, timeout_sec: nil)
+    def capture3(*cmd, chdir: nil, cfg: nil, timeout_sec: nil, max_stdout_bytes: nil)
       timeout_sec = normalized_timeout(timeout_sec || network_timeout_sec(cfg))
+      stdout_limit = max_stdout_bytes.nil? ? nil : Integer(max_stdout_bytes)
+      if stdout_limit && stdout_limit.negative?
+        raise ArgumentError, "max_stdout_bytes must be non-negative"
+      end
       stdout_r, stdout_w = IO.pipe
       stderr_r, stderr_w = IO.pipe
       env = { "GIT_TERMINAL_PROMPT" => "0", "GIT_SSH_COMMAND" => "ssh -o BatchMode=yes" }
@@ -796,7 +802,18 @@ module Hive
       pid = Process.spawn(env, *cmd, **spawn_options)
       stdout_w.close
       stderr_w.close
-      stdout_reader = Thread.new { read_capture_stream(stdout_r) }
+      stdout_reader = Thread.new do
+        Thread.current.report_on_exception = false
+        read_capture_stream(
+          stdout_r,
+          max_bytes: stdout_limit,
+          on_limit: lambda do
+            signal_process_group("KILL", pid)
+          rescue Errno::ESRCH
+            nil
+          end
+        )
+      end
       stderr_reader = Thread.new { read_capture_stream(stderr_r) }
 
       status = wait_with_deadline(
@@ -829,10 +846,20 @@ module Hive
       end
     end
 
-    def read_capture_stream(io)
-      io.read
+    def read_capture_stream(io, max_bytes: nil, on_limit: nil)
+      output = String.new(encoding: Encoding::BINARY)
+      loop do
+        chunk = io.readpartial(16 * 1024)
+        if max_bytes && output.bytesize + chunk.bytesize > max_bytes
+          on_limit&.call
+          raise Hive::GhError, "command output exceeds the #{max_bytes}-byte safety ceiling"
+        end
+        output << chunk
+      end
+    rescue EOFError
+      output
     rescue IOError
-      ""
+      output || ""
     end
 
     def terminate_process_group(pid)

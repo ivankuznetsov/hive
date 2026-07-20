@@ -53,6 +53,17 @@ class GhUnitTest < Minitest::Test
     assert_match(/network operation exceeded/, err.message)
   end
 
+  def test_capture3_enforces_stdout_limit_while_streaming
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.capture3(
+        RbConfig.ruby, "-e", "STDOUT.write('x' * 65536)",
+        timeout_sec: 5, max_stdout_bytes: 1024
+      )
+    end
+
+    assert_match(/1024-byte safety ceiling/, error.message)
+  end
+
   # --- pr_frontmatter ---------------------------------------------------
 
   def test_pr_frontmatter_returns_empty_for_missing_file

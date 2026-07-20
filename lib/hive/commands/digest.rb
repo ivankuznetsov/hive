@@ -21,6 +21,10 @@ module Hive
       rescue Hive::Error => e
         emit_error_envelope(e) if @json
         raise
+      rescue StandardError => e
+        error = Hive::InternalError.new("hive digest: internal error: #{e.class}: #{e.message}")
+        emit_error_envelope(error) if @json
+        raise error
       end
 
       private
@@ -102,7 +106,7 @@ module Hive
           "ok" => false,
           "error_class" => error.class.name.split("::").last,
           "error_kind" => error.is_a?(Hive::ConfigError) ? "config" : "internal",
-          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
+          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::SOFTWARE,
           "message" => error.message
         )
       end

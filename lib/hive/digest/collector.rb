@@ -2,7 +2,6 @@ require "digest"
 require "fileutils"
 require "json"
 require "logger"
-require "shellwords"
 require "tmpdir"
 require "hive/digest/london_window"
 require "hive/digest/repository"
@@ -77,14 +76,16 @@ module Hive
           window_start: window_start, cfg: @cfg
         )
         qualifying = candidates.select do |row|
-          LondonWindow.on_date?(row.fetch("merged_at"), local_date)
+          merged_at = row.fetch("merged_at")
+          !merged_at.nil? && LondonWindow.on_date?(merged_at, local_date)
         end
         qualifying = qualifying.uniq { |row| Integer(row.fetch("number")) }
                                .sort_by { |row| [ Time.iso8601(row.fetch("merged_at").to_s), row.fetch("number") ] }
 
         pull_requests = qualifying.map do |candidate|
           pr, consumed = collect_pull_request(
-            target, candidate, repo_dir: repo_dir, warnings: warnings
+            target, candidate, repo_dir: repo_dir, warnings: warnings,
+            repository_bytes: repository_bytes
           )
           repository_bytes += consumed
           if repository_bytes > @limits.fetch(:per_repository)
@@ -97,7 +98,7 @@ module Hive
         RepositoryCollection.new(target: target, metadata: metadata, pull_requests: pull_requests)
       end
 
-      def collect_pull_request(target, candidate, repo_dir:, warnings:)
+      def collect_pull_request(target, candidate, repo_dir:, warnings:, repository_bytes:)
         number = Integer(candidate.fetch("number"))
         detail = @gh.digest_pr_detail(
           repository: target.repository, host: target.host, number: number, cfg: @cfg
@@ -106,12 +107,13 @@ module Hive
         files = @gh.digest_pr_files(
           repository: target.repository, host: target.host, number: number, cfg: @cfg
         )
+        body = detail.fetch("body").to_s
         diff = @gh.digest_pr_diff(
-          repository: target.repository, host: target.host, number: number, cfg: @cfg
+          repository: target.repository, host: target.host, number: number, cfg: @cfg,
+          max_bytes: remaining_diff_bytes(body.bytesize, repository_bytes: repository_bytes)
         )
         validate_files_and_diff!(target, number, detail, files, diff)
 
-        body = detail.fetch("body").to_s
         consumed = body.bytesize + diff.bytesize
         enforce_pr_limit!(consumed)
         @digest_bytes += consumed
@@ -194,7 +196,7 @@ module Hive
           raise Hive::GhError, "raw diff is empty for #{target.repository}##{number}"
         end
 
-        diff_paths = diff_file_paths(diff)
+        diff_paths = diff_file_paths(diff, expected_paths: file_paths)
         return if diff_paths.sort == file_paths.sort
 
         raise Hive::GhError, "changed-file identity mismatch for #{target.repository}##{number}"
@@ -202,16 +204,87 @@ module Hive
         raise Hive::GhError, "malformed changed-file metadata for #{target.repository}##{number}: #{e.message}"
       end
 
-      def diff_file_paths(diff)
+      def diff_file_paths(diff, expected_paths:)
         diff.each_line.filter_map do |line|
           next unless line.start_with?("diff --git ")
 
-          tokens = Shellwords.shellsplit(line.delete_suffix("\n").sub("diff --git ", ""))
-          path = tokens.last.to_s
-          path.delete_prefix("b/") unless path.empty?
-        rescue ArgumentError => e
-          raise Hive::GhError, "raw diff contains an invalid file header: #{e.message}"
-        end.uniq
+          payload = line.delete_suffix("\n").delete_suffix("\r").delete_prefix("diff --git ")
+          path =
+            if payload.start_with?('"')
+              _old_path, offset = decode_git_quoted_path(payload, 0)
+              offset += 1 while payload.getbyte(offset) == 32
+              new_path, final_offset = decode_git_quoted_path(payload, offset)
+              unless payload.byteslice(final_offset..).to_s.strip.empty?
+                raise Hive::GhError, "raw diff contains an invalid quoted file header"
+              end
+              new_path
+            else
+              matches = expected_paths.select { |candidate| payload.end_with?(" b/#{candidate}") }
+              if matches.size > 1
+                raise Hive::GhError, "raw diff contains an ambiguous file header"
+              end
+              if matches.one?
+                "b/#{matches.first}"
+              else
+                parsed = payload.match(/\Aa\/(.+) b\/(.+)\z/)
+                raise Hive::GhError, "raw diff contains an invalid file header" unless parsed
+
+                "b/#{parsed[2]}"
+              end
+            end
+          unless path.start_with?("b/")
+            raise Hive::GhError, "raw diff contains an invalid destination path"
+          end
+          path.delete_prefix("b/")
+        end
+      end
+
+      GIT_QUOTED_ESCAPES = {
+        97 => 7, 98 => 8, 116 => 9, 110 => 10, 118 => 11, 102 => 12,
+        114 => 13, 34 => 34, 92 => 92
+      }.freeze
+
+      def decode_git_quoted_path(text, offset)
+        unless text.getbyte(offset) == 34
+          raise Hive::GhError, "raw diff contains an invalid quoted file header"
+        end
+
+        bytes = []
+        index = offset + 1
+        while index < text.bytesize
+          byte = text.getbyte(index)
+          if byte == 34
+            value = bytes.pack("C*").force_encoding(Encoding::UTF_8)
+            unless value.valid_encoding?
+              raise Hive::GhError, "raw diff contains an invalid UTF-8 file path"
+            end
+            return [ value, index + 1 ]
+          end
+          if byte == 92
+            index += 1
+            escaped = text.getbyte(index)
+            raise Hive::GhError, "raw diff contains a truncated file escape" unless escaped
+
+            if escaped.between?(48, 55)
+              digits = text.byteslice(index, 3).to_s[/\A[0-7]{1,3}/]
+              value = digits.to_i(8)
+              raise Hive::GhError, "raw diff contains an invalid file escape" if value > 255
+
+              bytes << value
+              index += digits.length
+              next
+            end
+            decoded = GIT_QUOTED_ESCAPES[escaped]
+            raise Hive::GhError, "raw diff contains an invalid file escape" unless decoded
+
+            bytes << decoded
+            index += 1
+            next
+          end
+          bytes << byte
+          index += 1
+        end
+        raise Hive::GhError, "raw diff contains an unterminated quoted file path"
       end
 
       def optional_metric(detail, key)
@@ -250,6 +323,26 @@ module Hive
 
         raise Hive::GhError,
               "pull-request evidence exceeds the #{MAX_PR_EVIDENCE_BYTES}-byte safety ceiling"
+      end
+
+      def remaining_diff_bytes(body_bytes, repository_bytes:)
+        enforce_pr_limit!(body_bytes)
+        repository_total = repository_bytes + body_bytes
+        if repository_total > @limits.fetch(:per_repository)
+          raise Hive::GhError,
+                "repository evidence exceeds the #{MAX_REPOSITORY_EVIDENCE_BYTES}-byte safety ceiling"
+        end
+        digest_total = @digest_bytes + body_bytes
+        if digest_total > @limits.fetch(:per_digest)
+          raise Hive::GhError,
+                "digest evidence exceeds the #{MAX_DIGEST_EVIDENCE_BYTES}-byte safety ceiling"
+        end
+
+        [
+          @limits.fetch(:per_pr) - body_bytes,
+          @limits.fetch(:per_repository) - repository_total,
+          @limits.fetch(:per_digest) - digest_total
+        ].min
       end
 
       def collection_failure(target, error)

@@ -66,6 +66,22 @@ class HiveCommandsDigestTest < Minitest::Test
     end
   end
 
+  def test_json_error_envelope_wraps_unexpected_runtime_and_delivery_failures
+    output = StringIO.new
+    command = Hive::Commands::Digest.new(
+      date: "2026-06-13", json: true,
+      runner: Runner.new([], nil, RuntimeError.new("telegram transport failed")), output: output
+    )
+
+    error = assert_raises(Hive::InternalError) { command.call }
+    payload = JSON.parse(output.string)
+    assert_match(/RuntimeError: telegram transport failed/, error.message)
+    assert_equal "hive-digest", payload.fetch("schema")
+    assert_equal "internal", payload.fetch("error_kind")
+    assert_equal Hive::ExitCodes::SOFTWARE, payload.fetch("exit_code")
+    assert_schema_valid(payload)
+  end
+
   def test_non_json_error_prints_no_envelope
     output = StringIO.new
     command = Hive::Commands::Digest.new(

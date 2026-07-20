@@ -49,4 +49,3 @@ contract. Remove `--source` and migrate v1 JSON consumers before upgrading."
 
 This fragment is version-neutral. It does not select a release version, change
 release metadata, create a tag, publish a package, or deploy anything.
-

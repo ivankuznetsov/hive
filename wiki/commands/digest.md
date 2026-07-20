@@ -64,8 +64,11 @@ falls back to its title.
 
 Raw body and diff evidence is written only to owner-only ephemeral scratch
 files. The collector enforces fixed 64 MiB per-PR, 256 MiB per-repository, and
-512 MiB per-digest safety ceilings. Crossing a ceiling fails the affected
-repository. Recognized secrets are replaced with typed placeholders before
+512 MiB per-digest safety ceilings while streaming `gh` output, before an
+oversized response is materialized. Crossing a ceiling fails the affected
+repository. Closed PR rows without a merge timestamp are skipped, and Git
+C-quoted or space-containing paths are decoded before exact file-identity
+validation. Recognized secrets are replaced with typed placeholders before
 agent-provider egress; raw files are removed after the redacted checksum is
 verified and are not retained as diagnostics.
 
@@ -75,7 +78,9 @@ Nonempty input is sent to one configured digest agent invocation. The manifest
 assigns stable IDs to body sections and diff hunks/file markers. The agent must
 first produce a fact ledger covering every evidence ID exactly once, then one
 significance sentence per project and one or more concrete bullets per PR.
-Every material fact must be cited by a bullet for the same PR.
+Every material fact must be cited by a bullet for the same PR. A legitimate PR
+with only no-user-facing-change rationales still emits a concrete rationale
+bullet; a zero-evidence PR may use one rationale fact with no evidence IDs.
 
 Hive validates exact evidence, fact, project, and PR identity sets. Missing,
 duplicate, unknown, blank, title-only, zero-bullet, or uncovered output is a
@@ -86,7 +91,10 @@ normal digest with `PRs 0`.
 Generated significance and bullet text is scanned and redacted again before
 the result leaves the agent boundary. Retained generation diagnostics contain
 only redacted evidence/fact/bullet ledgers and checksums, never the raw prompt,
-body, diff, or recognized credential value.
+body, diff, agent stream, or recognized credential value. Production
+generation uses a fail-closed Claude runtime policy with only private-run
+Read/Write access, isolated settings/MCP/environment, and no shell or network;
+configured providers that cannot enforce that boundary are rejected.
 
 ## Human Output And Statistics
 
@@ -190,9 +198,11 @@ The published schema is `schemas/hive-digest.v2.json`.
 
 ## Config, Auth, And Scheduling
 
-Generation uses `digest.agent`, falling back to `patrol.agent` and then
-`claude`, plus `budget_usd.digest` (default `50`) and `timeout_sec.digest`
-(default `1800`). Real delivery loads `~/.config/hive/.env`, resolves
+Generation resolves `digest.agent`, falling back to `patrol.agent` and then
+`claude`; the resolved provider must currently be Claude so Hive can enforce
+the confidential-evidence runtime policy. It also uses `budget_usd.digest`
+(default `50`) and `timeout_sec.digest` (default `1800`). Real delivery loads
+`~/.config/hive/.env`, resolves
 `bot.chat_id_allowlist[0]`, and requires `HIVE_TELEGRAM_BOT_TOKEN` before the
 paid generator starts. Dry-run remains credential-free.
 

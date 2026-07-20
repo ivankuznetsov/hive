@@ -1027,6 +1027,19 @@ module Hive
     end
 
     def registered_projects
+      registered_project_entries(preserve_invalid: false)
+    end
+
+    # Digest discovery must account for every persisted registry row. Other
+    # commands retain the tolerant loader contract above, while the digest
+    # receives malformed rows so RepoResolver can emit repository-scoped
+    # partial-discovery warnings instead of silently publishing an incomplete
+    # changelist.
+    def digest_registered_projects
+      registered_project_entries(preserve_invalid: true)
+    end
+
+    def registered_project_entries(preserve_invalid:)
       Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
@@ -1043,7 +1056,10 @@ module Hive
       # surface stays usable; `hive prune` operates on the raw entries
       # below the loader and is the cleanup verb for this case.
       Array(data["registered_projects"]).each_with_object([]) do |entry, out|
-        next unless valid_registry_entry?(entry)
+        unless valid_registry_entry?(entry)
+          out << entry if preserve_invalid
+          next
+        end
 
         abs_path = File.expand_path(entry["path"])
         out << {

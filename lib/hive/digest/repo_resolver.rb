@@ -6,7 +6,7 @@ require "hive/digest/repository"
 module Hive
   module Digest
     class RepoResolver
-      def initialize(registry: -> { Hive::Config.registered_projects }, gh: Hive::Gh,
+      def initialize(registry: -> { Hive::Config.digest_registered_projects }, gh: Hive::Gh,
                      cfg: nil, logger: Logger.new($stderr))
         @registry = registry
         @gh = gh
@@ -91,7 +91,8 @@ module Hive
       end
 
       def entry_name(entry)
-        entry.fetch("name", File.basename(entry.fetch("path"))).to_s
+        value = entry.fetch("name", File.basename(entry.fetch("path"))).to_s.strip
+        value.empty? ? "<malformed>" : value
       rescue StandardError
         "<malformed>"
       end

@@ -93,7 +93,7 @@
     "Warning": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "message"],
+      "required": ["kind", "message", "repository"],
       "properties": {
         "kind": { "type": "string", "minLength": 1 },
         "message": { "type": "string", "minLength": 1 },

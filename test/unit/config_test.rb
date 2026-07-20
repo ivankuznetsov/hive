@@ -2813,6 +2813,22 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_digest_registered_projects_preserves_malformed_rows_for_discovery_warnings
+    with_tmp_global_config do
+      malformed = { "name" => "Broken", "path" => 123 }
+      valid = { "name" => "Working", "path" => "/tmp/working" }
+      Hive::Config.send(
+        :write_global_config!,
+        { "registered_projects" => [ malformed, valid ] }
+      )
+
+      assert_equal [ "Working" ], Hive::Config.registered_projects.map { |entry| entry.fetch("name") }
+      rows = Hive::Config.digest_registered_projects
+      assert_equal malformed, rows.first
+      assert_equal "Working", rows.last.fetch("name")
+    end
+  end
+
   def test_register_project_still_works_on_first_call_with_fresh_hive_home
     # `register_project` must continue to lazy-create config.yml on first
     # use even though `registered_projects` now validates HIVE_HOME. The

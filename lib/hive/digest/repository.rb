@@ -123,11 +123,13 @@ module Hive
     end
 
     Warning = Data.define(:kind, :message, :repository, :pr_number, :metrics) do
-      def initialize(kind:, message:, repository: nil, pr_number: nil, metrics: nil)
+      def initialize(kind:, message:, repository:, pr_number: nil, metrics: nil)
         kind_value = kind.to_s.strip
         message_value = message.to_s.strip
+        repository_value = repository.to_s.strip
         raise ArgumentError, "digest warning kind must not be blank" if kind_value.empty?
         raise ArgumentError, "digest warning message must not be blank" if message_value.empty?
+        raise ArgumentError, "digest warning repository must not be blank" if repository_value.empty?
 
         parsed_pr = pr_number.nil? ? nil : Integer(pr_number)
         raise ArgumentError, "digest warning PR number must be positive" if parsed_pr && !parsed_pr.positive?
@@ -135,7 +137,7 @@ module Hive
         super(
           kind: kind_value,
           message: message_value,
-          repository: repository&.to_s,
+          repository: repository_value,
           pr_number: parsed_pr,
           metrics: Array(metrics).map(&:to_s).reject(&:empty?).uniq.freeze
         )

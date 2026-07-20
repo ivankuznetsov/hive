@@ -50,6 +50,23 @@ class HiveGhDigestTest < Minitest::Test
     end
   end
 
+  def test_merged_pr_candidates_exclude_closed_unmerged_rows
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    closed = row(1, "2026-06-13T10:00:00Z").merge("merged_at" => nil)
+    merged = row(2, "2026-06-12T22:00:00Z")
+    responses = [
+      [ JSON.generate([ closed, merged ]), "", ok ],
+      [ JSON.generate([]), "", ok ]
+    ]
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { responses.shift }) do
+      rows = Hive::Gh.digest_merged_pr_candidates(
+        repository: "owner/repo", host: "github.com", window_start: Time.utc(2026, 6, 13)
+      )
+      assert_equal [ 2 ], rows.map { |item| item.fetch("number") }
+    end
+  end
+
   def test_detail_diff_and_files_use_explicit_host_and_validate_shapes
     ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
     calls = []

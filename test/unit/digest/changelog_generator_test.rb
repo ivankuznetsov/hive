@@ -91,6 +91,48 @@ class HiveDigestChangelogGeneratorTest < Minitest::Test
     end
   end
 
+  def test_implementation_fix_release_and_migration_all_render_as_bullets
+    body = <<~BODY
+      ## Implementation
+      Adds the implementation.
+
+      ## Fix
+      Fixes the regression.
+
+      ## Release
+      Publishes release guidance.
+
+      ## Migration
+      Explains the migration.
+    BODY
+    repo = repository(body: body, diff: "")
+    with_tmp_dir do |dir|
+      manifest, = generator(dir).send(
+        :materialize_manifest, [ repo ], dir: dir, tag: "user_supplied_test"
+      )
+      document = valid_document(manifest)
+      expected = [
+        "Adds the complete implementation.",
+        "Fixes the reported regression.",
+        "Publishes the release guidance.",
+        "Explains the required migration."
+      ]
+      document.dig("projects", 0, "pull_requests", 0, "bullets").each_with_index do |bullet, index|
+        bullet["text"] = expected.fetch(index)
+      end
+      output = File.join(dir, "acceptance.json")
+      File.write(output, JSON.generate(document))
+
+      result = Hive::Digest::ChangelogGenerator.parse_output!(
+        output, repositories: [ repo ], manifest: manifest, logger: nil
+      )
+
+      assert_equal expected, result.projects.first.pull_requests.first.bullets.map(&:text)
+      assert_equal expected.size,
+                   result.projects.first.pull_requests.first.bullets.flat_map(&:fact_ids).uniq.size
+    end
+  end
+
   def test_blank_body_still_accepts_complete_diff_facts
     with_tmp_dir do |dir|
       repo = repository(body: "")
@@ -183,6 +225,87 @@ class HiveDigestChangelogGeneratorTest < Minitest::Test
           )
         end
       end
+    end
+  end
+
+  def test_unicode_title_repetition_is_compared_without_collapsing_distinct_text
+    repo = repository(title: "日本語の題名")
+    with_tmp_dir do |dir|
+      manifest, = generator(dir).send(
+        :materialize_manifest, [ repo ], dir: dir, tag: "user_supplied_test"
+      )
+      document = valid_document(manifest)
+      document.dig("projects", 0, "pull_requests", 0, "bullets", 0)["text"] = "別の具体的な変更"
+      output = File.join(dir, "unicode.json")
+      File.write(output, JSON.generate(document))
+      result = Hive::Digest::ChangelogGenerator.parse_output!(
+        output, repositories: [ repo ], manifest: manifest, logger: nil
+      )
+      assert_equal "別の具体的な変更", result.projects.first.pull_requests.first.bullets.first.text
+
+      repeated = Marshal.load(Marshal.dump(document))
+      repeated.dig("projects", 0, "pull_requests", 0, "bullets", 0)["text"] = "日本語の題名"
+      assert_invalid_document(dir, repeated, [ repo ], manifest, /repeated the raw title/)
+    end
+  end
+
+  def test_no_user_facing_facts_and_zero_evidence_prs_still_produce_exact_pr_bullets
+    with_tmp_dir do |dir|
+      repo = repository
+      manifest, = generator(dir).send(
+        :materialize_manifest, [ repo ], dir: dir, tag: "user_supplied_test"
+      )
+      rationale = valid_document(manifest)
+      rationale.fetch("facts").each { |fact| fact["kind"] = "no_user_facing_change" }
+      rationale.dig("projects", 0, "pull_requests", 0, "bullets").each do |bullet|
+        bullet["text"] = "No user-facing behavior changes; this is internal-only evidence."
+      end
+      output = File.join(dir, "no-user-facing.json")
+      File.write(output, JSON.generate(rationale))
+      result = Hive::Digest::ChangelogGenerator.parse_output!(
+        output, repositories: [ repo ], manifest: manifest, logger: nil
+      )
+      assert result.facts.all? { |fact| fact.kind == "no_user_facing_change" }
+      refute_empty result.projects.first.pull_requests.first.bullets
+
+      invented = Marshal.load(Marshal.dump(rationale))
+      invented.fetch("facts").first["evidence_ids"] = []
+      assert_invalid_document(
+        dir, invented, [ repo ], manifest, /empty evidence list for a PR that has evidence/
+      )
+
+      empty_repo = repository(body: "", diff: "")
+      empty_manifest, = generator(dir).send(
+        :materialize_manifest, [ empty_repo ], dir: dir, tag: "user_supplied_test"
+      )
+      empty_document = {
+        "facts" => [ {
+          "id" => "fact-no-evidence",
+          "repository" => "owner/repo",
+          "number" => 7,
+          "kind" => "no_user_facing_change",
+          "text" => "The empty merge carries no user-facing change.",
+          "evidence_ids" => []
+        } ],
+        "projects" => [ {
+          "repository" => "owner/repo",
+          "significance" => "This merge records an internal no-op.",
+          "pull_requests" => [ {
+            "number" => 7,
+            "bullets" => [ {
+              "text" => "Records an empty merge with no user-facing behavior change.",
+              "fact_ids" => [ "fact-no-evidence" ]
+            } ]
+          } ]
+        } ]
+      }
+      empty_output = File.join(dir, "empty-evidence.json")
+      File.write(empty_output, JSON.generate(empty_document))
+      empty_result = Hive::Digest::ChangelogGenerator.parse_output!(
+        empty_output, repositories: [ empty_repo ], manifest: empty_manifest, logger: nil
+      )
+      assert_equal [], empty_result.facts.first.evidence_ids
+      assert_equal [ "fact-no-evidence" ], empty_result.projects.first.pull_requests.first.bullets.first.fact_ids
     end
   end
 
@@ -302,9 +425,7 @@ class HiveDigestChangelogGeneratorTest < Minitest::Test
       empty_manifest, = generator(dir).send(
         :materialize_manifest, [ factless ], dir: dir, tag: "user_supplied_test"
       )
-      assert_invalid_document(
-        dir, valid_document(empty_manifest), [ factless ], empty_manifest, /produced no facts/
-      )
+      assert_invalid_document(dir, valid_document(empty_manifest), [ factless ], empty_manifest, /produced no facts/)
     end
   end
 
@@ -318,7 +439,7 @@ class HiveDigestChangelogGeneratorTest < Minitest::Test
       mutations = [
         [ /duplicate project/, lambda { |doc| doc.fetch("projects") << Marshal.load(Marshal.dump(doc.fetch("projects").first)) } ],
         [ /invalid PR number/, lambda { |doc| doc.dig("projects", 0, "pull_requests", 0)["number"] = "bad" } ],
-        [ /wrong PR or kind/, lambda { |doc| doc.fetch("facts").first["kind"] = "no_user_facing_change" } ],
+        [ /invalid fact kind/, lambda { |doc| doc.fetch("facts").first["kind"] = "unknown" } ],
         [ /must contain exactly/, lambda { |doc| doc["extra"] = true } ],
         [ /must be one sentence/, lambda { |doc| doc.fetch("projects").first["significance"] = "One. Two." } ],
         [ /invalid PR identity/, lambda { |doc| doc.fetch("facts").first["number"] = "bad" } ]
@@ -401,6 +522,8 @@ class HiveDigestChangelogGeneratorTest < Minitest::Test
 
   def test_default_agent_uses_configured_profile_budget_timeout_and_flags
     profile = Struct.new(:name).new(:claude)
+    runtime_policy = Object.new
+    compiled = nil
     created = nil
     fake_agent = Object.new
     cfg = {
@@ -419,19 +542,76 @@ class HiveDigestChangelogGeneratorTest < Minitest::Test
       created = kwargs
       fake_agent
     }
+    compiler = lambda do |permissions, **kwargs|
+      compiled = [ permissions, kwargs ]
+      runtime_policy
+    end
     with_replaced_singleton_method(Hive::AgentProfiles, :lookup, lookup) do
-      with_replaced_singleton_method(Hive::Agent, :new, factory) do
-        result = Hive::Digest::ChangelogGenerator.new(cfg: cfg, logger: nil).send(
-          :agent_for, task, "prompt", "/tmp/run/output.json"
-        )
-        assert_same fake_agent, result
+      with_replaced_singleton_method(Hive::WorkflowPackage::RuntimePolicy, :compile, compiler) do
+        with_replaced_singleton_method(Hive::Agent, :new, factory) do
+          result = Hive::Digest::ChangelogGenerator.new(cfg: cfg, logger: nil).send(
+            :agent_for, task, "prompt", "/tmp/run/output.json"
+          )
+          assert_same fake_agent, result
+        end
       end
     end
     assert_equal [ [ "claude", cfg ] ], looked_up
     assert_equal 12, created.fetch(:max_budget_usd)
     assert_equal 34, created.fetch(:timeout_sec)
-    assert_equal "bypassPermissions", created.fetch(:permission_mode)
-    assert_equal [ "--model", "default" ], created.fetch(:cli_flags)
+    assert_equal %w[Read Write], compiled.first.fetch("tools")
+    assert_equal "/tmp/run", compiled.last.fetch(:task_folder)
+    assert_same runtime_policy, created.fetch(:runtime_policy)
+    assert_equal false, created.fetch(:log_stream)
+    refute created.key?(:permission_mode)
+    refute created.key?(:cli_flags)
+  end
+
+  def test_default_agent_rejects_profiles_without_confidential_runtime_policy
+    profile = Struct.new(:name).new(:codex)
+    lookup = ->(_name, cfg:) { profile }
+    with_replaced_singleton_method(Hive::AgentProfiles, :lookup, lookup) do
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Digest::ChangelogGenerator.new(cfg: {}, logger: nil).send(
+          :agent_for,
+          Hive::Digest::ChangelogGenerator::RunnerTask.new(
+            folder: "/tmp/run", state_file: "/tmp/run/state.yml", log_dir: "/tmp/run/logs",
+            slug: "digest-2026-06-13", stage_name: "digest"
+          ),
+          "prompt", "/tmp/run/output.json"
+        )
+      end
+      assert_match(/cannot enforce the confidential evidence runtime policy/, error.message)
+    end
+  end
+
+  def test_default_agent_compiles_private_read_write_policy_without_shell_network_or_mcp
+    with_tmp_dir do |dir|
+      task = Hive::Digest::ChangelogGenerator::RunnerTask.new(
+        folder: dir, state_file: File.join(dir, "state.yml"), log_dir: File.join(dir, "logs"),
+        slug: "digest-2026-06-13", stage_name: "digest"
+      )
+      created = nil
+      factory = lambda do |**kwargs|
+        created = kwargs
+        Object.new
+      end
+
+      with_replaced_singleton_method(Hive::Agent, :new, factory) do
+        Hive::Digest::ChangelogGenerator.new(cfg: {}, logger: nil).send(
+          :agent_for, task, "prompt", File.join(dir, "output.json")
+        )
+      end
+
+      policy = created.fetch(:runtime_policy)
+      assert_equal %w[Read Write], policy.allowed_tools
+      assert_includes policy.disallowed_tools, "Bash"
+      assert_includes policy.disallowed_tools, "WebFetch"
+      assert_equal [ File.realpath(dir) ], policy.directories
+      assert_equal [], policy.domains
+      assert_equal({}, JSON.parse(File.read(policy.mcp_config_path)))
+      assert_equal false, created.fetch(:log_stream)
+    end
   end
 
   private
@@ -442,7 +622,8 @@ class HiveDigestChangelogGeneratorTest < Minitest::Test
     )
   end
 
-  def repository(repository: "owner/repo", project_name: "Project", number: 7, body: "Implementation body", diff: nil)
+  def repository(repository: "owner/repo", project_name: "Project", number: 7,
+                 title: "Ship the change", body: "Implementation body", diff: nil)
     target = Hive::Digest::RepositoryTarget.new(
       project_name: project_name, path: "/tmp/#{project_name.downcase}",
       repository: repository, host: "github.com"
@@ -450,7 +631,7 @@ class HiveDigestChangelogGeneratorTest < Minitest::Test
     pr = Hive::Digest::PullRequest.new(
       target: target,
       number: number,
-      title: "Ship the change",
+      title: title,
       url: "https://github.com/#{repository}/pull/#{number}",
       merged_at: Time.utc(2026, 6, 13, 12),
       body: body,

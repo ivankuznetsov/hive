@@ -2,6 +2,16 @@ require "test_helper"
 require "hive/digest/repository"
 
 class HiveDigestRepositoryTest < Minitest::Test
+  def test_warning_requires_nonblank_repository_scope
+    assert_raises(ArgumentError) do
+      Hive::Digest::Warning.new(kind: "test", message: "message", repository: " ")
+    end
+    warning = Hive::Digest::Warning.new(
+      kind: "test", message: "message", repository: "owner/repo"
+    )
+    assert_equal "owner/repo", warning.to_h.fetch("repository")
+  end
+
   def test_collection_rejects_pull_requests_from_another_target
     target = repository_target("owner/repo")
     other = repository_target("owner/other")

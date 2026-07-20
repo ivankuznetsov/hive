@@ -12,6 +12,7 @@ require "hive/digest/repository"
 require "hive/paths"
 require "hive/secret_patterns"
 require "hive/stages/base"
+require "hive/workflow_package/runtime_policy"
 
 module Hive
   module Digest
@@ -142,7 +143,14 @@ module Hive
             kind = row.fetch("kind").to_s
             raise GenerationError, "digest changelog returned invalid fact kind #{kind.inspect}" unless FACT_KINDS.include?(kind)
             text = nonblank!(row.fetch("text"), "fact text")
-            evidence_ids = string_array!(row.fetch("evidence_ids"), "fact evidence_ids")
+            evidence_ids = string_array!(
+              row.fetch("evidence_ids"), "fact evidence_ids",
+              allow_empty: kind == "no_user_facing_change"
+            )
+            if evidence_ids.empty? && evidence_owner.value?(key)
+              raise GenerationError,
+                    "digest changelog used an empty evidence list for a PR that has evidence #{key}"
+            end
             evidence_ids.each do |evidence_id|
               owner = evidence_owner[evidence_id]
               raise GenerationError, "digest changelog cited unknown evidence #{evidence_id.inspect}" unless owner
@@ -233,10 +241,10 @@ module Hive
               fact_ids.each do |fact_id|
                 fact = facts[fact_id]
                 raise GenerationError, "digest changelog cited unknown fact #{fact_id.inspect}" unless fact
-                unless fact.kind == "material" && pr_key(fact.repository, fact.pr_number) == pr_key(pr.repository, pr.number)
-                  raise GenerationError, "digest changelog cited fact #{fact_id.inspect} from the wrong PR or kind"
+                unless pr_key(fact.repository, fact.pr_number) == pr_key(pr.repository, pr.number)
+                  raise GenerationError, "digest changelog cited fact #{fact_id.inspect} from the wrong PR"
                 end
-                covered_material[fact_id] = true
+                covered_material[fact_id] = true if fact.kind == "material"
               end
               ChangeBullet.new(text: text, fact_ids: fact_ids)
             end
@@ -274,9 +282,11 @@ module Hive
                 "digest changelog #{label} coverage mismatch: missing=#{missing.inspect}, unknown=#{unknown.inspect}"
         end
 
-        def string_array!(value, label)
-          unless value.is_a?(Array) && !value.empty? && value.all? { |item| item.is_a?(String) && !item.strip.empty? }
-            raise GenerationError, "digest changelog #{label} must be a nonempty string array"
+        def string_array!(value, label, allow_empty: false)
+          unless value.is_a?(Array) && (allow_empty || !value.empty?) &&
+                 value.all? { |item| item.is_a?(String) && !item.strip.empty? }
+            requirement = allow_empty ? "a string array" : "a nonempty string array"
+            raise GenerationError, "digest changelog #{label} must be #{requirement}"
           end
           raise GenerationError, "digest changelog #{label} contains duplicates" unless value.uniq.size == value.size
 
@@ -301,7 +311,7 @@ module Hive
         end
 
         def normalize_text(value)
-          value.to_s.downcase.gsub(/[^a-z0-9]+/, " ").strip
+          value.to_s.unicode_normalize(:nfkc).downcase.gsub(/[^\p{L}\p{N}]+/u, " ").strip
         end
 
         def pr_key(repository, number)
@@ -566,6 +576,23 @@ module Hive
         return @agent_factory.call(task: task, prompt: prompt, output_path: output_path) if @agent_factory
 
         profile = Hive::AgentProfiles.lookup(agent_name, cfg: @cfg)
+        unless profile.name == :claude
+          raise Hive::ConfigError,
+                "hive digest: agent #{profile.name.inspect} cannot enforce the confidential evidence runtime policy"
+        end
+        runtime_policy = Hive::WorkflowPackage::RuntimePolicy.compile(
+          {
+            "tools" => %w[Read Write],
+            "deny" => [],
+            "directories" => [],
+            "commands" => [],
+            "domains" => [],
+            "credentials" => []
+          },
+          task_folder: task.folder,
+          profile: profile,
+          policy_dir: File.join(task.folder, "policy")
+        )
         Hive::Agent.new(
           task: task,
           prompt: prompt,
@@ -577,8 +604,8 @@ module Hive
           expected_output: output_path,
           status_mode: :output_file_exists,
           log_label: "digest",
-          permission_mode: profile.name == :claude ? Hive::Config.claude_permission_mode(@cfg) : nil,
-          cli_flags: profile.name == :claude ? Hive::Config.claude_cli_flags(@cfg) : []
+          runtime_policy: runtime_policy,
+          log_stream: false
         )
       end
 

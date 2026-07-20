@@ -18,7 +18,11 @@ Work in two explicit stages in one invocation:
    truly carries no material change, and put the concrete rationale in text.
 2. Write one plain-language significance sentence per project and one or more
    concrete change bullets per PR. Every material fact id must be cited by at
-   least one bullet for that same PR. Do not repeat the raw PR title as a bullet.
+   least one bullet for that same PR. When a PR has no material facts, write a
+   concrete no-user-facing-change bullet that cites its rationale fact. A PR
+   with no evidence chunks must still have one no-user-facing-change rationale
+   fact; only that fact may use an empty evidence_ids array. Do not repeat the
+   raw PR title as a bullet.
 
 Write JSON to this exact path: <%= output_path %>
 Do not write anywhere else. The JSON must contain exactly these shapes:
@@ -31,7 +35,7 @@ Do not write anywhere else. The JSON must contain exactly these shapes:
       "number": 123,
       "kind": "material|no_user_facing_change",
       "text": "concrete fact or concrete no-change rationale",
-      "evidence_ids": ["one or more exact evidence ids"]
+      "evidence_ids": ["one or more exact evidence ids, or empty only for a no-evidence rationale"]
     }
   ],
   "projects": [
@@ -44,7 +48,7 @@ Do not write anywhere else. The JSON must contain exactly these shapes:
           "bullets": [
             {
               "text": "Concrete plain-text change bullet.",
-              "fact_ids": ["one or more material fact ids from this PR"]
+              "fact_ids": ["one or more fact ids from this PR"]
             }
           ]
         }

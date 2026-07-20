@@ -83,7 +83,7 @@ Telegram credential lookup entirely.
 through explicit-host `gh api` calls. It validates monotonic `updated_at`,
 de-duplicates repository/PR identity, and stops only after an empty page or a
 page whose remaining rows all predate the London window. Filtering by validated
-`merged_at` happens afterward.
+`merged_at` happens afterward; ordinary closed-but-unmerged rows are excluded.
 
 Each qualifying PR is hydrated through:
 
@@ -94,9 +94,12 @@ Each qualifying PR is hydrated through:
 
 The collector rejects transport/JSON errors, inconsistent identities or merge
 times, incomplete pagination, changed-file mismatches, a missing nonempty diff,
-scratch/checksum/redaction failures, and fixed evidence-ceiling breaches. One
-bad qualifying PR fails its repository instead of disappearing from the
-changelist.
+scratch/checksum/redaction failures, and fixed evidence-ceiling breaches. It
+decodes Git C-quoted paths and validates unquoted paths with spaces against the
+authoritative files response. Remaining per-PR, per-repository, and per-digest
+byte budgets are passed into the streaming `gh` capture so oversized stdout is
+terminated before full materialization. One bad qualifying PR fails its
+repository instead of disappearing from the changelist.
 
 Scratch directories and files use modes 0700/0600. Raw body/diff bytes exist
 only long enough to construct and verify redacted evidence, then are removed.
@@ -112,13 +115,17 @@ invocation must return:
    or accompanied by a concrete no-user-facing-change rationale;
 2. exactly one significance sentence per repository and one row per PR;
 3. one or more concrete bullets per PR, collectively citing every material
-   fact for that PR.
+   fact for that PR. All-no-user-facing-change PRs cite their rationale facts;
+   a zero-evidence PR uses one no-user-facing-change fact with no evidence IDs.
 
 Validation accepts model row reordering but rejects identity drift, duplicates,
 unknowns, omissions, blanks, title repetition, zero bullets, uncovered
 evidence, and uncovered material facts. Failures retain only safe run/log
 breadcrumbs. Successful diagnostics retain a redacted ledger and checksums,
-not raw evidence or prompt payloads.
+not raw evidence, prompt payloads, or provider stream output. The production
+agent runs under a private-directory-only Claude runtime policy with isolated
+settings, MCP, and child environment and without shell or network tools. A
+configured provider that cannot enforce this boundary fails closed.
 
 `Hive::SecretPatterns` scans repository metadata/body/diff before agent
 provider egress and scans generated significance/bullets before rendering.

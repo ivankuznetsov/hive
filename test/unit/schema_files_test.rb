@@ -2221,6 +2221,7 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
     assert_equal 2,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    assert_includes doc.dig("$defs", "Warning", "required"), "repository"
     refute Hive::Schemas::SCHEMA_VERSIONS.key?("hive-merged-pr-digest")
     refute File.exist?(File.join(Hive::Schemas.schema_dir, "hive-merged-pr-digest.v1.json"))
   end

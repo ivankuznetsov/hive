@@ -4,7 +4,7 @@ type: module
 source: lib/hive/daemon/
 created: 2026-05-06
 updated: 2026-07-20
-tags: [daemon, module, automation, dispatcher]
+tags: [daemon, module, automation, dispatcher, operational-status, snapshots]
 ---
 
 **TLDR**: Small modules under `Hive::Daemon::*` that together form
@@ -16,7 +16,10 @@ the safety-relevant decisions are unit-testable without forking. Task-stage
 agents are detached durable attempts observed by the daemon;
 `ChildSupervisor` owns ancillary work only. The daemon also owns merge intake,
 fair scheduling, and fenced completion for the
-language-neutral [[commands/refactor-patrol]] lifecycle.
+language-neutral [[commands/refactor-patrol]] lifecycle. Each full tick also
+publishes an owner-private, atomic operational snapshot. `hive status
+--operational --json` and [[commands/watch]] join that scheduler evidence to
+the task graph without making status itself perform daemon reconciliation.
 
 `StatusConsumer` now passes through the additive condition projection fields
 from `hive status --json`. Dispatch still consumes the canonical `action` and
@@ -33,6 +36,7 @@ writes. See [[modules/conditions]].
 | `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate plus per-project patrol scans), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. `Dispatcher#reload_config!` applies reloaded limits through `update_limits` on this same object so SIGHUP changes admission immediately without discarding runtime state. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); everything else is intentionally in-memory. |
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
 | `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed rows including `workflow` and structured `admission_error`. Missing or malformed admission state is converted to `dependency_validation_failed`, `blocked: true`, action `admission_error`, and no command. Envelope shape is hard-validated while forward schema versions remain best-effort. |
+| `Hive::Daemon::OperationalSnapshot` | `lib/hive/daemon/operational_snapshot.rb` | Private daemon-to-status observation channel. `Assembler` publishes `started`, `failed`, and revalidated `complete` tick records; `Store` atomically persists them under owner-private path/inode checks; `Reader` accepts only the live daemon generation, complete phase, supported schema, and unexpired validity window, degrading every other condition to explicit unavailable/stale/invalid evidence. |
 | `Hive::Daemon::StatusReport` | `lib/hive/daemon/status_report.rb` | Shared `hive-daemon-status` producer for `hive daemon status --json` and hivebox. Builds the PID/service/binary/update-nudge envelope as a plain hash, exposes `running_state`, `payload`, and web-safe `safe_payload`, bounds `installed_binary --version` probes to 10s, and owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE` so the CLI producer and web repair affordance read the same enum source. |
 | `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Owns non-task ancillary children such as digest and patrol jobs. Task-stage agents use [[modules/attempts]] and are never adopted with `wait2` or terminated on daemon shutdown. |
 | `Hive::Conditions::AttemptObserver` | `lib/hive/conditions/attempt_observer.rb` | Observes reconciled terminal/lost durable attempts. For coding execute attempts it idempotently journals the current `AgentHealthy` fact and rebuilds the projection: only a terminal `succeeded` receipt is satisfied; failed/cancelled/lost outcomes fail closed. Confirmed deliveries are memoized in-process before task lookup/journal parsing; restart rechecks the durable journal once. |
@@ -70,6 +74,7 @@ hive daemon start
             ├─ Hive::Daemon::ConcurrencyController
             ├─ Hive::Daemon::ChildSupervisor     (ancillary jobs only)
             ├─ Hive::Daemon::StatusConsumer      (Open3.capture3 hive status --json)
+            ├─ Hive::Daemon::OperationalSnapshot (atomic scheduler observation)
             ├─ Hive::Daemon::DispatchRequestQueue (<state_home>/dispatch_requests/*.json)
             ├─ Hive::Daemon::PrMergeWatcher      (bounded Hive::Gh gh pr view)
             ├─ Hive::Daemon::RefactorPatrolMergeReconciler (incremental merge manifests/high-water)
@@ -97,8 +102,9 @@ change triggers a full `tick` immediately; otherwise
 `daemon.poll_interval_sec` (default 30s) remains the backstop full-scan
 cadence for changes the cheap probe cannot see.
 
-Each full tick begins by reconciling durable attempts, processing normalized
-loss, and publishing lease-first capacity. It then runs: reap ancillary children -> enforce child
+Each full tick first publishes a `started` record, then reconciles durable
+attempts, processes normalized loss, and publishes lease-first capacity. It
+then runs: reap ancillary children -> enforce child
 timeouts -> prune dispatch-result notices -> **tick the digest scheduler** ->
 fetch status -> heal stale agent markers -> heal recoverable terminal errors -> backfill missing display names ->
 backfill missing meta ids -> drop merge watches for every held row -> tick the PR-merge watcher -> **process dispatch requests** -> patrol dispatches
@@ -114,6 +120,23 @@ Dispatch requests come BEFORE the row-scan so a slug whose request just
 dispatched this tick is already in-flight in the controller and the row
 scan's per-slug in-flight gate (`controller.running_task?`) keeps the same
 tick from double-spawning.
+
+Scheduler decisions are captured in memory as each row is evaluated. At the
+end of the tick the dispatcher fetches status a second time and publishes a
+`complete` snapshot only after matching task identity, generation, stage,
+marker, attempt, and state-file mtime across that source window. Added,
+removed, or changed rows receive an unavailable disposition instead of a stale
+decision. The record also carries daemon generation/PID/start identity,
+sequence and validity window, capacity, queue counters, provider holds,
+recovery exhaustion, and per-task owner/reason. Failed reconciliation/status
+or failed revalidation publishes `failed`.
+
+The reader treats incomplete phases, a stopped/replaced daemon, generation
+mismatch, expiry, malformed content, unsafe symlink/hard-link/permissions, and
+unreadable paths as typed non-authoritative evidence. Snapshot publication is
+advisory: write/assembly failure logs `operational_snapshot_publish_failed` but
+does not stop dispatch. Consumers therefore report partial/unknown status
+rather than either crashing Hive or presenting old scheduler state as current.
 
 Durable task admissions use `Attempts::ConfiguredDispatcher`: it resolves the
 task and reloads that project's attempt heartbeat, stale, launch, and

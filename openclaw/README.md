@@ -18,7 +18,7 @@ skills/hive/skill.json
 skills/hive/references/*.md
 ```
 
-`Hive::AgentSkills::CanonicalSkill` renders platform frontmatter, invocation, provenance, the current Hive installer version, and `.hive-skill.json`. Tests byte-compare every committed OpenClaw file with that renderer. Claude, Codex, and Pi receive the same canonical payload through Hive’s consent-safe agent-skill setup.
+`Hive::AgentSkills::CanonicalSkill` renders platform frontmatter, invocation, provenance, the current Hive installer version, and `.hive-skill.json`. Tests byte-compare every committed OpenClaw file with that renderer. Claude (`/hive`), Codex (`$hive`), and Pi (`/skill:hive`) receive the same canonical payload through Hive’s consent-safe agent-skill setup; OpenClaw invokes it as `/hive`.
 
 The public listing remains <https://clawhub.ai/ivankuznetsov/skills/hive-cli>.
 
@@ -35,12 +35,16 @@ through the progressive setup reference:
 ```
 
 Guided setup explains the selected platform channel and asks before changing
-user-global software. It runs `hive setup --no-init --json` for local web and
-daemon provisioning; initial project enrollment remains a separate
-`hive init .` run in the user's real terminal so Hive can show its defaults and
-ask for confirmation. The Homebrew installer metadata provides the macOS
-`hive` binary dependency. OpenClaw installation remains ClawHub-owned;
-`hive setup-agents` diagnoses but never overwrites it.
+user-global software. After approval it runs
+`hive setup --no-init --yes --json` for local web and daemon provisioning;
+initial project enrollment remains a separate `hive init .` run in the user's
+real terminal so Hive can show its defaults and ask for confirmation. The
+Homebrew installer metadata provides the macOS `hive` binary dependency.
+OpenClaw installation remains ClawHub-owned:
+`hive doctor` reads local config, workspace, and ClawHub provenance without
+launching OpenClaw and points missing or stale installations to
+`openclaw skills install/update @ivankuznetsov/hive-cli`;
+`hive setup-agents` never writes OpenClaw state.
 
 ## Local projection test
 
@@ -51,6 +55,21 @@ openclaw skills install ./openclaw/skills/hive --as hive
 ```
 
 Then invoke `/hive status`. The skill should use `hive status --operational --json` and `hive watch --json-lines`, never a shell polling loop.
+
+## Authenticated release proof
+
+The protected `.github/workflows/live-agent-skills.yml` workflow builds one
+candidate gem and one four-platform skill archive from an exact commit, then
+runs each native agent against its projection in a disposable home. OpenClaw
+must discover `/hive` through its own JSON inventory and complete the same
+bounded status/watch task as Claude, Codex, and Pi. Retained evidence contains
+only structured event kinds, hashes, exact audited Hive argv, candidate
+provenance, and cleanup/secret-scan results.
+
+All four jobs and the attestation job must pass before the workflow can publish
+the candidate-bound `live-agent-skills` check. A local skip proves only that
+credentials were unavailable; it is not release evidence. See
+`docs/RELEASING.md` for the exact-artifact gate.
 
 ## Publish checklist
 

@@ -1,37 +1,62 @@
 ---
 title: hive setup
 type: command
-source: lib/hive/commands/setup.rb, lib/hive/setup/diagnostics.rb, lib/hive/web/app_bundle.rb, lib/hive/commands/{daemon,web}/service_installer.rb
+source: lib/hive/commands/setup.rb, lib/hive/commands/setup_agents.rb, lib/hive/setup/diagnostics.rb, lib/hive/web/app_bundle.rb, lib/hive/commands/{daemon,web}/service_installer.rb
 created: 2026-06-30
-updated: 2026-07-02
-tags: [command, setup, install, web, daemon]
+updated: 2026-07-20
+tags: [command, setup, install, agents, skills, consent, web, daemon]
 ---
 
-**TLDR**: `hive setup` is the local, non-Docker provisioning command for a workstation install. It runs diagnostics, bootstraps Hive-owned local dependencies it can manage, installs the daemon service, optionally enrolls the current project, optionally installs the web service, and reports the whole run as a `hive-setup` phase list.
+**TLDR**: `hive setup` is the local, non-Docker workstation provisioner. It
+checks dependencies, provisions Hive's operating skill for Claude, Codex, and
+Pi before other mutations, then repairs Hive-owned dependencies, installs the
+daemon, enrolls the project, and optionally installs the web service. One
+preview/consent boundary covers the run: interactive setup asks once; JSON or
+non-TTY setup requires `--yes` and otherwise performs no mutation.
 
 ## Surface
 
-`hive setup [--json] [--service] [--no-bootstrap] [--no-init]`
+`hive setup [--json] [--service] [--no-bootstrap] [--no-init] [--yes]`
 
-`arch-review-local-web-install` removed the previously advertised `--yes`
-flag. Setup has no interactive prompts or confirmation path, so there are no
-non-interactive defaults for that flag to accept.
+`--yes` accepts the revalidated plan for unattended operation. It does not
+bypass conflicts or let Hive replace user-owned agent skills. Without
+`--yes`, a TTY receives the normal `hive setup-agents` aggregate preview and
+one confirmation prompt. JSON never prompts. A JSON or non-TTY run without
+`--yes` records `classification: consent_required`, exits non-zero, and stops
+before diagnostics, native agent discovery, QMD, web-bundle, service, or
+project mutation. Its diagnostics phase is explicitly marked `skipped: true`
+with reason `consent_required`.
 
-The diagnostic phase checks Ruby 3.4, git, tmux, `gh`, Claude, Codex, Node/npm, QMD, the managed web bundle, and SQLite through `Hive::Setup::Diagnostics`. Missing QMD and missing/stale managed web bundles are bootstrappable; hard failures still make the command fail even when all provisioning phases succeed.
+On consented runs and explicit `--no-bootstrap` diagnosis, the diagnostic phase
+checks Ruby 3.4, git, tmux, `gh`, Claude, Codex, Node/npm, QMD, the managed web
+bundle, and SQLite through `Hive::Setup::Diagnostics`. Missing QMD and
+missing/stale managed web bundles are bootstrappable; hard failures still make
+the command fail even when all provisioning phases succeed.
 
 Without `--no-bootstrap`, setup provisions in this order:
 
-1. Install QMD through `npm install --global --prefix <data_home>/qmd @tobilu/qmd` when diagnostics report it missing and npm is available. Failed npm stderr is captured in the `qmd` phase `message`.
-2. Install or refresh the managed Rails web bundle through `Hive::Web::AppBundle.ensure!`.
-3. Run `hive daemon install` semantics through `Hive::Commands::Daemon::ServiceInstaller` with `autostart: true`, `force: true`, and the same `Hive::InvokedBinary.path` that setup was invoked through.
-4. Initialize or enroll the current project unless `--no-init` is passed. If `Hive::Commands::Init` reports the project is already initialized, setup falls back to `hive daemon enable <current-project-name>`.
-5. With `--service`, install the separate `hive-web` service through `Hive::Commands::Web::ServiceInstaller`, also using `Hive::InvokedBinary.path`.
+1. Inspect and provision the bundled Hive operating skill plus other selected
+   managed capabilities through `Hive::Commands::SetupAgents`. The nested
+   `hive init` later in the run suppresses its own agent-skill preflight, so
+   setup never asks twice.
+2. Install QMD through `npm install --global --prefix <data_home>/qmd
+   @tobilu/qmd` when diagnostics report it missing and npm is available.
+3. Install or refresh the managed Rails web bundle through
+   `Hive::Web::AppBundle.ensure!`.
+4. Install the daemon with autostart through the same invoked `hive`/`hv`
+   binary.
+5. Initialize or enroll the current project unless `--no-init` is passed.
+6. With `--service`, install the separate `hive-web` service through the same
+   invoked binary.
 
-`--no-bootstrap` is diagnose-only: it skips QMD/web-bundle provisioning, daemon service install, project enrollment, and web service install. It still appends the informational `web` phase with the configured `http://<bind>:<port>` URL.
+`--no-bootstrap` is diagnose-only: it skips agent skills, QMD/web-bundle
+provisioning, daemon/web service installation, and project enrollment. It
+still appends the informational `web` phase with the configured URL.
 
 ## JSON
 
-`--json` emits a single unversioned document:
+`--json` emits one unversioned document. The `agent_skills` phase contains the
+same structured consent, operation, and health evidence as setup-agents:
 
 ```json
 {
@@ -39,6 +64,16 @@ Without `--no-bootstrap`, setup provisions in this order:
   "ok": true,
   "phases": [
     { "name": "diagnostics", "ok": true },
+    {
+      "name": "agent_skills",
+      "ok": true,
+      "classification": "success",
+      "consent": {"granted": true, "provenance": "yes_flag"},
+      "targets": [],
+      "operation_results": [],
+      "final_health": [],
+      "setup_agents_exit_code": 0
+    },
     { "name": "web_bundle", "ok": true, "path": "/home/user/.local/share/hive/web" },
     { "name": "daemon_service", "ok": true, "outcome": "installed", "target_path": "/home/user/.config/systemd/user/hive-daemon.service", "messages": [] },
     { "name": "enroll", "ok": true, "path": "/home/user/project" },
@@ -52,9 +87,11 @@ be ok, and diagnostics must have no hard non-bootstrappable failures. Each
 provisioning helper runs through the shared `phase(name)` wrapper: the block
 returns `[ok, data]`, and any `StandardError` is recorded as an `ok:false`
 phase with a `"Class: message"` `message` instead of aborting before the JSON
-envelope can be emitted. This covers QMD bootstrap, web-bundle refresh, daemon
-service install, enrollment, and optional web-service install through the same
-failure shape.
+envelope can be emitted. This covers agent skills, QMD bootstrap, web-bundle
+refresh, daemon service install, enrollment, and optional web-service install
+through the same failure shape. An unavailable agent is a non-blocking skip;
+an actionable conflict, failed operation, or residual unhealthy available
+target fails the phase.
 
 If Thor rejects argv before `Hive::Commands::Setup` runs (for example
 `hive setup extra --json`), `bin/hive` emits an unversioned `hive-setup`

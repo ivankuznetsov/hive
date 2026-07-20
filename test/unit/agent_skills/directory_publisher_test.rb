@@ -80,6 +80,29 @@ class AgentSkillsDirectoryPublisherTest < Minitest::Test
     end
   end
 
+  def test_declared_external_metadata_cannot_mask_projection_or_foreign_files
+    with_tmp_dir do |home|
+      target = publisher(home)
+      publish(target)
+      metadata = File.join(target.destination, "_meta.json")
+      File.write(metadata, "{}\n", mode: "w", perm: 0o600)
+
+      assert_equal "foreign", target.report.state
+      allowed = target.report(allowed_extra_files: [ "_meta.json" ])
+      assert_equal "healthy", allowed.state
+      refute allowed.files.key?("_meta.json")
+
+      %w[SKILL.md .hive-skill.json].each do |canonical_path|
+        report = target.report(allowed_extra_files: [ canonical_path ])
+        assert_equal "unsafe", report.state
+        assert_match(/invalid allowed projection metadata/, report.issues.first.last)
+      end
+
+      File.write(File.join(target.destination, "PRIVATE.md"), "keep\n", mode: "w", perm: 0o600)
+      assert_equal "foreign", target.report(allowed_extra_files: [ "_meta.json" ]).state
+    end
+  end
+
   def test_symlink_and_group_writable_roots_are_rejected_read_only
     with_tmp_dir do |home|
       outside = File.join(home, "outside")

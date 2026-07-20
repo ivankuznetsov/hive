@@ -292,9 +292,11 @@ module Hive
       continues if another operation fails.
 
       Without --yes, stdin must be a TTY and the operator must confirm. JSON
-      mode never prompts, so --json requires --yes whenever mutations are
-      planned. Repeat --agent/--skill values (or pass several values after one
-      flag) to scope setup to effective managed targets.
+      mode never prompts, so --json requires --yes before native inspection or
+      provisioning. Non-TTY mode has the same boundary. Without consent Hive
+      returns a typed refusal before launching agent CLIs. Repeat
+      --agent/--skill values (or pass several values after one flag) to scope
+      setup to effective managed targets.
 
       Exit codes: 0 healthy/no-op; 1 attempted or residual failure;
       64 consent required/refused; 78 invalid manifest/config/filter.

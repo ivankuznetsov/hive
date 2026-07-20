@@ -86,7 +86,7 @@ capabilities:
     package: hive-operations
     agents:
       claude: { invocation: /hive, probe: SKILL.md }
-      codex: { invocation: /hive, probe: SKILL.md }
+      codex: { invocation: "$hive", probe: SKILL.md }
       pi: { invocation: "/skill:hive", probe: SKILL.md }
 
   - id: ce-brainstorm

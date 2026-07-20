@@ -278,7 +278,11 @@ module Hive
           row = expect_hash(entry, row_path)
           assert_keys!(row, %w[invocation probe alias], row_path, required: %w[invocation probe])
           invocation = string!(row.fetch("invocation"), "#{row_path}.invocation")
-          invalid!("#{row_path}.invocation", "must be a slash invocation") unless invocation.match?(%r{\A/[A-Za-z0-9_.:-]+\z})
+          slash_invocation = invocation.match?(%r{\A/[A-Za-z0-9_.:-]+\z})
+          codex_skill_mention = agent == "codex" && invocation.match?(/\A\$[A-Za-z0-9_.-]+\z/)
+          unless slash_invocation || codex_skill_mention
+            invalid!("#{row_path}.invocation", "must be a platform-native skill invocation")
+          end
           probe = safe_relative_path!(row.fetch("probe"), "#{row_path}.probe")
           alias_spec = row.key?("alias") ? parse_alias(row.fetch("alias"), "#{row_path}.alias", agent) : nil
           out[agent] = AgentContract.new(agent: agent, invocation: invocation, probe: probe, alias_spec: alias_spec)

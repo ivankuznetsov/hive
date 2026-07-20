@@ -7,7 +7,7 @@ class SetupAgentsCommandTest < Minitest::Test
   end
 
   class FakeProvisioner
-    attr_reader :executions, :build_args
+    attr_reader :executions, :build_args, :consent_required_args
 
     def initialize(plan:, revised: nil, changed: false, result: nil)
       @plan = plan
@@ -32,6 +32,11 @@ class SetupAgentsCommandTest < Minitest::Test
     def noop_result(plan) = result_for(plan, exit_code: 0, classification: "no_op", consent: "not_required")
     def refusal_result(plan, provenance:) = result_for(plan, exit_code: 64, classification: "refused", consent: provenance)
 
+    def consent_required_result(agents: nil, skills: nil, provenance:)
+      @consent_required_args = { agents: agents, skills: skills, provenance: provenance }
+      result_for(@plan, exit_code: 64, classification: "refused", consent: provenance)
+    end
+
     def result_for(plan, exit_code:, classification:, consent:)
       Hive::AgentSkills::ProvisioningResult.new(
         preview: plan,
@@ -44,6 +49,10 @@ class SetupAgentsCommandTest < Minitest::Test
 
   class InvalidProvisioner
     def build_plan(**)
+      raise Hive::ConfigError, "broken effective config"
+    end
+
+    def consent_required_result(**)
       raise Hive::ConfigError, "broken effective config"
     end
   end
@@ -126,6 +135,8 @@ class SetupAgentsCommandTest < Minitest::Test
     payload = JSON.parse(output.string)
     assert_equal "hive-setup-agents", payload.fetch("schema")
     assert_equal "refused", payload.fetch("classification")
+    assert_nil fake.build_args
+    assert_equal "json_requires_yes", fake.consent_required_args.fetch(:provenance)
     assert_empty error.string
     refute_match(/Proceed/, output.string)
   end

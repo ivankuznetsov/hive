@@ -295,6 +295,143 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
+  def test_filesystem_only_inventory_reads_claude_state_without_native_commands
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "claude")
+      executable(bin)
+      config_root = File.join(dir, "claude")
+      install = File.join(
+        config_root, "plugins", "cache",
+        "compound-engineering-plugin", "compound-engineering", "3.19.0"
+      )
+      write(File.join(install, "skills", "ce-brainstorm", "SKILL.md"))
+      write(
+        File.join(config_root, "plugins", "installed_plugins.json"),
+        JSON.generate(
+          "version" => 2,
+          "plugins" => {
+            "compound-engineering@compound-engineering-plugin" => [ {
+              "scope" => "user", "installPath" => install,
+              "version" => "3.19.0"
+            } ]
+          }
+        )
+      )
+      write(
+        File.join(config_root, "plugins", "known_marketplaces.json"),
+        JSON.generate(
+          "compound-engineering-plugin" => {
+            "source" => { "source" => "github", "repo" => "EveryInc/compound-engineering-plugin" }
+          }
+        )
+      )
+      runner = FakeRunner.new
+
+      row = Hive::AgentSkills::Inspector.new(
+        config: config(bin: bin), project_root: dir, runner: runner,
+        environment: { "HOME" => dir, "PATH" => "", "CLAUDE_CONFIG_DIR" => config_root },
+        native_commands: false
+      ).inspect(skills: [ "ce-brainstorm" ]).find { |entry| entry.capability_id == "ce-brainstorm" }
+
+      assert_equal "healthy", row.health
+      assert_equal "filesystem", row.native.fetch("inventory_source")
+      assert_equal "3.19.0", row.native.dig("package", "version")
+      assert_empty row.native.fetch("commands")
+      assert_empty runner.calls
+    end
+  end
+
+  def test_filesystem_only_inventory_honors_claude_disabled_state
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "claude")
+      executable(bin)
+      config_root = File.join(dir, "claude")
+      install = File.join(
+        config_root, "plugins", "cache",
+        "compound-engineering-plugin", "compound-engineering", "3.19.0"
+      )
+      write(File.join(install, "skills", "ce-brainstorm", "SKILL.md"))
+      write(File.join(config_root, "plugins", "installed_plugins.json"), JSON.generate(
+        "version" => 2,
+        "plugins" => {
+          "compound-engineering@compound-engineering-plugin" => [ {
+            "scope" => "user", "installPath" => install, "version" => "3.19.0"
+          } ]
+        }
+      ))
+      write(File.join(config_root, "plugins", "known_marketplaces.json"), JSON.generate(
+        "compound-engineering-plugin" => {
+          "source" => { "repo" => "EveryInc/compound-engineering-plugin" }
+        }
+      ))
+      write(File.join(config_root, "settings.json"), JSON.generate(
+        "enabledPlugins" => { "compound-engineering@compound-engineering-plugin" => false }
+      ))
+
+      row = Hive::AgentSkills::Inspector.new(
+        config: config(bin: bin), project_root: dir, runner: FakeRunner.new,
+        environment: { "HOME" => dir, "PATH" => "", "CLAUDE_CONFIG_DIR" => config_root },
+        native_commands: false
+      ).inspect(skills: [ "ce-brainstorm" ]).find { |entry| entry.capability_id == "ce-brainstorm" }
+
+      assert_equal "missing", row.health
+      assert_match(/disabled/, row.explanation)
+      assert_equal false, row.native.dig("package", "enabled")
+    end
+  end
+
+  def test_filesystem_only_inventory_reads_codex_and_pi_state_without_native_commands
+    with_tmp_dir do |dir|
+      runner = FakeRunner.new
+
+      codex_bin = File.join(dir, "bin", "codex")
+      executable(codex_bin)
+      codex_root = File.join(dir, "codex")
+      codex_install = File.join(
+        codex_root, "plugins", "cache",
+        "compound-engineering-plugin", "compound-engineering", "3.19.0"
+      )
+      write(File.join(codex_install, "skills", "ce-brainstorm", "SKILL.md"))
+      write(File.join(codex_install, ".codex-plugin", "plugin.json"), JSON.generate("version" => "3.19.0"))
+      write(File.join(codex_root, "config.toml"), <<~TOML)
+        [features]
+        enabled = ["unrelated", "values"]
+
+        [marketplaces.compound-engineering-plugin]
+        source = "https://github.com/EveryInc/compound-engineering-plugin.git"
+
+        [plugins."compound-engineering@compound-engineering-plugin"]
+        enabled = true
+      TOML
+      codex_row = Hive::AgentSkills::Inspector.new(
+        config: config(agent: "codex", bin: codex_bin), project_root: dir, runner: runner,
+        environment: { "HOME" => dir, "PATH" => "", "CODEX_HOME" => codex_root },
+        native_commands: false
+      ).inspect(skills: [ "ce-brainstorm" ]).find { |entry| entry.capability_id == "ce-brainstorm" }
+
+      assert_equal "healthy", codex_row.health
+      assert_equal "3.19.0", codex_row.native.dig("package", "version")
+
+      pi_bin = File.join(dir, "bin", "pi")
+      executable(pi_bin)
+      pi_root = File.join(dir, "pi")
+      pi_install = File.join(pi_root, "git", "github.com", "EveryInc", "compound-engineering-plugin")
+      write(File.join(pi_install, "skills", "ce-brainstorm", "SKILL.md"))
+      write(File.join(pi_install, "package.json"), JSON.generate(
+        "version" => "3.19.0", "pi" => { "skills" => [ "./skills" ] }
+      ))
+      pi_row = Hive::AgentSkills::Inspector.new(
+        config: config(agent: "pi", bin: pi_bin), project_root: dir, runner: runner,
+        environment: { "HOME" => dir, "PATH" => "", "PI_CODING_AGENT_DIR" => pi_root },
+        native_commands: false
+      ).inspect(skills: [ "ce-brainstorm" ]).find { |entry| entry.capability_id == "ce-brainstorm" }
+
+      assert_equal "healthy", pi_row.health
+      assert_equal "3.19.0", pi_row.native.dig("package", "version")
+      assert_empty runner.calls
+    end
+  end
+
   def test_command_runner_timeout_terminates_and_reaps_the_process_group
     with_tmp_dir do |dir|
       script = File.join(dir, "hang")
@@ -510,7 +647,7 @@ class AgentSkillsInspectorTest < Minitest::Test
       package = manifest.package("compound-engineering")
       native = package.native_for("claude").with(provider: "future")
       profile = Hive::AgentProfiles.lookup("claude", cfg: cfg)
-      evidence = inspector.send(:inspect_native, profile: profile, bin: bin, package: package, native_spec: native)
+      evidence = inspector.send(:inspect_native, profile: profile, bin: bin, native_spec: native)
       assert_match(/unsupported provider/, evidence.fetch("issues").first.last)
 
       assert_raises(Hive::ConfigError) { inspector.send(:skill_module, "future") }

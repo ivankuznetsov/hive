@@ -217,23 +217,8 @@ class SetupOrchestratorTest < Minitest::Test
 
   def test_json_without_yes_reports_consent_required_before_any_mutation
     output = StringIO.new
-    diagnostics = diag(ok_row)
-    fake_diag = Object.new
-    fake_diag.define_singleton_method(:run) { diagnostics }
-    plan = Hive::AgentSkills::ProvisioningPlan.new(
-      inspections: [].freeze, operations: [].freeze, conflicts: [].freeze,
-      filters: { "agents" => [], "skills" => [] }.freeze, fingerprint: "none"
-    ).freeze
-    result = Hive::AgentSkills::ProvisioningResult.new(
-      preview: plan,
-      consent: { "granted" => false, "provenance" => "not_required" }.freeze,
-      operation_results: [].freeze, final_health: [].freeze,
-      exit_code: 0, classification: "no_op"
-    ).freeze
-    coordinator = Object.new
-    coordinator.define_singleton_method(:run) { result }
-
-    exit_code = with_replaced_singleton_method(Hive::Setup::Diagnostics, :new, ->(*) { fake_diag }) do
+    exit_code = with_replaced_singleton_method(Hive::Setup::Diagnostics, :new,
+      ->(*) { flunk "diagnostics must wait for unattended --yes consent" }) do
       with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!, ->(*) { flunk "web bootstrap must wait for --yes" }) do
         with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new,
           ->(**_kw) { flunk "daemon install must wait for --yes" }) do
@@ -241,7 +226,7 @@ class SetupOrchestratorTest < Minitest::Test
             Hive::Commands::Setup.new(
               json: true,
               output: output,
-              setup_agents_factory: ->(**_kwargs) { coordinator }
+              setup_agents_factory: ->(**_kwargs) { flunk "agent inspection must wait for --yes" }
             ).call
           end
         end
@@ -251,6 +236,9 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal 1, exit_code
     payload = JSON.parse(output.string)
     assert_equal %w[diagnostics agent_skills web], payload.fetch("phases").map { |phase| phase.fetch("name") }
+    diagnostics_phase = payload.fetch("phases").find { |phase| phase.fetch("name") == "diagnostics" }
+    assert_equal true, diagnostics_phase.fetch("skipped")
+    assert_equal "consent_required", diagnostics_phase.fetch("reason")
     agent_phase = payload.fetch("phases").find { |phase| phase.fetch("name") == "agent_skills" }
     assert_equal false, agent_phase.fetch("ok")
     assert_equal "consent_required", agent_phase.fetch("classification")

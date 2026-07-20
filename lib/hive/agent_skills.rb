@@ -8,6 +8,16 @@ module Hive
   # Manifest-driven inspection and provisioning for Hive-owned built-in
   # workflow capabilities. Custom user skills remain visible but unmanaged.
   module AgentSkills
+    module_function
+
+    def same_source?(actual, expected)
+      normalize_source(actual) == normalize_source(expected)
+    end
+
+    def normalize_source(value)
+      value.to_s.strip.sub(%r{\Ahttps://github\.com/}i, "").sub(/\.git\z/i, "").downcase
+    end
+
     CommandResult = Data.define(:stdout, :stderr, :exit_status, :error, :timed_out) do
       def success?
         !timed_out && error.nil? && exit_status == 0

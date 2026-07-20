@@ -17,7 +17,7 @@ metadata:
 platform: openclaw
 invocation: /hive
 skill-version: 0.1.2
-canonical-digest: 1c8926b2e6a731eb430ea393443c5ce53b9ad6a4385adbb8acf970a79fb01acf
+canonical-digest: 992d2686e504213f75c09c81db3cff2beb4df011fac8ae1ff44dd3e03d1d0265
 hive-version: 0.6.4
 -->
 

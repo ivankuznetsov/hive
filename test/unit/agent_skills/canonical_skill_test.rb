@@ -32,7 +32,7 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
 
     assert_equal({
       "openclaw" => "/hive", "claude" => "/hive",
-      "codex" => "/hive", "pi" => "/skill:hive"
+      "codex" => "$hive", "pi" => "/skill:hive"
     }, projections.transform_values(&:invocation))
     assert_equal [ skill.version ], projections.values.map(&:skill_version).uniq
     assert_equal [ skill.canonical_digest ], projections.values.map(&:canonical_digest).uniq

@@ -42,8 +42,11 @@ module Hive
       end
 
       # Read-only state used by doctor, preview, and execution revalidation.
-      def report(ignore_orphans: [])
+      # External distributors may declare their own metadata files, but never
+      # mask a canonical projection file from integrity verification.
+      def report(ignore_orphans: [], allowed_extra_files: [])
         validate_existing_components!
+        allowed_extra_files = validate_allowed_extra_files!(allowed_extra_files)
         orphans = orphan_paths - ignore_orphans
         unless File.exist?(destination)
           snapshot = snapshot_for("absent", {}, nil, orphans)
@@ -56,7 +59,7 @@ module Hive
         end
 
         validate_directory!(destination)
-        files = tree_files(destination)
+        files = tree_files(destination, allowed_extra_files: allowed_extra_files)
         manifest_path = File.join(destination, MANIFEST_NAME)
         unless files.key?(MANIFEST_NAME)
           return foreign_report(files, nil, orphans, "destination has no Hive projection manifest")
@@ -439,7 +442,7 @@ module Hive
         nil
       end
 
-      def tree_files(root_path)
+      def tree_files(root_path, allowed_extra_files: [])
         files = {}
         walk = lambda do |directory, prefix|
           Dir.children(directory).sort.each do |name|
@@ -451,6 +454,8 @@ module Hive
             if stat.directory?
               walk.call(path, relative)
             elsif stat.file?
+              next if allowed_extra_files.include?(relative)
+
               content = File.binread(path)
               files[relative] = {
                 "digest" => ::Digest::SHA256.hexdigest(content),
@@ -464,6 +469,16 @@ module Hive
         end
         walk.call(root_path, "")
         files.freeze
+      end
+
+      def validate_allowed_extra_files!(paths)
+        files = Array(paths).map(&:to_s).uniq.freeze
+        invalid = files.reject do |path|
+          safe_relative?(path) && path != MANIFEST_NAME && !projection.files.key?(path)
+        end
+        raise UnsafePath, "invalid allowed projection metadata: #{invalid.join(', ')}" unless invalid.empty?
+
+        files
       end
 
       def public_files(files)

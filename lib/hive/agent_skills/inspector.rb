@@ -4,6 +4,7 @@ require "rubygems/version"
 require "hive/agent_skills"
 require "hive/agent_skills/canonical_skill"
 require "hive/agent_skills/directory_publisher"
+require "hive/agent_skills/filesystem_inventory"
 require "hive/skill_check"
 
 module Hive
@@ -36,16 +37,18 @@ module Hive
       end
     end
 
-    # Shared read-only health model used by doctor and setup. Native inventory
-    # is evidence, but a row is healthy only when SkillCheck resolves the exact
-    # runtime invocation from the expected package (or Hive-owned alias).
+    # Shared health model used by doctor and setup. Doctor selects durable
+    # filesystem evidence; consented setup selects refreshed native inventory.
+    # A row is healthy only when SkillCheck resolves the exact runtime
+    # invocation from the expected package (or Hive-owned alias).
     class Inspector
       HEALTH_PRECEDENCE = %w[conflicting incompatible unavailable stale missing healthy].freeze
       INVENTORY_TIMEOUT_SEC = 10
 
       def initialize(config:, project_root:, manifest: Manifest.load,
                      resolver: nil, runner: CommandRunner.new, environment: ENV,
-                     include_openclaw: false, openclaw_adapter: nil)
+                     include_openclaw: false, openclaw_adapter: nil,
+                     native_commands: true)
         @config = config
         @project_root = project_root && File.expand_path(project_root)
         @manifest = manifest
@@ -56,6 +59,7 @@ module Hive
         @environment = environment
         @include_openclaw = include_openclaw
         @openclaw_adapter = openclaw_adapter
+        @native_commands = native_commands
         @native_cache = {}
       end
 
@@ -64,6 +68,7 @@ module Hive
         # post-provision verification must observe fresh native state rather
         # than the pre-execution cache.
         @native_cache = {}
+        @filesystem_inventory = FilesystemInventory.new unless @native_commands
         rows = @resolver.resolve(agents: agents, skills: skills).map { |target| inspect_target(target) }
         rows << inspect_openclaw if @include_openclaw && Array(agents).empty? && Array(skills).empty?
         rows.freeze
@@ -74,7 +79,8 @@ module Hive
       def inspect_openclaw
         require "hive/agent_skills/adapters/openclaw"
         evidence = (@openclaw_adapter || Adapters::OpenClaw.new(
-          runner: @runner, environment: @environment
+          runner: @runner, environment: @environment,
+          native_commands: @native_commands
         )).inspect
         target = Target.new(
           surfaces: [ "hive.operations" ].freeze,
@@ -131,7 +137,7 @@ module Hive
         end
 
         native = @native_cache[[ target.agent, package.id ]] ||= inspect_native(
-          profile: profile, bin: bin, package: package, native_spec: native_spec
+          profile: profile, bin: bin, native_spec: native_spec
         )
         resolution = inspect_resolution(target, contract, native)
         issues = native.fetch("issues").map(&:dup)
@@ -235,6 +241,17 @@ module Hive
       end
 
       def inspect_bundled_cli(profile:, bin:)
+        unless @native_commands
+          return {
+            "available" => true,
+            "bin" => bin,
+            "cli_version" => nil,
+            "commands" => [].freeze,
+            "inventory_source" => "filesystem",
+            "issues" => [].freeze
+          }.freeze
+        end
+
         commands = []
         issues = []
         version_result = run([ bin, profile.version_flag ], commands)
@@ -334,7 +351,16 @@ module Hive
         )
       end
 
-      def inspect_native(profile:, bin:, package:, native_spec:)
+      def inspect_native(profile:, bin:, native_spec:)
+        unless @native_commands
+          return @filesystem_inventory.inspect(
+            profile: profile,
+            bin: bin,
+            native_spec: native_spec,
+            root: config_root_for(native_spec)
+          )
+        end
+
         commands = []
         issues = []
         version_result = run([ bin, profile.version_flag ], commands)
@@ -650,11 +676,7 @@ module Hive
       end
 
       def same_source?(actual, expected)
-        normalize_source(actual) == normalize_source(expected)
-      end
-
-      def normalize_source(value)
-        value.to_s.strip.sub(%r{\Ahttps://github\.com/}i, "").sub(/\.git\z/i, "").downcase
+        Hive::AgentSkills.same_source?(actual, expected)
       end
 
       def config_root_for(native_spec)

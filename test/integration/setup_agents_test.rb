@@ -1,4 +1,5 @@
 require "test_helper"
+require "json_schemer"
 require "hive/commands/setup_agents"
 
 class SetupAgentsIntegrationTest < Minitest::Test
@@ -11,6 +12,7 @@ class SetupAgentsIntegrationTest < Minitest::Test
 
     agent = File.basename($PROGRAM_NAME).delete_prefix("fake-")
     home = ENV.fetch("HOME")
+    File.open(File.join(home, ".fake-agent-calls"), "a") { |file| file.puts "#{agent} #{ARGV.join(' ')}" }
     state_dir = File.join(home, ".fake-agent-state")
     state_path = File.join(state_dir, "#{agent}.json")
     state = File.file?(state_path) ? JSON.parse(File.read(state_path)) : { "marketplaces" => {}, "packages" => {} }
@@ -238,8 +240,14 @@ class SetupAgentsIntegrationTest < Minitest::Test
       code, json, = run_setup(cfg, dir, yes: false)
 
       assert_equal 64, code
-      assert_equal "refused", JSON.parse(json).fetch("classification")
+      payload = JSON.parse(json)
+      assert_equal "refused", payload.fetch("classification")
+      schema = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path("hive-setup-agents")))
+      )
+      assert schema.valid?(payload), schema.validate(payload).to_a.inspect
       assert_equal before, Dir.glob(File.join(dir, "**", "*"), File::FNM_DOTMATCH).sort
+      refute File.exist?(File.join(dir, ".fake-agent-calls"))
       refute File.exist?(File.join(dir, ".fake-agent-state"))
     end
   end

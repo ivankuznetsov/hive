@@ -29,6 +29,8 @@ module Hive
       end
 
       def call
+        return refuse_unattended_setup if unattended_without_yes? && !@no_bootstrap
+
         diagnostics = Hive::Setup::Diagnostics.new.run
         add_phase("diagnostics", diagnostics.ok?, diagnostics.to_h)
 
@@ -54,6 +56,34 @@ module Hive
       end
 
       private
+
+      # Refuse before diagnostics or agent discovery. Even version/list probes
+      # can make upstream CLIs or version managers initialize state, so the
+      # zero-mutation unattended contract has to sit at the outermost setup
+      # boundary rather than immediately before Hive's own writes.
+      def refuse_unattended_setup
+        diagnostics = Hive::Setup::Diagnostics::Aggregate.new(results: [])
+        add_phase(
+          "diagnostics", true,
+          "ok" => true, "results" => [], "skipped" => true,
+          "reason" => "consent_required"
+        )
+        add_phase(
+          "agent_skills", false,
+          "classification" => "consent_required",
+          "consent" => {
+            "granted" => false,
+            "provenance" => @json ? "json_requires_yes" : "non_tty"
+          },
+          "targets" => [],
+          "operation_results" => [],
+          "final_health" => [],
+          "setup_agents_exit_code" => Hive::ExitCodes::USAGE
+        )
+        add_phase("web", true, "url" => web_url)
+        emit(diagnostics)
+        1
+      end
 
       # Setup succeeded only if BOTH diagnostics have no hard failure AND every
       # recorded phase (diagnostics / qmd / web_bundle / daemon_service /

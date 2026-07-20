@@ -2,6 +2,7 @@ require "test_helper"
 require "stringio"
 require "fileutils"
 require "json"
+require "digest"
 require "hive/commands/doctor"
 
 class HiveCommandsDoctorTest < Minitest::Test
@@ -969,6 +970,55 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
 
     assert_equal true, captured.fetch(:include_openclaw)
+    assert_equal false, captured.fetch(:native_commands)
+  end
+
+  def test_default_doctor_does_not_invoke_mutating_agent_inventory_commands
+    with_tmp_dir do |home|
+      bin_dir = File.join(home, "bin")
+      FileUtils.mkdir_p(bin_dir)
+      bins = %w[claude codex pi openclaw].to_h do |name|
+        path = File.join(bin_dir, name)
+        File.write(path, <<~SH)
+          #!/bin/sh
+          printf '%s\n' #{name} > #{File.join(home, "native-command-ran")}
+          exit 0
+        SH
+        FileUtils.chmod(0o700, path)
+        [ name, path ]
+      end
+      marker = File.join(home, "native-command-ran")
+      cfg = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
+      %w[claude codex pi].each { |agent| cfg.fetch("agents").fetch(agent)["bin"] = bins.fetch(agent) }
+      snapshot = lambda do
+        Dir.glob(File.join(home, "**", "*"), File::FNM_DOTMATCH).sort.to_h do |path|
+          next [ path, [ "directory", File.stat(path).mode & 0o777 ] ] if File.directory?(path)
+
+          [ path, [ "file", File.stat(path).mode & 0o777, Digest::SHA256.file(path).hexdigest ] ]
+        end
+      end
+      before = snapshot.call
+
+      exit_code = Hive::Commands::Doctor.new(
+        config: cfg,
+        project_root: nil,
+        json: true,
+        output: StringIO.new,
+        environment: {
+          "HOME" => home,
+          "PATH" => bin_dir,
+          "CLAUDE_CONFIG_DIR" => File.join(home, "claude"),
+          "CODEX_HOME" => File.join(home, "codex"),
+          "PI_CODING_AGENT_DIR" => File.join(home, "pi"),
+          "OPENCLAW_BIN" => bins.fetch("openclaw"),
+          "OPENCLAW_STATE_DIR" => File.join(home, "openclaw")
+        }
+      ).call
+
+      assert_equal Hive::Commands::Doctor::EXIT_MISSING_SKILL, exit_code
+      refute File.exist?(marker)
+      assert_equal before, snapshot.call
+    end
   end
 
   def test_openclaw_drift_is_actionable_but_never_setup_managed

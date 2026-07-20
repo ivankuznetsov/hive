@@ -89,6 +89,42 @@ module Hive
         ).freeze
       end
 
+      # An unattended caller that has not supplied consent must not launch
+      # native agent inventory commands merely to discover what it would
+      # change. Upstream CLIs may initialize config or version-manager state
+      # even for nominally read-only probes. Validate the requested scope from
+      # Hive's config/manifest only, then return a typed refusal whose empty
+      # preview is explicitly deferred until a consented run.
+      def consent_required_result(agents: nil, skills: nil, provenance:)
+        targets = TargetResolver.new(
+          config: @config, project_root: @project_root, manifest: @manifest
+        ).resolve(agents: agents, skills: skills)
+        if !Array(skills).empty? && targets.any? { |target| !target.managed }
+          names = targets.reject(&:managed).map(&:configured_skill).uniq
+          raise Hive::ConfigError, "skill filter selects unmanaged custom skill(s): #{names.join(', ')}"
+        end
+
+        filters = {
+          "agents" => Array(agents).map(&:to_s).freeze,
+          "skills" => Array(skills).map(&:to_s).freeze
+        }.freeze
+        plan = ProvisioningPlan.new(
+          inspections: [].freeze,
+          operations: [].freeze,
+          conflicts: [].freeze,
+          filters: filters,
+          fingerprint: fingerprint_for([], [], [], filters).freeze
+        ).freeze
+        ProvisioningResult.new(
+          preview: plan,
+          consent: { "granted" => false, "provenance" => provenance }.freeze,
+          operation_results: [].freeze,
+          final_health: [].freeze,
+          exit_code: Hive::ExitCodes::USAGE,
+          classification: "refused"
+        ).freeze
+      end
+
       def revalidate(plan)
         revised = build_plan(
           agents: plan.filters.fetch("agents"),

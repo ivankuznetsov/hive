@@ -36,6 +36,12 @@ module Hive
       # preview, consent, and revalidation lifecycle without emitting a nested
       # JSON envelope; callers receive the typed provisioning result instead.
       def run
+        if unattended_without_consent?
+          return @provisioner.consent_required_result(
+            agents: @agents, skills: @skills, provenance: refusal_provenance
+          )
+        end
+
         plan = @provisioner.build_plan(agents: @agents, skills: @skills)
         render_plan(plan) unless @json
         return @provisioner.noop_result(plan) if plan.operations.empty?
@@ -80,6 +86,10 @@ module Hive
         @input.respond_to?(:tty?) && @input.tty?
       rescue IOError
         false
+      end
+
+      def unattended_without_consent?
+        !@yes && @consent_provenance.nil? && (@json || !interactive?)
       end
 
       def confirm?

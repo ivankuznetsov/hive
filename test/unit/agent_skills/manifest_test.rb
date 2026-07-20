@@ -13,7 +13,7 @@ class AgentSkillsManifestTest < Minitest::Test
     assert_equal Hive::AgentSkills::CanonicalSkill.new.version, bundled.version
     assert_equal "skills/hive", bundled.native_for("claude").destination
     assert_equal "/hive", manifest.capability("hive").agent("claude").invocation
-    assert_equal "/hive", manifest.capability("hive").agent("codex").invocation
+    assert_equal "$hive", manifest.capability("hive").agent("codex").invocation
     assert_equal "/skill:hive", manifest.capability("hive").agent("pi").invocation
     assert_equal "compound-engineering@compound-engineering-plugin",
                  manifest.package("compound-engineering").native_for("claude").package

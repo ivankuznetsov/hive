@@ -369,6 +369,15 @@ the matched route rather than accepting an operator-controlled action name.
 `WorkflowsController` is left with the collection page and authored-workflow
 creation.
 
+Telegram configuration is a `TelegramBot` model. It owns strict allowlist
+parsing, saved-token lookup/persistence, `getMe` validation, global bot config,
+supervisor reload signalling, round-trip delivery, and pending/approved
+pairings. `TelegramController` now exposes only the settings resource's
+`show`/`update`; test deliveries and pairing approvals enter
+`Telegram::TestMessagesController#create` and
+`Telegram::PairingApprovalsController#create`. The model wraps pending pairing
+rows before they reach ERB.
+
 A task page is a filesystem-backed `Task`, built from the matching status
 snapshot row and its `Project`. That model owns task
 reads and their invariants — workflow-aware artifact ordering, brainstorm

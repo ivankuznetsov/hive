@@ -338,7 +338,11 @@ origin also prints the Host-header/reverse-proxy warning.
   `Integer(..., exception: false)`
   before any Telegram network call or config/env write: when pairing is off,
   blank input renders 422, and handles such as `@mychannel` always render 422
-  and persist nothing.
+  and persist nothing. These rules, secret persistence, supervisor reload,
+  test delivery, and pairing lifecycle are owned by the Rails `TelegramBot`
+  model. The settings controller is limited to `show`/`update`; the existing
+  test-message and pairing-approval URLs now target standard `create` actions
+  on named resources.
 
 Task Drop is routed as `POST /tasks/:project/:slug/drop` →
 `Tasks::DropsController#create` → `Hive::Web::Dispatcher#drop` →
@@ -390,7 +394,8 @@ a red task page shows the diagnostic banner and Retry button, and that the
 route queues the marker-clear command plus the hidden rerun sequence. It also
 pins the Telegram first-run guide shape, strict token/chat-ID validation,
 empty-list pairing bootstrap, saved-token reuse, pending-code rendering,
-corrupt-store visibility, and consent-gated approval, repo clone target refusal
+corrupt-store visibility, consent-gated approval, and the test-message
+resource's missing-token/success rendering, repo clone target refusal
 for non-directories,
 agent-login status rendering for
 binary PTY output, Grok route reachability, and operator-ward poll flows,

@@ -15,7 +15,7 @@ class TelegramTest < ActionDispatch::IntegrationTest
   end
 
   teardown do
-    TelegramController.instance_variable_set(:@pairing_gateway, nil)
+    TelegramBot.reset_pairing_gateway!
     if @original_telegram_token
       ENV["HIVE_TELEGRAM_BOT_TOKEN"] = @original_telegram_token
     else
@@ -93,6 +93,30 @@ class TelegramTest < ActionDispatch::IntegrationTest
     assert_equal false, bot.fetch("pairing_enabled")
     assert_equal "HIVE_TELEGRAM_BOT_TOKEN=123:existing\n", File.read(Hive::EnvFile::DEFAULT_PATH),
                  "a settings-only save must not rewrite the persisted secret"
+  end
+
+  test "test delivery requires a saved token" do
+    sign_in!
+
+    post test_telegram_path
+
+    assert_response :unprocessable_entity
+    assert_select ".flash-alert", text: /Save a bot token/
+  end
+
+  test "test delivery renders the shared Telegram result" do
+    ENV["HIVE_TELEGRAM_BOT_TOKEN"] = "123:existing"
+    Hive::Config.update_global_config! do |data|
+      data["bot"]["chat_id_allowlist"] = [ 123, 456 ]
+    end
+    sign_in!
+
+    with_telegram_tester(ok: true, sent: 2) do
+      post test_telegram_path
+    end
+
+    assert_response :success
+    assert_select ".flash-notice", text: /Sent a test message to 2 chat\(s\)/
   end
 
   test "page lists pending pairing codes and approves through the shared lifecycle" do
@@ -200,7 +224,7 @@ class TelegramTest < ActionDispatch::IntegrationTest
       gateway.define_singleton_method(:pending) { pending }
     end
     gateway.define_singleton_method(:approve, &approve)
-    TelegramController.instance_variable_set(:@pairing_gateway, gateway)
+    TelegramBot.pairing_gateway = gateway
   end
 
   def with_valid_telegram_token
@@ -209,5 +233,18 @@ class TelegramTest < ActionDispatch::IntegrationTest
     yield
   ensure
     Hive::Web::TelegramValidator.define_singleton_method(:call, original)
+  end
+
+  def with_telegram_tester(result)
+    original = Hive::Web::TelegramTester.method(:call)
+    Hive::Web::TelegramTester.define_singleton_method(:call) do |token:, chat_ids:|
+      raise "wrong token" unless token == "123:existing"
+      raise "wrong chats" unless chat_ids == [ 123, 456 ]
+
+      result
+    end
+    yield
+  ensure
+    Hive::Web::TelegramTester.define_singleton_method(:call, original)
   end
 end

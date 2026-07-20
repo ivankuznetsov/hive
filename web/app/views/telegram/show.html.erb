@@ -3,7 +3,7 @@
 <p class="muted">Connect the hive bot so you can drive the pipeline from Telegram. The token is validated against the real API before anything is saved.</p>
 
 <%# Open while unconfigured, tucked away once the bot works. %>
-<details class="setup-guide" <%= "open" unless @bot["enabled"] %>>
+<details class="setup-guide" <%= "open" unless @telegram_bot.enabled? %>>
   <summary>First time? Three steps</summary>
   <ol class="setup-steps">
     <li>
@@ -35,15 +35,15 @@
 <%= form_with url: update_telegram_path, class: "form-grid" do |f| %>
   <div class="form-row">
     <%= f.label :token, "Bot token" %>
-    <%= f.password_field :token, required: !@token_saved,
-          placeholder: @token_saved ? "Saved — leave blank to keep it, or enter a replacement" : "123456:ABC…" %>
+    <%= f.password_field :token, required: !@telegram_bot.token_saved?,
+          placeholder: @telegram_bot.token_saved? ? "Saved — leave blank to keep it, or enter a replacement" : "123456:ABC…" %>
   </div>
   <div class="form-row">
     <%= f.label :chat_ids, "Allowed chat IDs (optional when pairing is enabled)" %>
-    <%= f.text_field :chat_ids, value: Array(@bot["chat_id_allowlist"]).join(", ") %>
+    <%= f.text_field :chat_ids, value: @telegram_bot.chat_ids.join(", ") %>
   </div>
   <div class="form-row checkbox-row">
-    <%= f.check_box :pairing_enabled, checked: @bot["pairing_enabled"] %>
+    <%= f.check_box :pairing_enabled, checked: @telegram_bot.pairing_enabled? %>
     <%= f.label :pairing_enabled, "Let new Telegram chats request access with /start" %>
     <p class="muted">Unknown chats receive an 8-letter code that expires after 24 hours. They cannot drive Hive until you approve it below.</p>
   </div>
@@ -52,7 +52,7 @@
 
 <section class="pairing-section" aria-labelledby="pairing-heading">
   <h2 id="pairing-heading">Pairing requests</h2>
-  <% if @bot["pairing_enabled"] %>
+  <% if @telegram_bot.pairing_enabled? %>
     <p class="muted">Ask the person to send <code>/start</code> to your bot, then match the code shown in their chat. Refresh this page to check for new requests.</p>
     <% if @pairing_error %>
       <div class="flash flash-alert"><%= @pairing_error %></div>
@@ -61,17 +61,17 @@
     <% else %>
       <div class="pairing-list">
         <% @pairings.each do |pairing| %>
-          <article class="pairing-row" data-pairing-code="<%= pairing.fetch("code") %>">
+          <article class="pairing-row" data-pairing-code="<%= pairing.code %>">
             <div>
-              <strong class="pairing-code"><%= pairing.fetch("code") %></strong>
-              <span class="repo-desc">Telegram chat <%= pairing.fetch("chat_id") %></span>
-              <span class="faint">requested <%= relative_age(pairing.fetch("age_sec")) %> · expires in <%= distance_of_time_in_words(Time.current, Time.current + pairing.fetch("expires_in_sec")) %></span>
+              <strong class="pairing-code"><%= pairing.code %></strong>
+              <span class="repo-desc">Telegram chat <%= pairing.chat_id %></span>
+              <span class="faint">requested <%= relative_age(pairing.age_sec) %> · expires in <%= distance_of_time_in_words(Time.current, Time.current + pairing.expires_in_sec) %></span>
             </div>
-            <%= button_to "Approve", telegram_pairing_approve_path(pairing.fetch("code")),
+            <%= button_to "Approve", telegram_pairing_approve_path(pairing.code),
                   params: { consent: "approve_telegram_pairing" },
                   class: "btn-secondary btn-sm",
                   data: {
-                    turbo_confirm: "Approve Telegram chat #{pairing.fetch('chat_id')}?",
+                    turbo_confirm: "Approve Telegram chat #{pairing.chat_id}?",
                     turbo_submits_with: "Approving…"
                   } %>
           </article>
@@ -86,8 +86,8 @@
 <h2>Round trip</h2>
 <p class="muted">Sends a real message to every allowed chat with the saved token.</p>
 <%= button_to "Send test message", test_telegram_path, class: "btn-secondary",
-      disabled: Array(@bot["chat_id_allowlist"]).empty?,
+      disabled: @telegram_bot.chat_ids.empty?,
       data: { turbo_submits_with: "Sending…" } %>
-<% if Array(@bot["chat_id_allowlist"]).empty? %>
+<% if @telegram_bot.chat_ids.empty? %>
   <p class="faint">Approve a pairing request or add a chat ID before sending a test.</p>
 <% end %>

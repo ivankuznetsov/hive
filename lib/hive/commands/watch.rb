@@ -3,8 +3,6 @@ require "json"
 require "time"
 require "hive/commands/status"
 require "hive/config"
-require "hive/daemon/operational_snapshot"
-require "hive/operational_status"
 require "hive/terminal_text"
 
 module Hive
@@ -49,15 +47,7 @@ module Hive
           projects = Hive::Config.registered_projects
           status = Hive::Commands::Status.new(json: true)
           full_graph = status.json_payload(projects)
-          project_context = status.operational_project_context(projects)
-          scheduler_snapshot = if project_context.any? { |_name, context| context["daemon_enabled"] == true }
-            Hive::Daemon::OperationalSnapshot::Reader.new.read
-          end
-          operational = Hive::OperationalStatus.new(
-            status_payload: full_graph,
-            project_context: project_context,
-            scheduler_snapshot: scheduler_snapshot
-          ).to_h
+          operational = status.operational_payload(projects, status_payload: full_graph)
           SourceSnapshot.new(operational: operational, full_graph: full_graph)
         end
       end

@@ -175,8 +175,8 @@ module Hive
         end
       end
 
-      def operational_payload(projects, scheduler_snapshot: AUTO_SCHEDULER_SNAPSHOT)
-        source = json_payload(projects)
+      def operational_payload(projects, scheduler_snapshot: AUTO_SCHEDULER_SNAPSHOT, status_payload: nil)
+        source = status_payload || json_payload(projects)
         project_context = operational_project_context(projects)
         if scheduler_snapshot.equal?(AUTO_SCHEDULER_SNAPSHOT)
           scheduler_snapshot = if project_context.any? { |_name, context| context["daemon_enabled"] == true }
@@ -944,7 +944,18 @@ module Hive
               marker = Hive::Markers.current(task.state_file)
               marker, projection = status_projection(task, marker)
               folder_mtime = File.mtime(entry)
-              mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
+              # Generic markerless tasks still carry meta.yml. Use that stable
+              # task-owned file before falling back to the directory mtime:
+              # acquiring `.lock` changes the directory mtime and would make a
+              # freshly emitted operational action invalidate itself inside
+              # the command's lock.
+              mtime = if File.exist?(task.state_file)
+                File.mtime(task.state_file)
+              elsif File.exist?(task.meta_yml_path)
+                File.mtime(task.meta_yml_path)
+              else
+                folder_mtime
+              end
               lock_holder = task_lock_holder(task)
               live_holder = live_task_lock_holder(lock_holder)
               icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: !live_holder.nil?)

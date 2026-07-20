@@ -16,18 +16,23 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
   Row = Struct.new(
     :project, :slug, :folder, :workflow, :stage, :marker, :marker_attrs,
     :task_generation, :condition_task_generation, :commit_generation,
-    :attempt_id, :state_file_mtime,
+    :attempt_id, :state_file_mtime, :action, :depends_on, :blocked_by,
+    :dependency_stage, :blocked, :admission_error,
     keyword_init: true
   )
 
   def row(stage: "4-execute", marker: "waiting", task_generation: "task-generation-1",
-          slug: "ship-it")
+          slug: "ship-it", marker_attrs: { "marker_id" => "marker-1" },
+          state_file_mtime: T0, action: "ready_to_run", depends_on: nil,
+          blocked_by: nil, dependency_stage: nil, blocked: false, admission_error: nil)
     Row.new(
       project: "demo", slug: slug, folder: "/tmp/#{slug}",
       workflow: "coding", stage: stage, marker: marker,
-      marker_attrs: { "marker_id" => "marker-1" },
+      marker_attrs: marker_attrs,
       task_generation: task_generation, condition_task_generation: "condition-1",
-      commit_generation: 2, attempt_id: "attempt-1", state_file_mtime: T0
+      commit_generation: 2, attempt_id: "attempt-1", state_file_mtime: state_file_mtime,
+      action: action, depends_on: depends_on, blocked_by: blocked_by,
+      dependency_stage: dependency_stage, blocked: blocked, admission_error: admission_error
     )
   end
 
@@ -106,6 +111,42 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assert_equal "unavailable", disposition.fetch("status")
       assert_equal "changed_during_tick", disposition.fetch("reason")
       assert_nil disposition["decision"]
+    end
+  end
+
+  def test_policy_bearing_changes_invalidate_the_tick_disposition
+    with_tmp_dir do |dir|
+      path = File.join(dir, "snapshot", "state.json")
+      _store, assembler, reader = build(path)
+      before = row
+      after = row(
+        marker_attrs: { "marker_id" => "marker-2" },
+        state_file_mtime: T0 + 1,
+        action: "admission_error",
+        depends_on: "demo:base",
+        blocked_by: "demo:base",
+        dependency_stage: "7-artifacts",
+        blocked: true,
+        admission_error: {
+          "reason_code" => "dependency_task_missing",
+          "offending_ref" => "demo:base",
+          "safe_correction" => "repair the dependency"
+        }
+      )
+
+      assembler.begin_tick(now: T0)
+      assembler.observe(before, decision: "global_cap", owner: "scheduler", reason: "full")
+      assembler.complete(
+        initial_rows: [ before ], final_rows: [ after ], controller: {}, queue: {},
+        recoveries: {}, now: T0 + 1
+      )
+
+      task = reader.read(now: T0 + 2).fetch("tasks").first
+      assert_equal "unavailable", task.dig("disposition", "status")
+      assert_equal "changed_during_tick", task.dig("disposition", "reason")
+      assert_equal "admission_error", task.fetch("action")
+      assert_equal true, task.fetch("blocked")
+      assert_equal "dependency_task_missing", task.dig("admission_error", "reason_code")
     end
   end
 

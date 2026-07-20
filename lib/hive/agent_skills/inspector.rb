@@ -79,8 +79,7 @@ module Hive
       def inspect_openclaw
         require "hive/agent_skills/adapters/openclaw"
         evidence = (@openclaw_adapter || Adapters::OpenClaw.new(
-          runner: @runner, environment: @environment,
-          native_commands: @native_commands
+          environment: @environment
         )).inspect
         target = Target.new(
           surfaces: [ "hive.operations" ].freeze,

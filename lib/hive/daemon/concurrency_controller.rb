@@ -363,12 +363,14 @@ module Hive
       # explanation surface, not another execution channel.
       def operational_snapshot(now: Time.now)
         projects = (
-          @running.values.map { |entry| entry[:project] } +
+          @running.values.filter_map do |entry|
+            entry[:project] unless entry[:kind] == :patrol_scan || entry[:kind] == :digest
+          end +
           @external_running_by_project.keys +
           @daily_counts.keys.map(&:first) +
           @durable_daily_counts.keys.map(&:first)
         ).compact.uniq.sort
-        used = in_flight_count
+        used = task_running_count + @external_running_global
         {
           "limits" => {
             "global" => @max_concurrent_runs,
@@ -425,7 +427,9 @@ module Hive
       end
 
       def running_count_for(project)
-        @running.count { |_pid, entry| entry[:project] == project } +
+        @running.count do |_pid, entry|
+          entry[:project] == project && entry[:kind] != :patrol_scan && entry[:kind] != :digest
+        end +
           @external_running_by_project[project].to_i
       end
 

@@ -5,26 +5,6 @@ require "hive/agent_skills/adapters/openclaw"
 class AgentSkillsOpenClawTest < Minitest::Test
   include HiveTestHelper
 
-  class Runner
-    attr_reader :calls
-
-    def initialize(responses)
-      @responses = responses
-      @calls = []
-    end
-
-    def call(argv, **)
-      @calls << argv
-      @responses.fetch(argv)
-    end
-  end
-
-  def result(stdout: "", status: 0, stderr: "")
-    Hive::AgentSkills::CommandResult.new(
-      stdout: stdout, stderr: stderr, exit_status: status, error: nil, timed_out: false
-    )
-  end
-
   def executable(path)
     FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
     File.write(path, "#!/bin/sh\nexit 0\n")
@@ -47,34 +27,6 @@ class AgentSkillsOpenClawTest < Minitest::Test
       root: root, trusted_root: home, projection: relocated
     )
     [ publisher, workspace, canonical ]
-  end
-
-  def documents(publisher, workspace, canonical, skill_digest: nil)
-    path = File.join(publisher.destination, "SKILL.md")
-    list = {
-      "workspaceDir" => workspace,
-      "managedSkillsDir" => File.join(File.dirname(workspace), "skills"),
-      "skills" => [ { "name" => "hive" } ]
-    }
-    info = {
-      "name" => "hive",
-      "filePath" => path,
-      "baseDir" => publisher.destination,
-      "source" => "openclaw-workspace",
-      "eligible" => true,
-      "userInvocable" => true,
-      "clawhub" => {
-        "status" => "linked",
-        "valid" => true,
-        "slug" => "hive-cli",
-        "installedVersion" => canonical.skill_version,
-        "skillFile" => {
-          "path" => "SKILL.md",
-          "sha256" => skill_digest || Digest::SHA256.file(path).hexdigest
-        }
-      }
-    }
-    [ list, info ]
   end
 
   def write_clawhub_metadata(base:, lock_root:, canonical:)
@@ -100,16 +52,8 @@ class AgentSkillsOpenClawTest < Minitest::Test
     )
   end
 
-  def inspect(home, bin, list:, info:, info_status: 0)
-    responses = {
-      [ bin, "--version" ] => result(stdout: "OpenClaw 2026.7.1\n"),
-      [ bin, "skills", "list", "--json" ] => result(stdout: JSON.generate(list)),
-      [ bin, "skills", "info", "hive", "--json" ] => result(
-        stdout: info_status.zero? ? JSON.generate(info) : "", status: info_status, stderr: "not found"
-      )
-    }
+  def inspect(home, bin)
     Hive::AgentSkills::Adapters::OpenClaw.new(
-      runner: Runner.new(responses),
       environment: { "HOME" => home, "PATH" => "", "OPENCLAW_BIN" => bin }
     ).inspect
   end
@@ -120,12 +64,14 @@ class AgentSkillsOpenClawTest < Minitest::Test
       executable(bin)
       publisher, workspace, canonical = projection_at(home)
       publisher.publish(expected_snapshot: publisher.report.snapshot)
-      list, info = documents(publisher, workspace, canonical)
+      write_clawhub_metadata(base: publisher.destination, lock_root: workspace, canonical: canonical)
       before = Digest::SHA256.file(File.join(publisher.destination, "SKILL.md")).hexdigest
 
-      evidence = inspect(home, bin, list: list, info: info)
+      evidence = inspect(home, bin)
 
       assert_equal "healthy", evidence.health
+      assert_equal "filesystem", evidence.native.fetch("inventory_source")
+      assert_empty evidence.native.fetch("commands")
       assert_equal "healthy", evidence.native.dig("projection", "state")
       assert_equal canonical.canonical_digest,
                    evidence.native.dig("projection", "manifest", "canonical_digest")
@@ -142,15 +88,15 @@ class AgentSkillsOpenClawTest < Minitest::Test
       skill = File.join(publisher.destination, "SKILL.md")
       File.write(skill, canonical.files.fetch("SKILL.md"))
       File.chmod(0o600, skill)
-      list, info = documents(publisher, workspace, canonical)
+      write_clawhub_metadata(base: publisher.destination, lock_root: workspace, canonical: canonical)
 
-      stale = inspect(home, bin, list: list, info: info)
+      stale = inspect(home, bin)
       assert_equal "stale", stale.health
       assert_match(/predates canonical provenance/, stale.explanation)
       assert_equal "openclaw skills update @ivankuznetsov/hive-cli", stale.remediation
 
       File.open(skill, "a") { |file| file.write("user edit\n") }
-      conflict = inspect(home, bin, list: list, info: info)
+      conflict = inspect(home, bin)
       assert_equal "conflicting", conflict.health
       assert_match(/will not replace/, conflict.explanation)
     end
@@ -159,7 +105,6 @@ class AgentSkillsOpenClawTest < Minitest::Test
   def test_absent_cli_and_missing_skill_are_distinct_without_mutation
     with_tmp_dir do |home|
       unavailable = Hive::AgentSkills::Adapters::OpenClaw.new(
-        runner: Runner.new({}),
         environment: { "HOME" => home, "PATH" => "", "OPENCLAW_BIN" => File.join(home, "missing") }
       ).inspect
       assert_equal "unavailable", unavailable.health
@@ -167,8 +112,7 @@ class AgentSkillsOpenClawTest < Minitest::Test
       bin = File.join(home, "bin", "openclaw")
       executable(bin)
       publisher, workspace, canonical = projection_at(home)
-      list = { "workspaceDir" => workspace, "managedSkillsDir" => File.join(home, ".openclaw", "skills"), "skills" => [] }
-      missing = inspect(home, bin, list: list, info: {}, info_status: 1)
+      missing = inspect(home, bin)
       assert_equal "missing", missing.health
       assert_equal "openclaw skills install @ivankuznetsov/hive-cli", missing.remediation
       refute File.exist?(publisher.destination)
@@ -187,19 +131,14 @@ class AgentSkillsOpenClawTest < Minitest::Test
       File.write(File.join(state, "openclaw.json"), JSON.generate(
         "agents" => { "defaults" => { "workspace" => workspace } }
       ))
-      runner = Runner.new({})
-
       evidence = Hive::AgentSkills::Adapters::OpenClaw.new(
-        runner: runner,
-        environment: { "HOME" => home, "PATH" => "", "OPENCLAW_BIN" => bin },
-        native_commands: false
+        environment: { "HOME" => home, "PATH" => "", "OPENCLAW_BIN" => bin }
       ).inspect
 
       assert_equal "healthy", evidence.health
       assert_equal "filesystem", evidence.native.fetch("inventory_source")
       assert_equal canonical.skill_version, evidence.native.dig("clawhub", "installedVersion")
       assert_empty evidence.native.fetch("commands")
-      assert_empty runner.calls
     end
   end
 
@@ -229,9 +168,7 @@ class AgentSkillsOpenClawTest < Minitest::Test
       ))
 
       evidence = Hive::AgentSkills::Adapters::OpenClaw.new(
-        runner: Runner.new({}),
-        environment: { "HOME" => home, "PATH" => "", "OPENCLAW_BIN" => bin },
-        native_commands: false
+        environment: { "HOME" => home, "PATH" => "", "OPENCLAW_BIN" => bin }
       ).inspect
 
       assert_equal "healthy", evidence.health

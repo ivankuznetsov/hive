@@ -44,6 +44,18 @@ or database state during diagnosis. Setup retains refreshed native discovery
 only behind its explicit consent boundary; disposable-home tests and a real CLI
 probe prove Doctor leaves the home byte-identical.
 
+**Current-head review hardening:** Revalidated the feature after rebasing and
+discarded the earlier review as stale. Dependency-blocked tasks now project as
+scheduler waits instead of idle; daemon snapshots and later status joins bind
+decisions to marker attrs, mtime, action, dependency, blocked, and admission
+policy; task capacity excludes separately budgeted patrol/digest workers; and
+markerless generic action tokens use stable task metadata so their own lock
+cannot invalidate them. Doctor's OpenClaw adapter is now filesystem-only by
+construction, managed-skill Doctor tests are split from legacy checks, all
+three real operational executor branches are covered, and the live proof's
+audited shim delegates status/watch to the exact candidate instead of emitting
+fixture payloads.
+
 **Uncertainty:** The authenticated protected workflow has not yet been
 dispatched for this candidate. Until all four native jobs and attestation pass
 and the exact-SHA Check Run exists, the implementation is locally validated

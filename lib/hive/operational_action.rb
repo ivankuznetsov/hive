@@ -121,8 +121,14 @@ module Hive
       private
 
       def observation_mtime(task)
-        path = task.state_file
-        mtime = File.exist?(path) ? File.mtime(path) : File.mtime(task.folder)
+        path = if File.exist?(task.state_file)
+          task.state_file
+        elsif File.exist?(task.meta_yml_path)
+          task.meta_yml_path
+        else
+          task.folder
+        end
+        mtime = File.mtime(path)
         mtime.utc.iso8601(6)
       end
 

@@ -102,6 +102,27 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", manual.fetch("blocker_owner")
   end
 
+  def test_dependency_block_is_scheduler_owned_and_primary_unless_human_input_wins
+    blocked = task(
+      action: "ready_to_develop", slug: "blocked", blocked: true,
+      depends_on: "demo:base", blocked_by: "demo:base", dependency_stage: "7-artifacts"
+    )
+    human = task(
+      action: "needs_input", slug: "human-blocked", blocked: true,
+      blocked_by: "demo:base", unanswered_questions: 1
+    )
+
+    rows = project(status_payload(blocked, human)).fetch("tasks").to_h do |row|
+      [ row.dig("identity", "slug"), row ]
+    end
+
+    assert_equal "waiting_on_provider_or_scheduler", rows.fetch("blocked").fetch("state")
+    assert_equal "scheduler", rows.fetch("blocked").fetch("blocker_owner")
+    assert_equal "dependency_wait", rows.fetch("blocked").dig("reasons", 0, "code")
+    assert_equal "waiting_on_you", rows.fetch("human-blocked").fetch("state")
+    assert_equal "human_input", rows.fetch("human-blocked").dig("reasons", 0, "code")
+  end
+
   def test_project_failures_and_invalid_rows_make_completeness_explicit
     payload = status_payload(task(action: "ready_to_plan", slug: "healthy"))
     payload.fetch("projects") << {
@@ -184,6 +205,32 @@ class OperationalStatusTest < Minitest::Test
     assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_task_mismatch"
   end
 
+  def test_policy_change_after_daemon_observation_invalidates_scheduler_decision
+    observed = task(action: "ready_to_plan", slug: "policy-drift")
+    snapshot = scheduler_snapshot_for(
+      observed,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    current = observed.merge(
+      "attrs" => { "marker_id" => "rotated" },
+      "action" => "ready_to_run",
+      "blocked" => true,
+      "blocked_by" => "demo:base"
+    )
+
+    result = project(
+      status_payload(current),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "partial", result.fetch("completeness")
+    assert_equal "unavailable", result.dig("tasks", 0, "freshness", "scheduler_status")
+    refute_includes result.dig("tasks", 0, "reasons").map { |reason| reason.fetch("code") }, "global_cap"
+    assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_task_mismatch"
+  end
+
   def test_routine_action_is_closed_freshness_bound_and_contains_no_argv
     row = task(action: "ready_to_plan", slug: "advance", marker: "complete")
     action = project(status_payload(row)).fetch("tasks").first.fetch("action")
@@ -254,10 +301,18 @@ class OperationalStatusTest < Minitest::Test
         "workflow" => source_task["workflow"],
         "stage" => source_task["stage"],
         "marker" => source_task["marker"],
+        "marker_attrs" => source_task["attrs"] || {},
         "task_generation" => source_task["task_generation"],
         "condition_task_generation" => source_task["condition_task_generation"],
         "commit_generation" => source_task["commit_generation"],
         "attempt_id" => source_task["attempt_id"],
+        "state_file_mtime" => source_task["mtime"],
+        "action" => source_task["action"],
+        "depends_on" => source_task["depends_on"],
+        "blocked_by" => source_task["blocked_by"],
+        "dependency_stage" => source_task["dependency_stage"],
+        "blocked" => source_task["blocked"] == true,
+        "admission_error" => source_task["admission_error"],
         "disposition" => {
           "status" => "available", "decision" => decision,
           "owner" => "scheduler", "reason" => reason
@@ -283,16 +338,17 @@ class OperationalStatusTest < Minitest::Test
 
   def task(action:, slug:, stage: "1-inbox", marker: "waiting", attrs: {}, held: nil,
            live_task_lock: false, task_lock_pid: nil, unanswered_questions: 0,
-           blocked: false, admission_error: nil)
+           blocked: false, depends_on: nil, blocked_by: nil, dependency_stage: nil,
+           admission_error: nil)
     row = {
       "stage" => stage,
       "slug" => slug,
       "id" => nil,
       "display_name" => slug.capitalize,
       "workflow" => "coding",
-      "depends_on" => nil,
-      "blocked_by" => nil,
-      "dependency_stage" => nil,
+      "depends_on" => depends_on,
+      "blocked_by" => blocked_by,
+      "dependency_stage" => dependency_stage,
       "blocked" => blocked,
       "admission_error" => admission_error,
       "folder" => "/tmp/demo/.hive-state/stages/#{stage}/#{slug}",

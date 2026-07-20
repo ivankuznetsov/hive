@@ -220,7 +220,13 @@ module Hive
             "condition_task_generation" => nullable_string(value(row, :condition_task_generation)),
             "commit_generation" => value(row, :commit_generation),
             "attempt_id" => nullable_string(value(row, :attempt_id)),
-            "state_file_mtime" => time_string(value(row, :state_file_mtime))
+            "state_file_mtime" => time_string(value(row, :state_file_mtime)),
+            "action" => nullable_string(value(row, :action)),
+            "depends_on" => nullable_string(value(row, :depends_on)),
+            "blocked_by" => nullable_string(value(row, :blocked_by)),
+            "dependency_stage" => nullable_string(value(row, :dependency_stage)),
+            "blocked" => value(row, :blocked) == true,
+            "admission_error" => canonical_record(value(row, :admission_error))
           }
         end
 
@@ -323,6 +329,11 @@ module Hive
           when Time then value.utc.iso8601(6)
           else value
           end
+        end
+
+        def canonical_record(value)
+          value = value.to_h if value && !value.is_a?(Hash) && value.respond_to?(:to_h)
+          canonical(value)
         end
       end
 

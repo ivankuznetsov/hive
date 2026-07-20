@@ -660,4 +660,20 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal "s1", snapshot.dig("running", 0, "slug")
     refute snapshot.fetch("running").first.key?("command")
   end
+
+  def test_operational_capacity_excludes_patrol_and_digest_workers_from_task_caps
+    c = make(global: 3, per_project: 2, daily: 5)
+    dispatch(c, 100, "p1", "task")
+    dispatch(c, 101, "p1", "patrol-scan", kind: :patrol_scan)
+    dispatch(c, 102, "digest", "2026-07-20", kind: :digest)
+    c.set_external_running_counts(per_project: { "p2" => 1 })
+
+    snapshot = c.operational_snapshot(now: T0)
+
+    assert_equal({ "used" => 2, "available" => 1 }, snapshot.fetch("global"))
+    assert_equal 1, snapshot.dig("projects", "p1", "used")
+    assert_equal 1, snapshot.dig("projects", "p2", "used")
+    refute snapshot.fetch("projects").key?("digest")
+    assert_equal %w[digest patrol_scan task], snapshot.fetch("running").map { |row| row.fetch("kind") }.sort
+  end
 end

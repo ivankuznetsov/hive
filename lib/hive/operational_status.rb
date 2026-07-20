@@ -343,7 +343,7 @@ module Hive
       unless scheduler_task_matches?(observed, row)
         add_scheduler_join_issue(
           code: "scheduler_task_mismatch", project: key[0], task: key[1],
-          message: "task identity or generation changed after the daemon observation"
+          message: "task identity, policy, or generation changed after the daemon observation"
         )
         return [ nil, "unavailable" ]
       end
@@ -366,24 +366,63 @@ module Hive
         "workflow" => row["workflow"],
         "stage" => row["stage"],
         "marker" => row["marker"],
+        "marker_attrs" => row["attrs"] || {},
         "task_generation" => row["task_generation"],
         "condition_task_generation" => row["condition_task_generation"],
         "commit_generation" => row["commit_generation"],
-        "attempt_id" => row["attempt_id"]
+        "attempt_id" => row["attempt_id"],
+        "state_file_mtime" => row["mtime"],
+        "action" => row["action"],
+        "depends_on" => row["depends_on"],
+        "blocked_by" => row["blocked_by"],
+        "dependency_stage" => row["dependency_stage"],
+        "blocked" => row["blocked"] == true,
+        "admission_error" => row["admission_error"]
       }
       actual = {
         "folder" => observed.dig("identity", "folder"),
         "workflow" => observed["workflow"],
         "stage" => observed["stage"],
         "marker" => observed["marker"],
+        "marker_attrs" => observed["marker_attrs"],
         "task_generation" => observed["task_generation"],
         "condition_task_generation" => observed["condition_task_generation"],
         "commit_generation" => observed["commit_generation"],
-        "attempt_id" => observed["attempt_id"]
+        "attempt_id" => observed["attempt_id"],
+        "state_file_mtime" => observed["state_file_mtime"],
+        "action" => observed["action"],
+        "depends_on" => observed["depends_on"],
+        "blocked_by" => observed["blocked_by"],
+        "dependency_stage" => observed["dependency_stage"],
+        "blocked" => observed["blocked"],
+        "admission_error" => observed["admission_error"]
       }
       expected.all? do |key, value|
         other = actual[key]
-        value.nil? ? other.nil? : value.to_s == other.to_s
+        scheduler_value_matches?(value, other)
+      end
+    end
+
+    def scheduler_value_matches?(expected, actual)
+      return actual.nil? if expected.nil?
+      return expected == actual if expected == true || expected == false
+      return canonical_scheduler_value(expected) == canonical_scheduler_value(actual) if
+        expected.is_a?(Hash) || expected.is_a?(Array)
+
+      expected.to_s == actual.to_s
+    end
+
+    def canonical_scheduler_value(value)
+      case value
+      when Hash
+        value.keys.map(&:to_s).sort.to_h do |key|
+          original = value.key?(key) ? key : value.keys.find { |candidate| candidate.to_s == key }
+          [ key, canonical_scheduler_value(value.fetch(original)) ]
+        end
+      when Array
+        value.map { |entry| canonical_scheduler_value(entry) }
+      else
+        value
       end
     end
 
@@ -436,6 +475,7 @@ module Hive
 
         return [ "waiting_on_you", "operator" ]
       end
+      return [ "waiting_on_provider_or_scheduler", "scheduler" ] if row["blocked"] == true
       return [ "completion_ready", daemon_enabled?(project["name"]) ? "scheduler" : "operator" ] if
         COMPLETION_ACTIONS.include?(row["action"])
 
@@ -505,6 +545,9 @@ module Hive
         unanswered = row["unanswered_questions"].to_i
         message = unanswered.positive? ? "#{unanswered} unanswered questions" : row["action_label"]
         reasons << reason("human_input", message || "task requires an operator decision", "task")
+      elsif row["blocked"] == true
+        message = row["blocked_by"] ? "blocked by #{row.fetch('blocked_by')}" : "blocked by a task dependency"
+        reasons << reason("dependency_wait", message, "dependency")
       elsif COMPLETION_ACTIONS.include?(row["action"])
         reasons << reason("completion_ready", row["action_label"] || "task is ready to complete", "task")
       else
@@ -515,7 +558,7 @@ module Hive
         held = row.fetch("held")
         reasons << reason("provider_quota", "#{held['provider'] || 'provider'} quota hold", "provider")
       end
-      if row["blocked_by"]
+      if row["blocked_by"] && reasons.none? { |entry| entry["code"] == "dependency_wait" }
         reasons << reason("dependency_wait", "blocked by #{row.fetch('blocked_by')}", "dependency")
       end
       if row["condition_warning"]

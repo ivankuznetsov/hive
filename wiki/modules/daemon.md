@@ -124,12 +124,21 @@ tick from double-spawning.
 Scheduler decisions are captured in memory as each row is evaluated. At the
 end of the tick the dispatcher fetches status a second time and publishes a
 `complete` snapshot only after matching task identity, generation, stage,
-marker, attempt, and state-file mtime across that source window. Added,
-removed, or changed rows receive an unavailable disposition instead of a stale
-decision. The record also carries daemon generation/PID/start identity,
+marker/attrs, attempt, state-file mtime, action, dependency/admission policy,
+and blocked state across that source window. Added, removed, or policy-changed
+rows receive an unavailable disposition instead of a stale decision. The
+status-side join rechecks the same fields, so a decision cannot remain
+authoritative after a change between the completed daemon tick and a later
+status read. The record also carries daemon generation/PID/start identity,
 sequence and validity window, capacity, queue counters, provider holds,
 recovery exhaustion, and per-task owner/reason. Failed reconciliation/status
 or failed revalidation publishes `failed`.
+
+Operational task capacity uses the same accounting as dispatch admission:
+task-kind internal runs plus reconciled external task runs. Patrol scans and
+the global digest remain visible in the diagnostic `running` list but do not
+consume the global/per-project task slots or create phantom capacity projects;
+both have separate scheduler budgets.
 
 The reader treats incomplete phases, a stopped/replaced daemon, generation
 mismatch, expiry, malformed content, unsafe symlink/hard-link/permissions, and

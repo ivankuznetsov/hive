@@ -5,6 +5,7 @@ require "json_schemer"
 require "open3"
 require "rbconfig"
 require "timeout"
+require "yaml"
 require_relative "../../packaging/live_agent_skills/proof"
 
 # Opt-in release-readiness proof for the canonical Hive operating skill.
@@ -49,7 +50,10 @@ class LiveHiveOperatingSkillSmokeTest < Minitest::Test
   def test_controlled_hive_uses_the_published_operational_and_watch_contracts
     with_tmp_dir do |root|
       audit_path = File.join(root, "audit.jsonl")
-      binary = install_audited_hive(root, audit_path)
+      binary = install_audited_hive(
+        root, audit_path,
+        proven_hive: File.expand_path("../../bin/hive", __dir__)
+      )
 
       status_out, status_err, status = Open3.capture3(binary, *HiveLiveAgentProof::STATUS_ARGV)
       assert status.success?, status_err
@@ -173,11 +177,11 @@ class LiveHiveOperatingSkillSmokeTest < Minitest::Test
         root, platform, skill_root, credential_name, credential
       )
       audit_path = File.join(root, "hive-argv.jsonl")
-      install_audited_hive(root, audit_path)
-      environment["PATH"] = [ File.join(root, "bin"), environment.fetch("PATH") ].join(File::PATH_SEPARATOR)
-
       proven_hive = ENV["HIVE_PROVEN_HIVE_BIN"].to_s
       availability!(File.file?(proven_hive) && File.executable?(proven_hive), "HIVE_PROVEN_HIVE_BIN is unavailable")
+      install_audited_hive(root, audit_path, proven_hive: proven_hive)
+      environment["PATH"] = [ File.join(root, "bin"), environment.fetch("PATH") ].join(File::PATH_SEPARATOR)
+
       hive_version = run_version(proven_hive, environment, workspace)
       prompt = operating_prompt(platform)
       native_discovery = discover_skill(
@@ -325,127 +329,64 @@ class LiveHiveOperatingSkillSmokeTest < Minitest::Test
     [ workspace, environment, destination ]
   end
 
-  def install_audited_hive(root, audit_path)
+  def install_audited_hive(root, audit_path, proven_hive:)
+    assert File.file?(proven_hive) && File.executable?(proven_hive),
+           "the audited wrapper requires an executable proven Hive candidate"
+
+    proof_home = File.join(root, "home")
+    project_root = File.join(root, "proof-project")
+    hive_state = File.join(project_root, ".hive-state")
+    task_folder = File.join(hive_state, "stages", "2-brainstorm", "live-agent-skill")
+    state_file = File.join(task_folder, "brainstorm.md")
+    FileUtils.mkdir_p(task_folder, mode: 0o700)
+    project_config = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
+    project_config["project_name"] = "proof"
+    secure_write(File.join(hive_state, "config.yml"), YAML.dump(project_config))
+    secure_write(state_file, "# Live agent skill proof\n<!-- COMPLETE -->\n")
+    secure_write(
+      File.join(proof_home, ".config", "hive", "config.yml"),
+      YAML.dump(
+        "registered_projects" => [ {
+          "name" => "proof",
+          "path" => project_root,
+          "hive_state_path" => hive_state
+        } ]
+      )
+    )
+
     bin_dir = File.join(root, "bin")
     FileUtils.mkdir_p(bin_dir, mode: 0o700)
-    observed_at = "2026-07-20T12:00:00Z"
-    task = {
-      "identity" => {
-        "project" => "proof", "slug" => "live-agent-skill", "id" => 1,
-        "display_name" => "Live agent skill proof", "folder" => "/proof/4-execute/live-agent-skill"
-      },
-      "workflow" => "coding",
-      "position" => { "stage" => "4-execute", "marker" => "agent_working" },
-      "liveness" => {
-        "status" => "running", "pid" => 4242, "attempt_id" => "proof-attempt",
-        "task_generation" => "proof-generation"
-      },
-      "state" => "running", "blocker_owner" => "agent",
-      "reason" => "controlled worker is live",
-      "reasons" => [ {
-        "code" => "worker_live", "message" => "controlled worker is live",
-        "source" => "task_graph", "freshness" => "current"
-      } ],
-      "provider" => nil,
-      "dependency" => {
-        "blocked" => false, "blocked_by" => nil, "dependency_stage" => nil,
-        "admission_error" => nil
-      },
-      "freshness" => { "task_observed_at" => observed_at, "scheduler_status" => "current" },
-      "evidence" => {
-        "task_action" => "agent_running", "task_action_label" => "Agent running",
-        "marker_attrs" => {}, "diagnostic" => nil, "condition_warning" => nil, "held" => nil
-      },
-      "action" => nil
-    }
-    status = {
-      "schema" => "hive-operational-status", "schema_version" => 1,
-      "ok" => true,
-      "generated_at" => observed_at,
-      "completeness" => "complete",
-      "source" => {
-        "task_graph" => {
-          "schema" => "hive-status", "schema_version" => 6, "generated_at" => observed_at,
-          "status" => "complete", "projects_total" => 1, "projects_healthy" => 1
-        },
-        "scheduler" => { "status" => "current", "observed_at" => observed_at }
-      },
-      "summary" => {
-        "overall_state" => "running", "active" => 1, "archived" => 0,
-        "projects_total" => 1, "projects_healthy" => 1,
-        "states" => {
-          "unknown" => 0, "running" => 1, "needs_repair" => 0,
-          "waiting_on_you" => 0, "waiting_on_provider_or_scheduler" => 0,
-          "completion_ready" => 0, "idle" => 0
-        }
-      },
-      "daemon" => {
-        "status" => "healthy", "generation" => "proof-daemon", "pid" => 4242,
-        "process_start_time" => "proof-start", "phase" => "complete", "observed_at" => observed_at
-      },
-      "scheduler" => {
-        "status" => "current", "reason" => nil, "observed_at" => observed_at,
-        "valid_until" => "2026-07-20T12:01:30Z", "tick_sequence" => 1,
-        "capacity" => {}, "queue" => {}, "provider_holds" => []
-      },
-      "archive" => { "count" => 0, "by_project" => [] },
-      "issues" => [], "tasks" => [ task ]
-    }
-    watch_target = {
-      "target" => "proof:live-agent-skill", "project" => "proof", "slug" => "live-agent-skill",
-      "present" => true, "archived" => false, "state" => "running",
-      "blocker_owner" => "agent", "reason" => "controlled worker is live",
-      "reason_codes" => [ "worker_live" ],
-      "position" => { "stage" => "4-execute", "marker" => "agent_working" },
-      "provider" => nil, "freshness" => { "scheduler_status" => "current" },
-      "liveness_status" => "running",
-      "terminality" => { "settled" => false, "completion" => false }, "action_policy" => nil
-    }
-    watch = [
-      { "schema" => "hive-watch-event", "schema_version" => 1, "ok" => true,
-        "event" => "initial", "sequence" => 0, "observed_at" => observed_at,
-        "reason" => nil, "message" => nil, "selected_count" => 1, "targets" => [ watch_target ] },
-      { "schema" => "hive-watch-event", "schema_version" => 1, "ok" => true,
-        "event" => "transition", "sequence" => 1, "observed_at" => observed_at,
-        "reason" => nil, "message" => nil, "selected_count" => 1,
-        "targets" => [ watch_target.merge(
-          "state" => "waiting_on_you", "blocker_owner" => "operator",
-          "reason" => "controlled proof reached its human gate", "reason_codes" => [ "needs_input" ],
-          "liveness_status" => "not_running", "terminality" => { "settled" => true, "completion" => false }
-        ) ] },
-      { "schema" => "hive-watch-event", "schema_version" => 1, "ok" => true,
-        "event" => "final", "sequence" => 2, "observed_at" => observed_at,
-        "reason" => "settled", "message" => nil, "selected_count" => 1,
-        "targets" => [ watch_target.merge(
-          "state" => "waiting_on_you", "blocker_owner" => "operator",
-          "reason" => "controlled proof reached its human gate", "reason_codes" => [ "needs_input" ],
-          "liveness_status" => "not_running", "terminality" => { "settled" => true, "completion" => false }
-        ) ] }
-    ]
-    operational_schema = JSONSchemer.schema(
-      JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
-    )
-    watch_schema = JSONSchemer.schema(
-      JSON.parse(File.read(Hive::Schemas.schema_path("hive-watch-event")))
-    )
-    assert operational_schema.valid?(status), "controlled operational payload must match the production schema"
-    assert watch.all? { |event| watch_schema.valid?(event) },
-           "controlled watch events must match the production schema"
     script = <<~RUBY
       #!#{RbConfig.ruby}
       require "json"
-      audit = #{audit_path.dump}
-      File.open(audit, File::WRONLY | File::CREAT | File::APPEND, 0o600) do |file|
-        file.puts(JSON.generate("argv" => ARGV, "ordinal" => (File.exist?(audit) ? File.foreach(audit).count + 1 : 1)))
-      end
-      if ARGV == #{HiveLiveAgentProof::STATUS_ARGV.inspect}
-        puts #{JSON.generate(status).dump}
-      elsif ARGV == #{HiveLiveAgentProof::WATCH_ARGV.inspect}
-        JSON.parse(#{JSON.generate(watch).dump}).each { |event| puts JSON.generate(event) }
-      else
+      allowed = #{HiveLiveAgentProof::OBSERVATION_COMMANDS.inspect}
+      unless allowed.include?(ARGV)
         warn "live proof permits only operational status and bounded native watch"
         exit 64
       end
+
+      audit = #{audit_path.dump}
+      File.open(audit, File::WRONLY | File::CREAT | File::APPEND, 0o600) do |file|
+        ordinal = File.foreach(audit).count + 1
+        file.puts(JSON.generate("argv" => ARGV, "ordinal" => ordinal))
+      end
+
+      if ARGV == #{HiveLiveAgentProof::WATCH_ARGV.inspect}
+        child = fork do
+          sleep 3
+          state_file = #{state_file.dump}
+          temporary = "#{state_file}.transition"
+          File.write(temporary, "# Live agent skill proof\\n<!-- WAITING -->\\n", mode: "w", perm: 0o600)
+          File.rename(temporary, state_file)
+        end
+        Process.detach(child)
+      end
+
+      ENV["HOME"] = #{proof_home.dump}
+      %w[
+        HIVE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME
+      ].each { |key| ENV.delete(key) }
+      exec #{File.expand_path(proven_hive).dump}, *ARGV
     RUBY
     path = File.join(bin_dir, "hive")
     secure_write(path, script)
@@ -517,7 +458,7 @@ class LiveHiveOperatingSkillSmokeTest < Minitest::Test
     <<~PROMPT
       #{invocation}
       Use the installed Hive operating skill and its status-and-watch reference. This is a controlled release proof.
-      Request a fresh agent operational snapshot and identify the exact running target from its structured fields.
+      Request a fresh agent operational snapshot and identify the exact active target from its structured fields.
       Only if that target is proof:live-agent-skill, follow it with one native observer bounded by settled state,
       a 20-second timeout, five events, a one-second interval, and JSON Lines output.
       Stop after the final watch record. Do not use process discovery, logs, a polling loop, a sidecar, hive act, or any mutating/admin/release command.

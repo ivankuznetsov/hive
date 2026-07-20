@@ -143,11 +143,12 @@ project.
 - `test/unit/agent_skills/inspector_test.rb` covers health precedence,
   source/version evidence, shadowing, configured homes/binaries, native setup
   refresh, and filesystem-only Claude/Codex/Pi inventory with zero runner calls.
-- `test/unit/agent_skills/openclaw_test.rb` covers native setup inventory,
-  filesystem-only ClawHub provenance, legacy projection evidence, drift, and
-  zero-command/no-write behavior.
-- `test/unit/commands/doctor_test.rb` covers human/v2 JSON rendering, legacy
-  rows, remediation, non-blocking unavailable agents, and byte-identical homes
+- `test/unit/agent_skills/openclaw_test.rb` covers filesystem-only ClawHub
+  provenance from workspace and managed roots, legacy projection evidence,
+  drift, missing binaries/skills, and an always-empty command audit.
+- `test/unit/commands/doctor_test.rb` covers human/v2 JSON rendering and legacy
+  dependency rows. `doctor_managed_skills_test.rb` covers managed remediation,
+  non-blocking unavailable agents, OpenClaw ownership, and byte-identical homes
   even when every available agent runner would mutate if called.
 - `test/unit/skill_check_test.rb` covers exact Claude `/hive`, Codex `$hive`,
   and Pi `/skill:hive` resolution, escaping, Pi jails, and the write-free

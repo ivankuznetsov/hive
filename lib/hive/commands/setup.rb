@@ -40,7 +40,6 @@ module Hive
         # the daemon and enrolls the cwd.
         unless @no_bootstrap
           setup_agent_skills
-          require_unattended_consent! if unattended_without_yes?
           unless agent_setup_refused?
             bootstrap_qmd_if_missing(diagnostics)
             bootstrap_web_bundle
@@ -201,20 +200,7 @@ module Hive
         true
       end
 
-      def require_unattended_consent!
-        phase = @phases.reverse.find { |entry| entry["name"] == "agent_skills" }
-        return unless phase
-        phase["ok"] = false
-        phase["classification"] = "consent_required"
-        phase["consent"] = {
-          "granted" => false,
-          "provenance" => @json ? "json_requires_yes" : "non_tty"
-        }
-        phase["setup_agents_exit_code"] = Hive::ExitCodes::USAGE
-      end
-
       def agent_setup_refused?
-        return true if unattended_without_yes?
         @agent_setup_result&.classification == "refused"
       end
 

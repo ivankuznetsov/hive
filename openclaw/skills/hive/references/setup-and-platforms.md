@@ -50,19 +50,24 @@ Use Hive’s setup lifecycle rather than copying files manually:
 
 ```bash
 hive doctor --json
+# Interactive terminals preview exact managed writes and prompt for consent:
+hive setup-agents
+# JSON/non-TTY calls without --yes return a typed, empty refusal:
 hive setup-agents --json
-# Only after the user approves that exact plan:
+# Only after the user approves the managed Claude/Codex/Pi scope:
 hive setup-agents --yes --json
 # Only after the user approves core provisioning:
 hive setup --no-init --yes --json
 ```
 
 `hive doctor` is read-only and inspects durable filesystem evidence without
-launching Claude, Codex, Pi, or OpenClaw. `hive setup-agents --json` is the
-machine-readable preview; its consent-required response and nonzero exit are
-expected when changes are planned. Run `--yes --json` only after the user
-approves the displayed scope. Foreign or user-edited destinations are
-conflicts, not overwrite targets.
+launching Claude, Codex, Pi, or OpenClaw. An interactive `hive setup-agents`
+previews exact managed writes before prompting. By design,
+`hive setup-agents --json` without `--yes` does not inspect agent homes or
+return a write plan: it returns a typed `consent_required` refusal with empty
+targets and operations. An agent must explain the managed Claude/Codex/Pi
+scope, obtain the user's approval, and only then run `--yes --json`. Foreign or
+user-edited destinations are conflicts, not overwrite targets.
 
 JSON or non-interactive setup without `--yes` returns a typed refusal before
 diagnostics or native agent discovery. After approval,

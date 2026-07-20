@@ -125,6 +125,51 @@ class OperationalStatusTest < Minitest::Test
     assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_unavailable"
   end
 
+  def test_matching_complete_daemon_observation_explains_scheduler_gate
+    source_task = task(action: "ready_to_plan", slug: "capacity-wait")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+    projected = result.fetch("tasks").first
+
+    assert_equal "complete", result.fetch("completeness")
+    assert_equal "waiting_on_provider_or_scheduler", projected.fetch("state")
+    assert_equal "scheduler", projected.fetch("blocker_owner")
+    assert_equal "global_cap", projected.dig("reasons", 0, "code")
+    assert_equal "current", projected.dig("freshness", "scheduler_status")
+    assert_nil projected.fetch("action"), "daemon-owned work must not offer a bypass action"
+    assert_equal "daemon-generation-1", result.dig("daemon", "generation")
+  end
+
+  def test_mismatched_daemon_observation_is_warning_not_definitive_blocker
+    source_task = task(action: "ready_to_plan", slug: "moved")
+    snapshot = scheduler_snapshot_for(
+      source_task.merge("stage" => "2-brainstorm"),
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+    projected = result.fetch("tasks").first
+
+    assert_equal "partial", result.fetch("completeness")
+    assert_equal "unavailable", projected.dig("freshness", "scheduler_status")
+    refute_includes projected.fetch("reasons").map { |reason| reason.fetch("code") }, "global_cap"
+    assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_task_mismatch"
+  end
+
   def test_routine_action_is_closed_freshness_bound_and_contains_no_argv
     row = task(action: "ready_to_plan", slug: "advance", marker: "complete")
     action = project(status_payload(row)).fetch("tasks").first.fetch("action")
@@ -163,12 +208,48 @@ class OperationalStatusTest < Minitest::Test
 
   private
 
-  def project(payload, project_context: {})
+  def project(payload, project_context: {}, scheduler_snapshot: nil)
     Hive::OperationalStatus.new(
       status_payload: payload,
       project_context: project_context,
+      scheduler_snapshot: scheduler_snapshot,
       now: Time.utc(2026, 7, 20, 10, 0, 2)
     ).to_h
+  end
+
+  def scheduler_snapshot_for(source_task, decision:, reason:)
+    {
+      "status" => "current",
+      "phase" => "complete",
+      "observed_at" => "2026-07-20T10:00:01Z",
+      "valid_until" => "2026-07-20T10:01:31Z",
+      "tick_sequence" => 7,
+      "daemon" => {
+        "generation" => "daemon-generation-1",
+        "pid" => 1234,
+        "process_start_time" => "process-start-1"
+      },
+      "capacity" => { "global" => { "used" => 2, "available" => 0 } },
+      "queue" => { "pending" => 1 },
+      "provider_holds" => [],
+      "tasks" => [ {
+        "identity" => {
+          "project" => "demo", "slug" => source_task.fetch("slug"),
+          "folder" => source_task.fetch("folder")
+        },
+        "workflow" => source_task["workflow"],
+        "stage" => source_task["stage"],
+        "marker" => source_task["marker"],
+        "task_generation" => source_task["task_generation"],
+        "condition_task_generation" => source_task["condition_task_generation"],
+        "commit_generation" => source_task["commit_generation"],
+        "attempt_id" => source_task["attempt_id"],
+        "disposition" => {
+          "status" => "available", "decision" => decision,
+          "owner" => "scheduler", "reason" => reason
+        }
+      } ]
+    }
   end
 
   def status_payload(*tasks)

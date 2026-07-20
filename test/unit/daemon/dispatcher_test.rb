@@ -320,7 +320,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       with_digest_scheduler: false, with_answer_digest_scheduler: false,
                       refactor_patrol_merge_reconciler: nil,
                       refactor_patrol_scheduler: nil, patrol_arbiter: nil,
-                      attempt_dispatcher: nil, attempt_reconciler: nil)
+                      attempt_dispatcher: nil, attempt_reconciler: nil,
+                      operational_snapshot: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -370,7 +371,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatch_request_state_home: dispatch_request_state_home,
       dispatch_result_state_home: dispatch_result_state_home,
       attempt_dispatcher: attempt_dispatcher,
-      attempt_reconciler: attempt_reconciler
+      attempt_reconciler: attempt_reconciler,
+      operational_snapshot: operational_snapshot
     )
     # Bypass the Hive::Config.find_project / Config.load lookup chain
     # for unit tests — stub the predicate directly.
@@ -741,6 +743,41 @@ class HiveDaemonDispatcherTest < Minitest::Test
     def close; end
   end
 
+  class FakeOperationalSnapshot
+    attr_reader :calls
+
+    def initialize(fail_on: [], error: Errno::ENOSPC.new("snapshot publication"))
+      @fail_on = Array(fail_on).map(&:to_sym)
+      @error = error
+      @calls = []
+    end
+
+    def begin_tick(**attributes)
+      record(:begin_tick, attributes)
+    end
+
+    def observe(row, **attributes)
+      record(:observe, attributes.merge(project: row.project, slug: row.slug))
+    end
+
+    def fail(**attributes)
+      record(:fail, attributes)
+    end
+
+    def complete(**attributes)
+      record(:complete, attributes)
+    end
+
+    private
+
+    def record(method, attributes)
+      raise @error if @fail_on.include?(method)
+
+      @calls << [ method, attributes ]
+      true
+    end
+  end
+
   def row(project: "p1", slug: "s1", stage: "1-inbox", marker: "waiting",
           action: "ready_to_brainstorm", command: "hive brainstorm s1",
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
@@ -770,6 +807,68 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   # ── core dispatch flow ────────────────────────────────────────────────
+
+  def test_operational_snapshot_publishes_started_disposition_and_revalidated_complete
+    observed = row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm")
+    snapshot = FakeOperationalSnapshot.new
+    with_tmp_dir do |state_home|
+      dispatcher, = make_dispatcher(
+        rows: [ observed ], operational_snapshot: snapshot,
+        dispatch_request_state_home: state_home
+      )
+
+      dispatcher.tick(now: T0)
+
+      assert_equal %i[begin_tick observe complete], snapshot.calls.map(&:first)
+      assert_equal "dispatched", snapshot.calls[1][1].fetch(:decision).to_s
+      complete = snapshot.calls.last.last
+      assert_equal [ observed ], complete.fetch(:initial_rows)
+      assert_equal [ observed ], complete.fetch(:final_rows)
+      assert_equal "current", complete.dig(:queue, "status")
+    end
+  end
+
+  def test_handled_status_failure_publishes_failed_without_authoritative_tasks
+    snapshot = FakeOperationalSnapshot.new
+    failed = Hive::Daemon::StatusConsumer::Result.new(
+      ok: false, rows: [], projects: [], error: "status failed"
+    )
+    dispatcher, = make_dispatcher(status_result: failed, operational_snapshot: snapshot)
+
+    dispatcher.tick(now: T0)
+
+    assert_equal %i[begin_tick fail], snapshot.calls.map(&:first)
+    assert_equal "status_failure", snapshot.calls.last.last.fetch(:reason)
+  end
+
+  def test_snapshot_publication_failures_are_advisory_and_dispatch_continues
+    errors = [
+      Errno::ENOSPC.new("full"), Errno::EROFS.new("read-only"),
+      Errno::EACCES.new("denied"), IOError.new("rename/fsync failed")
+    ]
+    errors.each_with_index do |error, index|
+      observed = row(
+        slug: "snapshot-#{index}", action: "ready_to_plan",
+        command: "hive plan snapshot-#{index} --from 2-brainstorm"
+      )
+      snapshot = FakeOperationalSnapshot.new(
+        fail_on: %i[begin_tick observe complete fail], error: error
+      )
+      with_tmp_dir do |state_home|
+        dispatcher, supervisor, _controller, logger = make_dispatcher(
+          rows: [ observed ], operational_snapshot: snapshot,
+          dispatch_request_state_home: state_home
+        )
+
+        dispatcher.tick(now: T0)
+
+        assert_equal 1, supervisor.spawned.size
+        failures = logger.events.select { |name, _attrs| name == :operational_snapshot_publish_failed }
+        assert_operator failures.size, :>=, 3
+        assert failures.all? { |_name, attrs| attrs.fetch(:error).include?(error.class.name) }
+      end
+    end
+  end
 
   def test_advance_action_dispatches_workflow_verb
     rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]

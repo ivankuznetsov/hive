@@ -647,4 +647,17 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal 0, c.daily_count_for("digest", T0),
                  "no residual daily-count entry may survive a completed digest"
   end
+
+  def test_operational_snapshot_exposes_capacity_without_executable_commands
+    c = make(global: 2, per_project: 1, daily: 5)
+    dispatch(c, 100, "p1", "s1")
+
+    snapshot = c.operational_snapshot(now: T0)
+
+    assert_equal 2, snapshot.dig("limits", "global")
+    assert_equal({ "used" => 1, "available" => 1 }, snapshot.fetch("global"))
+    assert_equal 0, snapshot.dig("projects", "p1", "available")
+    assert_equal "s1", snapshot.dig("running", 0, "slug")
+    refute snapshot.fetch("running").first.key?("command")
+  end
 end

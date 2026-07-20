@@ -28,6 +28,12 @@ module Hive
       File.join(state_home, ".task-counter.lock")
     end
 
+    # Owner-private daemon-to-CLI operational observation. Callers running
+    # against an injected daemon home may pass that state root explicitly.
+    def operational_snapshot_path(root = state_home)
+      File.join(root, "operational", "daemon-snapshot.json")
+    end
+
     # Owner-private, versioned durable task-attempt state. Keeping the
     # version in the directory name lets a future on-disk migration inspect
     # old records without teaching older binaries to rewrite them.

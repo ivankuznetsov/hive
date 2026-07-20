@@ -275,7 +275,51 @@ module Hive
         end
       end
 
+      # Read-only retry ownership for the dispatcher-owned observation. Keys
+      # are reduced to task identity and bounded counters; marker contents and
+      # executable commands never cross this interface.
+      def operational_snapshot
+        {
+          "error_retries" => retry_entries(@error_auto_recoveries, kind: "error"),
+          "review_retries" => retry_entries(@review_error_auto_recoveries, kind: "review"),
+          "error_exhausted" => exhausted_entries(@error_recovery_exhausted, kind: "error"),
+          "review_exhausted" => exhausted_entries(@review_error_recovery_exhausted, kind: "review"),
+          "limits" => {
+            "error" => @error_auto_recovery_limit,
+            "review" => @review_error_auto_recovery_limit,
+            "attempt_loss" => @attempt_loss_recovery_limit
+          }
+        }
+      end
+
       private
+
+      def retry_entries(source, kind:)
+        source.filter_map do |key, attempts|
+          next unless attempts.to_i.positive?
+
+          operational_recovery_entry(key, kind: kind).merge("attempts" => attempts.to_i)
+        end
+      end
+
+      def exhausted_entries(source, kind:)
+        source.filter_map do |key, exhausted|
+          next unless exhausted
+
+          operational_recovery_entry(key, kind: kind)
+        end
+      end
+
+      def operational_recovery_entry(key, kind:)
+        values = Array(key)
+        {
+          "project" => values[0].to_s,
+          "slug" => values[1].to_s,
+          "stage" => kind == "error" ? values[2].to_s : "6-review",
+          "reason" => (kind == "error" ? values[3] : values[2]).to_s,
+          "kind" => kind
+        }
+      end
 
       def task_for_attempt(attempt, outcome)
         folder = outcome["task_folder"]

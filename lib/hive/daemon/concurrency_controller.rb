@@ -1,5 +1,6 @@
 require "set"
 require "date"
+require "time"
 
 module Hive
   module Daemon
@@ -355,6 +356,61 @@ module Hive
       def daily_count_for(project, now = Time.now)
         [ @daily_counts[[ project, now.to_date ]],
           @durable_daily_counts.fetch([ project, now.to_date ], 0) ].max
+      end
+
+      # Minimal read-only scheduler facts for the dispatcher-owned operational
+      # snapshot. Commands and raw argv are deliberately excluded: this is an
+      # explanation surface, not another execution channel.
+      def operational_snapshot(now: Time.now)
+        projects = (
+          @running.values.map { |entry| entry[:project] } +
+          @external_running_by_project.keys +
+          @daily_counts.keys.map(&:first) +
+          @durable_daily_counts.keys.map(&:first)
+        ).compact.uniq.sort
+        used = in_flight_count
+        {
+          "limits" => {
+            "global" => @max_concurrent_runs,
+            "per_project" => @max_concurrent_per_project,
+            "daily_per_project" => @max_runs_per_day_per_project,
+            "patrol_scans_per_project" => @max_concurrent_patrol_scans
+          },
+          "global" => {
+            "used" => used,
+            "available" => [ @max_concurrent_runs - used, 0 ].max
+          },
+          "projects" => projects.to_h do |project|
+            project_used = running_count_for(project)
+            [
+              project,
+              {
+                "used" => project_used,
+                "available" => [ @max_concurrent_per_project - project_used, 0 ].max,
+                "daily_used" => daily_count_for(project, now)
+              }
+            ]
+          end,
+          "running" => @running.sort_by { |pid, _entry| pid }.map do |pid, entry|
+            {
+              "pid" => pid,
+              "project" => entry[:project],
+              "slug" => entry[:slug],
+              "stage" => entry[:stage],
+              "kind" => (entry[:kind] || :task).to_s,
+              "started_at" => entry[:started_at]&.utc&.iso8601
+            }
+          end,
+          "cooldowns" => @cooldown_until.filter_map do |(project, slug), expires_at|
+            next unless expires_at && expires_at > now
+
+            { "project" => project, "slug" => slug, "until" => expires_at.utc.iso8601 }
+          end.sort_by { |entry| [ entry.fetch("project"), entry.fetch("slug") ] },
+          "quarantined" => @quarantine.to_a.sort.map do |project, slug|
+            { "project" => project, "slug" => slug }
+          end,
+          "dropped_projects" => @dropped_projects.to_a.sort
+        }
       end
 
       private

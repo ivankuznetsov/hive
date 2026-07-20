@@ -24,12 +24,15 @@ require "hive/gh"
 require "hive/pr"
 require "hive/process_kill"
 require "hive/operational_status"
+require "hive/daemon/operational_snapshot"
 require "hive/tui/views/hyperlink"
 
 module Hive
   module Commands
     class Status
       include Hive::Schemas::EnvelopeEmitter
+
+      AUTO_SCHEDULER_SNAPSHOT = Object.new.freeze
 
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
@@ -158,11 +161,17 @@ module Hive
         end
       end
 
-      def operational_payload(projects, scheduler_snapshot: nil)
+      def operational_payload(projects, scheduler_snapshot: AUTO_SCHEDULER_SNAPSHOT)
         source = json_payload(projects)
+        project_context = operational_project_context(projects)
+        if scheduler_snapshot.equal?(AUTO_SCHEDULER_SNAPSHOT)
+          scheduler_snapshot = if project_context.any? { |_name, context| context["daemon_enabled"] == true }
+            Hive::Daemon::OperationalSnapshot::Reader.new.read
+          end
+        end
         Hive::OperationalStatus.new(
           status_payload: source,
-          project_context: operational_project_context(projects),
+          project_context: project_context,
           scheduler_snapshot: scheduler_snapshot
         ).to_h
       end

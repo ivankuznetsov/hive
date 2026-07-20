@@ -72,6 +72,14 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     )
   end
 
+  def test_operational_snapshot_starts_with_bounded_empty_recovery_state
+    snapshot = @healer.operational_snapshot
+
+    assert_equal 3, snapshot.dig("limits", "error")
+    assert_empty snapshot.fetch("error_retries")
+    assert_empty snapshot.fetch("review_exhausted")
+  end
+
   def heal(rows, **opts)
     @healer.heal(rows, now: NOW, **opts)
   end

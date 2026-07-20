@@ -34,10 +34,17 @@ module Hive
       active = active_rows(projects)
       issues = source_issues(projects, active)
       task_source_status = task_source_status(projects, active)
+      @scheduler_join_issues = []
+      @scheduler_join_issue_keys = {}
       scheduler = scheduler_payload(projects)
       issues.concat(scheduler.fetch("issues"))
       tasks = active.map { |project, row| project_row(project, row, scheduler) }
-      completeness = combined_completeness(task_source_status, scheduler.fetch("status"))
+      issues.concat(@scheduler_join_issues)
+      completeness = combined_completeness(
+        task_source_status,
+        scheduler.fetch("status"),
+        scheduler_join_complete: @scheduler_join_issues.empty?
+      )
       counts = STATES.to_h { |state| [ state, tasks.count { |row| row.fetch("state") == state } ] }
 
       {
@@ -190,8 +197,25 @@ module Hive
     end
 
     def scheduler_from_snapshot(snapshot, _enabled)
+      @daemon_snapshot = snapshot
+      status = snapshot.fetch("status", "unavailable")
+      @scheduler_task_index = if status == "current"
+        Array(snapshot["tasks"]).to_h do |task|
+          [ [ task.dig("identity", "project"), task.dig("identity", "slug") ], task ]
+        end
+      else
+        {}
+      end
+      issues = []
+      unless status == "current"
+        issues << issue(
+          code: "scheduler_#{status}", source: "scheduler",
+          message: "daemon scheduler observation is #{status}: #{snapshot['reason'] || 'unknown reason'}",
+          remediation: "check hive daemon status --json and wait for one complete reconciliation tick"
+        )
+      end
       {
-        "status" => snapshot.fetch("status", "unavailable"),
+        "status" => status,
         "reason" => snapshot["reason"],
         "observed_at" => snapshot["observed_at"],
         "valid_until" => snapshot["valid_until"],
@@ -199,7 +223,7 @@ module Hive
         "capacity" => snapshot["capacity"],
         "queue" => snapshot["queue"],
         "provider_holds" => Array(snapshot["provider_holds"]),
-        "issues" => Array(snapshot["issues"])
+        "issues" => issues + Array(snapshot["issues"])
       }
     end
 
@@ -211,12 +235,13 @@ module Hive
       else
         "unknown"
       end
+      daemon = @daemon_snapshot.is_a?(Hash) ? @daemon_snapshot["daemon"] : nil
       {
         "status" => status,
-        "generation" => nil,
-        "pid" => nil,
-        "process_start_time" => nil,
-        "phase" => nil,
+        "generation" => daemon&.fetch("generation", nil),
+        "pid" => daemon&.fetch("pid", nil),
+        "process_start_time" => daemon&.fetch("process_start_time", nil),
+        "phase" => @daemon_snapshot&.fetch("phase", nil),
         "observed_at" => scheduler["observed_at"]
       }
     end
@@ -226,9 +251,10 @@ module Hive
         @project_context.dig(project_name, :daemon_enabled) == true
     end
 
-    def combined_completeness(task_status, scheduler_status)
+    def combined_completeness(task_status, scheduler_status, scheduler_join_complete: true)
       return "unknown" if task_status == "unknown"
-      return "partial" if task_status == "partial" || scheduler_status == "unavailable"
+      return "partial" if task_status == "partial" || !scheduler_join_complete
+      return "partial" unless %w[current not_applicable].include?(scheduler_status)
 
       "complete"
     end
@@ -236,6 +262,24 @@ module Hive
     def project_row(project, row, scheduler)
       reasons = reasons_for(project, row)
       state, owner = classify(project, row)
+      scheduler_disposition, scheduler_freshness = scheduler_disposition_for(
+        project, row, scheduler
+      )
+      if scheduler_disposition
+        scheduler_reason = reason(
+          scheduler_disposition.fetch("decision", "scheduler_decision"),
+          scheduler_disposition.fetch("reason", "scheduler disposition is unavailable"),
+          "scheduler"
+        )
+        reasons.unshift(scheduler_reason) if material_scheduler_disposition?(scheduler_disposition)
+        scheduler_state, scheduler_owner = classify_scheduler_disposition(scheduler_disposition)
+        unless running?(row) || scheduler_state.nil?
+          state = scheduler_state
+          owner = scheduler_owner
+        end
+      end
+      action = Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row)
+      action = nil if daemon_enabled?(project.fetch("name"))
       {
         "identity" => {
           "project" => project.fetch("name"),
@@ -265,7 +309,7 @@ module Hive
         },
         "freshness" => {
           "task_observed_at" => @status_payload.fetch("generated_at"),
-          "scheduler_status" => scheduler.fetch("status")
+          "scheduler_status" => scheduler_freshness
         },
         "evidence" => {
           "task_action" => row["action"],
@@ -275,8 +319,108 @@ module Hive
           "condition_warning" => row["condition_warning"],
           "held" => row["held"]
         },
-        "action" => Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row)
+        "action" => action
       }
+    end
+
+    def scheduler_disposition_for(project, row, scheduler)
+      return [ nil, "not_applicable" ] unless daemon_enabled?(project.fetch("name"))
+
+      status = scheduler.fetch("status")
+      return [ nil, status ] unless status == "current"
+
+      key = [ project.fetch("name"), row.fetch("slug") ]
+      observed = (@scheduler_task_index || {})[key]
+      unless observed
+        add_scheduler_join_issue(
+          code: "scheduler_task_missing", project: key[0], task: key[1],
+          message: "current task is absent from the daemon's completed observation"
+        )
+        return [ nil, "unavailable" ]
+      end
+      unless scheduler_task_matches?(observed, row)
+        add_scheduler_join_issue(
+          code: "scheduler_task_mismatch", project: key[0], task: key[1],
+          message: "task identity or generation changed after the daemon observation"
+        )
+        return [ nil, "unavailable" ]
+      end
+
+      disposition = observed["disposition"]
+      unless disposition.is_a?(Hash) && disposition["status"] == "available"
+        add_scheduler_join_issue(
+          code: "scheduler_task_changed", project: key[0], task: key[1],
+          message: "task changed during the daemon tick; no disposition is authoritative yet"
+        )
+        return [ nil, "unavailable" ]
+      end
+
+      [ disposition, "current" ]
+    end
+
+    def scheduler_task_matches?(observed, row)
+      expected = {
+        "folder" => row["folder"],
+        "workflow" => row["workflow"],
+        "stage" => row["stage"],
+        "marker" => row["marker"],
+        "task_generation" => row["task_generation"],
+        "condition_task_generation" => row["condition_task_generation"],
+        "commit_generation" => row["commit_generation"],
+        "attempt_id" => row["attempt_id"]
+      }
+      actual = {
+        "folder" => observed.dig("identity", "folder"),
+        "workflow" => observed["workflow"],
+        "stage" => observed["stage"],
+        "marker" => observed["marker"],
+        "task_generation" => observed["task_generation"],
+        "condition_task_generation" => observed["condition_task_generation"],
+        "commit_generation" => observed["commit_generation"],
+        "attempt_id" => observed["attempt_id"]
+      }
+      expected.all? do |key, value|
+        other = actual[key]
+        value.nil? ? other.nil? : value.to_s == other.to_s
+      end
+    end
+
+    def add_scheduler_join_issue(code:, project:, task:, message:)
+      key = [ code, project, task ]
+      return if (@scheduler_join_issue_keys ||= {}).key?(key)
+
+      @scheduler_join_issue_keys[key] = true
+      @scheduler_join_issues << issue(
+        code: code,
+        source: "scheduler",
+        project: project,
+        task: task,
+        message: message,
+        remediation: "request a fresh operational status after the next daemon tick"
+      )
+    end
+
+    def material_scheduler_disposition?(disposition)
+      !%w[not_evaluated skip project_disabled].include?(disposition["decision"])
+    end
+
+    def classify_scheduler_disposition(disposition)
+      decision = disposition["decision"]
+      case decision
+      when "provider_hold"
+        [ "waiting_on_provider_or_scheduler", "provider" ]
+      when "global_cap", "project_cap", "daily_cap", "cooldown", "in_flight",
+           "dispatched", "wait_for_debounce", "record_baseline", "poll_for_merge",
+           "merge_watch", "blocked_on_dependency"
+        [ "waiting_on_provider_or_scheduler", "scheduler" ]
+      when "wait_for_answers"
+        [ "waiting_on_you", "operator" ]
+      when "quarantined", "project_dropped", "folder_missing", "folder_missing_nil",
+           "plan_approval_invalid", "legacy_layout", "markerless_stalled", "recovery_exhausted"
+        [ "needs_repair", disposition["owner"] || "operator" ]
+      else
+        [ nil, nil ]
+      end
     end
 
     def classify(project, row)

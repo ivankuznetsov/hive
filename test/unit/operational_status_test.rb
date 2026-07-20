@@ -48,6 +48,20 @@ class OperationalStatusTest < Minitest::Test
     assert_includes projected.fetch("reasons").map { |reason| reason.fetch("code") }, "provider_quota"
   end
 
+  def test_dead_recorded_runner_is_repair_not_running
+    row = task(action: "agent_running", slug: "stale").merge(
+      "claude_pid" => 99_999,
+      "claude_pid_alive" => false
+    )
+
+    projected = project(status_payload(row)).fetch("tasks").first
+
+    assert_equal "needs_repair", projected.fetch("state")
+    assert_equal "hive", projected.fetch("blocker_owner")
+    assert_equal "stale", projected.dig("liveness", "status")
+    assert_equal "stale_runner", projected.dig("reasons", 0, "code")
+  end
+
   def test_invalid_task_is_unknown_while_admission_error_needs_repair
     invalid = task(
       action: "error", slug: "invalid", marker: "error",

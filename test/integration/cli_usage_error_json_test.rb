@@ -82,6 +82,27 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_status_mode_conflicts_are_usage_errors_with_the_selected_schema
+    with_tmp_global_config do |home|
+      out, _err, status = run_hive(home, "status", "--full", "--json")
+
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-status", payload.fetch("schema")
+      assert_equal 6, payload.fetch("schema_version")
+      assert_equal false, payload.fetch("ok")
+      assert_match(/--full cannot be combined with --json/, payload.fetch("message"))
+
+      out, _err, status = run_hive(
+        home, "status", "--operational", "--diagnose", "task", "--json"
+      )
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-status-diagnose", payload.fetch("schema")
+      assert_match(/--operational cannot be combined/, payload.fetch("message"))
+    end
+  end
+
   def test_screenote_commands_json_usage_errors_emit_unversioned_envelopes
     with_tmp_global_config do |home|
       [

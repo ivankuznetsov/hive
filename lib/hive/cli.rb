@@ -977,8 +977,9 @@ module Hive
 
     desc "status", "Show all active tasks across registered projects"
     long_desc <<~DESC
-      Default: prints a grouped table of every task across registered
-      projects, ordered by stage. Combine with --json to emit the
+      Default: prints a concise operational snapshot with counts, exact active
+      tasks, blocker ownership, and reasons. Use --full for the former grouped
+      table of every task ordered by stage. Combine with --json to emit the
       `hive-status` envelope (schema v#{Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")}); every row carries a required
       nullable `diagnostic` field — null for green rows, populated with
       a bounded summary + artifact tail + marker signature for red
@@ -1019,6 +1020,8 @@ module Hive
                    desc: "with --diagnose --write, re-spawn the agent even when a fresh agent-written artifact already exists"
     option :operational, type: :boolean, default: false,
                          desc: "emit the agent-first operational status view (combine with --json for its v1 envelope)"
+    option :full, type: :boolean, default: false,
+                  desc: "show the detailed human task table (cannot be combined with --json or --operational)"
     def status
       require "hive/commands/status"
       Hive::Commands::Status.new(
@@ -1028,7 +1031,8 @@ module Hive
         stage: options[:stage],
         write: options[:write],
         force: options[:force],
-        operational: options[:operational]
+        operational: options[:operational],
+        full: options[:full]
       ).call
     end
 

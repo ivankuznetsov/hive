@@ -79,8 +79,19 @@ module Hive
         error: "⚠"
       }.freeze
 
+      OPERATIONAL_BANDS = [
+        [ "running", "RUNNING" ],
+        [ "waiting_on_you", "WAITING ON YOU" ],
+        [ "needs_repair", "NEEDS REPAIR" ],
+        [ "waiting_on_provider_or_scheduler", "WAITING ON PROVIDER / SCHEDULER" ],
+        [ "completion_ready", "COMPLETION READY" ],
+        [ "unknown", "UNKNOWN" ],
+        [ "idle", "READY / IDLE" ]
+      ].freeze
+      OPERATIONAL_BAND_LIMIT = 5
+
       def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false,
-                     operational: false)
+                     operational: false, full: false)
         @json = json
         @diagnose = diagnose
         @project = project
@@ -89,10 +100,12 @@ module Hive
         @force = force
         @archive = archive
         @operational = operational
+        @full = full
       end
 
       def call
         call_with_envelope do
+          validate_mode_combinations!
           if @diagnose && @diagnose.to_s.strip.empty?
             raise Hive::Error, "--diagnose requires a non-empty task slug"
           end
@@ -126,7 +139,7 @@ module Hive
 
       def do_call
         projects = Hive::Config.registered_projects
-        if @operational
+        if concise_operational_mode?
           payload = operational_payload(projects)
           if @json
             puts JSON.generate(payload)
@@ -178,15 +191,91 @@ module Hive
 
       def render_operational(payload)
         summary = payload.fetch("summary")
-        puts "SNAPSHOT #{payload.fetch('completeness').upcase} — " \
+        completeness = %w[complete partial unknown].include?(payload["completeness"]) ?
+          payload.fetch("completeness") : "unknown"
+        puts "SNAPSHOT #{completeness.upcase} — " \
              "#{summary.fetch('active')} active · #{summary.fetch('archived')} archived"
-        payload.fetch("issues").each { |entry| puts "  ⚠ #{entry.fetch('message')}" }
-        payload.fetch("tasks").group_by { |row| row.fetch("state") }.each do |state, rows|
-          puts state.tr("_", " ").upcase
-          rows.each do |row|
-            puts "  #{row.dig('identity', 'project')}:#{row.dig('identity', 'slug')} — #{row.fetch('reason')}"
-          end
+        render_operational_issues(payload.fetch("issues"))
+
+        if completeness == "complete" && summary.fetch("active").zero?
+          render_operational_empty_state(payload)
+          return
         end
+
+        grouped = payload.fetch("tasks").group_by { |row| row.fetch("state") }
+        OPERATIONAL_BANDS.each do |state, label|
+          rows = Array(grouped[state]).sort_by do |row|
+            [ row.dig("identity", "project").to_s, row.dig("identity", "slug").to_s ]
+          end
+          next if rows.empty?
+
+          puts label
+          rows.first(OPERATIONAL_BAND_LIMIT).each { |row| puts operational_row_line(row) }
+          overflow = rows.size - OPERATIONAL_BAND_LIMIT
+          puts "  +#{overflow} more — run `hive status --full`" if overflow.positive?
+        end
+      end
+
+      def validate_mode_combinations!
+        if @full && @json
+          raise Hive::InvalidTaskPath, "--full cannot be combined with --json; omit --full for hive-status.v6"
+        end
+        if @full && @operational
+          raise Hive::InvalidTaskPath, "--full cannot be combined with --operational"
+        end
+        if (@full || @operational) && (@diagnose || @write || @force)
+          mode = @full ? "--full" : "--operational"
+          raise Hive::InvalidTaskPath,
+                "#{mode} cannot be combined with --diagnose, --write, or --force"
+        end
+      end
+
+      def concise_operational_mode?
+        @operational || (!@full && !@json && !@archive)
+      end
+
+      def render_operational_issues(issues)
+        Array(issues).each do |entry|
+          puts "  ⚠ #{terminal_safe(entry.fetch('message', 'status source is incomplete'))}"
+          remediation = terminal_safe(entry["remediation"])
+          puts "    #{remediation}" unless remediation.empty?
+        end
+      end
+
+      def render_operational_empty_state(payload)
+        summary = payload.fetch("summary")
+        if summary.fetch("projects_total").zero?
+          puts "NO REGISTERED PROJECTS"
+          puts "  run `hive init <path>` to register and initialize a project"
+        elsif summary.fetch("archived").positive?
+          puts "ARCHIVE ONLY — #{summary.fetch('archived')} archived task" \
+               "#{summary.fetch('archived') == 1 ? '' : 's'}"
+          puts "  run `hive status --full` to inspect archived task details"
+        else
+          puts "IDLE — no active work"
+        end
+      end
+
+      def operational_row_line(row)
+        identity = row.fetch("identity")
+        project = terminal_safe(identity["project"])
+        slug = terminal_safe(identity["slug"])
+        display_name = terminal_safe(identity["display_name"])
+        target = "#{project}:#{slug}"
+        target = "#{target} (#{display_name})" unless display_name.empty? || display_name == slug
+        stage = terminal_safe(row.dig("position", "stage"))
+        marker = terminal_safe(row.dig("position", "marker"))
+        owner = terminal_safe(row["blocker_owner"] || "unknown")
+        reason = terminal_safe(row["reason"] || "status reason unavailable")
+        "  #{target} · #{stage}/#{marker} · #{owner} — #{reason}"
+      end
+
+      def terminal_safe(value)
+        value.to_s
+             .encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "�")
+             .gsub(/[\u0000-\u001f\u007f-\u009f]/) do |character|
+               character.codepoints.map { |codepoint| format("\\x%02X", codepoint) }.join
+             end
       end
 
       def operational_project_context(projects)

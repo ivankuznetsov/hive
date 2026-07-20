@@ -940,7 +940,7 @@ class CommandsStatusTest < Minitest::Test
 
       out = err = nil
       with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
-        out, err = capture_io { raising.new.call }
+        out, err = capture_io { raising.new(full: true).call }
       end
 
       assert_match(/explodes: failed to load \(boom in explodes\)/, out,

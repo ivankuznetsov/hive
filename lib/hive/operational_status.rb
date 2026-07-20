@@ -425,6 +425,7 @@ module Hive
 
     def classify(project, row)
       return [ "unknown", "unknown" ] if invalid_task?(row)
+      return [ "needs_repair", "hive" ] if stale_liveness?(row)
       return [ "running", "agent" ] if running?(row)
       return [ "needs_repair", "operator" ] if repair?(row)
       return [ "waiting_on_provider_or_scheduler", "provider" ] if row["held"]
@@ -444,8 +445,15 @@ module Hive
     end
 
     def running?(row)
-      RUNNING_ACTIONS.include?(row["action"]) || row["live_task_lock"] == true ||
-        row["claude_pid_alive"] == true
+      return true if row["live_task_lock"] == true || row["claude_pid_alive"] == true
+      return false if stale_liveness?(row)
+
+      RUNNING_ACTIONS.include?(row["action"])
+    end
+
+    def stale_liveness?(row)
+      (row["claude_pid"] && row["claude_pid_alive"] == false) ||
+        (row["task_lock_pid"] && row["live_task_lock"] == false)
     end
 
     def repair?(row)
@@ -464,6 +472,10 @@ module Hive
       reasons = []
       if invalid_task?(row)
         reasons << reason("invalid_task", row.dig("attrs", "message") || "task metadata is invalid", "task")
+      elsif stale_liveness?(row)
+        message = row.dig("diagnostic", "summary") || row.dig("attrs", "message") ||
+                  "recorded task runner is no longer alive"
+        reasons << reason("stale_runner", message, "liveness")
       elsif running?(row)
         message = if row["task_lock_pid"]
           "task runner holds the live lock (pid #{row.fetch('task_lock_pid')})"
@@ -522,7 +534,7 @@ module Hive
 
     def liveness_status(row)
       return "running" if running?(row)
-      return "stale" if row["claude_pid"] && row["claude_pid_alive"] == false
+      return "stale" if stale_liveness?(row)
 
       "not_running"
     end

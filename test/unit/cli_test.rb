@@ -507,13 +507,19 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "2-gather", "--write", "--force", "--json" ])
       assert_equal({
         json: true, diagnose: "slug", project: "proj", stage: "2-gather",
-        write: true, force: true, operational: false
+        write: true, force: true, operational: false, full: false
       }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Status) do |calls|
       Hive::CLI.start([ "status", "--operational", "--json" ])
       assert_equal true, calls.first.dig(:kwargs, :operational)
+      assert_equal false, calls.first.dig(:kwargs, :full)
+    end
+
+    with_command_new_stub(Hive::Commands::Status) do |calls|
+      Hive::CLI.start([ "status", "--full" ])
+      assert_equal true, calls.first.dig(:kwargs, :full)
     end
 
     with_command_new_stub(Hive::Commands::Act) do |calls|
@@ -545,6 +551,14 @@ class HiveCliTest < Minitest::Test
       assert_equal [ Hive::Commands::FindingToggle::REJECT, "slug" ], reject.fetch(:args)
       assert_equal({ ids: [ "4" ], all: false, severity: "low", pass: nil, project: "proj", stage: nil, json: true }, reject.fetch(:kwargs))
     end
+  end
+
+  def test_status_help_documents_concise_full_and_operational_modes
+    out, = capture_io { Hive::CLI.start([ "help", "status" ]) }
+
+    assert_match(/concise operational snapshot/, out)
+    assert_match(/--full/, out)
+    assert_match(/--operational/, out)
   end
 
   def test_patrol_markers_daemon_bot_and_metrics_pass_options

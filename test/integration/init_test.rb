@@ -1758,6 +1758,24 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_llm_wiki_shared_runtime_copy_is_safe_with_utf8_default_internal_encoding
+    with_tmp_git_repo do |dir|
+      original_internal = Encoding.default_internal
+      Encoding.default_internal = Encoding::UTF_8
+
+      Hive::LlmWikiBootstrap.ensure_config(dir)
+      Hive::LlmWikiBootstrap.ensure_refresh_scripts(dir)
+      Hive::LlmWikiBootstrap.ensure_shared_runtime(dir)
+
+      common_dir = Hive::LlmWikiBootstrap.git_common_dir(dir)
+      local_compile_log = File.join(dir, ".llm-wiki", "compile-log.sh")
+      shared_compile_log = File.join(common_dir, "llm-wiki", "compile-log.sh")
+      assert_equal File.binread(local_compile_log), File.binread(shared_compile_log)
+    ensure
+      Encoding.default_internal = original_internal
+    end
+  end
+
   def test_llm_wiki_runtime_hook_install_restores_local_and_shared_runtime_first
     with_tmp_git_repo do |dir|
       Hive::LlmWikiBootstrap.install_runtime_hooks!(dir)

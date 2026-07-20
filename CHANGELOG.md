@@ -2,6 +2,44 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.6.4
+
+- Fixed hivebox occasionally retaining a successfully submitted idea in its
+  permanent composer while Turbo rendered the redirect. Successful responses
+  now clear duplicate-ready text and attachments before the permanent node can
+  disconnect, while retaining the selected project as working context.
+- Fixed concurrent babysitter dry-run commands racing to create their shared
+  audit log and dropping all but the first record. Dry-run setup now creates a
+  private empty log before agent commands launch; every append retains the
+  existing fail-closed target and descriptor checks.
+
+## 0.6.3
+
+- Retired the reduced Architecture and Writing scaffold templates now that
+  their full reviewed workflows ship through Honeycomb. Old `--template`
+  invocations now point to the corresponding install command; blank and
+  research scaffolds remain available.
+- Fixed Architecture Patrol rejecting a valid leading JSON fence when Claude
+  appended a plain-text leverage rationale. Hive now treats that first fenced
+  document as canonical while still rejecting leading prose or ambiguous
+  additional backtick/tilde fences, and retains the exact raw response for
+  audit.
+
+## 0.6.2
+
+- Fixed ordinary patrol exhausting its launch allowance without advancing past
+  source-verified clean features. Review batches now fit the remaining launch
+  headroom, preserve clean-prefix progress, and keep one fixer launch available
+  when the quota permits it.
+- Fixed Architecture Patrol depending on the registered developer checkout.
+  Discovery and retry now use a detached exact worktree pinned to committed
+  default-branch source, so local branches and uncommitted edits cannot block or
+  contaminate analysis.
+- Fixed Architecture Patrol quota churn and lost reviewer evidence. Bounded
+  runs stop after the first failed slice, back off until the next UTC budget
+  window when daily headroom is exhausted, accept a strict whole-message JSON
+  fence, and retain raw reviewer responses with their job context.
+
 ## 0.6.1
 
 - Fixed Honeycomb installation defaults for scoped workflow actors. When a

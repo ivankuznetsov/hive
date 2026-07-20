@@ -11,14 +11,6 @@ tags: [gap, todo]
 
 ## Current release gap
 
-- The managed-workflow configuration/pinning/exact-policy contract is source-
-  and focused-test-pinned, but no released Hive artifact has yet installed and
-  completed Architecture, Writing, and SEO Content from the public Honeycomb
-  catalog. The remaining proof must record the released Hive digest, catalog
-  commit, package/configuration digests, completed flagship artifacts, and
-  optional SEO inputs absent/partial without value disclosure. Hive's built-in
-  architecture and writing scaffold templates must remain until that proof.
-
 - Cross-project dependency admission is covered with local-path remotes and
   anonymized multi-project integration fixtures, including stored/live remote
   mismatch. It has not yet been dogfooded end-to-end against two separately
@@ -233,19 +225,21 @@ evidence closing the following June 16 gaps.
 
 ## Release install follow-ups
 
-Latest refresh (2026-07-18): v0.5.3 release-prep source is synchronized in
+Latest refresh (2026-07-19): v0.6.2 release-prep source is synchronized in
 `lib/hive.rb`, both lockfiles, README/install URLs, the changelog, and the
 release-facing wiki pages. This source commit does not itself prove the public
 tag, signed gem/assets, Homebrew/AUR updates, or multi-architecture hivebox
 images; those remain the tag-triggered `release.yml` verification boundary.
-The v0.5.3 prep packages the bounded Architecture Patrol merged-PR intake fix
-after its focused gateway/daemon tests and exact-head pull-request CI gates
-passed.
+The v0.6.2 prep packages quota-bounded ordinary/architecture patrol progress,
+durable architecture reviewer evidence, and detached exact-source analysis
+after their focused tests and exact-head pull-request CI gates passed. The live
+post-release dogfood evidence tracked below remains intentionally open until the
+published release is installed and both patrol modes complete a real run.
 Historical commit `54fd3455` still provides commit-message evidence for the
 native arm64 GHCR smoke against `ghcr.io/ivankuznetsov/hivebox:0.3.1`.
 Dependency lock uncertainty is unchanged: the root bundle has
 `concurrent-ruby` 1.3.7 and Brakeman 8.0.5, while `web/Gemfile.lock` resolves
-`concurrent-ruby` 1.3.6 and Brakeman 8.0.4; v0.5.3 synchronizes only the local
+`concurrent-ruby` 1.3.6 and Brakeman 8.0.4; v0.6.2 synchronizes only the local
 `hive-cli` path-gem version in that independently resolved web bundle.
 
 1. **Release tag creation is protected, while signed git-tag verification remains deferred.** Homebrew and AUR publishing are implemented and public install docs route macOS users to the tap and Arch users to `yay -S hive-bin` (see ADR-032 in [[decisions]], `docs/RELEASING.md`, `README.md`, and `install.md`). The live repository has an active `v*` tag ruleset restricting creation, update, deletion, and non-fast-forward changes to the configured repository-role bypass. Release automation still publishes the commit selected by an authorized tag without independently verifying a maintainer cryptographic git-tag signature.
@@ -525,17 +519,18 @@ could consume its three-launch cycle envelope, report the remaining features as
 errors, and leave the cursor at zero. Live architecture jobs then exposed the
 same exhausted shared 8-launch UTC-day ceiling as one synthetic failure for
 every remaining feature and retried it every minute without starting another
-provider process. An earlier live architecture run also produced a single
-fenced JSON final response that strict parsing rejected, while the ephemeral
-PR-mode run directory removed the raw response before quality review. Focused
-unit and integration tests now pin launch-aware batching, one reserved ordinary
-fixer launch, clean-prefix cursor progress, one-error architecture stops,
-next-UTC-day scheduler backoff, whole-message fence handling, and durable raw
-response retention with job/PR/feature identity. Durable architecture review
-run directories do not yet have an automatic retention policy, so long-running
-installations should monitor `.hive-state/refactor_patrol/runs/` growth. A
-release containing these changes has not yet repeated
-both real runs because the project's shared UTC-day patrol launch quota was
-already exhausted; retain this gap until post-release ordinary and architecture
-dogfood confirms forward progress, no quota churn, and inspectable accepted
-output.
+provider process. Post-release v0.6.2 ordinary patrol mapped 209 features,
+reviewed exactly the launch-aware three-feature batch without errors, advanced
+its clean prefix, and ranked one source-anchored systemd startup defect at alpha
+80. Architecture Patrol reached the isolated exact checkout and retained its
+raw response, proving the dirty-checkout and ephemeral-evidence fixes, but
+exposed a valid leading JSON fence followed by plain-text rationale that v0.6.2
+rejected. The v0.6.3 parser accepts that canonical document shape; exact-main
+dogfood then completed clean PR-scoped reviews and a full scan produced the
+meaningful `invert-usage-error-contract-ownership` thesis above the configured
+0.25 discovery floor. Automation correctly rejected it for unverified evidence,
+multi-feature scope, and file/diff limits. Durable architecture review run
+directories still have no automatic retention policy, so long-running
+installations should monitor `.hive-state/refactor_patrol/runs/` growth. Retain
+this gap only until the installed v0.6.4 package repeats both patrol modes
+without dirty-checkout, quota-churn, or response-envelope errors.

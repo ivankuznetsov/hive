@@ -70,10 +70,14 @@ export default class extends Controller {
 
   // Turbo keeps this form alive across the successful redirect so live grid
   // updates cannot destroy an unfinished idea. That same permanence must not
-  // keep a FINISHED idea around: clear only after a 2xx/3xx submission, while
-  // retaining the selected project as useful context for the next idea.
+  // keep a FINISHED idea around. turbo:before-fetch-response arrives while
+  // the permanent node is still connected; turbo:submit-end is the fallback
+  // for clients that only expose the completion event. Clear only after a
+  // successful response, while retaining the selected project as useful
+  // context for the next idea.
   submitted(event) {
-    if (!event.detail.success) return
+    const success = event.detail.success ?? event.detail.fetchResponse?.succeeded
+    if (!success) return
 
     this.attachments.forEach((_file, label) => this.revokePreview(label))
     this.attachments.clear()

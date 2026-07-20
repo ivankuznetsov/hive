@@ -17,6 +17,7 @@ module Hive
     class Workflow
       TEMPLATES_DIR = File.expand_path("../../../templates/workflows", __dir__)
       DEFAULT_TEMPLATE = "blank".freeze
+      HONEYCOMB_TEMPLATES = %w[architecture writing].freeze
       WORKFLOW_ID_RE = Hive::Workflows::DescriptorParser::SAFE_SLUG
       SCHEMA = "hive-workflow-new".freeze
       SUBCOMMANDS = %w[new install list update remove publish].freeze
@@ -101,6 +102,15 @@ module Hive
         name = DEFAULT_TEMPLATE if name.empty?
         dir = File.join(TEMPLATES_DIR, name)
         return dir if File.file?(File.join(dir, "descriptor.yml.erb"))
+
+        if HONEYCOMB_TEMPLATES.include?(name)
+          raise UsageError.new(
+            "workflow template #{name.inspect} moved to Honeycomb; " \
+            "install it with `hive workflow install honeycomb/#{name}`",
+            value: name,
+            expected: available_templates
+          )
+        end
 
         raise UsageError.new(
           "unknown workflow template #{name.inspect} (available: #{available_templates.join(', ')})",

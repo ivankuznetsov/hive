@@ -134,12 +134,16 @@ module Hive
       end
 
       # Claude occasionally wraps an otherwise exact JSON response in one
-      # Markdown JSON fence. Accept only that whole-message wrapper; prose plus
-      # embedded JSON remains invalid so the discovery contract stays strict.
+      # leading Markdown JSON fence and follows it with a rationale. Treat that
+      # first fenced document as canonical while rejecting leading prose or a
+      # second fence, which would make the structured result ambiguous.
       def read_only_json_body(raw)
         stripped = raw.to_s.strip
-        match = /\A```(?:json)?[ \t]*\r?\n(?<body>.*)\r?\n```[ \t]*\z/im.match(stripped)
-        match ? match[:body] : stripped
+        match = /\A```(?:json)?[ \t]*\r?\n(?<body>.*?)\r?\n```[ \t]*(?<trailing>(?:\r?\n.*)?)\z/im.match(stripped)
+        return stripped unless match
+        return stripped if /(?:\A|\r?\n)[ \t]*(?:```|~~~)/.match?(match[:trailing])
+
+        match[:body]
       end
 
       def resource_limited_with_final_message?(result)

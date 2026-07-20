@@ -1,6 +1,10 @@
 {
   "ignored_warnings": [
     {
+      "fingerprint": "ab976c42d9f793cc6e0340c16147e6f4c0ff1bff856e912b8cf316b5009e2c5f",
+      "note": "False positive. RefactorPatrol::CheckoutGuard invokes git with discrete Open3.capture3 argv elements and places --end-of-options before the revision, so neither a shell nor git option parsing interprets ref content. Persisted analysis commits must be full 40- or 64-character hexadecimal object IDs, and every resolved value is revalidated as a full object ID before use. Fresh default-branch refs are constructed internally beneath refs/remotes/origin/ or refs/heads/."
+    },
+    {
       "fingerprint": "2b04ae09c74c02877b56a2a2a91f97b6363dbd965e1537c105d6781bb785a670",
       "note": "False positive. Open3.capture3 array form in Stages::Finalize#final_commits. base is produced by `git merge-base HEAD origin/<default>` and interpolated into one revspec argv element (`base..HEAD`); no shell ever sees it."
     },
@@ -121,6 +125,6 @@
       "note": "False positive. Commands::Patrol#materializable_commit? rejects anything except a full 40-64 character hexadecimal object ID before passing the <oid>^{commit} revision as one Open3.capture3 argv element. No shell interprets the value."
     }
   ],
-  "updated": "2026-07-17 00:00:00 +0000",
+  "updated": "2026-07-19 00:00:00 +0000",
   "brakeman_version": "8.0.5"
 }

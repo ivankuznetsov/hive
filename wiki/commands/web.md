@@ -113,9 +113,11 @@ origin also prints the Host-header/reverse-proxy warning.
   typed-but-unsent idea text and staged image chips live in browser state. Its
   Stimulus controller rehydrates the staged-file index if Turbo reconnects the
   permanent node, revokes removed preview URLs, and clears the submitted text,
-  chips, and upload transport only after a successful response; the selected
-  project remains as working context, so the next idea cannot accidentally
-  resubmit the completed draft. No polling JS, no SSE. The daemon strip uses
+  chips, and upload transport on a successful `turbo:before-fetch-response`
+  while the form is still connected (`turbo:submit-end` remains a fallback);
+  the selected project remains as working context, so the next idea cannot
+  accidentally resubmit the completed draft even when Turbo moves the
+  permanent node during rendering. No polling JS, no SSE. The daemon strip uses
   `Hive::Daemon::StatusReport.safe_payload` directly instead of constructing a
   `Hive::Commands::Daemon` CLI object; the view also reads
   `StatusReport::BINARY_DRIFT_ACTIONABLE` for the Repair affordance, so CLI
@@ -353,7 +355,8 @@ sanctioned JS exception), Turbo Stream live row arrival without reload, grid
 project-rail filtering with URL sync, composer project sync, and
 `+ Add project` routing, plus re-application after a live broadcast, grid
 scroll plus composer draft preservation across a live broadcast, successful
-composer text/chip/file reset with project-context retention, failed-submit
+composer text/chip/file reset before Turbo renders with project-context
+retention, failed-submit
 draft/file retention on a 422-shaped Turbo event, and attachment-index rebuild
 after a real Stimulus disconnect/reconnect before adding and submitting another
 image, both approve

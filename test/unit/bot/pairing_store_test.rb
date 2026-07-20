@@ -173,6 +173,16 @@ class HiveBotPairingStoreTest < Minitest::Test
     end
   end
 
+  def test_non_object_store_is_treated_as_unreadable
+    Dir.mktmpdir("hive-pairing-store") do |dir|
+      store = STORE.new(state_home: dir)
+      File.write(File.join(dir, STORE::FILENAME), "[]")
+
+      assert_empty store.pending
+      assert_raises(STORE::ReadError) { store.pending(strict: true) }
+    end
+  end
+
   def test_pending_treats_file_vanishing_mid_read_as_empty
     Dir.mktmpdir("hive-pairing-store") do |dir|
       store = STORE.new(state_home: dir, now: -> { Time.utc(2026, 6, 30, 12, 0, 0) })

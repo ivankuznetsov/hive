@@ -76,17 +76,33 @@ the v2 action ledger.
 
 `--pr` and `--job-manifest` are v2 modes. They require JSON, reject legacy
 scope hints, select mapped features only from the immutable changed-path/status
-manifest, and pin a clean attached default-branch `analysis_sha` that contains
-the merge. The daemon consumes only the write-once manifest published by merge
-intake; it never re-fetches mutable PR metadata during discovery.
+manifest, and pin a freshly fetched committed default-branch `analysis_sha`
+that contains the merge. Discovery materializes that commit as a detached,
+clean, exact worktree under the configured worktree root. Mapper, leverage, and
+reviewer source reads all use that tree, while durable job state remains under
+the registered project's `.hive-state`. The operator's current branch and
+uncommitted edits are therefore outside the analysis boundary. The daemon
+consumes only the write-once manifest published by merge intake; it never
+re-fetches mutable PR metadata during discovery.
+
+On partial-job resume, the durable `analysis_sha` must be a full 40- or
+64-character hexadecimal Git object ID. Commit resolution fences option
+parsing and revalidates Git's returned object ID before materializing a tree.
+An explicit replay of a terminal job creates its new occurrence before this
+pin step, so the replay samples the current committed default branch while an
+incomplete retry continues to reuse its original durable SHA. PR dry runs use
+an invocation-unique analysis-worktree key and therefore cannot reuse or
+remove a same-job daemon worker's tree. If an interrupted removal leaves only
+stale Git worktree administration, the next materialization prunes that orphan
+record and retries without operator repair.
 
 Discovery requires Claude's read-only tool scope plus its verified
 `--safe-mode` capability, so project customizations cannot run before the
 read-only boundary is established; an older or overridden Claude binary that
-does not advertise the flag fails closed. Hive snapshots the registered
-checkout before and after review. A reviewer that dirties tracked source makes
-the command fail, releases its discovery claim as `command_error`, and records
-no feature results or dispositions. Every thesis appears exactly once
+does not advertise the flag fails closed. Hive validates the analysis worktree
+before each feature checkpoint and again before completion. A reviewer that
+dirties the detached source tree makes the command fail, removes the ephemeral
+tree, and releases its discovery claim as `command_error`. Every thesis appears exactly once
 as accepted, flagged, or suppressed. Complete zero-result runs use
 `no_mapped_slice`, `no_theses`, or `all_suppressed`; malformed or partial
 reviewer results remain retryable and do not checkpoint completion.
@@ -146,13 +162,15 @@ error. When every reported error is a shared daily token or launch limit,
 including positive daily token headroom too small for the next initial context,
 the daemon backs the job off until the next UTC day instead of retrying it every
 minute.
-The read-only runner accepts either bare JSON or one whole-message `json` code
-fence, normalizes the accepted object into `theses.json`, and retains the exact
+The read-only runner accepts either bare JSON or one leading `json` code fence.
+Plain-text rationale may follow that single fence, but leading prose or another
+fence remains invalid so there is only one canonical structured result. The
+runner normalizes the accepted object into `theses.json` and retains the exact
 provider response as `final-message.txt` in the feature run directory for
 quality audits. Real PR-mode run directories are durable and include a
 `review-context.json` binding the artifact to its job, analysis SHA, source PR,
 and feature; only an explicit `--dry-run` uses ephemeral scratch space.
-Surrounding prose, malformed
+Leading prose, additional fences, malformed
 envelopes, null/scalar items, and
 schema-invalid records remain review errors rather than successful zero-result
 scans. Evidence is also checked against the pinned checkout's real,
@@ -255,7 +273,8 @@ Manual `--pr` uses this same manifest, policy snapshot, job claim, fencing
 generation, checkpoint, and report path. The first invocation can intentionally
 backfill a merge the catch-up baseline omitted. Invoking it again after that
 job is terminal creates an explicit `-replay-N` occurrence with the current
-policy snapshot while preserving the original job bytes. Canonical action ids
+policy snapshot and a freshly pinned current-default `analysis_sha`, while
+preserving the original job bytes. Canonical action ids
 still prevent duplicate remote effects across replays. Production ids hash the
 normalized source host, repository, action kind, and either the fix fingerprint
 or issue family id. Semantic-family descriptors and ids also include the source
@@ -329,8 +348,10 @@ validation command, switch agents, or otherwise broaden an old job.
 Fixes run with the Codex workspace-write profile in a deterministic isolated
 worktree on `hive-refactor/<canonical-action-id>`. The repository-global branch
 keeps the same action on one branch across jobs, replays, and registration
-handoffs. The registered checkout must stay clean, attached to the configured
-default branch, and descendant of its validated head. Before commit or push,
+handoffs. Hive fetches and validates the committed default-branch ref before
+the fix and at publication fences; the operator's checked-out branch and dirty
+files are irrelevant. Default-branch history must still descend from the
+validated head. Before commit or push,
 Hive checks actual feature-boundary paths, file/diff caps, protected paths,
 secrets, dependency manifests, and public declarations across supported
 ecosystems, then runs every named validation command. Unknown source languages
@@ -433,11 +454,10 @@ existing effect. Unstarted siblings remain queued and the job records
 `repository_identity_drift`; a continuation claim cannot pass a new push/create
 fence. Duplicate or unresolved global ownership blocks even reconciliation
 until one owner remains and every registered config/continuation scan plus each
-participating live identity is resolvable. If registered default-branch HEAD
-moves after partial discovery has pinned its analysis SHA, the job preserves
-completed slices and blocks visibly as
-`analysis_checkout_changed_after_pin` with expected/current SHAs. Hive does not
-mix snapshots, reset trunk, or create an implicit analysis worktree.
+participating live identity is resolvable. If the default branch advances after
+partial discovery pins its analysis SHA, the job preserves completed slices,
+reuses the original SHA, and rematerializes the same detached exact worktree
+for only the incomplete slices. Hive never mixes snapshots or resets trunk.
 
 ## State and JSON
 
@@ -513,9 +533,10 @@ discovery-consent checks read-only, then previews discovery, would-initialize
 actions, or resumptions. An uninitialized action job whose discovery consent
 was revoked reports `discovery_revoked` with `would_complete: false`; it does
 not invent report-only completion. Dry run never writes manifests, ledgers,
-indexes, global catalogs or proof archives, worktrees, branches, commits, PRs,
-issues, handoffs, or completion checkpoints, and authoritative job bytes remain
-unchanged.
+indexes, global catalogs or proof archives, durable worktrees, branches,
+commits, PRs, issues, handoffs, or completion checkpoints. PR-scoped discovery
+may materialize the same temporary detached analysis tree as a real run, but
+removes it before returning; authoritative job bytes remain unchanged.
 
 ## Backlinks
 

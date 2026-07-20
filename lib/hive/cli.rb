@@ -455,11 +455,11 @@ module Hive
 
       By default `new` scaffolds the blank `inbox -> work -> done` stub. Pass
       `--template NAME` to seed from a richer sample workflow instead (e.g.
-      writing, research). Either way: edit the scaffolded stage instruction(s),
+      research). Either way: edit the scaffolded stage instruction(s),
       then run `hive new PROJECT --workflow ID "<your idea>"`.
     DESC
     option :template, type: :string,
-                      desc: "for `new`: seed from a named sample workflow (e.g. writing, research) instead of the blank stub"
+                      desc: "for `new`: seed from a named sample workflow (e.g. research) instead of the blank stub"
     option :yes, type: :boolean, default: false,
                  desc: "confirm install/update/remove in JSON or non-interactive mode"
     option :dry_run, type: :boolean, default: false,

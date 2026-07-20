@@ -78,6 +78,63 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_create_detached_exact_materializes_clean_commit_without_a_branch
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      File.write(File.join(dir, "README.md"), "dirty registered checkout\n")
+      wt = Hive::Worktree.new(dir, "analysis-pinned", worktree_root: root)
+
+      assert_equal :created, wt.create_detached_exact!(base_sha: pinned)
+
+      assert_equal pinned, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_empty run!("git", "-C", wt.path, "branch", "--show-current").strip
+      assert_empty run!("git", "-C", wt.path, "status", "--porcelain=v1", "-z")
+      assert_equal "dirty registered checkout\n", File.read(File.join(dir, "README.md"))
+    end
+  end
+
+  def test_create_detached_exact_reuses_an_existing_exact_worktree
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      wt = Hive::Worktree.new(dir, "analysis-existing", worktree_root: root)
+
+      assert_equal :created, wt.create_detached_exact!(base_sha: pinned)
+      assert_equal :existing, wt.create_detached_exact!(base_sha: pinned)
+    end
+  end
+
+  def test_create_detached_exact_prunes_orphaned_registration_before_retry
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      wt = Hive::Worktree.new(dir, "analysis-orphaned", worktree_root: root)
+      wt.create_detached_exact!(base_sha: pinned)
+      FileUtils.rm_rf(wt.path)
+      assert_includes wt.list_worktree_paths, wt.path
+
+      assert_equal :created, wt.create_detached_exact!(base_sha: pinned)
+      assert wt.exists?
+      assert_equal pinned, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+    end
+  end
+
+  def test_assert_detached_exact_rejects_a_different_pinned_commit
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      wt = Hive::Worktree.new(dir, "analysis-wrong-sha", worktree_root: root)
+      wt.create_detached_exact!(base_sha: pinned)
+      File.write(File.join(dir, "later.txt"), "later\n")
+      run!("git", "-C", dir, "add", "later.txt")
+      run!("git", "-C", dir, "commit", "-m", "later", "--quiet")
+      later = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+
+      error = assert_raises(Hive::WorktreeError) do
+        wt.assert_detached_exact!(base_sha: later)
+      end
+
+      assert_includes error.message, "expected pinned commit #{later}"
+    end
+  end
+
   def test_create_exact_rejects_same_named_branch_outside_pinned_history
     with_initialized_project do |dir, root|
       pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip

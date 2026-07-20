@@ -36,6 +36,18 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
     end
   end
 
+  def test_base_scheduler_requires_a_subclass_contract
+    base = Hive::Daemon::DigestSchedulerBase.new(
+      state_path: "/tmp/hive-digest-base-test.json",
+      clock: -> { T0 },
+      enabled: false,
+      logger: nil
+    )
+
+    error = assert_raises(NotImplementedError) { base.send(:scheduler_contract) }
+    assert_includes error.message, "must define its digest scheduler contract"
+  end
+
   def test_first_run_initializes_cursor_without_dispatching_history
     with_tmp_dir do |dir|
       scheduler = scheduler(dir, enabled: true)

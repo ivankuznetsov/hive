@@ -605,6 +605,7 @@ class StagesCouncilTest < Minitest::Test
       task: task, cfg: {}, stage: stage, reviewer: reviewer, round: 1, target_path: "/tmp/draft.md"
     )
     assert_raises(Hive::ConfigError) { reviewer_runner.send(:launch_identity) }
+    assert_equal "stages.review.reviewers.missing:body", reviewer_runner.send(:managed_prompt, "body")
 
     revise = Hive::Workflow::Revise.new(prompt: "Revise", permissions: "read-only")
     revise_runner = Hive::Stages::Council::Revise.new(

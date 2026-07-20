@@ -10,6 +10,7 @@ class NativeWebPositioningTest < Minitest::Test
     docs/cli.md
     docs/faq.md
     docs/architecture.md
+    docs/hive-site-companion.md
     docs/RELEASING.md
     openclaw/README.md
     openclaw/skills/hive/SKILL.md
@@ -27,6 +28,7 @@ class NativeWebPositioningTest < Minitest::Test
     README.md
     install.md
     docs/getting-started.md
+    docs/hive-site-companion.md
     openclaw/README.md
     openclaw/skills/hive/SKILL.md
     wiki/index.md
@@ -127,6 +129,28 @@ class NativeWebPositioningTest < Minitest::Test
     assert_match(/upgrade/i, readme)
     assert_match(/troubleshoot/i, readme)
     assert_includes readme, "127.0.0.1"
+  end
+
+  def test_hive_site_companion_handoff_pins_pages_build_and_delivery_boundary
+    handoff = read("docs/hive-site-companion.md")
+
+    %w[
+      index.md
+      _includes/landing/hero.html
+      docs/getting-started.md
+      docs/configuration.md
+      docs/operating.md
+      docs/commands/setup.md
+      docs/commands/web.md
+      box/index.md
+    ].each { |path| assert_includes handoff, path }
+
+    assert_includes handoff, "bundle exec jekyll build"
+    assert_includes handoff, "npx -y pagefind@^1 --site _site"
+    assert_includes handoff, "non-draft PR"
+    assert_includes handoff, "without merge"
+    assert_match(/without merge,\s+auto-merge, version bump, publication, or Cloudflare deployment/, handoff)
+    assert_includes handoff, "Hive PR release-note block"
   end
 
   private

@@ -24,4 +24,17 @@ class ProjectTest < ActiveSupport::TestCase
     assert_equal "alpha", project["name"]
     assert_equal "/repos/alpha", project.fetch("path")
   end
+
+  test "wraps active status rows as tasks" do
+    project = Project.new(
+      "name" => "alpha",
+      "tasks" => [ { "slug" => "ship-it-260720-abcd", "stage" => "3-plan" } ]
+    )
+
+    task = project.active_tasks.sole
+
+    assert_instance_of Task, task
+    assert_same project, task.project
+    assert_equal "ship-it-260720-abcd", task.slug
+  end
 end

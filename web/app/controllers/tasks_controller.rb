@@ -6,7 +6,6 @@ class TasksController < Tasks::BaseController
     @media = @task.media_manifest
     @log = @task.latest_log
     @questions = @task.open_questions
-    @worktree_exists = @task.worktree?
     @daemon_enabled = @project.daemon_enabled?
     @daemon_running = daemon_running?
   end

@@ -1,7 +1,7 @@
-<% content_for(:title, "#{web_product_name} — #{task_title(@task)}") %>
+<% content_for(:title, "#{web_product_name} — #{@task.title}") %>
 
 <div class="task-header">
-  <h1><%= task_title(@task) %></h1>
+  <h1><%= @task.title %></h1>
 </div>
 <p class="task-slug"><%= @project.name %> · <%= @task["slug"] %></p>
 
@@ -69,7 +69,7 @@
           params: { from: @task["stage"] }, class: "btn-danger",
           data: { turbo_confirm: "Send #{@task["slug"]} back a stage?" } %>
   </div>
-  <% unless stage_passable?(@task) %>
+  <% unless @task.passable? %>
     <div class="advanced-item">
       <div>
         <p class="advanced-title">Force approve</p>

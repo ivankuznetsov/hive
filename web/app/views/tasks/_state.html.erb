@@ -46,14 +46,14 @@
   <%# Only the state-driven primary actions appear (Approve when the gate is
       passable, Run when the operator drives stages manually, Diff when a
       worktree exists). The sharp tools live in the Advanced section. %>
-  <% if recovery_action?(@task) %>
+  <% if @task.recovery_action? %>
     <div class="state-banner state-banner-error">
       <span class="status-dot status-dot-error"></span>
       <span><%= @task.dig("diagnostic", "summary").presence || "The stage hit an error and needs a retry." %></span>
     </div>
   <% end %>
 
-  <% if @daemon_enabled && !@daemon_running && !Hive::Workflows.all_terminal_stage_dirs.include?(@task["stage"].to_s) %>
+  <% if @daemon_enabled && !@daemon_running && !@task.terminal? %>
     <div class="state-banner daemon-blocker">
       <span class="status-dot status-dot-waiting"></span>
       <span>
@@ -65,22 +65,22 @@
   <% end %>
 
   <div class="task-actions">
-    <% if recovery_action?(@task) %>
+    <% if @task.recovery_action? %>
       <%# The bot's Autofix, web-shaped: clears the failure marker (guarded
           by its attrs) and re-runs the stage verb as one queued sequence. %>
       <%= button_to "Retry stage", task_recover_path(@project.name, @task["slug"]),
             data: { turbo_submits_with: "Queueing…" } %>
     <% end %>
-    <% if stage_passable?(@task) %>
+    <% if @task.passable? %>
       <%= button_to "Approve", task_approve_path(@project.name, @task["slug"]),
             params: { from: @task["stage"] }, data: { turbo_submits_with: "Approving…" } %>
     <% end %>
-    <% if !@daemon_enabled && (dispatch_action = stage_dispatch_action(@task)) %>
-      <%= button_to "Run #{stage_run_verb(@task)}", task_run_path(@project.name, @task["slug"]),
+    <% if !@daemon_enabled && (dispatch_action = @task.dispatch_action) %>
+      <%= button_to "Run #{@task.run_verb}", task_run_path(@project.name, @task["slug"]),
             params: { action_name: dispatch_action, stage: @task["stage"] }, class: "btn-secondary",
             data: { turbo_submits_with: "Queueing…" } %>
     <% end %>
-    <% if @worktree_exists %>
+    <% if @task.worktree? %>
       <%= link_to "Diff", task_diff_path(@project.name, @task["slug"]), class: "btn btn-secondary" %>
     <% end %>
   </div>
@@ -88,7 +88,7 @@
   <% if @questions.any? %>
     <section class="qa">
       <h2>Questions from the agent</h2>
-      <% if (idea_text = original_idea_text(@task)) %>
+      <% if (idea_text = @task.original_idea_text) %>
         <details class="idea-context" open>
           <summary class="muted">Original idea</summary>
           <p class="idea-text"><%= idea_text %></p>
@@ -125,7 +125,7 @@
         <p><%= f.submit "Send", data: { turbo_submits_with: "Sending…" } %></p>
       <% end %>
     </details>
-  <% elsif @task["marker"].to_s == "waiting" && !stage_passable?(@task) %>
+  <% elsif @task["marker"].to_s == "waiting" && !@task.passable? %>
     <%# Post-answer limbo: everything answered, daemon not done yet. The
         page morph-refreshes on every status push, so the banner hands off
         to the next round's questions, a running dot, or a passable gate

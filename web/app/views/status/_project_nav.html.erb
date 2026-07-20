@@ -2,7 +2,7 @@
   <button type="button" class="project-nav-item" data-project-filter-target="button"
           data-action="project-filter#choose" data-project-filter-name-param="">All projects</button>
   <% projects.each do |project| %>
-    <% name = project.fetch("name") %>
+    <% name = project.name %>
     <button type="button" class="project-nav-item" data-project-filter-target="button"
             data-action="project-filter#choose" data-project-filter-name-param="<%= name %>"><%= name %></button>
   <% end %>

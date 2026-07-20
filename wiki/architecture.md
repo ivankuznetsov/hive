@@ -381,8 +381,12 @@ rows before they reach ERB.
 A task page is a filesystem-backed `Task`, built from the matching status
 snapshot row and its `Project`. That model owns task
 reads and their invariants — workflow-aware artifact ordering, brainstorm
-questions, bounded log tails, worktree presence, and media-manifest/path
-validation. `TasksController` renders that resource. Namespaced task-resource
+questions, original-idea/title resolution, workflow-aware action/verb policy,
+terminal/passable/recovery predicates, bounded log tails and diffs, worktree
+presence, and media-manifest/path validation. Dashboard snapshots are wrapped
+as `Project`/`Task` models before rendering, so the grid and detail page use the
+same behavior rather than helper-owned filesystem reads or action tables.
+`TasksController` renders that resource. Namespaced task-resource
 controllers expose diff, log, media, approval, rejection, drop, run, recovery,
 answer, and intervention through standard `show`/`create` actions; each remains
 a thin HTTP boundary over `Task` or `Hive::Web::Dispatcher`.

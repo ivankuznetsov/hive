@@ -43,4 +43,60 @@ class TaskTest < ActiveSupport::TestCase
   ensure
     FileUtils.remove_entry(root) if root&.exist?
   end
+
+  test "derives its display title from the original idea before the slug" do
+    folder = Pathname(Dir.mktmpdir("hive-web-task-title"))
+    folder.join("idea.md").write(<<~MARKDOWN)
+      ---
+      created_at: 2026-07-20 12:00:00 Z
+      original_text: "Ship [image1] the calmer task page"
+      ---
+    MARKDOWN
+    task = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: { "slug" => "fallback-title-260720-abcd", "folder" => folder.to_s }
+    )
+
+    assert_equal "Ship  the calmer task page", task.title
+    assert_equal "Ship [image1] the calmer task page", task.original_idea_text
+  ensure
+    FileUtils.remove_entry(folder) if folder&.exist?
+  end
+
+  test "maps coding and generic stages to their actual dispatch actions" do
+    coding = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: { "stage" => "2-brainstorm" }
+    )
+    generic = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: {
+        "stage" => "2-research", "workflow" => "content_fixture", "action" => "ready_to_run"
+      }
+    )
+    advancing = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: {
+        "stage" => "2-research", "workflow" => "content_fixture", "action" => "ready_to_advance"
+      }
+    )
+
+    assert_equal "ready_to_brainstorm", coding.dispatch_action
+    assert_equal "brainstorm", coding.run_verb
+    assert_equal "ready_to_run", generic.dispatch_action
+    assert_equal "stage", generic.run_verb
+    assert_nil advancing.dispatch_action
+    assert_nil advancing.run_verb
+  end
+
+  test "refuses a diff when the task has no materialized worktree" do
+    task = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: { "slug" => "no-worktree-260720-abcd" }
+    )
+
+    error = assert_raises(Hive::InvalidTaskPath) { task.diff }
+
+    assert_equal "no worktree for no-worktree-260720-abcd", error.message
+  end
 end

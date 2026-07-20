@@ -221,11 +221,15 @@ origin also prints the Host-header/reverse-proxy warning.
   reads only a 256 KiB byte
   window and returns the last 200 lines with a torn leading line dropped, so a
   multi-MB agent log cannot pin a Puma worker every 3 seconds.
-  The Diff route has the same bounded-subprocess discipline: it runs
+  `Task#diff` has the same bounded-subprocess discipline: it runs
   `git diff --` in its own process group, enforces
   `HIVEBOX_DIFF_TIMEOUT_SEC` (default 15s), writes combined output to a
   tempfile, and renders at most the first 512 KiB with an explicit truncation
-  notice.
+  notice; `Tasks::DiffsController#show` only exposes that result. The model also
+  owns original-idea/title resolution and the workflow-aware passable,
+  recovery, terminal, dispatch-action, and run-verb decisions used by the
+  dashboard and task page. Status projects/tasks are wrapped before ERB, so
+  presentation helpers no longer read task files or duplicate command policy.
   Red diagnostic rows also render a danger banner from
   `tasks[].diagnostic.summary` so the page says why the row is stuck before
   offering Retry. A stopped-daemon blocker is shown only for non-terminal

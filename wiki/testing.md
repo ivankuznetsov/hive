@@ -387,7 +387,10 @@ such as argv-form subprocess calls, integer coercion before shell use, or
 registry-laundered filesystem paths. The old task-log-path ignore from commit
 `83f0a800` is no longer needed: `Tasks::LogsController#show` loads a `Task`
 only after registered-project resolution, and moving the bounded path read to
-`Task#latest_log` lets Brakeman see no controller file sink. Focused integration
+`Task#latest_log` lets Brakeman see no controller file sink. `Task#diff` now
+owns the similarly bounded process/tempfile read used by the diff resource,
+while focused model coverage pins title/original-idea and workflow-specific
+dispatch behavior. Focused integration
 coverage rejects unknown projects and valid-shaped unknown task slugs on the
 log route. See [[commands/web]] for the task log-tail surface.
 

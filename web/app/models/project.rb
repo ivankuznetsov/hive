@@ -40,6 +40,12 @@ class Project
     InitSetup.workflows(path)
   end
 
+  def active_tasks
+    @active_tasks ||= attributes.fetch("tasks", []).map do |task_attributes|
+      Task.new(project: self, attributes: task_attributes)
+    end
+  end
+
   def default_workflow
     Hive::Config.load(path)["default_workflow"].presence
   rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e

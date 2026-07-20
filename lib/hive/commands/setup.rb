@@ -6,22 +6,31 @@ require "hive/invoked_binary"
 require "hive/paths"
 require "hive/setup/diagnostics"
 require "hive/web/app_bundle"
+require "hive/web/environment"
 require "hive/web/service_status"
 
 module Hive
   module Commands
     class Setup
       def initialize(json: false, service: true, no_bootstrap: false,
-                     no_init: false, output: $stdout)
+                     no_init: false, output: $stdout, error: nil,
+                     environment: ENV)
         @json = json
         @service = service
         @no_bootstrap = no_bootstrap
         @no_init = no_init
         @output = output
+        @error = error
+        @environment = environment
         @phases = []
       end
 
       def call
+        Hive::Web::Environment.emit_warnings(
+          environment: @environment,
+          output: @error || $stderr,
+          prefix: "hive setup"
+        )
         diagnostics = Hive::Setup::Diagnostics.new.run
         add_phase("diagnostics", diagnostics.ok?, diagnostics.to_h)
 
@@ -251,7 +260,7 @@ module Hive
           "mode" => mode,
           "url" => web_url,
           "service" => @web_service,
-          "warnings" => [],
+          "warnings" => Hive::Web::Environment.warnings(environment: @environment),
           "phases" => @phases
         }
         if @json

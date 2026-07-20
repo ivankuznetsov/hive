@@ -1,4 +1,5 @@
 require "uri"
+require "hive/web/environment"
 
 class ApplicationController < ActionController::Base
   # Rails 8 enables forgery protection by default; explicit so static
@@ -82,9 +83,9 @@ class ApplicationController < ActionController::Base
 
   # Hive::Web::Loopback is the same test the CLI bind policy uses, so the
   # "which addresses count as loopback" rule can't drift between the tier
-  # that sets HIVEBOX_LOCAL_LOOPBACK and the tier that honors it.
+  # that sets HIVE_WEB_LOCAL_LOOPBACK and the tier that honors it.
   def local_loopback_request?
-    return false unless ENV["HIVEBOX_LOCAL_LOOPBACK"] == "1"
+    return false unless Hive::Web::Environment.boolean("HIVE_WEB_LOCAL_LOOPBACK")
 
     Hive::Web::Loopback.address?(request.remote_ip)
   end
@@ -95,10 +96,10 @@ class ApplicationController < ActionController::Base
   # hosts plus the host from the explicitly configured origin, before any
   # controller can read or mutate operator state.
   def authorize_local_host!
-    return unless ENV["HIVEBOX_LOCAL_LOOPBACK"] == "1"
+    return unless Hive::Web::Environment.boolean("HIVE_WEB_LOCAL_LOOPBACK")
     return if Hive::Web::Loopback.address?(request.host)
 
-    origin = ENV["HIVE_WEB_ORIGIN"].presence || ENV["HIVEBOX_ORIGIN"].presence
+    origin = Hive::Web::Environment.value("HIVE_WEB_ORIGIN")
     allowed_host = URI.parse(origin).host if origin
     return if allowed_host && request.host.casecmp?(allowed_host)
 

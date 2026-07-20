@@ -5,11 +5,11 @@ class WebCommandTest < Minitest::Test
   include HiveTestHelper
 
   # `hive web` now boots the Rails app under web/; outside the container or
-  # a source checkout (no web/ dir, no HIVEBOX_WEB_APP_DIR) it must fail
+  # a source checkout (no web/ dir, no HIVE_WEB_APP_DIR) it must fail
   # loudly with guidance instead of exec-ing into a missing app.
   def test_missing_rails_app_exits_with_guidance
     with_tmp_global_config do
-      with_env("HIVEBOX_WEB_APP_DIR" => File.join(Dir.mktmpdir("hive-noapp"), "nope")) do
+      with_env("HIVE_WEB_APP_DIR" => File.join(Dir.mktmpdir("hive-noapp"), "nope")) do
         command = Hive::Commands::Web.new
         # Singleton override instead of minitest/mock (not bundled): the
         # checkout itself contains web/, so the fallback path would resolve.
@@ -22,15 +22,54 @@ class WebCommandTest < Minitest::Test
     end
   end
 
-  def test_rails_app_dir_honours_env_override
+  def test_rails_app_dir_honours_legacy_env_override
     Dir.mktmpdir("hive-webapp") do |dir|
       FileUtils.mkdir_p(File.join(dir, "config"))
       File.write(File.join(dir, "config", "application.rb"), "# rails app marker")
       with_env("HIVEBOX_WEB_APP_DIR" => dir) do
         command = Hive::Commands::Web.new
         assert_equal dir, command.send(:rails_app_dir),
-                     "HIVEBOX_WEB_APP_DIR must take precedence when it holds a Rails app"
+                     "the HIVEBOX_WEB_APP_DIR compatibility alias must still select a Rails app"
       end
+    end
+  end
+
+  def test_canonical_app_dir_wins_over_legacy_alias
+    Dir.mktmpdir("hive-web-new") do |canonical|
+      Dir.mktmpdir("hive-web-old") do |legacy|
+        [ canonical, legacy ].each do |dir|
+          FileUtils.mkdir_p(File.join(dir, "config"))
+          File.write(File.join(dir, "config", "application.rb"), "# rails app marker")
+        end
+        error = StringIO.new
+        command = Hive::Commands::Web.new(
+          environment: {
+            "HIVE_WEB_APP_DIR" => canonical,
+            "HIVEBOX_WEB_APP_DIR" => legacy
+          },
+          error: error
+        )
+
+        assert_equal canonical, command.send(:rails_app_dir)
+        assert_empty error.string
+      end
+    end
+  end
+
+  def test_invalid_canonical_app_dir_does_not_fall_back_to_valid_legacy_alias
+    Dir.mktmpdir("hive-web-old") do |legacy|
+      FileUtils.mkdir_p(File.join(legacy, "config"))
+      File.write(File.join(legacy, "config", "application.rb"), "# rails app marker")
+      command = Hive::Commands::Web.new(
+        environment: {
+          "HIVE_WEB_APP_DIR" => "/missing/canonical-hive-web",
+          "HIVEBOX_WEB_APP_DIR" => legacy
+        }
+      )
+
+      error = assert_raises(Hive::Error) { command.send(:rails_app_dir) }
+      assert_includes error.message, "HIVE_WEB_APP_DIR"
+      assert_includes error.message, "/missing/canonical-hive-web"
     end
   end
 
@@ -73,7 +112,7 @@ class WebCommandTest < Minitest::Test
         exit 0
       SH
       FileUtils.chmod(0o755, File.join(dir, "bin", "rails"))
-      with_env("HIVEBOX_WEB_APP_DIR" => dir) do
+      with_env("HIVE_WEB_APP_DIR" => dir) do
         yield dir
       end
     end
@@ -111,8 +150,8 @@ class WebCommandTest < Minitest::Test
         refute_nil caught, "the command must end in Kernel.exec of the rails server"
         assert_equal %w[bin/rails server -b], caught.argv[0..2]
         assert caught.env.key?("SECRET_KEY_BASE"), "the persisted session secret must reach Rails"
-        assert caught.env.key?("HIVEBOX_STORAGE_DIR")
-        # A HIVEBOX_WEB_APP_DIR override (like the hivebox image's baked
+        assert caught.env.key?("HIVE_WEB_STORAGE_DIR")
+        # A HIVE_WEB_APP_DIR override (like the Hivebox image's baked
         # /app/web) was bundle-installed against its own ".." — exporting
         # HIVE_CLI_ROOT would re-point the Gemfile's path source and
         # invalidate that prebuilt bundle (the v0.3.4/v0.3.5 image-smoke
@@ -138,7 +177,7 @@ class WebCommandTest < Minitest::Test
         original = Kernel.method(:exec)
         caught = nil
         Dir.chdir(parent) do
-          with_env("HIVEBOX_WEB_APP_DIR" => app_name) do
+          with_env("HIVE_WEB_APP_DIR" => app_name) do
             Kernel.define_singleton_method(:exec) do |env, *argv|
               raise ExecCaught.new(env, argv)
             end
@@ -266,8 +305,32 @@ class WebCommandTest < Minitest::Test
     end
   end
 
+  def test_install_json_and_stderr_include_legacy_alias_guidance_once
+    with_tmp_global_config do
+      with_fake_web_installer(:written) do
+        error = StringIO.new
+        environment = { "HIVEBOX_ORIGIN" => "https://legacy.example" }
+        out, = capture_io do
+          Hive::Commands::Web.new(
+            "install",
+            no_bootstrap: true,
+            json: true,
+            environment: environment,
+            error: error
+          ).call
+        end
+        payload = JSON.parse(out)
+
+        assert_equal 1, payload.fetch("warnings").length
+        assert_equal "HIVEBOX_ORIGIN", payload.dig("warnings", 0, "alias")
+        assert_equal "HIVE_WEB_ORIGIN", payload.dig("warnings", 0, "replacement")
+        assert_equal 1, error.string.scan("HIVEBOX_ORIGIN").length
+      end
+    end
+  end
+
   # ── loopback no-auth env export matrix ──────────────────────────────
-  # `call` sets HIVEBOX_LOCAL_LOOPBACK=1 only when the bind is loopback AND
+  # `call` sets HIVE_WEB_LOCAL_LOOPBACK=1 only when the bind is loopback AND
   # web.local_loopback is still true; the Rails side trusts that env var to
   # enable the no-auth bypass, so the CLI must export it exactly in that case.
   def captured_exec_env(bind:, unsafe: false, web_config: nil)
@@ -293,18 +356,18 @@ class WebCommandTest < Minitest::Test
   end
 
   def test_loopback_env_set_on_loopback_bind_with_default_config
-    assert_equal "1", captured_exec_env(bind: "127.0.0.1")["HIVEBOX_LOCAL_LOOPBACK"],
+    assert_equal "1", captured_exec_env(bind: "127.0.0.1")["HIVE_WEB_LOCAL_LOOPBACK"],
                  "a loopback bind with local_loopback enabled must signal the no-auth bypass"
   end
 
   def test_loopback_env_omitted_on_non_loopback_bind
-    refute captured_exec_env(bind: "0.0.0.0", unsafe: true).key?("HIVEBOX_LOCAL_LOOPBACK"),
+    refute captured_exec_env(bind: "0.0.0.0", unsafe: true).key?("HIVE_WEB_LOCAL_LOOPBACK"),
            "a non-loopback bind must never signal the loopback bypass"
   end
 
   def test_loopback_env_omitted_when_config_opts_out
     refute captured_exec_env(bind: "127.0.0.1", web_config: { "local_loopback" => false })
-           .key?("HIVEBOX_LOCAL_LOOPBACK"),
+           .key?("HIVE_WEB_LOCAL_LOOPBACK"),
            "web.local_loopback:false must suppress the bypass even on a loopback bind"
   end
 

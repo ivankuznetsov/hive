@@ -1,5 +1,6 @@
 require "active_support/core_ext/integer/time"
 require "uri"
+require "hive/web/environment"
 
 Rails.application.configure do
   # Settings specified here will take precedence over those in config/application.rb.
@@ -87,7 +88,7 @@ Rails.application.configure do
   # ordinary setup path admits only loopback hostnames/literals; an operator's
   # explicitly configured origin contributes exactly one additional host.
   config.hosts = [ "localhost", /\A127(?:\.\d{1,3}){3}\z/, "::1" ]
-  configured_origin = ENV["HIVE_WEB_ORIGIN"].presence || ENV["HIVEBOX_ORIGIN"].presence
+  configured_origin = Hive::Web::Environment.value("HIVE_WEB_ORIGIN")
   if configured_origin
     origin_host = URI.parse(configured_origin).host
     config.hosts << origin_host if origin_host
@@ -96,10 +97,10 @@ Rails.application.configure do
   # Turbo Streams connect over Action Cable. Same-origin-as-host covers the
   # normal case with ZERO config — browse the box at any address and the
   # Origin header matches the Host header (also true behind proxies that
-  # forward Host). web.origin → HIVEBOX_ORIGIN remains as an explicit
+  # forward Host). web.origin → HIVE_WEB_ORIGIN remains as an explicit
   # additional allow for exotic setups where the two genuinely differ;
   # without same-origin, an unset origin silently dropped every live
   # update on any non-localhost URL — a trap on the install path.
   config.action_cable.allow_same_origin_as_host = true
-  config.action_cable.allowed_request_origins = [ ENV["HIVEBOX_ORIGIN"] ].compact
+  config.action_cable.allowed_request_origins = [ configured_origin ].compact
 end

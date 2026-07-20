@@ -7,7 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     XDG_STATE_HOME=/data/state \
     XDG_CACHE_HOME=/data/cache \
     HIVEBOX_REPOS_DIR=/data/repos \
-    HIVEBOX_WEB_APP_DIR=/app/web \
+    HIVE_WEB_APP_DIR=/app/web \
     RAILS_ENV=production
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -38,7 +38,7 @@ RUN bundle install --without development test \
 # the dummy secret never reaches runtime.
 WORKDIR /app/web
 RUN bundle install \
-    && SECRET_KEY_BASE=assets-build-dummy HIVEBOX_STORAGE_DIR=/tmp/assets-build \
+    && SECRET_KEY_BASE=assets-build-dummy HIVE_WEB_STORAGE_DIR=/tmp/assets-build \
        bin/rails assets:precompile \
     && rm -rf /tmp/assets-build \
     # Build steps run as root; the runtime user needs tmp/ + log/ writable

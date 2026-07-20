@@ -165,6 +165,38 @@ class SetupOrchestratorTest < Minitest::Test
     assert payload["phases"].all? { |p| p["ok"] }, "every phase ok on the happy path"
   end
 
+  def test_setup_json_and_stderr_include_deduplicated_alias_guidance
+    output = StringIO.new
+    error = StringIO.new
+    diagnostics = diag(ok_row)
+    environment = {
+      "HIVEBOX_STORAGE_DIR" => "/legacy/storage",
+      "HIVEBOX_ORIGIN" => "https://legacy.example",
+      "HIVE_WEB_ORIGIN" => "https://canonical.example"
+    }
+    require "hive/commands/init"
+    require "hive/commands/daemon/service_installer"
+    require "hive/commands/web/service_installer"
+
+    exit_code = with_all_collaborators_ok(diagnostics: diagnostics) do
+      with_fake_init do
+        Hive::Commands::Setup.new(
+          json: true,
+          output: output,
+          error: error,
+          environment: environment
+        ).call
+      end
+    end
+
+    assert_equal 0, exit_code
+    warnings = JSON.parse(output.string).fetch("warnings")
+    assert_equal 2, warnings.length
+    assert_equal true, warnings.find { |warning| warning["alias"] == "HIVEBOX_ORIGIN" }.fetch("ignored")
+    assert_equal 1, error.string.scan("HIVEBOX_ORIGIN").length
+    assert_equal 1, error.string.scan("HIVEBOX_STORAGE_DIR").length
+  end
+
   # ── --no-bootstrap (diagnose-only) ───────────────────────────────────
 
   def test_no_bootstrap_provisions_nothing_and_only_records_diagnostics_and_web

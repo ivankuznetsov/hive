@@ -4,6 +4,7 @@ require "hive/config"
 require "hive/paths"
 require "hive/web/session_secret"
 require "hive/web/app_bundle"
+require "hive/web/environment"
 require "hive/web/loopback"
 require "hive/web/service_status"
 require "hive/invoked_binary"
@@ -14,7 +15,8 @@ module Hive
       VALID_SUBCOMMANDS = %w[install start stop status].freeze
 
       def initialize(subcommand = nil, bind: nil, port: nil, no_bootstrap: false,
-                     unsafe: false, force: false, json: false, detach: false)
+                     unsafe: false, force: false, json: false, detach: false,
+                     environment: ENV, error: nil)
         @subcommand = subcommand
         @bind = bind
         @port = port
@@ -23,12 +25,19 @@ module Hive
         @force = force
         @json = json
         @detach = detach
+        @environment = environment
+        @error = error
       end
 
       # Bare `hive web` (and `start` without --detach) runs the Rails server
       # in the foreground; install/start/stop/status manage the per-user
       # systemd/launchd service.
       def call
+        Hive::Web::Environment.emit_warnings(
+          environment: @environment,
+          output: @error || $stderr,
+          prefix: "hive web"
+        )
         case @subcommand
         when nil then run_foreground
         when "install" then install_command
@@ -50,29 +59,32 @@ module Hive
         enforce_bind_policy!(bind, cfg)
         app_dir = rails_app_dir(bootstrap: !@no_bootstrap)
         unless app_dir
-          warn "hive web: the hivebox web app (web/) was not found. " \
-               "Run `hive web install`, or point HIVEBOX_WEB_APP_DIR at the Rails app."
+          warn "hive web: the Hive web app (web/) was not found. " \
+               "Run `hive web install`, or point HIVE_WEB_APP_DIR at the Rails app."
           exit 1
         end
 
         env = {
-          "RAILS_ENV" => ENV.fetch("RAILS_ENV", "production"),
+          "RAILS_ENV" => @environment.fetch("RAILS_ENV", "production"),
           # Rails' secret_key_base derives from the same persisted secret the
           # session cookies used pre-Rails, so restarting the web service keeps
           # sessions signed in (the secret file is persisted under state_home).
-          "SECRET_KEY_BASE" => ENV["SECRET_KEY_BASE"] ||
+          "SECRET_KEY_BASE" => @environment["SECRET_KEY_BASE"] ||
             Hive::Web::SessionSecret.load_or_create(cfg.fetch("session_secret_file")),
-          "HIVEBOX_ORIGIN" => cfg.fetch("origin"),
+          "HIVE_WEB_ORIGIN" => Hive::Web::Environment.value(
+            "HIVE_WEB_ORIGIN", environment: @environment, default: cfg.fetch("origin")
+          ),
           # The solid_cable/cache/queue sqlite files must survive upgrades —
           # keep them under state_home, not in the app dir (the managed web
           # bundle is replaced wholesale on a version upgrade).
-          "HIVEBOX_STORAGE_DIR" => ENV["HIVEBOX_STORAGE_DIR"] ||
-            File.join(Hive::Paths.state_home, "web-storage"),
+          "HIVE_WEB_STORAGE_DIR" => Hive::Web::Environment.value(
+            "HIVE_WEB_STORAGE_DIR", environment: @environment
+          ),
           "BUNDLE_GEMFILE" => File.join(app_dir, "Gemfile")
         }
         # Only the MANAGED bundle resolves the hive-cli path gem via
         # HIVE_CLI_ROOT — its ".." holds no gem, and its bundle was installed
-        # with this same export. A source checkout or a HIVEBOX_WEB_APP_DIR
+        # with this same export. A source checkout or a HIVE_WEB_APP_DIR
         # override (e.g. the hivebox image's baked /app/web) was
         # bundle-installed against its own ".."; re-pointing the path source
         # at runtime invalidates that prebuilt bundle (the v0.3.4/v0.3.5
@@ -82,8 +94,19 @@ module Hive
         # web.local_loopback: false to force GitHub login even on a loopback
         # bind. Only signal the bypass when both the bind is loopback AND the
         # config still allows it.
-        env["HIVEBOX_LOCAL_LOOPBACK"] = "1" if loopback_bind?(bind) && cfg.fetch("local_loopback", true)
-        FileUtils.mkdir_p(env.fetch("HIVEBOX_STORAGE_DIR"))
+        local_loopback = Hive::Web::Environment.boolean(
+          "HIVE_WEB_LOCAL_LOOPBACK",
+          environment: @environment,
+          default: cfg.fetch("local_loopback", true)
+        )
+        env["HIVE_WEB_LOCAL_LOOPBACK"] = "1" if loopback_bind?(bind) && local_loopback
+        # The child Rails process receives canonical names only. Removing a
+        # supplied legacy alias prevents a second warning after the CLI has
+        # already reported and translated it.
+        Hive::Web::Environment.legacy_names.each do |legacy|
+          env[legacy] = nil if @environment.key?(legacy)
+        end
+        FileUtils.mkdir_p(env.fetch("HIVE_WEB_STORAGE_DIR"))
 
         Dir.chdir(app_dir) do
           # Idempotent: creates/migrates the solid-stack sqlite databases on
@@ -93,7 +116,7 @@ module Hive
           unless system(env, "bin/rails", "db:prepare")
             raise Hive::Error,
                   "hive web: db:prepare failed — check that " \
-                  "#{env.fetch("HIVEBOX_STORAGE_DIR")} is writable " \
+                  "#{env.fetch("HIVE_WEB_STORAGE_DIR")} is writable " \
                   "and that the web bundle is installed (cd #{app_dir} && bundle install)"
           end
           puts "hive web: listening on http://#{bind}:#{port}"
@@ -111,9 +134,14 @@ module Hive
       def rails_app_dir(bootstrap: true)
         # An explicit override is operator-managed, not the version-stamped
         # managed bundle — use it verbatim when it points at a real app.
-        if (override = ENV["HIVEBOX_WEB_APP_DIR"]) &&
-           File.file?(File.join(override, "config", "application.rb"))
-          return File.expand_path(override)
+        if (override = Hive::Web::Environment.value("HIVE_WEB_APP_DIR", environment: @environment))
+          expanded = File.expand_path(override)
+          unless File.file?(File.join(expanded, "config", "application.rb"))
+            raise Hive::Error,
+                  "HIVE_WEB_APP_DIR #{override.inspect} is not a Hive web Rails app " \
+                  "(missing config/application.rb)"
+          end
+          return expanded
         end
 
         # The managed bundle takes precedence over a source checkout (matching
@@ -222,7 +250,7 @@ module Hive
             "schema" => "hive-web-status",
             "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-web-status"),
             "ok" => true,
-            "warnings" => []
+            "warnings" => environment_warnings
           }.merge(state))
         else
           puts "hive web: service " \
@@ -246,8 +274,12 @@ module Hive
           "backup_path" => outcome.backup_path,
           "restarted" => outcome.restarted,
           "messages" => installer.messages.dup,
-          "warnings" => []
+          "warnings" => environment_warnings
         }.merge(state)
+      end
+
+      def environment_warnings
+        @environment_warnings ||= Hive::Web::Environment.warnings(environment: @environment)
       end
     end
   end

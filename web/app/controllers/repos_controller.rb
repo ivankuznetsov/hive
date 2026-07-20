@@ -147,7 +147,7 @@ class ReposController < ApplicationController
 
   # A hung clone (slow network, wedged gh) would otherwise hold a Puma
   # worker forever; the box has few. Env-overridable for tests.
-  CLONE_TIMEOUT_SEC = Integer(ENV.fetch("HIVEBOX_CLONE_TIMEOUT_SEC", 180))
+  CLONE_TIMEOUT_SEC = Integer(Hive::Web::Environment.value("HIVE_WEB_CLONE_TIMEOUT_SEC"))
 
   # Clone via `gh` with the operator's device-flow token in GH_TOKEN, so
   # private repos clone with the session grant — the box needs no separate

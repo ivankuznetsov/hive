@@ -125,7 +125,7 @@ class TasksController < ApplicationController
   # discipline as ReposController#clone!: own process group, hard wall-clock
   # deadline, output to a tempfile, and only the first DIFF_MAX_BYTES are
   # rendered (with an explicit truncation flag).
-  DIFF_TIMEOUT_SEC = Integer(ENV.fetch("HIVEBOX_DIFF_TIMEOUT_SEC", 15))
+  DIFF_TIMEOUT_SEC = Integer(Hive::Web::Environment.value("HIVE_WEB_DIFF_TIMEOUT_SEC"))
   DIFF_MAX_BYTES = 512 * 1024
 
   def bounded_diff(worktree)

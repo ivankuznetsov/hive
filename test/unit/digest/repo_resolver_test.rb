@@ -94,4 +94,24 @@ class HiveDigestRepoResolverTest < Minitest::Test
 
     assert_equal [ "First" ], result.targets.map(&:project_name)
   end
+
+  def test_wraps_registry_failures_and_labels_malformed_entries
+    registry_failure = Hive::Digest::RepoResolver.new(
+      registry: -> { raise IOError, "registry unavailable" }, logger: nil
+    )
+    error = assert_raises(Hive::ConfigError) { registry_failure.resolve }
+    assert_match(/repository discovery failed: registry unavailable/, error.message)
+
+    entries = [ {}, { "name" => "Working", "path" => "/tmp/working" } ]
+    resolver = Hive::Digest::RepoResolver.new(
+      registry: -> { entries },
+      gh: FakeGh.new([], {
+        "/tmp/working" => { "repository" => "owner/repo", "host" => "github.com" }
+      }),
+      logger: nil
+    )
+    result = resolver.resolve
+    assert_equal "<malformed>", result.warnings.first.repository
+    assert_equal [ "owner/repo" ], result.targets.map(&:repository)
+  end
 end

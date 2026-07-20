@@ -141,6 +141,101 @@ class HiveDigestCollectorTest < Minitest::Test
     assert_equal 4, pr.additions
   end
 
+  def test_repository_and_digest_safety_ceilings_fail_the_repository
+    merged_at = "2026-06-13T13:00:00Z"
+    gh = fake_gh(candidates: [
+      { "number" => 7, "updated_at" => "2026-06-13T12:00:00Z", "merged_at" => "2026-06-13T12:00:00Z" },
+      { "number" => 8, "updated_at" => merged_at, "merged_at" => merged_at }
+    ])
+    add_pr(gh, number: 8, merged_at: merged_at)
+    report = Hive::Digest::Collector.new(
+      gh: gh, logger: nil,
+      limits: { per_pr: 1_000, per_repository: 200, per_digest: 1_000 }
+    ).for_date(Date.new(2026, 6, 13), targets: [ target ])
+    assert report.all_failed?
+    assert_match(/repository evidence exceeds/, report.failures.first.message)
+
+    report = Hive::Digest::Collector.new(
+      gh: fake_gh, logger: nil,
+      limits: { per_pr: 1_000, per_repository: 1_000, per_digest: 5 }
+    ).for_date(Date.new(2026, 6, 13), targets: [ target ])
+    assert report.all_failed?
+    assert_match(/digest evidence exceeds/, report.failures.first.message)
+  end
+
+  def test_checksum_mismatch_fails_the_repository_and_removes_raw_files
+    with_tmp_dir do |scratch|
+      digest_override = ->(_content) { "0" * 64 }
+      with_replaced_singleton_method(::Digest::SHA256, :hexdigest, digest_override) do
+        report = Hive::Digest::Collector.new(gh: fake_gh, logger: nil, scratch_root: scratch).for_date(
+          Date.new(2026, 6, 13), targets: [ target ]
+        )
+        assert report.all_failed?
+        assert_match(/checksum mismatch/, report.failures.first.message)
+      end
+      assert_empty Dir.children(scratch)
+    end
+  end
+
+  def test_candidate_identity_changes_and_malformed_identity_fail_the_repository
+    changed = fake_gh
+    changed.data[:detail]["owner/repo#7"]["merged_at"] = "2026-06-13T13:00:00Z"
+    report = Hive::Digest::Collector.new(gh: changed, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+    assert_match(/identity changed/, report.failures.first.message)
+
+    malformed = fake_gh
+    malformed.data[:detail]["owner/repo#7"]["merged_at"] = "not-a-time"
+    report = Hive::Digest::Collector.new(gh: malformed, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+    assert_match(/malformed pull-request identity/, report.failures.first.message)
+  end
+
+  def test_changed_file_count_and_metadata_fail_closed
+    count_mismatch = fake_gh
+    count_mismatch.data[:detail]["owner/repo#7"]["changed_files"] = 2
+    report = Hive::Digest::Collector.new(gh: count_mismatch, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+    assert_match(/changed-file count mismatch/, report.failures.first.message)
+
+    malformed = fake_gh
+    malformed.data[:files]["owner/repo#7"] = [ {} ]
+    report = Hive::Digest::Collector.new(gh: malformed, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+    assert_match(/malformed changed-file metadata/, report.failures.first.message)
+  end
+
+  def test_invalid_raw_diff_header_fails_the_repository
+    gh = fake_gh(diff: "diff --git \"unterminated\n")
+    report = Hive::Digest::Collector.new(gh: gh, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+    assert report.all_failed?
+    assert_match(/invalid file header/, report.failures.first.message)
+  end
+
+  def test_redaction_verification_and_runtime_errors_fail_the_repository
+    unsafe = Object.new
+    unsafe.define_singleton_method(:scan) { |_text| [ { name: :token } ] }
+    unsafe.define_singleton_method(:redact) { |text| text }
+    report = Hive::Digest::Collector.new(gh: fake_gh, logger: nil, redactor: unsafe).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+    assert_match(/could not be verified/, report.failures.first.message)
+
+    broken = Object.new
+    broken.define_singleton_method(:scan) { |_text| raise EncodingError, "invalid" }
+    broken.define_singleton_method(:redact) { |text| text }
+    report = Hive::Digest::Collector.new(gh: fake_gh, logger: nil, redactor: broken).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+    assert_match(/redaction failed: EncodingError/, report.failures.first.message)
+  end
+
   private
 
   def target(repository: "owner/repo", project_name: "Project")
@@ -183,6 +278,23 @@ class HiveDigestCollectorTest < Minitest::Test
       },
       []
     )
+  end
+
+  def add_pr(gh, number:, merged_at:)
+    key = "owner/repo##{number}"
+    gh.data[:detail][key] = {
+      "number" => number,
+      "html_url" => "https://github.example.com/owner/repo/pull/#{number}",
+      "title" => "Ship another change",
+      "body" => "Another body",
+      "merged_at" => merged_at,
+      "changed_files" => 1,
+      "additions" => 1,
+      "deletions" => 1,
+      "commits" => 1
+    }
+    gh.data[:files][key] = [ { "filename" => "lib/change.rb" } ]
+    gh.data[:diff][key] = diff_fixture("lib/change.rb", "+another change")
   end
 
   def diff_fixture(path, change)

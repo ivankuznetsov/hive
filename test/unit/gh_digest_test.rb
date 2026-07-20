@@ -86,6 +86,137 @@ class HiveGhDigestTest < Minitest::Test
     assert calls[2].include?("--paginate")
   end
 
+  def test_candidate_pagination_rejects_page_shape_order_and_invalid_limits
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    responses = [
+      [ "{}", "", ok ],
+      [ JSON.generate([ row(1, "2026-06-13T09:00:00Z"), row(2, "2026-06-13T10:00:00Z") ]), "", ok ]
+    ]
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { responses.shift }) do
+      assert_match(/incomplete pull-request page/, assert_raises(Hive::GhError) {
+        Hive::Gh.digest_merged_pr_candidates(
+          repository: "owner/repo", host: "github.com", window_start: Time.utc(2026, 6, 13)
+        )
+      }.message)
+      assert_match(/out of updated_at order/, assert_raises(Hive::GhError) {
+        Hive::Gh.digest_merged_pr_candidates(
+          repository: "owner/repo", host: "github.com", window_start: Time.utc(2026, 6, 13)
+        )
+      }.message)
+    end
+
+    assert_match(/invalid merged-PR pagination input/, assert_raises(Hive::GhError) {
+      Hive::Gh.digest_merged_pr_candidates(
+        repository: "owner/repo", host: "github.com",
+        window_start: Time.utc(2026, 6, 13), max_pages: Object.new
+      )
+    }.message)
+  end
+
+  def test_repository_metadata_validates_shape_and_json
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    valid = {
+      "full_name" => "Owner/Repo",
+      "html_url" => "https://github.example.com/Owner/Repo",
+      "description" => nil
+    }
+    responses = [
+      [ JSON.generate(valid), "", ok ],
+      [ JSON.generate({ "full_name" => "other/repo" }), "", ok ],
+      [ "{", "", ok ]
+    ]
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { responses.shift }) do
+      assert_equal valid, Hive::Gh.digest_repository_metadata(
+        repository: "owner/repo", host: "github.example.com"
+      )
+      assert_match(/malformed repository metadata/, assert_raises(Hive::GhError) {
+        Hive::Gh.digest_repository_metadata(repository: "owner/repo", host: "github.example.com")
+      }.message)
+      assert_match(/unparseable/, assert_raises(Hive::GhError) {
+        Hive::Gh.digest_repository_metadata(repository: "owner/repo", host: "github.example.com")
+      }.message)
+    end
+  end
+
+  def test_detail_rejects_malformed_shape_inputs_times_and_urls
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    base = {
+      "number" => 7,
+      "html_url" => "https://github.com/owner/repo/pull/7",
+      "title" => "Title",
+      "body" => "Body",
+      "merged_at" => "2026-06-13T12:00:00Z",
+      "changed_files" => 1
+    }
+    invalid_time = base.merge("merged_at" => "not-a-time")
+    invalid_url = base.merge("html_url" => "http://[")
+    responses = [
+      [ "{}", "", ok ],
+      [ JSON.generate(invalid_time), "", ok ],
+      [ JSON.generate(invalid_url), "", ok ]
+    ]
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { responses.shift }) do
+      assert_match(/malformed pull-request detail/, assert_raises(Hive::GhError) {
+        Hive::Gh.digest_pr_detail(repository: "owner/repo", host: "github.com", number: 7)
+      }.message)
+      assert_match(/merged_at.*invalid/, assert_raises(Hive::GhError) {
+        Hive::Gh.digest_pr_detail(repository: "owner/repo", host: "github.com", number: 7)
+      }.message)
+      assert_match(/URL is invalid/, assert_raises(Hive::GhError) {
+        Hive::Gh.digest_pr_detail(repository: "owner/repo", host: "github.com", number: 7)
+      }.message)
+    end
+    assert_match(/invalid pull-request detail input/, assert_raises(Hive::GhError) {
+      Hive::Gh.digest_pr_detail(repository: "owner/repo", host: "github.com", number: Object.new)
+    }.message)
+  end
+
+  def test_diff_and_files_wrap_transport_shape_parse_and_input_failures
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    secret = "ghp_#{'z' * 36}"
+    responses = [
+      [ secret, "", failed ],
+      [ "{}", "", ok ],
+      [ JSON.generate([ [ {} ] ]), "", ok ],
+      [ "{", "", ok ]
+    ]
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { responses.shift }) do
+      error = assert_raises(Hive::GhError) do
+        Hive::Gh.digest_pr_diff(repository: "owner/repo", host: "github.com", number: 7)
+      end
+      assert_match(/gh api.*failed/, error.message)
+      assert_includes error.message, "[REDACTED:github_token]"
+      refute_includes error.message, secret
+
+      assert_match(/incomplete file pages/, assert_raises(Hive::GhError) {
+        Hive::Gh.digest_pr_files(repository: "owner/repo", host: "github.com", number: 7)
+      }.message)
+      assert_match(/malformed file metadata/, assert_raises(Hive::GhError) {
+        Hive::Gh.digest_pr_files(repository: "owner/repo", host: "github.com", number: 7)
+      }.message)
+      assert_match(/unparseable/, assert_raises(Hive::GhError) {
+        Hive::Gh.digest_pr_files(repository: "owner/repo", host: "github.com", number: 7)
+      }.message)
+    end
+
+    assert_match(/invalid pull-request diff input/, assert_raises(Hive::GhError) {
+      Hive::Gh.digest_pr_diff(repository: "owner/repo", host: "github.com", number: Object.new)
+    }.message)
+    assert_match(/invalid pull-request files input/, assert_raises(Hive::GhError) {
+      Hive::Gh.digest_pr_files(repository: "owner/repo", host: "github.com", number: Object.new)
+    }.message)
+  end
+
+  def test_pr_body_returns_empty_for_missing_file_and_strips_frontmatter
+    with_tmp_dir do |dir|
+      path = File.join(dir, "pr.md")
+      assert_equal "", Hive::Gh.pr_body(path)
+      File.write(path, "---\ntitle: Example\n---\n\nBody text\n")
+      assert_equal "Body text", Hive::Gh.pr_body(path)
+    end
+  end
+
   private
 
   def row(number, updated_at)

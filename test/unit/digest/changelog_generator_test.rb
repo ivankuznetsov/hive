@@ -250,15 +250,199 @@ class HiveDigestChangelogGeneratorTest < Minitest::Test
     end
   end
 
+  def test_missing_and_malformed_agent_output_fail_closed
+    with_tmp_dir do |dir|
+      manifest, = generator(dir).send(
+        :materialize_manifest, [ repository ], dir: dir, tag: "user_supplied_test"
+      )
+      missing = File.join(dir, "missing.json")
+      error = assert_raises(Hive::Digest::GenerationError) do
+        Hive::Digest::ChangelogGenerator.parse_output!(
+          missing, repositories: [ repository ], manifest: manifest, logger: nil
+        )
+      end
+      assert_match(/missing or empty/, error.message)
+
+      malformed = File.join(dir, "malformed.json")
+      File.write(malformed, "{")
+      messages = []
+      logger = Object.new
+      logger.define_singleton_method(:error) { |message| messages << message }
+      error = assert_raises(Hive::Digest::GenerationError) do
+        Hive::Digest::ChangelogGenerator.parse_output!(
+          malformed, repositories: [ repository ], manifest: manifest, logger: logger
+        )
+      end
+      assert_match(/not valid JSON/, error.message)
+      assert_equal 1, messages.size
+    end
+  end
+
+  def test_validation_rejects_wrong_owner_missing_coverage_and_factless_pr
+    repositories = [
+      repository(repository: "a/repo", project_name: "A"),
+      repository(repository: "b/repo", project_name: "B")
+    ]
+    with_tmp_dir do |dir|
+      manifest, = generator(dir).send(
+        :materialize_manifest, repositories, dir: dir, tag: "user_supplied_test"
+      )
+      base = valid_document(manifest)
+
+      wrong_owner = Marshal.load(Marshal.dump(base))
+      wrong_owner.fetch("facts").first["evidence_ids"] =
+        wrong_owner.fetch("facts").last.fetch("evidence_ids")
+      assert_invalid_document(dir, wrong_owner, repositories, manifest, /wrong PR/)
+
+      incomplete = Marshal.load(Marshal.dump(base))
+      incomplete.fetch("facts").pop
+      assert_invalid_document(dir, incomplete, repositories, manifest, /evidence coverage mismatch/)
+
+      factless = repository(body: "", diff: "")
+      empty_manifest, = generator(dir).send(
+        :materialize_manifest, [ factless ], dir: dir, tag: "user_supplied_test"
+      )
+      assert_invalid_document(
+        dir, valid_document(empty_manifest), [ factless ], empty_manifest, /produced no facts/
+      )
+    end
+  end
+
+  def test_validation_rejects_duplicate_projects_invalid_prs_wrong_facts_and_shapes
+    with_tmp_dir do |dir|
+      repo = repository
+      manifest, = generator(dir).send(
+        :materialize_manifest, [ repo ], dir: dir, tag: "user_supplied_test"
+      )
+      base = valid_document(manifest)
+      mutations = [
+        [ /duplicate project/, lambda { |doc| doc.fetch("projects") << Marshal.load(Marshal.dump(doc.fetch("projects").first)) } ],
+        [ /invalid PR number/, lambda { |doc| doc.dig("projects", 0, "pull_requests", 0)["number"] = "bad" } ],
+        [ /wrong PR or kind/, lambda { |doc| doc.fetch("facts").first["kind"] = "no_user_facing_change" } ],
+        [ /must contain exactly/, lambda { |doc| doc["extra"] = true } ],
+        [ /must be one sentence/, lambda { |doc| doc.fetch("projects").first["significance"] = "One. Two." } ],
+        [ /invalid PR identity/, lambda { |doc| doc.fetch("facts").first["number"] = "bad" } ]
+      ]
+
+      mutations.each_with_index do |(pattern, mutation), index|
+        doc = Marshal.load(Marshal.dump(base))
+        mutation.call(doc)
+        assert_invalid_document(dir, doc, [ repo ], manifest, pattern, suffix: index)
+      end
+    end
+  end
+
+  def test_generation_wraps_filesystem_errors_and_cleans_private_inputs
+    with_tmp_dir do |dir|
+      factory = lambda do |**|
+        Object.new.tap do |agent|
+          agent.define_singleton_method(:run!) { raise Errno::ENOSPC, "full" }
+        end
+      end
+
+      error = assert_raises(Hive::Digest::GenerationError) do
+        generator(dir, agent_factory: factory).generate([ repository ], date: Date.new(2026, 6, 13))
+      end
+
+      assert_match(/Errno::ENOSPC/, error.message)
+      run_dir = Dir.children(dir).map { |name| File.join(dir, name) }.find { |path| File.directory?(path) }
+      refute File.exist?(File.join(run_dir, "manifest.json"))
+      refute File.exist?(File.join(run_dir, "evidence"))
+    end
+  end
+
+  def test_generated_text_redaction_failures_fail_closed
+    unsafe = Object.new
+    calls = 0
+    unsafe.define_singleton_method(:scan) do |_text|
+      calls += 1
+      calls == 1 ? [] : [ { name: :github_token } ]
+    end
+    unsafe.define_singleton_method(:redact) { |text| text }
+    warnings = []
+    error = assert_raises(Hive::Digest::GenerationError) do
+      generator("/tmp", agent_factory: nil, redactor: unsafe).send(
+        :sanitize_text, "safe", repository: "owner/repo", pr_number: 7, warnings: warnings
+      )
+    end
+    assert_match(/could not be verified/, error.message)
+
+    broken = Object.new
+    broken.define_singleton_method(:scan) { |_text| raise EncodingError, "invalid" }
+    broken.define_singleton_method(:redact) { |text| text }
+    error = assert_raises(Hive::Digest::GenerationError) do
+      generator("/tmp", agent_factory: nil, redactor: broken).send(
+        :sanitize_text, "safe", repository: "owner/repo", pr_number: nil, warnings: []
+      )
+    end
+    assert_match(/redaction failed: EncodingError/, error.message)
+  end
+
+  def test_run_retention_prunes_old_directories_and_logs_stat_failures
+    with_tmp_dir do |dir|
+      old_dirs = (Hive::Digest::ChangelogGenerator::RUN_DIR_RETENTION + 1).times.map do |index|
+        path = File.join(dir, format("run-%02d", index))
+        FileUtils.mkdir_p(path)
+        File.utime(Time.at(index), Time.at(index), path)
+        path
+      end
+      generator(dir).send(:prune_old_runs, dir)
+      refute File.exist?(old_dirs.first)
+
+      messages = []
+      logger = Object.new
+      logger.define_singleton_method(:warn) { |message| messages << message }
+      with_replaced_singleton_method(Dir, :children, ->(_root) { raise Errno::EACCES, "blocked" }) do
+        generator(dir, logger: logger).send(:prune_old_runs, dir)
+      end
+      assert_match(/run-dir prune failed/, messages.first)
+    end
+  end
+
+  def test_default_agent_uses_configured_profile_budget_timeout_and_flags
+    profile = Struct.new(:name).new(:claude)
+    created = nil
+    fake_agent = Object.new
+    cfg = {
+      "digest" => { "agent" => "claude" },
+      "budget_usd" => { "digest" => 12 },
+      "timeout_sec" => { "digest" => 34 },
+      "agents" => { "claude" => { "permission_mode" => "bypassPermissions", "cli_flags" => [ "--flag" ] } }
+    }
+    task = Hive::Digest::ChangelogGenerator::RunnerTask.new(
+      folder: "/tmp/run", state_file: "/tmp/run/state.yml", log_dir: "/tmp/run/logs",
+      slug: "digest-2026-06-13", stage_name: "digest"
+    )
+    looked_up = []
+    lookup = ->(name, cfg:) { looked_up << [ name, cfg ]; profile }
+    factory = lambda { |**kwargs|
+      created = kwargs
+      fake_agent
+    }
+    with_replaced_singleton_method(Hive::AgentProfiles, :lookup, lookup) do
+      with_replaced_singleton_method(Hive::Agent, :new, factory) do
+        result = Hive::Digest::ChangelogGenerator.new(cfg: cfg, logger: nil).send(
+          :agent_for, task, "prompt", "/tmp/run/output.json"
+        )
+        assert_same fake_agent, result
+      end
+    end
+    assert_equal [ [ "claude", cfg ] ], looked_up
+    assert_equal 12, created.fetch(:max_budget_usd)
+    assert_equal 34, created.fetch(:timeout_sec)
+    assert_equal "bypassPermissions", created.fetch(:permission_mode)
+    assert_equal [ "--model", "default" ], created.fetch(:cli_flags)
+  end
+
   private
 
-  def generator(run_root, agent_factory: nil)
+  def generator(run_root, agent_factory: nil, redactor: Hive::SecretPatterns, logger: nil)
     Hive::Digest::ChangelogGenerator.new(
-      cfg: {}, run_root: run_root, logger: nil, agent_factory: agent_factory
+      cfg: {}, run_root: run_root, logger: logger, agent_factory: agent_factory, redactor: redactor
     )
   end
 
-  def repository(repository: "owner/repo", project_name: "Project", number: 7, body: "Implementation body")
+  def repository(repository: "owner/repo", project_name: "Project", number: 7, body: "Implementation body", diff: nil)
     target = Hive::Digest::RepositoryTarget.new(
       project_name: project_name, path: "/tmp/#{project_name.downcase}",
       repository: repository, host: "github.com"
@@ -270,15 +454,7 @@ class HiveDigestChangelogGeneratorTest < Minitest::Test
       url: "https://github.com/#{repository}/pull/#{number}",
       merged_at: Time.utc(2026, 6, 13, 12),
       body: body,
-      diff: <<~DIFF,
-        diff --git a/lib/change.rb b/lib/change.rb
-        index 1111111..2222222 100644
-        --- a/lib/change.rb
-        +++ b/lib/change.rb
-        @@ -1 +1 @@
-        -old
-        +new
-      DIFF
+      diff: diff || default_diff,
       files: [ "lib/change.rb" ],
       additions: 1,
       deletions: 1,
@@ -325,5 +501,28 @@ class HiveDigestChangelogGeneratorTest < Minitest::Test
       }
     end
     { "facts" => facts, "projects" => projects }
+  end
+
+  def default_diff
+    <<~DIFF
+      diff --git a/lib/change.rb b/lib/change.rb
+      index 1111111..2222222 100644
+      --- a/lib/change.rb
+      +++ b/lib/change.rb
+      @@ -1 +1 @@
+      -old
+      +new
+    DIFF
+  end
+
+  def assert_invalid_document(dir, document, repositories, manifest, pattern, suffix: SecureRandom.hex(2))
+    output = File.join(dir, "invalid-#{suffix}.json")
+    File.write(output, JSON.generate(document))
+    error = assert_raises(Hive::Digest::GenerationError) do
+      Hive::Digest::ChangelogGenerator.parse_output!(
+        output, repositories: repositories, manifest: manifest, logger: nil
+      )
+    end
+    assert_match pattern, error.message
   end
 end

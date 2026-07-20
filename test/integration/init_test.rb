@@ -1849,7 +1849,11 @@ class InitTest < Minitest::Test
     assert_includes service_contents, "ExecStart=#{File.join(project_dir, ".llm-wiki", "refresh-wiki.sh")}"
     assert_includes service_contents, "TimeoutStartSec=45min"
     refute_includes service_contents, 'WorkingDirectory="'
-    assert_includes File.read(timer), "OnUnitActiveSec=1d"
+    timer_contents = File.read(timer)
+    assert_includes timer_contents, "OnActiveSec=10min"
+    assert_includes timer_contents, "OnUnitActiveSec=1d"
+    refute_includes timer_contents, "OnBootSec="
+    refute_includes timer_contents, "Persistent=true"
   end
 
   def test_init_preserves_existing_post_commit_hook_when_adding_managed_wiki_block

@@ -24,6 +24,9 @@ class InstallScriptTest < Minitest::Test
     script = File.read(INSTALL_SCRIPT)
 
     assert_includes script, 'command -v cosign >/dev/null 2>&1 || die "missing installer prerequisite \'cosign\''
+    assert_includes script,
+                    '--certificate-identity-regexp "^https://github\\\\.com/${REPO_OWNER}/${REPO_NAME}/' \
+                    '\\\\.github/workflows/release\\\\.yml@refs/tags/${VERSION}$"'
     refute_includes script, "install cosign for additional keyless signature verification"
   end
 end

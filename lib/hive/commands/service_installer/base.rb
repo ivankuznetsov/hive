@@ -161,6 +161,11 @@ module Hive
           return :drifted if write_result == :drifted
 
           if autostart
+            # `launchctl load` is not idempotent: loading an already-loaded
+            # plist returns non-zero even when the existing job is healthy.
+            # An unchanged loaded unit therefore needs no mutation at all.
+            return write_result if write_result == :unchanged && service_enabled?
+
             if write_result == :upgraded
               # launchd does not pick up a rewritten plist while the
               # service is loaded; new EnvironmentVariables would be

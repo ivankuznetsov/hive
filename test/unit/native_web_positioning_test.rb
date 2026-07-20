@@ -153,16 +153,6 @@ class NativeWebPositioningTest < Minitest::Test
     assert_includes handoff, "Hive PR release-note block"
   end
 
-  def test_production_host_allowlist_only_applies_to_loopback_bypass
-    production = read("web/config/environments/production.rb")
-
-    assert_match(
-      /if Hive::Web::Environment\.boolean\("HIVE_WEB_LOCAL_LOOPBACK"\)\s+config\.hosts =/m,
-      production
-    )
-    assert_match(/machine IP \/ LAN hostname/, production)
-  end
-
   private
 
   def read(path)

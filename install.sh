@@ -438,10 +438,10 @@ download_with_status "$cert_url" "${tmpdir}/SHA256SUMS.pem" "SHA256SUMS.pem"
 cosign verify-blob \
   --certificate "${tmpdir}/SHA256SUMS.pem" \
   --signature "${tmpdir}/SHA256SUMS.sig" \
-  --certificate-identity-regexp "^https://github\\.com/${REPO_OWNER}/${REPO_NAME}/" \
+  --certificate-identity-regexp "^https://github\\.com/${REPO_OWNER}/${REPO_NAME}/\\.github/workflows/release\\.yml@refs/tags/${VERSION}$" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   "${tmpdir}/SHA256SUMS" \
-  || die "cosign verify-blob failed for SHA256SUMS (identity must match ${REPO_OWNER}/${REPO_NAME} release workflow)"
+  || die "cosign verify-blob failed for SHA256SUMS (identity must match ${REPO_OWNER}/${REPO_NAME} release workflow at ${VERSION})"
 
 # Strict line match: optional `./` prefix, sha digest, two-space sep,
 # exact gem_file, optional CR. `|| true` so a no-match under `set -e`

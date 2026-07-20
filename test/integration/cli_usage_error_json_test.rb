@@ -373,6 +373,26 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_web_status_json_config_failure_retains_the_versioned_contract
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), "web: [\n")
+
+      out, err, status = run_hive(home, "web", "status", "--json")
+
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-web-status", payload["schema"]
+      assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-web-status"), payload["schema_version"]
+      assert_equal false, payload["ok"]
+      assert_equal "ConfigError", payload["error_class"]
+      assert_equal "config_error", payload["error_kind"]
+      assert_equal Hive::ExitCodes::CONFIG, payload["exit_code"]
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-status"))))
+      assert_empty schemer.validate(payload).map { |error| error["error"] }
+      assert_match(/^hive: /, err)
+    end
+  end
+
   def test_invalid_byte_errors_use_the_selected_json_surface
     invalid = "bad\xFF".b
     cases = [

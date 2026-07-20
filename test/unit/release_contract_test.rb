@@ -32,6 +32,9 @@ class ReleaseContractTest < Minitest::Test
 
     assert_match(/sha256sum hive-cli-\*\.gem hive-web-\*\.tar\.gz > SHA256SUMS/, workflow)
     assert_includes workflow, "hive-web-${version}.tar.gz"
+    assert_includes workflow,
+                    '--certificate-identity-regexp "^https://github\\.com/ivankuznetsov/hive/' \
+                    '\\.github/workflows/release\\.yml@refs/tags/${REF_NAME}$"'
   end
 
   private

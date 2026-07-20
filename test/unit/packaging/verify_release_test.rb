@@ -5,6 +5,7 @@ class PackagingVerifyReleaseTest < Minitest::Test
   SCRIPT = File.expand_path("../../../packaging/verify-release.sh", __dir__).freeze
   HIVEBOX_SMOKE = File.expand_path("../../../packaging/docker/smoke.sh", __dir__).freeze
   RELEASE_WORKFLOW = File.expand_path("../../../.github/workflows/release.yml", __dir__).freeze
+  INSTALL_SMOKE_WORKFLOW = File.expand_path("../../../.github/workflows/install-smoke.yml", __dir__).freeze
 
   def test_service_manager_is_stubbed_before_any_installed_hive_command_runs
     body = File.read(SCRIPT)
@@ -32,6 +33,8 @@ class PackagingVerifyReleaseTest < Minitest::Test
     assert_includes body, "deep_health_deadline=$(($(date +%s) + 120))"
     assert_operator body.index("/health?deep=1"), :<, body.index('body="$(smoke_curl -fsS')
     assert_operator body.rindex("/health?deep=1"), :>, body.index("unauthenticated / expected 302")
+    assert_includes body, 'Hive::Web::AppBundle.assets_ready?("/app/web")'
+    assert_includes body, "FAIL baked /app/web assets are incomplete"
   end
 
   def test_release_promotes_only_the_two_native_smoked_digests
@@ -51,9 +54,20 @@ class PackagingVerifyReleaseTest < Minitest::Test
 
     assert_includes body, 'WEB_BUNDLE="hive-web-${HIVE_VERSION#v}.tar.gz"'
     assert_includes body, "cosign verify-blob"
-    assert_includes body, "--certificate-identity-regexp '^https://github\\.com/ivankuznetsov/hive/'"
+    assert_includes body,
+                    '--certificate-identity-regexp "^https://github\\.com/ivankuznetsov/hive/' \
+                    '\\.github/workflows/release\\.yml@refs/tags/${HIVE_VERSION}$"'
     assert_includes body, "sha256sum -c -"
     assert_operator body.index("cosign verify-blob"), :<, body.index("sha256sum -c -")
+  end
+
+  def test_verify_release_job_requires_the_managed_web_asset_on_the_pinned_release
+    body = File.read(INSTALL_SMOKE_WORKFLOW)
+
+    assert_includes body, 'gh release view "$HIVE_VERSION" --repo ivankuznetsov/hive --json assets'
+    assert_includes body, "hive-web-${HIVE_VERSION#v}.tar.gz"
+    assert_includes body, 'echo "capable=true" >> "$GITHUB_OUTPUT"'
+    assert_includes body, "steps.release.outputs.capable == 'true'"
   end
 
   def test_hivebox_smoke_rejects_one_transient_deep_health_success

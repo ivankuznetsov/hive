@@ -17,22 +17,19 @@ module Hive
         ready manager_unavailable not_installed disabled inactive active_not_ready invalid_url
       ].freeze
 
-      def snapshot(installer:, config:, environment: ENV, probe: nil)
-        state = if installer&.respond_to?(:service_lifecycle_state)
-          installer.service_lifecycle_state
-        elsif installer
-          installer.service_state
-        else
-          {}
+      def snapshot(installer:, config:, environment: ENV, probe: nil,
+                   wait_for_running: false, attempts: 12, interval: 0.25,
+                   sleeper: nil)
+        state = lifecycle_state(installer)
+        if wait_for_running
+          state = wait_for_running_state(
+            installer,
+            state,
+            attempts: attempts,
+            interval: interval,
+            sleeper: sleeper
+          )
         end
-        state = {
-          "platform" => "unsupported",
-          "unit_path" => nil,
-          "service_installed" => false,
-          "service_enabled" => false,
-          "service_running" => false,
-          "service_manager_available" => false
-        }.merge(state)
         url = effective_url(config, environment: environment)
         readiness = readiness_for(state, local_url(config), probe: probe)
         state.merge(
@@ -40,6 +37,48 @@ module Hive
           "ready" => readiness == "ready",
           "readiness" => readiness
         )
+      end
+
+      def lifecycle_state(installer)
+        observed = if installer&.respond_to?(:service_lifecycle_state)
+          installer.service_lifecycle_state
+        elsif installer
+          installer.service_state
+        else
+          {}
+        end
+        {
+          "platform" => "unsupported",
+          "unit_path" => nil,
+          "service_installed" => false,
+          "service_enabled" => false,
+          "service_running" => false,
+          "service_manager_available" => false
+        }.merge(observed)
+      end
+
+      # launchctl returns from `load` before the job necessarily transitions
+      # to running. During mutating setup/install flows, resample the manager
+      # state inside the same bounded readiness window before deciding the
+      # service is inactive. Read-only `hive web status` keeps its immediate
+      # one-sample behavior by leaving `wait_for_running` false.
+      def wait_for_running_state(installer, state, attempts:, interval:, sleeper: nil)
+        return state unless installer
+        return state unless state.values_at(
+          "service_manager_available", "service_installed", "service_enabled"
+        ).all?
+        return state if state["service_running"]
+
+        sleeper ||= ->(duration) { sleep duration }
+        (Integer(attempts) - 1).times do
+          sleeper.call(interval)
+          state = lifecycle_state(installer)
+          break if state["service_running"]
+          break unless state.values_at(
+            "service_manager_available", "service_installed", "service_enabled"
+          ).all?
+        end
+        state
       end
 
       def effective_url(config, environment: ENV)

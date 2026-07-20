@@ -56,7 +56,10 @@ while systemd-user was unavailable becomes visible. Foreground
 separate installed, enabled, running, manager availability, URL, and readiness
 state on success and pre-dispatch/runtime errors. Readiness probes the local
 managed Rails endpoint even when the advertised origin points at DNS or a
-reverse proxy.
+reverse proxy. Install success requires the observed service to be installed,
+enabled, running, and ready; an inactive or active-but-not-ready service emits
+`ok: false` before the command exits non-zero. Configuration failures from
+`status --json` retain the versioned status error envelope on stdout.
 
 ## Environment compatibility
 

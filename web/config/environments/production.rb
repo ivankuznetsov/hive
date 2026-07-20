@@ -1,6 +1,6 @@
 require "active_support/core_ext/integer/time"
-require "uri"
 require "hive/web/environment"
+require "hive/web/host_authorization"
 
 Rails.application.configure do
   # Settings specified here will take precedence over those in config/application.rb.
@@ -88,12 +88,8 @@ Rails.application.configure do
   # deliberately non-loopback, GitHub-authenticated service must accept its
   # machine IP / LAN hostname before the controller-level login gate runs.
   configured_origin = Hive::Web::Environment.value("HIVE_WEB_ORIGIN")
-  if Hive::Web::Environment.boolean("HIVE_WEB_LOCAL_LOOPBACK")
-    config.hosts = [ "localhost", /\A127(?:\.\d{1,3}){3}\z/, "::1" ]
-    if configured_origin
-      origin_host = URI.parse(configured_origin).host
-      config.hosts << origin_host if origin_host
-    end
+  if (allowed_hosts = Hive::Web::HostAuthorization.allowed_hosts)
+    config.hosts = allowed_hosts
   end
 
   # Turbo Streams connect over Action Cable. Same-origin-as-host covers the

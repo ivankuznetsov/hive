@@ -380,7 +380,11 @@ class WebAppBundleTest < Minitest::Test
       hive-web-#{Hive::VERSION}.tar.gz SHA256SUMS SHA256SUMS.sig SHA256SUMS.pem
     ], downloads
     assert_equal 1, verifier_calls.length
-    assert_match(%r{github\\?\.com/ivankuznetsov/hive}, verifier_calls.first.last)
+    assert_equal(
+      "^https://github\\.com/ivankuznetsov/hive/\\.github/workflows/" \
+      "release\\.yml@refs/tags/v#{Regexp.escape(Hive::VERSION)}$",
+      verifier_calls.first.last
+    )
   end
 
   def test_default_release_digest_mismatch_fails_before_extraction_or_bundler

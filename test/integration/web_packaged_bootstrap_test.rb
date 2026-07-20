@@ -27,60 +27,35 @@ class WebPackagedBootstrapTest < Minitest::Test
       refute File.file?(File.expand_path("../hive.gemspec", installed_root)),
              "fixture must not consult an enclosing source checkout"
 
-      script = <<~'RUBY'
-        require "hive/web/app_bundle"
-        source = ARGV.fetch(0)
-        captured = nil
-        Hive::Web::AppBundle.ensure!(
-          bundle_url: source,
-          output: nil,
-          runner: lambda do |argv, env|
-            captured = env
-            if argv == %w[bin/rails assets:precompile]
-              assets = File.join(Dir.pwd, "public", "assets")
-              FileUtils.mkdir_p(assets)
-              File.write(File.join(assets, "application.css"), "body {}")
-              File.write(File.join(assets, "application.js"), "export {}")
-              File.write(File.join(assets, ".manifest.json"), JSON.generate(
-                "application.css" => { "digested_path" => "application.css" },
-                "application.js" => { "digested_path" => "application.js" }
-              ))
-            end
-            true
-          end
-        )
-        root = Hive::Web::AppBundle.hive_cli_root
-        abort "wrong root" unless root == ARGV.fetch(1)
-        abort "missing packaged gemspec" unless File.file?(File.join(root, "hive.gemspec"))
-        abort "wrong bundler root" unless captured.fetch("HIVE_CLI_ROOT") == root
-      RUBY
-      source = File.join(tmp, "web-source")
-      FileUtils.mkdir_p(File.join(source, "config"))
-      File.write(File.join(source, "config", "application.rb"), "# app\n")
-      File.write(File.join(source, "Gemfile"), "source 'https://rubygems.org'\n")
+      # Inject service-manager fakes from the installed gem's real executable,
+      # after it has activated the packaged hive-cli. RUBYOPT would leak into
+      # Bundler, Rails, and native-extension child Rubies and stop this from
+      # exercising the actual bootstrap chain.
+      installed_executable = File.join(installed_root, "bin", "hive")
+      executable_source = File.read(installed_executable)
+      injection = "require ENV.fetch(\"HIVE_SETUP_FIXTURE\") if ENV[\"HIVE_SETUP_FIXTURE\"]\n"
+      File.write(
+        installed_executable,
+        executable_source.sub("require \"hive\"\n", "require \"hive\"\n#{injection}")
+      )
+
+      source = File.join(ROOT, "web")
       env = {
         "GEM_HOME" => gem_home,
         "GEM_PATH" => [ gem_home, *Gem.path ].join(File::PATH_SEPARATOR),
-        "HIVE_HOME" => File.join(tmp, "hive-home"),
         **clean_bundler_environment
       }
-      _stdout, stderr, status = Open3.capture3(
-        env, RbConfig.ruby, "-I#{File.join(installed_root, 'lib')}", "-e", script,
-        source, installed_root,
-        chdir: tmp
-      )
-
-      assert status.success?, "installed bootstrap failed: #{stderr}"
 
       preload = File.join(tmp, "setup-fixtures.rb")
       capture = File.join(tmp, "setup-capture")
+      setup_home = File.join(tmp, "setup-home")
       File.write(preload, setup_fixture_source)
       setup_env = env.merge(
-        "HIVE_HOME" => File.join(tmp, "setup-home"),
+        "HIVE_HOME" => setup_home,
         "HIVE_WEB_BUNDLE_URL" => source,
         "HIVE_EXPECTED_CLI_ROOT" => installed_root,
         "HIVE_PACKAGE_CAPTURE" => capture,
-        "RUBYOPT" => "-r#{preload}"
+        "HIVE_SETUP_FIXTURE" => preload
       )
       stdout, setup_stderr, setup_status = Open3.capture3(
         setup_env, File.join(gem_home, "bin", "hive"), "setup", "--json", "--no-init",
@@ -94,6 +69,12 @@ class WebPackagedBootstrapTest < Minitest::Test
       assert_equal %w[diagnostics web_bundle daemon_service web_service web],
                    payload.fetch("phases").map { |phase| phase.fetch("name") }
       assert_equal [ installed_root, "daemon", "web" ], File.readlines(capture, chomp: true)
+      assert File.file?(File.join(setup_home, "web", "config", "application.rb"))
+      assert File.file?(File.join(setup_home, "web", ".hive-web-version"))
+      assert Dir.exist?(File.join(setup_home, "web-gems")),
+             "the real Bundler install must populate the managed dependency directory"
+      assets = File.join(setup_home, "web", "public", "assets", ".manifest.json")
+      assert File.file?(assets), "the real Rails assets:precompile must write a manifest"
     end
   end
 
@@ -105,6 +86,11 @@ class WebPackagedBootstrapTest < Minitest::Test
       require "hive/commands/setup"
       require "hive/commands/daemon/service_installer"
       require "hive/commands/web/service_installer"
+
+      packaged_root = Hive::Web::AppBundle.hive_cli_root
+      abort "wrong packaged root" unless packaged_root == ENV.fetch("HIVE_EXPECTED_CLI_ROOT")
+      abort "missing packaged gemspec" unless File.file?(File.join(packaged_root, "hive.gemspec"))
+      File.open(ENV.fetch("HIVE_PACKAGE_CAPTURE"), "a") { |file| file.puts(packaged_root) }
 
       class PackagedSetupDiagnostics
         def run = self
@@ -166,21 +152,6 @@ class WebPackagedBootstrapTest < Minitest::Test
           "ready" => true,
           "readiness" => "ready"
         }
-      end
-      Hive::Web::AppBundle.define_singleton_method(:prepare!) do |dir:, **|
-        root = hive_cli_root
-        abort "wrong packaged root" unless root == ENV.fetch("HIVE_EXPECTED_CLI_ROOT")
-        abort "missing packaged gemspec" unless File.file?(File.join(root, "hive.gemspec"))
-        File.open(ENV.fetch("HIVE_PACKAGE_CAPTURE"), "a") { |file| file.puts(root) }
-        assets = File.join(dir, "public", "assets")
-        FileUtils.mkdir_p(assets)
-        File.write(File.join(assets, "application.css"), "body {}")
-        File.write(File.join(assets, "application.js"), "export {}")
-        File.write(File.join(assets, ".manifest.json"), JSON.generate(
-          "application.css" => { "digested_path" => "application.css" },
-          "application.js" => { "digested_path" => "application.js" }
-        ))
-        dir
       end
     RUBY
   end

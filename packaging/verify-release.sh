@@ -326,7 +326,7 @@ curl -fsSL "$RELEASE_BASE/SHA256SUMS.pem" -o "$WEB_TRUST_DIR/SHA256SUMS.pem"
 cosign verify-blob \
   --certificate "$WEB_TRUST_DIR/SHA256SUMS.pem" \
   --signature "$WEB_TRUST_DIR/SHA256SUMS.sig" \
-  --certificate-identity-regexp '^https://github\.com/ivankuznetsov/hive/' \
+  --certificate-identity-regexp "^https://github\.com/ivankuznetsov/hive/\.github/workflows/release\.yml@refs/tags/${HIVE_VERSION}$" \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   "$WEB_TRUST_DIR/SHA256SUMS"
 

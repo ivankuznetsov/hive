@@ -57,6 +57,16 @@ while [ "$stable_deep_health" -lt 11 ]; do
   [ "$stable_deep_health" -ge 11 ] || sleep 1
 done
 
+# The Rails process can boot and answer health checks even if a packaging
+# regression omitted its compiled CSS/JavaScript. Assert the baked source tree
+# through the same manifest-aware contract used by managed native installs.
+if ! docker exec "$NAME" ruby -I/app/lib -e \
+  'require "hive/web/app_bundle"; exit Hive::Web::AppBundle.assets_ready?("/app/web") ? 0 : 1'
+then
+  echo "FAIL baked /app/web assets are incomplete"
+  exit 1
+fi
+
 # A fresh box must be CLAIMABLE out of the box (shipped client_id default):
 # this single assertion proves config defaults, the web tier, and the claim
 # flow all survived the image build.

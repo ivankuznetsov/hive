@@ -77,6 +77,18 @@ class SchemaFilesTest < Minitest::Test
       )
       assert_empty schemer.validate(error).to_a, "#{name} usage payload must validate"
     end
+
+    status_error = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-web-status",
+      error: Hive::ConfigError.new("invalid web config"),
+      error_kind: "config_error",
+      extras: { "mode" => "managed_service", "warnings" => [] }.merge(service)
+    )
+    status_schema = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-status")))
+    )
+    assert_empty status_schema.validate(status_error).to_a,
+                 "hive web status configuration errors must retain the v1 envelope"
   end
 
   def test_native_web_schemas_reject_incomplete_success_unknown_readiness_and_bad_warning

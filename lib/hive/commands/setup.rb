@@ -160,11 +160,7 @@ module Hive
             environment: @environment,
             config: web_config
           )
-          lifecycle = if installer.respond_to?(:service_lifecycle_state)
-            installer.service_lifecycle_state
-          else
-            installer.service_state
-          end
+          lifecycle = Hive::Web::ServiceStatus.lifecycle_state(installer)
           was_running = lifecycle["service_running"]
           # Ordinary setup is intentionally drift-safe. A customized unit is
           # observed and preserved; explicit `hive web install --force` owns
@@ -172,10 +168,11 @@ module Hive
           outcome = installer.install!(autostart: true, force: false)
           restarted = @web_bundle_refreshed && was_running && outcome.success? ? installer.restart! : false
           state = Hive::Web::ServiceStatus.snapshot(
-            installer: installer, config: web_config, environment: @environment
+            installer: installer, config: web_config, environment: @environment,
+            wait_for_running: true
           )
           @web_service = state
-          ok = outcome.success? && service_available?(state)
+          ok = outcome.success? && state["ready"]
           data = {
             "mutation" => "attempted",
             "outcome" => outcome.wire_outcome,
@@ -232,10 +229,6 @@ module Hive
             { "mutation" => mutation, "message" => "#{e.class}: #{e.message}", "messages" => [] }.merge(state)
           )
         end
-      end
-
-      def service_available?(state)
-        state.values_at("service_installed", "service_enabled", "service_running", "ready").all?
       end
 
       def current_project_name

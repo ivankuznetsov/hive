@@ -265,6 +265,10 @@ module Hive
         end
         raise Hive::Error, "web service install failed" if outcome.failed?
         raise Hive::InvalidTaskPath, "web service differs; retry with --force" if outcome.drifted?
+        unless envelope["ok"]
+          raise Hive::Error,
+                "web service install did not become ready (readiness=#{envelope['readiness']})"
+        end
       end
 
       def start_service
@@ -296,11 +300,16 @@ module Hive
 
       def status_service
         require "hive/commands/web/service_installer"
-        config = Hive::Config.load_global_web
-        installer = Hive::Commands::Web::ServiceInstaller.new(environment: @environment, config: config)
-        state = Hive::Web::ServiceStatus.snapshot(
-          installer: installer, config: config, environment: @environment
-        )
+        begin
+          config = Hive::Config.load_global_web
+          installer = Hive::Commands::Web::ServiceInstaller.new(environment: @environment, config: config)
+          state = Hive::Web::ServiceStatus.snapshot(
+            installer: installer, config: config, environment: @environment
+          )
+        rescue StandardError => e
+          emit_status_error(e) if @json
+          raise
+        end
         if @json
           puts JSON.generate({
             "schema" => "hive-web-status",
@@ -316,12 +325,13 @@ module Hive
 
       def service_envelope(installer, outcome, config: Hive::Config.load_global_web)
         state = Hive::Web::ServiceStatus.snapshot(
-          installer: installer, config: config, environment: @environment
+          installer: installer, config: config, environment: @environment,
+          wait_for_running: true
         )
         {
           "schema" => "hive-web-install",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-web-install"),
-          "ok" => outcome.success?,
+          "ok" => outcome.success? && state["ready"],
           "mode" => "managed_service",
           "outcome" => outcome.wire_outcome,
           "platform" => installer.envelope_platform,
@@ -338,6 +348,17 @@ module Hive
           schema: "hive-web-install",
           error: error,
           error_kind: "bootstrap_failed",
+          extras: self.class.error_context(environment: @environment)
+        )
+        puts JSON.generate(payload)
+      end
+
+      def emit_status_error(error)
+        error_kind = error.is_a?(Hive::ConfigError) ? "config_error" : "status_failed"
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: "hive-web-status",
+          error: error,
+          error_kind: error_kind,
           extras: self.class.error_context(environment: @environment)
         )
         puts JSON.generate(payload)

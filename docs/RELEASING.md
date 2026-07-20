@@ -185,7 +185,8 @@ version until you bump it manually or set the token.
    Then run `hive setup --json` in the isolated verification environment and
    require the same package-root dependency and service-state contract as a
    normal install. The default release URL is trusted only after cosign
-   verification of `SHA256SUMS` and exact archive-digest verification. A
+   verification of `SHA256SUMS` against `.github/workflows/release.yml` at the
+   exact expected `vX.Y.Z` tag, followed by exact archive-digest verification. A
    custom remote `HIVE_WEB_BUNDLE_URL` must be paired with the documented exact
    `HIVE_WEB_BUNDLE_SHA256`; never weaken that requirement to diagnose a mirror.
 
@@ -249,7 +250,7 @@ Arch-Linux-ARM image).
 - **Tap not updated** → `HOMEBREW_TAP_TOKEN` is unset or expired. Renew the PAT
   and re-set the secret; the tap stays at its last version meanwhile.
 - **`cosign verify-blob` fails in `aur-publish`** → the released gem's signing
-  identity didn't match the pinned identity. This is the supply-chain gate
+  identity didn't match the pinned release workflow and version tag. This is the supply-chain gate
   working; do **not** loosen the `--certificate-identity-regexp`. Investigate
   the release artifact.
 - **`Host key verification failed` in `aur-publish`** → the AUR SSH first-contact

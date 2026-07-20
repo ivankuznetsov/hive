@@ -349,6 +349,28 @@ class ServiceInstallerBaseTest < Minitest::Test
     end
   end
 
+  def test_macos_install_is_idempotent_when_unchanged_job_is_already_loaded
+    with_tmp_dir do |dir|
+      calls = []
+      installer = TestInstaller.new(
+        host_os: "darwin", home: dir, launchctl_available: true,
+        runner: lambda do |argv|
+          calls << argv
+          argv == %w[launchctl list local.hive-test]
+        end
+      )
+      FileUtils.mkdir_p(File.dirname(installer.target_path))
+      File.write(installer.target_path, TestInstaller::UNIT_BODY)
+
+      outcome = installer.install!(autostart: true)
+
+      assert_equal :unchanged, outcome.kind
+      assert_equal [ %w[launchctl list local.hive-test] ], calls
+      refute calls.any? { |argv| argv[0, 2] == %w[launchctl load] },
+             "an unchanged loaded plist must not be loaded a second time"
+    end
+  end
+
   def test_macos_lifecycle_distinguishes_loaded_from_running_job
     with_tmp_dir do |dir|
       installer = TestInstaller.new(

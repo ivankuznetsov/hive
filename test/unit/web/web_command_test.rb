@@ -247,29 +247,30 @@ class WebCommandTest < Minitest::Test
   # a drifted unit → InvalidTaskPath (retry with --force), a failed install →
   # Hive::Error, and --json emits the hive-web-install envelope. Swap in a fake
   # installer so the mapping is asserted without touching launchctl/systemctl.
-  def with_fake_web_installer(outcome_kind)
+  def with_fake_web_installer(outcome_kind, state: nil)
     require "hive/commands/web/service_installer"
     require "hive/commands/service_installer/outcome"
     outcome = Hive::Commands::ServiceInstaller::Outcome.new(outcome_kind)
+    service_state = state || {
+      "platform" => "macos", "unit_path" => "/tmp/local.hive-web.plist",
+      "service_installed" => true, "service_enabled" => true,
+      "service_running" => true, "service_manager_available" => true,
+      "url" => "http://127.0.0.1:4567", "ready" => true, "readiness" => "ready"
+    }
     fake = Class.new do
       define_method(:initialize) { |**_kwargs| }
       define_method(:install!) { |autostart:, force:| outcome }
       define_method(:messages) { [ "installed note" ] }
       define_method(:target_path) { "/tmp/local.hive-web.plist" }
       define_method(:envelope_platform) { "macos" }
-      define_method(:service_state) do
-        {
-          "platform" => "macos", "unit_path" => "/tmp/local.hive-web.plist",
-          "service_installed" => true, "service_enabled" => false,
-          "service_running" => false, "service_manager_available" => true
-        }
-      end
     end
     original = Hive::Commands::Web.const_get(:ServiceInstaller)
     Hive::Commands::Web.send(:remove_const, :ServiceInstaller)
     Hive::Commands::Web.const_set(:ServiceInstaller, fake)
     begin
-      yield
+      with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot, ->(**) { service_state }) do
+        yield
+      end
     ensure
       Hive::Commands::Web.send(:remove_const, :ServiceInstaller)
       Hive::Commands::Web.const_set(:ServiceInstaller, original)
@@ -313,6 +314,35 @@ class WebCommandTest < Minitest::Test
         assert payload.key?("backup_path"), "envelope must carry backup_path"
         assert payload.key?("restarted"), "envelope must carry restarted"
         assert_kind_of Array, payload["messages"]
+      end
+    end
+  end
+
+  def test_install_service_json_fails_when_service_does_not_become_ready
+    state = {
+      "platform" => "macos", "unit_path" => "/tmp/local.hive-web.plist",
+      "service_installed" => true, "service_enabled" => true,
+      "service_running" => false, "service_manager_available" => true,
+      "url" => "http://127.0.0.1:4567", "ready" => false, "readiness" => "inactive"
+    }
+
+    with_tmp_global_config do
+      with_fake_web_installer(:written, state: state) do
+        output = StringIO.new
+        original_stdout = $stdout
+        begin
+          $stdout = output
+          error = assert_raises(Hive::Error) do
+            Hive::Commands::Web.new("install", no_bootstrap: true, json: true).call
+          end
+          assert_match(/did not become ready/, error.message)
+        ensure
+          $stdout = original_stdout
+        end
+
+        payload = JSON.parse(output.string)
+        assert_equal false, payload["ok"]
+        assert_equal "inactive", payload["readiness"]
       end
     end
   end
@@ -584,6 +614,32 @@ class WebCommandTest < Minitest::Test
     assert_equal false, payload["service_running"]
     assert_equal false, payload["ready"]
     assert_equal "disabled", payload["readiness"]
+  end
+
+  def test_status_service_json_emits_versioned_error_when_config_is_invalid
+    command = Hive::Commands::Web.new("status", json: true)
+    output = StringIO.new
+    original_stdout = $stdout
+    begin
+      $stdout = output
+      error = assert_raises(Hive::ConfigError) do
+        with_replaced_singleton_method(
+          Hive::Config,
+          :load_global_web,
+          -> { raise Hive::ConfigError, "invalid web config" }
+        ) { command.call }
+      end
+      assert_equal Hive::ExitCodes::CONFIG, error.exit_code
+    ensure
+      $stdout = original_stdout
+    end
+
+    payload = JSON.parse(output.string)
+    assert_equal "hive-web-status", payload["schema"]
+    assert_equal 1, payload["schema_version"]
+    assert_equal false, payload["ok"]
+    assert_equal "config_error", payload["error_kind"]
+    assert_equal Hive::ExitCodes::CONFIG, payload["exit_code"]
   end
 
   # ── rails_app_dir resolution + bootstrap ────────────────────────────

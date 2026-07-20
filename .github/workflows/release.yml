@@ -372,7 +372,7 @@ jobs:
           cosign verify-blob \
             --certificate dist/SHA256SUMS.pem \
             --signature dist/SHA256SUMS.sig \
-            --certificate-identity-regexp '^https://github\.com/ivankuznetsov/hive/' \
+            --certificate-identity-regexp "^https://github\.com/ivankuznetsov/hive/\.github/workflows/release\.yml@refs/tags/${REF_NAME}$" \
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             dist/SHA256SUMS
           version="${REF_NAME#v}"

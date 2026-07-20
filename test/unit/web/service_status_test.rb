@@ -90,6 +90,40 @@ class WebServiceStatusTest < Minitest::Test
     assert_equal "not_installed", result["readiness"]
   end
 
+  def test_snapshot_waits_for_launchd_job_to_start_before_probing_health
+    states = [
+      {
+        "platform" => "macos", "unit_path" => "/unit", "service_installed" => true,
+        "service_enabled" => true, "service_running" => false, "service_manager_available" => true
+      },
+      {
+        "platform" => "macos", "unit_path" => "/unit", "service_installed" => true,
+        "service_enabled" => true, "service_running" => true, "service_manager_available" => true
+      }
+    ]
+    samples = 0
+    rich_installer = Object.new
+    rich_installer.define_singleton_method(:service_lifecycle_state) do
+      samples += 1
+      states.fetch([ samples - 1, states.length - 1 ].min)
+    end
+
+    result = Hive::Web::ServiceStatus.snapshot(
+      installer: rich_installer,
+      config: config,
+      probe: ->(*) { true },
+      wait_for_running: true,
+      attempts: 2,
+      interval: 0,
+      sleeper: ->(*) { }
+    )
+
+    assert_equal 2, samples
+    assert result["service_running"]
+    assert result["ready"]
+    assert_equal "ready", result["readiness"]
+  end
+
   def test_disabled_and_active_not_ready_are_distinct
     base = {
       "service_manager_available" => true,

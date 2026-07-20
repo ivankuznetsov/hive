@@ -117,7 +117,7 @@ module Hive
                 "reinstall the hive-cli package before provisioning Hive web"
         end
 
-        runner ||= ->(argv, env) { system(env, *argv) }
+        runner ||= default_runner(output)
         env = {
           "BUNDLE_GEMFILE" => File.join(dir, "Gemfile"),
           "BUNDLE_PATH" => dependency_dir,
@@ -135,7 +135,7 @@ module Hive
       end
 
       def prepare!(dir: app_dir, runner: nil, output: $stderr)
-        runner ||= ->(argv, env) { system(env, *argv) }
+        runner ||= default_runner(output)
         bundle_install!(dir: dir, runner: runner, output: nil)
         asset_storage = File.join(dir, "tmp", "assets-build-storage")
         asset_env = {
@@ -158,6 +158,13 @@ module Hive
         dir
       ensure
         FileUtils.rm_rf(asset_storage) if asset_storage
+      end
+
+      def default_runner(output)
+        lambda do |argv, env|
+          destination = output || File::NULL
+          system(env, *argv, out: destination, err: destination)
+        end
       end
 
       def dependency_dir
@@ -243,7 +250,8 @@ module Hive
         downloader.call("#{release_base}/SHA256SUMS.pem", certificate)
 
         identity = "^https://github\\.com/#{Regexp.escape(Hive::REPO_OWNER)}/" \
-                   "#{Regexp.escape(Hive::REPO_NAME)}/"
+                   "#{Regexp.escape(Hive::REPO_NAME)}/\\.github/workflows/" \
+                   "release\\.yml@refs/tags/v#{Regexp.escape(Hive::VERSION)}$"
         verify = verifier || method(:verify_manifest_signature)
         ok = verify.call(
           manifest: manifest,

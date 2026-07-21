@@ -1,0 +1,98 @@
+Deterministic replay fixture. This complete patch is not a provider-backed change.
+
+diff --git a/Gemfile b/Gemfile
+new file mode 100644
+index 0000000..f0b72f4
+--- /dev/null
++++ b/Gemfile
+@@ -0,0 +1,5 @@
++source "https://rubygems.org"
++
++gem "minitest", "~> 5.25"
++gem "rack", "~> 3.1"
++gem "rackup", "~> 2.2"
+diff --git a/config.ru b/config.ru
+new file mode 100644
+index 0000000..4c796e1
+--- /dev/null
++++ b/config.ru
+@@ -0,0 +1,3 @@
++require_relative "lib/health_app"
++
++run HealthApp
+diff --git a/lib/health_app.rb b/lib/health_app.rb
+new file mode 100644
+index 0000000..e74ecb3
+--- /dev/null
++++ b/lib/health_app.rb
+@@ -0,0 +1,27 @@
++# frozen_string_literal: true
++
++require "json"
++require "open3"
++
++class HealthApp
++  VERSION = "0.1.0"
++
++  def self.call(environment)
++    return [404, { "content-type" => "text/plain" }, ["not found\n"]] unless environment["PATH_INFO"] == "/healthz"
++
++    body = JSON.generate(status: "ok", version: VERSION, revision: revision)
++    [
++      200,
++      { "content-type" => "application/json", "content-length" => body.bytesize.to_s },
++      [body]
++    ]
++  end
++
++  def self.revision(command_runner: Open3.method(:capture2))
++    output, status = command_runner.call("git", "rev-parse", "--short", "HEAD")
++    value = output.strip
++    status.success? && !value.empty? ? value : "unknown"
++  rescue Errno::ENOENT
++    "unknown"
++  end
++end
+diff --git a/test/health_app_test.rb b/test/health_app_test.rb
+new file mode 100644
+index 0000000..859994f
+--- /dev/null
++++ b/test/health_app_test.rb
+@@ -0,0 +1,37 @@
++# frozen_string_literal: true
++
++require "json"
++require "minitest/autorun"
++require_relative "../lib/health_app"
++
++class HealthAppTest < Minitest::Test
++  FakeStatus = Struct.new(:success?)
++
++  def test_health_response_contains_only_public_fields
++    HealthApp.stub(:revision, "7c9e12a") do
++      status, headers, chunks = HealthApp.call("PATH_INFO" => "/healthz")
++      body = JSON.parse(chunks.join)
++
++      assert_equal 200, status
++      assert_equal "application/json", headers.fetch("content-type")
++      assert_equal %w[revision status version], body.keys.sort
++      assert_equal "ok", body.fetch("status")
++      assert_equal "0.1.0", body.fetch("version")
++      assert_equal "7c9e12a", body.fetch("revision")
++    end
++  end
++
++  def test_revision_falls_back_when_git_metadata_is_unavailable
++    runner = ->(*) { ["", FakeStatus.new(false)] }
++
++    assert_equal "unknown", HealthApp.revision(command_runner: runner)
++  end
++
++  def test_other_paths_are_not_found
++    status, headers, chunks = HealthApp.call("PATH_INFO" => "/")
++
++    assert_equal 404, status
++    assert_equal "text/plain", headers.fetch("content-type")
++    assert_equal "not found\n", chunks.join
++  end
++end

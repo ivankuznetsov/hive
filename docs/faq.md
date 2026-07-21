@@ -22,6 +22,15 @@ Hive state changes often and should not pollute the project's code history or tr
 
 The daemon service is installed as global user infrastructure so it survives login and reboot. Project enrollment stays explicit because the daemon can spend real agent time and move many tasks; `daemon.enabled: true` is the durable consent signal for a specific repository, and `--dry-run` lets you inspect dispatches before live mode.
 
+### How does the native web UI fit the file-backed model?
+
+Run `hive setup`, then `hive web` to serve the native Rails UI at
+`http://127.0.0.1:4567`. It operates the same local project registry and
+workflow state as the TUI and CLI; it does not introduce a second workflow
+database or hosted control plane. Loopback access, optional GitHub login,
+service installation, reverse-proxy boundaries, and the separate Hivebox
+container mode are documented in [the web reference](../wiki/commands/web.md).
+
 ### When should I choose Hivebox instead of native Hive web?
 
 Run `hive setup` for the ordinary single-instance Linux/macOS experience: it

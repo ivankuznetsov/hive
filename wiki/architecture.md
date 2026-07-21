@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-07-20
+updated: 2026-07-21
 tags: [architecture, overview]
 ---
 
@@ -331,7 +331,24 @@ Streams, with production Action Cable accepting same-origin-as-host and
 `HIVE_WEB_ORIGIN` only as an extra allow for split-origin deployments:
 `StatusBroadcaster` (self-healing subscriber loop) bridges
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
-broadcast of the projects frame over solid_cable. Mutations reuse gem
+broadcast morph refresh plus targeted project-rail/composer updates over
+solid_cable. The current route renders either the Rails-native workflow Board
+or compact Grid, so live reconciliation does not maintain a second board patch
+protocol. Digest-based DOM identities preserve the owning band/card across
+reorder morphs, and the status-level refresh guard defers background refreshes
+from the native submit-bubble boundary while status forms submit, using a
+successful redirect's fresh GET as the reconciliation instead of racing a
+replay against the old URL. It also
+keeps first-connection history on the permanent status Action Cable source as
+a clone-stable DOM attribute, surviving both Stimulus disconnects and Turbo
+history restoration without leaking across fresh sources, and issues one
+catch-up refresh on later reconnects. That closes the window in
+which the only filesystem broadcast could be missed without duplicating the
+fresh initial page load. The
+request-local Rails `Project` wrapper
+reuses one parsed config for Board defaults, daemon state, and workflow-overlay
+loading. `Hive::StageLabel` gives web and bot surfaces one acronym-aware stage
+formatter. Mutations reuse gem
 primitives: `Commands::Approve` in-process, `Commands::Drop` in-process for
 Advanced hard deletes, daemon dispatch queue for stage runs, the bot's
 `RecoverySequence` for task-page Retry recovery (`markers clear` plus the

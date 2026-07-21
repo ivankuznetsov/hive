@@ -1,0 +1,10 @@
+<nav class="status-view-switch" aria-label="Status view">
+  <%= button_to "Board", status_view_preference_path,
+        params: { view: "board", project: params[:project] },
+        class: class_names("status-view-option", "active": status_view == "board"),
+        aria: { current: ("page" if status_view == "board") } %>
+  <%= button_to "Grid", status_view_preference_path,
+        params: { view: "grid", project: params[:project] },
+        class: class_names("status-view-option", "active": status_view == "grid"),
+        aria: { current: ("page" if status_view == "grid") } %>
+</nav>

@@ -414,6 +414,19 @@ state/reason assertions, remove `pending: true`, and keep the report-measured
 runtime below five seconds. Full incident coverage is not complete until the
 incident report contains six ordinary green results and zero pending entries.
 
+## Rails-native kanban live-update proof (2026-07-21)
+
+The Board model, route preference, shared task actions, workflow-derived
+columns, unknown-stage retention, mobile containment, and affected Turbo morph
+flows are covered by focused Rails and Playwright tests. This branch has not
+yet produced a long-running external-browser artifact with two simultaneous
+clients watching different Board/Grid preferences while a real daemon advances
+tasks across both built-in and project-authored workflows. The implementation
+deliberately relies on the existing URL-aware Turbo refresh instead of custom
+patch cursors, so that live smoke is confidence evidence rather than a missing
+contract; retain the gap until post-merge dogfood observes the multi-client
+case.
+
 ## Areas the wiki could be expanded
 
 - `wiki/troubleshooting.md` — currently lives only in README's Troubleshooting section. Could be lifted into a dedicated page once the project sees real-world failures.

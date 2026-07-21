@@ -1,3 +1,5 @@
+require "digest"
+
 module ApplicationHelper
   NAV_SECTIONS = {
     status: ->(c) { c == "status" || c == "tasks" || c == "ideas" },
@@ -10,6 +12,13 @@ module ApplicationHelper
   def nav_class(section)
     active = NAV_SECTIONS.fetch(section).call(controller_path.split("/", 2).first)
     class_names("nav-link", "nav-link-active": active)
+  end
+
+  # Turbo morphs by DOM identity. Use a digest of the full raw tuple so
+  # project/workflow names that normalize to the same text cannot collide.
+  def stable_dom_id(prefix, *parts)
+    digest = Digest::SHA256.hexdigest(JSON.generate(parts.map(&:to_s))).first(24)
+    "#{prefix}-#{digest}"
   end
 
   # Stage dir ("3-plan") → its short name and a stable color class used by

@@ -55,6 +55,10 @@ class Task
     original_idea_line || slug.to_s.sub(/-\d{6}-\h{4}\z/, "").tr("-", " ").upcase_first
   end
 
+  def status_label
+    self["action_label"].presence || self["marker"].presence || "idle"
+  end
+
   def folder
     self["folder"]
   end

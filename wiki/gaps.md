@@ -556,3 +556,20 @@ reviewer prompt with that existing fail-closed validator. Retain this gap until
 the installed v0.6.5 package opens meaningful ordinary and Architecture Patrol
 work without dirty-checkout, quota-churn, response-envelope, or evidence-
 contract errors.
+
+## Build and Content launch fixtures lack clean live timing (2026-07-21)
+
+The public first-run guide and deterministic fixtures preserve memorable Build
+and Content inputs, stage artifacts, native state labels, recovery boundaries,
+and explicit next actions. They do not prove provider completion or the
+five-minute first-artifact target. Two private live Content tasks initially
+failed at the `1-inbox` approval transition under installed Hive 0.6.4 because
+durable attempt context resolved `approve` as a workflow verb (`key not found:
+"approve"`). Exact supported approval recovered both tasks. At the
+2026-07-21T15:23:25Z observation, one research stage had stopped at its provider
+budget with its artifact preserved, while one outline stage was running after a
+single bounded retry. Private task identifiers, attempt identifiers, costs, and
+artifact sizes are intentionally absent from this public gap record. A reviewed
+terminal article and measured first-artifact/full-completion times were not yet
+available. Keep the fixture and live evidence classes separate until clean
+replays close this gap.

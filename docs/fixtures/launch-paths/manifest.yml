@@ -1,0 +1,38 @@
+schema: hive-launch-path-fixtures/v1
+fixture: true
+provider_completed: false
+live_full_replay_status: not_completed
+observed_at: "2026-07-21T15:23:25Z"
+live_first_artifact_time:
+measured_full_completion_time:
+state_labels:
+  launch: Add idea
+  queued: Queued for the daemon
+  running: Agent running
+  approval_waiting: Needs your input
+  provider_limit: Waiting on provider / scheduler
+  recoverable_failure: Needs recovery
+  terminal_failure: Error
+  success: Archived
+  artifact_inspection: Artifacts
+  retry_resume: Retry stage
+  next_action: Next action
+paths:
+  build:
+    workflow: coding
+    input: build/idea.md
+    artifacts:
+      - build/brainstorm.md
+      - build/plan.md
+      - build/patch.diff
+      - build/review.md
+      - build/artifact.md
+  content:
+    workflow: content
+    input: content/idea.md
+    artifacts:
+      - content/research.md
+      - content/outline.md
+      - content/draft.md
+      - content/critique.md
+      - content/article.md

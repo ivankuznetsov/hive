@@ -131,7 +131,7 @@ After version verification, run the shared setup command and parse its
 versioned envelope:
 
 ```bash
-"$hive_cmd" setup --no-init --json
+"$hive_cmd" setup --no-init --yes --json
 ```
 
 On supported Linux/macOS this bootstraps the authenticated managed Rails
@@ -141,7 +141,7 @@ URL. Report `service_installed`, `service_enabled`, `service_running`, `ready`,
 and `readiness` separately; never describe the URL as available when `ready` is
 false. If a customized web unit is drifted, leave it byte-identical and report
 `"$hive_cmd" web install --force` as the explicit repair. If the user opts out,
-run `"$hive_cmd" setup --no-service --json`; that performs no web-service
+run `"$hive_cmd" setup --no-service --yes --json`; that performs no web-service
 mutation and does not stop or disable an existing unit. Use `--no-bootstrap`
 only for a diagnose-only run with no provisioning.
 
@@ -211,7 +211,7 @@ Report:
 - channel used
 - command run
 - Hive CLI version output (`"$hive_cmd" --version`)
-- setup mode, effective URL, and distinct daemon/Hive web service state from `"$hive_cmd" setup --json`
+- setup mode, effective URL, and distinct daemon/Hive web service state from `"$hive_cmd" setup --no-init --yes --json`
 - whether `hive init` was run
 - missing runtime dependencies from `hive doctor`
 - `qmd --version` output, or the reason QMD install/repair was skipped

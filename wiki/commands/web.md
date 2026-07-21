@@ -80,6 +80,9 @@ reverse proxy. Install success requires the observed service to be installed,
 enabled, running, and ready; an inactive or active-but-not-ready service emits
 `ok: false` before the command exits non-zero. Configuration failures from
 `status --json` retain the versioned status error envelope on stdout.
+Bootstrap and service-install exceptions from `install --json` likewise emit
+exactly one versioned install error envelope, distinguished by
+`bootstrap_failed` and `service_install_failed`.
 
 ## Environment compatibility
 

@@ -456,6 +456,34 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_web_install_json_service_write_failure_retains_the_versioned_contract
+    with_tmp_global_config do |home|
+      invalid_home = File.join(home, "home-is-a-file")
+      File.write(invalid_home, "not a directory")
+
+      out, err, status = Open3.capture3(
+        { "HIVE_HOME" => home, "HOME" => invalid_home },
+        RbConfig.ruby, "-Ilib", HIVE_BIN,
+        "web", "install", "--no-bootstrap", "--json"
+      )
+
+      assert_equal Hive::ExitCodes::GENERIC, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-web-install", payload["schema"]
+      assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-web-install"), payload["schema_version"]
+      assert_equal false, payload["ok"]
+      assert_equal "Error", payload["error_class"]
+      assert_equal "service_install_failed", payload["error_kind"]
+      assert_equal Hive::ExitCodes::GENERIC, payload["exit_code"]
+      assert_match(/Errno::(?:EEXIST|ENOTDIR)/, payload["message"])
+      assert_includes payload["message"], invalid_home
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-install"))))
+      assert_empty schemer.validate(payload).map { |error| error["error"] }
+      assert_equal 1, out.lines.length, "JSON mode must emit exactly one install document"
+      assert_match(/^hive: /, err)
+    end
+  end
+
   def test_invalid_byte_errors_use_the_selected_json_surface
     invalid = "bad\xFF".b
     cases = [

@@ -178,17 +178,17 @@ module Hive
       end
 
       def install_command
+        @install_json_emitted = false
+        phase = :bootstrap
         unless @no_bootstrap
-          begin
-            Hive::Web::AppBundle.ensure!
-          rescue StandardError => e
-            emit_install_error(e) if @json
-            raise(e) if e.is_a?(Hive::Error)
-
-            raise Hive::Error, "#{e.class}: #{e.message}"
-          end
+          Hive::Web::AppBundle.ensure!
         end
+        phase = :service_install
         install_service
+      rescue StandardError => e
+        error = normalize_install_error(e, phase: phase)
+        emit_install_error(error, error_kind: install_error_kind(phase)) if @json && !@install_json_emitted
+        raise error
       end
 
       def rails_app_dir(bootstrap: true)
@@ -271,7 +271,7 @@ module Hive
         outcome = installer.install!(autostart: true, force: @force)
         envelope = service_envelope(installer, outcome, config: config)
         if @json
-          puts JSON.generate(envelope)
+          emit_install_json(envelope)
         else
           installer.messages.each { |line| warn "hive: #{line}" }
           puts "hive web: #{outcome.wire_outcome} #{installer.target_path}"
@@ -356,14 +356,31 @@ module Hive
         }.merge(state)
       end
 
-      def emit_install_error(error)
+      def emit_install_error(error, error_kind:)
         payload = Hive::Schemas::ErrorEnvelope.build(
           schema: "hive-web-install",
           error: error,
-          error_kind: "bootstrap_failed",
+          error_kind: error_kind,
           extras: self.class.error_context(environment: @environment)
         )
-        puts JSON.generate(payload)
+        emit_install_json(payload)
+      end
+
+      def emit_install_json(payload)
+        document = JSON.generate(payload)
+        @install_json_emitted = true
+        puts document
+      end
+
+      def install_error_kind(phase)
+        phase == :bootstrap ? "bootstrap_failed" : "service_install_failed"
+      end
+
+      def normalize_install_error(error, phase:)
+        return error if error.is_a?(Hive::Error)
+        return error if phase == :service_install && !@json
+
+        Hive::Error.new("#{error.class}: #{error.message}")
       end
 
       def emit_status_error(error)

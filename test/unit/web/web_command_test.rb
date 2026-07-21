@@ -383,7 +383,7 @@ class WebCommandTest < Minitest::Test
   # a drifted unit → InvalidTaskPath (retry with --force), a failed install →
   # Hive::Error, and --json emits the hive-web-install envelope. Swap in a fake
   # installer so the mapping is asserted without touching launchctl/systemctl.
-  def with_fake_web_installer(outcome_kind, state: nil)
+  def with_fake_web_installer(outcome_kind, state: nil, install_error: nil)
     require "hive/commands/web/service_installer"
     require "hive/commands/service_installer/outcome"
     outcome = Hive::Commands::ServiceInstaller::Outcome.new(outcome_kind)
@@ -395,7 +395,11 @@ class WebCommandTest < Minitest::Test
     }
     fake = Class.new do
       define_method(:initialize) { |**_kwargs| }
-      define_method(:install!) { |autostart:, force:| outcome }
+      define_method(:install!) do |autostart:, force:|
+        raise install_error if install_error
+
+        outcome
+      end
       define_method(:messages) { [ "installed note" ] }
       define_method(:target_path) { "/tmp/local.hive-web.plist" }
       define_method(:envelope_platform) { "macos" }
@@ -515,6 +519,28 @@ class WebCommandTest < Minitest::Test
     assert_equal "bootstrap_failed", payload["error_kind"]
     assert_equal "managed_service", payload["mode"]
     assert_equal "inactive", payload["readiness"]
+  end
+
+  def test_install_service_exception_emits_one_versioned_json_error
+    with_tmp_global_config do
+      with_fake_web_installer(
+        :written,
+        install_error: Hive::Error.new("service manager exploded")
+      ) do
+        out, = capture_io do
+          error = assert_raises(Hive::Error) do
+            Hive::Commands::Web.new("install", no_bootstrap: true, json: true).call
+          end
+          assert_match(/service manager exploded/, error.message)
+        end
+
+        payload = JSON.parse(out)
+        assert_equal "hive-web-install", payload["schema"]
+        assert_equal false, payload["ok"]
+        assert_equal "service_install_failed", payload["error_kind"]
+        assert_equal 1, out.lines.length, "JSON mode must emit exactly one install document"
+      end
+    end
   end
 
   def test_install_json_and_stderr_include_legacy_alias_guidance_once

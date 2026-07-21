@@ -79,6 +79,16 @@ class NativeWebPositioningTest < Minitest::Test
     end
   end
 
+  def test_agent_installer_pre_authorizes_unattended_native_setup_after_approval
+    installer = read("install.md")
+
+    assert_includes installer, '"$hive_cmd" setup --no-init --yes --json'
+    assert_includes installer, '"$hive_cmd" setup --no-service --yes --json'
+    refute_includes installer, '"$hive_cmd" setup --no-init --json'
+    refute_includes installer, '"$hive_cmd" setup --no-service --json'
+    refute_includes installer, '"$hive_cmd" setup --json'
+  end
+
   def test_legacy_native_aliases_are_confined_to_explicit_migration_docs
     legacy = /HIVEBOX_(?:WEB_APP_DIR|ORIGIN|STORAGE_DIR|LOCAL_LOOPBACK|DIFF_TIMEOUT_SEC|CLONE_TIMEOUT_SEC)/
 

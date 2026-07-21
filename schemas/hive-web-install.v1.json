@@ -42,7 +42,7 @@
         "schema_version": { "const": 1 },
         "ok": { "const": false },
         "error_class": { "type": "string", "minLength": 1 },
-        "error_kind": { "enum": ["invalid_task_path", "bootstrap_failed"] },
+        "error_kind": { "enum": ["invalid_task_path", "bootstrap_failed", "service_install_failed"] },
         "exit_code": { "type": "integer" },
         "message": { "type": "string", "minLength": 1 },
         "mode": { "const": "managed_service" },

@@ -58,7 +58,7 @@ class WebPackagedBootstrapTest < Minitest::Test
         "HIVE_SETUP_FIXTURE" => preload
       )
       stdout, setup_stderr, setup_status = Open3.capture3(
-        setup_env, File.join(gem_home, "bin", "hive"), "setup", "--json", "--no-init",
+        setup_env, File.join(gem_home, "bin", "hive"), "setup", "--json", "--no-init", "--yes",
         chdir: tmp
       )
 
@@ -66,8 +66,10 @@ class WebPackagedBootstrapTest < Minitest::Test
       payload = JSON.parse(stdout)
       assert_equal "managed_service", payload.fetch("mode")
       assert_equal true, payload.fetch("ok")
-      assert_equal %w[diagnostics web_bundle daemon_service web_service web],
+      assert_equal %w[diagnostics agent_skills web_bundle daemon_service web_service web],
                    payload.fetch("phases").map { |phase| phase.fetch("name") }
+      agent_skills = payload.fetch("phases").find { |phase| phase.fetch("name") == "agent_skills" }
+      refute_equal "consent_required", agent_skills.fetch("classification")
       assert_equal [ installed_root, "daemon", "web" ], File.readlines(capture, chomp: true)
       assert File.file?(File.join(setup_home, "web", "config", "application.rb"))
       assert File.file?(File.join(setup_home, "web", ".hive-web-version"))

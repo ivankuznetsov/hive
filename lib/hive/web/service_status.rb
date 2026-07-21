@@ -31,7 +31,14 @@ module Hive
           )
         end
         url = effective_url(config, environment: environment)
-        readiness = readiness_for(state, local_url(config), probe: probe)
+        health_probe = probe || lambda { |health_url|
+          ready?(
+            health_url,
+            attempts: wait_for_running ? attempts : 1,
+            interval: interval
+          )
+        }
+        readiness = readiness_for(state, local_url(config), probe: health_probe)
         state.merge(
           "url" => url,
           "ready" => readiness == "ready",

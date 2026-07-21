@@ -124,6 +124,45 @@ class WebServiceStatusTest < Minitest::Test
     assert_equal "ready", result["readiness"]
   end
 
+  def test_read_only_status_snapshot_probes_health_once
+    starts = 0
+    unavailable = response(Net::HTTPBadGateway, "not ready")
+    with_replaced_singleton_method(Net::HTTP, :start, lambda { |*_args, **_kwargs, &block|
+      starts += 1
+      http = Object.new
+      http.define_singleton_method(:get) { |_path, _headers| unavailable }
+      block.call(http)
+    }) do
+      result = Hive::Web::ServiceStatus.snapshot(
+        installer: installer(running_state), config: config, interval: 0
+      )
+
+      assert_equal "active_not_ready", result["readiness"]
+    end
+
+    assert_equal 1, starts
+  end
+
+  def test_setup_install_snapshot_retains_configured_health_retry_window
+    starts = 0
+    unavailable = response(Net::HTTPBadGateway, "not ready")
+    with_replaced_singleton_method(Net::HTTP, :start, lambda { |*_args, **_kwargs, &block|
+      starts += 1
+      http = Object.new
+      http.define_singleton_method(:get) { |_path, _headers| unavailable }
+      block.call(http)
+    }) do
+      result = Hive::Web::ServiceStatus.snapshot(
+        installer: installer(running_state), config: config,
+        wait_for_running: true, attempts: 3, interval: 0
+      )
+
+      assert_equal "active_not_ready", result["readiness"]
+    end
+
+    assert_equal 3, starts
+  end
+
   def test_disabled_and_active_not_ready_are_distinct
     base = {
       "service_manager_available" => true,
@@ -177,6 +216,13 @@ class WebServiceStatusTest < Minitest::Test
   end
 
   private
+
+  def running_state
+    {
+      "platform" => "linux", "unit_path" => "/unit", "service_installed" => true,
+      "service_enabled" => true, "service_running" => true, "service_manager_available" => true
+    }
+  end
 
   def response(type, body)
     value = type.new("1.1", type == Net::HTTPOK ? "200" : "502", type.name)

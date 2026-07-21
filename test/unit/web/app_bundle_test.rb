@@ -1,6 +1,7 @@
 require "test_helper"
 require "rubygems/package"
 require "zlib"
+require "hive/digest"
 require "hive/web/app_bundle"
 
 class WebAppBundleTest < Minitest::Test
@@ -56,16 +57,18 @@ class WebAppBundleTest < Minitest::Test
       source = seed_source_app
       ran = false
       captured_env = nil
-      Hive::Web::AppBundle.ensure!(
-        bundle_url: source,
-        output: nil,
-        runner: lambda do |argv, env|
-          captured_env = env
-          ran = true
-          write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
-          true
-        end
-      )
+      with_env("GEM_HOME" => "/installed/gems", "GEM_PATH" => "/installed/gems:/system/gems") do
+        Hive::Web::AppBundle.ensure!(
+          bundle_url: source,
+          output: nil,
+          runner: lambda do |argv, env|
+            captured_env = env
+            ran = true
+            write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
+            true
+          end
+        )
+      end
       assert ran, "bundle install runner should have run"
       # The managed bundle's Gemfile resolves the hive-cli path gem through
       # HIVE_CLI_ROOT (its ".." holds no gem, and hive-cli is not on
@@ -73,6 +76,11 @@ class WebAppBundleTest < Minitest::Test
       # bundle-install, so `hive setup`/`hive web install` would fail on
       # every non-source-checkout install.
       assert_equal Hive::Web::AppBundle.hive_cli_root, captured_env["HIVE_CLI_ROOT"]
+      assert_nil captured_env["GEM_HOME"]
+      assert_nil captured_env["GEM_PATH"]
+      assert_equal Hive::Web::AppBundle.dependency_dir, captured_env["BUNDLE_PATH"]
+      assert Hive::Web::AppBundle.dependency_dir.start_with?(Hive::Paths.data_home),
+             "packaged users must install dependencies beneath their writable data home"
       assert File.file?(File.join(Hive::Web::AppBundle.hive_cli_root, "hive.gemspec")),
              "HIVE_CLI_ROOT must point at the gem root (hive.gemspec present)"
       assert Hive::Web::AppBundle.present?
@@ -99,9 +107,10 @@ class WebAppBundleTest < Minitest::Test
       asset_env = calls.last.fetch(:env)
       assert_equal "production", asset_env["RAILS_ENV"]
       assert asset_env["SECRET_KEY_BASE"].to_s != ""
-      assert asset_env["HIVEBOX_STORAGE_DIR"].to_s != ""
+      assert asset_env["HIVE_WEB_STORAGE_DIR"].to_s != ""
       assert Hive::Web::AppBundle.assets_ready?,
              "a successfully installed managed bundle must contain fetchable CSS and JavaScript"
+      assert_equal Hive::VERSION, Hive::Web::AppBundle.installed_version
     end
   end
 
@@ -271,14 +280,8 @@ class WebAppBundleTest < Minitest::Test
       # dir (hive-web-X.Y.Z/) around config/application.rb. ensure! must
       # detect that layout and hoist the wrapper's children to the app root.
       source = seed_nested_source_app
-      Hive::Web::AppBundle.ensure!(
-        bundle_url: source,
-        output: nil,
-        runner: lambda do |argv, _env|
-          write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
-          true
-        end
-      )
+      Hive::Web::AppBundle.ensure!(bundle_url: source, output: nil,
+                                   runner: successful_prepare_runner)
       assert Hive::Web::AppBundle.present?,
              "a bundle wrapped in a single versioned dir must unwrap to the app root"
       assert_equal "# app\n",
@@ -328,6 +331,83 @@ class WebAppBundleTest < Minitest::Test
     end
   end
 
+  def test_bundle_install_rejects_package_root_without_gemspec
+    Dir.mktmpdir("hive-web-app") do |app|
+      Dir.mktmpdir("hive-cli-root") do |root|
+        File.write(File.join(app, "Gemfile"), "source 'https://rubygems.org'\n")
+        with_replaced_singleton_method(Hive::Web::AppBundle, :hive_cli_root, -> { root }) do
+          error = assert_raises(Hive::Error) do
+            Hive::Web::AppBundle.bundle_install!(dir: app, output: nil, runner: ->(*) { flunk })
+          end
+          assert_match(/has no hive\.gemspec/, error.message)
+        end
+      end
+    end
+  end
+
+  def test_bundle_install_restores_authenticated_lockfile_bytes_and_mode
+    Dir.mktmpdir("hive-web-app") do |app|
+      lockfile = File.join(app, "Gemfile.lock")
+      File.write(File.join(app, "Gemfile"), "source 'https://rubygems.org'\n")
+      File.binwrite(lockfile, "authenticated lockfile\n")
+      FileUtils.chmod(0o640, lockfile)
+
+      result = Hive::Web::AppBundle.bundle_install!(
+        dir: app,
+        output: nil,
+        runner: lambda do |argv, _env|
+          assert_equal %w[bundle install], argv
+          File.binwrite(lockfile, "machine-local rewrite\n")
+          FileUtils.chmod(0o600, lockfile)
+          true
+        end
+      )
+
+      assert_equal app, result
+      assert_equal "authenticated lockfile\n", File.binread(lockfile)
+      assert_equal 0o640, File.stat(lockfile).mode & 0o777
+    end
+  end
+
+  def test_prepare_restores_lockfile_after_asset_compilation
+    Dir.mktmpdir("hive-web-app") do |app|
+      lockfile = File.join(app, "Gemfile.lock")
+      File.write(File.join(app, "Gemfile"), "source 'https://rubygems.org'\n")
+      File.binwrite(lockfile, "authenticated lockfile\n")
+      FileUtils.chmod(0o644, lockfile)
+
+      result = Hive::Web::AppBundle.prepare!(
+        dir: app,
+        output: nil,
+        runner: lambda do |argv, _env|
+          File.binwrite(lockfile, "rewrite from #{argv.join(' ')}\n")
+          write_compiled_assets(app) if argv == %w[bin/rails assets:precompile]
+          true
+        end
+      )
+
+      assert_equal app, result
+      assert Hive::Web::AppBundle.assets_ready?(app)
+      assert_equal "authenticated lockfile\n", File.binread(lockfile)
+      assert_equal 0o644, File.stat(lockfile).mode & 0o777
+      refute Dir.exist?(File.join(app, "tmp", "assets-build-storage"))
+    end
+  end
+
+  def test_default_runner_routes_stdout_and_stderr_to_selected_output
+    Dir.mktmpdir("hive-web-runner") do |dir|
+      output_path = File.join(dir, "command.log")
+      File.open(output_path, "w+") do |output|
+        runner = Hive::Web::AppBundle.default_runner(output)
+        assert runner.call([ "/bin/sh", "-c", "printf stdout; printf stderr >&2" ], {})
+        output.rewind
+        combined = output.read
+        assert_includes combined, "stdout"
+        assert_includes combined, "stderr"
+      end
+    end
+  end
+
   def test_default_bundle_url_prefers_env_override_then_falls_back_to_release_url
     with_env("HIVE_WEB_BUNDLE_URL" => "https://example.test/custom-bundle.tar.gz") do
       assert_equal "https://example.test/custom-bundle.tar.gz", Hive::Web::AppBundle.default_bundle_url
@@ -354,6 +434,7 @@ class WebAppBundleTest < Minitest::Test
         StringIO.new(gz_bytes)
       }) do
         Hive::Web::AppBundle.ensure!(bundle_url: "https://example.test/bundle.tar.gz",
+                                     bundle_sha256: Digest::SHA256.hexdigest(gz_bytes),
                                      output: nil, runner: lambda { |argv, _env|
                                        ran = true
                                        write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
@@ -369,6 +450,272 @@ class WebAppBundleTest < Minitest::Test
                    File.read(File.join(Hive::Web::AppBundle.app_dir, "config", "application.rb"))
       assert File.directory?(File.join(Hive::Web::AppBundle.app_dir, "config")),
              "the directory tar entry must have been created via mkdir_p"
+    end
+  end
+
+
+  def test_custom_remote_requires_digest_before_downloading
+    opened = false
+    with_replaced_singleton_method(URI, :open, ->(*) { opened = true }) do
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.ensure!(
+          bundle_url: "https://example.test/custom.tar.gz",
+          bundle_sha256: nil,
+          output: nil,
+          runner: ->(*) { true }
+        )
+      end
+
+      assert_match(/HIVE_WEB_BUNDLE_SHA256/, error.message)
+      refute opened, "missing digest must fail before untrusted bytes are downloaded"
+    end
+  end
+
+  def test_custom_remote_rejects_invalid_url
+    error = assert_raises(Hive::Error) do
+      Hive::Web::AppBundle.ensure!(
+        bundle_url: "https://exa mple.test/bundle.tar.gz",
+        bundle_sha256: "0" * 64,
+        output: nil,
+        runner: ->(*) { flunk }
+      )
+    end
+
+    assert_match(/invalid managed bundle URL/, error.message)
+  end
+
+  def test_custom_remote_digest_mismatch_fails_before_extraction_or_bundler
+    gz_bytes = build_gzipped_tar do |w|
+      w.add_file("config/application.rb", 0o644) { |f| f.write("# app\n") }
+      w.add_file("Gemfile", 0o644) { |f| f.write("source 'https://rubygems.org'\n") }
+    end
+    ran = false
+    with_replaced_singleton_method(URI, :open, ->(*) { StringIO.new(gz_bytes) }) do
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.ensure!(
+          bundle_url: "https://example.test/custom.tar.gz",
+          bundle_sha256: "0" * 64,
+          output: nil,
+          runner: ->(*) { ran = true }
+        )
+      end
+
+      assert_match(/digest mismatch/, error.message)
+      refute ran, "tampered archive must never reach Bundler"
+    end
+  end
+
+  def test_default_release_verifies_signed_manifest_identity_and_exact_digest
+    gz_bytes = build_gzipped_tar do |w|
+      w.add_file("config/application.rb", 0o644) { |f| f.write("# app\n") }
+      w.add_file("Gemfile", 0o644) { |f| f.write("source 'https://rubygems.org'\n") }
+    end
+    digest = Digest::SHA256.hexdigest(gz_bytes)
+    downloads = []
+    verifier_calls = []
+    downloader = lambda do |url, path|
+      downloads << File.basename(URI.parse(url).path)
+      content = case File.basename(path)
+      when /hive-web/ then gz_bytes
+      when "SHA256SUMS" then "#{digest}  hive-web-#{Hive::VERSION}.tar.gz\n"
+      when "SHA256SUMS.sig" then "signature"
+      when "SHA256SUMS.pem" then "certificate"
+      else flunk "unexpected download #{url}"
+      end
+      File.binwrite(path, content)
+    end
+    verifier = lambda do |manifest:, signature:, certificate:, identity:|
+      verifier_calls << [ manifest, signature, certificate, identity ]
+      true
+    end
+
+    with_hive_home do
+      Hive::Web::AppBundle.ensure!(
+        downloader: downloader,
+        verifier: verifier,
+        output: nil,
+        runner: successful_prepare_runner
+      )
+    end
+
+    assert_equal %W[
+      hive-web-#{Hive::VERSION}.tar.gz SHA256SUMS SHA256SUMS.sig SHA256SUMS.pem
+    ], downloads
+    assert_equal 1, verifier_calls.length
+    assert_equal(
+      "^https://github\\.com/ivankuznetsov/hive/\\.github/workflows/" \
+      "release\\.yml@refs/tags/v#{Regexp.escape(Hive::VERSION)}$",
+      verifier_calls.first.last
+    )
+  end
+
+  def test_default_release_digest_mismatch_fails_before_extraction_or_bundler
+    gz_bytes = build_gzipped_tar do |writer|
+      writer.add_file("config/application.rb", 0o644) { |file| file.write("# app\n") }
+      writer.add_file("Gemfile", 0o644) { |file| file.write("source 'https://rubygems.org'\n") }
+    end
+    downloader = lambda do |url, path|
+      content = case File.basename(URI.parse(url).path)
+      when /hive-web/ then gz_bytes
+      when "SHA256SUMS" then "#{'0' * 64}  hive-web-#{Hive::VERSION}.tar.gz\n"
+      else "signed fixture"
+      end
+      File.binwrite(path, content)
+    end
+    ran = false
+
+    with_hive_home do
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.ensure!(
+          downloader: downloader,
+          verifier: ->(**) { true },
+          output: nil,
+          runner: ->(*) { ran = true }
+        )
+      end
+      assert_match(/digest mismatch/, error.message)
+      refute ran, "a modified default release archive must never reach Bundler"
+      refute Hive::Web::AppBundle.present?
+    end
+  end
+
+  def test_default_release_requires_exactly_one_manifest_row
+    Dir.mktmpdir("hive-web-manifest") do |dir|
+      archive = File.join(dir, "hive-web-#{Hive::VERSION}.tar.gz")
+      File.binwrite(archive, "archive")
+      downloader = lambda do |_url, path|
+        content = File.basename(path) == "SHA256SUMS" ? "no matching row\n" : "fixture"
+        File.binwrite(path, content)
+      end
+
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.verify_default_release!(
+          bundle_url: Hive::Web::AppBundle.github_release_url,
+          archive_path: archive,
+          download_dir: dir,
+          downloader: downloader,
+          verifier: ->(**) { true }
+        )
+      end
+      assert_match(/exactly one digest/, error.message)
+    end
+  end
+
+  def test_default_release_rejects_failed_signature_verification
+    Dir.mktmpdir("hive-web-signature") do |dir|
+      archive = File.join(dir, "hive-web-#{Hive::VERSION}.tar.gz")
+      File.binwrite(archive, "archive")
+      downloader = ->(_url, path) { File.binwrite(path, "fixture") }
+
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.verify_default_release!(
+          bundle_url: Hive::Web::AppBundle.github_release_url,
+          archive_path: archive,
+          download_dir: dir,
+          downloader: downloader,
+          verifier: ->(**) { false }
+        )
+      end
+      assert_match(/signed release manifest verification failed/, error.message)
+    end
+  end
+
+  def test_default_signature_verification_requires_cosign
+    with_replaced_singleton_method(Hive::InvokedBinary, :which, ->(_name) { }) do
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.verify_manifest_signature(
+          manifest: "manifest",
+          signature: "signature",
+          certificate: "certificate",
+          identity: "identity"
+        )
+      end
+      assert_match(/cosign is required/, error.message)
+    end
+  end
+
+  def test_default_signature_verification_runs_cosign_and_reports_failure_stderr
+    status = Object.new
+    status.define_singleton_method(:success?) { false }
+    captured = nil
+
+    _stdout, stderr = capture_io do
+      with_replaced_singleton_method(Hive::InvokedBinary, :which, ->(_name) { "/usr/bin/cosign" }) do
+        runner = lambda { |*argv, timeout_sec:|
+          captured = [ *argv, timeout_sec ]
+          [ "", "identity mismatch", status ]
+        }
+        refute Hive::Web::AppBundle.verify_manifest_signature(
+          manifest: "manifest", signature: "signature", certificate: "certificate",
+          identity: "identity", runner: runner
+        )
+      end
+    end
+
+    assert_equal "/usr/bin/cosign", captured.first
+    assert_includes captured, "--certificate-identity-regexp"
+    assert_equal Hive::Web::AppBundle::COSIGN_TIMEOUT_SEC, captured.last
+    assert_includes stderr, "identity mismatch"
+  end
+
+  def test_default_signature_verification_accepts_cosign_success
+    status = Object.new
+    status.define_singleton_method(:success?) { true }
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :which, ->(_name) { "/usr/bin/cosign" }) do
+      assert Hive::Web::AppBundle.verify_manifest_signature(
+        manifest: "manifest", signature: "signature", certificate: "certificate",
+        identity: "identity", runner: ->(*_argv, timeout_sec:) { [ "", "", status ] }
+      )
+    end
+  end
+
+  def test_bounded_capture_terminates_a_stuck_verifier
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    error = assert_raises(Hive::Error) do
+      Hive::Web::AppBundle.capture3_bounded(
+        RbConfig.ruby, "-e", "sleep 30", timeout_sec: 0.05
+      )
+    end
+
+    assert_match(/timed out/, error.message)
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 3
+  end
+
+  def test_bounded_capture_returns_stdout_stderr_and_status
+    stdout, stderr, status = Hive::Web::AppBundle.capture3_bounded(
+      "/bin/sh", "-c", "printf stdout; printf stderr >&2", timeout_sec: 2
+    )
+
+    assert_equal "stdout", stdout
+    assert_equal "stderr", stderr
+    assert status.success?
+  end
+
+  def test_process_group_cleanup_escalates_when_term_does_not_stop_child
+    joins = []
+    wait_thread = Object.new
+    wait_thread.define_singleton_method(:join) do |timeout|
+      joins << timeout
+      joins.length > 1
+    end
+    kills = []
+
+    with_replaced_singleton_method(Process, :kill, lambda { |signal, pid|
+      kills << [ signal, pid ]
+    }) do
+      assert Hive::Web::AppBundle.terminate_process_group(1234, wait_thread)
+    end
+
+    assert_equal [ [ "TERM", -1234 ], [ "KILL", -1234 ] ], kills
+    assert_equal [ 2, 2 ], joins
+  end
+
+  def test_process_group_cleanup_tolerates_an_already_exited_child
+    with_replaced_singleton_method(Process, :kill, lambda { |_signal, _pid|
+      raise Errno::ESRCH
+    }) do
+      assert_nil Hive::Web::AppBundle.terminate_process_group(1234, Object.new)
     end
   end
 
@@ -405,6 +752,13 @@ class WebAppBundleTest < Minitest::Test
     File.write(File.join(src, "config", "application.rb"), "# app\n")
     File.write(File.join(src, "Gemfile"), "source 'https://rubygems.org'\n")
     src
+  end
+
+  def successful_prepare_runner
+    lambda do |argv, _env|
+      write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
+      true
+    end
   end
 
   def write_compiled_assets(dir)

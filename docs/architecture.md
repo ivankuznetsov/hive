@@ -58,14 +58,20 @@ Each stage has one state file: `idea.md` (1-inbox), `brainstorm.md` (2-brainstor
 
 ## Local Web Runtime
 
-The local Rails web UI is a managed runtime dependency, not part of the CLI
-gem payload. `hive web` resolves `HIVEBOX_WEB_APP_DIR`, then
-`${XDG_DATA_HOME}/hive/web`, then a source checkout `web/`. `hive setup` and
-`hive web` can bootstrap the managed app from the versioned web release bundle
-into a staging directory, install its Rails bundle, precompile production CSS
-and JavaScript, and verify the required entrypoints plus every manifest asset
+Hive web is the shared Rails application and a managed runtime dependency. The
+CLI gem packages the gem metadata needed for an installed package root to be a
+valid Bundler path dependency; the Rails source itself remains in the managed
+web bundle. `hive web` resolves `HIVE_WEB_APP_DIR`, then
+`${XDG_DATA_HOME}/hive/web`, then a source checkout `web/`. Released bundles
+are authenticated through the release's cosign-signed checksum manifest before
+extraction or execution. A custom remote `HIVE_WEB_BUNDLE_URL` also requires
+an exact `HIVE_WEB_BUNDLE_SHA256`; local bundle directories remain a
+development-only input. `hive setup` and `hive web` prepare the managed app in
+a staging directory, install its Rails bundle, precompile production CSS and
+JavaScript, and verify the required entrypoints plus every manifest asset
 before activating it. A current bundle with missing assets is repaired on the
-next setup or launch. The web
+next setup or launch. The deprecated `HIVEBOX_WEB_APP_DIR` alias remains
+accepted through the next major release with migration guidance. The web
 storage directory remains under
 `${XDG_STATE_HOME}/hive/web-storage`, so the TUI, daemon, and web UI operate
 on the same local registry, project `.hive-state/` directories, and task
@@ -77,6 +83,24 @@ the remote client's address. That proxy becomes part of the access boundary
 and must authenticate or restrict its clients; an unrestricted localhost
 forwarder exposes the no-auth UI. Hivebox is the separate owner-gated container
 deployment of the same Rails application.
+
+Normal `hive setup` installs, enables, starts, and probes the per-user service
+on supported Linux/macOS while preserving drifted units. Bare `hive web` is the
+blocking foreground path. The default URL is loopback-only and setup never
+creates exposure; Windows uses WSL with systemd or the Hivebox container path.
+
+The canonical shared-app environment settings are `HIVE_WEB_APP_DIR`,
+`HIVE_WEB_ORIGIN`, `HIVE_WEB_STORAGE_DIR`, `HIVE_WEB_LOCAL_LOOPBACK`,
+`HIVE_WEB_DIFF_TIMEOUT_SEC`, and `HIVE_WEB_CLONE_TIMEOUT_SEC`. Their named
+legacy aliases use the same suffix under `HIVEBOX_*` (with
+`HIVEBOX_WEB_APP_DIR` for the app directory) through the next major release.
+Blank values are unset; a canonical value wins over its alias, including when
+the canonical value is invalid, and a migration warning names the replacement.
+Warnings appear on stderr, in setup/web JSON, and as `kind: warning` doctor
+rows. Container-only variables such as `HIVEBOX_IMAGE`, `HIVEBOX_NAME`,
+`HIVEBOX_BIND`, `HIVEBOX_PORT`, `HIVEBOX_DATA`, `HIVEBOX_REPOS_DIR`,
+`HIVEBOX_SESSION_SECRET`, and `HIVEBOX_SUPERVISOR_PID` remain canonical and do
+not warn.
 
 ## Agents
 

@@ -1,6 +1,6 @@
 require "test_helper"
 
-# Guards the favicon assets the layout links. The box previously had only a
+# Guards the favicon assets the layout links. Hive web previously had only a
 # placeholder icon and no favicon.ico, so every page load logged a
 # `/favicon.ico` 404 (browsers request it from the root unconditionally).
 class FaviconTest < ActionDispatch::IntegrationTest
@@ -12,6 +12,7 @@ class FaviconTest < ActionDispatch::IntegrationTest
     get "/icon.svg"
     assert_response :success
     assert_equal "image/svg+xml", response.media_type
+    assert_includes response.body, "<title>Hive web</title>"
 
     get "/icon.png"
     assert_response :success

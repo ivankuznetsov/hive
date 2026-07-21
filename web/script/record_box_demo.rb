@@ -169,7 +169,7 @@ File.write(project_cfg, cfg.to_yaml)
 puts "==> booting rails + daemon"
 port = TCPServer.open(0) { |s| s.addr[1] }
 storage = File.join(sandbox, "storage")
-server_env = env_base.merge("HIVEBOX_STORAGE_DIR" => storage, "RAILS_ENV" => "development",
+server_env = env_base.merge("HIVE_WEB_STORAGE_DIR" => storage, "RAILS_ENV" => "development",
                             "BUNDLE_GEMFILE" => File.join(WEB_ROOT, "Gemfile"))
 run!(server_env, "bin/rails", "db:prepare", chdir: WEB_ROOT)
 server_pid = Process.spawn(server_env, "bin/rails", "server", "-p", port.to_s,

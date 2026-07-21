@@ -22,9 +22,14 @@ Hive state changes often and should not pollute the project's code history or tr
 
 The daemon service is installed as global user infrastructure so it survives login and reboot. Project enrollment stays explicit because the daemon can spend real agent time and move many tasks; `daemon.enabled: true` is the durable consent signal for a specific repository, and `--dry-run` lets you inspect dispatches before live mode.
 
-### Why no built-in web UI?
+### When should I choose Hivebox instead of native Hive web?
 
-The core interface is the filesystem and CLI. A web UI would add another state surface before the file protocol is finished.
+Run `hive setup` for the ordinary single-instance Linux/macOS experience: it
+installs the loopback-only native Hive web service by default. Choose
+[Hivebox](../packaging/docker/README.md) when you need container isolation,
+multiple local instances, containment for untrusted agents, or a reproducible
+server/NAS deployment. Windows users can use WSL with systemd for the native
+path or Hivebox for the container path.
 
 ### Why more than one agent?
 

@@ -1,5 +1,6 @@
 require "open3"
 require "tempfile"
+require "hive/web/environment"
 
 class Repository
   Registration = Data.define(:project, :warning)
@@ -7,7 +8,7 @@ class Repository
   GITHUB_URL_RE = %r{\Ahttps://github\.com/[\w.-]+/[\w.-]+?(?:\.git)?\z}
   GITHUB_SSH_RE = %r{\Agit@github\.com:[\w.-]+/[\w.-]+?(?:\.git)?\z}
   GH_SHORTHAND_RE = %r{\A[\w.-]+/[\w.-]+\z}
-  CLONE_TIMEOUT_SEC = Integer(ENV.fetch("HIVEBOX_CLONE_TIMEOUT_SEC", 180))
+  CLONE_TIMEOUT_SEC = Integer(Hive::Web::Environment.value("HIVE_WEB_CLONE_TIMEOUT_SEC"))
 
   attr_reader :source, :name, :path
 

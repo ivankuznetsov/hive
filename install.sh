@@ -15,7 +15,7 @@ usage: install.sh [--dry-run] [--prefix=<dir>] [--version=<tag>]
 
 Installs hive as a rubygem (\`hive-cli\`) from GitHub Releases. The .gem
 is signed with cosign keyless attestation against this repo's release
-workflow; verification fails closed when cosign is available.
+workflow; verification always fails closed when cosign is unavailable.
 
 After install the \`hive\` and \`hv\` executables are symlinked into
 \${XDG_BIN_HOME:-~/.local/bin}. The installer also runs \`hive daemon install\`
@@ -25,7 +25,7 @@ telegram-bot-ruby) live under \${HIVE_PREFIX:-~/.local/share}/hive/gems so an
 uninstall is a clean \`rm -rf\` plus symlink removal.
 
 Requires Ruby 3.4 already on PATH; the installer reports its own
-prereqs (\`curl\`, \`jq\`, checksum tool) on first run. When npm is
+prereqs (\`curl\`, \`jq\`, \`cosign\`, checksum tool) on first run. When npm is
 available, the installer also installs Hive's qmd wiki indexer into the
 Hive data directory and links it beside the \`hive\` executable. Set
 HIVE_INSTALL_QMD=0 to skip that step.
@@ -422,6 +422,7 @@ fi
 # Probe Ruby/gem now that we know this is not a dry-run; the gem
 # install path requires Ruby 3.4 on PATH.
 ruby_preflight
+command -v cosign >/dev/null 2>&1 || die "missing installer prerequisite 'cosign'"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -429,33 +430,18 @@ trap 'rm -rf "$tmpdir"' EXIT
 download_with_status "$gem_url" "${tmpdir}/${gem_file}" "release gem"
 download_with_status "$checksums_url" "${tmpdir}/SHA256SUMS" "SHA256SUMS"
 
-# Cosign verify SHA256SUMS when both the signature blob and the
-# keyless cert are published — release.yml writes both. We skip the
-# verification only when cosign isn't installed; missing signature
-# files are an attestable regression and we fail closed.
-if command -v cosign >/dev/null 2>&1; then
-  download_with_status "$sig_url" "${tmpdir}/SHA256SUMS.sig" "SHA256SUMS.sig"
-  download_with_status "$cert_url" "${tmpdir}/SHA256SUMS.pem" "SHA256SUMS.pem"
-  # Pin the keyless identity to OUR release workflow rather than `.*`.
-  # `.*` regexps would accept any GHA OIDC token from any repo —
-  # neutering the signature check. The identity must match the
-  # release.yml workflow path under ivankuznetsov/hive (allowing
-  # forks under HIVE_REPO_OWNER/HIVE_REPO_NAME via env). The issuer
-  # is GitHub Actions' Fulcio OIDC endpoint.
-  cosign verify-blob \
-    --certificate "${tmpdir}/SHA256SUMS.pem" \
-    --signature "${tmpdir}/SHA256SUMS.sig" \
-    --certificate-identity-regexp "^https://github\\.com/${REPO_OWNER}/${REPO_NAME}/" \
-    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    "${tmpdir}/SHA256SUMS" \
-    || die "cosign verify-blob failed for SHA256SUMS (identity must match ${REPO_OWNER}/${REPO_NAME} release workflow)"
-else
-  # Phrased as a positive info line, not a scare-warning: the SHA256 check still
-  # runs (see below). cosign is an optional second factor for keyless signature
-  # verification — installing it upgrades the check; not having it doesn't break
-  # the install.
-  log "verifying release with SHA256 (install cosign for additional keyless signature verification)"
-fi
+# Authenticate the checksum manifest before trusting its gem or managed-web
+# archive digests. Pin the keyless identity to this repository's release
+# workflow; a wildcard would accept any GitHub Actions OIDC identity.
+download_with_status "$sig_url" "${tmpdir}/SHA256SUMS.sig" "SHA256SUMS.sig"
+download_with_status "$cert_url" "${tmpdir}/SHA256SUMS.pem" "SHA256SUMS.pem"
+cosign verify-blob \
+  --certificate "${tmpdir}/SHA256SUMS.pem" \
+  --signature "${tmpdir}/SHA256SUMS.sig" \
+  --certificate-identity-regexp "^https://github\\.com/${REPO_OWNER}/${REPO_NAME}/\\.github/workflows/release\\.yml@refs/tags/${VERSION}$" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  "${tmpdir}/SHA256SUMS" \
+  || die "cosign verify-blob failed for SHA256SUMS (identity must match ${REPO_OWNER}/${REPO_NAME} release workflow at ${VERSION})"
 
 # Strict line match: optional `./` prefix, sha digest, two-space sep,
 # exact gem_file, optional CR. `|| true` so a no-match under `set -e`

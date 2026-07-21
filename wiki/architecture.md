@@ -309,15 +309,16 @@ buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
 ## Hive Web and Hivebox pipeline
 
-`hive web` serves a vanilla Rails 8 + Turbo app from `web/` (ADR-037; the
-original Sinatra/Puma + SSE tier is gone). Local Hive Web is a browser control
-plane over the same registry and workflow state as the CLI/TUI; loopback
-requests use the `hive` identity without mandatory sign-in, including through
-a local reverse proxy whose socket peer is loopback. GitHub is an optional
-connection for repository listing and cloning and does not claim ownership.
-Hivebox is the distinct owner-gated container mode. Its auth is the GitHub
-device flow (ADR-036): a configured `web.github.owner` gates entry, while an
-ownerless fresh box is claimable and the first successful login writes
+`hive web` serves the shared vanilla Rails 8 + Turbo app from `web/` (ADR-037;
+the original Sinatra/Puma + SSE tier is gone). Native Hive web is the default
+browser control plane over the same registry and workflow state as the CLI/TUI;
+loopback requests use the `hive` identity without mandatory sign-in, including
+through a local reverse proxy whose socket peer is loopback. GitHub is an
+optional connection for repository listing and cloning and does not claim
+ownership. Hivebox is the distinct owner-gated container distribution. Its
+auth is the GitHub device flow (ADR-036): a configured `web.github.owner` gates
+entry, while an ownerless fresh box is claimable and the first successful login
+writes
 `web.github.owner` under the global config lock. Owner-gated requests re-check
 the current owner on every request and evict old sessions when
 `web.github.owner` changes, so a repo-scoped session token cannot survive an
@@ -327,7 +328,7 @@ atomic bundle swap; same-version installs with missing assets are repaired.
 Reads render
 `Commands::Status#json_payload` snapshots; live updates flow over Turbo
 Streams, with production Action Cable accepting same-origin-as-host and
-`HIVEBOX_ORIGIN` only as an extra allow for split-origin deployments:
+`HIVE_WEB_ORIGIN` only as an extra allow for split-origin deployments:
 `StatusBroadcaster` (self-healing subscriber loop) bridges
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
 broadcast of the projects frame over solid_cable. Mutations reuse gem

@@ -31,9 +31,9 @@ codified in `CLAUDE.md`'s `## Workflow` section.
 
 ## Install
 
-Hive ships as the `hive-cli` rubygem attached to each GitHub Release,
-signed with cosign keyless attestation. All channels download the same `.gem`,
-verify the signature, run `gem install` against it, and write an
+Hive ships the `hive-cli` rubygem plus managed `hive-web-X.Y.Z.tar.gz` bundle
+in each GitHub Release. A cosign-signed checksum manifest authenticates both
+artifacts. All channels install the same `.gem` and write an
 `install-channel` marker so `hive update` delegates back to the same channel.
 Runtime gem constraints live in `hive.gemspec` and resolve from rubygems.org:
 the direct set is `thor`, `telegram-bot-ruby`, `faraday`,
@@ -80,8 +80,9 @@ bash "$tmpdir/hive-install.sh"
 For an agent-assisted install, paste the repository-root `install.md` into
 Claude Code, Codex, or Pi. It detects the host platform, chooses the channel,
 installs or repairs the QMD wiki indexer when npm is available, verifies
-`hive --version`, runs `hive daemon install --json` so the per-user daemon
-service is installed/enabled by default, offers `hive init`, and treats the
+`hive --version`, runs `hive setup --json` so the per-user daemon and default
+loopback Hive web service are installed and truthfully reported, offers
+`hive init`, and treats the
 skills package as optional marketplace content.
 
 Fresh installs use XDG locations:
@@ -114,15 +115,15 @@ wrapper/symlink themselves. The AUR package also uses an `hv -> hive` symlink;
 its `conflicts=('hive' 'apache-hive')` metadata blocks the parallel install
 before fallback aliasing is possible.
 
-Daemon autostart is part of install, not project enrollment. The bash installer
-runs `hive daemon install --json` after installing the gem. Agent-assisted
-Homebrew/AUR/manual installs run the same command after `hive --version`
-verification. If systemd-user or launchd cannot actually enable/start the unit,
-`hive daemon install --json` returns a failed envelope while leaving the written
-unit on disk for manual repair. Manual package users should run
-`hive daemon install` once after install if they did not use the agent prompt;
-package hooks cannot reliably start a per-user systemd/launchd service for every
-host setup.
+The daemon installer remains idempotent install-time infrastructure, while
+`hive setup` is the normal post-install first run. On supported Linux/macOS it
+installs/enables/starts both the daemon and Hive web services, optionally
+enrolls the current project, and returns distinct web installed, enabled,
+running, manager-available, and ready state. Package hooks cannot reliably
+start a per-user service on every host, so Homebrew/AUR caveats direct users to
+run setup. `hive setup --no-service` opts out of every web-service mutation;
+`hive setup --no-bootstrap` is diagnose-only. Windows uses WSL with systemd or
+the Hivebox container distribution rather than a separate native manager.
 
 Updates and uninstall:
 
@@ -166,10 +167,12 @@ search text, so listing copy belongs in that field and in the opening `SKILL.md`
 body for the single umbrella skill. `/hive setup` guides confirmed Hive install,
 strict `hive`/`hv` version verification, and
 `hive setup --no-init --yes --json` after approval for web/daemon provisioning
-without enrollment. Initial enrollment is a separate interactive
-`hive init .` in the user's real terminal so subscription-consuming patrol,
-architecture discovery, daemon dispatch, and babysitter defaults are reviewed;
-after setup, users pass normal CLI verbs as
+without enrollment. The result reports the effective loopback URL and
+distinct native web installed, enabled, running, and ready state alongside the
+daemon outcome. Initial enrollment is a separate interactive `hive init .` in
+the user's real terminal so subscription-consuming patrol, architecture
+discovery, daemon dispatch, and babysitter defaults are reviewed; after setup,
+users pass normal CLI verbs as
 `/hive status --operational --json`, `/hive watch <project>:<slug>
 --json-lines`, `/hive plan <slug>`, `/hive develop <slug>`, and so on.
 The current skill also covers `setup-agents`, Honeycomb workflow lifecycle,
@@ -208,14 +211,19 @@ URL is announced.
 The release ceremony exercises the published artifact end-to-end via
 [`packaging/verify-release.sh`](../packaging/verify-release.sh). The
 script installs a published release into an isolated XDG/HIVE_HOME/HOME
-tmp prefix, walks the command surface (`hive --version`, `hive doctor`,
+tmp prefix, authenticates the managed web bundle, and runs consent-approved
+managed `hive setup --no-init --yes --json` from that exact digest-pinned
+archive before walking the remaining command surface (`hive --version`, `hive doctor`,
 `hive init`, `hive new`, `hive status --json`, `hive daemon install
 [--force] --json`, `hive uninstall`), validates JSON envelopes against
 the published schemas, and asserts no state leaks outside the prefix. It also
 prepends inert `systemctl`/`launchctl` stubs inside that prefix: a rewritten
 `HOME` confines unit files but does not isolate the live per-user service
 manager, so verifier lifecycle calls must never reach the operator's actual
-Hive services.
+Hive services. The tag workflow applies the same harness before publication:
+`web-bundle` creates one tracked-file archive and digest, `proof-gate` installs
+the proven gem against those bytes, and `release-finalize` signs and publishes
+the same archive without rebuilding it.
 
 Local usage:
 
@@ -238,7 +246,7 @@ Exit codes:
 - `1` — a verification step failed; tmp prefix preserved at the
   path printed in the trailing `[verify] logs preserved at` line
 - `2` — bad arguments
-- `3` — prerequisite missing (`curl`, `ruby`, `jq`, `git`)
+- `3` — prerequisite missing (`curl`, `ruby`, `jq`, `git`, `cosign`)
 
 `--report=json` emits a single `hive-verify-release.v1` envelope on
 stdout (with human prose redirected to stderr) for programmatic
@@ -387,13 +395,13 @@ hive daemon start --detach
 
 ## Autostart
 
-`hive daemon install` writes and enables the platform daemon unit (see
-ADR-024). On Linux it lands at `~/.config/systemd/user/hive-daemon.service`;
-on macOS at `~/Library/LaunchAgents/local.hive-daemon.plist`. Installers and
-agent-assisted setup run this by default. `hive init` also idempotently ensures
+`hive setup` writes and enables the platform daemon and Hive web units by
+default (see ADR-024). On Linux they land under
+`~/.config/systemd/user/`; on macOS under `~/Library/LaunchAgents/`.
+`hive init` also idempotently ensures
 the service after project setup, but the init prompt only controls whether that
 project is enrolled for dispatch. The recipes below are the manual fallback for
-environments where the installer could not write or enable the unit (read-only
+environments where setup could not write or enable a unit (read-only
 home, restricted user, custom layout) or for migrating an existing install onto
 a newer template.
 

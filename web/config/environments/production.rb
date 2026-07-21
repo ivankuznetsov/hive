@@ -1,4 +1,6 @@
 require "active_support/core_ext/integer/time"
+require "hive/web/environment"
+require "hive/web/host_authorization"
 
 Rails.application.configure do
   # Settings specified here will take precedence over those in config/application.rb.
@@ -25,7 +27,7 @@ Rails.application.configure do
   config.active_storage.service = :local
 
   # Assume all access to the app is happening through a SSL-terminating reverse proxy.
-  # hivebox serves plain HTTP; TLS is the operator's reverse proxy / tunnel
+  # Hive web serves plain HTTP; TLS is the operator's reverse proxy / tunnel
   # (documented posture since the Sinatra tier). Cookies stay Secure-less so
   # local-network and tunnel deployments work.
   config.assume_ssl = false
@@ -82,22 +84,21 @@ Rails.application.configure do
   # Only use :id for inspections in production.
   config.active_record.attributes_for_inspect = [ :id ]
 
-  # Enable DNS rebinding protection and other `Host` header attacks.
-  # config.hosts = [
-  #   "example.com",     # Allow requests from example.com
-  #   /.*\.example\.com/ # Allow requests from subdomains like `www.example.com`
-  # ]
-  #
-  # Skip DNS rebinding protection for the default health check endpoint.
-  # config.host_authorization = { exclude: ->(request) { request.path == "/up" } }
+  # Enable the narrow Host allowlist only for the native loopback bypass. A
+  # deliberately non-loopback, GitHub-authenticated service must accept its
+  # machine IP / LAN hostname before the controller-level login gate runs.
+  configured_origin = Hive::Web::Environment.value("HIVE_WEB_ORIGIN")
+  if (allowed_hosts = Hive::Web::HostAuthorization.allowed_hosts)
+    config.hosts = allowed_hosts
+  end
 
   # Turbo Streams connect over Action Cable. Same-origin-as-host covers the
   # normal case with ZERO config — browse the box at any address and the
   # Origin header matches the Host header (also true behind proxies that
-  # forward Host). web.origin → HIVEBOX_ORIGIN remains as an explicit
+  # forward Host). web.origin → HIVE_WEB_ORIGIN remains as an explicit
   # additional allow for exotic setups where the two genuinely differ;
   # without same-origin, an unset origin silently dropped every live
   # update on any non-localhost URL — a trap on the install path.
   config.action_cable.allow_same_origin_as_host = true
-  config.action_cable.allowed_request_origins = [ ENV["HIVEBOX_ORIGIN"] ].compact
+  config.action_cable.allowed_request_origins = [ configured_origin ].compact
 end

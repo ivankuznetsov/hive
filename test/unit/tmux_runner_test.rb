@@ -356,6 +356,19 @@ class TmuxRunnerTest < Minitest::Test
     end
   end
 
+  def test_kill_session_tolerates_a_target_that_exited_during_cleanup
+    with_tmp_dir do |dir|
+      fake = write_fake_tmux(dir, <<~SH)
+        #!/bin/sh
+        echo "no current target" >&2
+        exit 1
+      SH
+      runner = Hive::TmuxRunner.new(name: unique_name("exited"), cwd: dir, tmux_bin: fake)
+
+      assert runner.kill_session
+    end
+  end
+
   def test_missing_tmux_raises_typed_error
     with_tmp_dir do |dir|
       runner = Hive::TmuxRunner.new(name: unique_name("missing"), cwd: dir, tmux_bin: "missing-tmux-for-hive")

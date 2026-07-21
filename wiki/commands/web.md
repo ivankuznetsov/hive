@@ -4,15 +4,15 @@ type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
 updated: 2026-07-20
-tags: [command, web, hivebox, rails, turbo]
+tags: [command, web, rails, turbo, hivebox-container]
 ---
 
-**TLDR**: `hive web` boots the local Hive browser UI — a vanilla **Rails 8**
-app (importmap, Turbo, Stimulus, propshaft, solid_cable) living in `web/` at
-the repo root. It is an advanced browser counterpart to the TUI over the same
-local registry and workflow state, with no mandatory sign-in. Hivebox is the
-separate owner-gated container deployment of this shared app at `/app/web`.
-The web tier adds no
+**TLDR**: `hive web` boots the default native Hive browser UI — a vanilla
+**Rails 8** app (importmap, Turbo, Stimulus, propshaft, solid_cable) living in
+`web/` at the repo root. It is the browser counterpart to the TUI over the same
+local registry and workflow state, with no mandatory sign-in on a verified
+loopback request. Hivebox is the separate owner-gated container distribution
+of the same app at `/app/web`. The web tier adds no
 pipeline logic: status reads call `Hive::Commands::Status#json_payload` (via
 `Hive::Web::StatusFeed`), gate approval calls `Hive::Commands::Approve`
 in-process, task Drop calls `Hive::Commands::Drop` in-process, stage runs go
@@ -29,7 +29,7 @@ path with separate gates.
 ## CLI
 
 `hive web [--bind] [--port]` (defaults from the `web:` config block). The
-command locates the Rails app in this order: `HIVEBOX_WEB_APP_DIR` when it
+command locates the Rails app in this order: `HIVE_WEB_APP_DIR` when it
 points at a real Rails app, the managed version-stamped app under
 `Hive::Paths.web_app_home` (refreshed when stale unless `--no-bootstrap` is
 passed), then a source checkout `web/` next to `lib/`; if none exists and
@@ -39,14 +39,14 @@ production `assets:precompile`, requires usable `application.css` and
 `application.js` entrypoints, verifies every Propshaft manifest asset resolves
 to a contained file, and only then atomically activates it. Missing or corrupt
 assets make even a same-version bundle repair itself.
-Relative `HIVEBOX_WEB_APP_DIR` values are accepted but normalized before the
+Relative `HIVE_WEB_APP_DIR` values are accepted but normalized before the
 Rails env is built, so `BUNDLE_GEMFILE` points at the real app Gemfile after
 the command changes into the app directory.
 It exports `SECRET_KEY_BASE` (derived from the same persisted
 `Hive::Web::SessionSecret` file as before — sessions survive container
-recreation), `HIVEBOX_ORIGIN` (extra Action Cable origin allow; same-origin
+recreation), `HIVE_WEB_ORIGIN` (extra Action Cable origin allow; same-origin
 host traffic is accepted without config), and
-`HIVEBOX_STORAGE_DIR` (the solid-stack sqlite files, under
+`HIVE_WEB_STORAGE_DIR` (the solid-stack sqlite files, under
 `Hive::Paths.state_home/web-storage` so they live on the `/data` mount). In
 production it guarantees a usable fingerprinted asset graph before Rails
 starts. Versioned managed bundles compile and validate assets while they are
@@ -54,11 +54,12 @@ provisioned; direct source checkouts and operator-managed app overrides run
 `bin/rails assets:precompile` at startup and refuse to boot unless the resulting
 manifest and application CSS/JavaScript entrypoints are usable. Startup
 compilation uses temporary build storage rather than the live solid-stack
-databases. It then runs
-`bin/rails db:prepare` and execs `bin/rails server`. Outside the container,
-a source checkout, or a bootstrapped managed bundle the command exits 1 with
-guidance — the gem itself does not package the Rails app
-(`test/unit/gemspec_test.rb` pins that).
+databases. It then runs `bin/rails db:prepare` and execs `bin/rails server`.
+Without a container app, source checkout, or bootstrapped managed bundle, the
+command exits 1 with guidance. Released package roots include `hive.gemspec`,
+so the managed bundle
+can resolve its path dependency without a parent source checkout; the Rails
+source itself remains a separate authenticated bundle.
 
 Hivebox keeps a separate asset lifecycle: its container image compiles and
 validates the Rails asset graph during the image build, then exports the
@@ -70,7 +71,35 @@ service using the invoked user-facing binary path; `hive web start --detach`
 starts that service and reloads systemd-user first on Linux so a unit written
 while systemd-user was unavailable becomes visible. Foreground
 `hive web start` is equivalent to `hive web`. `status --json` emits
-`hive-web-status`; `install --json` emits `hive-web-install`.
+`hive-web-status.v1`; `install --json` emits `hive-web-install.v1`. Both carry
+`mode: "managed_service"`, deduplicated environment migration warnings, and
+separate installed, enabled, running, manager availability, URL, and readiness
+state on success and pre-dispatch/runtime errors. Readiness probes the local
+managed Rails endpoint even when the advertised origin points at DNS or a
+reverse proxy. Install success requires the observed service to be installed,
+enabled, running, and ready; an inactive or active-but-not-ready service emits
+`ok: false` before the command exits non-zero. Configuration failures from
+`status --json` retain the versioned status error envelope on stdout.
+Bootstrap and service-install exceptions from `install --json` likewise emit
+exactly one versioned install error envelope, distinguished by
+`bootstrap_failed` and `service_install_failed`.
+
+## Environment compatibility
+
+`Hive::Web::Environment` is the single resolver for the six shared-app
+settings: `HIVE_WEB_APP_DIR`, `HIVE_WEB_ORIGIN`, `HIVE_WEB_STORAGE_DIR`,
+`HIVE_WEB_LOCAL_LOOPBACK`, `HIVE_WEB_DIFF_TIMEOUT_SEC`, and
+`HIVE_WEB_CLONE_TIMEOUT_SEC`. The corresponding legacy native-web aliases are
+`HIVEBOX_WEB_APP_DIR`, `HIVEBOX_ORIGIN`, `HIVEBOX_STORAGE_DIR`,
+`HIVEBOX_LOCAL_LOOPBACK`, `HIVEBOX_DIFF_TIMEOUT_SEC`, and
+`HIVEBOX_CLONE_TIMEOUT_SEC`. Blank is unset; canonical wins conflicts,
+including invalid canonical values, and old-only or both-set input warns with
+the replacement and next-major support window. Warnings are deduplicated on
+stderr, included in setup/web JSON, and exposed as doctor warning rows.
+Container-only Hivebox variables are deliberately outside this deprecated set.
+Foreground Rails receives resolved canonical timeout values even when the
+operator supplied an alias, and managed systemd/launchd units persist all six
+resolved settings so foreground and service-manager launches agree.
 
 ## Access and GitHub connection
 
@@ -94,27 +123,37 @@ an old session is still live, `ApplicationController#require_login` resets that
 session and redirects to login so the old repo-scoped token does not remain
 usable. The local dev/test seam is exempt only for tokenless local sessions.
 
-Local loopback mode is a deliberate no-auth bypass for local foreground use:
+Local loopback mode is a deliberate no-auth bypass for local native use:
 when the CLI bind address is `localhost`, `::1`, or any `127.0.0.0/8` address
-and `web.local_loopback` is not `false`, it exports `HIVEBOX_LOCAL_LOOPBACK=1`.
-Rails still checks that the actual socket peer in `REMOTE_ADDR` is loopback
-before skipping login; it deliberately ignores proxy-expanded `remote_ip` for
-this decision. A local reverse proxy such as Tailscale Serve therefore retains
-local access even when it forwards the tailnet client's address. The proxy is
-part of the security boundary: restrict/authenticate clients (for example with
-tailnet ACLs), because an unrestricted forwarder exposes the no-auth local UI.
-That connection-authenticated operator sees the complete primary navigation
-under the `hive` product identity and is labelled `Local`; GitHub-dependent
-repository browsing stays behind an explicit **Connect GitHub** action.
-Navigation state is grouped by the first segment of Rails `controller_path`,
-so namespaced task, workflow, and Telegram resource controllers retain their
-parent section's active link when they render a complete page.
-Completing that optional connection stores the login/token in the browser
-session but never claims or changes `web.github.owner`.
+and `web.local_loopback` is not `false`, foreground launches export
+`HIVE_WEB_LOCAL_LOOPBACK=1` and managed services persist the same value. An
+explicit non-loopback service bind always persists `0`, even when an inherited
+canonical or legacy environment setting enables local loopback mode, so service
+and foreground launches share the same bind safety boundary.
+Rails checks both the actual socket peer in `REMOTE_ADDR` and the authorized
+normalized Host before skipping login; it deliberately ignores proxy-expanded
+`remote_ip`, and an attacker-controlled Host is rejected even over a loopback
+socket. A local reverse proxy such as Tailscale Serve therefore retains local
+access when it connects over loopback. The proxy is part of the security
+boundary: restrict and authenticate clients, because an unrestricted forwarder
+exposes the no-auth local UI. That connection-authenticated operator sees the
+complete primary navigation under the `hive` product identity and is labelled
+`Local`; GitHub-dependent repository browsing stays behind an explicit
+**Connect GitHub** action. Navigation state is grouped by the first segment of
+Rails `controller_path`, so namespaced task, workflow, and Telegram resource
+controllers retain their parent section's active link when they render a
+complete page. Completing the optional GitHub connection stores the login and
+token in the browser session but never claims or changes `web.github.owner`.
+Outside loopback mode, native installs use the `Hive web` product identity;
+the container-only `HIVEBOX_PRECOMPILED_ASSETS=1` marker preserves the
+`hivebox` identity for the Docker distribution.
 Non-loopback binds require either `--unsafe` or a configured `web.github.owner`;
 when an owner gate authorizes a non-loopback bind, the CLI warns that
 `web.github.owner` is the only login gate, and `0.0.0.0` without an HTTPS
 origin also prints the Host-header/reverse-proxy warning.
+The production loopback allowlist is active only with the local bypass;
+deliberately non-loopback owner-gated launches accept LAN hosts and machine IPs
+so the login gate can run.
 
 ## Surfaces
 
@@ -226,7 +265,7 @@ origin also prints the Host-header/reverse-proxy warning.
   multi-MB agent log cannot pin a Puma worker every 3 seconds.
   `Task#diff` has the same bounded-subprocess discipline: it runs
   `git diff --` in its own process group, enforces
-  `HIVEBOX_DIFF_TIMEOUT_SEC` (default 15s), writes combined output to a
+  `HIVE_WEB_DIFF_TIMEOUT_SEC` (default 15s), writes combined output to a
   tempfile, and renders at most the first 512 KiB with an explicit truncation
   notice; `Tasks::DiffsController#show` only exposes that result. The model also
   owns original-idea/title resolution and the workflow-aware passable,
@@ -291,7 +330,7 @@ origin also prints the Host-header/reverse-proxy warning.
   return as an alert alongside the successful registration/settings notice
   instead of disappearing into Puma stderr. Clone runs call
   `gh repo clone` with the session token in `GH_TOKEN`, in a separate process
-  group with `HIVEBOX_CLONE_TIMEOUT_SEC` (default 180s) as a hard deadline; on
+  group with `HIVE_WEB_CLONE_TIMEOUT_SEC` (default 180s) as a hard deadline; on
   failure or timeout the partial target is removed so retry starts clean. A
   pre-existing directory is treated as a local checkout to re-init; any
   pre-existing symlink or non-directory target is a 422 refusal. The

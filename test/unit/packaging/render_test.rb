@@ -26,6 +26,7 @@ class PackagingRenderTest < Minitest::Test
     assert_includes out, 'version "0.1.1"'
     assert_includes out, %(sha256 "#{SAMPLE_SHA}")
     assert_includes out, "releases/download/v0.1.1/hive-cli-0.1.1.gem"
+    assert_includes out, 'depends_on "cosign"'
   end
 
   def test_renders_pkgbuild_with_version_and_sha
@@ -35,6 +36,7 @@ class PackagingRenderTest < Minitest::Test
     )
     assert_includes out, "pkgver=0.1.1"
     assert_includes out, "sha256sums=('#{SAMPLE_SHA}')"
+    assert_includes out, "depends=('ruby' 'cosign')"
   end
 
   def test_pkgbuild_wrapper_preserves_user_facing_binary_for_daemon_units

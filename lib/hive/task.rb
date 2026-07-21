@@ -141,6 +141,10 @@ module Hive
       meta[:depends_on]
     end
 
+    def base_branch
+      meta[:base_branch]
+    end
+
     def display_label
       display_name || slug
     end

@@ -2,13 +2,14 @@ require "test_helper"
 require "hive/config"
 require "hive/markers"
 require "hive/stages/agent"
+require "hive/stages/agent_worktree"
 
 class StagesAgentTest < Minitest::Test
   include HiveTestHelper
 
   TaskStub = Struct.new(
     :project_root, :folder, :state_file, :stage_name, :slug,
-    :stage_index, :log_dir, :project_name, :workflow,
+    :stage_index, :log_dir, :project_name, :workflow, :base_branch, :depends_on,
     keyword_init: true
   )
 
@@ -83,6 +84,91 @@ class StagesAgentTest < Minitest::Test
           refute_includes prompt, "## plan.md"
           refute_includes prompt, "old plan"
         end
+      end
+    end
+  end
+
+  def test_worktree_stage_delegates_before_generic_agent_spawn
+    with_tmp_dir do |project|
+      descriptor = worktree_workflow
+      task = task_for(project, "fix", descriptor: descriptor)
+      delegated = []
+      replacement = lambda do |received_task, cfg|
+        delegated << [ received_task, cfg ]
+        { commit: "worktree_initialized", status: :worktree_ready }
+      end
+
+      with_replaced_singleton_method(Hive::Stages::AgentWorktree, :run!, replacement) do
+        with_stubbed_spawn do |captured|
+          result = Hive::Stages::Agent.run!(task, { "fix" => { "agent" => "codex" } })
+
+          assert_equal({ commit: "worktree_initialized", status: :worktree_ready }, result)
+          assert_equal 1, delegated.length
+          assert_empty captured
+        end
+      end
+    end
+  end
+
+  def test_worktree_setup_creates_exact_receipt_and_resumes_matching_state
+    with_draft_pr_task do |task, worktree_root|
+      with_fake_github_controller do |auth_calls|
+        first = Hive::Stages::AgentWorktree.prepare!(task, {})
+        second = Hive::Stages::AgentWorktree.prepare!(task, {})
+
+        assert_equal first, second
+        assert_equal File.join(worktree_root, task.slug), first.worktree_path
+        assert_equal task.slug, first.task_branch
+        assert_equal "master", first.base_branch
+        assert_equal "github.com/acme/widgets", first.repository
+        assert_equal first.base_oid, run!("git", "-C", first.worktree_path, "rev-parse", "HEAD").strip
+        assert_equal 2, auth_calls.length, "every run and resume must re-check controller gh auth"
+
+        pointer = Hive::Worktree.read_strict_pointer(task.folder, expected_root: worktree_root)
+        receipt = Hive::DraftPrReceipt.read(task.folder, worktree_root: worktree_root)
+        assert_equal pointer.fetch("base_oid"), receipt.fetch("base_oid")
+        assert_equal pointer.fetch("path"), receipt.fetch("worktree_path")
+        assert_equal 0o600, File.stat(File.join(task.folder, "worktree.yml")).mode & 0o777
+        assert_equal 0o600, File.stat(File.join(task.folder, "handoff.yml")).mode & 0o777
+      end
+    end
+  end
+
+  def test_worktree_setup_auth_failure_creates_no_worktree
+    with_draft_pr_task do |task, worktree_root|
+      identity = ->(_path, cfg: nil) { { "host" => "github.com", "repository" => "acme/widgets" } }
+      fetch_identity = ->(_path, _cfg) { "github.com/acme/widgets" }
+      denied = ->(_cfg = nil, host: nil, timeout_sec: nil) { raise Hive::GhError, "auth denied" }
+
+      with_replaced_singleton_method(Hive::Gh, :repository_identity, identity) do
+        with_replaced_singleton_method(Hive::Stages::AgentWorktree, :controller_fetch_repository!, fetch_identity) do
+          with_replaced_singleton_method(Hive::Gh, :ensure_authenticated!, denied) do
+            assert_raises(Hive::GhError) { Hive::Stages::AgentWorktree.prepare!(task, {}) }
+          end
+        end
+      end
+
+      refute File.exist?(File.join(worktree_root, task.slug))
+      refute File.exist?(File.join(task.folder, "worktree.yml"))
+      refute File.exist?(File.join(task.folder, "handoff.yml"))
+    end
+  end
+
+  def test_worktree_setup_preserves_incomplete_resume_state_and_blocks
+    with_draft_pr_task do |task, worktree_root|
+      with_fake_github_controller do
+        context = Hive::Stages::AgentWorktree.prepare!(task, {})
+        FileUtils.rm_f(File.join(task.folder, "handoff.yml"))
+
+        error = assert_raises(Hive::WorktreeError) do
+          Hive::Stages::AgentWorktree.prepare!(task, {})
+        end
+
+        assert_includes error.message, "state is incomplete"
+        assert File.exist?(File.join(task.folder, "worktree.yml"))
+        assert File.directory?(context.worktree_path)
+        assert_equal task.slug, run!("git", "-C", context.worktree_path, "branch", "--show-current").strip
+        assert_equal File.join(worktree_root, task.slug), context.worktree_path
       end
     end
   end
@@ -756,6 +842,59 @@ class StagesAgentTest < Minitest::Test
           )
         ]
       )
+    end
+
+    def worktree_workflow
+      Hive::Workflow.new(
+        id: :worktree_agent,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "fix", index: 1, state_file: "report.md", kind: :agent,
+            workspace: :worktree, handoff: :draft_pr, deliverable: "report.md"
+          )
+        ]
+      )
+    end
+
+    def with_draft_pr_task
+      with_tmp_git_repo do |project|
+        origin = "#{project}.agent-worktree-origin.git"
+        worktree_root = "#{project}.managed-worktrees"
+        begin
+          run!("git", "clone", "--bare", project, origin)
+          run!("git", "-C", project, "remote", "add", "origin", origin)
+          FileUtils.mkdir_p(File.join(project, ".hive-state"))
+          File.write(
+            File.join(project, ".hive-state", "config.yml"),
+            { "worktree_root" => worktree_root, "default_branch" => "master" }.to_yaml
+          )
+          descriptor = worktree_workflow
+          task = task_for(project, "fix", descriptor: descriptor)
+          task.base_branch = "master"
+          task.depends_on = nil
+          yield task, worktree_root
+        ensure
+          FileUtils.rm_rf(worktree_root)
+          FileUtils.rm_rf(origin)
+        end
+      end
+    end
+
+    def with_fake_github_controller
+      auth_calls = []
+      identity = ->(_path, cfg: nil) { { "host" => "github.com", "repository" => "acme/widgets" } }
+      authenticated = lambda do |_cfg = nil, host: nil, timeout_sec: nil|
+        auth_calls << host
+        nil
+      end
+      fetch_identity = ->(_path, _cfg) { "github.com/acme/widgets" }
+      with_replaced_singleton_method(Hive::Gh, :repository_identity, identity) do
+        with_replaced_singleton_method(Hive::Stages::AgentWorktree, :controller_fetch_repository!, fetch_identity) do
+          with_replaced_singleton_method(Hive::Gh, :ensure_authenticated!, authenticated) do
+            yield auth_calls
+          end
+        end
+      end
     end
 
     def instruction_workflow(instruction_path, permissions: nil)

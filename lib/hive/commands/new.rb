@@ -14,6 +14,7 @@ require "hive/workflow_package/managed_store"
 require "hive/workflow_package/mutation_lock"
 require "hive/tui/text"
 require "hive/dependencies"
+require "hive/worktree"
 
 module Hive
   module Commands
@@ -43,6 +44,12 @@ module Hive
       class ProjectNotFound < TypedValueError; end
       class InvalidSlugError < TypedValueError; end
       class InvalidDependencyError < TypedValueError; end
+      class InvalidBaseError < TypedValueError
+        def exit_code = Hive::ExitCodes::USAGE
+      end
+      class InvalidDraftPrCombination < TypedValueError
+        def exit_code = Hive::ExitCodes::USAGE
+      end
       class SlugCollisionError < TypedValueError; end
       # Raised when an attachment's filename fails the basename/empty guard
       # in `copy_attachments!`. Distinct from `InvalidSlugError` so TUI
@@ -64,13 +71,14 @@ module Hive
       # with a raw Psych backtrace that escapes call's rescue list.
       class ProjectConfigUnreadable < TypedValueError; end
 
-      def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], depends_on: nil,
-                     workflow: nil)
+      def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], base: nil,
+                     depends_on: nil, workflow: nil)
         @project_name = project_name
         @text = text.to_s
         @slug_override = slug_override
         @body_override = body_override
         @attachments = attachments
+        @base = base
         @depends_on = depends_on
         @workflow_name = workflow
       end
@@ -96,7 +104,8 @@ module Hive
       # screen.
       def call
         call!
-      rescue ProjectNotFound, InvalidSlugError, InvalidDependencyError, InvalidAttachmentError,
+      rescue ProjectNotFound, InvalidSlugError, InvalidDependencyError, InvalidBaseError,
+             InvalidDraftPrCombination, InvalidAttachmentError,
              SlugCollisionError, UnregisteredProjectWorkflow, ProjectConfigUnreadable,
              Hive::Workflows::UnknownWorkflow,
              SystemCallError, IOError => e
@@ -123,6 +132,20 @@ module Hive
         depends_on = validate_dependency!(depends_on) if depends_on
         workflow_info = resolve_workflow(project)
         workflow = workflow_info.fetch(:descriptor)
+        draft_pr = draft_pr_workflow?(workflow)
+        if depends_on && draft_pr
+          raise InvalidDraftPrCombination.new(
+            "workflow #{workflow.id} uses draft-PR handoff and does not support --depends-on stacking",
+            value: depends_on
+          )
+        end
+        if normalize_base(@base) && !draft_pr
+          raise InvalidDraftPrCombination.new(
+            "--base is only valid for a workflow with draft-PR handoff",
+            value: @base
+          )
+        end
+        base_branch = effective_base_branch(project, workflow)
         entry_stage = workflow.stages.first
 
         hive_state = project["hive_state_path"]
@@ -142,7 +165,8 @@ module Hive
           copy_attachments!(task_dir)
           id = Hive::TaskCounter.next_or_nil
           write_task_meta(task_dir, id: id, slug: slug, depends_on: depends_on,
-                          workflow: workflow, workflow_info: workflow_info, hive_state: hive_state)
+                          base_branch: base_branch, workflow: workflow,
+                          workflow_info: workflow_info, hive_state: hive_state)
         rescue StandardError
           # An idea.md or attachment write failure leaves an orphan
           # uncommitted task on disk that the snapshot would surface as a
@@ -198,7 +222,7 @@ module Hive
         }
       end
 
-      def write_task_meta(task_dir, id:, slug:, depends_on:, workflow:, workflow_info:, hive_state:)
+      def write_task_meta(task_dir, id:, slug:, depends_on:, base_branch:, workflow:, workflow_info:, hive_state:)
         managed = workflow_info.fetch(:managed)
         managed_cfg = workflow_info.fetch(:managed_cfg, {})
         store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
@@ -212,6 +236,7 @@ module Hive
           end
           Hive::TaskMeta.write(
             task_dir, id: id, slug: slug, display_name: nil, depends_on: depends_on,
+            base_branch: base_branch,
             workflow: workflow_info.fetch(:pin) ? workflow.id.to_s : nil,
             workflow_commit: managed&.fetch("source_commit"),
             workflow_manifest_digest: managed&.fetch("manifest_digest"),
@@ -267,6 +292,41 @@ module Hive
       def normalize_workflow(value)
         string = value.to_s.strip
         string.empty? ? nil : string
+      end
+
+      def draft_pr_workflow?(workflow)
+        workflow.stages.any? { |stage| stage.handoff == :draft_pr }
+      end
+
+      def effective_base_branch(project, workflow)
+        return nil unless draft_pr_workflow?(workflow)
+
+        explicit = normalize_base(@base)
+        return validate_base!(explicit) if explicit
+
+        cfg = Hive::Config.load(project.fetch("path"))
+        detected = cfg["default_branch"].to_s.strip
+        detected = Hive::GitOps.new(project.fetch("path")).default_branch if detected.empty?
+        validate_base!(detected)
+      rescue Psych::Exception, Hive::ConfigError, SystemCallError, IOError => e
+        cfg_path = File.join(project.fetch("hive_state_path").to_s, "config.yml")
+        raise ProjectConfigUnreadable.new(
+          "could not resolve draft-PR base from #{cfg_path} (#{e.class}: #{e.message})",
+          value: cfg_path
+        )
+      end
+
+      def normalize_base(value)
+        value.to_s.strip.then { |string| string.empty? ? nil : string }
+      end
+
+      def validate_base!(value)
+        Hive::Worktree.validate_branch_name!(value)
+      rescue Hive::WorktreeError
+        raise InvalidBaseError.new(
+          "invalid base branch #{value.inspect}; pass a branch name such as main or release/next",
+          value: value
+        )
       end
 
       def derive_slug(text)

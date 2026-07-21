@@ -32,6 +32,103 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_strict_origin_creation_uses_fetched_oid_and_preserves_primary_checkout
+    with_initialized_project do |dir, root|
+      origin = "#{dir}.strict-origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin)
+        run!("git", "-C", dir, "remote", "add", "origin", origin)
+        primary_head = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+        primary_status = run!("git", "-C", dir, "status", "--porcelain=v1", "-z")
+        wt = Hive::Worktree.new(dir, "async-fix-task", worktree_root: root)
+
+        base_oid = wt.fetch_strict_origin_base!("master")
+        assert_equal :created,
+                     wt.create_strict_origin!("async-fix-task", base_branch: "master", base_oid: base_oid)
+
+        assert_equal base_oid, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+        assert_equal primary_head, run!("git", "-C", dir, "rev-parse", "HEAD").strip
+        assert_equal primary_status, run!("git", "-C", dir, "status", "--porcelain=v1", "-z")
+      ensure
+        FileUtils.rm_rf(origin)
+      end
+    end
+  end
+
+  def test_strict_origin_fetch_failure_creates_no_worktree_or_branch
+    with_initialized_project do |dir, root|
+      run!("git", "-C", dir, "remote", "add", "origin", File.join(dir, "missing.git"))
+      wt = Hive::Worktree.new(dir, "strict-failure", worktree_root: root)
+
+      assert_raises(Hive::WorktreeError) { wt.fetch_strict_origin_base!("master") }
+
+      refute File.exist?(wt.path)
+      _out, _err, status = Open3.capture3(
+        "git", "-C", dir, "show-ref", "--verify", "refs/heads/strict-failure"
+      )
+      refute status.success?
+    end
+  end
+
+  def test_strict_branch_validation_rejects_hidden_ref_components
+    assert_raises(Hive::WorktreeError) do
+      Hive::Worktree.validate_branch_name!("release/.hidden")
+    end
+  end
+
+  def test_strict_origin_creation_rejects_same_named_branch_without_deleting_it
+    with_initialized_project do |dir, root|
+      origin = "#{dir}.strict-origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin)
+        run!("git", "-C", dir, "remote", "add", "origin", origin)
+        run!("git", "-C", dir, "branch", "strict-collision")
+        branch_oid = run!("git", "-C", dir, "rev-parse", "strict-collision").strip
+        wt = Hive::Worktree.new(dir, "strict-collision", worktree_root: root)
+        base_oid = wt.fetch_strict_origin_base!("master")
+
+        error = assert_raises(Hive::WorktreeError) do
+          wt.create_strict_origin!("strict-collision", base_branch: "master", base_oid: base_oid)
+        end
+
+        assert_includes error.message, "already exists"
+        assert_equal branch_oid, run!("git", "-C", dir, "rev-parse", "strict-collision").strip
+        refute File.exist?(wt.path)
+      ensure
+        FileUtils.rm_rf(origin)
+      end
+    end
+  end
+
+  def test_strict_resume_requires_matching_branch_and_base_ancestry
+    with_initialized_project do |dir, root|
+      origin = "#{dir}.strict-origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin)
+        run!("git", "-C", dir, "remote", "add", "origin", origin)
+        wt = Hive::Worktree.new(dir, "strict-resume", worktree_root: root)
+        base_oid = wt.fetch_strict_origin_base!("master")
+        wt.create_strict_origin!("strict-resume", base_branch: "master", base_oid: base_oid)
+
+        assert_equal base_oid,
+                     wt.validate_strict_resume!(branch_name: "strict-resume", base_oid: base_oid)
+        assert_raises(Hive::WorktreeError) do
+          wt.validate_strict_resume!(branch_name: "wrong-branch", base_oid: base_oid)
+        end
+        tree = run!("git", "-C", dir, "rev-parse", "HEAD^{tree}").strip
+        unrelated = run!("git", "-C", dir, "commit-tree", tree, "-m", "unrelated").strip
+        run!("git", "-C", wt.path, "reset", "--hard", unrelated, "--quiet")
+        assert_raises(Hive::WorktreeError) do
+          wt.validate_strict_resume!(branch_name: "strict-resume", base_oid: base_oid)
+        end
+        assert_equal unrelated, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip,
+                     "a mismatched resume must preserve the unfamiliar branch state"
+      ensure
+        FileUtils.rm_rf(origin)
+      end
+    end
+  end
+
   def test_attaches_to_existing_branch
     with_initialized_project do |dir, root|
       wt1 = Hive::Worktree.new(dir, "feat-y", worktree_root: root)

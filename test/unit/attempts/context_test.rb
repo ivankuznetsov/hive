@@ -188,6 +188,21 @@ class AttemptsContextTest < Minitest::Test
     end
   end
 
+  def test_generic_approve_binds_to_the_tasks_current_stage
+    task = FakeTask.new(id: 42, slug: "task", stage_index: 1, stage_name: "inbox")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    record = {
+      "project" => "demo", "task_id" => "42", "task_slug" => "task",
+      "intended_stage" => "1-inbox"
+    }
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }) do
+      assert_nil Hive::Attempts::Context.send(
+        :validate_task_binding!, record, [ "hive", "approve", "task", "--from", "1-inbox" ]
+      )
+    end
+  end
+
   def test_legacy_opaque_generation_is_bridged_without_becoming_an_epoch
     context = Hive::Attempts::Context.send(
       :new, attempt_id: "attempt", task_generation: "opaque"

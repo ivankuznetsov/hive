@@ -27,7 +27,18 @@ module Hive
     def snapshot(root, names = ORCHESTRATOR_OWNED)
       names.each_with_object({}) do |name, h|
         path = File.join(root, name)
-        h[name] = File.exist?(path) ? ::Digest::SHA256.hexdigest(File.read(path)) : nil
+        begin
+          stat = File.lstat(path)
+          h[name] = if stat.file?
+            ::Digest::SHA256.hexdigest(File.binread(path))
+          else
+            # File type is part of the integrity snapshot. A symlink to a file
+            # with identical contents must still count as tampering.
+            "#{stat.ftype}:#{stat.symlink? ? File.readlink(path) : stat.mode}"
+          end
+        rescue Errno::ENOENT
+          h[name] = nil
+        end
       end
     end
 

@@ -9,6 +9,7 @@ require "hive/agent/message_extractor"
 require "hive/events"
 require "hive/lock"
 require "hive/permission_scope"
+require "hive/secret_patterns"
 
 module Hive
   class Agent
@@ -261,8 +262,14 @@ module Hive
       write_turn_completed = false
       plain_tail = +""
       stdin_file = prompt_stdin_file
-      File.open(log_file, "a") do |log|
-        log.puts "[hive] #{Time.now.utc.iso8601} spawn cwd=#{@cwd} cmd=#{cmd.inspect}"
+      open_private_log(log_file) do |log|
+        # Never serialize argv: for positional-prompt profiles it contains the
+        # complete task prompt, and even stdin profiles may carry sensitive
+        # identity/config arguments. Operational metadata is enough to debug
+        # which runner launched.
+        log.puts "[hive] #{Time.now.utc.iso8601} spawn " \
+                 "cwd=#{Hive::SecretPatterns.redact(@cwd)} " \
+                 "profile=#{@profile.name} executable=#{File.basename(cmd.first.to_s)} argc=#{cmd.length}"
       end
       r, w = IO.pipe
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
@@ -286,9 +293,14 @@ module Hive
       old_term = trap("TERM") { kill_group(pgid) }
 
       reader = Thread.new do
-        File.open(log_file, "a") do |log|
+        open_private_log(log_file) do |log|
           r.each_line do |line|
-            log.write("[stream] #{Time.now.utc.iso8601} #{line}")
+            # IO#each_line is the boundary buffer: provider writes can split a
+            # credential across arbitrary stdout/stderr chunks, but both
+            # streams share this pipe and are assembled before any bytes reach
+            # the durable log. Redact that assembled record first.
+            safe_line = Hive::SecretPatterns.redact(line)
+            log.write("[stream] #{Time.now.utc.iso8601} #{safe_line}")
             log.write("\n") unless line.end_with?("\n")
             log.flush
             json = parse_json_line(line)
@@ -811,6 +823,14 @@ module Hive
       FileUtils.mkdir_p(@task.log_dir)
     end
 
+    def open_private_log(path)
+      flags = File::WRONLY | File::CREAT | File::APPEND | File::NOFOLLOW
+      File.open(path, flags, 0o600) do |log|
+        File.chmod(0o600, path)
+        yield log
+      end
+    end
+
     def emit_agent_event(event_type, message:)
       Hive::Events.emit(
         task_folder: @task.folder,
@@ -818,7 +838,7 @@ module Hive
         stage: event_stage,
         agent: event_agent_label,
         event_type: event_type,
-        message: message
+        message: Hive::SecretPatterns.redact(message)
       )
     end
 

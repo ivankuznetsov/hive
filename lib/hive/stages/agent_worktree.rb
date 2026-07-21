@@ -1,6 +1,10 @@
 require "hive/config"
 require "hive/draft_pr_receipt"
 require "hive/gh"
+require "hive/protected_files"
+require "hive/stages/agent"
+require "hive/stages/agent_report"
+require "hive/stages/base"
 require "hive/worktree"
 require "open3"
 
@@ -12,18 +16,152 @@ module Hive
     module AgentWorktree
       module_function
 
+      MAX_INSTRUCTION_CHARS = 16_000
+      PROTECTED_FILES = (
+        Hive::ProtectedFiles::ORCHESTRATOR_OWNED + %w[meta.yml handoff.yml pr.md]
+      ).uniq.freeze
+
       Context = Data.define(
         :worktree_path, :task_branch, :base_branch, :base_oid, :repository
       )
 
       def run!(task, cfg)
         context = prepare!(task, cfg)
+        stage = task.workflow.stage_named(task.stage_name)
+        stage or raise Hive::StageError, "no agent stage #{task.stage_name}"
+        report_path = report_path!(task, stage)
+        prepare_report_output!(report_path)
+
+        profile = Hive::Stages::Base.stage_profile(
+          cfg || {}, task.stage_name, explicit_agent: stage.agent
+        )
+        prompt = render_prompt(task, stage, context, report_path)
+        permission_kwargs = stage.permissions.nil? ? {} : { explicit_permission_spec: stage.permissions }
+        prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
+          cfg || {}, task.stage_name, task, profile,
+          prompt: prompt,
+          base_add_dirs: [ context.worktree_path, task.folder ],
+          managed_slot: "stages.#{stage.name}",
+          **permission_kwargs
+        )
+        resource_limits = Hive::Stages::Base.stage_resource_limits(cfg || {}, stage)
+
+        validate_protected_files!(task.folder)
+        protected_before = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
+        result = nil
+        spawn_error = nil
+        begin
+          result = Hive::Stages::Base.spawn_agent(
+            task,
+            prompt: prompt,
+            add_dirs: scope.fetch(:add_dirs),
+            cwd: context.worktree_path,
+            **resource_limits,
+            log_label: task.stage_name,
+            profile: profile,
+            model: stage.model,
+            effort: stage.effort,
+            **Hive::Stages::Base.tool_scope_kwargs(scope),
+            status_mode: :exit_code_only,
+            cfg: cfg || {}
+          )
+        rescue StandardError => e
+          spawn_error = e
+        ensure
+          protected_after = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
+        end
+        tampered = Hive::ProtectedFiles.diff(protected_before, protected_after)
+        unless tampered.empty?
+          raise Hive::StageError,
+                "worktree agent modified protected task files: #{tampered.join(', ')}"
+        end
+        raise spawn_error if spawn_error
+
+        unless result.is_a?(Hash) && result[:status] == :ok
+          return (result.is_a?(Hash) ? result : { status: :error }).merge(
+            commit: nil, worktree_context: context
+          )
+        end
+
+        report = Hive::Stages::AgentReport.read(report_path)
+        repository_state = Hive::Stages::AgentReport.validate_repository!(report, context)
         {
-          commit: "worktree_initialized",
-          status: :worktree_ready,
-          worktree_context: context
+          commit: "agent_validated",
+          status: report.decision,
+          worktree_context: context,
+          report: report,
+          repository_state: repository_state,
+          agent_result: result
         }
       end
+
+      def render_prompt(task, stage, context, report_path)
+        instruction = read_instruction(stage)
+        tag = Hive::Stages::Base.user_supplied_tag
+        prior = Hive::Stages::Agent.prior_artifacts(task, File.basename(report_path))
+        Hive::Stages::Base.render(
+          "agent_worktree_prompt.md.erb",
+          Hive::Stages::Base::TemplateBindings.new(
+            worktree_path: context.worktree_path,
+            report_path: report_path,
+            instruction_body: instruction,
+            prior_context: prior,
+            user_supplied_tag: tag
+          )
+        )
+      end
+
+      def read_instruction(stage)
+        return nil unless stage.instruction
+
+        body = File.read(stage.instruction)
+        if body.length > MAX_INSTRUCTION_CHARS
+          raise Hive::StageError,
+                "worktree agent instruction exceeds #{MAX_INSTRUCTION_CHARS} characters"
+        end
+        body
+      rescue SystemCallError, IOError => e
+        raise Hive::StageError,
+              "worktree agent instruction is unreadable: #{e.class}: #{e.message}"
+      end
+      private_class_method :read_instruction
+
+      def report_path!(task, stage)
+        relative = stage.deliverable || stage.state_file
+        path = File.expand_path(File.join(task.folder, relative.to_s))
+        unless File.dirname(path) == File.expand_path(task.folder) && File.basename(path) == "fix-report.md"
+          raise Hive::StageError,
+                "draft-PR agent deliverable must be task-root fix-report.md"
+        end
+        path
+      end
+      private_class_method :report_path!
+
+      def prepare_report_output!(path)
+        stat = File.lstat(path)
+        raise Hive::StageError, "fix-report.md must be a regular file, not a symlink" if stat.symlink?
+        raise Hive::StageError, "fix-report.md must be a regular file" unless stat.file?
+
+        File.unlink(path)
+      rescue Errno::ENOENT
+        nil
+      rescue SystemCallError, IOError => e
+        raise Hive::StageError, "could not prepare fix-report.md: #{e.class}: #{e.message}"
+      end
+      private_class_method :prepare_report_output!
+
+      def validate_protected_files!(task_folder)
+        PROTECTED_FILES.each do |name|
+          stat = File.lstat(File.join(task_folder, name))
+          unless stat.file? && !stat.symlink?
+            raise Hive::StageError,
+                  "protected task file #{name} must be a regular file"
+          end
+        rescue Errno::ENOENT
+          next
+        end
+      end
+      private_class_method :validate_protected_files!
 
       def prepare!(task, cfg)
         if task.depends_on

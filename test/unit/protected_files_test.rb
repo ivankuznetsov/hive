@@ -95,4 +95,19 @@ class ProtectedFilesTest < Minitest::Test
       assert_equal Digest::SHA256.hexdigest("b\n"), snap["b.md"]
     end
   end
+
+  def test_diff_detects_regular_file_replaced_by_same_content_symlink
+    with_tmp_dir do |dir|
+      plan = File.join(dir, "plan.md")
+      target = File.join(dir, "outside.md")
+      File.write(plan, "same\n")
+      File.write(target, "same\n")
+      before = Hive::ProtectedFiles.snapshot(dir, [ "plan.md" ])
+      FileUtils.rm_f(plan)
+      File.symlink(target, plan)
+      after = Hive::ProtectedFiles.snapshot(dir, [ "plan.md" ])
+
+      assert_equal [ "plan.md" ], Hive::ProtectedFiles.diff(before, after)
+    end
+  end
 end

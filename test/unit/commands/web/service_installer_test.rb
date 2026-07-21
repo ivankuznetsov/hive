@@ -87,4 +87,90 @@ class WebServiceInstallerTest < Minitest::Test
     assert_equal "unsupported", state["platform"]
     assert_equal false, state["service_installed"]
   end
+
+  def test_restart_on_linux_reloads_systemd_then_restarts_service
+    commands = []
+    installer = Hive::Commands::Web::ServiceInstaller.new(
+      host_os: "linux",
+      runner: ->(argv) { commands << argv; true }
+    )
+
+    assert installer.restart!
+    assert_equal [
+      %w[systemctl --user daemon-reload],
+      %w[systemctl --user restart hive-web]
+    ], commands
+    assert_equal [ "restarted running web service to load the refreshed application bundle" ], installer.messages
+  end
+
+  def test_restart_on_macos_unloads_then_loads_plist
+    commands = []
+    installer = Hive::Commands::Web::ServiceInstaller.new(
+      host_os: "darwin23",
+      home: "/h",
+      runner: ->(argv) { commands << argv; true }
+    )
+
+    assert installer.restart!
+    assert_equal [
+      [ "launchctl", "unload", "/h/Library/LaunchAgents/local.hive-web.plist" ],
+      [ "launchctl", "load", "/h/Library/LaunchAgents/local.hive-web.plist" ]
+    ], commands
+    assert_equal [ "restarted running web service to load the refreshed application bundle" ], installer.messages
+  end
+
+  def test_restart_on_unsupported_platform_raises_without_running_command
+    commands = []
+    installer = Hive::Commands::Web::ServiceInstaller.new(
+      host_os: "freebsd14",
+      runner: ->(argv) { commands << argv; true }
+    )
+
+    error = assert_raises(Hive::Error) { installer.restart! }
+
+    assert_equal "hive web: could not restart managed web service", error.message
+    assert_empty commands
+    assert_empty installer.messages
+  end
+
+  def test_restart_on_linux_raises_when_systemctl_restart_fails
+    commands = []
+    installer = Hive::Commands::Web::ServiceInstaller.new(
+      host_os: "linux",
+      runner: lambda do |argv|
+        commands << argv
+        argv != %w[systemctl --user restart hive-web]
+      end
+    )
+
+    error = assert_raises(Hive::Error) { installer.restart! }
+
+    assert_equal "hive web: could not restart managed web service", error.message
+    assert_equal [
+      %w[systemctl --user daemon-reload],
+      %w[systemctl --user restart hive-web]
+    ], commands
+    assert_empty installer.messages
+  end
+
+  def test_restart_on_macos_raises_when_launchctl_load_fails
+    commands = []
+    installer = Hive::Commands::Web::ServiceInstaller.new(
+      host_os: "darwin23",
+      home: "/h",
+      runner: lambda do |argv|
+        commands << argv
+        argv[1] != "load"
+      end
+    )
+
+    error = assert_raises(Hive::Error) { installer.restart! }
+
+    assert_equal "hive web: could not restart managed web service", error.message
+    assert_equal [
+      [ "launchctl", "unload", "/h/Library/LaunchAgents/local.hive-web.plist" ],
+      [ "launchctl", "load", "/h/Library/LaunchAgents/local.hive-web.plist" ]
+    ], commands
+    assert_empty installer.messages
+  end
 end

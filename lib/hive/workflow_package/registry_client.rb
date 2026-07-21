@@ -14,6 +14,8 @@ module Hive
       def exit_code = Hive::ExitCodes::UNAVAILABLE
     end
 
+    class CatalogueUnavailable < RegistryError; end
+
     class RegistryClient
       OFFICIAL_REPOSITORY = "https://github.com/ivankuznetsov/honeycomb.git".freeze
       SOURCE = %r{\Ahoneycomb/(?<name>[a-z0-9][a-z0-9-]*)(?:@(?<ref>[^/\s]+))?\z}
@@ -24,6 +26,7 @@ module Hive
         :name, :version, :source_commit, :catalog_commit,
         :source_revision, :manifest_digest, :hive_min_version, :summary, :permissions
       )
+      CatalogueObservation = Data.define(:listed, :catalog_commit, :entry)
 
       CATALOG_SCHEMA = "honeycomb-catalog/v2".freeze
       ENTRY_KEYS = %w[
@@ -69,6 +72,39 @@ module Hive
         FileUtils.rm_rf(destination) if destination
         FileUtils.mkdir_p(destination) if destination
         raise
+      end
+
+      # Observe one immutable catalogue identity without materializing or
+      # executing package content. Absence is a successful current observation;
+      # transport failure is a distinct error so callers may label prior
+      # evidence as cached without hiding malformed catalogue data.
+      def observe(name:, version:, release_digest:)
+        unless RegistryManifest::NAME.match?(name.to_s) && RegistryManifest::SEMVER.match?(version.to_s) &&
+               Manifest::SHA256.match?(release_digest.to_s)
+          raise RegistryError, "catalogue observation identity is malformed"
+        end
+        Dir.mktmpdir("hive-honeycomb-observe-") do |checkout|
+          begin
+            git!("clone", "--quiet", "--no-checkout", "--", @repository, checkout)
+            commit = git!("-C", checkout, "rev-parse", "HEAD").strip
+            validate_full_sha!(commit, "catalog commit")
+            bytes = git!("-C", checkout, "show", "#{commit}:catalog.json", binary: true)
+          rescue RegistryError => e
+            raise CatalogueUnavailable, e.message
+          end
+          catalog = parse_catalog(bytes)
+          entry = catalog.fetch("entries").find do |candidate|
+            candidate["name"] == name && candidate["version"] == version
+          end
+          return CatalogueObservation.new(listed: false, catalog_commit: commit, entry: nil).freeze unless entry
+          actual = entry.dig("listing_approval", "release_sha256")
+          unless actual == release_digest
+            raise RegistryError, "catalogue immutable release digest conflicts with the publication"
+          end
+          CatalogueObservation.new(
+            listed: entry["state"] == "listed", catalog_commit: commit, entry: entry.freeze
+          ).freeze
+        end
       end
 
       def parse_source(source)

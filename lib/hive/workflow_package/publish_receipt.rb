@@ -94,8 +94,10 @@ module Hive
       end
 
       def observe(state:, observed_at:, pr_url: nil, pr_number: nil)
+        state = state.to_s
+        validate_transition!(observation && observation.fetch("state"), state)
         observation = {
-          "state" => state.to_s, "freshness" => "current", "observed_at" => observed_at.to_s
+          "state" => state, "freshness" => "current", "observed_at" => observed_at.to_s
         }
         observation["pr_url"] = pr_url if pr_url
         observation["pr_number"] = pr_number if pr_number
@@ -130,6 +132,17 @@ module Hive
       end
 
       private
+
+      def validate_transition!(from, to)
+        allowed = {
+          nil => STATES,
+          "pending_review" => %w[pending_review merged_pending_listing listed closed_unmerged],
+          "merged_pending_listing" => %w[merged_pending_listing listed],
+          "listed" => %w[listed],
+          "closed_unmerged" => %w[closed_unmerged]
+        }
+        fail!("lifecycle observation cannot move backwards") unless allowed.fetch(from, []).include?(to)
+      end
 
       def validate_lint_contract!
         contract = data["lint_contract"]

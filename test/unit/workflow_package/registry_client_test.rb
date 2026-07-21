@@ -28,6 +28,33 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
     end
   end
 
+  def test_observes_exact_catalogue_identity_without_materializing_package
+    with_registry do |repository, _source_revision, catalog_commit|
+      client = Hive::WorkflowPackage::RegistryClient.new(repository: repository)
+      manifest = YAML.safe_load(File.read(File.join(repository, "packages", "demo", "1.0.0", "manifest.yml")))
+      exact = client.observe(
+        name: "demo", version: "1.0.0", release_digest: manifest.fetch("release_sha256")
+      )
+      absent = client.observe(name: "demo", version: "9.0.0", release_digest: "a" * 64)
+
+      assert exact.listed
+      assert_equal catalog_commit, exact.catalog_commit
+      refute absent.listed
+      assert_nil absent.entry
+    end
+  end
+
+  def test_catalogue_observation_rejects_digest_mismatch
+    with_registry do |repository, _source_revision, _catalog_commit|
+      error = assert_raises(Hive::WorkflowPackage::RegistryError) do
+        Hive::WorkflowPackage::RegistryClient.new(repository: repository).observe(
+          name: "demo", version: "1.0.0", release_digest: "a" * 64
+        )
+      end
+      assert_match(/digest conflicts/, error.message)
+    end
+  end
+
   def test_rejects_external_namespace_mutable_and_unlisted_refs
     with_registry do |repository, _source_revision, _catalog_commit|
       client = Hive::WorkflowPackage::RegistryClient.new(repository: repository)

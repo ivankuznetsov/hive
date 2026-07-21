@@ -35,4 +35,6 @@ errors so Thor does not truncate unrelated command summaries. The typed act
 envelope now also classifies `AmbiguousSlug` before its `InvalidTaskPath`
 parent, preserving the closed `ambiguous_target` error vocabulary. Defensive
 coverage now exercises watch input/source boundaries, skill inventory and
-publication failures, scheduler snapshot joins, and recovery fallbacks.
+publication failures, scheduler snapshot joins, and recovery fallbacks. The
+TUI snapshot mirrors the additive `observation_mtime` field as well, preserving
+its one-to-one compatibility-status mapping for both current and older payloads.

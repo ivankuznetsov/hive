@@ -136,6 +136,7 @@ module Hive
       end
 
       def validate_managed_workflow(workflow, diagnostics, registry: false)
+        validate_managed_stage_contracts(workflow, diagnostics)
         workflow.executable_slots.each do |slot|
           actor = slot.actor
           if actor.permissions.nil?
@@ -159,6 +160,32 @@ module Hive
               "policy.external_skill", "workflow.yml", external_skill_message(slot.kind)
             )
           end
+        end
+      end
+
+      # DescriptorParser rejects these shapes for every authored workflow. Keep
+      # the stricter managed boundary defensive as well so a programmatically
+      # constructed Workflow cannot smuggle an unknown or misplaced capability
+      # into package admission.
+      def validate_managed_stage_contracts(workflow, diagnostics)
+        last_index = workflow.stages.length - 1
+        workflow.stages.each_with_index do |stage, index|
+          if stage.workspace &&
+             (stage.workspace != :worktree || stage.kind != :agent || index != last_index)
+            diagnostics << diagnostic(
+              "workspace.invalid_contract", "workflow.yml",
+              "stage #{stage.name} workspace must be worktree on the terminal agent stage"
+            )
+          end
+
+          next unless stage.handoff
+          next if stage.handoff == :draft_pr && stage.kind == :agent &&
+                  index == last_index && stage.workspace == :worktree && stage.deliverable
+
+          diagnostics << diagnostic(
+            "handoff.invalid_contract", "workflow.yml",
+            "stage #{stage.name} handoff must be draft_pr on a terminal worktree agent stage with an explicit deliverable"
+          )
         end
       end
 

@@ -99,13 +99,14 @@ module Hive
       :name, :index, :state_file, :advance_verb, :kind, :skill, :instruction,
       :permissions, :status_mode, :budget_usd, :timeout_sec, :capability,
       :agent, :model, :effort, :input, :reviewers, :council, :deliverable,
-      :condition_policy, :mapping_role, :mapping_contract
+      :workspace, :handoff, :condition_policy, :mapping_role, :mapping_contract
     ) do
       def initialize(name:, index:, state_file:, advance_verb: nil, kind: nil,
                      skill: nil, instruction: nil, permissions: nil,
                      status_mode: nil, budget_usd: nil, timeout_sec: nil,
                      capability: nil, agent: nil, model: nil, effort: nil,
                      input: nil, reviewers: nil, council: nil, deliverable: nil,
+                     workspace: nil, handoff: nil,
                      condition_policy: nil, mapping_role: nil, mapping_contract: nil)
         super
       end

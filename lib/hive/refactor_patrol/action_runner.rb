@@ -6,6 +6,7 @@ require "uri"
 require "hive/gh"
 require "hive/lock"
 require "hive/refactor_patrol/canonical_action_catalog"
+require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/family_store"
 require "hive/refactor_patrol/fixer"
 require "hive/refactor_patrol/issue_filer"
@@ -297,8 +298,9 @@ module Hive
 
       def reconstruct_entries(aggregate)
         errors = []
-        entries = JobStore::DISPOSITIONS.to_h do |name|
-          reconstructed = aggregate.dig("dispositions", name).filter_map do |item|
+        entries = JobStore::DISPOSITIONS.to_h { |name| [ name, [] ] }
+        JobStore::DISPOSITIONS.each do |name|
+          aggregate.dig("dispositions", name).each do |item|
             snapshot = item["thesis"]
             unless snapshot.is_a?(Hash)
               errors << event(
@@ -310,11 +312,8 @@ module Hive
               next
             end
 
-            {
-              disposition: name,
-              item: item,
-              thesis: Thesis.from_h(json_copy(snapshot))
-            }
+            entry = reconstructed_entry(name, item, snapshot)
+            entries.fetch(entry.fetch(:disposition)) << entry
           rescue KeyError, ArgumentError => e
             errors << event(
               "invalid_thesis_snapshot",
@@ -322,23 +321,27 @@ module Hive
               disposition: name,
               error: e.message
             )
-            nil
           end
-          [ name, reconstructed ]
         end
         [ entries, errors ]
+      end
+
+      def reconstructed_entry(disposition, item, snapshot)
+        disposition = @job_store.effective_disposition(disposition, item)
+        thesis = Thesis.from_h(json_copy(snapshot))
+        normalized_item = json_copy(item)
+        normalized_item["reasons"] = Caps.without_legacy_size_flags(normalized_item["reasons"])
+        thesis.risk ||= {}
+        thesis.risk["flags"] = Caps.without_legacy_size_flags(thesis.risk["flags"])
+        normalized_item["thesis"] = thesis.to_h
+        { disposition: disposition, item: normalized_item, thesis: thesis }
       end
 
       def issue_candidates(entries, policy)
         return [] unless policy.fetch("issue_filing")
 
         flagged = entries.fetch("flagged").select { |entry| strategic_flagged?(entry) }
-        accepted = if policy.fetch("auto_fix")
-          entries.fetch("accepted")
-        else
-          []
-        end
-        flagged + accepted
+        flagged + entries.fetch("accepted")
       end
 
       def strategic_flagged?(entry)
@@ -477,6 +480,7 @@ module Hive
           return finish_local_issue(aggregate, action, route.fetch(:outcome)) if route.fetch(:outcome)
         end
 
+        remote_continuation = remote_continuation_evidence?(action)
         token = claim_action(aggregate, action)
         unless token
           current = @job_store.read_job(aggregate.fetch("job_id"))
@@ -511,7 +515,10 @@ module Hive
         if action.fetch("kind") == "fix"
           process_fix(token, aggregate, action, entry.fetch(:thesis))
         else
-          process_issue(token, aggregate, action, entry.fetch(:thesis), route.fetch(:reasons))
+          process_issue(
+            token, aggregate, action, entry.fetch(:thesis), route.fetch(:reasons),
+            remote_continuation: remote_continuation
+          )
         end
       rescue JobStore::StaleClaim
         raise
@@ -631,7 +638,7 @@ module Hive
         settle(token, result, adapter: :pr)
       end
 
-      def process_issue(token, aggregate, action, thesis, reasons)
+      def process_issue(token, aggregate, action, thesis, reasons, remote_continuation: false)
         if (denial = transition_denial_reason(token, "issue", aggregate))
           release(token, denial)
           return
@@ -652,13 +659,18 @@ module Hive
           reasons: reasons,
           record_intent: publication_intent_callback(token, "issue", aggregate, action),
           authorize_create: external_effect_fence(token, "issue"),
-          creation_attempted: publication.any?,
+          creation_attempted: publication.any? || remote_continuation ||
+            remote_continuation_evidence?(fresh_action),
           publication_state: publication
         )
         settle(token, result, adapter: :issue)
       end
 
       def issue_route(aggregate, action, entry)
+        if remote_continuation_evidence?(action)
+          return { outcome: nil, reasons: Array(entry.dig(:item, "reasons")) }
+        end
+
         family_id = action["family_id"]
         fixes = aggregate.fetch("actions").select do |candidate|
           next false unless candidate.fetch("kind") == "fix"
@@ -681,6 +693,9 @@ module Hive
           return { outcome: nil, reasons: Array(entry.dig(:item, "reasons")) }
         end
         if fixes.empty?
+          if aggregate.dig("policy", "auto_fix") == false
+            return { outcome: nil, reasons: [ "auto_fix_disabled" ] }
+          end
           return { outcome: "issue_not_needed", reasons: [] }
         end
 
@@ -941,13 +956,29 @@ module Hive
         return false unless patch.validation.is_a?(Hash) && patch.validation["passed"] == true
         return false unless patch.changed_paths.is_a?(Array) && patch.changed_paths.any? &&
                             patch.changed_paths == patch.changed_paths.uniq &&
-                            patch.changed_paths.all? { |path| nonempty?(path) }
+                            patch.changed_paths.all? { |path| valid_patch_path?(path) }
         return false unless patch.diff_lines.is_a?(Integer) && patch.diff_lines.positive?
         return false unless patch.details.is_a?(Hash)
+        # A persisted patch receipt may outlive the configuration that allowed
+        # it to cross the mapped feature boundary. Revalidate publication
+        # against the captured/current intersection prepared for this run so a
+        # live revocation still fences an already-generated patch.
+        caps = @policy_result&.config&.dig("refactor_patrol", "caps")
+        if caps.is_a?(Hash) && caps["allow_cross_feature"] == true
+          return true
+        end
 
         boundary = Array(thesis.feature_boundary && thesis.feature_boundary["owned_files"]) +
                    Array(thesis.feature_boundary && thesis.feature_boundary["entrypoints"])
         (patch.changed_paths - boundary).empty?
+      end
+
+      def valid_patch_path?(value)
+        return false unless nonempty?(value) && !value.include?("\\")
+
+        path = Pathname.new(value)
+        path.relative? && path.cleanpath.to_s == value &&
+          path.each_filename.none? { |part| part == ".." }
       end
 
       def expected_fix_branch(canonical_action_id)
@@ -1075,11 +1106,7 @@ module Hive
             snapshot = item["thesis"]
             next unless snapshot.is_a?(Hash)
 
-            index[item.fetch("id")] = {
-              disposition: name,
-              item: item,
-              thesis: Thesis.from_h(json_copy(snapshot))
-            }
+            index[item.fetch("id")] = reconstructed_entry(name, item, snapshot)
           end
         end
       end
@@ -1237,7 +1264,8 @@ module Hive
         receipts = action.fetch("receipts")
         receipts["creation_intent"].is_a?(Hash) || nonempty?(receipts["pr_url"]) ||
           nonempty?(receipts["issue_url"]) || nonempty?(receipts["review_task_path"]) ||
-          publication_phase_evidence?(receipts)
+          publication_phase_evidence?(receipts) ||
+          action["outcome"].to_s.match?(/remote_outcome_unknown|pr_opened|handoff|merged/)
       end
 
       def publication_phase_evidence?(receipts)

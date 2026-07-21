@@ -33,6 +33,24 @@ class GemspecTest < Minitest::Test
     assert_includes spec.files, "config/agent-skills.yml"
   end
 
+  def test_gem_package_includes_every_canonical_hive_skill_asset
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+    root = File.expand_path("../..", __dir__)
+    expected = Dir.glob(File.join(root, "skills", "hive", "**", "*"), File::FNM_DOTMATCH)
+                  .select { |path| File.file?(path) }
+                  .map { |path| path.delete_prefix("#{root}/") }
+
+    refute_empty expected
+    expected.each { |path| assert_includes spec.files, path }
+  end
+
+  def test_gem_package_includes_metadata_for_managed_web_path_dependency
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+
+    assert_includes spec.files, "hive.gemspec",
+                    "an installed hive-cli root must remain a valid Bundler path dependency"
+  end
+
   def test_gem_executables_exclude_bash_hv_launcher
     spec = Gem::Specification.load(GEMSPEC_PATH)
 

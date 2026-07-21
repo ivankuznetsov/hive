@@ -1,4 +1,4 @@
-<% content_for(:title, "hivebox — project setup") %>
+<% content_for(:title, "#{web_product_name} — project setup") %>
 <h1>Project setup</h1>
 <% if @project_name %>
   <p class="muted">Re-running setup for <strong><%= @project_name %></strong> — the same questions <code>hive init</code> asks, applied to the existing checkout.</p>
@@ -127,11 +127,12 @@
         <label class="check">
           <%= hidden_field_tag "settings[refactor_patrol_enabled]", "0" %>
           <%= check_box_tag "settings[refactor_patrol_enabled]", "1", @defaults["refactor_patrol_enabled"] %>
-          Architecture patrol discovery (recommended)
+          Architecture patrol (recommended)
         </label>
         <p class="muted">
           Reviews future merged PRs for architectural refactor opportunities.
-          Discovery is read-only; auto-fixing and GitHub issue filing stay disabled.
+          Accepted findings attempt confined fixes and pull requests; GitHub issues
+          remain the fallback review surface when no safe fix ships.
         </p>
       <% end %>
     </div>

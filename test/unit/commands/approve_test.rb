@@ -11,6 +11,31 @@ class HiveCommandsApproveTest < Minitest::Test
     Hive::Commands::Approve.new("slug", **kwargs)
   end
 
+  def test_observation_guard_runs_under_commit_and_task_locks_before_move
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "2-brainstorm", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "brainstorm.md"), "# state\n<!-- COMPLETE -->\n")
+      current = task(folder: source, hive_state_path: state, project_root: root)
+      guarded = command(
+        observation_guard: lambda do |observed|
+          assert_same current, observed
+          assert File.exist?(File.join(state, ".commit-lock"))
+          assert File.exist?(File.join(source, ".lock"))
+          raise Hive::StaleOperationalObservation, "rotated"
+        end
+      )
+
+      assert_raises(Hive::StaleOperationalObservation) do
+        guarded.send(:perform_move_and_commit, current, "3-plan")
+      end
+      assert File.directory?(source), "guard failure must leave the source task in place"
+      refute File.exist?(File.join(source, ".lock")), "guard failure must release the task lock"
+      refute File.exist?(File.join(state, "stages", "3-plan", current.slug))
+    end
+  end
+
   def task(folder: "/tmp/task", hive_state_path: "/tmp/state", project_root: "/tmp/project",
            stage_index: 2, stage_name: "brainstorm", workflow: Hive::Workflows::Registry.default)
     FakeTask.new("slug-260522-abcd", stage_index, stage_name, folder, hive_state_path, project_root, workflow)
@@ -54,6 +79,22 @@ class HiveCommandsApproveTest < Minitest::Test
     end
 
     assert_equal "", out
+  end
+
+  def test_emit_envelope_preserves_json_generation_failure
+    cmd = command(json: true)
+
+    with_replaced_singleton_method(JSON, :generate, lambda { |_payload|
+      raise JSON::GeneratorError, "bad json"
+    }) do
+      out, err = capture_io do
+        assert_raises(JSON::GeneratorError) do
+          cmd.send(:emit_envelope, Hive::Error.new("boom"))
+        end
+      end
+      assert_empty out
+      assert_empty err
+    end
   end
 
   def test_direction_of_reports_same_stage
@@ -172,7 +213,7 @@ class HiveCommandsApproveTest < Minitest::Test
       }
     )
 
-    out, = capture_io { command.send(:emit_error_envelope, error) }
+    out, = capture_io { command.send(:emit_envelope, error) }
     payload = JSON.parse(out)
     assert_equal "blocked", payload.dig("condition_gate", "status")
     assert_equal "ChangesPresent",
@@ -225,59 +266,6 @@ class HiveCommandsApproveTest < Minitest::Test
       refute Dir.exist?(dst), "partial destination must be cleaned"
     ensure
       FileUtils.singleton_class.define_method(:cp_r, original) if original
-    end
-  end
-
-  def test_audit_and_move_roll_back_together_when_commit_fails
-    Dir.mktmpdir("hive-approve-audit") do |root|
-      state = File.join(root, ".hive-state")
-      source = File.join(state, "stages", "2-brainstorm", "slug-260522-abcd")
-      destination = File.join(state, "stages", "3-plan", "slug-260522-abcd")
-      FileUtils.mkdir_p(File.dirname(destination))
-      FileUtils.mkdir_p(source)
-      File.write(File.join(source, "events.jsonl"), "{\"event_type\":\"stage_enter\"}\n")
-      File.write(File.join(source, "status.md"), "before\n")
-      FileUtils.mv(source, destination)
-      approve_task = task(folder: source, hive_state_path: state, project_root: root)
-      cmd = command(audit: { actor: "alice", request_id: "req-rollback" })
-      cmd.define_singleton_method(:record_hive_commit) { |*| raise Hive::GitError, "commit failed" }
-
-      assert_raises(Hive::GitError) do
-        cmd.send(
-          :record_commit_or_rollback!, approve_task, "3-plan", destination,
-          "approve 2-brainstorm -> 3-plan", direction: "forward"
-        )
-      end
-
-      assert File.directory?(source)
-      refute File.exist?(destination)
-      assert_equal "{\"event_type\":\"stage_enter\"}\n", File.read(File.join(source, "events.jsonl"))
-      assert_equal "before\n", File.read(File.join(source, "status.md"))
-    end
-  end
-
-  def test_moved_task_lock_survives_through_audit_and_commit
-    Dir.mktmpdir("hive-approve-lock-lifetime") do |root|
-      state = File.join(root, ".hive-state")
-      source = File.join(state, "stages", "2-brainstorm", "slug-260522-abcd")
-      destination = File.join(state, "stages", "3-plan", "slug-260522-abcd")
-      FileUtils.mkdir_p(source)
-      File.write(File.join(source, "brainstorm.md"), "# task\n")
-      current = task(folder: source, hive_state_path: state, project_root: root)
-      cmd = command
-      observed_lock = false
-      cmd.define_singleton_method(:record_commit_or_rollback!) do |_task, _stage, moved, _action, direction:|
-        observed_lock = File.file?(File.join(moved, ".lock")) && direction == "forward"
-      end
-
-      moved, = cmd.send(
-        :perform_move_and_commit_under_lock, current, "3-plan",
-        enforce_admission: false, direction: "forward"
-      )
-
-      assert observed_lock, "the destination lock must cover audit and commit"
-      assert_equal destination, moved
-      refute File.exist?(File.join(destination, ".lock")), "the transaction must clean its moved lock"
     end
   end
 
@@ -447,7 +435,7 @@ class HiveCommandsApproveTest < Minitest::Test
     assert_equal "error", cmd.send(:error_kind_for, Hive::Error.new("generic"))
 
     out, _err = capture_io do
-      cmd.send(:emit_error_envelope, StandardError.new("plain"))
+      cmd.send(:emit_envelope, StandardError.new("plain"))
     end
     payload = JSON.parse(out)
     assert_equal "error", payload.fetch("error_kind")

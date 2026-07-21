@@ -18,6 +18,7 @@ module Hive
     # and future runners can swap this out without touching orchestration.
     class ReviewAgentRunner
       STAGE = "refactor-patrol-review".freeze
+      RAW_FINAL_MESSAGE_BASENAME = "final-message.txt".freeze
 
       def initialize(project_root:, cfg:, state:, dry_run: false, read_only: false,
                      token_budget: nil)
@@ -44,7 +45,12 @@ module Hive
         scope = read_only_scope(profile)
         launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :review)
         unless @token_budget.acquire(stage: STAGE, minimum_tokens: launch.fetch(:minimum_tokens))
-          return { status: :error, error_message: @token_budget.exhaustion_message }
+          exhaustion = @token_budget.resource_exhaustion if @token_budget.respond_to?(:resource_exhaustion)
+          return {
+            status: :error,
+            error_message: @token_budget.exhaustion_message,
+            resource_exhaustion: exhaustion
+          }
         end
         started_at = Time.now.utc
         result = nil
@@ -106,17 +112,41 @@ module Hive
       end
 
       def materialize_read_only_output(result, output_path)
-        return result unless result.is_a?(Hash) && result[:status] == :ok
+        return result unless result.is_a?(Hash)
 
-        doc = JSON.parse(result[:final_message].to_s)
+        raw = result[:final_message].to_s
+        persist_raw_final_message(raw, output_path) if result.key?(:final_message)
+        return result unless result[:status] == :ok
+
+        doc = JSON.parse(read_only_json_body(raw))
         unless doc.is_a?(Hash) && doc["theses"].is_a?(Array)
           raise JSON::ParserError, "read-only review final message must be an object with a theses array"
         end
-        FileUtils.mkdir_p(File.dirname(output_path))
         File.write(output_path, "#{JSON.generate(doc)}\n")
         result
       rescue JSON::ParserError => e
         result.merge(status: :error, error_message: "invalid read-only review output: #{e.message}")
+      end
+
+      def persist_raw_final_message(raw, output_path)
+        FileUtils.mkdir_p(File.dirname(output_path))
+        File.write(File.join(File.dirname(output_path), RAW_FINAL_MESSAGE_BASENAME), raw)
+      end
+
+      # Claude occasionally wraps an otherwise exact JSON response in one
+      # Markdown JSON fence and adds rationale before or after it. Treat the
+      # single fenced document as canonical while rejecting another fence,
+      # which would make the structured result ambiguous.
+      def read_only_json_body(raw)
+        stripped = raw.to_s.strip
+        match = /(?:\A|\r?\n)[ \t]*```(?:json)?[ \t]*\r?\n(?<body>.*?)\r?\n```[ \t]*(?=\r?\n|\z)/im.match(stripped)
+        return stripped unless match
+
+        remainder = stripped.dup
+        remainder[match.begin(0)...match.end(0)] = ""
+        return stripped if /(?:\A|\r?\n)[ \t]*(?:```|~~~)/.match?(remainder)
+
+        match[:body]
       end
 
       def resource_limited_with_final_message?(result)

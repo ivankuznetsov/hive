@@ -4,18 +4,20 @@ require "timeout"
 
 require "hive"
 require "hive/config"
+require "hive/invoked_binary"
 require "hive/agent_profiles"
 require "hive/agent_profiles/claude"
 require "hive/agent_profiles/codex"
 require "hive/agent_profiles/pi"
 require "hive/claude_launcher"
 require "hive/agent_skills/inspector"
+require "hive/web/environment"
 
 module Hive
   module Commands
     # `hive doctor` is the read-only renderer for AgentSkills::Inspector.
-    # Managed skill rows combine bounded native CLI inventory with the exact
-    # filesystem resolver used at runtime; legacy tmux/QMD/config advisories
+    # Managed skill rows combine filesystem-only native inventory with the
+    # exact filesystem resolver used at runtime; legacy tmux/QMD/config advisories
     # remain separate. `--json` emits the typed hive-doctor.v2 envelope.
     class Doctor
       EXIT_SUCCESS = 0
@@ -29,20 +31,19 @@ module Hive
       attr_reader :rows
 
       def initialize(config:, project_root:, json: false, output: $stdout,
-                     inspector: nil, inspector_runner: Hive::AgentSkills::CommandRunner.new,
-                     environment: ENV)
+                     inspector: nil, environment: ENV)
         @config = config
         @project_root = project_root
         @json = json
         @output = output
         @inspector = inspector
-        @inspector_runner = inspector_runner
         @environment = environment
         @rows = nil
       end
 
       def call
-        legacy_rows = check_tmux + check_llm_wiki_qmd + check_legacy_brainstorm_runtime
+        legacy_rows = check_tmux + check_llm_wiki_qmd + check_legacy_brainstorm_runtime +
+                      check_web_environment_aliases
         managed_rows = managed_skill_rows
         @rows = legacy_rows + managed_rows
         if @json
@@ -77,8 +78,9 @@ module Hive
         inspector = @inspector || Hive::AgentSkills::Inspector.new(
           config: @config,
           project_root: @project_root,
-          runner: @inspector_runner,
-          environment: @environment
+          environment: @environment,
+          include_openclaw: true,
+          native_commands: false
         )
         inspector.inspect.map { |inspection| managed_row(inspection) }
       end
@@ -211,11 +213,7 @@ module Hive
       end
 
       def which(name)
-        ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
-          path = File.join(dir, name)
-          return path if File.file?(path) && File.executable?(path)
-        end
-        nil
+        Hive::InvokedBinary.which(name)
       end
 
       def first_diagnostic_line(*parts)
@@ -251,6 +249,23 @@ module Hive
                    "  claude:\n    mode: tmux"
         )
         rows
+      end
+
+      def check_web_environment_aliases
+        Hive::Web::Environment.warnings(environment: @environment).map do |warning|
+          warning_row(
+            stage: "web",
+            label: "web/environment",
+            agent: "environment",
+            configured_skill: warning.fetch("alias"),
+            skill: warning.fetch("replacement"),
+            message: warning.fetch("message")
+          ).merge(
+            alias: warning.fetch("alias"),
+            replacement: warning.fetch("replacement"),
+            ignored: warning.fetch("ignored")
+          )
+        end
       end
 
       def legacy_brainstorm_runtime_present?

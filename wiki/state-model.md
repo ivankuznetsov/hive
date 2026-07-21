@@ -82,7 +82,7 @@ Task ids are allocated from the global counter file `<state_home>/task-counter.y
 next_id: 2
 ```
 
-`TaskCounter.peek` returns `1` on missing/corrupt input; `seed_at_least!` can advance the next id without moving it backwards. `hive new` treats counter lock contention as fail-soft: it writes `meta.yml` with `id: null` and still captures the task. `hive migrate` seeds the counter above existing sidecar ids before assigning new ones.
+`TaskCounter.peek` returns `1` on missing/corrupt input; `seed_at_least!` can advance the next id without moving it backwards. Capture paths (`hive new`, ad-hoc review, and patrol review handoff) use `next_or_nil`: counter lock contention writes `meta.yml` with `id: null` and preserves the already-created task for daemon backfill. `hive migrate` and the backfiller keep strict `next!` allocation; migration seeds the counter above existing sidecar ids before assigning new ones.
 
 ## Slug grammar
 
@@ -102,7 +102,7 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 | `<!-- COMPLETE -->` | stage finished, ready for `mv` to next stage | brainstorm/plan/open-pr/finalize agents; `done` runner |
 | `<!-- AGENT_WORKING pid=N started=ISO -->` | claude subprocess is running right now | `Hive::Agent#run!` pre-spawn |
 | `<!-- ERROR reason=... marker_id=<hex16> -->` | runner or launcher detected timeout, non-zero exit, concurrent edit, protected-file tamper, tmux session loss, or a stage-specific preflight failure; `Markers.set` generates `marker_id` for new `ERROR` markers | `Hive::Agent#handle_exit`, `Hive::ClaudeLauncher`, stage runners |
-| `<!-- ERROR reason=limits_reached provider=<agent>? message="limits reached for <agent>: ..." retry_after=<iso8601> marker_id=<hex16> -->` | provider account/rate/quota limit surfaced by agent stdout/stderr or a Claude tmux pane menu; used to avoid masking account exhaustion as `timeout`, `exit_code`, `tmux_session_terminated`, `implementer_failed`, or "interactive prompt did not become ready". When the captured provider text includes a complete dated reset hint (month, day, year, and time), `Hive::AgentLimit.retry_after` uses that boundary plus a one-minute grace; ambiguous time-only text and unparseable/expired/implausibly distant dates fall back to `now + RETRY_COOLDOWN_SEC` (default 1h, env `HIVE_LIMITS_RETRY_COOLDOWN_SEC`). Tmux parsing bounds this input to the live matched limit line and adjacent menu/reset lines, excluding unrelated transcript dates; all-reviewer failures use the latest captured provider boundary. The stamp lets the daemon healer wait for the real usage window instead of burning its bounded retries hourly or staying red until manual `hive markers clear` — see [[daemon]]. `4-execute` stamps `provider=<execute-agent>` because its runner owns the final marker in `:exit_code_only` mode; older agent/launcher writers may only expose the provider in `message=`. | `Hive::Agent#handle_exit`, `Hive::ClaudeLauncher`, `Stages::Execute#run_pass` |
+| `<!-- ERROR reason=limits_reached provider=<agent>? message="limits reached for <agent>: ..." retry_after=<iso8601> marker_id=<hex16> -->` | provider account/rate/quota limit surfaced by agent stdout/stderr or a Claude tmux pane menu; used to avoid masking account exhaustion as `timeout`, `exit_code`, `tmux_session_terminated`, `implementer_failed`, or "interactive prompt did not become ready". When the captured provider text includes a complete dated reset hint (month, day, year, and time), `Hive::AgentLimit.retry_after` preserves that boundary plus a one-minute grace for operator display; ambiguous time-only text and unparseable/expired/implausibly distant dates fall back to `now + RETRY_COOLDOWN_SEC` (default 1h, env `HIVE_LIMITS_RETRY_COOLDOWN_SEC`). Tmux parsing bounds this input to the live matched limit line and adjacent menu/reset lines, excluding unrelated transcript dates; all-reviewer failures display the latest captured provider boundary. Daemon scheduling does not trust the date as an embargo: it retries one cooldown interval after the latest marker mtime, indefinitely, so usage resets, top-ups, and account switches can recover early. `4-execute` stamps `provider=<execute-agent>` because its runner owns the final marker in `:exit_code_only` mode; older agent/launcher writers may only expose the provider in `message=`. | `Hive::Agent#handle_exit`, `Hive::ClaudeLauncher`, `Stages::Execute#run_pass` |
 | `<!-- ERROR reason=ensure_clean_on_exit_failed residue_paths=<rel,paths> marker_id=<hex16> -->` | the clean-exit invariant (`Hive::Stages::CleanExit`, gated on `stages.ensure_clean_on_exit`) overwrote a stage's outcome marker because residue at stage exit was out-of-scope for `review.fix.auto_commit.scope_check`, git add/commit failed (including `git status` / `git add -A` / `git reset HEAD --` / `git diff --cached --name-only` exceeding the shared `AUTO_COMMIT_OP_TIMEOUT_SEC = 300` cap — `AutoCommit.capture_git_with_timeout` wraps the previously unbounded `Open3.capture3` calls so a hung pre-commit hook or frozen pager surfaces as `timed_out: true` instead of pinning the runner), or auto-commit raised `Hive::ConfigError` (invalid `review.fix.auto_commit.sign_policy` etc. — surfaced with `detail="invalid sign_policy config: ..."` instead of silently dropping into the generic StandardError warn-and-continue path). `residue_paths` is the comma-joined list of worktree-relative paths (absent on the config-error variant; the message is always carried in the `detail=` attr, truncated to 200 chars). When this marker overwrites a runner's own marker, `with_stage_events` also rewrites `result[:commit]` to `"ensure_clean_on_exit_failed"` and `result[:status]` to `:error` so the post-run hive-state commit (`commands/run.rb#commit_after`) matches the on-disk marker rather than the runner's stale success commit action. The bot routes this reason through manual-only reply (no inline retry); operator must inspect, fix the config or commit/discard residue, then `hive markers clear <folder> --name ERROR --match-attr reason=ensure_clean_on_exit_failed` and re-run the stage verb. | `Hive::Stages::Base#enforce_clean_exit!` via `with_stage_events` exit hook + `Stages::Finalize` entry backstop |
 | `<!-- EXECUTE_WAITING reason=no_worktree_changes\|dirty_worktree\|missing_research_output\|branch_mismatch\|head_not_descendant -->` | impl spawn exited cleanly but cannot be marked done yet; inspect `## Execute Output`, revise/mark research, clean/commit worktree changes, or recover the expected task branch | `Stages::Execute#run!` |
 | `<!-- EXECUTE_COMPLETE mode=research? -->` | impl pass committed cleanly on the expected task branch, or explicit research-mode pass captured structured output; ready for `mv` to `5-open-pr/` | `Stages::Execute#run!` (impl-only since U9) |
@@ -111,7 +111,7 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 | `<!-- REVIEW_CI_STALE attempts=N -->` | CI hard-block — `cfg.review.ci.max_attempts` reached without green; reviewers don't run on red CI | `Stages::Review` CI phase |
 | `<!-- REVIEW_STALE pass=NN -->` | hit `cfg.review.max_passes` (default 2) | `Stages::Review` orchestrator |
 | `<!-- REVIEW_COMPLETE pass=NN browser=passed\|warned\|skipped -->` | review loop done — ready to run `hive artifacts` into 7-artifacts (`browser=warned` = soft-warn surfaced in PR body) | `Stages::Review` orchestrator |
-| `<!-- REVIEW_ERROR phase=... reason=... message="..." -->` | agent-level error or protected-file tampering (mirrors ADR-013's `:error` shape for `EXECUTE_*`). Most review errors remain human-recoverable, but the daemon auto-clears no-live-lock `reason=review_agent_died`, `phase=reviewers reason=reviewer_partial_failure` when `reviews/errors-NN.md` contains only Claude/tmux `tmux_session_terminated before writing expected output file` failures, `phase=fix reason=fix_failed message="claude stop hook did not signal completion"` for the legacy Claude stop-hook completion bug, and `reason=limits_reached` once its `retry_after` cooldown elapses. The review runner can suppress the known Claude/tmux fix Stop-hook failure before this marker is written only when launcher evidence and review facts prove a completed pass: artifacts exist, no unresolved escalations remain, the worktree is readable, and commit/dirty-worktree/whole-pass `RESOLVED/NO-FIX` evidence exists. Review limit markers can come from CI-fix, all reviewers failing on limits, or triage/fix spawn failures whose captured error text matches `Hive::AgentLimit`; this limit gate runs before any terminal classifier so rate-limit/429 text keeps the cooldown path. Residual non-limit triage/fix phase-agent failures use `Hive::ReviewErrorReason`'s closed enum (`merge_conflict`, `network_timeout`, `tool_permission_denied`, `agent_crashed`, `unknown`) and carry a whitespace-collapsed, 300-char-capped `message=` attr from the captured error so `status.md`, `hive status --json`, and the web diagnostic card show the real cause even when `reason=unknown` (in practice the triage/fix plumbing forwards a condensed wrapper string rather than raw agent output, so the named buckets rarely fire and this normally lands on `unknown` — see [[stages/review]]) (non-limit CI errors write `reason=ci_unrunnable` directly and carry no `message=`). Auto-clear is bounded per daemon process by failure signature (default 3); repeated identical failures stay red after the budget is exhausted. | `Stages::Review` orchestrator |
+| `<!-- REVIEW_ERROR phase=... reason=... message="..." -->` | agent-level error or protected-file tampering (mirrors ADR-013's `:error` shape for `EXECUTE_*`). Most review errors remain human-recoverable, but the daemon auto-clears no-live-lock `reason=review_agent_died`, `phase=reviewers reason=reviewer_partial_failure` when `reviews/errors-NN.md` contains only Claude/tmux `tmux_session_terminated before writing expected output file` failures, `phase=fix reason=fix_failed message="claude stop hook did not signal completion"` for the legacy Claude stop-hook completion bug, and `reason=limits_reached` after one interval from the latest marker mtime regardless of its displayed provider-reset estimate. The review runner can suppress the known Claude/tmux fix Stop-hook failure before this marker is written only when launcher evidence and review facts prove a completed pass: artifacts exist, no unresolved escalations remain, the worktree is readable, and commit/dirty-worktree/whole-pass `RESOLVED/NO-FIX` evidence exists. Review limit markers can come from CI-fix, all reviewers failing on limits, or triage/fix spawn failures whose captured error text matches `Hive::AgentLimit`; this limit gate runs before any terminal classifier so rate-limit/429 text keeps the periodic readiness path. Residual non-limit triage/fix phase-agent failures use `Hive::ReviewErrorReason`'s closed enum (`merge_conflict`, `network_timeout`, `tool_permission_denied`, `agent_crashed`, `unknown`) and carry a whitespace-collapsed, 300-char-capped `message=` attr from the captured error so `status.md`, `hive status --json`, and the web diagnostic card show the real cause even when `reason=unknown` (in practice the triage/fix plumbing forwards a condensed wrapper string rather than raw agent output, so the named buckets rarely fire and this normally lands on `unknown` — see [[stages/review]]) (non-limit CI errors write `reason=ci_unrunnable` directly and carry no `message=`). Non-limit auto-clear is bounded per daemon process by failure signature (default 3); quota readiness attempts remain hourly and unbounded. | `Stages::Review` orchestrator |
 
 New `REVIEW_WORKING` and `REVIEW_ERROR` writes carry a generated `marker_id`,
 just like generic `ERROR` writes. Review healers match the id observed in the
@@ -124,7 +124,7 @@ identity before signaling, claims its own lock generation after termination,
 and only then clears the matching marker. Together these fences prevent an old
 healer tick from disrupting a newer review or runner generation.
 
-`5-open-pr`, `7-artifacts`, and `8-finalize` reuse the generic `COMPLETE` / `ERROR` marker names with stage-specific attrs such as `pr_url=...`, `is_draft=true|false`, `idempotent=true`, and `reason=...`. Most `ERROR` markers remain manual recovery states, but the daemon auto-clears a narrow no-live-lock subset with marker-id guards and bounded per-process budgets: `8-finalize` `reason=unpushed_commits`, plus non-review terminal agent-loss `reason=tmux_session_terminated` / `reason=agent_orphaned` in `2-brainstorm`, `3-plan`, `4-execute`, `7-artifacts`, and `8-finalize`. `reason=limits_reached` (any stage, including review `REVIEW_ERROR` markers from reviewers/triage/fix) also self-heals, gated on its `retry_after` cooldown stamp rather than on stage. A second recoverable terminal-error healer handles dependency outages: Codex-auth `ERROR reason=implementer_failed provider=codex message=...401...` and `ERROR reason=claude_launch_failed` can be cleared only after fail-closed work-area safety checks, changed health signal/backoff gates, and successful dependency probes; `daemon.auto_retry.enabled: false` disables that path. `hive status`, `hive status --json`, and the TUI render quota holds through `Hive::AgentLimit`: human/TUI text says `held: agent quota (...) — retry after ... UTC; top up or switch execute agent`, while JSON adds `"held": {"reason":"quota","provider":...,"retry_after":...}` without overloading dependency `blocked_by`. The `3-plan` terminal-error path writes a `DispatchRequestQueue` request for `hive plan <slug> --project <project> --from 3-plan` after any successful terminal `ERROR` clear there, including terminal agent-loss, elapsed `limits_reached`, and recoverable dependency-outage clears, because clearing the marker can leave an empty markerless `plan.md` that otherwise classifies straight back to `:error`. See [[daemon]]. Separately, an `8-finalize` `ERROR reason=git_status_failed` or `reason=claude_launch_failed` stays red while the PR is open unless the recoverable-error healer clears it; `PrMergeWatcher` can also retire it after the PR is merged by dispatching the internal archive recovery path, and `StageAction` re-confirms the marker reason and GitHub `MERGED` state before moving the folder to `9-done`.
+`5-open-pr`, `7-artifacts`, and `8-finalize` reuse the generic `COMPLETE` / `ERROR` marker names with stage-specific attrs such as `pr_url=...`, `is_draft=true|false`, `idempotent=true`, and `reason=...`. Most `ERROR` markers remain manual recovery states, but the daemon auto-clears a narrow no-live-lock subset with marker-id guards and bounded per-process budgets: `8-finalize` `reason=unpushed_commits`, plus non-review terminal agent-loss `reason=tmux_session_terminated` / `reason=agent_orphaned` in `2-brainstorm`, `3-plan`, `4-execute`, `7-artifacts`, and `8-finalize`. `reason=limits_reached` (any stage, including review `REVIEW_ERROR` markers from reviewers/triage/fix) follows a separate unbounded policy: the reset estimate is display-only and marker age schedules the next periodic readiness attempt. A second recoverable terminal-error healer handles dependency outages: Codex-auth `ERROR reason=implementer_failed provider=codex message=...401...` and `ERROR reason=claude_launch_failed` can be cleared only after fail-closed work-area safety checks, changed health signal/backoff gates, and successful dependency probes; `daemon.auto_retry.enabled: false` disables that path. `hive status`, `hive status --json`, and the TUI render quota holds through `Hive::AgentLimit`: human/TUI text distinguishes the provider reset estimate from Hive's hourly retry, while JSON keeps the compatible `"held": {"reason":"quota","provider":...,"retry_after":...}` shape without overloading dependency `blocked_by`. The `3-plan` terminal-error path writes a `DispatchRequestQueue` request for `hive plan <slug> --project <project> --from 3-plan` after any successful terminal `ERROR` clear there, including terminal agent-loss, eligible `limits_reached`, and recoverable dependency-outage clears, because clearing the marker can leave an empty markerless `plan.md` that otherwise classifies straight back to `:error`. See [[daemon]]. Separately, an `8-finalize` `ERROR reason=git_status_failed` or `reason=claude_launch_failed` stays red while the PR is open unless the recoverable-error healer clears it; `PrMergeWatcher` can also retire it after the PR is merged by dispatching the internal archive recovery path, and `StageAction` re-confirms the marker reason and GitHub `MERGED` state before moving the folder to `9-done`.
 
 Marker name allowlist: `Hive::Markers::KNOWN_NAMES`. Regex: `Hive::Markers::MARKER_RE`. Adding a marker requires updating BOTH (two sources of truth). Attributes are `key=value` (or `key="quoted value"`). New `ERROR` markers get a generated `marker_id` attr; human labels hide it, but recovery surfaces use it as the preferred `hive markers clear --match-attr marker_id=...` guard. Legacy `ERROR` rows without `marker_id` fall back to observed attrs such as `reason=exit_code,exit_code=143`. U9 dropped `EXECUTE_STALE` from the live grammar (review iteration moved out of 4-execute); the name remains in `KNOWN_NAMES` for back-compat parsing of historical state files but is never written by current code. `EXECUTE_WAITING` remains live for implementation-output pauses, not review iteration.
 
@@ -198,11 +198,10 @@ The identity stores only provider, concrete model, profile/launcher label, sourc
 The daemon's producer queue lives under `$HIVE_HOME/dispatch_requests/`
 (`Hive::Paths.state_home`, not inside a project `.hive-state/`). Producers are
 the Telegram bot, hivebox web, and the `3-plan` terminal-error healer.
-Web paths write through `Hive::Bot::DispatchRequestWriter`. Recovery sequences
-retain their historical trigger metadata; board transitions use
-`requestor=web` and persist actor, semantic fingerprint, and destination so
-the daemon can revalidate the exact rendered intent before spawn. The healer
-writes `requestor=healer`.
+Web paths currently write through `Hive::Bot::DispatchRequestWriter`, so the
+JSON `requestor` field is commonly `bot`; `trigger` values such as `web` and
+`web_recover` distinguish the web-originated requests, while the healer writes
+`requestor=healer`.
 Each pending request is one JSON file:
 
 ```yaml
@@ -213,10 +212,7 @@ created_at: <UTC-ISO8601>
 project: <registered project name>
 slug: <task slug>
 argv: ["hive", "<allowlisted verb>", ...]
-requestor: bot|healer|web
-actor:
-expected_fingerprint:
-transition_destination:
+requestor: bot|healer
 chat_id:
 update_id:
 trigger:
@@ -248,14 +244,6 @@ Hivebox `recover` writes the sequence sidecar first, then the guarded
 `hive markers clear ... --json` request, and discards the sidecar if the
 request write fails so no orphaned continuation remains.
 
-Synchronous board moves do not pass through the queue. They resolve the owner,
-take the project commit lock, re-resolve the task, compare the semantic
-fingerprint, and recompute the exact transition before moving. The successful
-`operator_action` append and `hive/state` commit share the rollback boundary:
-neither a moved task without its audit nor an audit for a rolled-back move may
-survive. Denials are non-state observations and remain in structured
-Rails/daemon logs plus the process-local denial counter.
-
 Hivebox's `web/app/models/status_broadcaster.rb` is a Rails model class, but it
 is not an ActiveRecord workflow entity. It bridges `Hive::Web::StatusFeed` to
 Turbo Streams. `StatusFeed#snapshot` computes a fresh
@@ -269,16 +257,6 @@ publishes a status-channel refresh before rendering and replacing the
 dashboard's `projects` frame, so task pages that do not contain that frame
 still receive a morph signal even if a bad project row makes the grid partial
 raise.
-
-The same snapshot now supplies workflow definitions and self-contained board
-cards. `fingerprint` covers mutation-relevant task content; `card_digest`
-covers the assembled read model, including queue, dependency, retry, lock/PID,
-and on-disk PR/review facts. Board streams carry an in-process epoch and
-generation so reconnects and missed frames reconcile from a fresh snapshot.
-The additive `terminal` bit is derived from the task's selected workflow,
-making the shared three-day daily retention rule descriptor-aware in CLI, TUI,
-board, and grid. Rails stores only its existing cable/cache/queue plumbing;
-task folders and `hive/state` remain the sole workflow authority.
 
 ## Architecture-patrol v2 state
 
@@ -371,6 +349,21 @@ creation intents, validation/patch/PR/issue/handoff receipts, and parent
 completeness. Writes use a locked atomic tempfile/fsync/rename transition and
 the shared `Hive::AtomicFile.fsync_directory` policy to persist directory-entry
 changes where the platform supports directory fsync.
+
+V2 discovery materializes `analysis_sha` at
+`<worktree_root>/.refactor-patrol/analysis/<job-id>` as an ephemeral detached,
+clean worktree. Source mapping, leverage scoring, and review use only that
+tree; manifests, job aggregates, collision state, logs, and result receipts
+remain under the registered project's `.hive-state`. The tree is validated at
+feature checkpoints and removed before successful completion. An interrupted
+clean tree may be reused only at the same exact SHA; a dirty, attached, or
+different-SHA tree fails closed. The worktree is transport, never completion
+authority, and a partial job keeps its durable SHA when the default branch
+advances. A terminal manual replay receives a new current-default SHA after
+its replay occurrence is created. Dry-run occurrences use invocation-unique
+tree keys so they cannot collide with claimed discovery, and a missing tree
+whose stale Git registration survived an interruption is pruned before the
+deterministic retry materializes it again.
 
 Fix-action receipts scope remote publication to the validated patch generation.
 `publication_attempts` is an append-only object whose key is

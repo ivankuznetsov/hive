@@ -57,6 +57,16 @@ while [ "$stable_deep_health" -lt 11 ]; do
   [ "$stable_deep_health" -ge 11 ] || sleep 1
 done
 
+# The Rails process can boot and answer health checks even if a packaging
+# regression omitted its compiled CSS/JavaScript. Assert the baked source tree
+# through the same manifest-aware contract used by managed native installs.
+if ! docker exec "$NAME" ruby -I/app/lib -e \
+  'require "hive/web/app_bundle"; exit Hive::Web::AppBundle.assets_ready?("/app/web") ? 0 : 1'
+then
+  echo "FAIL baked /app/web assets are incomplete"
+  exit 1
+fi
+
 # A fresh box must be CLAIMABLE out of the box (shipped client_id default):
 # this single assertion proves config defaults, the web tier, and the claim
 # flow all survived the image build.
@@ -69,6 +79,40 @@ case "$body" in
     exit 1
     ;;
 esac
+
+# A rendered page is not a usable UI when its Propshaft manifest points at
+# files missing from the image. Require the entrypoints, then fetch every
+# digest-stamped stylesheet/module advertised by Rails so the smoke exercises
+# the same initial asset graph as a browser.
+stylesheet_path="$(printf '%s\n' "$body" | sed -n 's/.*<link rel="stylesheet" href="\([^"]*\)".*/\1/p' | head -1)"
+javascript_path="$(printf '%s\n' "$body" | sed -n 's/.*<link rel="modulepreload" href="\([^"]*application-[^"]*\.js\)".*/\1/p' | head -1)"
+case "$stylesheet_path:$javascript_path" in
+  /assets/*.css:/assets/*.js) ;;
+  *)
+    echo "FAIL login page did not advertise compiled CSS and JavaScript"
+    exit 1
+    ;;
+esac
+asset_paths="$(printf '%s\n' "$body" | sed -n \
+  -e 's/.*href="\([^"]*\/assets\/[^"]*\.css\)".*/\1/p' \
+  -e 's/.*href="\([^"]*\/assets\/[^"]*\.js\)".*/\1/p' \
+  -e 's/.*src="\([^"]*\/assets\/[^"]*\.js\)".*/\1/p' | sort -u)"
+for asset_path in $asset_paths; do
+  case "$asset_path" in
+    /assets/*.css|/assets/*.js) ;;
+    *)
+      echo "FAIL login page advertised an unexpected asset path: $asset_path"
+      exit 1
+      ;;
+  esac
+  smoke_curl -fsS "http://127.0.0.1:${PORT}${asset_path}" >/dev/null
+done
+
+# Exercise the exact managed-install readiness predicate against the real
+# Propshaft manifest produced by this image build. Unit fixtures alone cannot
+# protect the release from a manifest-format drift.
+docker exec "$NAME" ruby -rhive/web/app_bundle -e \
+  'abort "managed web asset manifest is not ready" unless Hive::Web::AppBundle.assets_ready?("/app/web")'
 
 # Everything else is owner-gated.
 code="$(smoke_curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/")"

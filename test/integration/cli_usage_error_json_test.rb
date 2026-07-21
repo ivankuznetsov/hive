@@ -82,6 +82,69 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_act_json_usage_errors_preserve_required_action_identity
+    cases = [
+      [ %w[act --json], "", "" ],
+      [ %w[act workflow.advance --json], "workflow.advance", "" ],
+      [ %w[act workflow.advance demo:task --json], "workflow.advance", "demo:task" ],
+      [
+        [ "act", "workflow.advance", "demo:task", "extra", "--observation", "a" * 64, "--json" ],
+        "workflow.advance",
+        "demo:task"
+      ]
+    ]
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-act"))))
+
+    with_tmp_global_config do |home|
+      cases.each do |argv, action_id, target|
+        out, _err, status = run_hive(home, *argv)
+
+        refute status.success?, "#{argv.inspect} should fail"
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        payload = JSON.parse(out)
+        assert_equal "hive-act", payload.fetch("schema")
+        assert_equal false, payload.fetch("ok")
+        assert_equal "usage", payload.fetch("error_kind")
+        assert_equal action_id, payload.fetch("action_id")
+        assert_equal target, payload.fetch("target")
+        assert_empty schemer.validate(payload).map { |error| error.fetch("error") },
+                     "#{argv.inspect} envelope must validate against hive-act"
+      end
+    end
+  end
+
+  def test_status_mode_conflicts_are_usage_errors_with_the_selected_schema
+    with_tmp_global_config do |home|
+      out, _err, status = run_hive(home, "status", "--full", "--json")
+
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-status", payload.fetch("schema")
+      assert_equal 6, payload.fetch("schema_version")
+      assert_equal false, payload.fetch("ok")
+      assert_match(/--full cannot be combined with --json/, payload.fetch("message"))
+
+      out, _err, status = run_hive(
+        home, "status", "--operational", "--diagnose", "task", "--json"
+      )
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-status-diagnose", payload.fetch("schema")
+      assert_match(/--operational cannot be combined/, payload.fetch("message"))
+    end
+  end
+
+  def test_watch_rejects_single_document_json_with_stream_guidance
+    with_tmp_global_config do |home|
+      out, err, status = run_hive(home, "watch", "demo:task", "--json")
+
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      assert_empty out
+      assert_match(/--json-lines/, err)
+      assert_match(/stream/, err)
+    end
+  end
+
   def test_screenote_commands_json_usage_errors_emit_unversioned_envelopes
     with_tmp_global_config do |home|
       [
@@ -139,12 +202,17 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
       payload = JSON.parse(out)
       assert_equal "hive-setup", payload["schema"]
-      refute payload.key?("schema_version"), "hive-setup JSON is unversioned"
+      assert_equal 1, payload["schema_version"]
       assert_equal false, payload["ok"]
       assert_equal "InvalidTaskPath", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
       assert_match(/Usage: "hive setup"/, payload["message"])
+      assert_equal "managed_service", payload["mode"]
+      assert_kind_of String, payload["url"]
+      assert_kind_of Hash, payload["service"]
+      assert payload.dig("service", "readiness")
+      assert_kind_of Array, payload["warnings"]
       assert_match(/^hive: ERROR: /, err.lines.first)
     end
   end
@@ -365,6 +433,54 @@ class CliUsageErrorJsonTest < Minitest::Test
       cases.each do |argv, schema, error_kind|
         assert_pre_dispatch_error(home, argv, schema: schema, error_kind: error_kind)
       end
+    end
+  end
+
+  def test_web_status_json_config_failure_retains_the_versioned_contract
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), "web: [\n")
+
+      out, err, status = run_hive(home, "web", "status", "--json")
+
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-web-status", payload["schema"]
+      assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-web-status"), payload["schema_version"]
+      assert_equal false, payload["ok"]
+      assert_equal "ConfigError", payload["error_class"]
+      assert_equal "config_error", payload["error_kind"]
+      assert_equal Hive::ExitCodes::CONFIG, payload["exit_code"]
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-status"))))
+      assert_empty schemer.validate(payload).map { |error| error["error"] }
+      assert_match(/^hive: /, err)
+    end
+  end
+
+  def test_web_install_json_service_write_failure_retains_the_versioned_contract
+    with_tmp_global_config do |home|
+      invalid_home = File.join(home, "home-is-a-file")
+      File.write(invalid_home, "not a directory")
+
+      out, err, status = Open3.capture3(
+        { "HIVE_HOME" => home, "HOME" => invalid_home },
+        RbConfig.ruby, "-Ilib", HIVE_BIN,
+        "web", "install", "--no-bootstrap", "--json"
+      )
+
+      assert_equal Hive::ExitCodes::GENERIC, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-web-install", payload["schema"]
+      assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-web-install"), payload["schema_version"]
+      assert_equal false, payload["ok"]
+      assert_equal "Error", payload["error_class"]
+      assert_equal "service_install_failed", payload["error_kind"]
+      assert_equal Hive::ExitCodes::GENERIC, payload["exit_code"]
+      assert_match(/Errno::(?:EEXIST|ENOTDIR)/, payload["message"])
+      assert_includes payload["message"], invalid_home
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-install"))))
+      assert_empty schemer.validate(payload).map { |error| error["error"] }
+      assert_equal 1, out.lines.length, "JSON mode must emit exactly one install document"
+      assert_match(/^hive: /, err)
     end
   end
 

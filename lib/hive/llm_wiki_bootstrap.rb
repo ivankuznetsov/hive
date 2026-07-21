@@ -1,5 +1,6 @@
 require "fileutils"
 require "json"
+require "open3"
 
 require "hive/llm_wiki_bootstrap/context"
 require "hive/llm_wiki_bootstrap/pages"
@@ -27,12 +28,16 @@ module Hive
       ensure_project_wiki(project_root)
       Context.install(project_root)
       ensure_refresh_scripts(project_root)
+      ensure_shared_runtime(project_root)
       ensure_post_commit_hook(project_root) if post_commit_hook
       Scheduler.install(project_root) if scheduler
     end
 
     def install_runtime_hooks!(project_root)
       project_root = File.expand_path(project_root)
+      ensure_config(project_root)
+      ensure_refresh_scripts(project_root)
+      ensure_shared_runtime(project_root)
       ensure_post_commit_hook(project_root)
       Scheduler.install(project_root)
     end
@@ -107,18 +112,53 @@ module Hive
       File.chmod(0o755, compile_log_path)
     end
 
+    def ensure_shared_runtime(project_root)
+      local_dir = File.join(project_root, ".llm-wiki")
+      shared_dir = File.join(git_common_dir(project_root), "llm-wiki")
+      shared_scripts = {
+        "post-commit-refresh.sh" => File.join(local_dir, "post-commit-refresh.sh"),
+        "compile-log.sh" => File.join(local_dir, "compile-log.sh")
+      }
+
+      shared_scripts.each do |name, source|
+        destination = File.join(shared_dir, name)
+        write_file(destination, File.binread(source))
+        File.chmod(0o755, destination)
+      end
+      write_file(File.join(shared_dir, "config.json"), File.binread(File.join(local_dir, "config.json")))
+    end
+
     def ensure_post_commit_hook(project_root)
-      hook_path = File.join(project_root, ".git", "hooks", "post-commit")
+      hook_path = File.join(git_common_dir(project_root), "hooks", "post-commit")
       block = <<~BASH.strip
         #{POST_COMMIT_BEGIN}
-        if [ "${HIVE_SKIP_LLM_WIKI_POST_COMMIT:-}" != "1" ] && [ -x ".llm-wiki/post-commit-refresh.sh" ]; then
-          ".llm-wiki/post-commit-refresh.sh" >/dev/null 2>&1 &
+        if [ "${HIVE_SKIP_LLM_WIKI_POST_COMMIT:-}" != "1" ]; then
+          project_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+          common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+          shared_runner="$common_dir/llm-wiki/post-commit-refresh.sh"
+          local_runner="$project_root/.llm-wiki/post-commit-refresh.sh"
+          if [ -n "$project_root" ] && [ -n "$common_dir" ] && [ -x "$shared_runner" ]; then
+            "$shared_runner" --project "$project_root" >/dev/null 2>&1 &
+          elif [ -n "$project_root" ] && [ -x "$local_runner" ]; then
+            "$local_runner" --project "$project_root" >/dev/null 2>&1 &
+          fi
         fi
         #{POST_COMMIT_END}
       BASH
       existing = File.exist?(hook_path) ? File.read(hook_path) : "#!/usr/bin/env bash\n"
       write_file(hook_path, managed_hook_content(existing, block))
       File.chmod(File.stat(hook_path).mode | 0o111, hook_path)
+    end
+
+    def git_common_dir(project_root)
+      out, err, status = Open3.capture3(
+        "git", "-C", project_root, "rev-parse", "--path-format=absolute", "--git-common-dir"
+      )
+      unless status.success? && !out.strip.empty?
+        raise ArgumentError, "cannot resolve Git common directory for #{project_root}: #{err.strip}"
+      end
+
+      File.expand_path(out.strip, project_root)
     end
 
     def project_slug(project_root)
@@ -159,7 +199,7 @@ module Hive
 
     def write_file(path, content)
       FileUtils.mkdir_p(File.dirname(path))
-      File.write(path, content)
+      File.binwrite(path, content)
     end
   end
 end

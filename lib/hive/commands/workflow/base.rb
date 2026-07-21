@@ -1,9 +1,12 @@
+require "fileutils"
 require "json"
+require "tmpdir"
 require "hive"
 require "hive/config"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/workflow_package/managed_store"
+require "hive/workflow_package/runtime_policy"
 
 module Hive
   module Commands
@@ -47,10 +50,27 @@ module Hive
           @store ||= Hive::WorkflowPackage::ManagedStore.new(hive_state_path)
         end
 
+        def project_config
+          @project_config ||= Hive::Config.load(@project_root)
+        end
+
         def hive_state_path
-          @hive_state_path ||= begin
-            configured = Hive::Config.load(@project_root).fetch("hive_state_path")
-            File.expand_path(configured, @project_root)
+          @hive_state_path ||= File.expand_path(
+            project_config.fetch("hive_state_path"), @project_root
+          )
+        end
+
+        def admit_runtime!(workflow, package_root, configuration: nil)
+          configured = configuration ? configuration.apply(workflow, cfg: project_config) : workflow
+          Dir.mktmpdir("hive-workflow-admission-") do |root|
+            task_folder = File.join(root, "task")
+            FileUtils.mkdir_p(task_folder)
+            Hive::WorkflowPackage::RuntimePolicy.admit_workflow!(
+              configured,
+              task_folder: task_folder,
+              policy_dir: File.join(root, "policy"),
+              package_root: package_root
+            )
           end
         end
 
@@ -61,6 +81,15 @@ module Hive
             Array(human_lines).each { |line| @stdout.puts line }
           end
           payload
+        end
+
+        def optional_input_disclosure(inputs)
+          Array(inputs).map do |input|
+            binding = input["binding"] || "unbound"
+            availability = input["available"] ? "available; value: [redacted]" : "unavailable"
+            "optional input: #{input.fetch('name')}; binding: #{binding}; " \
+              "authorized slots: #{Array(input.fetch('authorized_slots')).join(', ')}; #{availability}"
+          end
         end
 
         def confirmed?(prompt)
@@ -92,6 +121,28 @@ module Hive
               pathspecs: [ relative ]
             )
           end
+        end
+
+        def cleanup_after_failed_activation(name, original_error)
+          store.cleanup_unreferenced(name)
+        rescue StandardError => cleanup_error
+          warn "hive workflow: activation failed with #{original_error.class}: #{original_error.message}; " \
+               "candidate cleanup also failed with #{cleanup_error.class}: #{cleanup_error.message}"
+        ensure
+          raise original_error
+        end
+
+        def post_commit_step(warnings, label)
+          yield
+        rescue StandardError => e
+          message = "#{label} failed (#{e.class}: #{e.message}); the workflow selection change already succeeded"
+          warnings << message
+          warn "hive workflow: #{message}"
+          nil
+        end
+
+        def warning_lines(warnings)
+          warnings.map { |warning| "warning: #{warning}" }
         end
 
         def error_payload(error)

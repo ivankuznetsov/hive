@@ -9,8 +9,21 @@ export default class extends Controller {
   static targets = ["text", "files", "picker", "chips"]
 
   connect() {
-    this.counter = 0
+    this.submissionInFlight = false
     this.attachments = new Map()
+    this.previewUrls = new Map()
+
+    // A data-turbo-permanent form can reconnect after Turbo moves it into a
+    // morphed document. Rebuild the controller's in-memory index from the
+    // preserved transport input so staged files remain removable/submittable.
+    this.counter = 0
+    Array.from(this.filesTarget.files || []).forEach((file) => {
+      const label = file.name.match(/^image\d+/)?.[0]
+      if (!label) return
+
+      this.attachments.set(label, file)
+      this.counter = Math.max(this.counter, Number(label.slice("image".length)))
+    })
   }
 
   paste(event) {
@@ -49,10 +62,68 @@ export default class extends Controller {
   remove(event) {
     const label = event.params.label
     this.attachments.delete(label)
+    this.revokePreview(label)
     this.chipsTarget.querySelector(`[data-chip="${label}"]`)?.remove()
     this.textTarget.value = this.textTarget.value
       .replace(new RegExp(`\\s?\\[${label}\\]`, "g"), "")
     this.syncInput()
+  }
+
+  submitting(event) {
+    if (event.target === this.element) this.submissionInFlight = true
+  }
+
+  // StatusBroadcaster cannot attach Turbo's request ID because it observes
+  // filesystem changes on a background thread. A page-wide refresh arriving
+  // while this form is submitting would therefore abort the POST after the
+  // server wrote the idea but before Turbo delivered its success lifecycle.
+  // Ignore only refresh streams on the submitting client; targeted project
+  // replacements still render, and other connected clients still refresh.
+  beforeStreamRender(event) {
+    const stream = event.detail?.newStream || event.target
+    if (this.submissionInFlight && stream?.getAttribute("action") === "refresh") {
+      event.preventDefault()
+      return
+    }
+
+    // The server owns the live project order, but the selected project is
+    // unfinished form state owned by this browser. Preserve that choice when
+    // Turbo morphs the select, provided the project still exists.
+    if (stream?.getAttribute("target") !== "composer-project") return
+
+    const selectedProject = this.element.querySelector("#composer-project")?.value
+    if (!selectedProject) return
+
+    const render = event.detail.render
+    event.detail.render = async (newStream) => {
+      await render(newStream)
+
+      const select = this.element.querySelector("#composer-project")
+      const projectStillExists = Array.from(select?.options || [])
+        .some((option) => option.value === selectedProject)
+      if (projectStillExists) select.value = selectedProject
+    }
+  }
+
+  // Turbo keeps this form alive across the successful redirect so live grid
+  // updates cannot destroy an unfinished idea. That same permanence must not
+  // keep a FINISHED idea around. turbo:before-fetch-response arrives while
+  // the permanent node is still connected; turbo:submit-end is the fallback
+  // for clients that only expose the completion event. Clear only after a
+  // successful response, while retaining the selected project as useful
+  // context for the next idea.
+  submitted(event) {
+    const success = event.detail.success ?? event.detail.fetchResponse?.succeeded
+    if (event.type === "turbo:submit-end") this.submissionInFlight = false
+    if (!success) return
+
+    this.attachments.forEach((_file, label) => this.revokePreview(label))
+    this.attachments.clear()
+    this.chipsTarget.replaceChildren()
+    this.textTarget.value = ""
+    this.pickerTarget.value = ""
+    this.filesTarget.value = ""
+    this.counter = 0
   }
 
   insertPlaceholder(placeholder) {
@@ -75,6 +146,7 @@ export default class extends Controller {
     const img = document.createElement("img")
     img.alt = ""
     img.src = URL.createObjectURL(file)
+    this.previewUrls.set(label, img.src)
     chip.appendChild(img)
 
     chip.appendChild(document.createTextNode(label))
@@ -88,6 +160,15 @@ export default class extends Controller {
     chip.appendChild(button)
 
     this.chipsTarget.appendChild(chip)
+  }
+
+  revokePreview(label) {
+    const chipUrl = this.chipsTarget
+      .querySelector(`[data-chip="${label}"] img`)
+      ?.src
+    const url = this.previewUrls.get(label) || chipUrl
+    if (url?.startsWith("blob:")) URL.revokeObjectURL(url)
+    this.previewUrls.delete(label)
   }
 
   // The hidden multi-file input is the transport: DataTransfer rebuilds its

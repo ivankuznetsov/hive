@@ -24,8 +24,8 @@ an agent, declare `permissions:` on a pipeline stage or a review reviewer.
 Permission scoping is tool/MCP-level, enforced by the agent's allowed tool set.
 It is not an OS sandbox. The agent runs as the same OS user; `read-only` limits
 accidental over-reach, but it does not contain a determined or mis-prompted
-agent. For real isolation, run hive under a sandboxed user or container, such as
-hivebox.
+agent. For real isolation, run Hive under a sandboxed user or choose the
+[Hivebox container distribution](../packaging/docker/README.md).
 
 ## Managed Honeycomb Policy
 
@@ -42,20 +42,19 @@ project state changes. The current Bench and Docs Sync seeds therefore verify
 as registry content but are not installable until Hive can enforce v2 precisely
 or the registry adds an exact runtime policy contract.
 
-For an admitted Claude package, Hive generates a private settings file, empty
-strict MCP config, `dontAsk` permission mode, sanitized environment/PATH, and a
-Hive-owned pre-tool hook. These enforcement files live under orchestrator-owned
-`.hive-state/.managed-policies/`, outside the writable task tree. The hook
-rechecks Bash subcommands and WebFetch domains, treats exact domains and `*.`
-wildcards distinctly, and maps every supported file tool to its actual path
-field; repository-local executable shims and inherited user/project settings,
-hooks, plugins, MCP servers, or permission rules cannot expand the package.
-When Bash is declared, the generated settings also enable Claude's OS sandbox,
-fail when it is unavailable, disable unsandboxed-command escape, and pass the
-declared write directories and network domain allowlist. Headless and tmux
-launches consume the same compiled policy; tmux starts the wrapper through an
-empty environment populated only from the compiled safe environment and
-orchestrator-owned stage variables.
+V2 managed actors compile their descriptor's exact `permissions:` preset in
+memory. Headless and tmux launches receive the resulting permission mode,
+allowed/denied tool lists, task/package directories, and a sanitized child
+environment/PATH. This actor path does not write `.managed-policies`, generate
+settings or MCP files, or install a pre-tool hook; it therefore does not claim
+to disable inherited Claude settings, hooks, plugins, or MCP configuration.
+Use hivebox or another OS/container boundary when those sources must be
+isolated as well as the actor's Hive-supplied tool scope.
+
+The legacy exact-policy compiler used by the separate publish/admission path
+can still materialize private settings, strict MCP configuration, and a
+pre-tool hook for its command/domain contract. Those generated artifacts are
+not the V2 actor-spawn contract described above.
 
 Admission runs before installation/update, then the policy is compiled again
 from the task-pinned manifest immediately before spawn. The still-legacy

@@ -4,7 +4,7 @@ require "pathname"
 require "timeout"
 
 module Hive
-  # Per-agent verification that a configured slash-command skill
+  # Per-agent verification that a configured native skill
   # invocation actually resolves to a file on disk. `Hive::AgentProfile`
   # delegates to one of `SkillCheck::Claude` / `SkillCheck::Codex` /
   # `SkillCheck::Pi` so the profile interface stays uniform.
@@ -23,20 +23,24 @@ module Hive
   #     — this invocation form cannot be checked for this agent
   #       (e.g. pi only resolves skills as `/skill:<name>`).
   module SkillCheck
-    # Parsed invocation. Either form is accepted:
+    # Parsed invocation. These forms are accepted:
     #   /name           -> Invocation.new(plugin: nil, name: "name")
     #   /plugin:name    -> Invocation.new(plugin: "plugin", name: "name")
+    #   $name           -> Invocation.new(plugin: nil, name: "name")
     Invocation = Struct.new(:plugin, :name, keyword_init: true)
     Resolution = Data.define(:status, :path, :message, :candidates, :parse_errors)
 
     # Raises ArgumentError on malformed input so callers can surface the
     # error rather than silently treating garbage as a valid skill.
     def self.parse(invocation)
-      raise ArgumentError, "expected /name or /plugin:name, got nil" if invocation.nil?
+      raise ArgumentError, "expected /name, /plugin:name, or $name, got nil" if invocation.nil?
 
       str = invocation.to_s
+      if (mention = str.match(%r{\A\$([^:/$\s]+)\z}))
+        return Invocation.new(plugin: nil, name: mention[1])
+      end
       m = str.match(%r{\A/(?:([^:/\s]+):)?([^:/\s]+)\z})
-      raise ArgumentError, "expected /name or /plugin:name, got #{str.inspect}" unless m
+      raise ArgumentError, "expected /name, /plugin:name, or $name, got #{str.inspect}" unless m
 
       Invocation.new(plugin: m[1], name: m[2])
     end

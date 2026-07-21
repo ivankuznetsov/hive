@@ -1,13 +1,21 @@
 ---
 title: hive doctor
 type: command
-source: lib/hive/commands/doctor.rb, lib/hive/agent_skills/inspector.rb, lib/hive/skill_check.rb
+source: skills/hive/, lib/hive/commands/doctor.rb, lib/hive/agent_skills/{inspector,filesystem_inventory}.rb, lib/hive/agent_skills/adapters/openclaw.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-07-10
-tags: [command, preflight, skills, tmux, provisioning]
+updated: 2026-07-20
+tags: [command, preflight, skills, hive, openclaw, tmux, provisioning]
 ---
 
-**TLDR**: `hive doctor` is the read-only renderer for Hive's shared managed-skill inspector. It derives effective coding stages, named reviewers, browser hooks, and configured agents; combines native CLI inventory with the real filesystem resolver; and emits one evidence-rich row per agent/capability. `--json` is the versioned `hive-doctor.v2` contract. Legacy tmux, QMD, and deprecated-config checks remain separate rows.
+**TLDR**: `hive doctor` is the read-only renderer for Hive's managed-skill
+inspector. It always checks Hive's own operating skill for supported Claude,
+Codex, and Pi agents, adds capabilities derived from project configuration,
+and reads OpenClaw's durable ClawHub provenance without changing it. Durable
+filesystem evidence is joined with the real runtime resolver and exact
+projection digests; Doctor does not launch supported agent CLIs, because even
+nominally read-only upstream commands can initialize user state. `--json` is
+the versioned `hive-doctor.v2` contract.
+Legacy tmux, QMD, and deprecated-config checks remain separate rows.
 
 ## Usage
 
@@ -16,12 +24,18 @@ hive doctor
 hive doctor --json
 ```
 
-Run from a Hive-initialized project. Doctor never invokes adapters, install
-commands, alias writes, or network/model calls.
+Run from a Hive-initialized project. Doctor reads installed-package registries,
+config, cache paths, canonical manifests, and ClawHub origin/lock metadata. It
+does not launch Claude, Codex, Pi, or OpenClaw; invoke install/update commands;
+write aliases or skills; or call a model. An absent agent binary is an
+`unavailable`, non-blocking row. Legacy dependency checks remain bounded and
+separate from managed-agent inventory.
 
 ## Managed target and health model
 
-`Hive::AgentSkills::TargetResolver` derives rows from the effective config,
+`Hive::AgentSkills::TargetResolver` starts with the bundled `hive` capability
+for every supported agent, independent of which agents happen to own a stage.
+It then derives rows from the effective config,
 including `brainstorm`, `plan`, `review.reviewers`, optional browser testing,
 ad-hoc reviewers, and enabled patrol reviewers. Manifest-known built-ins are
 managed. Native reviewers and custom skills remain visible but never become
@@ -37,10 +51,15 @@ real stage execution. It honors `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and
 resolution rules. A native inventory claim is insufficient when the runtime
 resolver cannot load the declared probe.
 
+In `native`, `inventory_source: "filesystem"`, `commands: []`, and a null
+`cli_version` make that evidence boundary explicit. Setup uses live native
+inventory only after consent; Doctor intentionally reports durable installed
+state without asking an upstream CLI to bootstrap or refresh it.
+
 Health precedence is:
 
 1. `conflicting` — a user-owned alias/source or higher-priority shadow wins;
-2. `incompatible` — unsupported CLI/package/source or malformed inventory;
+2. `incompatible` — unsupported package/source or malformed durable inventory;
 3. `unavailable` — agent binary absent (visible, non-blocking);
 4. `stale` — an older repairable version line;
 5. `missing` — package or runtime probe unresolved;
@@ -49,6 +68,27 @@ Health precedence is:
 Every unresolved managed row carries a scoped remediation such as
 `hive setup-agents --agent claude --skill ce-brainstorm`. Conflict messages
 name the winning path/owner and state that Hive will not replace it.
+
+For the bundled capability, `expected` carries distribution `bundled`, skill
+version, platform invocation (`/hive` for Claude, `$hive` for Codex,
+`/skill:hive` for Pi), canonical digest, Hive version, destination, and exact
+file digests. The inspector verifies `.hive-skill.json`, all files, safe path
+ownership, and native runtime resolution. A missing projection is `missing`,
+an intact older Hive-owned projection is `stale`, and modified/foreign content
+or unsafe path ancestry is `conflicting`.
+
+## OpenClaw evidence
+
+With no `--agent`/`--skill` filter, doctor also runs the read-only OpenClaw
+adapter. It resolves the configured workspace from `openclaw.json`, verifies
+the local `hive-cli` ClawHub origin and workspace lock against `SKILL.md`, and
+checks canonical projection provenance while allowing ClawHub-owned metadata
+files. It never launches `openclaw` or writes the OpenClaw skill directory.
+
+- Missing: `openclaw skills install @ivankuznetsov/hive-cli`
+- Stale: `openclaw skills update @ivankuznetsov/hive-cli`
+- Conflicting/incompatible: inspect `openclaw skills info hive --json`; Hive
+  will not replace foreign content.
 
 ## Legacy rows and exit codes
 
@@ -100,9 +140,19 @@ project.
 
 ## Tests
 
-- `test/unit/agent_skills/inspector_test.rb` covers health precedence, source/version evidence, shadowing, configured homes/binaries, malformed inventory, repeated fresh inspection, and read-only behavior.
-- `test/unit/commands/doctor_test.rb` covers human/v2 JSON rendering, legacy rows, remediation, non-blocking unavailable agents, and shared result correspondence.
-- `test/unit/skill_check_test.rb` covers exact Claude/Codex/Pi resolution, escaping, Pi jails, and the write-free global npm-root probe.
+- `test/unit/agent_skills/inspector_test.rb` covers health precedence,
+  source/version evidence, shadowing, configured homes/binaries, native setup
+  refresh, and filesystem-only Claude/Codex/Pi inventory with zero runner calls.
+- `test/unit/agent_skills/openclaw_test.rb` covers filesystem-only ClawHub
+  provenance from workspace and managed roots, legacy projection evidence,
+  drift, missing binaries/skills, and an always-empty command audit.
+- `test/unit/commands/doctor_test.rb` covers human/v2 JSON rendering and legacy
+  dependency rows. `doctor_managed_skills_test.rb` covers managed remediation,
+  non-blocking unavailable agents, OpenClaw ownership, and byte-identical homes
+  even when every available agent runner would mutate if called.
+- `test/unit/skill_check_test.rb` covers exact Claude `/hive`, Codex `$hive`,
+  and Pi `/skill:hive` resolution, escaping, Pi jails, and the write-free
+  global npm-root probe.
 - `test/integration/init_doctor_preflight_test.rb` covers init delegation and non-mutating flows.
 
 ## Backlinks

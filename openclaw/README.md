@@ -1,65 +1,65 @@
 # Hive OpenClaw Skill
 
-This directory contains the OpenClaw skill for driving the `hive` CLI from an
-OpenClaw agent. The published ClawHub surface is intentionally one skill:
+Hive publishes one OpenClaw skill:
 
 ```bash
-openclaw skills install hive-cli
+openclaw skills install @ivankuznetsov/hive-cli
 ```
 
-That listing installs a skill whose frontmatter name is `hive`, so users invoke
-it in OpenClaw as:
+The ClawHub slug is `hive-cli`; the installed invocation is `/hive` because the rendered skill name is `hive`. Do not publish one listing per Hive subcommand.
+
+## Canonical source
+
+Do not hand-edit `openclaw/skills/hive/`. It is the committed OpenClaw projection of:
+
+```text
+skills/hive/SKILL.md
+skills/hive/skill.json
+skills/hive/references/*.md
+```
+
+`Hive::AgentSkills::CanonicalSkill` renders platform frontmatter, invocation, provenance, the current Hive installer version, and `.hive-skill.json`. Tests byte-compare every committed OpenClaw file with that renderer. Claude (`/hive`), Codex (`$hive`), and Pi (`/skill:hive`) receive the same canonical payload through Hive’s consent-safe agent-skill setup; OpenClaw invokes it as `/hive`.
+
+The public listing remains <https://clawhub.ai/ivankuznetsov/skills/hive-cli>.
+
+## First use
+
+ClawHub installation does not run arbitrary setup commands. The OpenClaw
+projection remains visible before the Hive CLI is installed and routes setup
+through the progressive setup reference:
 
 ```text
 /hive setup
-/hive status --json
-/hive new . "build this feature"
-/hive plan <task-slug>
-/hive develop <task-slug>
-/hive review <task-slug>
+/hive status
+/hive watch <project>:<slug>
 ```
 
-Do not publish one ClawHub listing per Hive command. Subcommands and options
-belong after `/hive ...`.
+Guided setup explains the selected platform channel and asks before changing
+user-global software. After approval it runs
+`hive setup --no-init --yes --json` for local web and daemon provisioning;
+initial project enrollment remains a separate `hive init .` run in the user's
+real terminal so Hive can show its defaults and ask for confirmation. The
+Homebrew installer metadata provides the macOS `hive` binary dependency.
+OpenClaw installation remains ClawHub-owned:
+`hive doctor` reads local config, workspace, and ClawHub provenance without
+launching OpenClaw and points missing or stale installations to
+`openclaw skills install/update @ivankuznetsov/hive-cli`;
+`hive setup-agents` never writes OpenClaw state.
 
-## Shape
+On supported Linux/macOS, the approved guided setup reports the loopback URL
+and distinct installed, enabled, running, and ready state for the default
+managed Hive web service alongside daemon setup. Use
+`/hive web status --json` for read-only web state. Bare `/hive web` is the
+explicit blocking foreground path, not a status probe. The skill never creates
+LAN/public binding or Tailscale exposure; it only reports a non-loopback origin
+that an operator explicitly configured through Hive's existing gates.
 
-OpenClaw skills are directories containing a `SKILL.md` file with YAML
-frontmatter and markdown instructions:
+Choose Hivebox when the user needs container isolation, multiple local
+instances, containment for untrusted agents, or reproducible server/NAS
+deployment. Windows can use WSL with systemd for native Hive web or Hivebox
+through Docker Desktop; do not invent a separate Windows service manager.
 
-- Creating skills: <https://docs.openclaw.ai/tools/creating-skills>
-- Installing skills: <https://docs.openclaw.ai/tools/skills>
-- Publishing skills: <https://github.com/openclaw/clawhub/blob/main/docs/quickstart.md>
-
-Hive ships one source skill folder:
-
-```text
-openclaw/skills/hive/SKILL.md
-```
-
-The ClawHub slug is `hive-cli` because the public `hive` slug is already owned
-by another publisher. The installed slash command is still `/hive` because
-OpenClaw reads `name: hive` from `SKILL.md`.
-
-Public listing: <https://clawhub.ai/ivankuznetsov/hive-cli>.
-
-## Setup Model
-
-`openclaw skills install hive-cli` installs the OpenClaw skill folder. It does
-not run arbitrary setup commands during the install itself. The `/hive` skill is
-always visible, even before the Hive CLI is installed, and guides first use:
-
-```text
-/hive setup
-```
-
-That guided setup asks for confirmation, installs the Hive CLI through the
-documented platform channel, verifies `hive`/`hv`, runs `hive daemon install`,
-and optionally initializes the current project with non-interactive defaults.
-The macOS Skills UI can also use the skill's Homebrew installer metadata to
-install the `hive` binary.
-
-## Local Install For Testing
+## Local projection test
 
 From the Hive repository root:
 
@@ -67,24 +67,77 @@ From the Hive repository root:
 openclaw skills install ./openclaw/skills/hive --as hive
 ```
 
-Then run `/hive setup` from OpenClaw.
+Then invoke `/hive status`. The skill should use `hive status --operational --json` and `hive watch --json-lines`, never a shell polling loop.
 
-## Publish Checklist
+## Authenticated release proof
 
-Publish exactly the umbrella skill:
+The protected `.github/workflows/live-agent-skills.yml` workflow builds one
+candidate gem and one four-platform skill archive from an exact commit, then
+runs each native agent against its projection in a disposable home. OpenClaw
+must discover `/hive` through its own JSON inventory and complete the same
+bounded status/watch task as Claude, Codex, and Pi. Retained evidence contains
+only structured event kinds, hashes, exact audited Hive argv, candidate
+provenance, and cleanup/secret-scan results.
+
+All four jobs and the attestation job must pass before the workflow can publish
+the candidate-bound `live-agent-skills` check. A local skip proves only that
+credentials were unavailable; it is not release evidence. See
+`docs/RELEASING.md` for the exact-artifact gate.
+
+## Publish checklist
+
+Publishing is a release action. Do not run these commands without a separate explicit release request and version direction.
+
+ClawHub versions are immutable. Do not reuse a published version for changed
+bytes; the separate release request must provide the new version direction and
+update `skills/hive/skill.json` before this checklist runs. Read that
+authoritative value instead of copying a literal into documentation:
 
 ```bash
+skill_version="$(ruby -rjson -e 'print JSON.parse(File.read("skills/hive/skill.json")).fetch("version")')"
+skill_dir="$(pwd)/openclaw/skills/hive"
+
 clawhub login
 clawhub whoami
-
-clawhub skill publish openclaw/skills/hive \
+clawhub skill publish "$skill_dir" \
   --slug hive-cli \
   --name "Hive CLI" \
   --owner ivankuznetsov \
-  --version 0.1.1 \
-  --changelog "Improve ClawHub listing summary and setup guidance"
+  --version "$skill_version" \
+  --dry-run \
+  --json
 ```
 
-Do not run `clawhub sync` for this repository, and do not publish folders such
-as `openclaw/skills/plan` or slugs such as `hive-plan`. Those shortcut listings
-are intentionally not part of the public surface.
+The absolute path avoids ClawHub resolving the source under another configured
+skills directory. Inspect the dry-run payload before a separately authorized
+release reruns the command without `--dry-run`.
+
+ClawHub publication is staged. A publish can reserve the immutable version
+before that version is inspectable. Do not republish, delete, or increment the
+version while checks are pending. Poll the exact version with a bounded wait:
+
+```bash
+clawhub inspect @ivankuznetsov/hive-cli \
+  --version "$skill_version" \
+  --files \
+  --json
+```
+
+Declare the skill live only after the exact version is inspectable and a clean
+temporary install matches the reviewed source:
+
+```bash
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+clawhub --workdir "$tmpdir" --dir skills install \
+  @ivankuznetsov/hive-cli \
+  --version "$skill_version"
+cmp openclaw/skills/hive/SKILL.md \
+  "$tmpdir/skills/@ivankuznetsov/hive-cli/SKILL.md"
+```
+
+Keep host mutations reviewable: do not suppress package-manager confirmation,
+patch installed Hive files, or write service-manager overrides from the public
+skill. Publish exactly `openclaw/skills/hive`. Do not run `clawhub sync`, do not
+publish folders such as `openclaw/skills/plan`, and do not create slugs such as
+`hive-plan`.

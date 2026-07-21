@@ -14,7 +14,7 @@ class HealthController < ApplicationController
   end
 
   # `/health` is web liveness (also the supervisor/installer smoke), while
-  # `/health?deep=1` is the container readiness probe: the box is only
+  # `/health?deep=1` is the Hivebox readiness probe: the container is only
   # useful when the daemon child is running too — a crashlooping daemon
   # must turn the container unhealthy, not sit invisible behind a green
   # web tier.

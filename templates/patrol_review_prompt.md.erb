@@ -31,17 +31,34 @@ bug, security, performance, documentation, test-gap, maintainability.
 Severity must be critical, high, medium, or low. Confidence must be high,
 medium, or low.
 
+Calibrate severity by observable production impact, not by patch size or how
+many users are likely to hit the trigger:
+- critical: active exploitation, unrecoverable data loss, or widespread outage;
+- high: severe security/data-integrity failure or feature-wide unavailability;
+- medium: a reachable supported path crashes, returns wrong behavior, persists
+  wrong state, or materially violates a user/operator-facing contract;
+- low: localized inconvenience with a safe fallback and no persistent wrong
+  state or output.
+Persistent wrong state or wrong user-visible output is at least medium even
+when the affected surface is small or a workaround exists.
+
 Use at most two bounded inspection rounds before producing the JSON. Read the
-listed slice first, in parallel where possible. Only when that establishes a
-concrete defect hypothesis, use one follow-up round for its direct caller,
-guard, or test. Never run a repository-wide search or return a broad file list;
-if the listed evidence does not establish a production defect, immediately
-write an empty `findings` array.
+listed owned paths first (at most four, selected with a 32KB source budget), in
+parallel where possible. The first entrypoint remains listed when it alone
+exceeds that budget, so cap each Read at 400 lines rather than loading a whole
+large file. Only when that establishes a concrete defect hypothesis, use one
+follow-up round for one direct caller, guard, or test. Never run a
+repository-wide search or return a broad file list; if the listed evidence does
+not establish a production defect, immediately write an empty `findings`
+array.
 
 Response contract: your first response may read the listed paths; your second
 may perform the one bounded follow-up; your third response MUST call `Write`
 for the JSON output and MUST NOT call Read, Grep, or Glob. The output response
-still counts when the correct result is an empty array.
+still counts when the correct result is an empty array. Hive permits a fourth
+response as an emergency finalization turn only when the provider failed to
+honor that third-response contract; that fourth response MUST call `Write`
+immediately and MUST NOT call Read, Grep, or Glob.
 
 Before reporting a finding:
 - Verify it against the current checkout and try to disprove it by reading
@@ -56,6 +73,11 @@ Before reporting a finding:
 - Provide a deterministic reproduction (or precise static trace) and a
   targeted validation that would fail before the fix and pass afterward.
 - Choose scope from local, feature, cross_feature, or system.
+- For every evidence item, copy `snippet` as a non-empty exact substring of
+  the single source line named by `file` and `line`. Never span multiple
+  lines, use ellipses, or add explanatory comments to a snippet. Hive verifies
+  every evidence item byte-for-byte and rejects the complete finding when any
+  snippet is not present on its claimed line.
 
 Write a JSON object to this exact path:
 <%= output_path %>
@@ -77,7 +99,7 @@ Required shape:
       "validation": "targeted before/after proof plus broader checks",
       "recommendation": "smallest coherent root-cause fix",
       "evidence": [
-        {"file": "relative/path", "line": 12, "snippet": "code anchor", "role": "trigger|root_cause|impact"}
+        {"file": "relative/path", "line": 12, "snippet": "exact single-line source substring", "role": "trigger|root_cause|impact"}
       ]
     }
   ]

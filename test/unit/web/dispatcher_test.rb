@@ -16,6 +16,13 @@ require "hive/daemon/dispatch_request_queue"
 class WebDispatcherTest < Minitest::Test
   include HiveTestHelper
 
+  def test_stage_dispatch_actions_are_the_queueable_task_action_commands
+    expected = Hive::TaskAction::READY_COMMANDS.select do |_action, verb|
+      Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS.include?(verb)
+    end
+    assert_equal expected, Hive::Web::Dispatcher::STAGE_VERB_BY_ACTION
+  end
+
   def seed_task_at(dir, stage)
     capture_io { Hive::Commands::Init.new(dir).call }
     project = File.basename(dir)
@@ -234,165 +241,6 @@ class WebDispatcherTest < Minitest::Test
     end
   ensure
     Hive::Workflows::Project.reset!
-  end
-
-  def test_guarded_transition_moves_and_audits_a_custom_workflow_task
-    with_tmp_global_config do
-      with_tmp_git_repo do |dir|
-        project, slug = seed_custom_task(dir, "flow")
-        card = Hive::Commands::Status.new.task_card(project: project, slug: slug)
-
-        result = Hive::Web::Dispatcher.new.transition(
-          slug: slug, project: project, destination: "2-work",
-          expected_fingerprint: card.fetch("fingerprint"),
-          actor: "alice", request_id: "web-request-1"
-        )
-
-        assert_equal "applied", result.fetch(:state)
-        folder = File.join(dir, ".hive-state", "stages", "2-work", slug)
-        assert File.directory?(folder)
-        event = File.readlines(File.join(folder, "events.jsonl"), chomp: true)
-          .map { |line| JSON.parse(line) }.last
-        assert_equal "operator_action", event.fetch("event_type")
-        assert_equal "alice", event.fetch("actor")
-        assert_equal "web-request-1", event.fetch("request_id")
-        assert_equal "1-inbox", event.fetch("from")
-        assert_equal "2-work", event.fetch("to")
-        committed = `git -C #{Shellwords.escape(File.join(dir, ".hive-state"))} show HEAD:stages/2-work/#{slug}/events.jsonl`
-        assert_includes committed, "web-request-1"
-
-        assert_raises(Hive::StaleTask) do
-          Hive::Web::Dispatcher.new.transition(
-            slug: slug, project: project, destination: "2-work",
-            expected_fingerprint: card.fetch("fingerprint"),
-            actor: "bob", request_id: "web-request-2"
-          )
-        end
-        successes = File.readlines(File.join(folder, "events.jsonl"), chomp: true)
-          .map { |line| JSON.parse(line) }
-          .count { |record| record["event_type"] == "operator_action" }
-        assert_equal 1, successes
-      end
-    end
-  ensure
-    Hive::Workflows::Project.reset!
-  end
-
-  def test_guarded_transition_rejects_a_stale_or_illegal_destination_without_an_event
-    with_tmp_global_config do
-      with_tmp_git_repo do |dir|
-        project, slug = seed_custom_task(dir, "flow")
-        card = Hive::Commands::Status.new.task_card(project: project, slug: slug)
-        dispatcher = Hive::Web::Dispatcher.new
-
-        illegal = assert_raises(Hive::StaleTask) do
-          dispatcher.transition(
-            slug: slug, project: project, destination: "3-done",
-            expected_fingerprint: card.fetch("fingerprint"), actor: "alice"
-          )
-        end
-        assert_match(/not currently allowed/, illegal.message)
-
-        metadata = Hive::TaskMeta.read(card.fetch("folder"))
-        Hive::TaskMeta.write(
-          card.fetch("folder"), id: metadata[:id], slug: slug,
-          display_name: metadata[:display_name], depends_on: "missing-task-260719-dead",
-          workflow: metadata[:workflow]
-        )
-        assert_raises(Hive::StaleTask) do
-          dispatcher.transition(
-            slug: slug, project: project, destination: "2-work",
-            expected_fingerprint: card.fetch("fingerprint"), actor: "alice"
-          )
-        end
-        operator_events = Dir[File.join(dir, ".hive-state", "stages", "*", slug, "events.jsonl")]
-          .flat_map { |path| File.readlines(path, chomp: true) }
-          .map { |line| JSON.parse(line) }
-          .select { |event| event["event_type"] == "operator_action" }
-        assert_empty operator_events
-      end
-    end
-  ensure
-    Hive::Workflows::Project.reset!
-  end
-
-  def test_run_transition_persists_web_guard_and_actor_in_queue
-    with_tmp_global_config do
-      with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
-        project = File.basename(dir)
-        capture_io { Hive::Commands::New.new(project, "queued board run").call! }
-        slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
-        card = Hive::Commands::Status.new.task_card(project: project, slug: slug)
-
-        result = Hive::Web::Dispatcher.new.transition(
-          slug: slug, project: project, destination: "2-brainstorm",
-          expected_fingerprint: card.fetch("fingerprint"), actor: "alice",
-          request_id: "web-queued-1"
-        )
-
-        assert_equal "queued", result.fetch(:state)
-        request = Hive::Daemon::DispatchRequestQueue.pending.find { |entry| entry.request_id == "web-queued-1" }
-        refute_nil request
-        assert_equal "web", request.requestor
-        assert_equal "alice", request.actor
-        assert_equal card.fetch("fingerprint"), request.expected_fingerprint
-        assert_equal "2-brainstorm", request.transition_destination
-        assert_equal "brainstorm", request.argv[1]
-      end
-    end
-  end
-
-  def test_repeated_queued_transition_reuses_the_pending_request
-    with_tmp_global_config do
-      with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
-        project = File.basename(dir)
-        capture_io { Hive::Commands::New.new(project, "deduplicated board run").call! }
-        slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
-        card = Hive::Commands::Status.new.task_card(project: project, slug: slug)
-        dispatcher = Hive::Web::Dispatcher.new
-
-        first = dispatcher.transition(
-          slug: slug, project: project, destination: "2-brainstorm",
-          expected_fingerprint: card.fetch("fingerprint"), actor: "alice", request_id: "web-dedup-1"
-        )
-        second = dispatcher.transition(
-          slug: slug, project: project, destination: "2-brainstorm",
-          expected_fingerprint: card.fetch("fingerprint"), actor: "alice", request_id: "web-dedup-2"
-        )
-
-        assert_equal first.fetch(:request_id), second.fetch(:request_id)
-        matching = Hive::Daemon::DispatchRequestQueue.pending.select { |request| request.slug == slug }
-        assert_equal 1, matching.size
-      end
-    end
-  end
-
-  def test_server_enforces_every_confirmation_tier
-    dispatcher = Hive::Web::Dispatcher.new
-    confirm = { "confirmation" => "confirm" }
-    reason = { "confirmation" => "reason" }
-    slug = { "confirmation" => "slug" }
-
-    assert_raises(Hive::Error) do
-      dispatcher.send(:validate_confirmation!, confirm, slug: "task-1", confirmation: nil,
-                       reason: nil, confirmation_slug: nil)
-    end
-    dispatcher.send(:validate_confirmation!, confirm, slug: "task-1", confirmation: "confirmed",
-                     reason: nil, confirmation_slug: nil)
-    assert_raises(Hive::Error) do
-      dispatcher.send(:validate_confirmation!, reason, slug: "task-1", confirmation: nil,
-                       reason: "  ", confirmation_slug: nil)
-    end
-    dispatcher.send(:validate_confirmation!, reason, slug: "task-1", confirmation: nil,
-                     reason: "operator override", confirmation_slug: nil)
-    assert_raises(Hive::Error) do
-      dispatcher.send(:validate_confirmation!, slug, slug: "task-1", confirmation: nil,
-                       reason: nil, confirmation_slug: "task-2")
-    end
-    dispatcher.send(:validate_confirmation!, slug, slug: "task-1", confirmation: nil,
-                     reason: nil, confirmation_slug: "task-1")
   end
 
   def test_drop_hard_deletes_the_task_folder

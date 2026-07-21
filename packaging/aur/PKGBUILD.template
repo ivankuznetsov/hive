@@ -26,7 +26,7 @@ pkgdesc='Folder-as-agent pipeline for autonomous software tasks'
 arch=('any')
 url='https://github.com/ivankuznetsov/hive'
 license=('MIT')
-depends=('ruby')
+depends=('ruby' 'cosign')
 makedepends=('ruby-rubygems')
 # `provides=('hive')` + `conflicts=('hive')` is INTENTIONAL and not a
 # self-conflict. We provide the virtual `hive` capability so consumers

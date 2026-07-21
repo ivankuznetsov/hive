@@ -31,24 +31,16 @@ module Hive
 
       # `from` accepts either the long stage dir ("4-execute") or the # not-a-stage-ref: CLI help example
       # short name ("execute"); see `Hive::Stages.resolve` for the map.
-      def initialize(target, project: nil, from: nil, json: false, audit: nil)
+      def initialize(target, project: nil, from: nil, json: false)
         @target = target
         @project_filter = project
         @from = from
         @stage_filter = from
         @json = json
-        @audit = audit&.transform_keys(&:to_s)
       end
 
       def call
         call_with_envelope { do_call }
-      end
-
-      # The web transition dispatcher owns the project commit lock so it can
-      # compare the rendered fingerprint and exact transition immediately
-      # before deletion. This primitive deliberately performs no nested lock.
-      def call_under_lock
-        call_with_envelope { perform_drop(resolve_context) }
       end
 
       def envelope_schema
@@ -62,16 +54,7 @@ module Hive
       private
 
       def do_call
-        owner = resolve_context
-        Hive::Lock.with_commit_lock(owner.hive_state_path) do
-          # The pre-lock resolve discovers the owner only. Resolve again under
-          # the lock before any process, PR, worktree, branch, or folder is
-          # touched so a concurrent stage move cannot pass a stale guard.
-          perform_drop(resolve_context)
-        end
-      end
-
-      def perform_drop(context)
+        context = resolve_context
         guard_archived!(context)
 
         cleanup = cleanup_context(context)
@@ -544,33 +527,21 @@ module Hive
         rel_paths = context.from_stages.map { |stage| File.join("stages", stage, context.slug) }
         rel_paths << File.join("logs", context.slug)
         body = "Dropped task #{context.slug} from stages: #{context.from_stages.join(', ')}"
-        body = "#{body}\n\n#{JSON.generate(drop_audit_record)}" if @audit
         # `allow_empty: true` collapses the result to the single
         # "committed" symbol — drop always writes a commit so the
         # audit trail is complete, even when the working tree was
         # already clean from a prior interrupted run.
-        result = Hive::GitOps.new(context.project_root).hive_commit(
-          stage_name: "dropped",
-          slug: context.slug,
-          action: "dropped",
-          body: body,
-          pathspecs: rel_paths,
-          allow_empty: true
-        )
+        result = Hive::Lock.with_commit_lock(context.hive_state_path) do
+          Hive::GitOps.new(context.project_root).hive_commit(
+            stage_name: "dropped",
+            slug: context.slug,
+            action: "dropped",
+            body: body,
+            pathspecs: rel_paths,
+            allow_empty: true
+          )
+        end
         result.to_s
-      end
-
-      def drop_audit_record
-        {
-          "event_type" => "operator_action",
-          "agent" => "web:#{@audit['actor']}",
-          "actor" => @audit["actor"],
-          "request_id" => @audit["request_id"],
-          "from" => @audit["from"],
-          "to" => @audit["to"],
-          "direction" => @audit["direction"],
-          "confirmation_reason" => @audit["reason"]
-        }.compact
       end
 
       def success_payload(context, cleanup, commit_action)

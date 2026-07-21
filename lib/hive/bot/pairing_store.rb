@@ -2,12 +2,15 @@ require "json"
 require "fileutils"
 require "securerandom"
 require "time"
+require "hive"
 require "hive/atomic_file"
 require "hive/paths"
 
 module Hive
   module Bot
     class PairingStore
+      class ReadError < Hive::Error; end
+
       EXPIRY_SEC = 86_400
       CODE_LENGTH = 8
       CODE_ALPHABET = ("A".."Z").to_a.freeze
@@ -62,9 +65,9 @@ module Hive
         end
       end
 
-      def pending
+      def pending(strict: false)
         with_lock do
-          entries = load_entries
+          entries = load_entries(strict: strict)
           pruned = pruned_entries(entries)
           # `pending` is a read-mostly query (the digest and `hive pairing
           # list` both call it). Only rewrite when pruning actually removed an
@@ -137,11 +140,16 @@ module Hive
         end
       end
 
-      def load_entries
+      def load_entries(strict: false)
         return {} unless File.exist?(@path)
 
         data = JSON.parse(File.read(@path))
-        return {} unless data.is_a?(Hash)
+        unless data.is_a?(Hash)
+          return unreadable_entries(
+            ReadError.new("pairing store root must be a JSON object"),
+            strict: strict
+          )
+        end
 
         data.each_with_object({}) do |(code, payload), memo|
           next unless valid_code?(code)
@@ -160,11 +168,18 @@ module Hive
         # the owner could not tell empty from broken. Warn (the only
         # observability channel here — the store has no logger), then keep the
         # {} fallback so a corrupt file can't wedge minting/approval.
-        warn "hive: pairing store at #{@path} is unreadable " \
-             "(#{e.class}: #{e.message}); treating as empty"
-        {}
+        unreadable_entries(e, strict: strict)
       rescue Errno::ENOENT
         # Benign: the file vanished between the exist? check and the read.
+        {}
+      end
+
+      def unreadable_entries(error, strict:)
+        warning = "pairing store at #{@path} is unreadable " \
+                  "(#{error.class}: #{error.message})"
+        warn "hive: #{warning}; treating as empty"
+        raise ReadError, warning if strict
+
         {}
       end
 

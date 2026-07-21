@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb, lib/hive/tui/**
 created: 2026-04-27
-updated: 2026-07-19
+updated: 2026-06-15
 tags: [command, tui, observability, interactive, diagnostics, task-id, archive, pr]
 ---
 
@@ -33,7 +33,7 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 
 Pane focus is keyboard-only; the focused pane border is bright cyan, the inactive pane border is faint. Below 70 cols the project pane is suppressed and the tasks pane occupies the full width — narrow terminals still get a usable view, just without the left-pane drill-down.
 
-The dashboard intentionally has no persistent metadata header. Scope and filter context live in pane titles and prompt modes, while `generated_at` remains an internal snapshot field rather than always-on chrome. The composer computes pane height from `model.rows` minus any stalled banner and footer rows; both panes clip/pad to that budget. The project and task panes use cursor-following viewports, so vertical terminal shrink keeps the selected project/task visible and keeps the footer on-screen instead of letting rows overflow below it.
+The dashboard intentionally has no persistent metadata header. Scope and filter context live in pane titles and prompt modes, while `generated_at` remains an internal snapshot field rather than always-on chrome. The composer computes pane height from `model.rows` minus any stalled banner and footer rows; both panes clip/pad to that budget. The project and task panes use the shared `Views::Format.viewport_start` cursor-following calculation, so vertical terminal shrink keeps the selected project/task visible and keeps the footer on-screen instead of letting rows overflow below it.
 
 ## Modes
 
@@ -170,7 +170,7 @@ the last dispatched snapshot. Identical snapshots do not redraw.
 
 The task grid has a fixed PR column between id and display name. Rows with no parseable pull-request URL render `—`; rows whose `pr_url` ends in `/pull/<number>` render `#<number>` via [[modules/pr]]. When stdout is a TTY, the number is wrapped in an OSC 8 hyperlink by `Hive::Tui::Views::Hyperlink`; invalid or non-http URLs fall back to the plain label. The PR column does not drop under narrow-width layout branches, so very small terminals first hide stage and status before sacrificing the PR signal.
 
-The grid view derives its visible snapshot through scope, slug/name/id filter, and `Snapshot#without_old_archived`. That drops workflow-terminal rows older than 3 days by row `mtime` (the same state-file timestamp rendered as task age), falling back to `folder_mtime` only for legacy payloads. Terminal identity comes from the status row/workflow descriptor rather than a hard-coded `9-done` stage, so custom workflows share the board/grid retention contract. Marker state is intentionally ignored: complete, unresolved, and markerless terminal rows all hide by the same age rule. Rows with neither timestamp fail open and stay visible. Cursor movement and `BubbleModel#current_row` use the same filtered projection, so keystrokes cannot dispatch against a hidden row. The default footer does not surface the hidden-archive count; `z` opens the Archive pane when the operator wants the unfiltered archive list. The Archive pane itself renders directly from the unfiltered snapshot and therefore lists every terminal task regardless of age.
+The grid view derives its visible snapshot through scope, slug/name/id filter, and `Snapshot#without_old_archived`. That drops `9-done` rows older than 3 days by row `mtime` (the same state-file timestamp rendered as task age), falling back to `folder_mtime` only for legacy payloads. Marker state is intentionally ignored: complete, unresolved, and markerless done rows all hide by the same age rule. Rows with neither timestamp fail open and stay visible. Cursor movement and `BubbleModel#current_row` use the same filtered projection, so keystrokes cannot dispatch against a hidden row. The default footer does not surface the hidden-archive count; `z` opens the Archive pane when the operator wants the unfiltered archive list. The Archive pane itself renders directly from the unfiltered snapshot and therefore lists every `9-done` task regardless of age.
 
 Snapshots carry a `current_seen_at` timestamp; if the last successful refresh is older than 5s, the header renders a `[stalled: Xs]` banner and the `@last_error` message is surfaced in the status line. The previous snapshot stays visible — the loop never crashes on a transient JSON / IO error.
 
@@ -192,6 +192,11 @@ The takeover handler reuses `Hive::Tui::Subprocess.foreground_takeover_command` 
 Pressing `o` from grid mode opens the focused row's task folder in `$EDITOR` for read-only browsing — distinct from `Enter` (workflow-contextual: editor on `needs_input`, log tail on `agent_running`, recover+rerun on review/error recovery rows, etc.) and the verb keys (which dispatch a `hive <verb>` subprocess). `o` mutates no marker, dispatches no workflow, and emits no follow-up `Messages::InputEditorExited` — the editor's exit is the user's last word. Useful for revisiting investigation outputs in `9-done` (or any stage) without dropping to a shell. The handler reuses the same `foreground_takeover_command` machinery `Enter`-on-`needs_input` uses, so terminal handoff is identical; only the after-spawn plumbing differs.
 
 Pressing `i` from grid mode opens a full-screen read-only info panel for the focused task. `BubbleModel#open_idea_preview` reads the task's `idea.md` once, builds `Hive::Tui::Model::InfoPanelState`, and the view renders common identity fields (slug, stage, `created_at`, absolute stage folder, latest `.hive-state/logs/<slug>/*.log` path, and original idea text). Stage extras are plain-text snapshots: `brainstorm.md` for `2-brainstorm`, `plan.md` for `3-plan`, the latest execute-log tail for `4-execute`, and no extra block for `1-inbox`. The panel uses the existing `:idea_preview` mode and `OpenIdeaPreview` / `Back` messages; it mutates no files and spawns no subprocess. Only `q`, `Esc`, or `i` closes it, so accidental unmapped keys are no-ops.
+
+The idea composer and read-only preview share
+`Views::Format.character_chunks` for fixed-width character slicing. Composer
+cursor placement, attachment badges, row-windowing, and preview panel fitting
+remain view-specific.
 
 Pressing `s` from grid mode is the manual-steering escape hatch. `KeyMap` emits `Messages::OpenInAgent`, and `BubbleModel` resolves the task's project config, looks up `execute.agent`, verifies the feature worktree exists, then writes `MANUAL_STEERING` to the row's state file before handing the terminal to the configured development agent in that worktree. Existing stage folders for the slug are passed in `Hive::Stages::DIRS` order with the agent profile's add-dir flag, so the agent can read the idea, brainstorm, plan, task, logs, reviews, and later-stage artifacts without the operator copying paths by hand. `MANUAL_STEERING` classifies as `manual_steering` with no suggested command, so `hive run`, the daemon policy, and workflow verb keys skip it. When the interactive agent exits, `Messages::AgentSteerExited` moves the active stage folder to `.hive-state/stages/archived-manual/<slug>/` (or a numeric suffix on collision), which makes the slug disappear from `hive status` and the TUI without treating it as an `9-done` pipeline archive.
 

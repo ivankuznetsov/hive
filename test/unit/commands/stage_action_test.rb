@@ -219,7 +219,7 @@ class CommandsStageActionTest < Minitest::Test
     )
     command = Hive::Commands::StageAction.new("open-pr", "task", json: true)
 
-    out, = capture_io { command.send(:emit_error_envelope, error) }
+    out, = capture_io { command.send(:emit_envelope, error) }
     payload = JSON.parse(out)
     assert_equal "blocked", payload.dig("condition_gate", "status")
     assert_equal "AgentHealthy",
@@ -286,6 +286,26 @@ class CommandsStageActionTest < Minitest::Test
     entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
     command = Hive::Commands::StageAction.new(
       "plan", "some-slug", json: true, durable: true, attempt_entrypoint: entrypoint
+    )
+    command.define_singleton_method(:resolve_task) { task }
+
+    out, = capture_io do
+      exit_error = assert_raises(SystemExit) { command.call }
+      assert_equal 7, exit_error.status
+    end
+    assert_empty out
+  end
+
+  def test_failed_durable_text_attempt_preserves_exit_without_json
+    task = Struct.new(:folder).new("/tmp/task-folder")
+    result = Hive::Attempts::ClientResult.new(
+      status: :terminal, exit_status: 7, outcome: "failed",
+      receipt: {}, attempt_id: "attempt-text", stdout_bytes: 0
+    )
+    entrypoint = Object.new
+    entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
+    command = Hive::Commands::StageAction.new(
+      "plan", "some-slug", json: false, durable: true, attempt_entrypoint: entrypoint
     )
     command.define_singleton_method(:resolve_task) { task }
 

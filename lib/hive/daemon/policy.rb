@@ -86,6 +86,29 @@ module Hive
       # the edit-resume brake.
       RUN_ACTION = "ready_to_run".freeze
 
+      OPERATIONAL_DISPOSITIONS = {
+        admission_error: [ "operator", "dependency admission failed" ],
+        dispatch: [ "scheduler", "eligible for dispatch" ],
+        wait_for_debounce: [ "scheduler", "waiting for the edit debounce window" ],
+        record_baseline: [ "scheduler", "recorded the first edit baseline" ],
+        wait_for_answers: [ "operator", "waiting for unanswered brainstorm questions" ],
+        blocked_on_dependency: [ "scheduler", "waiting for a workflow dependency" ],
+        poll_for_merge: [ "scheduler", "waiting for pull request merge observation" ],
+        markerless_stalled: [ "hive", "agent exited without a terminal marker" ],
+        skip: [ "none", "no scheduler action is required" ]
+      }.freeze
+
+      # Closed explanation for a pure policy result. The dispatcher augments
+      # `dispatch` with the actual concurrency gate it observed, but separate
+      # status processes never need to reimplement Policy.decide.
+      def operational_disposition(decision)
+        owner, reason = OPERATIONAL_DISPOSITIONS.fetch(
+          decision.to_sym,
+          [ "unknown", "scheduler decision is not recognized" ]
+        )
+        { decision: decision.to_s, owner: owner, reason: reason }
+      end
+
       # Action that means "task is at the finalize stage, waiting for the human
       # to merge the PR on GitHub". Daemon hands off to PrMergeWatcher (U10)
       # which polls `gh pr view --json state` and dispatches `hive archive`

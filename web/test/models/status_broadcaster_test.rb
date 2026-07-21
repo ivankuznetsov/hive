@@ -26,6 +26,58 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     StatusBroadcaster.feed = nil
   end
 
+  test "projects are ordered by active task count with stable ties" do
+    payload = {
+      "projects" => [
+        { "name" => "idle", "tasks" => [] },
+        { "name" => "busy-first", "tasks" => [ {}, {} ] },
+        { "name" => "busy-second", "tasks" => [ {}, {} ] },
+        { "name" => "active", "tasks" => [ {} ] }
+      ]
+    }
+
+    assert_equal %w[busy-first busy-second active idle],
+                 StatusBroadcaster.projects(payload).map { |project| project["name"] }
+  end
+
+  test "one sorted snapshot renders every live project surface" do
+    payload = {
+      "projects" => [
+        { "name" => "idle", "tasks" => [] },
+        { "name" => "busy", "tasks" => [ {} ] }
+      ]
+    }
+    events = []
+    channel = Turbo::StreamsChannel
+    original_refresh = channel.method(:broadcast_refresh_to)
+    original_replace = channel.method(:broadcast_replace_to)
+    channel.define_singleton_method(:broadcast_refresh_to) do |*args, **kwargs|
+      events << [ :refresh, args, kwargs ]
+    end
+    channel.define_singleton_method(:broadcast_replace_to) do |*args, **kwargs|
+      events << [ :replace, args, kwargs ]
+    end
+
+    StatusBroadcaster.send(:broadcast, payload)
+
+    assert_equal [ :refresh, :replace, :replace, :replace ], events.map(&:first)
+    assert_equal %w[project-nav composer-project projects],
+                 events.drop(1).map { |event| event.last.fetch(:target) }
+    assert_equal [
+      "status/project_nav",
+      "status/composer_project",
+      "status/projects"
+    ], events.drop(1).map { |event| event.last.fetch(:partial) }
+    events.drop(1).each do |event|
+      assert_equal %w[busy idle],
+                   event.last.dig(:locals, :projects).map { |project| project.fetch("name") }
+    end
+    assert_equal({ method: :morph }, events[2].last.fetch(:attributes))
+  ensure
+    channel&.define_singleton_method(:broadcast_refresh_to, original_refresh) if original_refresh
+    channel&.define_singleton_method(:broadcast_replace_to, original_replace) if original_replace
+  end
+
   test "a raising broadcast does not permanently stop live updates" do
     feed = FakeFeed.new
     StatusBroadcaster.feed = feed
@@ -51,126 +103,11 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     assert_equal [ { "name" => "b" } ], payload["projects"],
                  "the broadcast after the failure must still be delivered"
   ensure
-    StatusBroadcaster.define_singleton_method(:broadcast, original_broadcast) if original_broadcast
+    if original_broadcast
+      StatusBroadcaster.define_singleton_method(:broadcast, original_broadcast)
+      StatusBroadcaster.singleton_class.send(:private, :broadcast)
+    end
     StatusBroadcaster.send(:remove_const, :RETRY_SEC)
     StatusBroadcaster.const_set(:RETRY_SEC, original_retry)
-  end
-
-  test "board cursor advances and changes epoch after restart" do
-    replacements = []
-    refreshes = []
-    StatusBroadcaster.send(:reset_stream!)
-    before = StatusBroadcaster.stream_cursor
-
-    replace = lambda do |*args, **kwargs|
-      replacements << [ args, kwargs ]
-    end
-    refresh = lambda do |*args, **kwargs|
-      refreshes << [ args, kwargs ]
-    end
-
-    original_replace = Turbo::StreamsChannel.method(:broadcast_replace_to)
-    original_refresh = Turbo::StreamsChannel.method(:broadcast_refresh_to)
-    Turbo::StreamsChannel.define_singleton_method(:broadcast_replace_to, replace)
-    Turbo::StreamsChannel.define_singleton_method(:broadcast_refresh_to, refresh)
-    StatusBroadcaster.send(:broadcast, { "projects" => [] })
-
-    after = StatusBroadcaster.stream_cursor
-    assert_equal before[:epoch], after[:epoch]
-    assert_equal before[:generation] + 1, after[:generation]
-    assert_equal %w[board_sync], replacements.map { |_args, kwargs| kwargs.fetch(:target) }
-    assert_equal 1, refreshes.size
-
-    StatusBroadcaster.stop!
-    restarted = StatusBroadcaster.stream_cursor
-    refute_equal after[:epoch], restarted[:epoch]
-    assert_equal 0, restarted[:generation]
-  ensure
-    Turbo::StreamsChannel.define_singleton_method(:broadcast_replace_to, original_replace) if original_replace
-    Turbo::StreamsChannel.define_singleton_method(:broadcast_refresh_to, original_refresh) if original_refresh
-  end
-
-  test "card digests drive focus-safe targeted patches and a small reconciliation refresh" do
-    replacements = []
-    refreshes = []
-    old_payload = payload_with_cards(1)
-    changed = Marshal.load(Marshal.dump(old_payload))
-    changed.dig("projects", 0, "tasks", 0)["card_digest"] = "card1:changed"
-    StatusBroadcaster.instance_variable_set(:@last_payload, old_payload)
-
-    with_broadcast_spies(replacements, refreshes) do
-      StatusBroadcaster.send(:broadcast, changed)
-    end
-
-    targets = replacements.map { |_args, kwargs| kwargs.fetch(:target) }
-    assert_includes targets, "card_project_task-0"
-    refute_includes targets, "projects"
-    card_patch = replacements.find { |_args, kwargs| kwargs[:target] == "card_project_task-0" }.last
-    assert_equal :morph, card_patch[:method]
-    assert_equal 1, refreshes.size
-    sync = replacements.find { |_args, kwargs| kwargs[:target] == "board_sync" }.last
-    assert_equal true, sync.dig(:locals, :refresh_required)
-  end
-
-  test "snapshot and cursor are exposed through one atomic read" do
-    StatusBroadcaster.send(:reset_stream!)
-    payload, cursor = StatusBroadcaster.snapshot_with_cursor
-
-    assert_kind_of Array, payload.fetch("projects")
-    assert_equal StatusBroadcaster.stream_cursor, cursor
-  end
-
-  test "ten changed cards fall back to one whole band patch" do
-    replacements = []
-    refreshes = []
-    old_payload = payload_with_cards(10)
-    changed = Marshal.load(Marshal.dump(old_payload))
-    changed.dig("projects", 0, "tasks").each_with_index do |card, index|
-      card["card_digest"] = "card1:changed-#{index}"
-    end
-    StatusBroadcaster.instance_variable_set(:@last_payload, old_payload)
-
-    with_broadcast_spies(replacements, refreshes) do
-      StatusBroadcaster.send(:broadcast, changed)
-    end
-
-    targets = replacements.map { |_args, kwargs| kwargs.fetch(:target) }
-    assert_includes targets, "band_project_coding"
-    refute targets.any? { |target| target.start_with?("card_") }
-    assert_equal 1, refreshes.size
-  end
-
-  private
-
-  def with_broadcast_spies(replacements, refreshes)
-    original_replace = Turbo::StreamsChannel.method(:broadcast_replace_to)
-    original_refresh = Turbo::StreamsChannel.method(:broadcast_refresh_to)
-    Turbo::StreamsChannel.define_singleton_method(:broadcast_replace_to) do |*args, **kwargs|
-      replacements << [ args, kwargs ]
-    end
-    Turbo::StreamsChannel.define_singleton_method(:broadcast_refresh_to) do |*args, **kwargs|
-      refreshes << [ args, kwargs ]
-    end
-    yield
-  ensure
-    Turbo::StreamsChannel.define_singleton_method(:broadcast_replace_to, original_replace)
-    Turbo::StreamsChannel.define_singleton_method(:broadcast_refresh_to, original_refresh)
-  end
-
-  def payload_with_cards(count)
-    now = Time.now.utc.iso8601
-    {
-      "projects" => [ {
-        "name" => "project",
-        "workflows" => [ { "id" => "coding", "stages" => [ { "dir" => "1-inbox" } ] } ],
-        "tasks" => count.times.map do |index|
-          {
-            "slug" => "task-#{index}", "workflow" => "coding", "stage" => "1-inbox",
-            "terminal" => false, "mtime" => now, "folder_mtime" => now,
-            "card_digest" => "card1:#{index}"
-          }
-        end
-      } ]
-    }
   end
 end

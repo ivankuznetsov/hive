@@ -44,8 +44,7 @@ module Hive
       Request = Struct.new(
         :request_id, :created_at, :project, :slug, :argv, :requestor,
         :chat_id, :update_id, :trigger, :task_generation,
-        :predecessor_attempt_id, :inherited_outputs, :actor,
-        :expected_fingerprint, :transition_destination, :schema_version, :path,
+        :predecessor_attempt_id, :inherited_outputs, :schema_version, :path,
         keyword_init: true
       )
       ClaimedDelivery = Data.define(:request, :claim, :path)
@@ -67,8 +66,7 @@ module Hive
       def write_request!(project:, slug:, argv:, requestor: "bot", chat_id: nil,
                          update_id: nil, trigger: nil, request_id: generate_request_id,
                          task_generation: nil, predecessor_attempt_id: nil,
-                         inherited_outputs: [], actor: nil, expected_fingerprint: nil,
-                         transition_destination: nil,
+                         inherited_outputs: [],
                          state_home: Hive::Paths.state_home, now: Time.now)
         unless valid_argv?(argv)
           raise ArgumentError, "argv #{argv.inspect} is not allowlisted for dispatch requests"
@@ -96,10 +94,7 @@ module Hive
           "trigger" => trigger.to_s,
           "task_generation" => task_generation,
           "predecessor_attempt_id" => predecessor_attempt_id,
-          "inherited_outputs" => inherited_outputs || [],
-          "actor" => actor,
-          "expected_fingerprint" => expected_fingerprint,
-          "transition_destination" => transition_destination
+          "inherited_outputs" => inherited_outputs || []
         }
 
         dir = directory(state_home: state_home)
@@ -348,10 +343,7 @@ module Hive
           return {
             chat_id: data["chat_id"], update_id: data["update_id"],
             project: data["project"], slug: data["slug"],
-            requestor: data["requestor"], actor: data["actor"],
-            expected_fingerprint: data["expected_fingerprint"],
-            transition_destination: data["transition_destination"],
-            task_generation: data["task_generation"],
+            requestor: data["requestor"], task_generation: data["task_generation"],
             predecessor_attempt_id: data["predecessor_attempt_id"]
           }
         end
@@ -393,8 +385,7 @@ module Hive
       end
 
       def promote_sequence(request_id, project:, slug:, requestor: "bot", chat_id: nil,
-                           update_id: nil, actor: nil, expected_fingerprint: nil,
-                           transition_destination: nil, trigger: "sequence_continuation",
+                           update_id: nil, trigger: "sequence_continuation",
                            state_home: Hive::Paths.state_home, now: Time.now)
         dir = directory(state_home: state_home)
         path = sequence_path(dir, request_id)
@@ -405,8 +396,6 @@ module Hive
         next_request_id = write_request!(
           project: project, slug: slug, argv: next_argv, requestor: requestor,
           chat_id: chat_id, update_id: update_id, trigger: trigger,
-          actor: actor, expected_fingerprint: expected_fingerprint,
-          transition_destination: transition_destination,
           state_home: state_home, now: now
         )
         if sequence.empty?
@@ -420,8 +409,6 @@ module Hive
           slug: slug.to_s, argv: next_argv, requestor: requestor.to_s,
           chat_id: chat_id, update_id: update_id, trigger: trigger.to_s,
           task_generation: nil, predecessor_attempt_id: nil, inherited_outputs: [],
-          actor: actor, expected_fingerprint: expected_fingerprint,
-          transition_destination: transition_destination,
           schema_version: SCHEMA_VERSION, path: nil
         )
       end
@@ -630,9 +617,6 @@ module Hive
             task_generation: data["task_generation"],
             predecessor_attempt_id: data["predecessor_attempt_id"],
             inherited_outputs: data["inherited_outputs"].is_a?(Array) ? data["inherited_outputs"] : [],
-            actor: data["actor"],
-            expected_fingerprint: data["expected_fingerprint"],
-            transition_destination: data["transition_destination"],
             schema_version: schema_version,
             path: path
           )

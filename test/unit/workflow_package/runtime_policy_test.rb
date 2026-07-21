@@ -220,11 +220,20 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
   end
 
   def test_admission_compiles_council_reviewers_and_revise_agents
-    reviewer = Struct.new(:agent).new(nil)
-    revise = Struct.new(:agent).new(nil)
-    council = Struct.new(:revise).new(revise)
-    stage = Struct.new(:kind, :agent, :reviewers, :council).new(:council, nil, [ reviewer ], council)
-    workflow = Struct.new(:stages).new([ stage ])
+    reviewer = Hive::Workflow::Reviewer.new(
+      name: "reviewer", permissions: permissions
+    )
+    revise = Hive::Workflow::Revise.new(permissions: permissions)
+    workflow = Hive::Workflow.new(
+      id: :demo,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "council", index: 1, state_file: "council.md", kind: :council,
+          permissions: permissions, reviewers: [ reviewer ],
+          council: Hive::Workflow::Council.new(quorum: 1, revise: revise)
+        )
+      ]
+    )
     with_tmp_dir do |dir|
       task = File.join(dir, "task")
       FileUtils.mkdir_p(task)
@@ -348,6 +357,32 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
 
       assert status.success?, err
       assert_equal "allow", JSON.parse(out).dig("hookSpecificOutput", "permissionDecision")
+    end
+  end
+
+  def test_actor_policy_rejects_malformed_inputs_and_unavailable_package_context
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+      profile = Hive::AgentProfiles.lookup(:claude)
+
+      [ { "PATH" => "override" }, { "SEO_TOKEN" => :not_a_string } ].each_with_index do |environment, index|
+        error = assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            "read-only", task_folder: task, package_root: package, profile: profile,
+            environment: environment
+          )
+        end
+        assert_match(/environment is malformed/, error.message)
+      end
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          "read-only", task_folder: task, package_root: File.join(dir, "missing"), profile: profile
+        )
+      end
+      assert_match(/package context is unavailable/, error.message)
     end
   end
 

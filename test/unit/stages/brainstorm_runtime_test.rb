@@ -53,6 +53,7 @@ class BrainstormRuntimeTest < Minitest::Test
   end
 
   def test_action_for_preserves_unknown_marker_name
+    assert_equal "none", Hive::Stages::Brainstorm.action_for(:none)
     assert_equal "paused", Hive::Stages::Brainstorm.action_for(:paused)
   end
 

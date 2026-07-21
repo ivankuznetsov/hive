@@ -77,13 +77,21 @@ Branches, tags, abbreviated revisions, arbitrary repositories, and unlisted
 versions are rejected.
 
 ```bash
-hive workflow install honeycomb/repo-brief --yes
+hive workflow install honeycomb/architecture --yes
+hive workflow install honeycomb/writing --yes
+hive workflow install honeycomb/seo-content --yes --allow-escalation
 hive workflow list
-hive workflow update repo-brief --dry-run
-hive workflow update repo-brief --yes
-hive workflow remove repo-brief --yes
+hive workflow update architecture --dry-run
+hive workflow update architecture --yes
+hive workflow remove architecture --yes
 hive workflow publish my-flow --version 1.0.0
 ```
+
+Architecture and Writing previously existed as lightweight `workflow new`
+scaffold templates. Their full reviewed packages now own those names in
+Honeycomb; `--template architecture` and `--template writing` return the exact
+install command instead of creating a reduced local copy. The owner-authored
+samples that remain in Hive are `blank` and `research`.
 
 Install clones one exact catalog snapshot, materializes
 `packages/<name>/<version>/` from that catalog commit (not from the review-head
@@ -92,6 +100,13 @@ bytes, `release_sha256`, the complete Git tree, every payload hash, catalog to
 manifest metadata binding, static security findings, and runner capabilities
 before asking for confirmation. A managed selection is an atomic lock over an
 immutable catalog-commit generation:
+
+Before consent, Hive shows an agent mapping for every stage, council reviewer,
+and reviser. Suggestions start from the project choices made by `hive init`.
+When one of those agents cannot enforce an actor's non-`yolo` tool scope, Hive
+suggests Claude for that slot instead so accepting all defaults remains
+runnable. An explicit mapping is never rewritten: an incompatible explicit
+choice fails runtime admission before project state changes.
 
 ```text
 .hive-state/workflows/<name>/honeycomb.lock.json
@@ -103,6 +118,12 @@ removing the project selection therefore affects only new tasks; generations
 still referenced by existing tasks remain verifiable and runnable. Tampering
 is an integrity error, never an implicit local override.
 
+Lifecycle mutations recheck the selected source commit and manifest digest
+inside the workflow mutation lock. A first install likewise verifies that no
+selection appeared after validation. If another operator changes the selection
+between preview and apply, Hive stops with a retryable conflict instead of
+installing, updating, or removing a generation the caller did not review.
+
 `workflow update --dry-run` validates and returns descriptor, instruction,
 manifest, dependency, permission, command, domain, and file changes without
 writing project state. An applied update always needs ordinary confirmation.
@@ -110,19 +131,37 @@ Capability additions, removed deny rules, dependency additions, or
 incomparable dependency changes additionally require a separate
 `--allow-escalation`; neither consent flag implies the other.
 
-`workflow list` keeps origin, selection, integrity, and catalog visibility as
-orthogonal fields. `workflow remove` operates only on Hive-managed locks and
-never deletes task-pinned generations or owner-authored/built-in workflows.
+`workflow list --json` schema v2 keeps origin, selection, integrity, and
+catalog visibility as orthogonal fields. A verified selected row also reports
+its active configuration digest, every stable-slot agent/model/effort mapping,
+and optional-input environment binding plus current availability. Values are
+never read into the document. A task-retained row carries its configuration
+digest when the task metadata has one, but does not present that historical
+snapshot as the active mapping. Owner-authored and built-in rows retain their
+generation-free shape. `workflow remove` operates only on Hive-managed locks
+and never deletes task-pinned generations or owner-authored/built-in workflows.
 List and remove work offline; catalog visibility is reported as
 `unknown_offline` until a trusted refresh is available.
 
-The current Honeycomb v2 manifest carries a coarse risk/capability/filesystem
-disclosure rather than Hive's legacy exact tool/command policy. Hive maps only
-the lossless low-risk, task-local read-only subset to its existing managed
-runtime policy. Every broader v2 disclosure fails admission before install or
-update mutation. In particular, the current Bench and Docs Sync seed packages
-can resolve and pass registry integrity verification, but cannot yet be
-installed by this client.
+Hive web exposes the same project-scoped lifecycle under **Workflows**. It lists
+built-in, authored, selected, and retained generations; scaffolds project
+workflows; and makes install/update/remove a two-step review. The first step is
+the command's real dry-run disclosure. The second uses a 15-minute signed
+receipt bound to the reviewed package, configuration, and selected baseline;
+security-expanding updates require their own checkbox in addition to ordinary
+update consent. The current legacy `workflow publish` output is shown as a known
+limitation rather than an action that would open an unusable v2 registry PR.
+
+Honeycomb v2 manifests carry coarse disclosure for review and consent, while
+each executable stage, reviewer, and reviser declares its exact runtime
+`permissions:`. Install rejects a manifest that understates those actor
+permissions. High-risk actors require a separate `--allow-escalation` consent.
+The strict `x-hive` extension names manifest-hashed executable tools, optional
+prompt assets, and optional environment inputs authorized for stable actor
+slots. Input values remain in the operator environment: configuration stores
+only the binding name, injects a current value only into its authorized child,
+and rejects package-declared process-control names such as `PATH`, `HOME`,
+`RUBYOPT`, and `LD_PRELOAD`.
 
 `workflow publish` still emits the legacy `workflows/<name>/manifest.json`
 submission shape. It remains `pending_review`, not listed, and does not yet
@@ -194,6 +233,7 @@ Council stages declare reviewers and a council policy:
     quorum: 2
     max_rounds: 3
     exit_rule: consensus # consensus | human
+    on_max_rounds: wait   # wait | complete
     triage_output: reviews/triage.md
     revise:
       agent: claude
@@ -214,8 +254,11 @@ Each reviewer declares exactly one of `skill:`, `instruction:`, `prompt:`, or
 verdicts, accepted findings, rejected findings, required edits, open
 disagreements, and readiness. If quorum is not met, `exit_rule: human` pauses
 with `WAITING reason=needs_revision`; `exit_rule: consensus` runs the optional
-revise agent until quorum or `max_rounds`, then pauses with
-`WAITING reason=max_rounds`.
+revise agent until quorum or `max_rounds`. The default
+`on_max_rounds: wait` pauses with `WAITING reason=max_rounds`; bounded editorial
+workflows may opt into `on_max_rounds: complete`, which writes
+`COMPLETE reason=max_rounds` so a downstream delivery stage can emit an
+explicit non-publishable capped outcome.
 
 Stage indexes and stage directories are derived from array order. The example
 above produces `1-inbox`, `2-work`, and `3-done`. The first stage has no
@@ -236,7 +279,8 @@ differs from `state_file`.
 For a ready-to-copy example:
 
 ```bash
-hive workflow new architecture --template architecture
+hive workflow install honeycomb/architecture --yes
+hive new <project> --workflow architecture "Plan the system..."
 ```
 
 ## Trust Boundary
@@ -244,7 +288,8 @@ hive workflow new architecture --template architecture
 Project workflow descriptors are trusted project-owner configuration. An
 `instruction:` file is injected into the agent prompt as the stage instruction,
 not treated as untrusted task data. Managed Honeycomb instructions instead pass
-package admission and run through a generated Hive-owned policy with inherited
-settings, hooks, plugins, and MCP configuration disabled. Both permission
-systems are tool-level controls, not a universal OS sandbox; run Hive in a
-sandboxed user/container when host isolation matters.
+package admission and run with a task-pinned exact permission scope plus a
+sanitized child environment. V2 actor presets do not disable inherited Claude
+settings, hooks, plugins, or MCP configuration. Both permission systems are
+tool-level controls, not a universal OS sandbox; run Hive in a sandboxed
+user/container when host and configuration-source isolation matter.

@@ -61,14 +61,15 @@ module Hive
       def list
         ensure_no_args!("list")
         entries = pending_entries
+        payload = list_payload(entries)
         if @json
-          @output.puts JSON.generate(list_payload(entries))
+          @output.puts JSON.generate(payload)
         elsif entries.empty?
           @output.puts "No pending pairing requests."
         else
           print_table(entries)
         end
-        entries
+        payload
       end
 
       def approve
@@ -128,8 +129,8 @@ module Hive
       # that into a clean envelope instead of a raw backtrace on `hive pairing
       # list`.
       def pending_entries
-        @store.pending
-      rescue SystemCallError, IOError => e
+        @store.pending(strict: true)
+      rescue Hive::Bot::PairingStore::ReadError, SystemCallError, IOError => e
         raise ApprovalError.new("failed to read pending pairing requests: #{e.message}",
                                 error_kind: "store_read_failed")
       end

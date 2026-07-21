@@ -1,9 +1,9 @@
-<% content_for(:title, "hivebox — telegram") %>
+<% content_for(:title, "#{web_product_name} — telegram") %>
 <h1>Telegram</h1>
 <p class="muted">Connect the hive bot so you can drive the pipeline from Telegram. The token is validated against the real API before anything is saved.</p>
 
 <%# Open while unconfigured, tucked away once the bot works. %>
-<details class="setup-guide" <%= "open" unless @bot["enabled"] %>>
+<details class="setup-guide" <%= "open" unless @telegram_bot.enabled? %>>
   <summary>First time? Three steps</summary>
   <ol class="setup-steps">
     <li>
@@ -15,35 +15,79 @@
       <code>/revoke</code> and save the new one here.
     </li>
     <li>
-      <strong>Find your chat ID.</strong> Message
+      <strong>Choose how to authorize yourself.</strong> For a manual allowlist, message
       <a href="https://t.me/userinfobot" target="_blank" rel="noopener">@userinfobot</a>
       — it replies with your numeric ID (like <code>123456789</code>). Put that
-      number in the allowlist; only listed chats can drive the pipeline.
+      number in the allowlist. Or enable pairing below and leave the allowlist
+      empty; your bot will issue a one-time approval code instead.
     </li>
     <li>
       <strong>Say hello.</strong> Open your new bot's chat and send
       <code>/start</code> (Telegram only lets bots message people who messaged
-      them first). Then save below and hit "Send test message" — the reply
-      should land in Telegram.
+      them first). With pairing enabled, approve the request that appears on
+      this page. Otherwise save the manual ID and send a round-trip test.
     </li>
   </ol>
   <p class="muted">No webhook, public URL, or tunnel — the bot long-polls
-  Telegram from inside the box.</p>
+  Telegram from the same Hive runtime.</p>
 </details>
 
 <%= form_with url: update_telegram_path, class: "form-grid" do |f| %>
   <div class="form-row">
     <%= f.label :token, "Bot token" %>
-    <%= f.password_field :token, required: true, placeholder: @bot["enabled"] ? "Saved — enter a new token to rotate" : "123456:ABC…" %>
+    <%= f.password_field :token, required: !@telegram_bot.token_saved?,
+          placeholder: @telegram_bot.token_saved? ? "Saved — leave blank to keep it, or enter a replacement" : "123456:ABC…" %>
   </div>
   <div class="form-row">
-    <%= f.label :chat_ids, "Allowed chat IDs (comma or space separated)" %>
-    <%= f.text_field :chat_ids, value: Array(@bot["chat_id_allowlist"]).join(", ") %>
+    <%= f.label :chat_ids, "Allowed chat IDs (optional when pairing is enabled)" %>
+    <%= f.text_field :chat_ids, value: @telegram_bot.chat_ids.join(", ") %>
+  </div>
+  <div class="form-row checkbox-row">
+    <%= f.check_box :pairing_enabled, checked: @telegram_bot.pairing_enabled? %>
+    <%= f.label :pairing_enabled, "Let new Telegram chats request access with /start" %>
+    <p class="muted">Unknown chats receive an 8-letter code that expires after 24 hours. They cannot drive Hive until you approve it below.</p>
   </div>
   <p><%= f.submit "Validate and save", data: { turbo_submits_with: "Validating…" } %></p>
 <% end %>
 
+<section class="pairing-section" aria-labelledby="pairing-heading">
+  <h2 id="pairing-heading">Pairing requests</h2>
+  <% if @telegram_bot.pairing_enabled? %>
+    <p class="muted">Ask the person to send <code>/start</code> to your bot, then match the code shown in their chat. Refresh this page to check for new requests.</p>
+    <% if @pairing_error %>
+      <div class="flash flash-alert"><%= @pairing_error %></div>
+    <% elsif @pairings.empty? %>
+      <div class="empty-state"><p>No pending pairing requests.</p></div>
+    <% else %>
+      <div class="pairing-list">
+        <% @pairings.each do |pairing| %>
+          <article class="pairing-row" data-pairing-code="<%= pairing.code %>">
+            <div>
+              <strong class="pairing-code"><%= pairing.code %></strong>
+              <span class="repo-desc">Telegram chat <%= pairing.chat_id %></span>
+              <span class="faint">requested <%= relative_age(pairing.age_sec) %> · expires in <%= distance_of_time_in_words(Time.current, Time.current + pairing.expires_in_sec) %></span>
+            </div>
+            <%= button_to "Approve", telegram_pairing_approve_path(pairing.code),
+                  params: { consent: "approve_telegram_pairing" },
+                  class: "btn-secondary btn-sm",
+                  data: {
+                    turbo_confirm: "Approve Telegram chat #{pairing.chat_id}?",
+                    turbo_submits_with: "Approving…"
+                  } %>
+          </article>
+        <% end %>
+      </div>
+    <% end %>
+  <% else %>
+    <div class="empty-state"><p>Enable pairing above to approve new chats without copying numeric IDs.</p></div>
+  <% end %>
+</section>
+
 <h2>Round trip</h2>
 <p class="muted">Sends a real message to every allowed chat with the saved token.</p>
 <%= button_to "Send test message", test_telegram_path, class: "btn-secondary",
+      disabled: @telegram_bot.chat_ids.empty?,
       data: { turbo_submits_with: "Sending…" } %>
+<% if @telegram_bot.chat_ids.empty? %>
+  <p class="faint">Approve a pairing request or add a chat ID before sending a test.</p>
+<% end %>

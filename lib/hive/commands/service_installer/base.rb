@@ -1,7 +1,9 @@
 require "cgi"
 require "fileutils"
 require "hive/install_channel"
+require "hive/invoked_binary"
 require "hive/commands/service_installer/outcome"
+require "open3"
 require "rbconfig"
 require "shellwords"
 
@@ -19,7 +21,7 @@ module Hive
         attr_reader :messages
 
         def initialize(host_os: RbConfig::CONFIG["host_os"], home: nil, binary_path: nil, runner: nil,
-                       systemctl_available: nil, launchctl_available: nil)
+                       systemctl_available: nil, launchctl_available: nil, status_reader: nil)
           @host_os = host_os
           # Anchor on the real user home for launchd/systemd paths —
           # HIVE_HOME is a config/test override that does not apply
@@ -28,7 +30,9 @@ module Hive
           # HOME stay hermetic.
           @home = File.expand_path(home || ENV["HOME"] || Dir.home)
           @binary_path = binary_path
+          @runner_injected = !runner.nil?
           @runner = runner || ->(argv) { system(*argv, out: File::NULL) }
+          @status_reader = status_reader
           @systemctl_available = systemctl_available
           @launchctl_available = launchctl_available
           @messages = []
@@ -79,6 +83,16 @@ module Hive
             "service_installed" => !target_path.nil? && File.exist?(target_path),
             "service_enabled" => service_enabled?
           }
+        end
+
+        # Rich lifecycle snapshot for callers that need more than the legacy
+        # installed/enabled contract. Kept separate so daemon/bot schemas do
+        # not acquire web-only keys merely because they share this base.
+        def service_lifecycle_state
+          service_state.merge(
+            "service_running" => service_running?,
+            "service_manager_available" => service_manager_available?
+          )
         end
 
         def expected_binary
@@ -147,6 +161,11 @@ module Hive
           return :drifted if write_result == :drifted
 
           if autostart
+            # `launchctl load` is not idempotent: loading an already-loaded
+            # plist returns non-zero even when the existing job is healthy.
+            # An unchanged loaded unit therefore needs no mutation at all.
+            return write_result if write_result == :unchanged && service_enabled?
+
             if write_result == :upgraded
               # launchd does not pick up a rewritten plist while the
               # service is loaded; new EnvironmentVariables would be
@@ -399,11 +418,7 @@ module Hive
         end
 
         def which(name)
-          ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
-            path = File.join(dir, name)
-            return path if File.file?(path) && File.executable?(path)
-          end
-          nil
+          Hive::InvokedBinary.which(name)
         end
 
         def platform
@@ -446,6 +461,51 @@ module Hive
           else
             false
           end
+        end
+
+        # Non-mutating "is the managed process active?" probe. Keep this in
+        # the shared installer so setup, daemon, bot, and web status cannot
+        # invent platform-specific lifecycle commands independently.
+        def service_running?
+          case platform
+          when :linux
+            return false unless systemctl_available?
+
+            !!@runner.call([ "systemctl", "--user", "is-active", "--quiet", service_name ])
+          when :macos
+            return false unless launchctl_available?
+
+            # A loaded launchd job can be waiting with no process. `print`
+            # exposes the actual state, so only `state = running` counts. Unit
+            # tests and older injected runners retain the boolean seam.
+            return !!@runner.call([ "launchctl", "list", launchd_label ]) if @runner_injected && !@status_reader
+
+            output, ok = read_status([ "launchctl", "print", "gui/#{Process.uid}/#{launchd_label}" ])
+            ok && output.match?(/\bstate\s*=\s*running\b/i)
+          else
+            false
+          end
+        end
+
+        def service_manager_available?
+          case platform
+          when :linux
+            return @systemctl_available unless @systemctl_available.nil?
+            return false unless systemctl_available?
+
+            !!@runner.call(%w[systemctl --user show-environment])
+          when :macos then launchctl_available?
+          else false
+          end
+        end
+
+        def read_status(argv)
+          return @status_reader.call(argv) if @status_reader
+
+          output, status = Open3.capture2e(*argv)
+          [ output, status.success? ]
+        rescue Errno::ENOENT
+          [ "", false ]
         end
 
         # Mirror systemctl_available? for macOS: distinguish "launchctl

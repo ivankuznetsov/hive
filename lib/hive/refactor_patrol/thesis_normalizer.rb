@@ -2,6 +2,7 @@ require "json_schemer"
 require "pathname"
 require "hive"
 require "hive/patrol/source_reader"
+require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/fingerprint"
 require "hive/refactor_patrol/leverage"
 require "hive/refactor_patrol/thesis"
@@ -231,20 +232,18 @@ module Hive
         caps = risk["caps"].is_a?(Hash) ? risk["caps"] : {}
         {
           "caps" => {
-            "est_files" => caps["est_files"].to_i,
-            "est_diff_lines" => caps["est_diff_lines"].to_i,
             "single_feature" => caps.key?("single_feature") ? caps["single_feature"] == true : true
           },
           "public_api_impact" => risk["public_api_impact"] == true,
           "public_api_details" => Array(risk["public_api_details"]),
           "cross_feature_impact" => risk["cross_feature_impact"] == true,
           "cross_feature_details" => Array(risk["cross_feature_details"]),
-          "flags" => Array(risk["flags"])
+          "flags" => Caps.without_legacy_size_flags(risk["flags"])
         }
       end
 
       def enforce_behavior_guidance!(feature, hash)
-        return enforce_documentation_guidance!(hash) if feature.documentation?
+        return enforce_documentation_guidance!(feature, hash) if feature.documentation?
 
         validation = hash.fetch("required_validation")
         known_commands = @commands.keys
@@ -277,20 +276,29 @@ module Hive
         hash["confidence"] = "medium" if !has_tests && validation["characterization_first"] && hash["confidence"] == "high"
       end
 
-      def enforce_documentation_guidance!(hash)
+      def enforce_documentation_guidance!(feature, hash)
         validation = hash.fetch("required_validation")
         docs_command = @commands["docs"]
         if docs_command
           validation["commands"] = [ "docs" ]
           validation["characterization_first"] = false
           validation["notes"] = "Run the configured documentation validation before publishing a fix."
+        elsif built_in_documentation_validation_available?(feature)
+          validation["commands"] = []
+          validation["characterization_first"] = false
+          validation["notes"] = "Use Hive's built-in documentation safety checks before normal PR review."
         else
           validation["commands"] = []
           validation["characterization_first"] = false
-          validation["notes"] = "No documentation validation command is configured; this thesis is report-only."
+          validation["notes"] = "Configure an executable docs validation command before automatic refactoring."
           hash.fetch("risk").fetch("flags") << "missing_docs_validation"
           hash.fetch("risk")["flags"].uniq!
         end
+      end
+
+      def built_in_documentation_validation_available?(feature)
+        paths = Array(feature.owned_files) + Array(feature.entrypoints)
+        paths.any? && paths.all? { |path| Caps.documentation_path?(path) }
       end
 
       def enforce_admissibility!(hash)

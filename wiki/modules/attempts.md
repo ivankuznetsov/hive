@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-07-17
+updated: 2026-07-18
 tags: [attempts, ownership, leases, daemon, recovery]
 ---
 
@@ -17,13 +17,14 @@ reconciles and applies policy; it does not own or reap task agents.
 
 | Module | Responsibility |
 |--------|----------------|
-| `Record`, `Store` | Write v2 records, ingest v1/v2, and perform locked guarded transitions with atomic write/fsync/rename persistence. |
+| `Record`, `Store` | Write v2 records, ingest v1/v2, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, and expose process-local compatibility projections after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
 | `Dispatcher` | Resolve receipt replay, live duplicate attachment, loss deferral, capacity, fresh admission, and explicit successors. |
 | `DetachedLauncher` | Reject unsupported platforms before handoff, create a POSIX session, and start the private supervisor route. |
 | `Supervisor` | Claim, first-heartbeat, spawn the existing Hive command, heartbeat, frame output, enforce timeout/cancellation, and terminalize. |
 | `Client` | Tail frames read-only and replay a terminal result. Interrupt means detach; it never signals the owner group. |
+| `CommandDispatch` | Give `hive run` and workflow stage commands one attach-result policy: shared durable dispatch, lost-attempt translation, receipt exit propagation, and single-document JSON fallback when a failed worker emitted no stdout. |
 | `Reconciler`, `ProcessIdentity` | Adopt without `wait2`, detect PID/start/session/group mismatch, preserve suspects, expire launches, and normalize loss. |
 | `DirtyStateCapture`, `LostOutcomeStore` | Inventory partial git/untracked/binary work without mutation and make cleanup/successor policy restart-idempotent. |
 | `LegacyBackfiller` | Create a compatibility lease only when legacy task/PID/start identity is trustworthy. |
@@ -45,6 +46,12 @@ deadlines, checkpoint, integrity references, diagnostics, and loss or receipt
 fields. The capability itself is never persisted. Large payloads remain
 owner-private referenced files with canonical relative path, byte size, and
 SHA-256.
+
+Record construction/readers and store transitions all use the same
+non-mutating `Hive::StringifyKeys` transform as the task journal and projection.
+It recursively copies hashes/arrays and stringifies keys while leaving scalar
+values unchanged, preserving the former `Record.deep_copy` contract without a
+second normalization implementation.
 
 Task generation—not request ID—is semantic idempotency. Its progress token
 hashes both the stage artifact and this task's deterministic dependency-
@@ -109,9 +116,13 @@ dependency changes. It immediately deletes every inherited
 the admission bypass. The attempt transport cannot supply a dedicated store
 override, and production exposes neither public context construction nor a
 `Context.with` override. The authenticated context remains only in the worker
-process. An attached client records whether any stdout frame was replayed; a
-non-zero terminal result with no worker stdout is routed through the command's
-normal versioned JSON error envelope instead of returning an empty document.
+process. An attached client records whether any stdout frame was replayed.
+`Hive::Attempts::CommandDispatch` applies that result identically for `hive
+run` and workflow verbs: a non-zero terminal result with no worker stdout is
+routed through the owning command's normal versioned JSON error envelope
+instead of returning an empty document; a worker-emitted document is never
+duplicated; lost attempts without output become the command's typed concurrent
+run error; and every other non-zero receipt preserves its exit status.
 
 This is an application ownership boundary, not privilege separation. Hive's
 configured global attempt store, its `HIVE_HOME`/`XDG_STATE_HOME`/`HOME`

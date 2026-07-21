@@ -56,7 +56,6 @@ module Hive
         :state_file,
         :worktree_path,
         :pr_url,
-        :terminal,
         :attempt_id,
         :task_generation,
         :condition_task_generation,
@@ -81,6 +80,7 @@ module Hive
         # hold-label bug by editing `row.held`.
         :held,
         :mtime,
+        :observation_mtime,
         :folder_mtime,
         :age_seconds,
         :claude_pid,
@@ -95,18 +95,7 @@ module Hive
         :task_lock_process_start_time,
         :task_lock_id,
         :implementation_identity,
-        :unanswered_questions,
-        :fingerprint,
-        :card_digest,
-        :dominant_state,
-        :state_rank,
-        :allowed_transitions,
-        :blocked_reason,
-        :lock,
-        :dependency,
-        :queued_request,
-        :retries,
-        :operational_chips
+        :unanswered_questions
       ) do
         # worktree_path defaults to nil so existing test factories that
         # predate PR #84 finding #8 can keep their existing Row.new
@@ -121,24 +110,19 @@ module Hive
         # unanswered_questions defaults to 0 so payloads / test factories
         # that predate issue #270 keep working; production payloads always
         # emit the integer explicitly.
-        def initialize(stage:, id: nil, display_name: nil, workflow: nil, worktree_path: nil,
+        def initialize(id: nil, display_name: nil, workflow: nil, worktree_path: nil,
                        pr_url: nil, attempt_id: nil, task_generation: nil,
-                       terminal: nil,
                        condition_task_generation: nil, commit_generation: nil,
                        current_attempt: nil, conditions: [], condition_history: [],
                        evidence: [], condition_overrides: [], condition_gate: nil, condition_migration: nil,
                        condition_provenance: {}, shadow_audit: {}, condition_warning: nil,
-                       folder_mtime: nil, live_task_lock: false,
+                       observation_mtime: nil, folder_mtime: nil, live_task_lock: false,
                        task_lock_pid: nil, task_lock_process_start_time: nil, task_lock_id: nil,
                        implementation_identity: nil,
                        unanswered_questions: 0, depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
-                       blocked: false, admission_error: nil, held: nil,
-                       fingerprint: nil, card_digest: nil, dominant_state: nil,
-                       state_rank: nil, allowed_transitions: [], blocked_reason: nil,
-                       lock: {}, dependency: {}, queued_request: nil, retries: {},
-                       operational_chips: [], **rest)
-          super(stage: stage, id: id, display_name: display_name,
+                       blocked: false, admission_error: nil, held: nil, **rest)
+          super(id: id, display_name: display_name,
                 workflow: workflow,
                 depends_on: depends_on,
                 blocked_by: blocked_by,
@@ -147,7 +131,6 @@ module Hive
                 admission_error: admission_error,
                 worktree_path: worktree_path,
                 pr_url: pr_url,
-                terminal: terminal.nil? ? Hive::ArchiveFilter.archived?(stage) : terminal,
                 attempt_id: attempt_id,
                 task_generation: task_generation,
                 condition_task_generation: condition_task_generation,
@@ -163,25 +146,14 @@ module Hive
                 shadow_audit: shadow_audit,
                 condition_warning: condition_warning,
                 held: held,
+                observation_mtime: observation_mtime,
                 folder_mtime: folder_mtime,
                 live_task_lock: live_task_lock,
                 task_lock_pid: task_lock_pid,
                 task_lock_process_start_time: task_lock_process_start_time,
                 task_lock_id: task_lock_id,
                 implementation_identity: implementation_identity,
-                unanswered_questions: unanswered_questions,
-                fingerprint: fingerprint,
-                card_digest: card_digest,
-                dominant_state: dominant_state,
-                state_rank: state_rank,
-                allowed_transitions: allowed_transitions,
-                blocked_reason: blocked_reason,
-                lock: lock,
-                dependency: dependency,
-                queued_request: queued_request,
-                retries: retries,
-                operational_chips: operational_chips,
-                **rest)
+                unanswered_questions: unanswered_questions, **rest)
         end
       end
 
@@ -248,7 +220,6 @@ module Hive
           state_file: payload["state_file"],
           worktree_path: payload["worktree_path"],
           pr_url: payload["pr_url"],
-          terminal: payload["terminal"],
           attempt_id: payload["attempt_id"],
           task_generation: payload["task_generation"],
           condition_task_generation: payload["condition_task_generation"],
@@ -267,6 +238,7 @@ module Hive
           attrs: payload["attrs"],
           held: payload["held"],
           mtime: payload["mtime"],
+          observation_mtime: payload["observation_mtime"],
           folder_mtime: payload["folder_mtime"],
           age_seconds: payload["age_seconds"],
           claude_pid: payload["claude_pid"],
@@ -281,18 +253,7 @@ module Hive
           task_lock_process_start_time: payload["task_lock_process_start_time"],
           task_lock_id: payload["task_lock_id"],
           implementation_identity: payload["implementation_identity"],
-          unanswered_questions: payload["unanswered_questions"].to_i,
-          fingerprint: payload["fingerprint"],
-          card_digest: payload["card_digest"],
-          dominant_state: payload["dominant_state"],
-          state_rank: payload["state_rank"],
-          allowed_transitions: Array(payload["allowed_transitions"]).freeze,
-          blocked_reason: payload["blocked_reason"],
-          lock: payload["lock"] || {},
-          dependency: payload["dependency"] || {},
-          queued_request: payload["queued_request"],
-          retries: payload["retries"] || {},
-          operational_chips: Array(payload["operational_chips"]).freeze
+          unanswered_questions: payload["unanswered_questions"].to_i
         ).freeze
       end
 
@@ -390,7 +351,6 @@ module Hive
       def old_archived_row?(row, now:)
         Hive::ArchiveFilter.hide?(
           stage: row.stage,
-          terminal: row.terminal,
           mtime: parse_time(row.mtime),
           folder_mtime: parse_folder_mtime(row.folder_mtime),
           now: now

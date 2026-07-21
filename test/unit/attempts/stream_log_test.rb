@@ -78,6 +78,37 @@ class AttemptsStreamLogTest < Minitest::Test
     end
   end
 
+  def test_reopen_after_torn_write_preserves_the_first_post_recovery_frame
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      log.append(:stdout, "a")
+      log.close
+      File.open(path, "ab") { |file| file.write('{"sequence":2,"timestamp":"2026-') }
+
+      reopened = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      assert_equal 2, reopened.append(:stdout, "b")
+      reopened.close
+
+      frames = Hive::Attempts::StreamLog.read(path)
+      assert_equal [ 1, 2 ], frames.map(&:sequence)
+      assert_equal "b", frames.last.bytes
+    end
+  end
+
+  def test_reopen_of_a_log_ending_at_a_frame_boundary_leaves_the_file_unchanged
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      log.append(:stdout, "a")
+      log.close
+      before = File.binread(path)
+
+      Hive::Attempts::StreamLog.new(path, clock: -> { NOW }).close
+      assert_equal before, File.binread(path)
+    end
+  end
+
   def test_reader_ignores_malformed_frames_and_read_errors
     with_tmp_dir do |root|
       path = File.join(root, "bad.frames")

@@ -273,38 +273,6 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
-  def test_project_admission_context_skips_unrelated_projects_but_follows_explicit_dependencies
-    with_tmp_dir do |home|
-      app = File.join(home, "app")
-      data = File.join(home, "data")
-      unrelated = File.join(home, "unrelated")
-      dependent = write_task_meta(app, "4-execute", "dependent-task", id: 2)
-      Hive::TaskMeta.write(
-        dependent, id: 2, slug: "dependent-task", display_name: nil,
-        depends_on: "data:base-task"
-      )
-      write_task_meta(data, "8-finalize", "base-task", id: 1)
-      write_task_meta(unrelated, "4-execute", "other-task", id: 3)
-      entries = [
-        { "name" => "app", "path" => app, "repository_identity" => "github.com/acme/app" },
-        { "name" => "data", "path" => data, "repository_identity" => "github.com/acme/data" },
-        { "name" => "unrelated", "path" => unrelated, "repository_identity" => nil }
-      ]
-
-      context = with_replaced_singleton_method(
-        Hive::RepositoryIdentity, :current,
-        ->(root) { root == data ? "github.com/acme/data" : nil }
-      ) do
-        Hive::DependencySnapshot.admission_context_for_project(
-          entries.first, registry_entries: entries
-        )
-      end
-
-      assert context.verdict(project: "app", slug: "dependent-task").clear?
-      assert_equal %w[app data], context.projects.map(&:name).sort
-    end
-  end
-
   def test_admission_project_fails_closed_for_bad_entries_and_configs
     with_tmp_dir do |root|
       missing_name = Hive::DependencySnapshot.admission_project({ "path" => root })

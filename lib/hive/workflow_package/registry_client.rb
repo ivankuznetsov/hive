@@ -213,10 +213,11 @@ module Hive
         manifest = parse_manifest_bytes(manifest_bytes)
         expected_paths = [ RegistryManifest::FILE_NAME ] + manifest.file_entries.map { |entry| entry.fetch("path") }
         tree = git!("-C", checkout, "ls-tree", "-r", "-z", resolution.catalog_commit, "--", prefix, binary: true)
-        tree_paths = parse_tree(tree, prefix)
-        unless tree_paths.sort == expected_paths.sort
+        tree_entries = parse_tree(tree, prefix)
+        unless tree_entries.map { |entry| entry.fetch("path") }.sort == expected_paths.sort
           raise RegistryError, "source commit package tree does not match its complete manifest inventory"
         end
+        modes = tree_entries.to_h { |entry| [ entry.fetch("path"), entry.fetch("mode") ] }
 
         FileUtils.mkdir_p(destination, mode: 0o700)
         expected_paths.each do |relative|
@@ -225,6 +226,7 @@ module Hive
           target = File.join(destination, relative)
           FileUtils.mkdir_p(File.dirname(target), mode: 0o700)
           File.binwrite(target, bytes)
+          File.chmod(modes.fetch(relative) == "100755" ? 0o755 : 0o644, target)
         end
       end
 
@@ -243,7 +245,7 @@ module Hive
           unless type == "blob" && %w[100644 100755].include?(mode) && path&.start_with?(prefix)
             raise RegistryError, "source commit package contains a link or unsupported file type"
           end
-          path.delete_prefix(prefix)
+          { "path" => path.delete_prefix(prefix), "mode" => mode }
         end
       end
 
@@ -255,7 +257,12 @@ module Hive
         out, err, status = Timeout.timeout(@timeout_sec) do
           Open3.capture3({ "LC_ALL" => "C", "LANG" => "C" }, "git", *args)
         end
-        raise RegistryError, "registry git operation failed" unless status.success?
+        unless status.success?
+          detail = err.to_s.strip.byteslice(0, 4096).to_s
+          message = "registry git operation failed"
+          message = "#{message}: #{detail}" unless detail.empty?
+          raise RegistryError, message
+        end
 
         binary ? out.b : out
       rescue Timeout::Error

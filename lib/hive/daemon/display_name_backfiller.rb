@@ -1,5 +1,6 @@
 require "fileutils"
 require "hive/paths"
+require "hive/process_kill"
 require "hive/task_meta"
 
 module Hive
@@ -137,12 +138,7 @@ module Hive
       end
 
       def pid_alive?(pid)
-        Process.kill(0, pid)
-        true
-      rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        true
+        Hive::ProcessKill.pid_alive?(pid)
       end
 
       def reap_zombie(pid)

@@ -8,7 +8,7 @@ module Hive
     module Views
       # Read-only archive projection. It intentionally uses the full
       # in-memory snapshot, not the grid's old-archive filter, so operators
-      # can reach every workflow-terminal task without a filesystem walk.
+      # can reach every 9-done task without a filesystem walk.
       module ArchivePane
         TITLE = "Archive · all done tasks".freeze
         EMPTY = "(no archived tasks)".freeze
@@ -41,7 +41,7 @@ module Hive
           return [] unless model.snapshot
 
           model.snapshot.projects.flat_map do |project|
-            project.rows.select(&:terminal)
+            project.rows.select { |row| row.stage == Hive::ArchiveFilter::ARCHIVE_STAGE_DIR }
           end
         end
 

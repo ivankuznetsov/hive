@@ -7,6 +7,7 @@ require "hive/patrol/finding"
 require "hive/patrol/fingerprint"
 require "hive/patrol/runner_task"
 require "hive/patrol/agent_launch"
+require "hive/patrol/review_error_details"
 require "hive/patrol/source_reader"
 require "hive/patrol/state_store"
 require "hive/patrol/token_budget"
@@ -17,6 +18,8 @@ module Hive
     class Reviewer
       STAGE = "patrol-review".freeze
       MAX_OUTPUT_BYTES = 64 * 1024
+      MAX_PROMPT_OWNED_FILES = 4
+      MAX_PROMPT_SOURCE_BYTES = 32 * 1024
       VALID_CATEGORIES = %w[bug security performance documentation test-gap maintainability].freeze
       VALID_SEVERITIES = %w[critical high medium low].freeze
       VALID_CONFIDENCE = %w[high medium low].freeze
@@ -75,7 +78,8 @@ module Hive
                                     output_path: output_path, run_dir: run_dir)
         if agent_failed?(result)
           return record_feature_error(
-            feature, "agent_failed", agent_error_message(result), agent_error_details(result)
+            feature, "agent_failed", agent_error_message(result),
+            Hive::Patrol::ReviewErrorDetails.from_agent_result(result)
           )
         end
 
@@ -97,21 +101,6 @@ module Hive
         message
       end
 
-      def agent_error_details(result)
-        exhaustion = result.is_a?(Hash) ? result[:resource_exhaustion] : nil
-        return {} unless exhaustion.is_a?(Hash)
-
-        {
-          "details" => {
-            "resource_exhaustion" => {
-              "reason" => exhaustion[:reason].to_s,
-              "limit" => exhaustion[:limit].to_i,
-              "observed" => exhaustion[:observed].to_i
-            }
-          }
-        }
-      end
-
       def record_feature_error(feature, kind, message, details = {})
         error = { "feature_id" => feature.id, "error" => kind, "message" => message }.merge(details)
         @review_errors << error
@@ -124,12 +113,40 @@ module Hive
           "patrol_review_prompt.md.erb",
           TemplateBindings.new(
             project_root: @project_root,
-            feature: feature,
+            feature: bounded_prompt_feature(feature),
             output_path: output_path,
             max_findings: max_findings,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
+      end
+
+      # Candidate scoring and evidence validation retain the complete mapped
+      # feature. The model receives a bounded initial view so large components
+      # cannot spend the per-agent allowance loading every context and test
+      # file before the response that must write findings. A concrete defect
+      # hypothesis may still use the prompt's one direct follow-up round.
+      def bounded_prompt_feature(feature)
+        feature.dup.tap do |bounded|
+          bounded.owned_files = bounded_owned_files(feature.owned_files)
+          bounded.context_files = []
+          bounded.tests = []
+        end
+      end
+
+      def bounded_owned_files(paths)
+        remaining = MAX_PROMPT_SOURCE_BYTES
+        selected = []
+        Array(paths).each do |path|
+          break if selected.size >= MAX_PROMPT_OWNED_FILES
+
+          bytes = @source_reader.read_bytes(path, limit: remaining + 1).bytesize
+          if selected.empty? || bytes <= remaining
+            selected << path
+            remaining = [ remaining - bytes, 0 ].max
+          end
+        end
+        selected
       end
 
       def parse_findings(feature, output_path, run_id:)
@@ -285,7 +302,12 @@ module Hive
         profile = Hive::AgentProfiles.lookup(@cfg.dig("patrol", "agent") || "claude", cfg: @cfg)
         launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :review)
         unless @token_budget.acquire(stage: STAGE, minimum_tokens: launch.fetch(:minimum_tokens))
-          return { status: :error, error_message: @token_budget.exhaustion_message }
+          exhaustion = @token_budget.resource_exhaustion if @token_budget.respond_to?(:resource_exhaustion)
+          return {
+            status: :error,
+            error_message: @token_budget.exhaustion_message,
+            resource_exhaustion: exhaustion
+          }
         end
         started_at = Time.now.utc
         result = nil

@@ -93,12 +93,39 @@ class RefactorPatrolReviewerTest < Minitest::Test
     end
   end
 
+  def test_real_review_run_records_job_and_feature_identity
+    with_tmp_dir do |dir|
+      state = Hive::RefactorPatrol::StateStore.new(dir)
+      runner = lambda do |output_path:, **|
+        File.write(output_path, JSON.generate("theses" => []))
+        {}
+      end
+      context = {
+        "job_id" => "pr-7-stable", "analysis_sha" => "a" * 40,
+        "source_pr" => { "number" => 7, "url" => "https://example.test/pull/7" }
+      }
+      reviewer = Hive::RefactorPatrol::Reviewer.new(
+        dir, cfg: cfg, state: state, agent_runner: runner, audit_context: context
+      )
+
+      reviewer.call([ feature ], leverage_by_feature: leverage_by_feature)
+
+      path = Dir.glob(File.join(state.root, "runs", "review-*", "review-context.json")).fetch(0)
+      recorded = JSON.parse(File.read(path))
+      assert_equal "pr-7-stable", recorded.fetch("job_id")
+      assert_equal "a" * 40, recorded.fetch("analysis_sha")
+      assert_equal "checkout", recorded.fetch("feature_id")
+      assert_equal 7, recorded.dig("source_pr", "number")
+    end
+  end
+
   def test_prompt_view_bounds_files_without_changing_measured_feature
     with_tmp_dir do |dir|
       complete = Hive::Patrol::Feature.new(
         id: "wide", kind: "architecture", entrypoints: [ "lib/one.rb" ],
         owned_files: 6.times.map { |index| "lib/#{index}.rb" },
-        context_files: [ "lib/context.rb" ], tests: [ "test/wide_test.rb" ]
+        context_files: 6.times.map { |index| "lib/context-#{index}.rb" },
+        tests: 6.times.map { |index| "test/wide-#{index}_test.rb" }
       )
       reviewer = Hive::RefactorPatrol::Reviewer.new(
         dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
@@ -108,10 +135,11 @@ class RefactorPatrolReviewerTest < Minitest::Test
       bounded = reviewer.send(:bounded_prompt_feature, complete)
 
       assert_equal complete.owned_files.first(4), bounded.owned_files
-      assert_empty bounded.context_files
-      assert_empty bounded.tests
+      assert_equal complete.context_files.first(4), bounded.context_files
+      assert_equal complete.tests.first(4), bounded.tests
       assert_equal 6, complete.owned_files.size
-      assert_equal [ "lib/context.rb" ], complete.context_files
+      assert_equal 6, complete.context_files.size
+      assert_equal 6, complete.tests.size
 
       FileUtils.mkdir_p(File.join(dir, "lib"))
       File.write(File.join(dir, "lib", "large-a.rb"), "a" * 20_000)
@@ -122,6 +150,22 @@ class RefactorPatrolReviewerTest < Minitest::Test
         [ "lib/large-a.rb", "lib/large-b.rb", "lib/small.rb" ]
       )
       assert_equal [ "lib/large-a.rb", "lib/small.rb" ], byte_bounded
+    end
+  end
+
+  def test_documentation_prompt_has_one_unambiguous_validation_route
+    with_tmp_dir do |dir|
+      reviewer = Hive::RefactorPatrol::Reviewer.new(
+        dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
+        agent_runner: ->(**) { raise "not called" }
+      )
+      prompt = reviewer.send(
+        :render_prompt, documentation_feature, leverage_by_feature.fetch("checkout"),
+        File.join(dir, "theses.json"), max_theses: 1
+      )
+
+      assert_match(/Without a\s+configured `docs` command, leave the command list empty/, prompt)
+      refute_includes prompt, "With no applicable command the thesis is report-only"
     end
   end
 
@@ -255,6 +299,31 @@ class RefactorPatrolReviewerTest < Minitest::Test
     end
   end
 
+  def test_review_stops_after_first_failed_feature_and_leaves_the_tail_unattempted
+    with_tmp_dir do |dir|
+      reviewed = []
+      runner = lambda do |feature:, **|
+        reviewed << feature.id
+        { status: :error, error_message: "daily quota exhausted" }
+      end
+      reviewer = Hive::RefactorPatrol::Reviewer.new(
+        dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), agent_runner: runner
+      )
+      features = %w[checkout search billing].map do |id|
+        Hive::Patrol::Feature.from_h(feature.to_h.merge("id" => id))
+      end
+      leverage = features.to_h do |candidate|
+        [ candidate.id, leverage_by_feature.fetch("checkout") ]
+      end
+
+      assert_empty reviewer.call(features, leverage_by_feature: leverage)
+
+      assert_equal [ "checkout" ], reviewed
+      assert_equal [ "checkout" ], reviewer.feature_results.map { |item| item.fetch("feature_id") }
+      assert_equal 1, reviewer.review_errors.size
+    end
+  end
+
   def test_unexpected_runner_exception_records_review_error
     with_tmp_dir do |dir|
       runner = ->(**) { raise ArgumentError, "bad prompt" }
@@ -329,6 +398,9 @@ class RefactorPatrolReviewerTest < Minitest::Test
       assert_includes captured, "leverage floor is 0.2500"
       assert_includes captured, "current consequence evidence"
       assert_includes captured, "added indirection, not leverage"
+      assert_match(/fourth\s+response as an emergency finalization turn/, captured)
+      assert_includes captured, "complete coherent refactoring"
+      assert_includes captured, "Do not reject, down-rank, truncate, or split"
     end
   end
 
@@ -496,13 +568,13 @@ class RefactorPatrolReviewerTest < Minitest::Test
     with_tmp_dir do |dir|
       reviewer = reviewer_for(dir, [ valid_raw_thesis ])
       invalid = Hive::RefactorPatrol::ThesisNormalizer::Invalid.new(
-        errors: [ "expected /risk/caps/est_files to be an integer" ]
+        errors: [ "expected /confidence to match an allowed value" ]
       )
       reviewer.instance_variable_set(:@normalizer, ->(**) { invalid })
 
       assert_empty reviewer.call([ feature ], leverage_by_feature: leverage_by_feature)
       assert_equal "schema_invalid", reviewer.review_errors.first.fetch("error")
-      assert_includes reviewer.review_errors.first.fetch("message"), "est_files"
+      assert_includes reviewer.review_errors.first.fetch("message"), "confidence"
     end
   end
 
@@ -534,5 +606,16 @@ class RefactorPatrolReviewerTest < Minitest::Test
         "commands" => { "test" => "ruby -Itest test/foo_test.rb", "lint" => nil }
       }
     }
+  end
+
+  def documentation_feature
+    Hive::Patrol::Feature.new(
+      id: "checkout",
+      kind: "documentation",
+      entrypoints: [ "docs/guide.md" ],
+      owned_files: [ "docs/guide.md" ],
+      context_files: [ "README.md" ],
+      tests: []
+    )
   end
 end

@@ -8,6 +8,10 @@ module Hive
     module_function
 
     FILENAME = "meta.yml".freeze
+    WRITABLE_FIELDS = %i[
+      id slug display_name depends_on workflow workflow_commit
+      workflow_manifest_digest workflow_configuration_digest
+    ].freeze
 
     class InvalidMetadata < StandardError; end
 
@@ -38,6 +42,11 @@ module Hive
       if raw.key?("workflow_manifest_digest") || raw.key?(:workflow_manifest_digest)
         data[:workflow_manifest_digest] = normalize_string(
           raw["workflow_manifest_digest"] || raw[:workflow_manifest_digest]
+        )
+      end
+      if raw.key?("workflow_configuration_digest") || raw.key?(:workflow_configuration_digest)
+        data[:workflow_configuration_digest] = normalize_string(
+          raw["workflow_configuration_digest"] || raw[:workflow_configuration_digest]
         )
       end
       data
@@ -113,14 +122,18 @@ module Hive
     end
 
     def write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil,
-              workflow_commit: nil, workflow_manifest_digest: nil)
+              workflow_commit: nil, workflow_manifest_digest: nil, workflow_configuration_digest: nil)
       FileUtils.mkdir_p(task_folder)
       normalized_depends_on = normalize_string(depends_on)
       normalized_workflow = normalize_string(workflow)
       normalized_commit = normalize_string(workflow_commit)
       normalized_digest = normalize_string(workflow_manifest_digest)
+      normalized_configuration_digest = normalize_string(workflow_configuration_digest)
       if normalized_commit.nil? != normalized_digest.nil?
         raise ArgumentError, "workflow_commit and workflow_manifest_digest must be written together"
+      end
+      if normalized_configuration_digest && normalized_commit.nil?
+        raise ArgumentError, "workflow_configuration_digest requires immutable workflow provenance"
       end
       data = {
         "id" => normalize_id(id),
@@ -131,6 +144,7 @@ module Hive
       data["workflow"] = normalized_workflow if normalized_workflow
       data["workflow_commit"] = normalized_commit if normalized_commit
       data["workflow_manifest_digest"] = normalized_digest if normalized_digest
+      data["workflow_configuration_digest"] = normalized_configuration_digest if normalized_configuration_digest
       tmp = File.join(task_folder, ".#{FILENAME}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
       File.write(tmp, data.to_yaml)
       File.rename(tmp, path(task_folder))
@@ -140,6 +154,7 @@ module Hive
       if normalized_commit
         result[:workflow_commit] = normalized_commit
         result[:workflow_manifest_digest] = normalized_digest
+        result[:workflow_configuration_digest] = normalized_configuration_digest if normalized_configuration_digest
       end
       result
     ensure
@@ -147,39 +162,21 @@ module Hive
     end
 
     def update_display_name(task_folder, name)
-      current = read_for_update!(task_folder)
-      slug = current[:slug] || File.basename(task_folder)
-      write(
-        task_folder,
-        id: current[:id],
-        slug: slug,
-        display_name: name,
-        depends_on: current[:depends_on],
-        workflow: current[:workflow],
-        workflow_commit: current[:workflow_commit],
-        workflow_manifest_digest: current[:workflow_manifest_digest]
-      )
+      rewrite(task_folder, display_name: name)
     end
 
     # Set the task id while preserving every other meta field. Used by the
     # daemon's id backfiller to assign an id to a task created outside
     # `hive new` (hand-made folder, `mv`-ed in) whose meta has none.
     def update_id(task_folder, id)
+      rewrite(task_folder, id: id)
+    end
+
+    def rewrite(task_folder, changes)
       current = read_for_update!(task_folder)
-      slug = current[:slug] || File.basename(task_folder)
-      write(
-        task_folder,
-        id: id,
-        slug: slug,
-        display_name: current[:display_name],
-        depends_on: current[:depends_on],
-        # Preserve the workflow selector — without it, the daemon's id
-        # backfiller would silently drop a non-coding `workflow:` and revert
-        # the task to the project default (mirrors update_display_name).
-        workflow: current[:workflow],
-        workflow_commit: current[:workflow_commit],
-        workflow_manifest_digest: current[:workflow_manifest_digest]
-      )
+      updated = current.merge(changes)
+      updated[:slug] ||= File.basename(task_folder)
+      write(task_folder, **updated.slice(*WRITABLE_FIELDS))
     end
 
     def empty
@@ -201,7 +198,8 @@ module Hive
         depends_on: normalize_string(fetch(raw, "depends_on")),
         workflow: normalize_string(fetch(raw, "workflow")),
         workflow_commit: normalize_string(fetch(raw, "workflow_commit")),
-        workflow_manifest_digest: normalize_string(fetch(raw, "workflow_manifest_digest"))
+        workflow_manifest_digest: normalize_string(fetch(raw, "workflow_manifest_digest")),
+        workflow_configuration_digest: normalize_string(fetch(raw, "workflow_configuration_digest"))
       }
     end
 

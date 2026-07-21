@@ -39,13 +39,10 @@ module Hive
     # emitting commands produce a typed JSON document on success and a
     # structured error envelope on every failure path; init currently
     # publishes the success envelope while precondition failures keep the
-    # legacy stderr + exit-code contract.
+    # legacy stderr + exit-code contract. `watch` deliberately rejects this
+    # document mode because it is a stream; use its --json-lines option.
     class_option :json, type: :boolean, default: false,
                         desc: "emit a single JSON document on stdout (commands that support it)"
-    class_option :audit_actor, type: :string, hide: true,
-                               desc: "internal web operator audit actor"
-    class_option :audit_request_id, type: :string, hide: true,
-                                    desc: "internal web operator audit request id"
 
     FINDING_SEVERITY_ENUM = %w[high medium low nit].freeze
 
@@ -295,9 +292,11 @@ module Hive
       continues if another operation fails.
 
       Without --yes, stdin must be a TTY and the operator must confirm. JSON
-      mode never prompts, so --json requires --yes whenever mutations are
-      planned. Repeat --agent/--skill values (or pass several values after one
-      flag) to scope setup to effective managed targets.
+      mode never prompts, so --json requires --yes before native inspection or
+      provisioning. Non-TTY mode has the same boundary. Without consent Hive
+      returns a typed refusal before launching agent CLIs. Repeat
+      --agent/--skill values (or pass several values after one flag) to scope
+      setup to effective managed targets.
 
       Exit codes: 0 healthy/no-op; 1 attempted or residual failure;
       64 consent required/refused; 78 invalid manifest/config/filter.
@@ -318,8 +317,10 @@ module Hive
       ).call
     end
 
-    desc "setup", "Provision local Hive web mode, daemon service, and project enrollment"
-    option :service, type: :boolean, default: false, desc: "also install the managed web service"
+    desc "setup", "Provision Hive web, daemon service, and project enrollment"
+    option :yes, type: :boolean, default: false, desc: "accept the aggregate agent-skill provisioning plan"
+    option :service, type: :boolean, default: true,
+                     desc: "install and start the managed Hive web service (use --no-service to opt out)"
     option :no_bootstrap, type: :boolean, default: false, desc: "diagnose only; do not install qmd or web bundle"
     option :no_init, type: :boolean, default: false, desc: "do not initialize or enroll the current project"
     def setup
@@ -328,7 +329,8 @@ module Hive
         json: options[:json],
         service: options[:service],
         no_bootstrap: options[:no_bootstrap],
-        no_init: options[:no_init]
+        no_init: options[:no_init],
+        yes: options[:yes]
       ).call
     end
 
@@ -459,17 +461,21 @@ module Hive
 
       By default `new` scaffolds the blank `inbox -> work -> done` stub. Pass
       `--template NAME` to seed from a richer sample workflow instead (e.g.
-      writing, research). Either way: edit the scaffolded stage instruction(s),
+      research). Either way: edit the scaffolded stage instruction(s),
       then run `hive new PROJECT --workflow ID "<your idea>"`.
     DESC
     option :template, type: :string,
-                      desc: "for `new`: seed from a named sample workflow (e.g. writing, research) instead of the blank stub"
+                      desc: "for `new`: seed from a named sample workflow (e.g. research) instead of the blank stub"
     option :yes, type: :boolean, default: false,
                  desc: "confirm install/update/remove in JSON or non-interactive mode"
     option :dry_run, type: :boolean, default: false,
                      desc: "for `install`, `update`, or `remove`: validate and report without changing project state"
     option :allow_escalation, type: :boolean, default: false,
-                              desc: "for `update`: separately allow a security capability increase"
+                              desc: "for `install`/`update`: separately allow unbounded or increased capabilities"
+    option :mapping, type: :array, default: [],
+                     desc: "for `install`/`update`: SLOT=AGENT[,model=MODEL][,effort=EFFORT] overrides"
+    option :input_binding, type: :array, default: [],
+                           desc: "for `install`/`update`: optional input NAME=ENV_NAME bindings"
     option :version, type: :string,
                      desc: "for `publish`: semantic package version"
     def workflow(subcommand = nil, id = nil)
@@ -483,6 +489,8 @@ module Hive
         yes: options[:yes],
         dry_run: options[:dry_run],
         allow_escalation: options[:allow_escalation],
+        mapping_overrides: options[:mapping],
+        input_bindings: options[:input_binding],
         version: options[:version]
       ).call
     end
@@ -572,16 +580,14 @@ module Hive
                        desc: "skip the auto-rebase pre-step for this run only (one-off override of cfg.rebase.enabled)"
     def run_task(target)
       require "hive/commands/run"
-      kwargs = {
+      Hive::Commands::Run.new(
+        target,
         project: options[:project],
         stage: options[:stage],
         json: options[:json],
         no_rebase: options[:no_rebase],
         durable: true
-      }
-      audit = web_operator_audit
-      kwargs[:audit] = audit if audit
-      Hive::Commands::Run.new(target, **kwargs).call
+      ).call
     end
     map "run" => :run_task
 
@@ -797,10 +803,10 @@ module Hive
       Use --pr with a merged PR number or URL to analyze only its immutable
       changed-path manifest from a clean registered default-branch checkout.
       PR mode requires --json, cannot be combined with legacy scope hints, and
-      emits hive-refactor-patrol.v2 through an enforceable read-only agent.
+      emits hive-refactor-patrol.v3 through an enforceable read-only agent.
 
       The daemon uses --actions with --job-manifest to resume the immutable
-      per-thesis action ledger after discovery. It emits the same v2 contract.
+      per-thesis action ledger after discovery. It emits the same v3 contract.
 
       Use --list or --show JOB_ID to inspect the authoritative durable job
       ledger without enqueueing, claiming, replaying, or resuming work. With
@@ -814,7 +820,7 @@ module Hive
     option :entrypoint, type: :string, desc: "only review the feature owning this entrypoint"
     option :path, type: :string, desc: "only review features with owned files under this path"
     option :changed_since, type: :string, desc: "git ref used for changed-feature ranking/filtering"
-    option :pr, type: :string, desc: "analyze one merged PR number or URL with the v2 read-only contract"
+    option :pr, type: :string, desc: "analyze one merged PR number or URL with the v3 read-only contract"
     option :job_manifest, type: :string,
                           desc: "analyze one immutable merge-intake manifest (daemon/internal)"
     option :actions, type: :boolean, default: false,
@@ -977,8 +983,9 @@ module Hive
 
     desc "status", "Show all active tasks across registered projects"
     long_desc <<~DESC
-      Default: prints a grouped table of every task across registered
-      projects, ordered by stage. Combine with --json to emit the
+      Default: prints a concise operational snapshot with counts, exact active
+      tasks, blocker ownership, and reasons. Use --full for the former grouped
+      table of every task ordered by stage. Combine with --json to emit the
       `hive-status` envelope (schema v#{Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")}); every row carries a required
       nullable `diagnostic` field — null for green rows, populated with
       a bounded summary + artifact tail + marker signature for red
@@ -1017,6 +1024,10 @@ module Hive
                    desc: "with --diagnose, write diagnostics/red-status.md using the configured execute agent"
     option :force, type: :boolean, default: false,
                    desc: "with --diagnose --write, re-spawn the agent even when a fresh agent-written artifact already exists"
+    option :operational, type: :boolean, default: false,
+                         desc: "emit the agent-first operational status view (combine with --json for its v1 envelope)"
+    option :full, type: :boolean, default: false,
+                  desc: "show the detailed human task table (cannot be combined with --json or --operational)"
     def status
       require "hive/commands/status"
       Hive::Commands::Status.new(
@@ -1025,7 +1036,85 @@ module Hive
         project: options[:project],
         stage: options[:stage],
         write: options[:write],
-        force: options[:force]
+        force: options[:force],
+        operational: options[:operational],
+        full: options[:full]
+      ).call
+    end
+
+    desc "watch [TARGET...]", "Observe bounded semantic task transitions"
+    long_desc <<~DESC
+      Watches one or more tasks without mutating workflow state. TARGET may be
+      PROJECT:SLUG, a globally unique bare slug, or a slug scoped by --project.
+      With --project and no TARGET, the active task set is selected once at
+      startup. Selection never expands while the command runs and is capped at
+      100 tasks.
+
+      The default human stream prints the initial state, meaningful transitions,
+      source warnings, and exactly one final record. --json-lines emits one
+      independently valid hive-watch-event.v1 object per line. The global
+      --json option is rejected because it promises one JSON document.
+
+      --until settled returns when every selected task needs operator attention,
+      needs repair, or is ready for completion. --until completion is stricter:
+      every task must be observed in the full status graph as archived. A task
+      disappearing from status is never treated as completion.
+
+      The observer is bounded by --timeout and --max-events. Three consecutive
+      source failures or unexplained task absences fail with exit 69. SIGINT and
+      SIGTERM emit a final record before preserving exit 130 or 143.
+    DESC
+    option :project, type: :string, desc: "scope bare slugs, or select this project's active tasks"
+    option :until, type: :string, default: "settled", enum: %w[settled completion],
+                   desc: "terminal condition: settled or verified completion"
+    option :timeout, type: :numeric, default: 1_800,
+                     desc: "maximum watch duration in seconds"
+    option :max_events, type: :numeric, default: 100,
+                        desc: "maximum non-final events; one final event is always reserved"
+    option :interval, type: :numeric, default: 15,
+                      desc: "status polling interval in seconds"
+    option :json_lines, type: :boolean, default: false,
+                        desc: "emit one hive-watch-event.v1 JSON object per line"
+    def watch(*targets)
+      require "hive/commands/watch"
+      Hive::Commands::Watch.new(
+        targets: targets,
+        project: options[:project],
+        until_condition: options[:until],
+        timeout: options[:timeout],
+        max_events: options[:max_events],
+        interval: options[:interval],
+        json_lines: options[:json_lines],
+        json: options[:json]
+      ).call
+    end
+
+    desc "act ACTION_ID TARGET", "Execute a fresh confirmation-free action emitted by operational status"
+    long_desc <<~DESC
+      ACTION_ID and TARGET must come from the same fresh
+      `hive status --operational --json` task action. Pass its opaque token as
+      --observation. Hive resolves the task again and revalidates identity,
+      stage, marker, action, and task-generation evidence while holding the
+      normal mutation lock. Stale or elevated recommendations never mutate.
+
+      `hive act` accepts only Hive's closed confirmation-free routine action
+      registry. It never executes a command string or shell argv from status.
+      Destructive, administrative, destination-changing, release, and
+      publication actions must use their direct commands after operator
+      confirmation.
+    DESC
+    # Commands::Act owns the typed usage error. Keeping this optional at the
+    # Thor layer prevents the required-option banner from widening every help
+    # row enough to truncate unrelated command summaries.
+    option :observation, type: :string,
+                         desc: "opaque observation token from operational status"
+    def act(action_id, target)
+      require "hive/commands/act"
+      Hive::Commands::Act.new(
+        action_id,
+        target,
+        observation: options[:observation],
+        json: options[:json]
       ).call
     end
 
@@ -1568,16 +1657,19 @@ module Hive
       if options[:json]
         unless %w[install status].include?(subcommand.to_s)
           require "json"
+          require "hive/commands/web"
           message = "hive web has no JSON output for foreground server commands. " \
                     "Use 'hive web status --json' or 'hive status --json'."
+          error = Hive::InvalidTaskPath.new(message)
           puts JSON.generate(
-            "ok" => false,
-            "error_class" => "InvalidTaskPath",
-            "error_kind" => "invalid_task_path",
-            "exit_code" => Hive::ExitCodes::USAGE,
-            "message" => message
+            Hive::Schemas::ErrorEnvelope.build(
+              schema: "hive-web-status",
+              error: error,
+              error_kind: "invalid_task_path",
+              extras: Hive::Commands::Web.error_context(environment: ENV)
+            )
           )
-          raise Hive::InvalidTaskPath, message
+          raise error
         end
       end
 
@@ -1705,8 +1797,6 @@ module Hive
           from: options[:from],
           json: options[:json]
         }
-        audit = web_operator_audit
-        kwargs[:audit] = audit if audit
         reason = options[:recover_merged_error_reason]
         kwargs[:recover_merged_error_reason] = reason unless reason.nil?
 
@@ -1716,14 +1806,6 @@ module Hive
           **kwargs,
           durable: true
         ).call
-      end
-
-      def web_operator_audit
-        actor = options[:audit_actor].to_s
-        request_id = options[:audit_request_id].to_s
-        return nil if actor.empty? || request_id.empty?
-
-        { actor: actor, request_id: request_id }
       end
     end
   end

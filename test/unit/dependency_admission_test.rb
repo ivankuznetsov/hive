@@ -83,12 +83,12 @@ class DependencyAdmissionTest < Minitest::Test
                  "plan_dependency_invalid"
   end
 
-  def test_explicit_gates_missing_from_the_prerequisite_are_unreachable
+  def test_gate_unknown_and_unreachable_are_errors
     root = task("app", "dependent", depends_on: "base")
     base = task("app", "base", workflow_stages: %w[1-inbox 2-work 9-done], stage: "2-work")
 
     unknown = project(gate: "7-artifacts", tasks: [ root, base ])
-    assert_error context(unknown).verdict(project: "app", slug: "dependent"), "dependency_gate_unreachable"
+    assert_error context(unknown).verdict(project: "app", slug: "dependent"), "dependency_gate_unknown"
 
     unreachable = project(gate: "8-finalize", tasks: [ root, base ])
     assert_error context(unreachable).verdict(project: "app", slug: "dependent"), "dependency_gate_unreachable"
@@ -101,35 +101,6 @@ class DependencyAdmissionTest < Minitest::Test
 
     assert context(finalize).verdict(project: "app", slug: "dependent").wait?
     assert context(done).verdict(project: "app", slug: "dependent").clear?
-  end
-
-  def test_omitted_gate_uses_the_prerequisite_workflow_finalize_then_terminal
-    dependent = task("app", "dependent", depends_on: "base")
-    custom_below = task(
-      "app", "base", stage: "2-build",
-      workflow_stages: %w[1-intake 2-build 3-release 4-done],
-      workflow_finalize_stage: "3-release"
-    )
-    custom_at_gate = custom_below.with(stage: "3-release")
-
-    assert context(project(gate: nil, gate_explicit: false, tasks: [ dependent, custom_below ]))
-      .verdict(project: "app", slug: "dependent").wait?
-    assert context(project(gate: nil, gate_explicit: false, tasks: [ dependent, custom_at_gate ]))
-      .verdict(project: "app", slug: "dependent").clear?
-
-    terminal_only = custom_below.with(workflow_finalize_stage: nil, stage: "3-release")
-    assert context(project(gate: nil, gate_explicit: false, tasks: [ dependent, terminal_only ]))
-      .verdict(project: "app", slug: "dependent").wait?
-  end
-
-  def test_explicit_missing_gate_fails_closed_against_prerequisite_workflow
-    dependent = task("app", "dependent", depends_on: "base")
-    custom = task("app", "base", workflow_stages: %w[1-intake 2-build 3-done])
-
-    verdict = context(project(gate: "8-finalize", gate_explicit: true, tasks: [ dependent, custom ]))
-      .verdict(project: "app", slug: "dependent")
-
-    assert_error verdict, "dependency_gate_unreachable"
   end
 
   def test_indexed_fallback_preserves_archived_transitive_waits_and_workflows
@@ -268,14 +239,13 @@ class DependencyAdmissionTest < Minitest::Test
   end
 
   def project(name: "app", stored: "github.com/acme/#{name}", live: "github.com/acme/#{name}",
-              gate: "8-finalize", gate_explicit: true, tasks: [])
+              gate: "8-finalize", tasks: [])
     D::ProjectSnapshot.new(
       name: name,
       path: "/tmp/#{name}",
       repository_identity: stored,
       live_repository_identity: live,
       dependency_gate_stage: gate,
-      dependency_gate_explicit: gate_explicit,
       tasks: tasks,
       validation_error: nil
     )
@@ -283,7 +253,6 @@ class DependencyAdmissionTest < Minitest::Test
 
   def task(project, slug, id: nil, depends_on: nil, stage: "4-execute",
            workflow_stages: Hive::Stages::DIRS, metadata_status: :ok, metadata_error: nil,
-           workflow_dependency_gate: nil, workflow_finalize_stage: "8-finalize",
            plan_status: :absent, plan_dependency: nil, plan_error: nil, validation_error: nil)
     D::TaskSnapshot.new(
       project: project,
@@ -291,8 +260,6 @@ class DependencyAdmissionTest < Minitest::Test
       id: id,
       stage: stage,
       workflow_stages: workflow_stages,
-      workflow_dependency_gate: workflow_dependency_gate,
-      workflow_finalize_stage: workflow_finalize_stage,
       depends_on: depends_on,
       metadata_status: metadata_status,
       metadata_error: metadata_error,

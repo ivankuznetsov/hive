@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-07-19
+updated: 2026-07-17
 tags: [module, status, action, classifier, diagnostic]
 ---
 
@@ -18,16 +18,8 @@ action.label       # human label, e.g. "Ready to plan"
 action.command     # copy-paste shell command, or nil
 action.next_action # structured row-local recovery action, or nil
 action.diagnostic  # bounded diagnostic payload for recover_review / recover_execute / error rows, nil otherwise
-action.payload     # { "key", "label", "command", "next_action", "allowed_transitions" }
+action.payload     # { "key", "label", "command", "next_action" } for JSON emission
 ```
-
-`allowed_transitions` is the server-owned board/menu contract. Descriptor
-ordering supplies ordinary forward destinations, coding supplies its supported
-backward gate, and run/recovery actions target the current stage. Confirmation
-tiers are part of each transition: rerun/backward/recovery require explicit
-confirmation, forced advancement requires a nonblank reason, and active-task
-deletion uses the reserved `__delete__` destination plus the exact slug. Only
-`confirmation: none` transitions are eligible for drag-and-drop.
 
 ## Red-status diagnostic (`#diagnostic`)
 

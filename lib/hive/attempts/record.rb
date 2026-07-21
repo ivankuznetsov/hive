@@ -1,6 +1,7 @@
 require "time"
 require "hive/attempts/capability"
 require "hive/attempts/output_reference"
+require "hive/stringify_keys"
 
 module Hive
   module Attempts
@@ -55,7 +56,7 @@ module Hive
           "task_input_epoch" => task_input_epoch,
           "progress_token" => progress_token,
           "provider" => provider,
-          "worker_argv" => deep_copy(worker_argv),
+          "worker_argv" => Hive::StringifyKeys.call(worker_argv),
           "claim_capability_digest" => claim_capability_digest,
           "starting_revision" => starting_revision,
           "retry_charge" => retry_charge,
@@ -76,7 +77,7 @@ module Hive
           "latest_revision" => starting_revision,
           "checkpoint" => { "revision" => starting_revision, "progress_token" => progress_token },
           "log_reference" => nil,
-          "inherited_outputs" => deep_copy(inherited_outputs),
+          "inherited_outputs" => Hive::StringifyKeys.call(inherited_outputs),
           "current_outputs" => [],
           "receipt" => nil,
           "loss" => nil,
@@ -115,7 +116,7 @@ module Hive
           "state" => "running",
           "lease_version" => 1,
           "claim_deadline" => nil,
-          "wrapper" => deep_copy(owner),
+          "wrapper" => Hive::StringifyKeys.call(owner),
           "started_at" => timestamp,
           "diagnostics" => { "legacy_backfilled_at" => timestamp }
         ))
@@ -169,7 +170,7 @@ module Hive
       end
 
       def initialize(data)
-        @data = self.class.deep_copy(data)
+        @data = Hive::StringifyKeys.call(data)
         validate_source_schema!
         normalize_generation_bridge!
         validate!
@@ -177,7 +178,7 @@ module Hive
       end
 
       def to_h
-        self.class.deep_copy(@data)
+        Hive::StringifyKeys.call(@data)
       end
 
       def with(changes)
@@ -191,10 +192,10 @@ module Hive
       def ownership_generation = @data.fetch("ownership_generation")
       def task_input_epoch = @data.fetch("task_input_epoch")
       def lease_version = @data.fetch("lease_version")
-      def receipt = self.class.deep_copy(@data["receipt"])
-      def wrapper = self.class.deep_copy(@data["wrapper"])
-      def worker = self.class.deep_copy(@data["worker"])
-      def checkpoint = self.class.deep_copy(@data["checkpoint"])
+      def receipt = Hive::StringifyKeys.call(@data["receipt"])
+      def wrapper = Hive::StringifyKeys.call(@data["wrapper"])
+      def worker = Hive::StringifyKeys.call(@data["worker"])
+      def checkpoint = Hive::StringifyKeys.call(@data["checkpoint"])
       def compatibility? = @data.fetch("compatibility")
       def live? = %w[launching running].include?(state)
       def final? = FINAL_STATES.include?(state)
@@ -336,14 +337,6 @@ module Hive
           Time.iso8601(value)
         rescue ArgumentError, TypeError
           raise error_class, "#{label} must be an ISO 8601 timestamp"
-        end
-
-        def deep_copy(value)
-          case value
-          when Hash then value.to_h { |key, child| [ key.to_s, deep_copy(child) ] }
-          when Array then value.map { |child| deep_copy(child) }
-          else value
-          end
         end
       end
     end

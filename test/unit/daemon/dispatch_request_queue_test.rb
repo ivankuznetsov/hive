@@ -538,9 +538,6 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       meta = Q.metadata("meta0001", state_home: dir)
       assert_equal 42, meta[:chat_id]
       assert_equal "hive", meta[:project]
-      assert meta.key?(:actor)
-      assert meta.key?(:expected_fingerprint)
-      assert meta.key?(:transition_destination)
     end
   end
 
@@ -685,19 +682,13 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
 
       promoted = Q.promote_sequence(
         "seq00001", project: "hive", slug: "task", chat_id: 42,
-        update_id: 99, requestor: "web", actor: "alice",
-        expected_fingerprint: "task1:abc", transition_destination: "6-review",
-        state_home: dir, now: Time.utc(2026, 5, 28, 18, 0, 2)
+        update_id: 99, state_home: dir, now: Time.utc(2026, 5, 28, 18, 0, 2)
       )
 
       assert_equal [ "hive", "markers", "clear", "task", "--name", "ERROR" ], promoted.argv
-      assert_equal "alice", promoted.actor
-      assert_equal "task1:abc", promoted.expected_fingerprint
-      assert_equal "6-review", promoted.transition_destination
       pending = Q.pending(state_home: dir)
       assert_equal [ promoted.request_id ], pending.map(&:request_id)
       assert_equal [ promoted.argv ], pending.map(&:argv)
-      assert_equal [ "alice" ], pending.map(&:actor)
       # The remaining retry is now attached to the promoted request id.
       next_sequence_path = File.join(Q.directory(state_home: dir), "#{promoted.request_id}#{Q::SEQUENCE_SUFFIX}")
       assert File.exist?(next_sequence_path)

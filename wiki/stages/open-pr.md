@@ -3,7 +3,7 @@ title: 5-open-pr stage
 type: stage
 source: lib/hive/stages/open_pr.rb, templates/open_pr_prompt.md.erb
 created: 2026-05-13
-updated: 2026-06-15
+updated: 2026-07-18
 tags: [stage, pr, github]
 ---
 
@@ -14,6 +14,8 @@ tags: [stage, pr, github]
 1. `worktree.yml` must exist from 4-execute.
 2. The pointed worktree must exist on disk.
 3. `gh auth status` must succeed; unavailable GitHub auth is a hard failure.
+
+The first two checks are the shared `Hive::Stages::Base.worktree_pointer_or_exit` policy also used by [[stages/finalize]], so their warnings and exit status cannot drift.
 
 ## Steps performed (`Stages::OpenPr.run!`)
 

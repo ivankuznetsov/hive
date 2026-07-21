@@ -140,7 +140,7 @@ module Hive
         begin
           File.write(idea_path, render_initial_state(slug, @text, body_override: @body_override, workflow: workflow))
           copy_attachments!(task_dir)
-          id = allocate_task_id
+          id = Hive::TaskCounter.next_or_nil
           write_task_meta(task_dir, id: id, slug: slug, depends_on: depends_on,
                           workflow: workflow, workflow_info: workflow_info, hive_state: hive_state)
         rescue StandardError
@@ -190,16 +190,23 @@ module Hive
 
       def workflow_resolution(descriptor, project, pin:)
         store = Hive::WorkflowPackage::ManagedStore.new(project.fetch("hive_state_path"))
-        { descriptor: descriptor, pin: pin, managed: store.selected(descriptor.id.to_s) }
+        cfg = {}
+        managed = store.selected(descriptor.id.to_s) { cfg = managed_project_config(project) }
+        {
+          descriptor: descriptor, pin: pin,
+          managed: managed, managed_cfg: cfg
+        }
       end
 
       def write_task_meta(task_dir, id:, slug:, depends_on:, workflow:, workflow_info:, hive_state:)
         managed = workflow_info.fetch(:managed)
+        managed_cfg = workflow_info.fetch(:managed_cfg, {})
         store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
-        store.with_stable_selection(workflow.id.to_s) do |current|
+        store.with_stable_selection(workflow.id.to_s, cfg: managed_cfg) do |current|
           if managed
             unless current && current.fetch("source_commit") == managed.fetch("source_commit") &&
-                   current.fetch("manifest_digest") == managed.fetch("manifest_digest")
+                   current.fetch("manifest_digest") == managed.fetch("manifest_digest") &&
+                   current.fetch("configuration_digest") == managed.fetch("configuration_digest")
               raise Hive::ConcurrentRunError.new("managed workflow selection changed while creating the task")
             end
           end
@@ -207,9 +214,20 @@ module Hive
             task_dir, id: id, slug: slug, display_name: nil, depends_on: depends_on,
             workflow: workflow_info.fetch(:pin) ? workflow.id.to_s : nil,
             workflow_commit: managed&.fetch("source_commit"),
-            workflow_manifest_digest: managed&.fetch("manifest_digest")
+            workflow_manifest_digest: managed&.fetch("manifest_digest"),
+            workflow_configuration_digest: managed&.fetch("configuration_digest")
           )
         end
+      end
+
+      def managed_project_config(project)
+        Hive::Config.load(project.fetch("path"))
+      rescue Psych::Exception, Hive::ConfigError, SystemCallError, IOError => e
+        cfg_path = File.join(project.fetch("hive_state_path").to_s, "config.yml")
+        raise ProjectConfigUnreadable.new(
+          "could not read #{cfg_path} (#{e.class}: #{e.message}); fix the file before creating a managed-workflow task",
+          value: cfg_path
+        )
       end
 
       # A typo'd or later-removed PROJECT default_workflow would otherwise raise
@@ -358,12 +376,6 @@ module Hive
 
           FileUtils.cp(src_path, File.join(assets_dir, name))
         end
-      end
-
-      def allocate_task_id
-        Hive::TaskCounter.next!
-      rescue Hive::ConcurrentRunError
-        nil
       end
 
       def spawn_name_generator(task_dir)

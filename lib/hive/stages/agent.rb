@@ -35,8 +35,9 @@ module Hive
         end
         prompt = render_prompt(task, cfg, stage, profile: profile, instruction_body: instruction_body)
         permission_kwargs = stage.permissions.nil? ? {} : { explicit_permission_spec: stage.permissions }
-        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
-          cfg, task.stage_name, task, profile, **permission_kwargs
+        prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
+          cfg, task.stage_name, task, profile,
+          prompt: prompt, managed_slot: "stages.#{stage.name}", **permission_kwargs
         )
         resource_limits = Hive::Stages::Base.stage_resource_limits(cfg, stage)
 
@@ -153,17 +154,7 @@ module Hive
       end
 
       def action_for(marker_name)
-        case marker_name
-        when :waiting then "round_waiting"
-        when :complete then "complete"
-        when :error then "error"
-        # A markerless (:none) run has nothing to commit; return nil so
-        # commit_after's `return unless result[:commit]` guard skips the commit
-        # outright, instead of relying on hive_commit's empty-diff no-op to
-        # swallow a bogus "none" action.
-        when :none then nil
-        else marker_name.to_s
-        end
+        Hive::Stages::Base.marker_commit_action(marker_name)
       end
     end
   end

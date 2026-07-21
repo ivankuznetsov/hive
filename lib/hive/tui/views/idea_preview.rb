@@ -116,25 +116,10 @@ module Hive
           wrap_text(text, width).map { |line| truncate(line, width) }
         end
 
-        # Intentional local copy of NewIdeaPrompt's simple chunking shape.
-        # NewIdeaPrompt's helper is cursor-aware and attachment-aware;
-        # extracting it would widen this read-only view change.
-        def chunk_buffer(buffer, capacity)
-          return [ "" ] if buffer.empty?
-
-          chunks = []
-          offset = 0
-          while offset < buffer.length
-            chunks << buffer[offset, capacity].to_s
-            offset += capacity
-          end
-          chunks
-        end
-
         def wrap_text(text, width)
           capacity = [ width.to_i, 1 ].max
           text.each_line(chomp: true).flat_map do |line|
-            chunk_buffer(line, capacity)
+            Views::Format.character_chunks(line, capacity)
           end
         end
 

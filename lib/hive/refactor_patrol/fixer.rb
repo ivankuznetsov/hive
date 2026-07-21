@@ -9,6 +9,7 @@ require "hive/patrol/token_budget"
 require "hive/patrol/agent_launch"
 require "hive/patrol/validator"
 require "hive/refactor_patrol/caps"
+require "hive/refactor_patrol/checkout_guard"
 require "hive/secret_patterns"
 require "hive/stages/base"
 require "hive/stages/review/fix_guardrail"
@@ -35,7 +36,10 @@ module Hive
         def head_sha = commit_sha
       end
 
-      TemplateBindings = Struct.new(:worktree_path, :thesis, :user_supplied_tag, keyword_init: true) do
+      TemplateBindings = Struct.new(
+        :worktree_path, :thesis, :user_supplied_tag, :allow_cross_feature,
+        keyword_init: true
+      ) do
         def binding_for_erb = binding
       end
 
@@ -49,7 +53,10 @@ module Hive
         @cfg = cfg
         @worktree_factory = worktree_factory || method(:build_worktree)
         @agent_runner = agent_runner || method(:run_agent)
-        @validator_factory = validator_factory || ->(commands) { Hive::Patrol::Validator.new(commands) }
+        validation_timeout = cfg.dig("timeout_sec", "patrol") || Hive::Patrol::Validator::DEFAULT_TIMEOUT_SEC
+        @validator_factory = validator_factory || lambda do |commands|
+          Hive::Patrol::Validator.new(commands, timeout_sec: validation_timeout)
+        end
         @public_contract_guard = public_contract_guard
         @token_budget = token_budget || Hive::Patrol::TokenBudget.new(@project_root, cfg: cfg)
       end
@@ -61,7 +68,7 @@ module Hive
 
         branch = branch_name(job_id, thesis.fingerprint, canonical_action_id)
         worktree = @worktree_factory.call(branch: branch)
-        registered_checkout = registered_checkout_snapshot!(analysis_sha)
+        default_branch_snapshot = default_branch_snapshot!(analysis_sha)
         materialized = worktree.create_exact!(branch, base_sha: analysis_sha)
         if materialized == :existing && !git_output!(worktree.path, "status", "--porcelain=v1", "-z").empty?
           return transient(
@@ -75,14 +82,14 @@ module Hive
         patch_base =
           if recovering_commit
             recovered_patch_base!(
-              worktree.path, analysis_sha, registered_checkout.fetch(:head)
+              worktree.path, analysis_sha, default_branch_snapshot.fetch(:head)
             )
           else
             analysis_sha
           end
         unless recovering_commit
           control_plane = control_plane_snapshot(
-            worktree.path, registered_checkout.fetch(:status)
+            worktree.path
           )
           agent_result = @agent_runner.call(
             thesis: thesis, prompt: render_prompt(thesis, worktree.path), worktree_path: worktree.path,
@@ -105,7 +112,7 @@ module Hive
 
         commit_audited_changes!(worktree.path, thesis, amend: recovering_commit)
         publication_base = reconcile_trunk_drift(
-          thesis, worktree, branch, analysis_sha, patch_base, registered_checkout
+          thesis, worktree, branch, analysis_sha, patch_base, default_branch_snapshot
         )
         if publication_base.is_a?(Result)
           if publication_base.outcome == "trunk_overlap_reanalysis_required" && reanalysis_depth.zero?
@@ -137,7 +144,7 @@ module Hive
           commit_audited_changes!(worktree.path, thesis, amend: true)
         end
         assert_clean_worktree!(worktree.path)
-        assert_registered_checkout!(registered_checkout)
+        assert_default_branch_descends!(default_branch_snapshot)
 
         Result.new(
           outcome: "validated", terminal: false, branch: branch, worktree_path: worktree.path,
@@ -198,10 +205,9 @@ module Hive
       end
 
       # Every audit diff disables rename detection: a detected rename reports
-      # only its destination path and a near-zero line count, which would let
-      # the vacated source path slip past the boundary, contract, and cap
-      # guards below. With --no-renames both endpoints surface as a deletion
-      # plus an addition and enter every guard.
+      # only its destination path, which would let the vacated source path slip
+      # past the boundary and contract guards below. With --no-renames both
+      # endpoints surface as a deletion plus an addition and enter every guard.
       def audit_and_validate(thesis, path, base_sha, validation_pass: 0)
         git_output!(path, "add", "-A")
         paths = nul_paths(git_output!(path, "diff", "--cached", "--no-renames", "--name-only", "-z", base_sha))
@@ -210,16 +216,20 @@ module Hive
         symlinked = paths.select { |changed| symlinked_path?(path, changed) }.sort
         return audit_failure("symlinked_path", paths, symlinked_paths: symlinked) if symlinked.any?
 
+        protected_paths = paths.select { |changed| protected_control_path?(changed) }.sort
+        if protected_paths.any?
+          return audit_failure("protected_path", paths, protected_paths: protected_paths)
+        end
+
         boundary = Array(thesis.feature_boundary && thesis.feature_boundary["owned_files"]) +
                    Array(thesis.feature_boundary && thesis.feature_boundary["entrypoints"])
         outside = paths - boundary
-        return audit_failure("boundary_violation", paths, outside: outside) unless outside.empty?
+        caps = @cfg.dig("refactor_patrol", "caps") || {}
+        unless caps.fetch("allow_cross_feature", false) || outside.empty?
+          return audit_failure("boundary_violation", paths, outside: outside)
+        end
 
         diff_lines = diff_line_count!(path, base_sha)
-        caps = @cfg.dig("refactor_patrol", "caps") || {}
-        if paths.size > caps.fetch("max_files", 8).to_i || diff_lines > caps.fetch("max_diff_lines", 400).to_i
-          return audit_failure("caps_exceeded", paths, diff_lines: diff_lines)
-        end
         if !caps.fetch("allow_dependency_bumps", false) &&
            paths.any? { |changed| Caps.dependency_manifest?(changed) }
           return audit_failure("dependency_change", paths, diff_lines: diff_lines)
@@ -261,13 +271,18 @@ module Hive
 
         names = Array(thesis.required_validation && thesis.required_validation["commands"]).map(&:to_s).uniq
         names << "public_contract" if configured_contract_guard && contract_paths.any?
-        return audit_failure("missing_validation", paths, diff_lines: diff_lines) if names.empty?
-        unless (names - VALIDATION_NAMES).empty? && names.all? { |name| configured_commands[name].to_s.strip != "" }
+        if names.empty?
+          return audit_failure("missing_validation", paths, diff_lines: diff_lines) unless documentation_only?(paths)
+        elsif !(names - VALIDATION_NAMES).empty? || names.any? { |name| configured_commands[name].to_s.strip == "" }
           return audit_failure("missing_validation", paths, diff_lines: diff_lines, required: names)
         end
 
         validation_head = git_output!(path, "rev-parse", "HEAD").strip
-        validation = @validator_factory.call(configured_commands).validate(path, names: names)
+        validation = if names.empty?
+          built_in_documentation_validation(path)
+        else
+          @validator_factory.call(configured_commands).validate(path, names: names)
+        end
         unless validation["passed"]
           return audit_failure("validation_failed", paths, diff_lines: diff_lines, validation: validation)
         end
@@ -315,16 +330,17 @@ module Hive
         )
       end
 
-      def reconcile_trunk_drift(thesis, worktree, branch, analysis_sha, patch_base, registered_checkout)
-        current = assert_registered_checkout!(registered_checkout)
+      def reconcile_trunk_drift(thesis, worktree, branch, analysis_sha, patch_base, default_branch_snapshot)
+        current = assert_default_branch_descends!(default_branch_snapshot)
         return patch_base if current == patch_base
 
         drift_paths = nul_paths(
           git_output!(@project_root, "diff", "--no-renames", "--name-only", "-z", "#{analysis_sha}..#{current}")
         )
-        boundary = Array(thesis.feature_boundary && thesis.feature_boundary["owned_files"]) +
-                   Array(thesis.feature_boundary && thesis.feature_boundary["entrypoints"])
-        overlap = drift_paths & boundary
+        patch_paths = nul_paths(
+          git_output!(worktree.path, "diff", "--no-renames", "--name-only", "-z", "#{patch_base}..HEAD")
+        )
+        overlap = drift_paths & patch_paths
         unless overlap.empty?
           cleanup(worktree)
           return Result.new(
@@ -452,12 +468,53 @@ module Hive
         @cfg.dig("refactor_patrol", "commands") || {}
       end
 
+      def documentation_only?(paths)
+        paths.any? && paths.all? { |changed| Caps.documentation_path?(changed) }
+      end
+
+      def protected_control_path?(path)
+        normalized = path.to_s.tr("\\", "/").sub(%r{\A(?:\./)+}, "")
+        normalized == ".hive-state" || normalized.start_with?(".hive-state/")
+      end
+
+      def built_in_documentation_validation(path)
+        stdout, stderr, status = Open3.capture3(
+          "git", "-C", path, "diff", "--cached", "--check"
+        )
+        command = Hive::Patrol::Validator::CommandResult.new(
+          name: "built_in_docs",
+          command: "git diff --cached --check",
+          exit_code: status.exitstatus,
+          signal: status.signaled? ? status.termsig : nil,
+          stdout: stdout,
+          stderr: stderr,
+          timed_out: false,
+          output_truncated: stdout.to_s.length > 4000 || stderr.to_s.length > 4000
+        )
+        {
+          "passed" => status.success?,
+          "commands" => [ command.to_h ]
+        }
+      rescue SystemCallError => e
+        {
+          "passed" => false,
+          "commands" => [
+            {
+              "name" => "built_in_docs", "command" => "git diff --cached --check",
+              "exit_code" => 127, "signal" => nil, "stdout" => "", "stderr" => e.message,
+              "timed_out" => false, "output_truncated" => false
+            }
+          ]
+        }
+      end
+
       def render_prompt(thesis, worktree_path)
         Hive::Stages::Base.render(
           "refactor_patrol_fix_prompt.md.erb",
           TemplateBindings.new(
             worktree_path: worktree_path, thesis: thesis,
-            user_supplied_tag: Hive::Stages::Base.user_supplied_tag
+            user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
+            allow_cross_feature: @cfg.dig("refactor_patrol", "caps", "allow_cross_feature") == true
           )
         )
       end
@@ -527,7 +584,7 @@ module Hive
       # writable worktree root, and an auto-fix agent must never alter them.
       # The configured default branch is intentionally omitted from the ref
       # snapshot because it may advance concurrently and is reconciled below.
-      def control_plane_snapshot(worktree_path, registered_status)
+      def control_plane_snapshot(worktree_path)
         common_dir = git_output!(worktree_path, "rev-parse", "--git-common-dir").strip
         common_dir = File.expand_path(common_dir, worktree_path)
         fix_branch_ref = git_output!(worktree_path, "symbolic-ref", "HEAD").strip
@@ -536,8 +593,7 @@ module Hive
           shared_config_path: File.join(common_dir, "config"),
           shared_git_config: file_identity(File.join(common_dir, "config")),
           fix_branch_ref: fix_branch_ref,
-          fix_branch_oid: git_output!(worktree_path, "rev-parse", fix_branch_ref).strip,
-          registered_checkout: registered_status
+          fix_branch_oid: git_output!(worktree_path, "rev-parse", fix_branch_ref).strip
         }
       end
 
@@ -547,14 +603,12 @@ module Hive
           "shared_git_config" => -> { file_identity(before.fetch(:shared_config_path)) },
           "fix_branch_ref" => lambda do
             git_output!(worktree_path, "rev-parse", before.fetch(:fix_branch_ref)).strip
-          end,
-          "registered_checkout" => -> { git_output!(@project_root, "status", "--porcelain=v1", "-z") }
+          end
         }
         expected = {
           "worktree_git_pointer" => before.fetch(:git_pointer),
           "shared_git_config" => before.fetch(:shared_git_config),
-          "fix_branch_ref" => before.fetch(:fix_branch_oid),
-          "registered_checkout" => before.fetch(:registered_checkout)
+          "fix_branch_ref" => before.fetch(:fix_branch_oid)
         }
 
         checks.each_with_object([]) do |(name, reader), changed|
@@ -591,24 +645,12 @@ module Hive
         nil
       end
 
-      def registered_checkout_snapshot!(analysis_sha)
-        branch = git_output!(@project_root, "branch", "--show-current").strip
-        expected = @cfg.fetch("default_branch").to_s
-        unless !branch.empty? && branch == expected
-          raise Hive::GitError,
-                "registered checkout must remain on configured default branch #{expected.inspect}"
-        end
-
-        head = git_output!(@project_root, "rev-parse", "HEAD").strip
-        assert_ancestor!(analysis_sha, head, "registered checkout no longer contains the analysis commit")
-        status = git_output!(@project_root, "status", "--porcelain=v1", "-z")
-        raise Hive::GitError, "registered checkout must be clean before refactor fix" unless status.empty?
-
-        {
-          branch: branch,
-          head: head,
-          status: status
-        }
+      def default_branch_snapshot!(analysis_sha)
+        guard = Hive::RefactorPatrol::CheckoutGuard.new(
+          @project_root, default_branch: @cfg.fetch("default_branch")
+        )
+        snapshot = guard.validate_and_snapshot!(merge_sha: analysis_sha)
+        { head: snapshot.fetch("analysis_sha") }
       end
 
       def recovered_patch_base!(worktree_path, analysis_sha, registered_head)
@@ -619,24 +661,18 @@ module Hive
 
         parent = ancestry.fetch(1)
         assert_ancestor!(analysis_sha, parent, "recovered refactor base no longer descends from analysis")
-        assert_ancestor!(parent, registered_head, "recovered refactor base is not on registered trunk")
+        assert_ancestor!(parent, registered_head, "recovered refactor base is not on default-branch trunk")
         parent
       end
 
-      def assert_registered_checkout!(before)
-        branch = git_output!(@project_root, "branch", "--show-current").strip
-        unless branch == before.fetch(:branch)
-          raise Hive::GitError,
-                "registered checkout left configured default branch #{before.fetch(:branch).inspect}"
-        end
-        status = git_output!(@project_root, "status", "--porcelain=v1", "-z")
-        unless status == before.fetch(:status)
-          raise Hive::GitError, "registered checkout changed during refactor fix"
-        end
-
-        head = git_output!(@project_root, "rev-parse", "HEAD").strip
-        assert_ancestor!(before.fetch(:head), head, "registered checkout no longer descends from its validated head")
-        head
+      def assert_default_branch_descends!(before)
+        guard = Hive::RefactorPatrol::CheckoutGuard.new(
+          @project_root, default_branch: @cfg.fetch("default_branch")
+        )
+        guard.validate_and_snapshot!(merge_sha: before.fetch(:head)).fetch("analysis_sha")
+      rescue Hive::GitError => e
+        raise Hive::GitError,
+              "default branch no longer descends from its validated head: #{e.message}"
       end
 
       def assert_ancestor!(ancestor, descendant, message)

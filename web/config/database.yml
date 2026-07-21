@@ -1,4 +1,5 @@
 # SQLite. Versions 3.8.0 and up are supported.
+<% require "hive/web/environment" %>
 #   gem install sqlite3
 #
 #   Ensure the SQLite 3 gem is defined in your Gemfile
@@ -26,21 +27,21 @@ test:
 #
 # Similarly, if you deploy your application as a Docker container, you must
 # ensure the database is located in a persisted volume.
-# Production sqlite files live under HIVEBOX_STORAGE_DIR (hive's state
+# Production sqlite files live under HIVE_WEB_STORAGE_DIR (hive's state
 # home — the /data mount in the container) so image upgrades keep them.
 production:
   primary:
     <<: *default
-    database: <%= ENV.fetch("HIVEBOX_STORAGE_DIR", "storage") %>/production.sqlite3
+    database: <%= Hive::Web::Environment.value("HIVE_WEB_STORAGE_DIR") %>/production.sqlite3
   cache:
     <<: *default
-    database: <%= ENV.fetch("HIVEBOX_STORAGE_DIR", "storage") %>/production_cache.sqlite3
+    database: <%= Hive::Web::Environment.value("HIVE_WEB_STORAGE_DIR") %>/production_cache.sqlite3
     migrations_paths: db/cache_migrate
   queue:
     <<: *default
-    database: <%= ENV.fetch("HIVEBOX_STORAGE_DIR", "storage") %>/production_queue.sqlite3
+    database: <%= Hive::Web::Environment.value("HIVE_WEB_STORAGE_DIR") %>/production_queue.sqlite3
     migrations_paths: db/queue_migrate
   cable:
     <<: *default
-    database: <%= ENV.fetch("HIVEBOX_STORAGE_DIR", "storage") %>/production_cable.sqlite3
+    database: <%= Hive::Web::Environment.value("HIVE_WEB_STORAGE_DIR") %>/production_cable.sqlite3
     migrations_paths: db/cable_migrate

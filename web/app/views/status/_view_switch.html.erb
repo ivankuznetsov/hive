@@ -1,8 +1,0 @@
-<nav class="view-switch" aria-label="Work view">
-  <%= link_to "Board", board_path(request.query_parameters),
-        class: class_names("view-switch-link", active: @work_view == "board"),
-        aria: { current: (@work_view == "board" ? "page" : nil) } %>
-  <%= link_to "Grid", grid_path(request.query_parameters),
-        class: class_names("view-switch-link", active: @work_view == "grid"),
-        aria: { current: (@work_view == "grid" ? "page" : nil) } %>
-</nav>

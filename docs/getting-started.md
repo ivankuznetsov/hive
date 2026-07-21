@@ -6,7 +6,7 @@ The example is xbookmark, a real Hive dogfood task that finished as [xbookmark P
 
 ## Prerequisites
 
-You need Ruby 3.4, git >= 2.40, `claude` authenticated, `codex` installed for the default execute agent, `gh` authenticated, and a git checkout you can modify. The commands below use `~/Dev/xbookmark`; substitute your own project path and project name when running against another repo.
+You need Ruby 3.4, git >= 2.40, `claude` authenticated, `codex` installed for the default execute agent, `gh` authenticated, and a git checkout you can modify. Released native installations also use `cosign` to authenticate the managed Hive web bundle. The commands below use `~/Dev/xbookmark`; substitute your own project path and project name when running against another repo.
 
 ## Step 1 - Install
 
@@ -18,8 +18,17 @@ If `~/.local/bin` is not on your `PATH`, put the symlink in a directory that is 
 
 ```bash
 hive --version
-hive daemon install
+hive setup
 ```
+
+On supported Linux and macOS hosts, setup installs and starts the per-user
+daemon and Hive web services and reports the loopback URL plus installed,
+enabled, running, and ready state. It never creates LAN/public binding or
+Tailscale exposure. Use `hive setup --no-service` to keep Hive web
+foreground-only, `hive web` to run it in the foreground, and
+`hive web status --json` for read-only structured state. Windows users should
+use the native path under WSL with systemd enabled, or choose
+[Hivebox](../packaging/docker/README.md).
 
 ## Step 2 - Attach Hive To A Project
 
@@ -83,5 +92,9 @@ When the task reaches execute, Hive durably captures its concrete provider and m
 - [docs/assets/xbookmark-walkthrough.txt](assets/xbookmark-walkthrough.txt) replays the completed dogfood task.
 - [docs/assets/xbookmark-state-tree.txt](assets/xbookmark-state-tree.txt) shows a mid-run `.hive-state/` layout (the task is paused in `3-plan/` to pair with Step 5 above).
 - [docs/recipes.md#xbookmark-end-to-end](recipes.md#xbookmark-end-to-end) expands the same example through PR and archive.
+
+Choose Hivebox when you need container isolation, multiple local instances,
+containment for untrusted agents, or a reproducible server/NAS deployment. Its
+complete container guide is [packaging/docker/README.md](../packaging/docker/README.md).
 
 Next, read [docs/concepts.md](concepts.md), [docs/cli.md](cli.md), or [docs/recipes.md](recipes.md).

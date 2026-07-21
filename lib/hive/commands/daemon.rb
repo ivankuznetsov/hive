@@ -11,6 +11,7 @@ require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
+require "hive/daemon/operational_snapshot"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/daemon/patrol_scheduler"
@@ -30,6 +31,7 @@ require "hive/attempts/legacy_backfiller"
 require "hive/attempts/reconciler"
 require "hive/attempts/lost_outcome"
 require "hive/conditions/attempt_observer"
+require "hive/commands/service_installer/result_presenter"
 
 module Hive
   module Commands
@@ -47,6 +49,7 @@ module Hive
     class Daemon
       include Hive::Schemas::EnvelopeEmitter
       include Hive::PidFile
+      include Hive::Commands::ServiceInstaller::ResultPresenter
 
       VALID_SUBCOMMANDS = %w[start stop status reload tail enable disable install queue].freeze
 
@@ -276,6 +279,15 @@ module Hive
           outcome_store: lost_outcome_store,
           process_identity: attempt_process_identity
         )
+        operational_snapshot = Hive::Daemon::OperationalSnapshot::Assembler.new(
+          store: Hive::Daemon::OperationalSnapshot::Store.new(
+            path: Hive::Paths.operational_snapshot_path(@hive_home)
+          ),
+          daemon_identity: Hive::Daemon::OperationalSnapshot.daemon_identity(
+            pid: Process.pid, process_start_time: own_start_time
+          ),
+          poll_interval_sec: daemon_cfg.fetch("poll_interval_sec", 30)
+        )
 
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
@@ -291,7 +303,8 @@ module Hive
           attempt_dispatcher: attempt_dispatcher,
           attempt_reconciler: attempt_reconciler,
           lost_outcome_store: lost_outcome_store,
-          lost_outcome_processor: lost_outcome_processor
+          lost_outcome_processor: lost_outcome_processor,
+          operational_snapshot: operational_snapshot
         )
 
         reexec_requested = false
@@ -575,130 +588,13 @@ module Hive
       def install_daemon
         require "hive/commands/daemon/service_installer"
         installer = Hive::Commands::Daemon::ServiceInstaller.new(binary_path: current_binary_path)
-        begin
-          result = installer.install!(autostart: true, force: @force)
-        rescue Hive::Error
-          raise
-        rescue StandardError => e
-          install_emit_exception_envelope(installer, e) if @json
-          raise Hive::DaemonInstallFailed,
-                "daemon service install failed: #{e.class}: #{e.message}"
-        end
-        unless @json
-          installer.messages.each { |line| warn "hive: #{line}" }
-          emit_install_success_summary(installer, result)
-        end
-        emit_install_outcome(installer, result)
+        perform_service_install(installer)
       end
 
-      # Bare-text positive confirmation on the non-JSON success path
-      # so operators can distinguish first-time install / no-op /
-      # in-place upgrade at a glance. Mirrors what `reload_daemon`
-      # already does on its success path.
-      def emit_install_success_summary(installer, outcome)
-        return if @json
-
-        case outcome.kind
-        when :written
-          puts "hive daemon: installed unit at #{installer.target_path}"
-        when :upgraded
-          msg = "hive daemon: upgraded unit at #{installer.target_path}"
-          msg += " (backup: #{outcome.backup_path})" if outcome.backup_path
-          puts msg
-        when :unchanged
-          puts "hive daemon: unit already up to date at #{installer.target_path}"
-        when :autostart_unavailable
-          # The unit was written; only autostart enablement was
-          # impossible (e.g. Linux without systemd-user). Not a
-          # failure — confirm the write and let installer.messages
-          # carry the "how to enable autostart" guidance.
-          puts "hive daemon: unit written at #{installer.target_path}; autostart not enabled on this host"
-        when :unsupported, :drifted, :failed
-          # :unsupported is messaged via installer.messages.
-          # :drifted / :failed are handled by emit_install_outcome
-          # (which raises); no positive summary applies.
-        end
-      end
-
-      def emit_install_outcome(installer, outcome)
-        if @json
-          if outcome.success?
-            puts JSON.generate(install_envelope(installer, outcome))
-          else
-            install_emit_error_envelope(installer, outcome: outcome.wire_outcome)
-          end
-        end
-
-        if outcome.drifted?
-          msg = "daemon unit at #{installer.target_path} differs from the current template. " \
-                "Re-run with `hive daemon install --force` to overwrite (a timestamped .bak " \
-                "will be saved)."
-          raise Hive::DaemonInstallDriftError, msg
-        elsif outcome.failed?
-          raise Hive::DaemonInstallFailed,
-                "daemon service install reported a failure; see messages above"
-        end
-      end
-
-      def install_envelope(installer, outcome)
-        # `target_path` is whatever the installer resolved: the written
-        # unit path on linux/macos (including the autostart-unavailable
-        # case, where the unit IS written), and nil only on a truly
-        # unsupported host where no unit exists. `backup_path`/`restarted`
-        # are only set on an :upgraded install, so reading them
-        # unconditionally is correct.
-        {
-          "schema" => "hive-daemon-install",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-install"),
-          "ok" => true,
-          "outcome" => outcome.wire_outcome,
-          "platform" => installer.envelope_platform,
-          "target_path" => installer.target_path,
-          "backup_path" => outcome.backup_path,
-          "restarted" => outcome.restarted,
-          "messages" => installer.messages.dup
-        }
-      end
-
-      def install_emit_error_envelope(installer, outcome:)
-        error_class = outcome == "drifted" ? "DaemonInstallDriftError" : "DaemonInstallFailed"
-        exit_code = outcome == "drifted" ? Hive::ExitCodes::USAGE : Hive::ExitCodes::SOFTWARE
-        message =
-          if outcome == "drifted"
-            "daemon unit at #{installer.target_path} differs from the current template; retry with --force."
-          else
-            "daemon service install reported a failure; see messages"
-          end
-        puts JSON.generate(
-          "schema" => "hive-daemon-install",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-install"),
-          "ok" => false,
-          "error_class" => error_class,
-          "error_kind" => outcome,
-          "exit_code" => exit_code,
-          "message" => message,
-          "outcome" => outcome,
-          "platform" => installer.envelope_platform,
-          "target_path" => installer.target_path,
-          "messages" => installer.messages.dup
-        )
-      end
-
-      def install_emit_exception_envelope(installer, error)
-        puts JSON.generate(
-          "schema" => "hive-daemon-install",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-install"),
-          "ok" => false,
-          "error_class" => "DaemonInstallFailed",
-          "error_kind" => "failed",
-          "exit_code" => Hive::ExitCodes::SOFTWARE,
-          "message" => "daemon service install failed: #{error.class}: #{error.message}",
-          "outcome" => "failed",
-          "platform" => safe_install_platform(installer),
-          "target_path" => safe_install_target_path(installer),
-          "messages" => safe_install_messages(installer)
-        )
-      end
+      def service_install_label = "daemon"
+      def service_install_schema = "hive-daemon-install"
+      def service_install_drift_error = Hive::DaemonInstallDriftError
+      def service_install_failure_error = Hive::DaemonInstallFailed
 
       def current_binary_path
         Hive::InvokedBinary.path
@@ -710,24 +606,6 @@ module Hive
         invoked = current_binary_path
         ENV["HIVE_BIN"] = invoked if invoked
         invoked
-      end
-
-      def safe_install_platform(installer)
-        installer.envelope_platform
-      rescue StandardError
-        "unsupported"
-      end
-
-      def safe_install_target_path(installer)
-        installer.target_path
-      rescue StandardError
-        nil
-      end
-
-      def safe_install_messages(installer)
-        installer.messages.dup
-      rescue StandardError
-        []
       end
 
       def envelope_schema

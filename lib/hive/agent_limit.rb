@@ -5,13 +5,10 @@ module Hive
   module AgentLimit
     # How long to wait, after a `limits_reached` marker is written, before
     # the daemon healer is allowed to auto-retry the parked task. A usage /
-    # credit window has plausibly reset by then, so the marker self-heals
-    # instead of staying red until a human runs `hive markers clear`. A fixed
-    # cooldown remains the fallback. When a provider gives a complete
-    # dated reset hint (month, day, year, and time), prefer that boundary so a
-    # week-long quota wall does not consume every bounded daemon retry hourly.
-    # Time-only hints remain on the fixed cooldown because their date and zone
-    # are ambiguous.
+    # credit window may have changed by then, so the marker self-heals instead
+    # of staying red until a human runs `hive markers clear`. Provider reset
+    # hints remain useful for display, but never gate daemon scheduling: credits
+    # can be added, usage can be reset, or the active account can change early.
     # Overridable per-process via HIVE_LIMITS_RETRY_COOLDOWN_SEC (a positive
     # integer of seconds); a missing / unparseable / non-positive value falls
     # back to the default so a typo can never silently disable the cooldown.
@@ -166,20 +163,27 @@ module Hive
       parsed&.positive? ? parsed : RETRY_COOLDOWN_SEC
     end
 
-    # ISO8601 timestamp the daemon healer may retry a `limits_reached` task
-    # at. Prefer a complete provider reset date when present; otherwise use
-    # `now` (UTC) plus the fixed cooldown. Stamped into the marker at write
-    # time so the comparison is a pure on-disk read at heal time.
+    # Provider reset estimate shown to operators. Prefer a complete provider
+    # date when present; otherwise show `now` plus the fixed cooldown. This is
+    # deliberately not the daemon scheduling boundary; `retry_due?` uses the
+    # quota marker's mtime so an account switch or top-up is noticed hourly.
     def retry_after(text: nil, now: Time.now.utc)
       retry_after_time_for(text, now: now).iso8601
     end
 
     # Multiple reviewers can fail against different providers/windows in one
-    # pass. Hold until the latest boundary so reviewer ordering cannot spend a
-    # bounded daemon retry while another provider is still known to be limited.
+    # pass. Display the latest provider estimate; scheduling remains hourly.
     def retry_after_for(texts, now: Time.now.utc)
       candidates = Array(texts).map { |text| retry_after_time_for(text, now: now) }
       (candidates.max || retry_after_time_for(nil, now: now)).iso8601
+    end
+
+    # True when the daemon may make a real readiness attempt for a parked
+    # provider-limit task. The latest quota marker is the schedule: each failed
+    # attempt writes a fresh marker, while a successful/account-switched attempt
+    # stops producing one. Provider reset text is intentionally absent here.
+    def retry_due?(limited_at:, now: Time.now.utc)
+      limited_at.is_a?(Time) && now >= limited_at + retry_cooldown_sec
     end
 
     def retry_after_time_for(text, now:)
@@ -222,18 +226,27 @@ module Hive
       retry_after_time(attrs)&.strftime("%Y-%m-%d %H:%M UTC")
     end
 
-    # Single-line operator label, e.g. "held: agent quota (codex) — retry
-    # after 2026-06-24 23:20 UTC; top up or switch execute agent". Provider
-    # and retry clauses are appended only when known.
+    # Single-line operator label. Provider reset estimates remain visible, but
+    # the periodic retry policy is explicit so the date is not mistaken for a
+    # hard scheduling embargo.
     def held_label(attrs)
       label = "held: agent quota"
       provider = held_provider(attrs)
       label = "#{label} (#{provider})" if provider
 
       retry_display = held_retry_display(attrs)
-      label = "#{label} — retry after #{retry_display}" if retry_display
+      label = "#{label} — reset estimate #{retry_display}" if retry_display
 
-      "#{label}; top up or switch execute agent"
+      "#{label}; Hive retries #{retry_interval_label}; top up or switch execute agent"
+    end
+
+    def retry_interval_label
+      seconds = retry_cooldown_sec
+      return "hourly" if seconds == 3600
+      return "every #{seconds / 3600} hours" if (seconds % 3600).zero?
+      return "every #{seconds / 60} minutes" if (seconds % 60).zero?
+
+      "every #{seconds} seconds"
     end
 
     # Machine-readable `held` object for the JSON status payload (schema:

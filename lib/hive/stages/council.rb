@@ -79,7 +79,8 @@ module Hive
           end
 
           if round >= stage.council.max_rounds
-            Hive::Markers.set(output_path, :waiting, reason: "max_rounds", round: round, triage: triage.path)
+            terminal = stage.council.on_max_rounds == :complete ? :complete : :waiting
+            Hive::Markers.set(output_path, terminal, reason: "max_rounds", round: round, triage: triage.path)
             marker = Hive::Markers.current(output_path)
             return { commit: action_for(marker.name), status: marker.name }
           end
@@ -148,13 +149,7 @@ module Hive
       end
 
       def action_for(marker_name)
-        case marker_name
-        when :waiting then "round_waiting"
-        when :complete then "complete"
-        when :error then "error"
-        when :none then nil
-        else marker_name.to_s
-        end
+        Hive::Stages::Base.marker_commit_action(marker_name)
       end
     end
   end

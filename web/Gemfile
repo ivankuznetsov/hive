@@ -65,8 +65,6 @@ group :test do
   gem "capybara"
   # House rule: Rails E2E runs Capybara + Playwright (not selenium).
   gem "capybara-playwright-driver"
-  # Run the maintained axe-core ruleset in the real browser accessibility gate.
-  gem "axe-core-api", "~> 4.12"
 end
 
 # The hive control plane: status payloads, gate approval, daemon dispatch,

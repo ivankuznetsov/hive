@@ -1,7 +1,7 @@
 PATH
   remote: ..
   specs:
-    hive-cli (0.5.3)
+    hive-cli (0.6.5)
       bubbletea (= 0.1.4)
       erb (>= 4.0)
       faraday (>= 2.14.2, < 3.0)
@@ -94,8 +94,6 @@ GEM
     addressable (2.9.0)
       public_suffix (>= 2.0.2, < 8.0)
     ast (2.4.3)
-    axe-core-api (4.12.0)
-      dumb_delegator
     base64 (0.3.0)
     bigdecimal (4.1.2)
     bindex (0.8.1)
@@ -166,7 +164,6 @@ GEM
       dry-inflector (~> 1.0)
       dry-logic (~> 1.4)
       zeitwerk (~> 2.6)
-    dumb_delegator (1.1.0)
     erb (6.0.4)
     erubi (1.13.1)
     et-orbi (1.4.0)
@@ -462,7 +459,6 @@ PLATFORMS
   x86_64-linux-musl
 
 DEPENDENCIES
-  axe-core-api (~> 4.12)
   bootsnap
   brakeman
   bundler-audit

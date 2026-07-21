@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hive Operations"
+  short_description: "Inspect and operate Hive task pipelines"
+  default_prompt: "Use $hive to inspect current pipeline status and follow active work safely."

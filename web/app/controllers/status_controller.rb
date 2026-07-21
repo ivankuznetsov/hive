@@ -1,8 +1,7 @@
 class StatusController < ApplicationController
   def index
-    @work_view = "grid"
     @payload = StatusBroadcaster.snapshot
-    @projects = StatusVisibility.projects(@payload)
+    @projects = StatusBroadcaster.projects(@payload)
     @daemon_status = daemon_status
   end
 

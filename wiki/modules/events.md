@@ -3,7 +3,7 @@ title: Hive::Events
 type: module
 source: lib/hive/events.rb
 created: 2026-05-23
-updated: 2026-07-20
+updated: 2026-07-17
 tags: [module, events, observability, status, append-only]
 ---
 
@@ -24,7 +24,6 @@ for versioned condition/generation/evidence/audit records. See
 | `error` | `Stages::Base.with_stage_events` rescue path; `emit_marker_event` for error markers | Stage raised, or marker landed on `:error` / `:review_error` / `:review_ci_stale` / `:review_stale` |
 | `round_waiting` | `Stages::Base.emit_marker_event` | Brainstorm or plan stage closed with `:waiting` marker |
 | `round_complete` | same | Brainstorm or plan stage closed with `:complete` marker |
-| `operator_action` | guarded web transition / daemon queue consumer | A web-requested move was accepted and applied; metadata carries actor, request id, from/to, direction, and optional reason |
 
 `ROUND_EVENT_STAGES = %w[brainstorm plan]` is the registry that gates round events — adding a new stage that publishes `:waiting` / `:complete` round markers requires extending this list so `emit_marker_event` stays in sync with the producers.
 
@@ -39,9 +38,6 @@ for versioned condition/generation/evidence/audit records. See
 - `agent` — `"<profile> <log_label>"` for agent spawns (e.g. `"claude review-stub-reviewer-pass01"`); `"phase=<name> pass=<NN>"` for review phase brackets; `null` for stage / round / error events.
 - `event_type` — one of the table above.
 - `message` — short human-readable detail. `agent_start` carries `cwd=<full @cwd path> timeout_sec=N max_budget_usd=N` (full path, not basename — basename collapsed the worktree-vs-task-folder distinction); `agent_end` carries `status=… exit_code=… pid=…` (or `status=exception` with the error class); `stage_exit` carries `status=<marker> phase=… reason=… pass=…` when those marker attrs are present.
-- Additional event metadata is optional. `operator_action` uses `actor`,
-  `request_id`, `from`, `to`, `direction`, and `confirmation_reason`; base
-  envelope keys cannot be overwritten by metadata.
 
 ## Storage and atomicity
 
@@ -57,20 +53,6 @@ contracts also use separate files: fail-soft operational telemetry stays in
 - **Path**: `<task_folder>/events.jsonl` (one file per task slug, lives next to `task.md`).
 - **Append**: single `File.write` of `JSON.generate(record) + "\n"` opened `O_WRONLY | O_APPEND | O_CREAT`. Records stay well under `PIPE_BUF` (~4 KiB), so POSIX append-atomicity holds across concurrent emitters; the single-write contract is load-bearing and must not be split into "write JSON then write newline."
 - **Failure mode**: `SystemCallError` during emit is caught and warned to stderr (`[hive.events] failed to emit ...`). The producing stage / agent control flow is not interrupted — observability must never mask the underlying run result.
-
-`Hive::Events.emit!` is the strict append variant used when the caller owns a
-state transaction. Guarded synchronous web moves append `operator_action`
-after the folder move but before the `hive/state` commit; an append or commit
-failure restores `events.jsonl`, `status.md`, and the task folder together.
-Queued web moves retain the same actor/request identity and pass it into the
-mutation child. `Run`/`Approve` append the strict audit before the same
-`hive/state` commit that records the transition, restoring the audit files if
-that transaction fails; the daemon does not add a second post-completion audit.
-Drop is the deliberate storage exception: deletion removes the task-local
-journal, so its structured `operator_action` fields live in the same
-`hive/state` deletion commit message instead. Stale, blocked, illegal, unauthenticated,
-or otherwise denied requests never append `transition_denied` or any other
-task event; they are logged and counted outside canonical state.
 
 ## Derived `status.md`
 
@@ -118,7 +100,7 @@ Per-reviewer spawns inside Phase 2 emit their own `agent_start` / `agent_end` vi
 
 ## Tests
 
-- `test/unit/events_test.rb` — emit/emit! happy paths, structured operator metadata, validation, atomic rename, torn-record skipping, 16 KiB tail window, current-agent stack across the 200-line walk, status body rendering.
+- `test/unit/events_test.rb` — emit happy path, validation, atomic rename, torn-record skipping, 16 KiB tail window, current-agent stack across the 200-line walk, status body rendering.
 - `test/unit/agent_test.rb` — agent_start / agent_end pairs on success and exception paths, slug / stage derivation from `SyntheticTask`.
 - `test/integration/run_brainstorm_test.rb`, `run_plan_test.rb`, `run_review_test.rb` — end-to-end bracket balance through `Commands::Run`.
 - `test/integration/status_test.rb` — `status.json` JSON contract preserved after events instrumentation rolled out.

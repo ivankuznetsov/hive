@@ -1,5 +1,6 @@
 require "securerandom"
 require "time"
+require "hive/stringify_keys"
 
 module Hive
   module TaskJournal
@@ -21,7 +22,7 @@ module Hive
       end
 
       def authoritative(attributes, id_generator: -> { SecureRandom.uuid }, clock: -> { Time.now.utc })
-        input = stringify(attributes)
+        input = Hive::StringifyKeys.call(attributes)
         {
           "schema" => SCHEMA,
           "schema_version" => SCHEMA_VERSION,
@@ -41,14 +42,6 @@ module Hive
           "provenance" => input.delete("provenance") || {},
           "payload" => (input.delete("payload") || {}).merge(input)
         }
-      end
-
-      def stringify(value)
-        case value
-        when Hash then value.to_h { |key, child| [ key.to_s, stringify(child) ] }
-        when Array then value.map { |child| stringify(child) }
-        else value
-        end
       end
     end
   end

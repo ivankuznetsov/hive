@@ -1,30 +1,24 @@
 ---
 title: Dependencies
 type: dependencies
-source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock
+source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
 updated: 2026-07-20
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: The `hive-cli` gem has eleven direct runtime gems; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering.
+**TLDR**: The `hive-cli` gem has eleven direct runtime gems; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or `gtimeout`) for their timeout-governed Git-ref, QMD, and provider operations.
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
-tools. The v0.5.3 release-prep checkout is `0.5.3`: `lib/hive.rb`, root
+tools. The v0.6.5 release-prep checkout is `0.6.5`: `lib/hive.rb`, root
 `Gemfile.lock`, and `web/Gemfile.lock` all pin the local path gem as
-`hive-cli (0.5.3)`. The release-prep change keeps both lockfiles synchronized
+`hive-cli (0.6.5)`. The release-prep change keeps both lockfiles synchronized
 with public installer URLs and the changelog. Recent root bundle dependency
 commits also bumped RuboCop to 1.88.2, Brakeman from
-8.0.4 to 8.0.5, and `concurrent-ruby` from 1.3.6 to 1.3.7. The separate web
-bundle now resolves Brakeman 8.0.5. Its current primary runtime locks are Rails
-8.1.3, Propshaft 1.3.2, Puma 7.2.1, Importmap Rails 2.2.3, Turbo Rails 2.0.23,
-Stimulus Rails 1.3.4, Jbuilder 2.15.1, Solid Cable 4.0.0, Solid Cache 1.0.10,
-Solid Queue 1.4.0, Bootsnap 1.24.6, Thruster 0.1.21, Image Processing 1.14.0,
-and Redcarpet 3.6.1. Its browser/test locks include Capybara 3.40.0,
-capybara-playwright-driver 0.5.9, playwright-ruby-client 1.60.0,
-axe-core-api 4.12.0, rack-test
-2.2.0, bundler-audit 0.9.3, and rubocop-rails-omakase 1.1.0.
+8.0.4 to 8.0.5, and `concurrent-ruby` from 1.3.6 to 1.3.7; the separate web
+bundle still resolves its own Brakeman 8.0.4 and `concurrent-ruby` 1.3.6 locks
+as of this refresh.
 
 ## Runtime gems
 
@@ -54,6 +48,8 @@ for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
 `web/Gemfile` is deliberately separate from the gem payload: `hive web`
 execs the Rails app from a source checkout or Docker image, and
 `test/unit/gemspec_test.rb` pins that the gem does not package `web/`.
+Managed release bundles authenticate `SHA256SUMS` against the exact release
+workflow identity and expected version tag before dependency installation.
 
 Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.3),
 propshaft, sqlite3, puma, importmap-rails, turbo-rails, stimulus-rails,
@@ -67,8 +63,7 @@ and the result is sanitized by Rails with an explicit allowlist. See
 
 Direct web development/test dependencies include `debug`,
 `bundler-audit`, `brakeman`, `rubocop-rails-omakase`, `web-console`,
-`capybara`, `capybara-playwright-driver`, and `axe-core-api` (`~> 4.12`) for
-the real-browser serious/critical accessibility gate. `rack-test` is not a direct
+`capybara`, and `capybara-playwright-driver`. `rack-test` is not a direct
 `web/Gemfile` entry, but the web lock resolves it transitively through
 Rails/Capybara and the web integration upload tests use
 `Rack::Test::UploadedFile`.
@@ -131,6 +126,7 @@ These are not gems but the CLI tools the runtime invokes:
 | `gh` | (any auth-supporting recent) | `Hive::Gh` (`auth status`, `pr list`, `pr view` for PR state checks, secret-scan, dedupe, status rollups, and babysitter context), `Hive::Web::AgentsAuth` (`gh auth status` plus the PTY relay for `gh auth login --web`), `Stages::OpenPr` (agent invokes `gh pr create` from its prompt), `Stages::Finalize` (runner owns `gh pr ready`; agent does `gh pr edit --body-file`), `Stages::Review::GithubPublisher` (`gh pr comment` for review mirroring). |
 | `git` | 2.40+ (worktree, symbolic-ref, etc.) | `Hive::GitOps`, `Hive::Worktree`, `Init`/`New` commands |
 | `tmux` | 3.0+ (3.6a verified locally) | runtime dependency when `claude.mode: tmux`; also used by TUI/e2e tests on private sockets |
+| GNU `timeout` / `gtimeout` | any recent GNU coreutils | hard execution bounds for managed llm-wiki Git-ref, QMD, and provider subprocesses; Linux coreutils normally supplies `timeout`, while GNU coreutils on macOS supplies `gtimeout` |
 | `qmd` | installed from `@tobilu/qmd` when npm is available | managed llm-wiki semantic search/index maintenance; installed by `install.sh` into `${XDG_DATA_HOME:-~/.local/share}/hive/qmd` and discovered by generated wiki scripts through `HIVE_QMD_BIN`, PATH, or Hive's managed install path |
 | `npm` | any recent npm with Node.js | installer for the QMD npm package; Hive reports missing npm but does not install Node.js/npm itself |
 | `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional TUI capture support; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed. Records a `.cast` only — rendering it to a terminal-demo GIF needs `agg` (or `vhs`), which the hivebox image does NOT ship |
@@ -140,12 +136,18 @@ These are not gems but the CLI tools the runtime invokes:
 
 `HIVE_CLAUDE_BIN` env var overrides the `claude` binary, used by tests with `test/fixtures/fake-claude` and `fake-gh`.
 
+Hive does not provision GNU coreutils as an OS package. If neither `timeout`
+nor `gtimeout` is executable, the llm-wiki runner fails the bounded operation
+closed (status 125) and retains its queued source for recovery. It deliberately
+has no unbounded fallback: limiting provider and Git execution is part of the
+subscription-safety contract.
+
 ## Ruby version
 
 `Gemfile` declares `ruby "~> 3.4"`. `hive.gemspec` requires Ruby
 `>= 3.4.0` for the packaged gem. `.rubocop.yml` pins
 `TargetRubyVersion: 3.4`. `Gemfile.lock` records Ruby 3.4.7, Bundler
-2.7.2, and the current local path gem as `hive-cli (0.5.3)`.
+2.7.2, and the current local path gem as `hive-cli (0.6.5)`.
 
 ## Backlinks
 

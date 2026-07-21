@@ -1,5 +1,6 @@
 require "hive"
 require "hive/install_channel"
+require "hive/invoked_binary"
 require "shellwords"
 
 module Hive
@@ -124,11 +125,7 @@ module Hive
       end
 
       def which(name)
-        Array(@env["PATH"].to_s.split(File::PATH_SEPARATOR)).each do |dir|
-          path = File.join(dir, name)
-          return path if File.file?(path) && File.executable?(path)
-        end
-        nil
+        Hive::InvokedBinary.which(name, env: @env)
       end
     end
   end

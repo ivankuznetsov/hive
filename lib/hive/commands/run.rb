@@ -1,5 +1,4 @@
 require "json"
-require "fileutils"
 require "hive/config"
 require "hive/task"
 require "hive/markers"
@@ -14,12 +13,14 @@ require "hive/task_resolver"
 require "hive/dependency_snapshot"
 require "hive/attempts/context"
 require "hive/conditions/transition_guard"
-require "hive/attempts/entrypoint"
-require "hive/events"
+require "hive/attempts/command_dispatch"
 
 module Hive
   module Commands
     class Run
+      include Hive::Schemas::EnvelopeEmitter
+      include Hive::Attempts::CommandDispatch
+
       # Single source of truth for the hive-run JSON envelope's required keys.
       # `report_json` builds the payload from this list so the schema-drift
       # test (test/unit/schema_files_test.rb) and the producer share one
@@ -36,7 +37,7 @@ module Hive
       OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
 
       def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false,
-                     durable: false, attempt_entrypoint: nil, audit: nil)
+                     durable: false, attempt_entrypoint: nil, observation_guard: nil)
         @target = target
         @project_filter = project
         @stage_filter = stage
@@ -45,28 +46,35 @@ module Hive
         @no_rebase = no_rebase
         @durable = durable
         @attempt_entrypoint = attempt_entrypoint
-        @audit = audit&.to_h
+        @observation_guard = observation_guard
       end
 
       def call
-        @stdout_written = false
-        return dispatch_durable if @durable && !Hive::Attempts::Context.active?
-
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json && !@stdout_written
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json && !@stdout_written
-        raise wrapped
+        call_with_envelope do
+          @durable && !Hive::Attempts::Context.active? ? dispatch_durable : do_call
+        end
       end
+
+      def envelope_schema
+        "hive-run"
+      end
+
+      def envelope_extras
+        { "slug" => @target, "stage_filter" => @stage_filter }.compact
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
+      end
+
+      def envelope_serialization_failure_policy = :suppress
 
       def do_call
         task = resolve_task
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
           Hive::DependencySnapshot.enforce_admission!(task)
           Hive::Attempts::Context.current&.validate_generation!(task)
+          @observation_guard&.call(task)
           cfg = Hive::Config.load(task.project_root)
           marker = Hive::Markers.current(task.state_file)
           if marker.name == :manual_steering
@@ -91,49 +99,14 @@ module Hive
         ).resolve
       end
 
-      def dispatch_durable
-        task = resolve_task
-        result = (@attempt_entrypoint || Hive::Attempts::Entrypoint.new).dispatch(
-          task: task,
-          intended_stage: "#{task.stage_index}-#{task.stage_name}",
-          argv: durable_worker_argv(task),
-          interactive: true
-        )
-        handle_durable_failure!(result) unless result.exit_status.zero?
-
-        result
-      end
-
-      def handle_durable_failure!(result)
-        if result.status == :lost
-          exit(result.exit_status) if @json && result.stdout_emitted?
-
-          raise Hive::ConcurrentRunError,
-                "durable attempt lost before producing a receipt for #{@target}: #{result.attempt_id}"
-        end
-
-        if @json && !result.stdout_emitted?
-          raise Hive::AttemptExecutionError.new(
-            "durable attempt #{result.attempt_id} finished with #{result.outcome || 'an error'} " \
-            "(exit #{result.exit_status}) before emitting JSON",
-            exit_code: result.exit_status,
-            attempt_id: result.attempt_id,
-            outcome: result.outcome
-          )
-        end
-
-        exit(result.exit_status)
+      def durable_intended_stage(task)
+        "#{task.stage_index}-#{task.stage_name}"
       end
 
       def durable_worker_argv(task)
         argv = [ "hive", "run", task.folder ]
         argv << "--json" if @json
         argv << "--no-rebase" if @no_rebase
-        if @audit
-          audit = @audit.transform_keys(&:to_s)
-          argv.concat([ "--audit-actor", audit["actor"].to_s,
-                        "--audit-request-id", audit["request_id"].to_s ])
-        end
         argv
       end
 
@@ -202,48 +175,14 @@ module Hive
       end
 
       def commit_after(task, result)
-        return unless result
-        return if [ :error, :review_error ].include?(result[:status])
-        return unless result[:commit] || @audit
+        return unless result && result[:commit]
 
         ops = Hive::GitOps.new(task.project_root)
         Hive::Lock.with_commit_lock(task.hive_state_path) do
-          audit_snapshot = snapshot_operator_audit(task.folder) if @audit
-          append_operator_audit!(task) if @audit
           ops.hive_commit(stage_name: "#{task.stage_index}-#{task.stage_name}",
                           slug: task.slug,
-                          action: result[:commit] || "web_operator_run")
-        rescue StandardError
-          restore_operator_audit(audit_snapshot) if audit_snapshot
-          raise
+                          action: result[:commit])
         end
-      end
-
-      def snapshot_operator_audit(folder)
-        %w[events.jsonl status.md].to_h do |name|
-          path = File.join(folder, name)
-          [ path, File.file?(path) ? File.binread(path) : nil ]
-        end
-      end
-
-      def restore_operator_audit(snapshot)
-        snapshot.each do |path, content|
-          content.nil? ? FileUtils.rm_f(path) : File.binwrite(path, content)
-        end
-      end
-
-      def append_operator_audit!(task)
-        audit = @audit.transform_keys(&:to_s)
-        stage = "#{task.stage_index}-#{task.stage_name}"
-        Hive::Events.emit!(
-          task_folder: task.folder, slug: task.slug, stage: stage,
-          event_type: :operator_action, agent: "web:#{audit['actor']}",
-          message: "ran #{stage}",
-          metadata: {
-            actor: audit["actor"], request_id: audit["request_id"],
-            from: stage, to: stage, direction: "run"
-          }
-        )
       end
 
       def report(task, result)
@@ -582,37 +521,6 @@ module Hive
       def project_name_for(task)
         project = Hive::Config.registered_projects.find { |p| p["path"] == task.project_root }
         project ? project["name"] : task.project_name
-      end
-
-      # Emit a hive-run ErrorPayload to stdout. Gated on @json + the
-      # @stdout_written flag in #call so we don't double-emit when
-      # report_json already wrote the dual-signal SuccessPayload before
-      # raising TaskInErrorState (see lib/hive/commands/run.rb#report_json
-      # and the contract documented at the top of report_json).
-      def emit_error_envelope(error)
-        # `stage_filter` carries the user-supplied `--stage` value (input);
-        # the structured `current_stage`/`target_stage` fields populated by
-        # ErrorEnvelope.build for WrongStage describe the resolved stage
-        # context (output). They live in different keys so an agent can read
-        # `payload.stage_filter` without ambiguity.
-        extras = { "slug" => @target, "stage_filter" => @stage_filter }.compact
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: "hive-run",
-          error: error,
-          error_kind: error_kind_for(error),
-          extras: extras
-        )
-        puts JSON.generate(payload)
-        @stdout_written = true
-      rescue Errno::EPIPE, JSON::GeneratorError
-        # Consumer closed the pipe (`hive run --json | jq -e ...` exiting
-        # early) or the error message contained non-encodable bytes (a
-        # subprocess stderr proxy with binary garbage). Swallow the emit
-        # failure so the original Hive::Error still propagates with its
-        # documented exit_code via bin/hive's outer rescue. The agent loses
-        # the structured envelope on this path but still receives the exit
-        # code, which is the load-bearing failure signal.
-        @stdout_written = true
       end
 
       # Map a Hive::Error subclass to a RunErrorKind value. Ordering matters:

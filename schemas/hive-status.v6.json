@@ -60,10 +60,6 @@
           "type": "string",
           "enum": ["missing_project_path", "not_initialised", "project_load_failed"]
         },
-        "workflows": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/Workflow" }
-        },
         "tasks": { "type": "array", "items": { "$ref": "#/$defs/Task" } },
         "legacy_stage_dirs": {
           "type": "array",
@@ -78,30 +74,6 @@
           }
         },
         "legacy_migrate_command": { "type": ["string", "null"] }
-      }
-    },
-    "Workflow": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "dependency_gate_stage", "stages"],
-      "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "dependency_gate_stage": { "type": ["string", "null"] },
-        "stages": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["name", "dir", "index", "kind"],
-            "properties": {
-              "name": { "type": "string", "minLength": 1 },
-              "dir": { "type": "string", "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$" },
-              "index": { "type": "integer", "minimum": 1 },
-              "kind": { "type": ["string", "null"] }
-            }
-          }
-        }
       }
     },
     "AdmissionError": {
@@ -139,7 +111,7 @@
       "required": [
         "stage", "slug", "id", "display_name", "depends_on", "blocked_by",
         "dependency_stage", "blocked", "admission_error", "folder", "state_file",
-        "worktree_path", "pr_url", "terminal", "marker", "attrs", "mtime", "folder_mtime",
+        "worktree_path", "pr_url", "marker", "attrs", "mtime", "observation_mtime", "folder_mtime",
         "age_seconds", "claude_pid", "claude_pid_alive", "live_task_lock",
         "attempt_id", "task_generation",
         "task_lock_pid", "task_lock_process_start_time", "task_lock_id",
@@ -148,9 +120,7 @@
          "evidence", "condition_overrides", "condition_gate", "condition_migration", "condition_provenance",
          "shadow_audit", "condition_warning", "unanswered_questions", "action",
          "action_label", "suggested_command",
-        "next_action", "diagnostic", "fingerprint", "card_digest",
-        "dominant_state", "state_rank", "allowed_transitions", "blocked_reason",
-        "lock", "dependency", "queued_request", "retries", "operational_chips"
+        "next_action", "diagnostic"
       ],
       "properties": {
         "stage": { "type": "string", "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$" },
@@ -158,7 +128,6 @@
         "id": { "type": ["integer", "null"] },
         "display_name": { "type": ["string", "null"] },
         "workflow": { "type": ["string", "null"] },
-        "terminal": { "type": "boolean" },
         "depends_on": { "type": ["string", "null"] },
         "blocked_by": { "type": ["string", "null"] },
         "dependency_stage": {
@@ -197,6 +166,7 @@
           }
         },
         "mtime": { "type": "string", "format": "date-time" },
+        "observation_mtime": { "type": "string", "format": "date-time" },
         "folder_mtime": { "type": "string", "format": "date-time" },
         "age_seconds": { "type": "integer", "minimum": 0 },
         "claude_pid": { "type": ["integer", "null"], "minimum": 1 },
@@ -301,146 +271,12 @@
             }
           }
         },
-        "fingerprint": {
-          "type": "string",
-          "pattern": "^tfp[0-9]+:[0-9a-f]{64}$"
-        },
-        "card_digest": {
-          "type": "string",
-          "pattern": "^card[0-9]+:[0-9a-f]{64}$"
-        },
-        "dominant_state": {
-          "type": "string",
-          "enum": ["needs-you", "error", "recovery", "running", "blocked", "ready", "idle"]
-        },
-        "state_rank": { "type": "integer", "minimum": 0, "maximum": 6 },
-        "allowed_transitions": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/Transition" }
-        },
-        "blocked_reason": {
-          "oneOf": [
-            { "$ref": "#/$defs/BlockedReason" },
-            { "type": "null" }
-          ]
-        },
-        "lock": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["live", "pid", "process_start_time", "id"],
-          "properties": {
-            "live": { "type": "boolean" },
-            "pid": { "type": ["integer", "null"], "minimum": 1 },
-            "process_start_time": { "type": ["string", "null"] },
-            "id": { "type": ["string", "null"] }
-          }
-        },
-        "dependency": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["depends_on", "blocked_by", "stage", "blocked", "admission_error"],
-          "properties": {
-            "depends_on": { "type": ["string", "null"] },
-            "blocked_by": { "type": ["string", "null"] },
-            "stage": { "type": ["string", "null"] },
-            "blocked": { "type": "boolean" },
-            "admission_error": {
-              "oneOf": [
-                { "$ref": "#/$defs/AdmissionError" },
-                { "type": "null" }
-              ]
-            }
-          }
-        },
-        "queued_request": {
-          "oneOf": [
-            { "$ref": "#/$defs/QueuedRequest" },
-            { "type": "null" }
-          ]
-        },
-        "retries": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["attempt", "retry_after"],
-          "properties": {
-            "attempt": { "type": ["string", "integer", "null"] },
-            "retry_after": { "type": ["string", "null"] }
-          }
-        },
-        "operational_chips": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/OperationalChip" }
-        },
         "diagnostic": {
           "oneOf": [
             { "$ref": "#/$defs/Diagnostic" },
             { "type": "null" }
           ]
         }
-      }
-    },
-    "Transition": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["destination", "verb", "direction", "confirmation", "label"],
-      "properties": {
-        "destination": {
-          "oneOf": [
-            { "type": "string", "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$" },
-            { "const": "__delete__" }
-          ]
-        },
-        "verb": { "type": "string", "minLength": 1 },
-        "direction": { "type": "string", "enum": ["forward", "backward", "run", "recover", "delete"] },
-        "confirmation": { "type": "string", "enum": ["none", "confirm", "reason", "slug"] },
-        "label": { "type": "string", "minLength": 1 }
-      }
-    },
-    "BlockedReason": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["summary", "detail", "remedies"],
-      "properties": {
-        "summary": { "type": "string" },
-        "detail": { "type": "string" },
-        "remedies": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["kind"],
-            "properties": {
-              "kind": { "type": "string" },
-              "command": { "type": ["string", "null"] },
-              "text": { "type": "string" },
-              "task": { "type": "string" }
-            }
-          }
-        }
-      }
-    },
-    "QueuedRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["request_id", "verb", "requestor", "trigger", "created_at"],
-      "properties": {
-        "request_id": { "type": "string", "minLength": 1 },
-        "verb": { "type": ["string", "null"] },
-        "requestor": { "type": ["string", "null"] },
-        "actor": { "type": ["string", "null"] },
-        "trigger": { "type": ["string", "null"] },
-        "created_at": { "type": "string", "format": "date-time" }
-      }
-    },
-    "OperationalChip": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "status", "source", "observed_at"],
-      "properties": {
-        "kind": { "type": "string", "enum": ["pr", "review", "ci", "queue"] },
-        "status": { "type": "string" },
-        "source": { "type": "string" },
-        "observed_at": { "type": ["string", "null"], "format": "date-time" }
       }
     },
     "ImplementationIdentity": {

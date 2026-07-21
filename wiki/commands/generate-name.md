@@ -43,7 +43,7 @@ The subprocess command is built from the profile binary, headless flag, Claude p
 
 ## State effects
 
-Successful generation calls `Hive::TaskMeta.update_display_name(task.folder, name)`, preserving the existing id and slug, then commits through `Hive::GitOps#hive_commit(stage_name:, slug:, action: "named")`. Git commit failures are swallowed after the sidecar update, matching the command's best-effort display-name posture.
+Successful generation calls `Hive::TaskMeta.update_display_name(task.folder, name)`. Display-name and daemon id updates share one metadata rewrite path that preserves every declared sidecar field, including workflow provenance, then this command commits through `Hive::GitOps#hive_commit(stage_name:, slug:, action: "named")`. Git commit failures are swallowed after the sidecar update, matching the command's best-effort display-name posture.
 
 `hive new` starts this command asynchronously after the captured-task commit:
 

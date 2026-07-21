@@ -195,6 +195,46 @@ class HivePatrolReviewerTest < Minitest::Test
       assert_includes captured, '"reproduction"'
       assert_includes captured, "Do not return documentation"
       assert_includes captured, "test-gap, or maintainability"
+      assert_includes captured, "exact substring"
+      assert_includes captured, "single source line"
+      assert_match(/Never span multiple\s+lines/, captured)
+      assert_includes captured, "rejects the complete finding"
+      assert_includes captured, '"snippet": "exact single-line source substring"'
+      assert_includes captured, "at most four, selected with a 32KB source budget"
+      assert_includes captured, "cap each Read at 400 lines"
+      assert_includes captured, "Persistent wrong state or wrong user-visible output is at least medium"
+      assert_match(/fourth\s+response as an emergency finalization turn/, captured)
+      assert_includes captured, "MUST call `Write`"
+    end
+  end
+
+  def test_prompt_bounds_the_initial_source_view_to_owned_files_and_bytes
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      FileUtils.mkdir_p(File.join(dir, "lib"))
+      FileUtils.mkdir_p(File.join(dir, "test"))
+      File.write(File.join(dir, "lib", "large.rb"), "x" * (32 * 1024 + 1))
+      File.write(File.join(dir, "lib", "small.rb"), "small\n")
+      File.write(File.join(dir, "lib", "context.rb"), "context\n")
+      File.write(File.join(dir, "test", "large_test.rb"), "test\n")
+      complete = Hive::Patrol::Feature.new(
+        id: "large-component",
+        kind: "architecture",
+        entrypoints: [ "lib/large.rb" ],
+        owned_files: [ "lib/large.rb", "lib/small.rb" ],
+        context_files: [ "lib/context.rb" ],
+        tests: [ "test/large_test.rb" ]
+      )
+      reviewer = Hive::Patrol::Reviewer.new(
+        dir, cfg: cfg,
+        agent_runner: ->(output_path:, **) { File.write(output_path, JSON.generate("findings" => [])) }
+      )
+
+      bounded = reviewer.send(:bounded_prompt_feature, complete)
+
+      assert_equal [ "lib/large.rb" ], bounded.owned_files
+      assert_empty bounded.context_files
+      assert_empty bounded.tests
     end
   end
 
@@ -491,6 +531,9 @@ class HivePatrolReviewerTest < Minitest::Test
         minimum_tokens >= 0 && stage != "patrol-review"
       end
       budget.define_singleton_method(:exhaustion_message) { "cycle exhausted" }
+      budget.define_singleton_method(:resource_exhaustion) do
+        { reason: "cycle_agent_spawn_limit", limit: 3, observed: 3 }
+      end
       reviewer = Hive::Patrol::Reviewer.new(dir, cfg: cfg, token_budget: budget)
       profile = Struct.new(:name, :initial_context_tokens) do
         def require_cli_capability!(name)
@@ -508,6 +551,10 @@ class HivePatrolReviewerTest < Minitest::Test
 
       assert_equal :error, result.fetch(:status)
       assert_equal "cycle exhausted", result.fetch(:error_message)
+      assert_equal(
+        { reason: "cycle_agent_spawn_limit", limit: 3, observed: 3 },
+        result.fetch(:resource_exhaustion)
+      )
     end
   end
 

@@ -6,32 +6,20 @@ require "hive/bot/notification_builders"
 require "hive/commands/approve"
 require "hive/commands/drop"
 require "hive/commands/new"
-require "hive/commands/status"
-require "hive/lock"
+require "hive/daemon/dispatch_request_queue"
 require "hive/stages"
+require "hive/task_action"
 
 module Hive
   module Web
     class Dispatcher
-      STAGE_VERB_BY_ACTION = {
-        "ready_to_brainstorm" => "brainstorm",
-        "ready_to_plan" => "plan",
-        "ready_to_develop" => "develop",
-        "ready_to_open_pr" => "open-pr",
-        "ready_for_review" => "review",
-        "ready_to_artifacts" => "artifacts",
-        "ready_to_finalize" => "finalize",
-        "ready_to_archive" => "archive",
-        # Generic-workflow first-run rows dispatch the generic stage agent
-        # via `hive run`; without this the web dispatcher rejected the new
-        # `ready_to_run` action as unknown (422). `ready_to_advance` is
-        # deliberately NOT mapped here: its verb is `hive approve`, which the
-        # daemon dispatch-request queue's allowlist excludes (approve is
-        # spawned in-process, not queued — see DispatchRequestQueue and the
-        # bot supervisor). Generic advance is driven by the in-process
-        # `#approve` method (the "Approve" button), not this queue path.
-        "ready_to_run" => "run"
-      }.freeze
+      # Web stage dispatch rides the daemon queue, so project the classifier's
+      # canonical ready-command table through that queue's verb allowlist.
+      # This deliberately excludes ready_to_advance => approve: generic
+      # advance is driven by the in-process #approve endpoint instead.
+      STAGE_VERB_BY_ACTION = Hive::TaskAction::READY_COMMANDS.select do |_action, verb|
+        Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS.include?(verb)
+      end.freeze
 
       def initialize(dispatch_writer: Hive::Bot::DispatchRequestWriter)
         @dispatch_writer = dispatch_writer
@@ -46,66 +34,6 @@ module Hive
           force: force,
           json: true
         ).call
-      end
-
-      # Canonical board mutation contract. The client supplies only a desired
-      # destination and the semantic snapshot it rendered; core status derives
-      # the exact verb. Synchronous moves revalidate again inside Approve's
-      # owning commit lock, while run-class actions are durably queued with the
-      # same guard for consume-time revalidation.
-      def transition(slug:, project:, destination:, expected_fingerprint:, actor:,
-                     request_id: Hive::Bot::DispatchRequestWriter.generate_request_id,
-                     confirmation: nil, reason: nil, confirmation_slug: nil)
-        raise Hive::Error, "destination is required" if destination.to_s.empty?
-        raise Hive::Error, "expected fingerprint is required" if expected_fingerprint.to_s.empty?
-
-        card = current_card(project: project, slug: slug)
-        transition = exact_transition!(
-          card, destination: destination, expected_fingerprint: expected_fingerprint
-        )
-        validate_confirmation!(
-          transition, slug: slug, confirmation: confirmation,
-          reason: reason, confirmation_slug: confirmation_slug
-        )
-        verb = transition.fetch("verb")
-        if %w[approve reject force_approve].include?(verb)
-          result = Hive::Commands::Approve.new(
-            slug,
-            project: project,
-            from: card.fetch("stage"),
-            to: transition.fetch("destination"),
-            force: %w[reject force_approve].include?(verb) || card["marker"] == "none",
-            quiet: true,
-            expected_fingerprint: expected_fingerprint,
-            transition_verb: verb,
-            audit: { actor: actor, request_id: request_id, reason: reason }
-          ).call
-          return { ok: true, state: "applied", request_id: request_id, transition: transition, result: result }
-        end
-        if verb == "recover"
-          queued_request_id = recover(
-            slug: slug, project: project, stage: card.fetch("stage"), marker: card["marker"],
-            attrs: card["attrs"], workflow: card["workflow"], request_id: request_id,
-            actor: actor, expected_fingerprint: expected_fingerprint,
-            transition_destination: transition.fetch("destination")
-          )
-          return { ok: true, state: "queued", request_id: queued_request_id, transition: transition }
-        end
-        if verb == "drop"
-          result = guarded_drop!(
-            slug: slug, project: project, transition: transition,
-            expected_fingerprint: expected_fingerprint, actor: actor,
-            request_id: request_id, reason: reason
-          )
-          return { ok: true, state: "applied", request_id: request_id, transition: transition, result: result }
-        end
-
-        queued_request_id = queue_transition!(
-          card: card, transition: transition, project: project, slug: slug,
-          expected_fingerprint: expected_fingerprint, actor: actor,
-          request_id: request_id
-        )
-        { ok: true, state: "queued", request_id: queued_request_id, transition: transition }
       end
 
       # Reject = send a task back to its immediately-prior gate, the parity
@@ -147,9 +75,7 @@ module Hive
       # for the argvs and the manual-only guard, so web and bot recover
       # byte-identically; the TUI has its own subprocess-based clear +
       # `hive run` path with separate gates.
-      def recover(slug:, project:, stage:, marker:, attrs: nil, workflow: nil,
-                  request_id: Hive::Bot::DispatchRequestWriter.generate_request_id,
-                  actor: nil, expected_fingerprint: nil, transition_destination: nil)
+      def recover(slug:, project:, stage:, marker:, attrs: nil, workflow: nil)
         attrs = (attrs || {}).to_h.transform_keys(&:to_s)
         # No failure marker = nothing to recover. RecoverySequence would
         # skip the clear and queue a bare, UNGUARDED stage rerun behind a
@@ -171,24 +97,15 @@ module Hive
         )
         raise Hive::Error, "no retry verb for stage #{stage.inspect}" if commands.empty?
 
-        duplicate = outstanding_transition_request(
-          project: project, slug: slug, expected_fingerprint: expected_fingerprint,
-          destination: transition_destination, verb: "recover"
-        )
-        return duplicate.request_id if duplicate
-
+        request_id = Hive::Bot::DispatchRequestWriter.generate_request_id
         first, *remaining = commands
         if remaining.any?
           Hive::Bot::DispatchRequestWriter.write_sequence!(request_id: request_id,
                                                            remaining_argvs: remaining)
         end
         begin
-          Hive::Bot::DispatchRequestWriter.write!(
-            project: project, slug: slug, argv: first, trigger: "web_recover",
-            request_id: request_id, requestor: actor ? "web" : "bot", actor: actor,
-            expected_fingerprint: expected_fingerprint,
-            transition_destination: transition_destination
-          )
+          Hive::Bot::DispatchRequestWriter.write!(project: project, slug: slug, argv: first,
+                                                  trigger: "web_recover", request_id: request_id)
         rescue StandardError
           # Sequence-first is deliberate (request-first could let the daemon
           # finish the clear before the sidecar lands, silently skipping the
@@ -355,121 +272,6 @@ module Hive
       end
 
       private
-
-      def current_card(project:, slug:)
-        Hive::Commands::Status.new.task_card(project: project, slug: slug)
-      end
-
-      def exact_transition!(card, destination:, expected_fingerprint:)
-        unless card["fingerprint"] == expected_fingerprint
-          raise Hive::StaleTask.new(
-            "task changed since the board rendered; review the current card and retry",
-            expected_fingerprint: expected_fingerprint, current_card: card
-          )
-        end
-
-        transition = Array(card["allowed_transitions"]).find do |candidate|
-          candidate["destination"] == destination.to_s
-        end
-        return transition if transition
-
-        raise Hive::StaleTask.new(
-          "the requested destination is not currently allowed",
-          expected_fingerprint: expected_fingerprint, current_card: card
-        )
-      end
-
-      def validate_confirmation!(transition, slug:, confirmation:, reason:, confirmation_slug:)
-        case transition.fetch("confirmation")
-        when "none"
-          nil
-        when "confirm"
-          raise Hive::Error, "confirmation is required for this transition" unless confirmation == "confirmed"
-        when "reason"
-          raise Hive::Error, "a nonblank reason is required for this transition" if reason.to_s.strip.empty?
-        when "slug"
-          unless confirmation_slug.to_s == slug.to_s
-            raise Hive::Error, "type the exact task slug to confirm this transition"
-          end
-        else
-          raise Hive::Error, "unsupported confirmation tier #{transition['confirmation'].inspect}"
-        end
-      end
-
-      def queue_transition!(card:, transition:, project:, slug:, expected_fingerprint:, actor:, request_id:)
-        project_entry = Hive::Config.find_project(project) ||
-                        raise(Hive::InvalidTaskPath, "unknown project #{project}")
-        Hive::Lock.with_commit_lock(project_entry.fetch("hive_state_path")) do
-          fresh = current_card(project: project, slug: slug)
-          exact = exact_transition!(
-            fresh,
-            destination: transition.fetch("destination"),
-            expected_fingerprint: expected_fingerprint
-          )
-          unless exact["verb"] == transition["verb"]
-            raise Hive::StaleTask.new(
-              "the transition verb changed while the request was being admitted",
-              expected_fingerprint: expected_fingerprint, current_card: fresh
-            )
-          end
-
-          verb = exact.fetch("verb")
-          duplicate = outstanding_transition_request(
-            project: project, slug: slug, expected_fingerprint: expected_fingerprint,
-            destination: exact.fetch("destination"), verb: verb
-          )
-          return duplicate.request_id if duplicate
-
-          argv = [ "hive", verb, slug, "--project", project ]
-          argv += [ verb == "run" ? "--stage" : "--from", fresh.fetch("stage") ]
-          return @dispatch_writer.write!(
-            project: project, slug: slug, argv: argv,
-            requestor: "web", actor: actor, trigger: "web_transition",
-            request_id: request_id, expected_fingerprint: expected_fingerprint,
-            transition_destination: exact.fetch("destination")
-          )
-        end
-      rescue ArgumentError => e
-        raise Hive::Error, "cannot queue this transition: #{e.message}"
-      end
-
-      def guarded_drop!(slug:, project:, transition:, expected_fingerprint:, actor:, request_id:, reason:)
-        project_entry = Hive::Config.find_project(project) ||
-                        raise(Hive::InvalidTaskPath, "unknown project #{project}")
-        Hive::Lock.with_commit_lock(project_entry.fetch("hive_state_path")) do
-          fresh = current_card(project: project, slug: slug)
-          exact = exact_transition!(
-            fresh,
-            destination: transition.fetch("destination"),
-            expected_fingerprint: expected_fingerprint
-          )
-          unless exact["verb"] == "drop" && exact["verb"] == transition["verb"]
-            raise Hive::StaleTask.new(
-              "the destructive transition changed while the request was being admitted",
-              expected_fingerprint: expected_fingerprint, current_card: fresh
-            )
-          end
-
-          Hive::Commands::Drop.new(
-            slug, project: project, from: fresh.fetch("stage"),
-            audit: {
-              actor: actor, request_id: request_id, from: fresh.fetch("stage"),
-              to: exact.fetch("destination"), direction: exact.fetch("direction"), reason: reason
-            }
-          ).call_under_lock
-        end
-      end
-
-      def outstanding_transition_request(project:, slug:, expected_fingerprint:, destination:, verb:)
-        outstanding = Hive::Daemon::DispatchRequestQueue.pending +
-                      Hive::Daemon::DispatchRequestQueue.claimed.map(&:request)
-        outstanding.find do |request|
-          request.project == project && request.slug == slug &&
-            request.expected_fingerprint == expected_fingerprint &&
-            request.transition_destination == destination &&
-            (verb == "recover" ? request.requestor == "web" : request.argv[1] == verb)
-        end
-      end
 
       # Map the task's current stage dir (e.g. "6-review") to the directory # not-a-stage-ref: documentation example
       # of the stage immediately before it. An absent `from` falls back to

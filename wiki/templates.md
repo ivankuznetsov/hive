@@ -1,13 +1,47 @@
 ---
-title: ERB Templates
+title: Templates
 type: reference
-source: templates/
+source: templates/, lib/hive/llm_wiki_bootstrap/scripts.rb
 created: 2026-04-25
-updated: 2026-06-18
-tags: [template, erb, prompt]
+updated: 2026-07-20
+tags: [template, erb, prompt, llm-wiki]
 ---
 
-**TLDR**: ERB templates under `templates/` cover config scaffolding, task capture, single-agent stage prompts, auto-rebase conflict resolution, 6-review sub-prompts, PR-first draft creation, artifact collection, final PR wrap-up, and the shipped-digest categorizer prompt. Agent-owned tmux-stage templates now finish with an explicit required completion section that makes the terminal marker the literal final instruction. The 6-review fix prompt stays scoped to accepted findings, with one bounded exception: when a finding names a recurring defect class, the fix agent should fix every same-defect site in that pass rather than one cited line. (The retired Telegram "Codex draft-assist" brainstorm template `bot_brainstorm_codex_prompt.md.erb` was deleted; see [[modules/bot]].)
+**TLDR**: Templates under `templates/` cover config scaffolding, task capture, stage/review prompts, and the managed llm-wiki shell scripts. Agent-owned tmux-stage templates finish with an explicit required completion section that makes the terminal marker the literal final instruction. The 6-review fix prompt stays scoped to accepted findings, with one bounded exception: when a finding names a recurring defect class, the fix agent should fix every same-defect site in that pass rather than one cited line.
+
+## LLM wiki script templates
+
+`templates/llm-wiki/{refresh-wiki.sh,post-commit-refresh.sh,compile-log.sh}` are real, executable assets read verbatim by `Hive::LlmWikiBootstrap::Scripts`. `.llm-wiki/` carries committed copies so Hive itself dogfoods the same scripts it installs.
+
+`refresh-wiki.sh` is deliberately only a compatibility dispatcher. It locates the canonical post-commit runner under the repository's shared Git directory, falls back to `.llm-wiki/post-commit-refresh.sh`, requires the explicit `# LLM_WIKI_RUNNER_CAPABILITIES: drain` marker, and executes that runner with `--project <root> --drain`. A missing marker fails closed so an upgraded wrapper cannot accidentally invoke a legacy enqueue-on-start runner. Provider execution, queue admission, locks, circuit breaking, QMD maintenance, and disposable-worktree writes belong to the canonical runner; the scheduled wrapper must not duplicate them or write in the primary checkout.
+
+`post-commit-refresh.sh` stores operational state below the absolute Git common
+directory returned by `git rev-parse --path-format=absolute --git-common-dir`.
+Within its `llm-wiki/` directory, queued sources live in `pending/`,
+quarantined sources in `failed/`, the circuit breaker in `refresh-disabled`,
+and the audit log in `post-commit-refresh.log`. Automatic processing opens or
+keeps the circuit open before another provider launch when the backlog exceeds
+`LLM_WIKI_MAX_AUTO_PENDING` (25 by default), a source or batch cannot be pinned,
+the batch failure count reaches `LLM_WIKI_MAX_REFRESH_ATTEMPTS` (2 by default),
+quarantined sources remain, or sources arriving outside the completed bounded
+batch are deferred. A batch includes at most `LLM_WIKI_MAX_BATCH_SOURCES`
+sources (10 by default).
+
+Recovery is an explicit operator action:
+
+```sh
+.llm-wiki/post-commit-refresh.sh --retry-failed <sha|all>
+```
+
+A full source SHA retries that quarantined or still-pending source; `all` restores all
+quarantined sources and processes one bounded batch of the combined queued
+work. If the command reports that queued or quarantined sources remain, repeat
+`--retry-failed all` for the next batch. A retry can launch the configured
+logged-in agent and consumes that provider subscription's token capacity; it is
+not a free bookkeeping command. The runner also requires GNU `timeout` or
+`gtimeout` (GNU coreutils supplies `gtimeout` on macOS) and retains queued work
+instead of falling back to unbounded Git, QMD, or provider execution when that
+binary is unavailable. See [[dependencies]].
 
 ## Rendering helper
 
@@ -88,4 +122,4 @@ All templates use `trim_mode: "-"` so `<%- … -%>` lines don't add stray newlin
 - [[modules/digest]]
 - [[architecture]]
 
-<!-- updated: 2026-06-18 -->
+<!-- updated: 2026-07-20 -->

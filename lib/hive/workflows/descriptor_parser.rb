@@ -12,7 +12,7 @@ module Hive
     # mid-flight) stay as arguments because they vary within a single parse.
     class DescriptorParser
       SAFE_SLUG = /\A[a-z0-9][a-z0-9-]*\z/
-      TOP_LEVEL_KEYS = %w[id dependency_gate_stage stages].freeze
+      TOP_LEVEL_KEYS = %w[id stages].freeze
       STAGE_KEYS = %w[
         name
         kind
@@ -31,6 +31,8 @@ module Hive
         deliverable
         conditions
         permissions
+        mapping_role
+        mapping_contract
       ].freeze
       REVIEWER_KEYS = %w[
         name
@@ -44,9 +46,16 @@ module Hive
         output_basename
         permissions
         max_attempts
+        mapping_role
+        mapping_contract
       ].freeze
-      COUNCIL_KEYS = %w[quorum max_rounds exit_rule triage_output revise].freeze
-      REVISE_KEYS = %w[agent model effort skill instruction prompt command permissions].freeze
+      COUNCIL_KEYS = %w[quorum max_rounds exit_rule on_max_rounds triage_output revise].freeze
+      MAX_ROUND_POLICIES = %w[wait complete].freeze
+      REVISE_KEYS = %w[
+        agent model effort skill instruction prompt command permissions
+        mapping_role mapping_contract
+      ].freeze
+      MAPPING_ROLES = Hive::Workflow::MAPPING_ROLES
       REVIEWER_INSTRUCTION_KEYS = %w[skill instruction prompt command].freeze
       EXIT_RULES = %w[consensus human].freeze
 
@@ -84,11 +93,7 @@ module Hive
         validate_terminal_last_stage!(stages)
         validate_deliverable_position!(stages)
 
-        dependency_gate_stage = optional_string(
-          descriptor["dependency_gate_stage"], label: "dependency_gate_stage"
-        )
-
-        build_workflow(id, stages, dependency_gate_stage: dependency_gate_stage)
+        build_workflow(id, stages)
       end
 
       private
@@ -131,10 +136,8 @@ module Hive
       # Wrapping the whole parse body (as before) would mislabel an unrelated
       # wrong-kwarg bug in a future Stage.new/Workflow.new signature change as a
       # descriptor error, hiding a genuine code bug from the maintainer.
-      def build_workflow(id, stages, dependency_gate_stage: nil)
-        Hive::Workflow.new(
-          id: id.to_sym, stages: stages, dependency_gate_stage: dependency_gate_stage
-        )
+      def build_workflow(id, stages)
+        Hive::Workflow.new(id: id.to_sym, stages: stages)
       rescue ArgumentError => e
         raise descriptor_error(e.message)
       end
@@ -210,7 +213,9 @@ module Hive
           council: council,
           deliverable: deliverable,
           condition_policy: condition_policy,
-          permissions: permissions
+          permissions: permissions,
+          mapping_role: parse_mapping_role(stage["mapping_role"], label: label),
+          mapping_contract: optional_string(stage["mapping_contract"], label: "#{label} mapping_contract")
         )
       end
 
@@ -360,7 +365,9 @@ module Hive
           command: optional_string(reviewer["command"], label: "#{label} command"),
           output_basename: optional_string(reviewer["output_basename"], label: "#{label} output_basename") || name,
           permissions: parse_permissions(reviewer, id: id, stage_name: name, label: label),
-          max_attempts: optional_positive_integer(reviewer["max_attempts"], label: "#{label} max_attempts")
+          max_attempts: optional_positive_integer(reviewer["max_attempts"], label: "#{label} max_attempts"),
+          mapping_role: parse_mapping_role(reviewer["mapping_role"], label: label),
+          mapping_contract: optional_string(reviewer["mapping_contract"], label: "#{label} mapping_contract")
         )
       end
 
@@ -375,6 +382,12 @@ module Hive
         exit_rule = optional_string(council["exit_rule"], label: "#{label} council exit_rule") || "human"
         unless EXIT_RULES.include?(exit_rule)
           raise descriptor_error("#{label} council exit_rule #{exit_rule.inspect} must be one of #{EXIT_RULES.inspect}")
+        end
+        on_max_rounds = optional_string(council["on_max_rounds"], label: "#{label} council on_max_rounds") || "wait"
+        unless MAX_ROUND_POLICIES.include?(on_max_rounds)
+          raise descriptor_error(
+            "#{label} council on_max_rounds #{on_max_rounds.inspect} must be one of #{MAX_ROUND_POLICIES.inspect}"
+          )
         end
 
         revise = parse_revise(council["revise"], id: id, label: "#{label} council revise")
@@ -399,6 +412,7 @@ module Hive
           quorum: quorum,
           max_rounds: max_rounds,
           exit_rule: exit_rule.to_sym,
+          on_max_rounds: on_max_rounds.to_sym,
           triage_output: parse_triage_output(council["triage_output"], label: "#{label} council triage_output"),
           revise: revise
         )
@@ -422,8 +436,18 @@ module Hive
           instruction: parse_instruction(revise["instruction"], label: label),
           prompt: optional_string(revise["prompt"], label: "#{label} prompt"),
           command: optional_string(revise["command"], label: "#{label} command"),
-          permissions: parse_permissions(revise, id: id, stage_name: "revise", label: label)
+          permissions: parse_permissions(revise, id: id, stage_name: "revise", label: label),
+          mapping_role: parse_mapping_role(revise["mapping_role"], label: label),
+          mapping_contract: optional_string(revise["mapping_contract"], label: "#{label} mapping_contract")
         )
+      end
+
+      def parse_mapping_role(value, label:)
+        role = optional_string(value, label: "#{label} mapping_role")
+        return nil unless role
+        return role if MAPPING_ROLES.include?(role)
+
+        raise descriptor_error("#{label} mapping_role #{role.inspect} must be one of #{MAPPING_ROLES.inspect}")
       end
 
       # `triage_output` is joined onto the task folder by the runner
@@ -467,7 +491,7 @@ module Hive
       def reject_agent_only_fields!(stage, kind:, label:)
         return if [ :agent, :council ].include?(kind)
 
-        present = %w[skill instruction agent model effort budget_usd timeout_sec input reviewers council deliverable permissions]
+        present = %w[skill instruction agent model effort budget_usd timeout_sec input reviewers council deliverable permissions mapping_role mapping_contract]
                   .select { |key| stage.key?(key) }
         return if present.empty?
 

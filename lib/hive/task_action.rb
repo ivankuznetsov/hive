@@ -185,6 +185,14 @@ module Hive
       }
     }.freeze
 
+    # Ready actions are the shared dispatch vocabulary for status consumers.
+    # Derive the lookup from the classifier table so bot and web adapters
+    # cannot drift from the command Hive actually reports for an action.
+    READY_COMMANDS = ACTIONS.values.each_with_object({}) do |action, commands|
+      key = action.fetch(:key)
+      commands[key] = action.fetch(:command) if key.start_with?("ready_")
+    end.freeze
+
     attr_reader :task, :marker, :project_name, :projection
 
     # Default grace window for placeholder AGENT_WORKING markers (no PID
@@ -261,70 +269,12 @@ module Hive
       parts.shelljoin
     end
 
-    # Complete, serializable transition contract for every UI consumer. The
-    # current action remains the legality source; descriptors supply ordering
-    # and destinations. Generic workflows never receive invented backwards
-    # semantics, while coding keeps its established prior-gate reject path.
-    def allowed_transitions
-      transitions = []
-      stage = workflow_stage
-      return transitions unless stage
-
-      if transitionable_action?
-        if key == Hive::Schemas::TaskActionKind::READY_TO_RUN
-          transitions << transition_payload(
-            destination: stage.dir, verb: "run", direction: "run",
-            confirmation: "confirm",
-            label: "Run #{stage_label(stage)}"
-          )
-        elsif (destination = task_workflow.next_stage_after(stage.name))
-          transitions << transition_payload(
-            destination: destination.dir,
-            verb: action[:command] == "approve" ? "approve" : action[:command],
-            direction: "forward",
-            label: "Move to #{stage_label(destination)}"
-          )
-        end
-
-        if Hive::Workflows.coding_id?(task_workflow.id) && stage.index > 1
-          prior = task_workflow.stages.fetch(stage.index - 2)
-          transitions << transition_payload(
-            destination: prior.dir, verb: "reject", direction: "backward",
-            confirmation: "confirm", label: "Send back to #{stage_label(prior)}"
-          )
-        end
-      end
-
-      if recovery_transition?
-        transitions << transition_payload(
-          destination: stage.dir, verb: "recover", direction: "recover",
-          confirmation: "confirm", label: "Retry stage"
-        )
-      end
-
-      if force_transition? && (destination = task_workflow.next_stage_after(stage.name))
-        transitions << transition_payload(
-          destination: destination.dir, verb: "force_approve", direction: "forward",
-          confirmation: "reason", label: "Force move to #{stage_label(destination)}"
-        )
-      end
-
-      unless stage == task_workflow.stages.last
-        transitions << transition_payload(
-          destination: "__delete__", verb: "drop", direction: "delete",
-          confirmation: "slug", label: "Drop task"
-        )
-      end
-      transitions
-    end
-
     def payload
       {
         "key" => key,
         "label" => label,
         "command" => command,
-        "next_action" => next_action,
-        "allowed_transitions" => allowed_transitions
+        "next_action" => next_action
       }
     end
 
@@ -352,52 +302,6 @@ module Hive
     end
 
     private
-
-    TRANSITIONABLE_KEYS = [
-      Hive::Schemas::TaskActionKind::READY_TO_BRAINSTORM,
-      Hive::Schemas::TaskActionKind::READY_TO_PLAN,
-      Hive::Schemas::TaskActionKind::READY_TO_DEVELOP,
-      Hive::Schemas::TaskActionKind::READY_TO_OPEN_PR,
-      Hive::Schemas::TaskActionKind::READY_FOR_REVIEW,
-      Hive::Schemas::TaskActionKind::READY_TO_ARTIFACTS,
-      Hive::Schemas::TaskActionKind::READY_TO_FINALIZE,
-      Hive::Schemas::TaskActionKind::READY_TO_ARCHIVE,
-      Hive::Schemas::TaskActionKind::READY_TO_ADVANCE,
-      Hive::Schemas::TaskActionKind::READY_TO_RUN
-    ].freeze
-
-    RECOVERY_TRANSITION_KEYS = [
-      Hive::Schemas::TaskActionKind::RECOVER_EXECUTE,
-      Hive::Schemas::TaskActionKind::RECOVER_REVIEW,
-      Hive::Schemas::TaskActionKind::ERROR
-    ].freeze
-
-    FORCE_TRANSITION_KEYS = [
-      Hive::Schemas::TaskActionKind::NEEDS_INPUT,
-      Hive::Schemas::TaskActionKind::RECOVER_EXECUTE,
-      Hive::Schemas::TaskActionKind::RECOVER_REVIEW,
-      Hive::Schemas::TaskActionKind::READY_TO_RUN,
-      Hive::Schemas::TaskActionKind::ERROR,
-      Hive::Schemas::TaskActionKind::MANUAL_STEERING
-    ].freeze
-
-    def transitionable_action? = TRANSITIONABLE_KEYS.include?(key)
-    def recovery_transition? = RECOVERY_TRANSITION_KEYS.include?(key)
-    def force_transition? = FORCE_TRANSITION_KEYS.include?(key)
-
-    def transition_payload(destination:, verb:, direction:, label:, confirmation: "none")
-      {
-        "destination" => destination,
-        "verb" => verb,
-        "direction" => direction,
-        "confirmation" => confirmation,
-        "label" => label
-      }
-    end
-
-    def stage_label(stage)
-      stage.name.split("-").map(&:capitalize).join(" ")
-    end
 
     def action
       override = universal_action

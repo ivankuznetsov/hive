@@ -719,60 +719,8 @@ class TaskActionTest < Minitest::Test
   def test_payload_has_expected_keys
     task = fake_task(stage_name: "brainstorm", stage_index: 2)
     payload = Hive::TaskAction.for(task, marker(:complete)).payload
-    assert_equal %w[allowed_transitions command key label next_action].sort, payload.keys.sort
+    assert_equal %w[command key label next_action].sort, payload.keys.sort
     assert_equal "ready_to_plan", payload["key"]
-  end
-
-  def test_allowed_transitions_follow_the_coding_descriptor
-    task = fake_task(stage_name: "brainstorm", stage_index: 2)
-    action = Hive::TaskAction.for(task, marker(:complete))
-
-    assert_equal [
-      {
-        "destination" => "3-plan",
-        "verb" => "plan",
-        "direction" => "forward",
-        "confirmation" => "none",
-        "label" => "Move to Plan"
-      },
-      {
-        "destination" => "1-inbox",
-        "verb" => "reject",
-        "direction" => "backward",
-        "confirmation" => "confirm",
-        "label" => "Send back to Inbox"
-      },
-      {
-        "destination" => "__delete__",
-        "verb" => "drop",
-        "direction" => "delete",
-        "confirmation" => "slug",
-        "label" => "Drop task"
-      }
-    ], action.allowed_transitions
-  end
-
-  def test_guarded_states_expose_only_confirmation_tier_transitions
-    task = fake_task(stage_name: "execute", stage_index: 4)
-
-    %i[execute_waiting execute_stale error agent_working].each do |marker_name|
-      options = marker_name == :agent_working ? { pid_alive: true } : {}
-      action = Hive::TaskAction.for(task, marker(marker_name), **options)
-      transitions = action.allowed_transitions
-      refute_empty transitions, marker_name
-      refute transitions.any? { |transition| transition["confirmation"] == "none" }, marker_name
-      assert transitions.any? { |transition| transition["verb"] == "drop" }, marker_name
-    end
-  end
-
-  def test_ready_to_run_targets_the_current_stage
-    task = fake_task(stage_name: "plan", stage_index: 3)
-    transition = Hive::TaskAction.for(task, marker(:none)).allowed_transitions.fetch(0)
-
-    assert_equal "3-plan", transition.fetch("destination")
-    assert_equal "run", transition.fetch("verb")
-    assert_equal "run", transition.fetch("direction")
-    assert_equal "confirm", transition.fetch("confirmation")
   end
 
   def test_non_recovery_rows_do_not_emit_diagnostic

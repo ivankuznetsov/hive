@@ -8,9 +8,9 @@ module Hive
     # Project-wide patrol resource gate. Measured tokens and provider-agnostic
     # launch counts are both bounded so a backend that omits usage accounting
     # cannot turn a frequent patrol tier into an unlimited subscription drain.
-    # Architecture work gets a larger cycle envelope without receiving a
-    # separate daily pool, so it can inspect broad boundaries without evading
-    # the project's shared subscription ceiling.
+    # Architecture work keeps the shared daily token pool and its bounded
+    # per-cycle envelope, but merged-PR demand is not discarded by the
+    # ordinary patrol launch-count ceiling.
     class TokenBudget
       DEFAULT_LIMITS = {
         "max_tokens_per_cycle" => 200_000,
@@ -18,8 +18,10 @@ module Hive
         "max_tokens_per_agent" => 50_000,
         "max_agent_spawns_per_cycle" => 3,
         "max_agent_spawns_per_day" => 8,
+        "max_architecture_unmetered_spawns_per_day" => 96,
         "max_budget_usd_per_agent" => 25,
-        "architecture_budget_multiplier" => 2
+        "architecture_budget_multiplier" => 2,
+        "fix_budget_multiplier" => 2
       }.freeze
 
       attr_reader :last_exhaustion
@@ -54,10 +56,10 @@ module Hive
           return false
         end
 
-        available_tokens = available_tokens(activity, stage)
+        available_tokens, headroom_reason = token_headroom(activity, stage)
         if minimum_tokens > available_tokens
           @last_exhaustion = exhaustion(
-            "insufficient_launch_headroom", activity, stage
+            headroom_reason, activity, stage
           ).merge(required_tokens: minimum_tokens, available_tokens: available_tokens)
           release_launch_lock
           return false
@@ -75,11 +77,46 @@ module Hive
           headroom = "required=#{detail.fetch(:required_tokens)} tokens, " \
                      "available=#{detail.fetch(:available_tokens)}; "
         end
+        architecture_safety = ""
+        if architecture_stage?(detail.fetch(:stage))
+          architecture_safety = ", unmetered_architecture=" \
+                                "#{detail.fetch(:today_architecture_unmetered_spawns)}/" \
+                                "#{detail.fetch(:max_architecture_unmetered_spawns_per_day)} today"
+        end
         "patrol agent budget exhausted (#{detail.fetch(:reason)}; #{headroom}" \
           "cycle=#{detail.fetch(:cycle_tokens)}/#{detail.fetch(:max_tokens_per_cycle)} tokens, " \
           "today=#{detail.fetch(:today_tokens)}/#{detail.fetch(:max_tokens_per_day)} tokens, " \
           "spawns=#{detail.fetch(:cycle_spawns)}/#{detail.fetch(:max_agent_spawns_per_cycle)} cycle, " \
-          "#{detail.fetch(:today_spawns)}/#{detail.fetch(:max_agent_spawns_per_day)} today)"
+          "#{detail.fetch(:today_spawns)}/#{detail.fetch(:max_agent_spawns_per_day) || 'unbounded'} today" \
+          "#{architecture_safety})"
+      end
+
+      # Review envelopes expose a compact, provider-neutral limit tuple so
+      # schedulers can distinguish a daily stop from a retryable agent error.
+      def resource_exhaustion
+        detail = @last_exhaustion
+        return nil unless detail
+
+        limit, observed = case detail.fetch(:reason)
+        when "daily_token_limit"
+          [ detail.fetch(:max_tokens_per_day), detail.fetch(:today_tokens) ]
+        when "cycle_token_limit"
+          [ detail.fetch(:max_tokens_per_cycle), detail.fetch(:cycle_tokens) ]
+        when "daily_agent_spawn_limit"
+          [ detail.fetch(:max_agent_spawns_per_day), detail.fetch(:today_spawns) ]
+        when "daily_architecture_unmetered_spawn_limit"
+          [
+            detail.fetch(:max_architecture_unmetered_spawns_per_day),
+            detail.fetch(:today_architecture_unmetered_spawns)
+          ]
+        when "cycle_agent_spawn_limit"
+          [ detail.fetch(:max_agent_spawns_per_cycle), detail.fetch(:cycle_spawns) ]
+        when "insufficient_launch_headroom", "daily_token_headroom"
+          [ detail.fetch(:available_tokens), detail.fetch(:required_tokens) ]
+        else
+          [ 1, 1 ]
+        end
+        { reason: detail.fetch(:reason), limit: limit.to_i, observed: observed.to_i }
       end
 
       # Agent CLIs call this limit USD, but on subscription-backed providers it
@@ -96,6 +133,27 @@ module Hive
       def max_tokens(stage: "patrol")
         activity = today_activity
         available_tokens(activity, stage)
+      end
+
+      # Batch planners use the same durable daily token accounting and
+      # in-process cycle counter as acquire. Architecture runs are driven by
+      # merged PRs, so their ordinary daily launch count is independent. A
+      # separate durable safety ceiling still bounds architecture launches
+      # when the provider repeatedly omits token accounting.
+      def remaining_launches(stage: "patrol")
+        activity = today_activity
+        return 0 if @usage_store_failed || activity.fetch(:available) == false
+
+        cycle_remaining = effective_limit("max_agent_spawns_per_cycle", stage) - @cycle_spawns
+        if architecture_stage?(stage)
+          daily_unmetered_remaining = @limits.fetch("max_architecture_unmetered_spawns_per_day") -
+                                      activity.fetch(:architecture_unmetered_spawns)
+          return [ [ cycle_remaining, daily_unmetered_remaining ].min, 0 ].max
+        end
+
+        daily_remaining = @limits.fetch("max_agent_spawns_per_day") -
+                          activity.fetch(:ordinary_agent_spawns)
+        [ [ cycle_remaining, daily_remaining ].min, 0 ].max
       end
 
       def record!(result:, profile:, stage:, started_at:)
@@ -198,7 +256,13 @@ module Hive
         if @cycle_tokens >= effective_limit("max_tokens_per_cycle", stage)
           return "cycle_token_limit"
         end
-        if activity.fetch(:agent_spawns) >= @limits.fetch("max_agent_spawns_per_day")
+        if architecture_stage?(stage) &&
+           activity.fetch(:architecture_unmetered_spawns) >=
+             @limits.fetch("max_architecture_unmetered_spawns_per_day")
+          return "daily_architecture_unmetered_spawn_limit"
+        end
+        if !architecture_stage?(stage) &&
+           activity.fetch(:ordinary_agent_spawns) >= @limits.fetch("max_agent_spawns_per_day")
           return "daily_agent_spawn_limit"
         end
         if @cycle_spawns >= effective_limit("max_agent_spawns_per_cycle", stage)
@@ -209,24 +273,38 @@ module Hive
       end
 
       def available_tokens(activity, stage)
+        token_headroom(activity, stage).first
+      end
+
+      def token_headroom(activity, stage)
         per_agent = effective_limit("max_tokens_per_agent", stage)
+        per_agent *= @limits.fetch("fix_budget_multiplier") if ordinary_fix_stage?(stage)
         cycle_remaining = effective_limit("max_tokens_per_cycle", stage) - @cycle_tokens
         daily_remaining = @limits.fetch("max_tokens_per_day") - activity.fetch(:tokens)
-        [ per_agent, cycle_remaining, daily_remaining ].min
+        available = [ per_agent, cycle_remaining, daily_remaining ].min
+        reason = daily_remaining <= per_agent && daily_remaining <= cycle_remaining ?
+          "daily_token_headroom" : "insufficient_launch_headroom"
+        [ available, reason ]
       end
 
       def exhaustion(reason, activity, stage)
+        architecture = architecture_stage?(stage)
         {
           reason: reason,
           stage: stage,
           cycle_tokens: @cycle_tokens,
           today_tokens: activity.fetch(:tokens),
           cycle_spawns: @cycle_spawns,
-          today_spawns: activity.fetch(:agent_spawns),
+          today_spawns: activity.fetch(
+            architecture ? :architecture_agent_spawns : :ordinary_agent_spawns
+          ),
+          today_architecture_unmetered_spawns: activity.fetch(:architecture_unmetered_spawns),
           max_tokens_per_cycle: effective_limit("max_tokens_per_cycle", stage),
           max_tokens_per_day: @limits.fetch("max_tokens_per_day"),
           max_agent_spawns_per_cycle: effective_limit("max_agent_spawns_per_cycle", stage),
-          max_agent_spawns_per_day: @limits.fetch("max_agent_spawns_per_day")
+          max_agent_spawns_per_day: architecture ? nil : @limits.fetch("max_agent_spawns_per_day"),
+          max_architecture_unmetered_spawns_per_day:
+            @limits.fetch("max_architecture_unmetered_spawns_per_day")
         }
       end
 
@@ -235,6 +313,10 @@ module Hive
         return value unless architecture_stage?(stage)
 
         value * @limits.fetch("architecture_budget_multiplier")
+      end
+
+      def ordinary_fix_stage?(stage)
+        stage.to_s == "patrol-fix"
       end
 
       def architecture_stage?(stage)

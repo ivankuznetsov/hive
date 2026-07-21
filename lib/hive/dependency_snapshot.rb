@@ -108,39 +108,6 @@ module Hive
       Hive::DependencyAdmission::Context.new(projects: projects, fallback: fallback_context)
     end
 
-    # Build the dependency view needed by one project's mutation guards without
-    # scanning every registered project. Explicit cross-project references are
-    # followed transitively so their verdicts remain correct, while unrelated
-    # projects never pay the status-scan cost of a single-card lookup.
-    def admission_context_for_project(entry, registry_entries: Hive::Config.registered_projects)
-      entries_by_name = registry_entries.to_h do |candidate|
-        [ candidate.fetch("name").to_s, candidate ]
-      end
-      pending = [ entry.fetch("name").to_s ]
-      snapshots = {}
-      until pending.empty?
-        name = pending.shift
-        next if snapshots.key?(name)
-
-        candidate = entries_by_name[name]
-        next unless candidate
-
-        snapshot = admission_project(candidate, live_repository_identity: nil)
-        snapshots[name] = snapshot
-        cross_project_identity_targets([ snapshot ]).each do |target|
-          pending << target unless snapshots.key?(target)
-        end
-      end
-
-      identity_targets = cross_project_identity_targets(snapshots.values)
-      projects = snapshots.values.map do |project|
-        next project unless identity_targets.include?(project.name)
-
-        project.with(live_repository_identity: Hive::RepositoryIdentity.current(project.path))
-      end
-      Hive::DependencyAdmission::Context.new(projects: projects)
-    end
-
     # Recompute dependency admission from disk and raise the typed manual
     # boundary error. Callers invoke this while holding the depending task's
     # lock immediately before forward side effects.
@@ -240,8 +207,7 @@ module Hive
         repository_identity: entry["repository_identity"],
         live_repository_identity: live_repository_identity == :detect ?
           Hive::RepositoryIdentity.current(root) : live_repository_identity,
-        dependency_gate_stage: config["dependency_gate_stage"],
-        dependency_gate_explicit: config.key?("dependency_gate_stage"),
+        dependency_gate_stage: config.fetch("dependency_gate_stage", Hive::Config::DEFAULTS.fetch("dependency_gate_stage")),
         tasks: tasks,
         validation_error: config_error
       )
@@ -252,7 +218,6 @@ module Hive
         repository_identity: entry["repository_identity"],
         live_repository_identity: nil,
         dependency_gate_stage: Hive::Config::DEFAULTS.fetch("dependency_gate_stage"),
-        dependency_gate_explicit: false,
         tasks: [],
         validation_error: "#{e.class}: #{e.message}"
       )
@@ -306,8 +271,7 @@ module Hive
       validation_error = nil
       begin
         Hive::Workflows::Project.assert_descriptor_loadable!(selector.to_sym, project_root: root)
-        workflow = Hive::Workflows::Registry.fetch(selector.to_sym)
-        workflow_stages = workflow.stage_dirs
+        workflow_stages = Hive::Workflows::Registry.fetch(selector.to_sym).stage_dirs
       rescue StandardError => e
         validation_error = "workflow #{selector.inspect} could not be resolved: #{e.class}: #{e.message}"
       end
@@ -329,8 +293,6 @@ module Hive
         id: metadata.data[:id],
         stage: stage,
         workflow_stages: workflow_stages,
-        workflow_dependency_gate: workflow&.dependency_gate_stage,
-        workflow_finalize_stage: workflow&.find { |candidate| candidate.kind == :finalize }&.dir,
         depends_on: metadata.data[:depends_on],
         metadata_status: metadata_status,
         metadata_error: metadata.error,

@@ -20,6 +20,28 @@ class CommandsRunTest < Minitest::Test
     Hive::Commands::Run.new("some-slug", **kwargs)
   end
 
+  def test_observation_guard_runs_after_the_task_lock_is_acquired
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "brainstorm.md")
+      File.write(state_file, "# state\n<!-- MANUAL_STEERING -->\n")
+      current = task(folder: dir, state_file: state_file)
+      guarded = command(
+        quiet: true,
+        observation_guard: lambda do |observed|
+          assert_same current, observed
+          assert File.exist?(File.join(dir, ".lock")), "guard must run under the task lock"
+          raise Hive::StaleOperationalObservation, "rotated"
+        end
+      )
+      guarded.define_singleton_method(:resolve_task) { current }
+
+      with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(_task) { }) do
+        assert_raises(Hive::StaleOperationalObservation) { guarded.call }
+      end
+      refute File.exist?(File.join(dir, ".lock")), "failed guard must release the task lock"
+    end
+  end
+
   def task(folder: "/tmp/hive-task", stage_name: "brainstorm", stage_index: 2,
            state_file: nil, hive_state_path: nil, workflow: Hive::Workflows::Registry.default)
     TaskDouble.new(
@@ -124,56 +146,6 @@ class CommandsRunTest < Minitest::Test
       end
 
       assert_match(/stage recorded :review_error/, err.message)
-    end
-  end
-
-  def test_web_operator_audit_exists_before_the_run_commit
-    with_tmp_dir do |dir|
-      t = task(folder: dir, hive_state_path: File.join(dir, ".hive-state"))
-      File.write(t.state_file, "# state\n")
-      committed_event = nil
-      ops = Object.new
-      ops.define_singleton_method(:hive_commit) do |**|
-        committed_event = JSON.parse(File.readlines(File.join(dir, "events.jsonl")).last)
-        "committed"
-      end
-
-      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { ops }) do
-        with_replaced_singleton_method(Hive::Lock, :with_commit_lock, ->(_path, &block) { block.call }) do
-          command(audit: { actor: "alice", request_id: "web-1" }).send(
-            :commit_after, t, { commit: "brainstorm_complete", status: :complete }
-          )
-        end
-      end
-
-      assert_equal "operator_action", committed_event.fetch("event_type")
-      assert_equal "alice", committed_event.fetch("actor")
-      assert_equal "web-1", committed_event.fetch("request_id")
-      assert_equal "run", committed_event.fetch("direction")
-    end
-  end
-
-  def test_failed_run_commit_rolls_back_operator_audit_files
-    with_tmp_dir do |dir|
-      t = task(folder: dir, hive_state_path: File.join(dir, ".hive-state"))
-      File.write(t.state_file, "# state\n")
-      File.write(File.join(dir, "events.jsonl"), "before\n")
-      File.write(File.join(dir, "status.md"), "before status\n")
-      ops = Object.new
-      ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
-
-      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { ops }) do
-        with_replaced_singleton_method(Hive::Lock, :with_commit_lock, ->(_path, &block) { block.call }) do
-          assert_raises(Hive::GitError) do
-            command(audit: { actor: "alice", request_id: "web-2" }).send(
-              :commit_after, t, { commit: "brainstorm_complete", status: :complete }
-            )
-          end
-        end
-      end
-
-      assert_equal "before\n", File.read(File.join(dir, "events.jsonl"))
-      assert_equal "before status\n", File.read(File.join(dir, "status.md"))
     end
   end
 
@@ -411,10 +383,12 @@ class CommandsRunTest < Minitest::Test
       raise JSON::GeneratorError, "bad json"
     end
 
-    capture_io do
-      run.send(:emit_error_envelope, Hive::InternalError.new("bad"))
+    out, err = capture_io do
+      run.send(:emit_envelope, Hive::InternalError.new("bad"))
     end
 
+    assert_empty out
+    assert_empty err
     assert run.instance_variable_get(:@stdout_written)
   ensure
     JSON.define_singleton_method(:generate, original) if original
@@ -435,7 +409,7 @@ class CommandsRunTest < Minitest::Test
       }
     )
 
-    out, = capture_io { command(json: true).send(:emit_error_envelope, error) }
+    out, = capture_io { command(json: true).send(:emit_envelope, error) }
     payload = JSON.parse(out)
     assert_equal "blocked", payload.dig("condition_gate", "status")
     assert_equal "AgentHealthy",
@@ -547,6 +521,24 @@ class CommandsRunTest < Minitest::Test
     out, = capture_io do
       exit_error = assert_raises(SystemExit) { run.call }
       assert_equal Hive::ExitCodes::SOFTWARE, exit_error.status
+    end
+    assert_empty out
+  end
+
+  def test_failed_durable_text_attempt_preserves_exit_without_json
+    result = Hive::Attempts::ClientResult.new(
+      status: :terminal, exit_status: 7, outcome: "failed",
+      receipt: {}, attempt_id: "attempt-text", stdout_bytes: 0
+    )
+    entrypoint = Object.new
+    entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
+    run = command(durable: true, json: false, attempt_entrypoint: entrypoint)
+    resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
+    run.define_singleton_method(:resolve_task) { resolved }
+
+    out, = capture_io do
+      exit_error = assert_raises(SystemExit) { run.call }
+      assert_equal 7, exit_error.status
     end
     assert_empty out
   end

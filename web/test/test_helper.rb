@@ -76,6 +76,14 @@ module ActiveSupport
     ensure
       $stdout, $stderr = orig_out, orig_err
     end
+
+    def with_replaced_singleton_method(receiver, name, replacement)
+      original = receiver.method(name)
+      receiver.define_singleton_method(name, &replacement)
+      yield
+    ensure
+      receiver.define_singleton_method(name, original)
+    end
   end
 end
 
@@ -87,7 +95,7 @@ module AuthTestHelper
     follow_redirect! if response.redirect?
   end
 
-  # owner: "" writes a CLAIMABLE box (the key is omitted — the config
+  # owner: "" writes a CLAIMABLE instance (the key is omitted — the config
   # validator rejects empty strings; claimable means absent).
   def configure_owner!(owner: "alice")
     path = File.join(ENV["HIVE_HOME"], "config.yml")

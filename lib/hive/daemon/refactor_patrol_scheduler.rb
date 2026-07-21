@@ -23,6 +23,7 @@ module Hive
       PATROL_STAGE = "refactor-patrol".freeze
       PATROL_SLUG_PREFIX = "refactor-patrol".freeze
       RETRY_BACKOFF_SEC = 60
+      SUPPORTED_REPORT_SCHEMA_VERSIONS = [ 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol") ].uniq.freeze
 
       class ReservationBlocked < StandardError
         attr_reader :reason, :evidence
@@ -63,9 +64,9 @@ module Hive
         @lease_sec = lease_sec.to_i
         @dry_run = dry_run
         @events = []
-        @schemer = JSONSchemer.schema(
-          Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2))
-        )
+        @schemers = SUPPORTED_REPORT_SCHEMA_VERSIONS.to_h do |version|
+          [ version, JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol", version: version))) ]
+        end
       end
 
       def candidates(now: Time.now)
@@ -196,20 +197,11 @@ module Hive
         end
 
         snapshot = @checkout_guard_factory.call(entry.fetch("path"), branch)
-                                          .validate_and_snapshot!(merge_sha: aggregate.dig("source", "merge_sha"))
+                                          .validate_and_snapshot!(
+                                            merge_sha: aggregate.dig("source", "merge_sha"),
+                                            analysis_sha: aggregate["analysis_sha"]
+                                          )
         analysis_sha = snapshot.fetch("analysis_sha")
-        pinned_sha = aggregate["analysis_sha"]
-        if pinned_sha && pinned_sha != analysis_sha
-          evidence = {
-            "expected_analysis_sha" => pinned_sha,
-            "current_analysis_sha" => analysis_sha
-          }
-          block(
-            entry, aggregate, reason: "analysis_checkout_changed_after_pin",
-            evidence: evidence, now: now, phase: phase
-          )
-          raise ReservationBlocked.new("analysis_checkout_changed_after_pin", evidence)
-        end
         token = if @dry_run
           { job_id: aggregate.fetch("job_id"), owner: @owner, generation: 0, dry_run: true }
         else
@@ -232,7 +224,8 @@ module Hive
           hive_state_path: entry["hive_state_path"],
           dispatch_token: token.merge(
             kind: :architecture_patrol, phase: :discovery,
-            registration: entry.fetch("name"), result_path: result_path
+            registration: entry.fetch("name"), result_path: result_path,
+            analysis_sha: analysis_sha
           )
         )
       rescue ReservationBlocked
@@ -278,7 +271,7 @@ module Hive
         entry = entry_for_token(dispatch_token)
         store = store_for(entry)
         aggregate = store.read_job(dispatch_token.fetch(:job_id))
-        unless exit_code == 0 && envelope.is_a?(Hash) && @schemer.valid?(envelope)
+        unless exit_code == 0 && envelope.is_a?(Hash) && valid_report_envelope?(envelope)
           aggregate = store.release_discovery!(
             dispatch_token, reason: completion_failure_reason(exit_code, envelope),
             now: now, backoff_sec: RETRY_BACKOFF_SEC
@@ -286,7 +279,12 @@ module Hive
           return completion_result(:retry, dispatch_token, envelope, aggregate: aggregate)
         end
 
-        aggregate = store.checkpoint_discovery!(dispatch_token, envelope: envelope, now: now)
+        aggregate = store.checkpoint_discovery!(
+          dispatch_token,
+          envelope: envelope,
+          now: now,
+          backoff_sec: discovery_backoff_sec(envelope, now)
+        )
         completion_result(
           if envelope.fetch("complete")
             aggregate.fetch("complete") ? :closed : :classified
@@ -478,11 +476,26 @@ module Hive
         "malformed_envelope"
       end
 
+      def discovery_backoff_sec(envelope, now)
+        errors = Array(envelope["review_errors"])
+        reasons = errors.filter_map do |error|
+          error.dig("details", "resource_exhaustion", "reason") if error.is_a?(Hash)
+        end
+        daily = %w[
+          daily_agent_spawn_limit daily_architecture_unmetered_spawn_limit
+          daily_token_headroom daily_token_limit
+        ]
+        return RETRY_BACKOFF_SEC unless errors.any? && reasons.size == errors.size && (reasons - daily).empty?
+
+        next_day = Time.utc(now.utc.year, now.utc.month, now.utc.day) + 86_400
+        [ (next_day - now).ceil, RETRY_BACKOFF_SEC ].max
+      end
+
       def complete_action(token, exit_code, envelope, now)
         entry = entry_for_token(token)
         store = store_for(entry)
         aggregate = store.read_job(token.fetch(:job_id))
-        valid = exit_code == 0 && envelope.is_a?(Hash) && @schemer.valid?(envelope) &&
+        valid = exit_code == 0 && envelope.is_a?(Hash) && valid_report_envelope?(envelope) &&
                 envelope["job_id"] == aggregate.fetch("job_id") &&
                 envelope["project"] == entry.fetch("name") &&
                 envelope["project_root"] == entry.fetch("path") &&
@@ -510,6 +523,10 @@ module Hive
         return "action_missing_envelope" if envelope.nil?
 
         "action_malformed_or_mismatched_envelope"
+      end
+
+      def valid_report_envelope?(envelope)
+        @schemers[envelope["schema_version"]]&.valid?(envelope) == true
       end
 
       def completion_result(status, token, envelope, aggregate: nil)

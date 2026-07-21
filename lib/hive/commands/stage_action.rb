@@ -35,7 +35,7 @@ module Hive
 
       def initialize(verb, target, project: nil, from: nil, json: false,
                      recover_merged_error_reason: nil, durable: false,
-                     attempt_entrypoint: nil)
+                     attempt_entrypoint: nil, quiet: false, observation_guard: nil)
         @verb = verb
         @target = target
         @project_filter = project
@@ -44,6 +44,8 @@ module Hive
         @recover_merged_error_reason = recover_merged_error_reason
         @durable = durable
         @attempt_entrypoint = attempt_entrypoint
+        @quiet = quiet
+        @observation_guard = observation_guard
       end
 
       def call
@@ -92,7 +94,7 @@ module Hive
         return emit_archive_noop(task) if archive_noop?(task, current_stage)
 
         if current_stage == target_stage
-          run_at(task.folder)
+          run_at(task.folder, observation_guard: @observation_guard)
           return emit_phase(task, "ran")
         end
 
@@ -108,7 +110,7 @@ module Hive
         validate_marker!(task, config)
         new_folder = File.join(task.hive_state_path, "stages", target_stage, task.slug)
         promote(task, target_stage, current_stage, config)
-        run_at(new_folder)
+        run_at(new_folder, observation_guard: nil)
         emit_phase(Hive::Task.new(new_folder), "promoted_and_ran")
       end
 
@@ -201,35 +203,37 @@ module Hive
             config
           ),
           json: false,
-          quiet: @json
+          quiet: @json || @quiet,
+          observation_guard: @observation_guard
         ).call
       end
 
-      def run_at(folder)
+      def run_at(folder, observation_guard:)
         Hive::Commands::Run.new(
           folder,
           project: @project_filter,
           json: false,
-          quiet: @json
+          quiet: @json || @quiet,
+          observation_guard: observation_guard
         ).call
       end
 
       # ── Reporting ───────────────────────────────────────────────────────
 
       def emit_phase(task, phase)
-        return unless @json
+        return unless @json && !@quiet
 
         puts JSON.generate(success_payload(task, phase))
       end
 
       def emit_archive_noop(task)
         marker = Hive::Markers.current(task.state_file)
-        if @json
+        if @json && !@quiet
           puts JSON.generate(success_payload(task, "noop",
                                              noop: true,
                                              reason: "already_archived",
                                              marker: marker))
-        else
+        elsif !@quiet
           puts "hive: noop — #{task.slug} is already at #{Hive::Stages::DIRS.last}"
         end
       end

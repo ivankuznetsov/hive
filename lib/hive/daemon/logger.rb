@@ -28,6 +28,7 @@ module Hive
         tick_end
         status_failure
         status_warning
+        operational_snapshot_publish_failed
         dispatched
         skipped
         debouncing

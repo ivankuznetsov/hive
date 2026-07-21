@@ -582,6 +582,15 @@ class HiveDaemonPolicyTest < Minitest::Test
                         answers_pending: true)
   end
 
+  def test_operational_disposition_is_closed_and_explains_policy_owner
+    assert_equal(
+      { decision: "wait_for_answers", owner: "operator",
+        reason: "waiting for unanswered brainstorm questions" },
+      Hive::Daemon::Policy.operational_disposition(:wait_for_answers)
+    )
+    assert_equal "unknown", Hive::Daemon::Policy.operational_disposition(:new_result).fetch(:owner)
+  end
+
   private
 
   def decide(action:, command:, stage: nil, workflow: nil, state_file_mtime: nil,

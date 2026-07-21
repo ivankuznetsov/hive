@@ -23,12 +23,18 @@ require "hive/brainstorm_parser"
 require "hive/gh"
 require "hive/pr"
 require "hive/process_kill"
+require "hive/operational_action"
+require "hive/operational_status"
+require "hive/daemon/operational_snapshot"
+require "hive/terminal_text"
 require "hive/tui/views/hyperlink"
 
 module Hive
   module Commands
     class Status
       include Hive::Schemas::EnvelopeEmitter
+
+      AUTO_SCHEDULER_SNAPSHOT = Object.new.freeze
 
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
@@ -75,7 +81,19 @@ module Hive
         error: "⚠"
       }.freeze
 
-      def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false)
+      OPERATIONAL_BANDS = [
+        [ "running", "RUNNING" ],
+        [ "waiting_on_you", "WAITING ON YOU" ],
+        [ "needs_repair", "NEEDS REPAIR" ],
+        [ "waiting_on_provider_or_scheduler", "WAITING ON PROVIDER / SCHEDULER" ],
+        [ "completion_ready", "COMPLETION READY" ],
+        [ "unknown", "UNKNOWN" ],
+        [ "idle", "READY / IDLE" ]
+      ].freeze
+      OPERATIONAL_BAND_LIMIT = 5
+
+      def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false,
+                     operational: false, full: false)
         @json = json
         @diagnose = diagnose
         @project = project
@@ -83,10 +101,13 @@ module Hive
         @write = write
         @force = force
         @archive = archive
+        @operational = operational
+        @full = full
       end
 
       def call
         call_with_envelope do
+          validate_mode_combinations!
           if @diagnose && @diagnose.to_s.strip.empty?
             raise Hive::Error, "--diagnose requires a non-empty task slug"
           end
@@ -113,11 +134,23 @@ module Hive
       # branch against `urn:hive:schema:status-diagnose:v1`. Plain
       # `hive status --json` stays on `hive-status`.
       def status_schema_for_call
-        @diagnose ? "hive-status-diagnose" : "hive-status"
+        return "hive-status-diagnose" if @diagnose
+
+        @operational ? "hive-operational-status" : "hive-status"
       end
 
       def do_call
         projects = Hive::Config.registered_projects
+        if concise_operational_mode?
+          payload = operational_payload(projects)
+          if @json
+            puts JSON.generate(payload)
+            @stdout_written = true
+          else
+            render_operational(payload)
+          end
+          return
+        end
         if @json
           puts JSON.generate(json_payload(projects))
           @stdout_written = true
@@ -140,6 +173,117 @@ module Hive
           warn "hive: status: project #{project['name'].inspect} failed to render " \
                "(#{e.class}: #{e.message}); skipping it so other projects still display"
           puts "#{project['name']}: failed to load (#{e.message})"
+        end
+      end
+
+      def operational_payload(projects, scheduler_snapshot: AUTO_SCHEDULER_SNAPSHOT, status_payload: nil)
+        source = status_payload || json_payload(projects)
+        project_context = operational_project_context(projects)
+        if scheduler_snapshot.equal?(AUTO_SCHEDULER_SNAPSHOT)
+          scheduler_snapshot = if project_context.any? { |_name, context| context["daemon_enabled"] == true }
+            Hive::Daemon::OperationalSnapshot::Reader.new.read
+          end
+        end
+        Hive::OperationalStatus.new(
+          status_payload: source,
+          project_context: project_context,
+          scheduler_snapshot: scheduler_snapshot
+        ).to_h
+      end
+
+      def render_operational(payload)
+        summary = payload.fetch("summary")
+        completeness = %w[complete partial unknown].include?(payload["completeness"]) ?
+          payload.fetch("completeness") : "unknown"
+        puts "SNAPSHOT #{completeness.upcase} — " \
+             "#{summary.fetch('active')} active · #{summary.fetch('archived')} archived"
+        render_operational_issues(payload.fetch("issues"))
+
+        if completeness == "complete" && summary.fetch("active").zero?
+          render_operational_empty_state(payload)
+          return
+        end
+
+        grouped = payload.fetch("tasks").group_by { |row| row.fetch("state") }
+        OPERATIONAL_BANDS.each do |state, label|
+          rows = Array(grouped[state]).sort_by do |row|
+            [ row.dig("identity", "project").to_s, row.dig("identity", "slug").to_s ]
+          end
+          next if rows.empty?
+
+          puts label
+          rows.first(OPERATIONAL_BAND_LIMIT).each { |row| puts operational_row_line(row) }
+          overflow = rows.size - OPERATIONAL_BAND_LIMIT
+          puts "  +#{overflow} more — run `hive status --full`" if overflow.positive?
+        end
+      end
+
+      def validate_mode_combinations!
+        if @full && @json
+          raise Hive::InvalidTaskPath, "--full cannot be combined with --json; omit --full for hive-status.v6"
+        end
+        if @full && @operational
+          raise Hive::InvalidTaskPath, "--full cannot be combined with --operational"
+        end
+        if (@full || @operational) && (@diagnose || @write || @force)
+          mode = @full ? "--full" : "--operational"
+          raise Hive::InvalidTaskPath,
+                "#{mode} cannot be combined with --diagnose, --write, or --force"
+        end
+      end
+
+      def concise_operational_mode?
+        @operational || (!@full && !@json && !@archive)
+      end
+
+      def render_operational_issues(issues)
+        Array(issues).each do |entry|
+          puts "  ⚠ #{terminal_safe(entry.fetch('message', 'status source is incomplete'))}"
+          remediation = terminal_safe(entry["remediation"])
+          puts "    #{remediation}" unless remediation.empty?
+        end
+      end
+
+      def render_operational_empty_state(payload)
+        summary = payload.fetch("summary")
+        if summary.fetch("projects_total").zero?
+          puts "NO REGISTERED PROJECTS"
+          puts "  run `hive init <path>` to register and initialize a project"
+        elsif summary.fetch("archived").positive?
+          puts "ARCHIVE ONLY — #{summary.fetch('archived')} archived task" \
+               "#{summary.fetch('archived') == 1 ? '' : 's'}"
+          puts "  run `hive status --full` to inspect archived task details"
+        else
+          puts "IDLE — no active work"
+        end
+      end
+
+      def operational_row_line(row)
+        identity = row.fetch("identity")
+        project = terminal_safe(identity["project"])
+        slug = terminal_safe(identity["slug"])
+        display_name = terminal_safe(identity["display_name"])
+        target = "#{project}:#{slug}"
+        target = "#{target} (#{display_name})" unless display_name.empty? || display_name == slug
+        stage = terminal_safe(row.dig("position", "stage"))
+        marker = terminal_safe(row.dig("position", "marker"))
+        owner = terminal_safe(row["blocker_owner"] || "unknown")
+        reason = terminal_safe(row["reason"] || "status reason unavailable")
+        "  #{target} · #{stage}/#{marker} · #{owner} — #{reason}"
+      end
+
+      def terminal_safe(value)
+        Hive::TerminalText.escape(value)
+      end
+
+      def operational_project_context(projects)
+        projects.to_h do |project|
+          enabled = begin
+            Hive::Config.load(project.fetch("path")).dig("daemon", "enabled") == true
+          rescue Hive::Error, SystemCallError
+            false
+          end
+          [ project.fetch("name"), { "daemon_enabled" => enabled } ]
         end
       end
 
@@ -308,6 +452,7 @@ module Hive
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
           "mtime" => row[:mtime].utc.iso8601(6),
+          "observation_mtime" => (row[:observation_mtime] || row[:mtime]).utc.iso8601(6),
           "folder_mtime" => row[:folder_mtime].utc.iso8601(6),
           "age_seconds" => (Time.now - row[:mtime]).to_i,
           "claude_pid" => row[:claude_pid],
@@ -802,6 +947,17 @@ module Hive
               marker, projection = status_projection(task, marker)
               folder_mtime = File.mtime(entry)
               mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
+              # Generic markerless tasks still carry meta.yml. Use that stable
+              # task-owned file for the action observation before falling back
+              # to the directory mtime. Keep `mtime` on its long-standing
+              # state-file/directory meaning because the daemon's dispatch
+              # baseline relies on a stage move changing that value.
+              #
+              # acquiring `.lock` changes the directory mtime and would make a
+              # freshly emitted operational action invalidate itself inside
+              # the command's lock.
+              observation_source = Hive::OperationalAction.observation_mtime_source(task)
+              observation_mtime = observation_source == entry ? folder_mtime : File.mtime(observation_source)
               lock_holder = task_lock_holder(task)
               live_holder = live_task_lock_holder(lock_holder)
               icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: !live_holder.nil?)
@@ -835,6 +991,7 @@ module Hive
                 icon: icon,
                 state_label: state_label,
                 mtime: mtime,
+                observation_mtime: observation_mtime,
                 folder_mtime: folder_mtime,
                 age: humanise_age(mtime),
                 claude_pid: claude_pid,

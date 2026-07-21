@@ -5,57 +5,120 @@ on:
     tags:
       - "v*.*.*"
 
-# Default-narrow permissions: the build job only reads source. The
+# Default-narrow permissions: proof/install gates only read trusted state. The
 # publish job needs `contents: write` to create the GitHub Release and
 # `id-token: write` for cosign keyless signing of SHA256SUMS.
 permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build hive-cli gem
+  proof-gate:
+    name: Verify exact-SHA live agent proof
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
+      checks: read
       contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
-          bundler-cache: true
-      - name: Build gem
-        # Hive ships as a rubygem (`hive-cli`) attached to the GitHub
-        # Release; install channels (install.sh, brew, AUR) download
-        # the .gem and run `gem install` on it. No native build chain
-        # (tebako/dwarfs/Boost) — the user provides Ruby 3.4 already
-        # because the rest of the toolchain needs it.
-        run: gem build hive.gemspec
-      - name: Smoke test built gem
-        # Confirm the gemspec is well-formed and the `hive`/`hv`
-        # executables resolve before we attach the artifact to a
-        # release. Installs into a throwaway $HOME-scoped gem prefix
-        # so the runner's default gem env stays clean.
+      - name: Resolve trusted Check Run and proof workflow
+        id: trusted
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          gem_file="$(ls hive-cli-*.gem | head -n 1)"
-          [[ -s "$gem_file" ]] || { echo "no hive-cli-*.gem in workspace" >&2; exit 1; }
-          sandbox="$(mktemp -d)/gem-sandbox"
-          mkdir -p "$sandbox"
-          GEM_HOME="$sandbox" GEM_PATH="$sandbox" gem install "$gem_file" \
-            --install-dir "$sandbox" \
-            --bindir "$sandbox/bin" \
-            --no-document \
-            --source https://rubygems.org
-          GEM_HOME="$sandbox" GEM_PATH="$sandbox" "$sandbox/bin/hive" --version
+          set -euo pipefail
+          candidate_sha="$(git rev-parse HEAD)"
+          [[ "$candidate_sha" == "$(git rev-parse "${GITHUB_REF}^{commit}")" ]] || {
+            echo "tag checkout does not resolve to the release candidate" >&2
+            exit 1
+          }
+
+          checks_path="$RUNNER_TEMP/live-agent-check-runs.json"
+          run_path="$RUNNER_TEMP/live-agent-proof-run.json"
+          jobs_path="$RUNNER_TEMP/live-agent-proof-jobs.json"
+          artifacts_path="$RUNNER_TEMP/live-agent-proof-artifacts.json"
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/commits/${candidate_sha}/check-runs?per_page=100" \
+            > "$checks_path"
+          check_identity="$(ruby packaging/live_agent_skills/select_release_proof.rb \
+            check "$candidate_sha" "$GITHUB_REPOSITORY" "$checks_path")"
+          proof_run_id="$(jq -er '.proof_run_id' <<<"$check_identity")"
+
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${proof_run_id}" > "$run_path"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${proof_run_id}/jobs?filter=latest&per_page=100" \
+            > "$jobs_path"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${proof_run_id}/artifacts?per_page=100" \
+            > "$artifacts_path"
+          selection="$(ruby packaging/live_agent_skills/select_release_proof.rb \
+            select "$candidate_sha" "$GITHUB_REPOSITORY" "$checks_path" \
+            "$run_path" "$jobs_path" "$artifacts_path")"
+          workflow_revision="$(jq -er '.workflow_revision' <<<"$selection")"
+          proof_run_attempt="$(jq -er '.proof_run_attempt' <<<"$selection")"
+          proof_artifact_id="$(jq -er '.proof_artifact_id' <<<"$selection")"
+          proof_artifact_digest="$(jq -er '.proof_artifact_digest' <<<"$selection")"
+          attestation_sha256="$(jq -er '.attestation_sha256' <<<"$selection")"
+          {
+            echo "candidate_sha=$candidate_sha"
+            echo "workflow_revision=$workflow_revision"
+            echo "proof_run_id=$proof_run_id"
+            echo "proof_run_attempt=$proof_run_attempt"
+            echo "proof_artifact_id=$proof_artifact_id"
+            echo "proof_artifact_digest=$proof_artifact_digest"
+            echo "attestation_sha256=$attestation_sha256"
+          } >> "$GITHUB_OUTPUT"
+      - name: Download and verify the exact attested artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ steps.trusted.outputs.candidate_sha }}
+          WORKFLOW_REVISION: ${{ steps.trusted.outputs.workflow_revision }}
+          PROOF_RUN_ID: ${{ steps.trusted.outputs.proof_run_id }}
+          PROOF_RUN_ATTEMPT: ${{ steps.trusted.outputs.proof_run_attempt }}
+          PROOF_ARTIFACT_ID: ${{ steps.trusted.outputs.proof_artifact_id }}
+          PROOF_ARTIFACT_DIGEST: ${{ steps.trusted.outputs.proof_artifact_digest }}
+          ATTESTATION_SHA256: ${{ steps.trusted.outputs.attestation_sha256 }}
+        run: |
+          set -euo pipefail
+          proof_dir="$RUNNER_TEMP/live-agent-skills-proof"
+          mkdir -p "$proof_dir" proven
+          proof_zip="$RUNNER_TEMP/live-agent-skills-proof.zip"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${PROOF_ARTIFACT_ID}/zip" > "$proof_zip"
+          ruby packaging/live_agent_skills/select_release_proof.rb \
+            digest "$PROOF_ARTIFACT_DIGEST" "$proof_zip" >/dev/null
+          while IFS= read -r entry; do
+            [[ -n "$entry" && "$entry" != /* && "/$entry/" != *"/../"* ]] || {
+              echo "proof archive contains an unsafe path" >&2
+              exit 1
+            }
+          done < <(unzip -Z1 "$proof_zip")
+          if zipinfo -l "$proof_zip" | awk '$1 ~ /^l/ { found = 1 } END { exit(found ? 0 : 1) }'; then
+            echo "proof archive contains a symbolic link" >&2
+            exit 1
+          fi
+          unzip -q "$proof_zip" -d "$proof_dir"
+          result="$(ruby packaging/live_agent_skills/verify.rb \
+            "$proof_dir" "$CANDIDATE_SHA" "$WORKFLOW_REVISION" \
+            "$GITHUB_REPOSITORY" "$PROOF_RUN_ID" "$PROOF_RUN_ATTEMPT" "$ATTESTATION_SHA256")"
+          gem_path="$(jq -er '.gem' <<<"$result")"
+          skill_path="$(jq -er '.skills' <<<"$result")"
+          cp "$gem_path" "$skill_path" proven/
+          ( cd proven && sha256sum * )
       - uses: actions/upload-artifact@v7
         with:
-          name: hive-cli-gem
-          path: hive-cli-*.gem
+          name: hive-proven-candidate
+          path: proven
           if-no-files-found: error
+          retention-days: 1
 
   install-gate:
     name: gem-install gate / ${{ matrix.runs-on }}
     runs-on: ${{ matrix.runs-on }}
-    needs: build
+    needs: proof-gate
     permissions:
       contents: read
     strategy:
@@ -65,15 +128,15 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: hive-cli-gem
+          name: hive-proven-candidate
           path: dist
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
-      - name: gem install the built gem
-        # Native-runner expansion of build's "Smoke test built gem":
+      - name: gem install the proven gem
+        # Native-runner expansion of the pre-release candidate smoke:
         # confirm the gem installs + runs on macOS arm64 and Linux arm64
-        # before publishing. x86_64 is already covered by `build`. The
+        # before publishing. x86_64 is already covered by the protected proof. The
         # gem is arch=any Ruby, so no Arch/emulated cell here — a flaky
         # emulated cell must never block a release (real Arch install is
         # covered post-release by install-verify.yml).
@@ -92,7 +155,7 @@ jobs:
   release-finalize:
     name: Publish GitHub release
     runs-on: ubuntu-24.04
-    needs: [build, install-gate]
+    needs: [proof-gate, install-gate]
     permissions:
       contents: write
       id-token: write
@@ -114,7 +177,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          name: hive-cli-gem
+          name: hive-proven-candidate
           path: dist
       - name: Package managed web bundle
         env:
@@ -133,7 +196,7 @@ jobs:
       - name: Build checksums
         run: |
           cd dist
-          sha256sum hive-cli-*.gem > SHA256SUMS
+          sha256sum hive-cli-*.gem hive-agent-skills-*.tar.gz > SHA256SUMS
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
       - name: Sign checksums

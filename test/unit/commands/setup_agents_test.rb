@@ -7,7 +7,7 @@ class SetupAgentsCommandTest < Minitest::Test
   end
 
   class FakeProvisioner
-    attr_reader :executions, :build_args
+    attr_reader :executions, :build_args, :consent_required_args
 
     def initialize(plan:, revised: nil, changed: false, result: nil)
       @plan = plan
@@ -32,6 +32,11 @@ class SetupAgentsCommandTest < Minitest::Test
     def noop_result(plan) = result_for(plan, exit_code: 0, classification: "no_op", consent: "not_required")
     def refusal_result(plan, provenance:) = result_for(plan, exit_code: 64, classification: "refused", consent: provenance)
 
+    def consent_required_result(agents: nil, skills: nil, provenance:)
+      @consent_required_args = { agents: agents, skills: skills, provenance: provenance }
+      result_for(@plan, exit_code: 64, classification: "refused", consent: provenance)
+    end
+
     def result_for(plan, exit_code:, classification:, consent:)
       Hive::AgentSkills::ProvisioningResult.new(
         preview: plan,
@@ -44,6 +49,10 @@ class SetupAgentsCommandTest < Minitest::Test
 
   class InvalidProvisioner
     def build_plan(**)
+      raise Hive::ConfigError, "broken effective config"
+    end
+
+    def consent_required_result(**)
       raise Hive::ConfigError, "broken effective config"
     end
   end
@@ -126,6 +135,8 @@ class SetupAgentsCommandTest < Minitest::Test
     payload = JSON.parse(output.string)
     assert_equal "hive-setup-agents", payload.fetch("schema")
     assert_equal "refused", payload.fetch("classification")
+    assert_nil fake.build_args
+    assert_equal "json_requires_yes", fake.consent_required_args.fetch(:provenance)
     assert_empty error.string
     refute_match(/Proceed/, output.string)
   end
@@ -140,6 +151,18 @@ class SetupAgentsCommandTest < Minitest::Test
     assert_equal true, payload.fetch("ok")
     assert_equal 1, payload.fetch("schema_version")
     assert_equal "yes_flag", payload.dig("consent", "provenance")
+  end
+
+  def test_shared_run_returns_typed_result_without_nested_json
+    output = StringIO.new
+    fake = FakeProvisioner.new(plan: plan)
+    result = command(
+      provisioner: fake, input: StringIO.new, output: output, json: true, yes: true
+    ).run
+
+    assert_instance_of Hive::AgentSkills::ProvisioningResult, result
+    assert_equal "success", result.classification
+    assert_empty output.string
   end
 
   def test_revalidation_drift_prints_revised_plan_and_prompts_again
@@ -239,5 +262,23 @@ class SetupAgentsCommandTest < Minitest::Test
     fake = FakeProvisioner.new(plan: plan)
 
     assert_equal 64, command(provisioner: fake, input: input).call
+  end
+
+  def test_human_plan_labels_hive_managed_directory_and_file_writes
+    directory = operation.with(
+      id: "claude:hive:publish", kind: "bundled_skill_publish", argv: [], files: [ "/tmp/.claude/skills/hive" ]
+    )
+    file = operation.with(
+      id: "claude:wiki:alias", kind: "alias_write", argv: [], files: [ "/tmp/.claude/commands/plan.md" ]
+    )
+    output = StringIO.new
+    fake = FakeProvisioner.new(plan: plan(operations: [ directory, file ]))
+
+    assert_equal 0, command(
+      provisioner: fake, input: TtyInput.new("y\n"), output: output
+    ).call
+
+    assert_includes output.string, "(Hive atomic directory publish)"
+    assert_includes output.string, "(Hive atomic file write)"
   end
 end

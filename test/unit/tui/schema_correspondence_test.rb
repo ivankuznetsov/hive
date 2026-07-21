@@ -32,6 +32,7 @@ class TuiSchemaCorrespondenceTest < Minitest::Test
       "retry_after" => "2026-06-24T23:20:00Z"
     },
     mtime: Time.now,
+    observation_mtime: Time.now,
     folder_mtime: Time.now,
     claude_pid: nil,
     claude_pid_alive: nil,

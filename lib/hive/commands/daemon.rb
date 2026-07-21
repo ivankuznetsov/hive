@@ -11,6 +11,7 @@ require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
+require "hive/daemon/operational_snapshot"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/daemon/patrol_scheduler"
@@ -278,6 +279,15 @@ module Hive
           outcome_store: lost_outcome_store,
           process_identity: attempt_process_identity
         )
+        operational_snapshot = Hive::Daemon::OperationalSnapshot::Assembler.new(
+          store: Hive::Daemon::OperationalSnapshot::Store.new(
+            path: Hive::Paths.operational_snapshot_path(@hive_home)
+          ),
+          daemon_identity: Hive::Daemon::OperationalSnapshot.daemon_identity(
+            pid: Process.pid, process_start_time: own_start_time
+          ),
+          poll_interval_sec: daemon_cfg.fetch("poll_interval_sec", 30)
+        )
 
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
@@ -293,7 +303,8 @@ module Hive
           attempt_dispatcher: attempt_dispatcher,
           attempt_reconciler: attempt_reconciler,
           lost_outcome_store: lost_outcome_store,
-          lost_outcome_processor: lost_outcome_processor
+          lost_outcome_processor: lost_outcome_processor,
+          operational_snapshot: operational_snapshot
         )
 
         reexec_requested = false

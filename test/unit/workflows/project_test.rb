@@ -60,13 +60,34 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_project_load_scans_the_workflow_fingerprint_once_and_config_reuses_the_active_overlay
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "my-flow", stage_name: "assemble")
+      config_path = File.join(project_root, ".hive-state", "config.yml")
+      File.write(config_path, { "assemble" => { "agent" => "codex" } }.to_yaml)
+      original = Hive::Workflows::Loader.method(:fingerprint)
+      scans = 0
+
+      with_replaced_singleton_method(Hive::Workflows::Loader, :fingerprint, lambda { |dir|
+        scans += 1
+        original.call(dir)
+      }) do
+        Hive::Workflows::Project.load!(project_root)
+        assert_equal 1, scans, "one project load must perform one workflow fingerprint scan"
+
+        Hive::Config.load(project_root)
+        assert_equal 1, scans, "config validation must reuse the already-active project vocabulary"
+      end
+    end
+  end
+
   def test_project_load_is_memoized_per_root
     with_tmp_dir do |project_root|
       workflows_dir = File.join(project_root, ".hive-state", "workflows")
       calls = 0
       descriptor = project_descriptor("memo-flow")
 
-      with_replaced_singleton_method(Hive::Workflows::Loader, :workflow_dir, ->(_root) { workflows_dir }) do
+      with_replaced_singleton_method(Hive::Workflows::Loader, :workflow_dir, ->(_root, **) { workflows_dir }) do
         with_replaced_singleton_method(Hive::Workflows::Loader, :load_dir, lambda { |_dir|
           calls += 1
           { descriptor.id => descriptor }
@@ -203,7 +224,7 @@ class WorkflowsProjectTest < Minitest::Test
       descriptor = project_descriptor("retry-flow")
       calls = 0
 
-      with_replaced_singleton_method(Hive::Workflows::Loader, :workflow_dir, ->(_root) { workflows_dir }) do
+      with_replaced_singleton_method(Hive::Workflows::Loader, :workflow_dir, ->(_root, **) { workflows_dir }) do
         with_replaced_singleton_method(Hive::Workflows::Loader, :load_dir, lambda { |_dir|
           calls += 1
           raise Hive::ConfigError, "boom mid-load" if calls == 1

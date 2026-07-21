@@ -74,6 +74,24 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_reports_unsupported_keys_before_expanding_an_invalid_hive_state_path
+    [ "bad\0state", "~hive-user-that-does-not-exist/.hive-state" ].each do |hive_state_path|
+      with_tmp_dir do |dir|
+        config_path = File.join(dir, ".hive-state", "config.yml")
+        FileUtils.mkdir_p(File.dirname(config_path))
+        File.write(config_path, {
+          "hive_state_path" => hive_state_path,
+          "reviewers" => []
+        }.to_yaml)
+
+        error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
+
+        assert_includes error.message, "Unknown top-level key `reviewers`"
+        assert_includes error.message, "move it to `review.reviewers`"
+      end
+    end
+  end
+
   def test_load_aggregates_unknown_top_level_keys_in_deterministic_order
     with_tmp_dir do |dir|
       config_path = File.join(dir, ".hive-state", "config.yml")

@@ -882,6 +882,38 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_json_status_surfaces_unsupported_project_config_instead_of_degrading_it
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
+      project = { "name" => "bad", "path" => project_root, "hive_state_path" => hive_state }
+
+      error = assert_raises(Hive::UnsupportedProjectConfigError) do
+        capture_io { Hive::Commands::Status.new.json_payload([ project ]) }
+      end
+
+      assert_includes error.message, "move it to `review.reviewers`"
+    end
+  end
+
+  def test_text_status_surfaces_unsupported_project_config_instead_of_skipping_it
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
+      project = { "name" => "bad", "path" => project_root, "hive_state_path" => hive_state }
+
+      error = with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ project ] }) do
+        assert_raises(Hive::UnsupportedProjectConfigError) do
+          capture_io { Hive::Commands::Status.new(full: true).call }
+        end
+      end
+
+      assert_includes error.message, "move it to `review.reviewers`"
+    end
+  end
+
   # Belt-and-suspenders for the same freeze: any unexpected per-project
   # raise inside project_payload must degrade that one project to an empty
   # task list rather than abort the whole envelope.

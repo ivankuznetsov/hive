@@ -25,6 +25,30 @@ class TaskTest < Minitest::Test
     end
   end
 
+  def test_managed_task_preserves_unsupported_project_config_error
+    with_tmp_dir do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
+      task = Hive::Task.allocate
+      task.instance_variable_set(:@project_root, dir)
+      task.instance_variable_set(:@hive_state_path, hive_state)
+      task.instance_variable_set(:@meta, {
+        workflow: "demo",
+        workflow_commit: "a" * 40,
+        workflow_manifest_digest: "b" * 64,
+        workflow_configuration_digest: nil
+      })
+      store = Object.new
+      store.define_singleton_method(:workflow) { |*| flunk "managed workflow lookup must not run with invalid config" }
+
+      with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
+        error = assert_raises(Hive::UnsupportedProjectConfigError) { task.send(:resolve_workflow) }
+        assert_includes error.message, "move it to `review.reviewers`"
+      end
+    end
+  end
+
   def test_parses_valid_path
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "add-foo")

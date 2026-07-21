@@ -207,6 +207,8 @@ module Hive
             configuration_digest: meta[:workflow_configuration_digest],
             cfg: Hive::Config.load(@project_root)
           )
+        rescue Hive::UnsupportedProjectConfigError
+          raise
         rescue Hive::ConfigError => e
           raise InvalidTaskPath, e.message
         end

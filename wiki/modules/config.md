@@ -18,7 +18,12 @@ supported static vocabulary is `Config::DEFAULTS.keys` plus explicitly
 supported no-default sections such as `gh`. Hive also loads the built-in and
 active project workflow descriptors and accepts their exact stage names as
 top-level per-stage override keys. Arbitrary lookalikes are not extension
-namespaces.
+namespaces. Static-only configs do not scan workflow descriptors; when a
+dynamic candidate is present, validation reuses the active project overlay or
+loads it once from the already-parsed `hive_state_path`. Project loading reads
+the same raw config data and validates it after installing the overlay, so it
+does not call back through `Config.load` or perform a duplicate fingerprint
+scan.
 
 All unsupported root keys are reported together in deterministic order and the
 error names the source config path. The loader raises
@@ -43,7 +48,9 @@ This root allowlist applies only to project config loaded through
 `Config.load`; global Hive config retains its separate vocabulary, including
 `registered_projects`. Because every project command shares this boundary, the
 same malformed project config fails consistently in `hive run`, `hive doctor`,
-and other consumers instead of reaching command-specific fallback behavior.
+`hive new`, text/JSON `hive status`, and other consumers instead of reaching
+command-specific fallback behavior. An invalid workflow path cannot pre-empt
+the targeted root-level `reviewers` migration diagnostic.
 
 ## Condition authority
 

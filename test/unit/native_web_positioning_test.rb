@@ -136,6 +136,16 @@ class NativeWebPositioningTest < Minitest::Test
     refute_includes workflow, "name: hivebox web (Rails tests + system)"
   end
 
+  def test_launchd_smoke_validates_install_mechanics_when_the_unbootstrapped_app_is_not_ready
+    workflow = read(".github/workflows/ci.yml")
+
+    assert_includes workflow, 'out="$(bundle exec hive web install --no-bootstrap --json)"'
+    assert_includes workflow, 'WEB_INSTALL_RC="$web_install_rc"'
+    assert_includes workflow, 'd["outcome"] == "written"'
+    assert_includes workflow, 'rc == 1 && !d["ok"] && !d["ready"]'
+    assert_includes workflow, '%w[inactive active_not_ready].include?(d["readiness"])'
+  end
+
   def test_hivebox_container_and_installer_jobs_remain_pinned
     ci = read(".github/workflows/ci.yml")
     release = read(".github/workflows/release.yml")

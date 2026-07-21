@@ -68,6 +68,9 @@ case "$(uname -s)" in
     SERVICE_MANAGER_COMMAND="systemctl"
     ;;
   Darwin)
+    # The generated stub expands its own positional argument when launchctl
+    # invokes it; the outer verifier must preserve the expression literally.
+    # shellcheck disable=SC2016
     printf '%s\n' \
       '#!/bin/sh' \
       'if [ "${1:-}" = "print" ]; then printf "%s\n" "state = running"; fi' \
@@ -158,7 +161,7 @@ set +e
   CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" \
   CODEX_HOME="$SANDBOX/home/.codex" \
   PI_CODING_AGENT_DIR="$SANDBOX/home/.pi/agent" \
-  ANTHROPIC_API_KEY= CLAUDE_API_KEY= OPENAI_API_KEY= \
+  ANTHROPIC_API_KEY='' CLAUDE_API_KEY='' OPENAI_API_KEY='' \
   RUBYLIB="$BUNDLER_RUBYLIB" \
   PATH="$SAFE_PATH" \
   HIVE_WEB_BUNDLE_URL="$WEB_ARCHIVE" \

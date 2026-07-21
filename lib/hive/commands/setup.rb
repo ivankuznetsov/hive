@@ -6,6 +6,7 @@ require "hive/invoked_binary"
 require "hive/paths"
 require "hive/setup/diagnostics"
 require "hive/web/app_bundle"
+require "hive/commands/setup_agents"
 require "hive/web/environment"
 require "hive/web/service_status"
 
@@ -13,15 +14,20 @@ module Hive
   module Commands
     class Setup
       def initialize(json: false, service: true, no_bootstrap: false,
-                     no_init: false, output: $stdout, error: nil,
-                     environment: ENV)
+                     no_init: false, yes: false, input: $stdin, output: $stdout,
+                     error: $stderr, environment: ENV, setup_agents_factory: nil)
         @json = json
         @service = service
         @no_bootstrap = no_bootstrap
         @no_init = no_init
+        @yes = yes
+        @input = input
         @output = output
         @error = error
         @environment = environment
+        @setup_agents_factory = setup_agents_factory || lambda do |**kwargs|
+          Hive::Commands::SetupAgents.new(**kwargs)
+        end
         @phases = []
       end
 
@@ -31,6 +37,8 @@ module Hive
           output: @error || $stderr,
           prefix: "hive setup"
         )
+        return refuse_unattended_setup if unattended_without_yes? && !@no_bootstrap
+
         diagnostics = Hive::Setup::Diagnostics.new.run
         add_phase("diagnostics", diagnostics.ok?, diagnostics.to_h)
 
@@ -39,22 +47,25 @@ module Hive
         # enrollment either. Otherwise a "diagnose" run silently force-installs
         # the daemon and enrolls the cwd.
         unless @no_bootstrap
-          bootstrap_qmd_if_missing(diagnostics)
-          web_bundle = bootstrap_web_bundle
-          install_daemon
-          enroll_project unless @no_init
-          if @service
-            if web_bundle["ok"]
-              install_web_service
+          setup_agent_skills
+          unless agent_setup_refused?
+            bootstrap_qmd_if_missing(diagnostics)
+            web_bundle = bootstrap_web_bundle
+            install_daemon
+            enroll_project unless @no_init
+            if @service
+              if web_bundle["ok"]
+                install_web_service
+              else
+                observe_web_service(
+                  mutation: "blocked",
+                  ok: false,
+                  message: "web service not installed because web_bundle failed"
+                )
+              end
             else
-              observe_web_service(
-                mutation: "blocked",
-                ok: false,
-                message: "web service not installed because web_bundle failed"
-              )
+              observe_web_service
             end
-          else
-            observe_web_service
           end
         end
         add_web_phase
@@ -64,6 +75,34 @@ module Hive
       end
 
       private
+
+      # Refuse before diagnostics or agent discovery. Even version/list probes
+      # can make upstream CLIs or version managers initialize state, so the
+      # zero-mutation unattended contract has to sit at the outermost setup
+      # boundary rather than immediately before Hive's own writes.
+      def refuse_unattended_setup
+        diagnostics = Hive::Setup::Diagnostics::Aggregate.new(results: [])
+        add_phase(
+          "diagnostics", true,
+          "ok" => true, "results" => [], "skipped" => true,
+          "reason" => "consent_required"
+        )
+        add_phase(
+          "agent_skills", false,
+          "classification" => "consent_required",
+          "consent" => {
+            "granted" => false,
+            "provenance" => @json ? "json_requires_yes" : "non_tty"
+          },
+          "targets" => [],
+          "operation_results" => [],
+          "final_health" => [],
+          "setup_agents_exit_code" => Hive::ExitCodes::USAGE
+        )
+        add_phase("web", true, "url" => web_url)
+        emit(diagnostics)
+        1
+      end
 
       # Setup succeeded only if BOTH diagnostics have no hard failure AND every
       # recorded phase (diagnostics / qmd / web_bundle / daemon_service /
@@ -142,13 +181,75 @@ module Hive
         phase("enroll") do
           require "hive/commands/init"
           begin
-            Hive::Commands::Init.new(Dir.pwd, force: true, json: false).call
+            Hive::Commands::Init.new(
+              Dir.pwd, force: true, json: false, agent_skill_preflight: false
+            ).call
           rescue Hive::AlreadyInitialized
             require "hive/commands/daemon"
             Hive::Commands::Daemon.new("enable", current_project_name).call
           end
           [ true, { "path" => Dir.pwd } ]
         end
+      end
+
+      def setup_agent_skills
+        phase("agent_skills") do
+          config = Hive::Config.load(Dir.pwd)
+          coordinator = @setup_agents_factory.call(
+            config: config,
+            project_root: Dir.pwd,
+            yes: @yes,
+            json: @json,
+            input: @input,
+            output: @output,
+            error: @error
+          )
+          result = coordinator.run
+          @agent_setup_result = result
+          [ result.exit_code.zero?, {
+            "classification" => result.classification,
+            "consent" => result.consent,
+            "targets" => setup_target_states(result.preview),
+            "operation_results" => result.operation_results.map(&:to_h),
+            "final_health" => result.final_health.map(&:to_h),
+            "setup_agents_exit_code" => result.exit_code
+          } ]
+        end
+      end
+
+      def unattended_without_yes?
+        return false if @yes
+        return true if @json
+        !(@input.respond_to?(:tty?) && @input.tty?)
+      rescue IOError
+        true
+      end
+
+      def agent_setup_refused?
+        @agent_setup_result&.classification == "refused"
+      end
+
+      def setup_target_states(plan)
+        plan.inspections.map do |row|
+          operation = plan.operations.find do |candidate|
+            candidate.agent == row.agent && candidate.capabilities.include?(row.capability_id)
+          end
+          state = case row.health
+          when "healthy" then "unchanged"
+          when "unavailable" then "unavailable"
+          when "stale" then "drifted"
+          when "missing" then operation ? "would_write" : "failed"
+          else "failed"
+          end
+          {
+            "agent" => row.agent,
+            "capability" => row.capability_id,
+            "state" => state,
+            "health" => row.health,
+            "operation_id" => operation&.id,
+            "message" => row.explanation
+          }.freeze
+        end.freeze
       end
 
       def install_web_service

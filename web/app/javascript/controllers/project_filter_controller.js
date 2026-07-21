@@ -34,7 +34,7 @@ export default class extends Controller {
   }
 
   reapply(event) {
-    if (event.detail.renderMethod === "morph") this.apply()
+    if (event.detail.renderMethod === "morph") requestAnimationFrame(() => this.apply())
   }
 
   choose(event) {

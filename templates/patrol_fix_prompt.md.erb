@@ -32,6 +32,17 @@ First reproduce the finding on this freshly based worktree and try to disprove
 it. If it is stale, already fixed, incorrectly scoped, or not reproducible, do
 not edit the repository and return a rejected proof below.
 
+Keep the agent phase to four bounded responses so enough allowance remains to
+implement the fix and write its proof. In the first response, read the evidence
+files and locate/read the likely regression test in parallel; use at most one
+targeted Grep or Glob for the named invariant or test. In the second response,
+run at most one focused pre-edit reproduction and decide whether to reject or
+fix. In the third response, batch the implementation and regression edits. In
+the fourth response, write the JSON proof immediately. Do not read unrelated
+whole files. Do not run tests, stash/revert the implementation, or simulate the
+base checkout after editing: Hive independently runs the configured
+fail-before/pass-after proof and broader validation.
+
 If confirmed, make the smallest complete root-cause fix, not the smallest
 one-line symptom patch. Audit sibling callers, input variants, and boundary
 paths named by the invariant. Add or strengthen a targeted regression that

@@ -7,6 +7,15 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
 
   T0 = Time.utc(2026, 6, 14, 0, 0, 30)
 
+  def test_base_requires_an_explicit_scheduler_contract
+    scheduler = Hive::Daemon::DigestSchedulerBase.new(
+      state_path: "/tmp/unused", clock: -> { T0 }, enabled: true, logger: nil
+    )
+
+    error = assert_raises(NotImplementedError) { scheduler.send(:scheduler_contract) }
+    assert_match(/must define its digest scheduler contract/, error.message)
+  end
+
   # Validate event names against the REAL daemon Logger allowlist so a
   # scheduler emitting an unregistered event (which a production
   # Hive::Daemon::Logger would reject with ArgumentError, crashing the

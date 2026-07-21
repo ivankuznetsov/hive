@@ -149,13 +149,7 @@ module Hive
       end
 
       def action_for(marker_name)
-        case marker_name
-        when :waiting then "round_waiting"
-        when :complete then "complete"
-        when :error then "error"
-        when :none then nil
-        else marker_name.to_s
-        end
+        Hive::Stages::Base.marker_commit_action(marker_name)
       end
     end
   end

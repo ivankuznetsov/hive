@@ -128,6 +128,15 @@ class InitAgentSkillsTest < Minitest::Test
     assert_equal Dir.pwd, captured.fetch(:project_root)
   end
 
+  def test_setup_orchestrator_can_disable_only_the_post_init_skill_preflight
+    command = Hive::Commands::Init.new(Dir.pwd, agent_skill_preflight: false)
+    assert_equal false, command.instance_variable_get(:@agent_skill_preflight)
+
+    assert_raises(ArgumentError) do
+      Hive::Commands::Init.new(Dir.pwd, agent_skill_preflight: :sometimes)
+    end
+  end
+
   def test_closed_tty_probe_falls_back_to_warnings
     input = Object.new
     input.define_singleton_method(:tty?) { raise IOError, "closed" }

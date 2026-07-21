@@ -134,14 +134,17 @@ module Hive
       end
 
       # Claude occasionally wraps an otherwise exact JSON response in one
-      # leading Markdown JSON fence and follows it with a rationale. Treat that
-      # first fenced document as canonical while rejecting leading prose or a
-      # second fence, which would make the structured result ambiguous.
+      # Markdown JSON fence and adds rationale before or after it. Treat the
+      # single fenced document as canonical while rejecting another fence,
+      # which would make the structured result ambiguous.
       def read_only_json_body(raw)
         stripped = raw.to_s.strip
-        match = /\A```(?:json)?[ \t]*\r?\n(?<body>.*?)\r?\n```[ \t]*(?<trailing>(?:\r?\n.*)?)\z/im.match(stripped)
+        match = /(?:\A|\r?\n)[ \t]*```(?:json)?[ \t]*\r?\n(?<body>.*?)\r?\n```[ \t]*(?=\r?\n|\z)/im.match(stripped)
         return stripped unless match
-        return stripped if /(?:\A|\r?\n)[ \t]*(?:```|~~~)/.match?(match[:trailing])
+
+        remainder = stripped.dup
+        remainder[match.begin(0)...match.end(0)] = ""
+        return stripped if /(?:\A|\r?\n)[ \t]*(?:```|~~~)/.match?(remainder)
 
         match[:body]
       end

@@ -2,8 +2,10 @@ require "digest"
 require "json"
 require "hive/agent_profiles"
 require "hive/permission_scope"
+require "hive/stringify_keys"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/input_name"
+require "hive/workflow_package/manifest"
 require "hive/workflow_package/registry_client"
 require "hive/workflows/descriptor_parser"
 
@@ -14,9 +16,9 @@ module Hive
     # agent/model/effort used by every stable executable slot.
     class Configuration
       SCHEMA_VERSION = 1
-      SHA256 = /\A[0-9a-f]{64}\z/
+      SHA256 = Manifest::SHA256
       SLOT_ID = /\Astages\.[a-z0-9][a-z0-9_-]*(?:\.reviewers\.[a-z0-9][a-z0-9_-]*|\.revise)?\z/
-      ROLES = %w[planning development reviewer].freeze
+      ROLES = Hive::Workflow::MAPPING_ROLES
 
       Slot = Data.define(:id, :role, :contract, :actor, :permissions, :authorized_inputs)
 
@@ -79,7 +81,7 @@ module Hive
       end
 
       def initialize(data)
-        @data = deep_stringify(data)
+        @data = Hive::StringifyKeys.call(data)
         validate!
         @bytes = CanonicalJSON.generate(@data).freeze
         @digest = ::Digest::SHA256.hexdigest(@bytes).freeze
@@ -92,18 +94,22 @@ module Hive
         expected = specs.map(&:id).sort
         actual = data.fetch("mappings").keys.sort
         raise Hive::ConfigError, "managed workflow configuration slots do not match descriptor" unless actual == expected
+        specs_by_id = specs.to_h { |slot| [ slot.id, slot ] }
 
         stages = workflow.stages.map do |stage|
           next stage unless [ :agent, :council ].include?(stage.kind)
 
-          stage_mapping = mapping_for("stages.#{stage.name}", stage, cfg, verify_profiles)
+          stage_mapping = mapping_for(specs_by_id.fetch("stages.#{stage.name}"), cfg, verify_profiles)
           reviewers = Array(stage.reviewers).map do |reviewer|
-            mapping = mapping_for("stages.#{stage.name}.reviewers.#{reviewer.name}", reviewer, cfg, verify_profiles)
+            mapping = mapping_for(
+              specs_by_id.fetch("stages.#{stage.name}.reviewers.#{reviewer.name}"),
+              cfg, verify_profiles
+            )
             reviewer.with(agent: mapping.fetch("agent"), model: mapping["model"], effort: mapping["effort"])
           end
           council = stage.council
           if council&.revise
-            mapping = mapping_for("stages.#{stage.name}.revise", council.revise, cfg, verify_profiles)
+            mapping = mapping_for(specs_by_id.fetch("stages.#{stage.name}.revise"), cfg, verify_profiles)
             council = council.with(revise: council.revise.with(
               agent: mapping.fetch("agent"), model: mapping["model"], effort: mapping["effort"]
             ))
@@ -132,9 +138,31 @@ module Hive
       def input_status_for(slot_id, runtime_metadata:, environment: ENV)
         Array(runtime_metadata["optional_inputs"]).filter_map do |entry|
           next unless Array(entry["authorized_slots"]).include?(slot_id)
-          name = entry.fetch("name")
-          env_name = data.fetch("input_bindings")[name]
-          { "name" => name, "binding" => env_name, "available" => !!(env_name && !environment[env_name].to_s.empty?) }
+
+          input_status(entry, environment)
+        end
+      end
+
+      def mapping_rows
+        data.fetch("mappings").map do |slot, mapping|
+          {
+            "slot" => slot,
+            "mapping_role" => mapping.fetch("mapping_role"),
+            "mapping_contract" => mapping.fetch("mapping_contract"),
+            "agent" => mapping.fetch("agent"),
+            "model" => mapping["model"],
+            "effort" => mapping["effort"],
+            "profile_fingerprint" => mapping.fetch("profile_fingerprint"),
+            "policy_fingerprint" => mapping.fetch("policy_fingerprint")
+          }
+        end
+      end
+
+      def input_rows(runtime_metadata:, environment: ENV)
+        Array(runtime_metadata["optional_inputs"]).map do |entry|
+          input_status(entry, environment).tap do |row|
+            row["authorized_slots"] = entry.fetch("authorized_slots")
+          end
         end
       end
 
@@ -143,19 +171,8 @@ module Hive
         Array(runtime_metadata["optional_inputs"]).each do |entry|
           Array(entry["authorized_slots"]).each { |slot| authorized[slot] << entry.fetch("name") }
         end
-        workflow.stages.flat_map do |stage|
-          next [] unless [ :agent, :council ].include?(stage.kind)
-
-          slots = [ slot("stages.#{stage.name}", stage, default_role: "development", authorized: authorized) ]
-          Array(stage.reviewers).each do |reviewer|
-            slots << slot("stages.#{stage.name}.reviewers.#{reviewer.name}", reviewer,
-                          default_role: "reviewer", authorized: authorized)
-          end
-          if stage.council&.revise
-            slots << slot("stages.#{stage.name}.revise", stage.council.revise,
-                          default_role: "development", authorized: authorized)
-          end
-          slots
+        workflow.executable_slots.map do |executable|
+          slot(executable, authorized: authorized)
         end
       end
 
@@ -200,12 +217,13 @@ module Hive
       class << self
         private
 
-        def slot(id, actor, default_role:, authorized:)
-          role = actor.respond_to?(:mapping_role) && actor.mapping_role || default_role
+        def slot(executable, authorized:)
+          actor = executable.actor
+          role = actor.respond_to?(:mapping_role) && actor.mapping_role || executable.default_role
           contract = actor.respond_to?(:mapping_contract) && actor.mapping_contract || "legacy-v1"
-          Slot.new(id: id, role: role, contract: contract, actor: actor,
+          Slot.new(id: executable.id, role: role, contract: contract, actor: actor,
                    permissions: actor.respond_to?(:permissions) ? actor.permissions : nil,
-                   authorized_inputs: authorized[id].sort).freeze
+                   authorized_inputs: authorized[executable.id].sort).freeze
         end
 
         def suggested_agent(role, cfg, reviewer_defaults, index)
@@ -281,20 +299,30 @@ module Hive
 
       private
 
-      def mapping_for(id, actor, cfg, verify_profiles)
-        mapping = data.fetch("mappings").fetch(id)
-        role = actor.respond_to?(:mapping_role) && actor.mapping_role || (id.include?(".reviewers.") ? "reviewer" : "development")
-        contract = actor.respond_to?(:mapping_contract) && actor.mapping_contract || "legacy-v1"
-        unless mapping.fetch("mapping_role") == role && mapping.fetch("mapping_contract") == contract
-          raise Hive::ConfigError, "managed workflow configuration contract drifted for #{id}"
+      def input_status(entry, environment)
+        name = entry.fetch("name")
+        binding = data.fetch("input_bindings")[name]
+        {
+          "name" => name,
+          "binding" => binding,
+          "available" => !!(binding && !environment[binding].to_s.empty?)
+        }
+      end
+
+      def mapping_for(slot, cfg, verify_profiles)
+        mapping = data.fetch("mappings").fetch(slot.id)
+        unless mapping.fetch("mapping_role") == slot.role &&
+               mapping.fetch("mapping_contract") == slot.contract
+          raise Hive::ConfigError, "managed workflow configuration contract drifted for #{slot.id}"
         end
         profile = Hive::AgentProfiles.lookup(mapping.fetch("agent"), cfg: cfg)
         self.class.validate_pin_support!(
-          profile, id, model: mapping["model"], effort: mapping["effort"]
+          profile, slot.id, model: mapping["model"], effort: mapping["effort"]
         )
         if verify_profiles
           unless mapping.fetch("profile_fingerprint") == self.class.profile_fingerprint(profile)
-            raise Hive::ConfigError, "managed workflow agent profile drifted for #{id}; reinstall or update the workflow mapping"
+            raise Hive::ConfigError,
+                  "managed workflow agent profile drifted for #{slot.id}; reinstall or update the workflow mapping"
           end
         end
         mapping
@@ -323,14 +351,6 @@ module Hive
                  SHA256.match?(mapping["profile_fingerprint"].to_s) && SHA256.match?(mapping["policy_fingerprint"].to_s)
             raise Hive::ConfigError, "managed workflow configuration mapping #{id.inspect} is malformed"
           end
-        end
-      end
-
-      def deep_stringify(value)
-        case value
-        when Hash then value.to_h { |key, child| [ key.to_s, deep_stringify(child) ] }
-        when Array then value.map { |child| deep_stringify(child) }
-        else value
         end
       end
 

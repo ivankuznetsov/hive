@@ -1,7 +1,19 @@
-<% content_for(:title, "Hive web — sign in") %>
+<% content_for(:title, "#{web_product_name} — #{local_web_mode? ? "connect GitHub" : "sign in"}") %>
 <div class="card auth-card">
-  <h1>Hive web</h1>
-  <% if @configured %>
+  <% if local_web_mode? %>
+    <h1>Connect GitHub</h1>
+    <% if @configured %>
+      <p>Optional — Hive already works with your existing local projects and workflows.</p>
+      <p class="muted">Connect GitHub only to browse or clone repositories from the Repos page.
+        You'll get a short code to type at github.com/login/device.</p>
+      <%= form_with url: auth_github_path do |f| %>
+        <%= f.submit "Connect GitHub", data: { turbo_submits_with: "Contacting GitHub…" } %>
+      <% end %>
+    <% else %>
+      <p>Optional GitHub connection is unavailable: <code>web.github.client_id</code> is empty.</p>
+    <% end %>
+  <% elsif @configured %>
+    <h1><%= web_product_name %></h1>
     <% if @claimable %>
       <p>Fresh Hive web instance — the first GitHub sign-in becomes its owner.</p>
       <p class="muted">You'll get a short code to type at github.com/login/device
@@ -13,6 +25,7 @@
       <%= f.submit "Continue with GitHub", data: { turbo_submits_with: "Contacting GitHub…" } %>
     <% end %>
   <% else %>
+    <h1><%= web_product_name %></h1>
     <p>Sign-in is unavailable: <code>web.github.client_id</code> is empty in the
       Hive web <code>config.yml</code>. The default ships with the shared Hive web
       OAuth app — restore it or set your own device-flow-enabled client id.</p>

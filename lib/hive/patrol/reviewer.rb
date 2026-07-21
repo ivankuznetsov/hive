@@ -18,6 +18,8 @@ module Hive
     class Reviewer
       STAGE = "patrol-review".freeze
       MAX_OUTPUT_BYTES = 64 * 1024
+      MAX_PROMPT_OWNED_FILES = 4
+      MAX_PROMPT_SOURCE_BYTES = 32 * 1024
       VALID_CATEGORIES = %w[bug security performance documentation test-gap maintainability].freeze
       VALID_SEVERITIES = %w[critical high medium low].freeze
       VALID_CONFIDENCE = %w[high medium low].freeze
@@ -111,12 +113,40 @@ module Hive
           "patrol_review_prompt.md.erb",
           TemplateBindings.new(
             project_root: @project_root,
-            feature: feature,
+            feature: bounded_prompt_feature(feature),
             output_path: output_path,
             max_findings: max_findings,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
+      end
+
+      # Candidate scoring and evidence validation retain the complete mapped
+      # feature. The model receives a bounded initial view so large components
+      # cannot spend the per-agent allowance loading every context and test
+      # file before the response that must write findings. A concrete defect
+      # hypothesis may still use the prompt's one direct follow-up round.
+      def bounded_prompt_feature(feature)
+        feature.dup.tap do |bounded|
+          bounded.owned_files = bounded_owned_files(feature.owned_files)
+          bounded.context_files = []
+          bounded.tests = []
+        end
+      end
+
+      def bounded_owned_files(paths)
+        remaining = MAX_PROMPT_SOURCE_BYTES
+        selected = []
+        Array(paths).each do |path|
+          break if selected.size >= MAX_PROMPT_OWNED_FILES
+
+          bytes = @source_reader.read_bytes(path, limit: remaining + 1).bytesize
+          if selected.empty? || bytes <= remaining
+            selected << path
+            remaining = [ remaining - bytes, 0 ].max
+          end
+        end
+        selected
       end
 
       def parse_findings(feature, output_path, run_id:)

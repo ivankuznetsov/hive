@@ -2395,17 +2395,19 @@ class SchemaFilesTest < Minitest::Test
     refute_includes doc.fetch("properties").keys, "ownership_generation"
   end
 
-  def test_refactor_patrol_retains_v1_while_v2_is_current
-    assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
+  def test_refactor_patrol_retains_v1_and_v2_while_v3_is_current
+    assert_equal 3, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
 
     v1 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 1)))
     v2 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+    v3 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3)))
     assert_equal 1, v1.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
     assert_equal 2, v2.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    assert_equal 3, v3.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
-  def test_refactor_patrol_v2_requires_a_complete_immutable_thesis_snapshot
-    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+  def test_refactor_patrol_v3_requires_a_complete_immutable_thesis_snapshot
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3)))
     snapshot_schema = JSONSchemer.schema(
       { "$ref" => "#/$defs/ThesisSnapshot", "$defs" => document.fetch("$defs") }
     )
@@ -2427,8 +2429,8 @@ class SchemaFilesTest < Minitest::Test
   # contracts must stay in lockstep or an agent thesis with an empty `problem`
   # would pass the normalizer and then poison the whole discovery envelope.
   def test_refactor_patrol_thesis_narrative_min_lengths_match_the_envelope_snapshot
-    thesis = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 2)))
-    envelope = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+    thesis = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 3)))
+    envelope = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3)))
 
     %w[problem cost proposed_refactor].each do |field|
       assert_equal 1, thesis.dig("properties", field, "minLength"),
@@ -2439,8 +2441,8 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
-  def test_refactor_patrol_v2_pins_complete_source_and_action_identity
-    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+  def test_refactor_patrol_v3_pins_complete_source_and_action_identity
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3)))
 
     source_required = document.dig("$defs", "SourcePr", "required")
     assert_includes source_required, "registration"
@@ -2451,6 +2453,23 @@ class SchemaFilesTest < Minitest::Test
     assert_includes action_required, "canonical_action_id"
     assert_includes action_required, "thesis_fingerprint"
     assert_includes action_required, "owner_job_id"
+  end
+
+  def test_refactor_patrol_thesis_v1_and_v2_keep_published_size_estimates_while_v3_removes_them
+    assert_equal 3, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol-thesis")
+
+    v1 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 1)))
+    v2 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 2)))
+    v3 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 3)))
+
+    [ v1, v2 ].each do |document|
+      required = document.dig("$defs", "Risk", "properties", "caps", "required")
+      assert_includes required, "est_files"
+      assert_includes required, "est_diff_lines"
+    end
+    assert_equal [ "single_feature" ], v3.dig("$defs", "Risk", "properties", "caps", "required")
+    refute v3.dig("$defs", "Risk", "properties", "caps", "properties").key?("est_files")
+    refute v3.dig("$defs", "Risk", "properties", "caps", "properties").key?("est_diff_lines")
   end
 
   # ── hive-dispatch-request: claimed-file contract (#247) ─────────────────
@@ -2561,5 +2580,36 @@ class SchemaFilesTest < Minitest::Test
     prune = queue_cmd.send(:queue_envelope, action: "prune", pruned_count: 1,
                                             requests: [ request_hash ], malformed: [])
     assert_empty schemer.validate(prune).to_a, "prune envelope must validate"
+  end
+
+
+  # ── agent-first operational contracts ─────────────────────────────────
+
+  def test_operational_status_watch_and_act_schemas_are_published_at_v1
+    %w[hive-operational-status hive-watch-event hive-act].each do |name|
+      path = Hive::Schemas.schema_path(name)
+      assert File.file?(path), "schema file missing: #{path}"
+      document = JSON.parse(File.read(path))
+      assert_equal "https://json-schema.org/draft/2020-12/schema", document.fetch("$schema")
+      assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS.fetch(name)
+    end
+  end
+
+  def test_hive_act_error_enum_matches_producer_and_common_envelope_validates
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-act")))
+    kinds = document.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum")
+    assert_equal Hive::Schemas::OperationalActionErrorKind::ALL.sort, kinds.sort
+    schemer = JSONSchemer.schema(document)
+
+    Hive::Schemas::OperationalActionErrorKind::ALL.each do |kind|
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: "hive-act",
+        error: Hive::OperationalActionUsageError.new("invalid recommendation"),
+        error_kind: kind,
+        extras: { "action_id" => "workflow.advance", "target" => "demo:task" }
+      )
+      assert schemer.valid?(payload),
+             "hive-act ErrorPayload must accept #{kind}: #{schemer.validate(payload).to_a.inspect}"
+    end
   end
 end

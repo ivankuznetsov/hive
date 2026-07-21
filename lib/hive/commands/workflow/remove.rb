@@ -22,7 +22,7 @@ module Hive
           if @expected_current && !same_selection?(lock, @expected_current)
             raise Hive::ConcurrentRunError.new("managed workflow selection changed since the reviewed removal preview")
           end
-          configured_default = Hive::Config.load(@project_root)["default_workflow"].to_s
+          configured_default = project_config["default_workflow"].to_s
           if configured_default == @name
             raise OwnershipError, "managed workflow #{@name.inspect} is the project default; choose another default before removal"
           end

@@ -141,6 +141,10 @@ weakening owner-authored descriptor compatibility:
   digest, and configuration digest under the mutation lock. The mutation lock
   classifies only acquisition/open failures as contention; I/O errors raised by
   the protected mutation retain their original type and message.
+- `Hive::Workflow#executable_slots` is the single actor-topology boundary for
+  configuration snapshots, package validation, and runtime admission. The
+  configuration object also owns the redacted mapping/input disclosure used by
+  lifecycle commands, so JSON surfaces cannot drift from snapshot semantics.
 - `Loader` registers selected managed workflows beside built-ins and authored
   descriptors while rejecting id collisions and reloading when its managed
   fingerprint changes. Task-pinned generations bypass the single-id overlay and
@@ -157,6 +161,11 @@ weakening owner-authored descriptor compatibility:
 - `Publisher` rewrites referenced authored instructions into the registry
   layout, packages deterministically, runs the shared validator/runtime
   admission, then delegates to a fork-aware PR client.
+
+Status dispatch adapters share the classifier's derived
+`TaskAction::READY_COMMANDS` lookup. The bot exposes every ready command,
+including in-process `approve`; the web exposes only commands accepted by the
+daemon dispatch-request queue.
 
 Managed locks/generations/configurations are Hive-owned. Lifecycle commands cannot overwrite a
 built-in or `<id>.yml` authored descriptor, and task metadata rewrites preserve
@@ -176,7 +185,9 @@ catalog materialization and generation placement. Generation directories and
 ordinary files are hardened to 0555 and 0444 before same-parent atomic
 publication, trusted executable payloads remain 0555, and reuse repairs mode
 tampering after content validation. Snapshots store environment variable names
-only and inject a current value only into its executing slot.
+only and inject a current value only into its executing slot. Each actor spawn
+loads that immutable runtime context once for both prompt and permission setup;
+preset actor compilation is in-memory and does not create empty policy state.
 `gh` and `qmd` remain baseline Hive dependencies. `Publisher` remains on the
 legacy submission layout and is not a v2 package authoring path.
 

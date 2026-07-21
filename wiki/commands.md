@@ -1,10 +1,10 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
 updated: 2026-07-20
-tags: [commands, api, skills, provisioning]
+tags: [commands, api, skills, agents, operational, provisioning]
 ---
 
 **TLDR**: Hive's external interaction surface is the Thor CLI (`hive` plus the
@@ -13,9 +13,10 @@ documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
 setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
 corpus producer, `hive digest` as the daily shipped digest producer,
 `hive pairing` as the Telegram first-contact approval surface, the read-only
-`hive doctor` / consent-safe `hive setup-agents` split for managed agent
-skills, and the
-single ClawHub `hive-cli` OpenClaw skill whose installed slash command is `/hive`.
+agent-first `hive status --operational --json`, bounded `hive watch`, closed
+`hive act`, the `hive doctor` / consent-safe setup split for one canonical Hive
+operating skill projected to OpenClaw, Claude, Codex, and Pi, and the single
+ClawHub `hive-cli` listing whose installed slash command is `/hive`.
 The Ruby command/API contract lives in [[cli]] and the
 per-command pages. OpenClaw does not add a second runtime and does not publish
 one ClawHub listing per Hive verb.
@@ -33,6 +34,11 @@ one ClawHub listing per Hive verb.
 - `lib/hive/commands/digest.rb`
 - `lib/hive/commands/pairing.rb`
 - `lib/hive/commands/setup_agents.rb`
+- `lib/hive/commands/watch.rb`
+- `lib/hive/commands/act.rb`
+- `lib/hive/operational_status.rb`
+- `lib/hive/operational_action.rb`
+- `skills/hive/`
 - `lib/hive/agent_skills/**/*.rb`
 - `config/agent-skills.yml`
 - `lib/hive/digest.rb`
@@ -42,6 +48,7 @@ one ClawHub listing per Hive verb.
 - `web/app/assets/**`
 - `hive.gemspec`
 - `.github/workflows/release.yml`
+- `.github/workflows/live-agent-skills.yml`
 - `packaging/docker/Dockerfile`
 - `packaging/docker/entrypoint.sh`
 - `packaging/docker/install-box.sh`
@@ -69,6 +76,12 @@ authorized actions), and
 [[commands/doctor]] read-only managed health reporting,
 [[commands/setup-agents]] consent-safe native provisioning,
 `--json` envelopes where the command page says they exist.
+The default human `hive status` is the concise operational projection;
+`--full` retains the detailed table, bare `--json` retains the complete v6
+graph, and `--operational --json` selects the additive agent document.
+[[commands/watch]] emits bounded semantic JSON Lines without shell polling.
+`hive act` accepts only a fresh observation token for the one closed routine
+workflow-advance action and recomputes the verb under the task lock.
 The wrapper also normalizes command-local help before Thor dispatch:
 `hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as
 `hive approve --from 2-brainstorm --help` are routed to `hive help <cmd>`
@@ -117,11 +130,15 @@ does not create task-state commits. The daemon can schedule it as a global,
 non-project-scoped child after local midnight when `digest.enabled: true`. See
 [[commands/digest]] and [[modules/digest]].
 
-`hive setup` is the normal native workstation provisioning bridge: it emits a
-`hive-setup.v1` report, installs/repairs Hive-owned QMD and authenticated
-managed web bundle assets when allowed, installs the daemon service, enrolls
+`hive setup` is the local workstation provisioning bridge for installs that
+`hive setup` is the normal native workstation provisioning bridge: it first
+previews and provisions the bundled Hive operating skill for supported agents,
+then emits a `hive-setup.v1` phase report, installs/repairs Hive-owned QMD and
+authenticated managed web bundle assets, installs the daemon service, enrolls
 the current project unless disabled, and installs/starts/probes the separate
-loopback Hive web service by default. `--no-service` is the read-only opt-out;
+loopback Hive web service by default. One interactive confirmation covers the
+run; JSON/non-TTY requires `--yes` or performs no mutation. `--no-service` opts
+out of web-service mutation while leaving other approved setup work enabled;
 `--no-bootstrap` is diagnose-only. See
 [[commands/setup]].
 
@@ -138,30 +155,31 @@ and clears it. See [[commands/screenote]].
 
 ### OpenClaw / ClawHub
 
-`openclaw/skills/hive/SKILL.md` is the only checked-in OpenClaw skill source
-published through ClawHub. The ClawHub reference is
-`@ivankuznetsov/hive-cli`, the canonical public listing is
+`skills/hive/` is the canonical operating policy. `openclaw/skills/hive/` is
+its generated OpenClaw projection and the only tree published through ClawHub.
+The ClawHub slug is `hive-cli`, installation uses `openclaw skills install
+@ivankuznetsov/hive-cli`, the public listing is
 `https://clawhub.ai/ivankuznetsov/skills/hive-cli`, and the installed slash
-command is still `/hive` because OpenClaw reads `name: hive` from the skill
-frontmatter.
+command is `/hive`. Claude
+receives `/hive`, Codex `$hive`, and Pi `/skill:hive` from the same canonical
+digest through setup-agents.
 
-The checked-in skill version is `0.1.3`. Its frontmatter `description` is the
-public listing/search summary, while the opening markdown body documents the
-install and common workflow paths. `/hive setup`, `/hive install`, and
-`/hive bootstrap` enter the guided setup flow: verify or install the Hive CLI,
-run strict `hive`/`hv` version detection, and use
-`hive setup --no-init --json` for per-user web/daemon provisioning without
-project enrollment. That setup report includes the loopback URL plus distinct
-Hive web installed, enabled, running, and ready state alongside daemon setup.
-Enrollment is then a separate user-run interactive `hive init .`, so the medium
-patrol, architecture discovery, daemon, and babysitter defaults are disclosed
-before confirmation. Package-manager confirmation is preserved; Arch
-transactions are handed to the user's real terminal and the skill does not use
-unattended install flags.
+The version comes from `skills/hive/skill.json`; every projection carries the
+skill version, canonical digest, Hive version, native invocation, and exact
+file digests. `/hive setup`, `/hive install`, and `/hive bootstrap` enter the
+guided setup flow: verify/install the CLI, run strict `hive`/`hv` detection,
+provision supported skills with explicit consent, and use
+`hive setup --no-init --yes --json` only after approval. Enrollment remains a
+separate `hive init .` in the user's real terminal so Hive can disclose its
+defaults and ask for confirmation. Package-manager confirmation is preserved;
+the skill does not use unattended Arch install flags. The setup report includes
+the loopback URL plus distinct Hive web installed, enabled, running, and ready
+state alongside daemon setup.
 
 For normal use, the slash-command text after `/hive` is treated as arguments
 for the detected Hive CLI binary. Examples in the skill include
-`/hive status --json`, `/hive new . "build this feature"`, `/hive plan
+`/hive status --operational --json`, `/hive watch <project>:<slug>
+--json-lines`, `/hive new . "build this feature"`, `/hive plan
 <task-slug>`, `/hive develop <task-slug>`, `/hive review <task-slug>`,
 `/hive web status --json`, foreground `/hive web`, `/hive tui`, `/hive
 setup-agents`, reviewed Honeycomb workflow
@@ -182,7 +200,10 @@ overrides and instead routes repair through Hive-native diagnose/consent flows.
 
 OpenClaw does not introduce Ruby routes, HTTP handlers, controllers, resolvers,
 or new executable entrypoints. It is an agent-facing wrapper over the existing
-CLI.
+CLI. `hive doctor` checks OpenClaw inventory/provenance read-only; only
+OpenClaw/ClawHub installs or updates that projection. The protected
+live-agent-skills workflow proves all four native surfaces against one exact
+candidate before the tag workflow can consume its gem/skill archive.
 
 ### Hive web
 

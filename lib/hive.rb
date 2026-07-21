@@ -1,5 +1,5 @@
 module Hive
-  VERSION = "0.6.4".freeze
+  VERSION = "0.6.5".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
   # Canonical GitHub org + repo. Referenced by the release probe
   # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.
@@ -14,6 +14,9 @@ module Hive
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
       "hive-status" => 6,
+      "hive-operational-status" => 1,
+      "hive-watch-event" => 1,
+      "hive-act" => 1,
       "hive-init" => 2,
       "hive-setup-agents" => 1,
       "hive-setup" => 1,
@@ -41,9 +44,9 @@ module Hive
       "hive-daemon-queue" => 1,
       "hive-patrol" => 2,
       "hive-patrol-finding" => 2,
-      "hive-refactor-patrol" => 2,
+      "hive-refactor-patrol" => 3,
       "hive-refactor-patrol-jobs" => 1,
-      "hive-refactor-patrol-thesis" => 2,
+      "hive-refactor-patrol-thesis" => 3,
       # Scaffold a blank per-project workflow descriptor (`hive workflow new ID
       # --json`). The error arm routes through Hive::Schemas::ErrorEnvelope so
       # its output carries the same schema/schema_version/error_kind keys as
@@ -244,6 +247,19 @@ module Hive
       INTERNAL = "internal".freeze
       ERROR    = "error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
+    end
+
+    module OperationalActionErrorKind
+      USAGE             = "usage".freeze
+      STALE_OBSERVATION = "stale_observation".freeze
+      AMBIGUOUS_TARGET  = "ambiguous_target".freeze
+      CONCURRENT_RUN    = "concurrent_run".freeze
+      DEPENDENCY_WAIT   = "dependency_wait".freeze
+      ADMISSION_ERROR   = "admission_error".freeze
+      CONFIG            = "config".freeze
+      INTERNAL          = "internal".freeze
+      ERROR             = "error".freeze
+      ALL = constants(false).reject { |constant| constant == :ALL }.map { |constant| const_get(constant) }.freeze
     end
 
     # Closed enum of `error_kind` values emitted by `hive status --diagnose --json`.
@@ -486,6 +502,18 @@ module Hive
   class InvalidTaskPath < Error
     def exit_code
       ExitCodes::USAGE
+    end
+  end
+
+  class OperationalActionUsageError < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
+  class StaleOperationalObservation < Error
+    def exit_code
+      ExitCodes::TEMPFAIL
     end
   end
 

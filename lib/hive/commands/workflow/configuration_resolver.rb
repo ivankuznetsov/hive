@@ -7,12 +7,13 @@ module Hive
       class ConfigurationResolver
         attr_reader :configuration
 
-        def initialize(workflow:, resolution:, cfg:, runtime_metadata:, mapping_overrides: [], input_bindings: [],
-                       previous: nil)
-          @workflow = workflow
+        def initialize(validated:, resolution:, cfg:, mapping_overrides: [], input_bindings: [],
+                       previous: nil, environment: ENV)
+          @workflow = validated.workflow
           @resolution = resolution
           @cfg = cfg
-          @runtime_metadata = runtime_metadata
+          @runtime_metadata = validated.manifest.data.fetch("x-hive", {})
+          @environment = environment
           @mapping_overrides = parse_mapping_overrides(mapping_overrides)
           @explicit_input_bindings = parse_input_bindings(input_bindings)
           @previous = previous
@@ -20,32 +21,13 @@ module Hive
         end
 
         def mappings
-          configuration.data.fetch("mappings").map do |slot, mapping|
-            {
-              "slot" => slot,
-              "mapping_role" => mapping.fetch("mapping_role"),
-              "mapping_contract" => mapping.fetch("mapping_contract"),
-              "agent" => mapping.fetch("agent"),
-              "model" => mapping["model"],
-              "effort" => mapping["effort"],
-              "profile_fingerprint" => mapping.fetch("profile_fingerprint"),
-              "policy_fingerprint" => mapping.fetch("policy_fingerprint")
-            }
-          end
+          configuration.mapping_rows
         end
 
         def inputs
-          declared = Array(@runtime_metadata["optional_inputs"])
-          declared.map do |entry|
-            name = entry.fetch("name")
-            binding = configuration.data.fetch("input_bindings")[name]
-            {
-              "name" => name,
-              "authorized_slots" => entry.fetch("authorized_slots"),
-              "binding" => binding,
-              "available" => !!(binding && !ENV[binding].to_s.empty?)
-            }
-          end
+          configuration.input_rows(
+            runtime_metadata: @runtime_metadata, environment: @environment
+          )
         end
 
         def unbounded?
@@ -63,10 +45,7 @@ module Hive
         def input_bindings_changed?
           return false unless @previous
 
-          declared = Array(@runtime_metadata["optional_inputs"]).map { |entry| entry.fetch("name") }
-          previous = @previous.data.fetch("input_bindings").select { |name, _env| declared.include?(name) }
-          current = configuration.data.fetch("input_bindings")
-          previous != current
+          prior_input_bindings != configuration.data.fetch("input_bindings")
         end
 
         private
@@ -152,7 +131,7 @@ module Hive
         def suggested_input_bindings
           Array(@runtime_metadata["optional_inputs"]).each_with_object({}) do |entry, out|
             name = entry.fetch("name")
-            out[name] = name unless ENV[name].to_s.empty?
+            out[name] = name unless @environment[name].to_s.empty?
           end
         end
       end

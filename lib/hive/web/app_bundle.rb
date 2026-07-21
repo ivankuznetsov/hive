@@ -103,7 +103,7 @@ module Hive
         File.write(File.join(app_dir, VERSION_FILE), "#{Hive::VERSION}\n")
         app_dir
       ensure
-        FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
+        FileUtils.rm_rf(tmp) if tmp
       end
 
       def bundle_install!(dir: app_dir, runner: nil, output: $stderr)

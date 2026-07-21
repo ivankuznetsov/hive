@@ -3,6 +3,7 @@ require "pathname"
 require "rubygems/requirement"
 
 require "hive/config"
+require "hive/agent_skills/canonical_skill"
 
 module Hive
   module AgentSkills
@@ -29,10 +30,14 @@ module Hive
         :agent, :provider, :package, :marketplace, :source, :scope,
         :config_home, :actions
       )
-      Package = Data.define(:id, :version, :requirement, :prerequisites, :agents) do
+      BundledPackage = Data.define(:agent, :provider, :config_home, :destination)
+      Package = Data.define(:id, :distribution, :version, :requirement, :prerequisites, :agents) do
         def native_for(agent)
           agents.fetch(agent.to_s)
         end
+
+        def bundled? = distribution == "bundled"
+        def native? = distribution == "native"
       end
       AgentContract = Data.define(:agent, :invocation, :probe, :alias_spec)
       Capability = Data.define(:id, :package_id, :agents) do
@@ -167,18 +172,50 @@ module Hive
         expect_array(value, "#{@source}.packages").each_with_index.map do |entry, index|
           path = "#{@source}.packages[#{index}]"
           row = expect_hash(entry, path)
-          assert_keys!(row, %w[id version prerequisites agents], path)
+          assert_keys!(row, %w[id distribution version prerequisites agents], path,
+                       required: %w[id prerequisites agents])
           id = safe_id!(row.fetch("id"), "#{path}.id")
-          version = string!(row.fetch("version"), "#{path}.version")
+          distribution = row.fetch("distribution", "native")
+          invalid!("#{path}.distribution", "must be native or bundled") unless %w[native bundled].include?(distribution)
+          if distribution == "bundled"
+            invalid!("#{path}.version", "is derived from the canonical skill and must be omitted") if row.key?("version")
+            version = CanonicalSkill.new.version
+            agents = parse_bundled_agents(row.fetch("agents"), "#{path}.agents")
+          else
+            version = string!(row.fetch("version"), "#{path}.version")
+            agents = parse_native_agents(row.fetch("agents"), "#{path}.agents")
+          end
           requirement = Gem::Requirement.new(version)
           prerequisites = expect_array(row.fetch("prerequisites"), "#{path}.prerequisites").map do |item|
             safe_id!(item, "#{path}.prerequisites")
           end
-          agents = parse_native_agents(row.fetch("agents"), "#{path}.agents")
-          Package.new(id: id, version: version, requirement: requirement,
+          Package.new(id: id, distribution: distribution, version: version, requirement: requirement,
                       prerequisites: prerequisites.freeze, agents: agents.freeze)
         rescue Gem::Requirement::BadRequirementError => e
           invalid!("#{path}.version", e.message)
+        end
+      end
+
+      def parse_bundled_agents(value, path)
+        rows = expect_hash(value, path)
+        invalid!(path, "must declare at least one agent") if rows.empty?
+        canonical = CanonicalSkill.new
+        rows.each_with_object({}) do |(agent, entry), out|
+          validate_agent!(agent, path)
+          row_path = "#{path}.#{agent}"
+          row = expect_hash(entry, row_path)
+          assert_keys!(row, %w[provider config_home], row_path)
+          provider = string!(row.fetch("provider"), "#{row_path}.provider")
+          invalid!("#{row_path}.provider", "must equal agent #{agent.inspect}") unless provider == agent
+          config_home = string!(row.fetch("config_home"), "#{row_path}.config_home")
+          invalid!("#{row_path}.config_home", "is not supported") unless CONFIG_HOMES.include?(config_home)
+          projection = canonical.render(agent)
+          out[agent] = BundledPackage.new(
+            agent: agent,
+            provider: provider,
+            config_home: config_home,
+            destination: projection.destination_relative
+          )
         end
       end
 
@@ -241,7 +278,11 @@ module Hive
           row = expect_hash(entry, row_path)
           assert_keys!(row, %w[invocation probe alias], row_path, required: %w[invocation probe])
           invocation = string!(row.fetch("invocation"), "#{row_path}.invocation")
-          invalid!("#{row_path}.invocation", "must be a slash invocation") unless invocation.match?(%r{\A/[A-Za-z0-9_.:-]+\z})
+          slash_invocation = invocation.match?(%r{\A/[A-Za-z0-9_.:-]+\z})
+          codex_skill_mention = agent == "codex" && invocation.match?(/\A\$[A-Za-z0-9_.-]+\z/)
+          unless slash_invocation || codex_skill_mention
+            invalid!("#{row_path}.invocation", "must be a platform-native skill invocation")
+          end
           probe = safe_relative_path!(row.fetch("probe"), "#{row_path}.probe")
           alias_spec = row.key?("alias") ? parse_alias(row.fetch("alias"), "#{row_path}.alias", agent) : nil
           out[agent] = AgentContract.new(agent: agent, invocation: invocation, probe: probe, alias_spec: alias_spec)
@@ -276,6 +317,15 @@ module Hive
             next if package.agents.key?(agent)
 
             invalid!("capability #{capability.id}", "supports #{agent} but package #{package.id} does not")
+          end
+          next unless package.bundled?
+
+          capability.agents.each do |agent, contract|
+            projection = CanonicalSkill.new.render(agent)
+            unless contract.invocation == projection.invocation && contract.probe == "SKILL.md"
+              invalid!("capability #{capability.id}",
+                       "must match bundled #{agent} projection invocation #{projection.invocation.inspect} and probe SKILL.md")
+            end
           end
         end
       end

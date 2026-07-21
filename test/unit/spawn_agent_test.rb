@@ -651,6 +651,7 @@ class SpawnAgentTest < Minitest::Test
       assert_nil policy.policy_path
       assert_includes policy.disallowed_tools, "Write"
       assert_equal "configured", policy.environment.fetch("DEMO_INPUT")
+      refute Dir.exist?(File.join(dir, ".hive-state", ".managed-policies"))
     end
   end
 

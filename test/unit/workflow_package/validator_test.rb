@@ -117,14 +117,26 @@ class WorkflowPackageValidatorTest < Minitest::Test
   end
 
   def test_managed_stage_and_council_bypass_constructs_are_rejected
-    reviewer = Struct.new(:command, :skill).new("raw command", "external-skill")
-    revise = Struct.new(:command, :skill).new("raw revise", "external-revise")
-    council = Struct.new(:revise).new(revise)
-    agent_stage = Struct.new(:kind, :permissions, :skill, :reviewers, :council)
-                        .new(:agent, nil, "external-stage", [], nil)
-    council_stage = Struct.new(:kind, :permissions, :skill, :reviewers, :council)
-                          .new(:council, "read-only", nil, [ reviewer ], council)
-    workflow = Struct.new(:stages).new([ agent_stage, council_stage ])
+    reviewer = Hive::Workflow::Reviewer.new(
+      name: "reviewer", command: "raw command", skill: "external-skill"
+    )
+    revise = Hive::Workflow::Revise.new(
+      command: "raw revise", skill: "external-revise"
+    )
+    workflow = Hive::Workflow.new(
+      id: :demo,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "agent", index: 1, state_file: "agent.md", kind: :agent,
+          skill: "external-stage"
+        ),
+        Hive::Workflow::Stage.new(
+          name: "council", index: 2, state_file: "council.md", kind: :council,
+          permissions: "read-only", reviewers: [ reviewer ],
+          council: Hive::Workflow::Council.new(quorum: 1, revise: revise)
+        )
+      ]
+    )
     diagnostics = []
     validator = Hive::WorkflowPackage::Validator.new(
       Dir.pwd, expected_name: nil, expected_manifest_digest: nil, managed: true
@@ -145,28 +157,29 @@ class WorkflowPackageValidatorTest < Minitest::Test
   end
 
   def test_registry_actor_contract_diagnostics_cover_nested_permissions_and_identity
-    actor_type = Struct.new(
-      :name, :kind, :permissions, :skill, :reviewers, :council,
-      :agent, :model, :effort, :mapping_role, :mapping_contract, :command
+    reviewer = Hive::Workflow::Reviewer.new(
+      name: "reviewer", agent: "claude",
+      mapping_role: "development"
     )
-    reviewer = actor_type.new(
-      "reviewer", nil, nil, nil, [], nil,
-      "claude", nil, nil, "development", nil, nil
+    revise = Hive::Workflow::Revise.new(
+      model: "model"
     )
-    revise = actor_type.new(
-      "revise", nil, nil, nil, [], nil,
-      nil, "model", nil, nil, nil, nil
-    )
-    stage = actor_type.new(
-      "council", :council, "read-only", nil, [ reviewer ], Struct.new(:revise).new(revise),
-      nil, nil, nil, nil, nil, nil
+    workflow = Hive::Workflow.new(
+      id: :demo,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "council", index: 1, state_file: "council.md", kind: :council,
+          permissions: "read-only", reviewers: [ reviewer ],
+          council: Hive::Workflow::Council.new(quorum: 1, revise: revise)
+        )
+      ]
     )
     diagnostics = []
     validator = Hive::WorkflowPackage::Validator.new(
       Dir.pwd, expected_name: nil, expected_manifest_digest: nil, managed: true
     )
 
-    validator.send(:validate_managed_workflow, Struct.new(:stages).new([ stage ]), diagnostics, registry: true)
+    validator.send(:validate_managed_workflow, workflow, diagnostics, registry: true)
 
     rules = diagnostics.map(&:rule_id)
     assert_equal 2, rules.count("policy.missing")

@@ -35,7 +35,7 @@ module Hive
       # Builds an isolated child environment around one descriptor actor's
       # exact permission block. Unlike #compile, this does not reconstruct a
       # policy from the package-wide catalog disclosure.
-      def self.compile_actor(permission_spec, task_folder:, profile:, policy_dir:, package_root:, environment: {})
+      def self.compile_actor(permission_spec, task_folder:, profile:, package_root:, environment: {})
         task_root = File.realpath(task_folder)
         package_root = File.realpath(package_root)
         scope = Hive::PermissionScope.resolve(
@@ -55,7 +55,6 @@ module Hive
           end
           child_environment[name] = value
         end
-        FileUtils.mkdir_p(policy_dir, mode: 0o700)
         Policy.new(
           permission_mode: scope.permission_mode,
           allowed_tools: scope.allowed_tools,
@@ -75,7 +74,8 @@ module Hive
       end
 
       def self.workflow_escalation_reasons(workflow)
-        executable_actors(workflow).flat_map do |actor|
+        workflow.executable_slots.flat_map do |slot|
+          actor = slot.actor
           spec = actor.respond_to?(:permissions) ? actor.permissions : nil
           spec.nil? ? [] : permission_escalation_reasons(spec)
         end.uniq.sort
@@ -104,7 +104,8 @@ module Hive
       # that selects a runner unable to enforce the package policy before the
       # generation is activated (and the same compile runs again at spawn).
       def self.admit_workflow!(workflow, permissions = nil, task_folder:, policy_dir:, package_root: task_folder)
-        executable_actors(workflow).each_with_index do |actor, index|
+        workflow.executable_slots.each_with_index do |slot, index|
+          actor = slot.actor
           name = actor.respond_to?(:agent) && actor.agent || :claude
           spec = actor.respond_to?(:permissions) ? actor.permissions : permissions
           raise Hive::ConfigError, "managed executable actor is missing permissions" if spec.nil?
@@ -116,27 +117,12 @@ module Hive
           else
             compile_actor(
               spec, task_folder: task_folder, package_root: package_root,
-              profile: Hive::AgentProfiles.lookup(name), environment: {},
-              policy_dir: File.join(policy_dir, "actor-#{index}-#{name}")
+              profile: Hive::AgentProfiles.lookup(name), environment: {}
             )
           end
         end
         true
       end
-
-      def self.executable_actors(workflow)
-        workflow.stages.flat_map do |stage|
-          next [] unless [ :agent, :council ].include?(stage.kind)
-
-          values = [ stage ]
-          if stage.kind == :council
-            values.concat(stage.reviewers)
-            values << stage.council.revise if stage.council&.revise
-          end
-          values
-        end
-      end
-      private_class_method :executable_actors
 
       def initialize(permissions, task_folder:, profile:, policy_dir:)
         @permissions = normalize_registry_permissions(stringify_hash(permissions))

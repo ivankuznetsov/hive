@@ -88,7 +88,10 @@ module Hive
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
-        @validator = validator || Validator.new(cfg.dig("patrol", "commands"))
+        @validator = validator || Validator.new(
+          cfg.dig("patrol", "commands"),
+          timeout_sec: cfg.dig("timeout_sec", "patrol") || Validator::DEFAULT_TIMEOUT_SEC
+        )
         @worktree_factory = worktree_factory || method(:build_worktree)
         @agent_runner = agent_runner || method(:run_agent)
         @token_budget = token_budget || TokenBudget.new(@project_root, cfg: cfg)
@@ -225,9 +228,11 @@ module Hive
         if message.empty? && result.is_a?(Hash) && result[:status] == :timeout
           message = "fix agent timed out"
         end
+        validation = { "passed" => false, "reason" => "fix_agent_failed", "error" => message }
+        exhaustion = result[:resource_exhaustion] if result.is_a?(Hash)
+        validation["resource_exhaustion"] = exhaustion if exhaustion.is_a?(Hash)
         failed_attempt_patch(
-          finding, branch, worktree,
-          { "passed" => false, "reason" => "fix_agent_failed", "error" => message },
+          finding, branch, worktree, validation,
           base_sha: base_sha
         )
       end
@@ -705,7 +710,8 @@ module Hive
         VALIDATION_NAMES.select { |name| present_proof_text?(commands[name]) }
       end
 
-      def run_agent(prompt:, run_dir:, worktree_path:, **)
+      def run_agent(prompt:, run_dir:, worktree_path:,
+                    output_path: File.join(run_dir, "fix.json"), **)
         task = RunnerTask.new(
           folder: run_dir,
           project_root: @project_root,
@@ -716,7 +722,12 @@ module Hive
         profile = Hive::AgentProfiles.lookup(@cfg.dig("patrol", "agent") || "claude", cfg: @cfg)
         launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :fix)
         unless @token_budget.acquire(stage: STAGE, minimum_tokens: launch.fetch(:minimum_tokens))
-          return { status: :error, error_message: @token_budget.exhaustion_message }
+          exhaustion = @token_budget.resource_exhaustion if @token_budget.respond_to?(:resource_exhaustion)
+          return {
+            status: :error,
+            error_message: @token_budget.exhaustion_message,
+            resource_exhaustion: exhaustion
+          }
         end
         started_at = Time.now.utc
         result = nil
@@ -734,7 +745,8 @@ module Hive
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
             log_label: STAGE,
             profile: profile,
-            status_mode: :exit_code_only,
+            expected_output: output_path,
+            status_mode: :output_file_exists,
             cli_flags: launch.fetch(:cli_flags)
           ).run!
         ensure

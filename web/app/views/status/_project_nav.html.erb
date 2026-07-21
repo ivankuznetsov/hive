@@ -1,0 +1,10 @@
+<aside id="project-nav" class="project-nav" aria-label="Project filter">
+  <button type="button" class="project-nav-item" data-project-filter-target="button"
+          data-action="project-filter#choose" data-project-filter-name-param="">All projects</button>
+  <% projects.each do |project| %>
+    <% name = project.name %>
+    <button type="button" class="project-nav-item" data-project-filter-target="button"
+            data-action="project-filter#choose" data-project-filter-name-param="<%= name %>"><%= name %></button>
+  <% end %>
+  <%= link_to "+ Add project", repos_path, class: "project-nav-item project-nav-add" %>
+</aside>

@@ -1,33 +1,13 @@
-require "open3"
-require "stringio"
-require "tempfile"
-
 class ReposController < ApplicationController
-  # Accepted clone sources: a github.com https/ssh URL or `owner/repo`
-  # gh shorthand. Open3 array form blocks shell injection; the regexes and
-  # the leading-dash guard block argument injection and arbitrary hosts.
-  GITHUB_URL_RE = %r{\Ahttps://github\.com/[\w.-]+/[\w.-]+?(?:\.git)?\z}
-  GITHUB_SSH_RE = %r{\Agit@github\.com:[\w.-]+/[\w.-]+?(?:\.git)?\z}
-  GH_SHORTHAND_RE = %r{\A[\w.-]+/[\w.-]+\z}
-
   def index
     @projects = registered_projects
-    registered_names = @projects.map { |p| p["name"] }.to_set
-    # The device-flow grant carries `repo` scope, so the operator's own
-    # repositories list directly — no separate GitHub configuration.
+    registered_names = @projects.map(&:name).to_set
     @github_repos = session[:github_token] ? github_repositories(registered_names) : nil
   end
 
-  # The setup questionnaire — the web equivalent of `hive init`'s TTY
-  # prompts. Reached from the clone form, a GitHub repo's "Add to hive",
-  # or a registered project's "Re-run setup".
   def new
     @url = params[:url].to_s.strip
     raw_project = params[:project].to_s.strip
-    # File.basename normalizes a crafted `project` param (strips path segments)
-    # for parity with create's hardening — defense in depth, not load-bearing
-    # here: the lookup below is a string-equality find on entry["name"], so a
-    # `../`-laden name simply wouldn't match anyway.
     @project_name = raw_project.present? ? File.basename(raw_project) : nil
     @suggested_name = params[:name].to_s.strip.presence ||
                       (@project_name || File.basename(@url).delete_suffix(".git") if @url.present? || @project_name)
@@ -35,189 +15,39 @@ class ReposController < ApplicationController
     @workflows = InitSetup.workflows
     @current_workflow = Hive::Workflows::CODING_ID.to_s
 
-    project = @project_name && registered_projects.find { |entry| entry["name"] == @project_name }
+    project = @project_name && registered_projects.find { |entry| entry.name == @project_name }
     return unless project
 
-    @workflows = InitSetup.workflows(project["path"])
-    @current_workflow = persisted_default_workflow(project) || @current_workflow
+    @workflows = project.workflows
+    @current_workflow = project.default_workflow || @current_workflow
   end
 
   def create
-    selected_workflow = validated_workflow_param
-    if params[:project].present?
-      # Re-run setup for an already-registered project (no clone).
-      project = find_project!(File.basename(params[:project].to_s.strip))
-      warning = reinit!(project["path"], InitSetup.new(params[:settings]), workflow: selected_workflow)
-      return redirect_after_init("#{project["name"]} settings applied", warning)
-    end
-
-    url = params[:url].to_s.strip
-    raise Hive::Error, "repo URL required" if url.empty?
-    raise Hive::Error, "invalid repo URL — use a github.com URL or owner/repo" unless valid_repo_url?(url)
-
-    name = params[:name].to_s.strip
-    name = File.basename(url).delete_suffix(".git") if name.empty?
-    # File.basename strips path segments so `../` can't escape the root.
-    name = File.basename(name)
-    raise Hive::Error, "invalid repo name" if name.empty? || name == "." || name == ".."
-
-    # The Hivebox container sets HIVEBOX_REPOS_DIR=/data/repos; a host run (dev
-    # checkout) keeps clones under hive's data home instead of assuming a
-    # /data mount exists.
-    root = ENV["HIVEBOX_REPOS_DIR"] || File.join(Hive::Paths.data_home, "repos")
-    FileUtils.mkdir_p(root)
-    target = File.join(root, name)
-
-    # A non-directory at the target (stray file, symlink) must be a hard
-    # stop: clone! deletes `target` on failure, and "clone over whatever is
-    # there" would turn that cleanup into deleting something we don't own.
-    if File.exist?(target) && !File.directory?(target)
-      raise Hive::Error, "#{name} already exists under the repos root and is not a directory — remove it first"
-    end
-
     setup = InitSetup.new(params[:settings])
-    clone!(url, target) unless File.directory?(target)
-    normalize_origin!(target)
-    warning = reinit!(target, setup, workflow: selected_workflow)
-    redirect_after_init("#{name} is registered", warning)
+    workflow = InitSetup.workflow(params.dig(:settings, :workflow))
+    return setup_existing_project(setup, workflow) if params[:project].present?
+
+    registration = Repository.new(
+      source: params[:url], name: params[:name], token: session[:github_token]
+    ).register!(setup:, workflow:)
+    redirect_after_init("#{registration.project.name} is registered", registration.warning)
   end
 
   private
 
-  # The web-supplied workflow id flows into Init → WorkflowSelection.fetch! →
-  # File.join(workflow_dir, "#{id}.yml"); a crafted `../…` would walk that join
-  # into File.file?/parse_file (and leak the resolved path through the
-  # ConfigError). The CLI scaffold path validates against SAFE_SLUG before any
-  # path use — do the same here before handing web input to Init. A nil/blank
-  # selection passes through to the implicit-coding default unchanged; an
-  # unknown-but-well-formed slug still becomes a readable 422 downstream via
-  # WorkflowSelection's UnknownWorkflow handling.
-  def validated_workflow_param
-    workflow = params.dig(:settings, :workflow).presence
-    return if workflow.nil?
-    return workflow if Hive::Workflows::DescriptorParser::SAFE_SLUG.match?(workflow)
-
-    raise Hive::Error, "invalid workflow id"
-  end
-
-  # The persisted `default_workflow` for a registered project's re-run form, or
-  # nil when none is set. A corrupt/unreadable config.yml degrades to nil (the
-  # caller then falls back to coding) — matching the InitSetup.workflows list
-  # rendered just above, which already survives the same broken file via its own
-  # fallback — rather than letting an unrescued Psych::Exception 500 the very
-  # form an operator opens to repair the project. The rescue is narrowed to the
-  # corrupt/unreadable-config classes (the same set Project#workflow_dir_for
-  # degrades on) so a real bug — a NoMethodError, or a Hive::Error other than
-  # ConfigError — still surfaces instead of masquerading as a benign "fell back
-  # to coding". Config.load (lib/hive/config.rb) does not rescue Psych and
-  # ApplicationController only rescues Hive::Error/ParameterMissing.
-  def persisted_default_workflow(project)
-    Hive::Config.load(project["path"])["default_workflow"].presence
-  rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
-    Rails.logger.warn("default_workflow unreadable for #{project["name"]}: #{e.class}: #{e.message}")
-    nil
-  end
-
-  # The InitSetup adapter rides Init's `prompts:` seam, so a web setup is
-  # indistinguishable from an interactive `hive init`. HTTP requests must
-  # never inherit Puma's terminal: new preflight questions would otherwise
-  # wait forever with no browser surface on which the operator can answer.
-  def reinit!(target, setup, workflow: nil)
-    provisioning_error = StringIO.new
-    Hive::Commands::Init.new(
-      target,
-      force: true,
-      json: false,
-      prompts: setup,
-      workflow: workflow,
-      provisioning_input: StringIO.new,
-      provisioning_error: provisioning_error
-    ).call
-    provisioning_error.string.strip.presence
+  def setup_existing_project(setup, workflow)
+    project = find_project!(File.basename(params[:project].to_s.strip))
+    warning = project.setup!(setup, workflow:)
+    redirect_after_init("#{project.name} settings applied", warning)
   end
 
   def redirect_after_init(notice, warning)
-    options = { notice: notice }
+    options = { notice: }
     if warning
       Rails.logger.warn("web init completed with provisioning findings: #{warning.squish}")
       options[:alert] = "Project setup completed with agent-skill findings: #{warning}"
     end
     redirect_to repos_path, **options
-  end
-
-  # A hung clone (slow network, wedged gh) would otherwise hold a Puma
-  # worker forever; Hive web has few. Env-overridable for tests.
-  CLONE_TIMEOUT_SEC = Integer(Hive::Web::Environment.value("HIVE_WEB_CLONE_TIMEOUT_SEC"))
-
-  # Clone via `gh` with the operator's device-flow token in GH_TOKEN, so
-  # private repos clone with the session grant — the runtime needs no separate
-  # `gh auth login` for repos the operator owns. Falls back to the runtime's
-  # gh auth when no session token exists (e.g. token-less curl admin).
-  # Runs in its own process group with a hard deadline; a timed-out or
-  # failed clone removes the partial target so a retry starts clean.
-  def clone!(url, target)
-    # Refuse rather than risk the failure-path cleanup deleting something
-    # that existed before this request (create already filters, but clone!
-    # must be safe on its own).
-    raise Hive::Error, "clone target already exists: #{File.basename(target)}" if File.exist?(target)
-
-    env = session[:github_token] ? { "GH_TOKEN" => session[:github_token] } : {}
-    log = Tempfile.create("hive-web-clone")
-    pid = Process.spawn(env, "gh", "repo", "clone", url, target,
-                        pgroup: true, out: log.path, err: log.path)
-    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + CLONE_TIMEOUT_SEC
-    status = nil
-    loop do
-      _, status = Process.waitpid2(pid, Process::WNOHANG)
-      break if status
-
-      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
-        Process.kill("KILL", -pid) rescue nil
-        Process.waitpid2(pid) rescue nil
-        FileUtils.rm_rf(target)
-        raise Hive::Error, "clone timed out after #{CLONE_TIMEOUT_SEC}s — "                            "check the network and try again"
-      end
-      sleep 0.2
-    end
-    return if status.success?
-
-    FileUtils.rm_rf(target)
-    raise Hive::Error, "clone failed: #{File.read(log.path).strip}"
-  ensure
-    log&.close
-    File.unlink(log.path) if log && File.exist?(log.path)
-  end
-
-  # Registered repos must push over https: at push time git's credential
-  # helper reads the runtime's `gh auth login` (the device-flow session token
-  # only powers clone-time GH_TOKEN and is never persisted), while SSH is a
-  # dead end here — the
-  # container ships no keys, and a host daemon can't answer an interactive
-  # agent (1Password and friends). gh clones over ssh whenever the
-  # operator's git_protocol prefers it, so rewrite the origin afterwards.
-  def normalize_origin!(target)
-    out, err, status = Open3.capture3("git", "-C", target, "remote", "get-url", "origin")
-    unless status.success?
-      # Pre-existing dir with no origin (or not a repo): registration still
-      # proceeds, but pushes will fail far from here — leave the breadcrumb.
-      Rails.logger.warn("origin not normalized for #{target}: #{err.strip.presence || out.strip}")
-      return
-    end
-
-    url = out.strip
-    https = url.sub(%r{\A(?:ssh://)?git@github\.com[:/]}, "https://github.com/")
-    if https == url
-      # Non-github ssh remotes survive the rewrite (the allowlist only admits
-      # github.com sources, but a pre-existing dir can point anywhere) — and
-      # Hive's unattended push path uses credentials for https://github.com.
-      unless url.start_with?("https://github.com/")
-        Rails.logger.warn("origin for #{target} is #{url.inspect} — Hive can only push to https://github.com remotes")
-      end
-      return
-    end
-
-    _out, err, set_status = Open3.capture3("git", "-C", target, "remote", "set-url", "origin", https)
-    raise Hive::Error, "failed to switch origin to https: #{err.strip}" unless set_status.success?
   end
 
   def github_repositories(registered_names)
@@ -233,15 +63,7 @@ class ReposController < ApplicationController
       }
     end
   rescue Hive::Error => e
-    # The repos page must still render the registered list when GitHub is
-    # unreachable or the token grant was revoked — degrade to a notice.
     @github_error = e.message
     nil
-  end
-
-  def valid_repo_url?(url)
-    return false if url.start_with?("-")
-
-    GITHUB_URL_RE.match?(url) || GITHUB_SSH_RE.match?(url) || GH_SHORTHAND_RE.match?(url)
   end
 end

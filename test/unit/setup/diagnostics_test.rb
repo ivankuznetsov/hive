@@ -143,12 +143,30 @@ class SetupDiagnosticsTest < Minitest::Test
     diag = Hive::Setup::Diagnostics.new(ruby_version: "3.4.1")
     with_replaced_singleton_method(Hive::Web::AppBundle, :present?, -> { true }) do
       with_replaced_singleton_method(Hive::Web::AppBundle, :stale?, -> { false }) do
-        with_replaced_singleton_method(Hive::Web::AppBundle, :app_dir, -> { "/managed/web" }) do
+        with_replaced_singleton_method(Hive::Web::AppBundle, :assets_ready?, -> { true }) do
+          with_replaced_singleton_method(Hive::Web::AppBundle, :app_dir, -> { "/managed/web" }) do
+            row = diag.check_web_bundle
+
+            assert_equal "ok", row.status
+            assert_equal "/managed/web", row.detail
+            refute row.bootstrappable, "a present+current bundle must not be a bootstrap candidate"
+          end
+        end
+      end
+    end
+  end
+
+  def test_web_bundle_with_missing_assets_is_bootstrappable
+    diag = Hive::Setup::Diagnostics.new(ruby_version: "3.4.1")
+    with_replaced_singleton_method(Hive::Web::AppBundle, :present?, -> { true }) do
+      with_replaced_singleton_method(Hive::Web::AppBundle, :stale?, -> { false }) do
+        with_replaced_singleton_method(Hive::Web::AppBundle, :assets_ready?, -> { false }) do
           row = diag.check_web_bundle
 
-          assert_equal "ok", row.status
-          assert_equal "/managed/web", row.detail
-          refute row.bootstrappable, "a present+current bundle must not be a bootstrap candidate"
+          assert_equal "missing", row.status
+          assert_equal "managed web bundle assets are missing", row.detail
+          assert row.bootstrappable, "hive setup repairs a current bundle whose compiled assets are absent"
+          assert_nil row.fix_command
         end
       end
     end

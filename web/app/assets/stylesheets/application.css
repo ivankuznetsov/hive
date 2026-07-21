@@ -247,6 +247,27 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .composer-toolbar .spacer { flex: 1; }
 .composer select { max-width: 220px; }
 
+.daemon-panel {
+  display: flex;
+  align-items: center;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  margin: 0 0 28px;
+  font-size: 0.88rem;
+}
+.daemon-panel-running { background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 25%, transparent); }
+.daemon-panel-warning, .daemon-panel-stopped { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 25%, transparent); }
+.daemon-summary, .daemon-action { display: flex; align-items: center; gap: 8px; }
+.daemon-summary strong { font-family: var(--font-sans); font-size: 0.9rem; }
+.daemon-action { margin-left: auto; }
+.daemon-warning, .daemon-guidance { color: var(--ink-muted); }
+.daemon-guidance { flex: 1 0 100%; padding-left: 17px; }
+.daemon-guidance code { font-family: var(--font-mono); font-size: 0.84em; }
+.daemon-panel form { margin: 0; }
+
 /* Project filter rail (TUI left-pane parity). */
 .status-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 30px; align-items: start; }
 .project-nav { position: sticky; top: 24px; display: flex; flex-direction: column; gap: 2px; }
@@ -702,6 +723,26 @@ pre {
   }
   .topbar nav::-webkit-scrollbar { display: none; }
   .session-login { display: none; }
+  .project-nav {
+    margin-inline: -14px;
+    padding-inline: 14px;
+    scroll-padding-inline: 14px;
+  }
+  .project-nav::-webkit-scrollbar { display: none; }
+  .composer-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
+  }
+  .composer select {
+    grid-column: 1 / -1;
+    width: 100%;
+    max-width: none;
+  }
+  .composer-toolbar .spacer { display: none; }
+  .composer-attach { justify-content: center; }
+  .composer input[type="submit"] { width: 100%; }
+  .daemon-action { margin-left: 0; }
   .task-row { grid-template-columns: 1fr; gap: 8px; }
   .task-meta { flex-wrap: wrap; white-space: normal; }
   .workflow-row { grid-template-columns: 1fr; }

@@ -1,0 +1,59 @@
+name: watch_semantic_transitions
+description: Real hive watch subprocess emits one semantic transition and a schema-valid settled final without mutating task ownership.
+tags: [watch, cli-only]
+steps:
+  - kind: seed_state
+    stage: 2-brainstorm
+    slug: watched-task
+    state_file: brainstorm.md
+    content: "# Watched task\n"
+
+  - kind: spawn_background
+    id: watch
+    args:
+      - watch
+      - "{project}:{slug}"
+      - --json-lines
+      - --interval
+      - "0.05"
+      - --timeout
+      - "10"
+
+  - kind: log_assert
+    path: "{run_home}/background/watch.log"
+    match: '"event":"initial".*"state":"idle"'
+    timeout: 5
+
+  - kind: write_file
+    path: "{task_dir:2-brainstorm}/brainstorm.md"
+    content: "# Watched task\n\n<!-- WAITING -->\n"
+
+  - kind: log_assert
+    path: "{run_home}/background/watch.log"
+    match: '"event":"transition".*"state":"waiting_on_you"'
+    timeout: 5
+
+  - kind: log_assert
+    path: "{run_home}/background/watch.log"
+    match: '"event":"final".*"reason":"settled"'
+    timeout: 5
+
+  - kind: stop_process
+    id: watch
+
+  - kind: ruby_block
+    block: |
+      require "json_schemer"
+      log_path = File.join(run_home, "background", "watch.log")
+      events = File.readlines(log_path, chomp: true).reject(&:empty?).map { |line| JSON.parse(line) }
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-watch-event"))))
+      raise "watch lines failed schema validation" unless events.all? { |event| schema.valid?(event) }
+      raise "unexpected watch lifecycle" unless events.map { |event| event.fetch("event") } == %w[initial transition final]
+
+  - kind: state_assert
+    path: "{task_dir:2-brainstorm}/brainstorm.md"
+    marker: { current: WAITING }
+
+  - kind: state_assert
+    path: "{task_dir:2-brainstorm}/.lock"
+    absent: true

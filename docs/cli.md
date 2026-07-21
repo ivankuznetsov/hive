@@ -63,11 +63,13 @@ hive patrol my-project --dry-run --json
 The JSON envelope is `hive-patrol.v2` and includes attempted/successful review counts, full-sweep completion, exact reviewer errors, finding/candidate counts, closed per-attempt fix/publication outcomes, PR/review-handoff results, skip decisions, and `last_scanned_sha`. A sweep stays pinned to its original SHA if main advances, then a later sweep starts at the newer SHA; the watermark advances only when the pinned sweep completes. Durable patrol state is stored under `<project>/.hive-state/patrol/`; immutable finding records and selection audit logs retain the score and decision behind each cycle. The pinned `hive-patrol.v1` schema remains available for existing consumers.
 
 Architecture patrol is the language-neutral post-merge discovery path. Fresh
-projects enable its read-only discovery by default; headless setup can make the
-choice before Hive writes state with `hive init --refactor-patrol` or
-`hive init --no-refactor-patrol`. These flags do not enable auto-fixing or issue
-filing. They are fresh-project selectors; an existing project rejects them
-rather than silently ignoring the choice during a workflow rebind.
+projects enable discovery, confined auto-fix/PR attempts, and issue fallback by
+default. Headless setup can make the whole choice before Hive writes state with
+`hive init --refactor-patrol` or `hive init --no-refactor-patrol`. These are
+fresh-project selectors; an existing project rejects them rather than silently
+ignoring the choice during a workflow rebind. Older discovery-only configs do
+not inherit mutation authority; established projects opt in by writing
+`refactor_patrol.auto_fix.enabled: true` explicitly.
 
 Durable architecture-patrol jobs have a non-mutating inspection surface:
 

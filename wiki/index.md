@@ -10,10 +10,12 @@ tags: [index, wiki]
 
 **TLDR**: Catalog of the LLM-maintained wiki for `hive`.
 
-Page count: 93
+Page count: 94
 Updated: 2026-07-20
 
-Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`, `grok`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. The public native release surface is the `hive-cli` rubygem plus authenticated managed Hive web bundle installed through Homebrew, AUR, or `install.sh`, with `hive setup` installing the loopback service by default on Linux/macOS and `hv` as the Apache Hive collision fallback. Hivebox remains the Docker distribution through the GHCR image and `hivecli.sh/box` shell / PowerShell installers for isolation, multiple instances, untrusted-agent containment, and reproducible server/NAS deployments. Managed built-in agent skills have a separate read-only `hive doctor` diagnosis and consent-safe `hive setup-agents` provisioning contract; Hive web, `hive init` workflow selection and normal-vs-patrol reviewer split, project-global Claude model/effort pins, `hive connect screenote` for OAuth-backed Screenote MCP uploads, ordinary `hive patrol` handoff into `6-review`, default-recommended language-neutral post-merge discovery through `hive refactor-patrol`, `hive babysit`, `hive bench submit` for hive-bench corpus submissions, `hive digest` for the daily shipped digest, and the single ClawHub `hive-cli` listing that installs the OpenClaw `/hive` skill are covered by dedicated command/module pages.
+Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`, `grok`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. Agent operation is centered on the additive operational status contract, coherent daemon scheduler snapshots, bounded semantic `hive watch`, and tokenized routine `hive act`; the legacy full JSON graph remains compatible. Hive packages one canonical operating skill projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, and Pi `/skill:hive`, with read-only `hive doctor`, consent-safe setup, and an exact-SHA four-agent pre-release proof.
+
+The public native release surface is the `hive-cli` rubygem plus authenticated managed Hive web bundle installed through Homebrew, AUR, or `install.sh`, with `hive setup` installing the loopback service by default on Linux/macOS and `hv` as the Apache Hive collision fallback. Hivebox remains the Docker distribution through the GHCR image and `hivecli.sh/box` shell / PowerShell installers for isolation, multiple instances, untrusted-agent containment, and reproducible server/NAS deployments. Hive web, `hive init` workflow selection and normal-vs-patrol reviewer split, project-global Claude model/effort pins, `hive connect screenote`, ordinary and architecture patrol, `hive babysit`, `hive bench submit`, `hive digest`, and the single ClawHub `hive-cli` listing are covered by dedicated command/module pages.
 
 ## Pages
 
@@ -48,6 +50,7 @@ Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descr
 - [[commands/setup-agents]] — `wiki/commands/setup-agents.md`
 - [[commands/stage_action]] — `wiki/commands/stage_action.md`
 - [[commands/status]] — `wiki/commands/status.md`
+- [[commands/watch]] — `wiki/commands/watch.md`
 - [[commands/tui]] — `wiki/commands/tui.md`
 - [[commands/uninstall]] — `wiki/commands/uninstall.md`
 - [[commands/update]] — `wiki/commands/update.md`

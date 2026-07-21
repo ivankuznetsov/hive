@@ -8,6 +8,10 @@ module Hive
     module_function
 
     FILENAME = "meta.yml".freeze
+    WRITABLE_FIELDS = %i[
+      id slug display_name depends_on workflow workflow_commit
+      workflow_manifest_digest workflow_configuration_digest
+    ].freeze
 
     class InvalidMetadata < StandardError; end
 
@@ -158,41 +162,21 @@ module Hive
     end
 
     def update_display_name(task_folder, name)
-      current = read_for_update!(task_folder)
-      slug = current[:slug] || File.basename(task_folder)
-      write(
-        task_folder,
-        id: current[:id],
-        slug: slug,
-        display_name: name,
-        depends_on: current[:depends_on],
-        workflow: current[:workflow],
-        workflow_commit: current[:workflow_commit],
-        workflow_manifest_digest: current[:workflow_manifest_digest],
-        workflow_configuration_digest: current[:workflow_configuration_digest]
-      )
+      rewrite(task_folder, display_name: name)
     end
 
     # Set the task id while preserving every other meta field. Used by the
     # daemon's id backfiller to assign an id to a task created outside
     # `hive new` (hand-made folder, `mv`-ed in) whose meta has none.
     def update_id(task_folder, id)
+      rewrite(task_folder, id: id)
+    end
+
+    def rewrite(task_folder, changes)
       current = read_for_update!(task_folder)
-      slug = current[:slug] || File.basename(task_folder)
-      write(
-        task_folder,
-        id: id,
-        slug: slug,
-        display_name: current[:display_name],
-        depends_on: current[:depends_on],
-        # Preserve the workflow selector — without it, the daemon's id
-        # backfiller would silently drop a non-coding `workflow:` and revert
-        # the task to the project default (mirrors update_display_name).
-        workflow: current[:workflow],
-        workflow_commit: current[:workflow_commit],
-        workflow_manifest_digest: current[:workflow_manifest_digest],
-        workflow_configuration_digest: current[:workflow_configuration_digest]
-      )
+      updated = current.merge(changes)
+      updated[:slug] ||= File.basename(task_folder)
+      write(task_folder, **updated.slice(*WRITABLE_FIELDS))
     end
 
     def empty

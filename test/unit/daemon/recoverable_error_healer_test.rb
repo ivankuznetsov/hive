@@ -109,6 +109,16 @@ class HiveDaemonRecoverableErrorHealerTest < Minitest::Test
     )
   end
 
+  def test_operational_snapshot_reports_disabled_recovery_without_mutation
+    snapshot = healer(config: { "daemon" => { "auto_retry" => { "enabled" => false } } })
+               .operational_snapshot
+
+    assert_equal false, snapshot.fetch("enabled")
+    assert_equal 2, snapshot.fetch("limit")
+    assert_empty snapshot.fetch("retries")
+    assert_empty snapshot.fetch("exhausted")
+  end
+
   def with_error_row(stage: "4-execute", attrs: nil, workflow: "coding")
     with_tmp_dir do |dir|
       state_file = File.join(dir, "task.md")
@@ -219,6 +229,11 @@ class HiveDaemonRecoverableErrorHealerTest < Minitest::Test
       assert_equal :error, Hive::Markers.current(state_file).name
       exhausted = @logger.events.select { |name, _attrs| name == :auto_retry_exhausted }
       assert_equal 1, exhausted.size
+      snapshot = h.operational_snapshot
+      assert_equal 2, snapshot.fetch("retries").first.fetch("attempts")
+      assert_equal({
+        "project" => "p", "slug" => "s", "stage" => "4-execute", "reason" => "implementer_failed"
+      }, snapshot.fetch("exhausted").first)
     end
   end
 

@@ -7,7 +7,7 @@ class WorkflowFlowTest < ApplicationSystemTestCase
   end
 
   teardown do
-    WorkflowsController.instance_variable_set(:@workflow_lifecycle, nil)
+    Workflow.reset_lifecycle!
     Hive::Workflows::Project.reset!
   end
 
@@ -39,7 +39,7 @@ class WorkflowFlowTest < ApplicationSystemTestCase
 
   test "operator reviews exact managed permissions before installing" do
     lifecycle = FakeManagedLifecycle.new
-    WorkflowsController.instance_variable_set(:@workflow_lifecycle, lifecycle)
+    Workflow.lifecycle = lifecycle
     sign_in!
     visit workflows_path(project: @project)
 

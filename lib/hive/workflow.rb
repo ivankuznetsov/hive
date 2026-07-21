@@ -27,6 +27,9 @@ module Hive
     # runners (council.rb round-tracking + triage.rb path building) so the value
     # can't drift across those copies.
     DEFAULT_TRIAGE_OUTPUT = "reviews/triage.md"
+    MAPPING_ROLES = %w[planning development reviewer].freeze
+
+    ExecutableSlot = Data.define(:id, :kind, :actor, :default_role)
 
     def each(&) = stages.each(&)
 
@@ -63,6 +66,34 @@ module Hive
     # built each call, so freezing it can't surprise a caller.
     def stage_names = map(&:name).freeze
     def stage_dirs = map(&:dir).freeze
+
+    # Canonical managed-runtime topology. Configuration snapshots, package
+    # validation, and admission all consume these same stable actor slots.
+    def executable_slots
+      stages.flat_map do |stage|
+        next [] unless [ :agent, :council ].include?(stage.kind)
+
+        slots = [
+          ExecutableSlot.new(
+            id: "stages.#{stage.name}", kind: :stage, actor: stage,
+            default_role: "development"
+          )
+        ]
+        Array(stage.reviewers).each do |reviewer|
+          slots << ExecutableSlot.new(
+            id: "stages.#{stage.name}.reviewers.#{reviewer.name}",
+            kind: :reviewer, actor: reviewer, default_role: "reviewer"
+          )
+        end
+        if stage.council&.revise
+          slots << ExecutableSlot.new(
+            id: "stages.#{stage.name}.revise", kind: :revise,
+            actor: stage.council.revise, default_role: "development"
+          )
+        end
+        slots
+      end
+    end
 
     Stage = Data.define(
       :name, :index, :state_file, :advance_verb, :kind, :skill, :instruction,

@@ -15,7 +15,8 @@ class ApplicationController < ActionController::Base
   before_action :authorize_local_host!
   before_action :require_login
 
-  helper_method :current_login, :operator_access?, :operator_label
+  helper_method :current_login, :operator_access?, :operator_label,
+                :local_web_mode?, :web_product_name
 
   # Hive's typed errors are operator-readable by design ("task not in stage",
   # "invalid clone URL"). Render them on an error page instead of a blank
@@ -64,6 +65,17 @@ class ApplicationController < ActionController::Base
     current_login.presence || "Local"
   end
 
+  def local_web_mode?
+    Hive::Web::Environment.boolean("HIVE_WEB_LOCAL_LOOPBACK")
+  end
+
+  def web_product_name
+    return "hive" if local_web_mode?
+    return "hivebox" if ENV["HIVEBOX_PRECOMPILED_ASSETS"] == "1"
+
+    "Hive web"
+  end
+
   def require_login
     return if local_loopback_request?
     return redirect_to login_path unless current_login
@@ -85,8 +97,12 @@ class ApplicationController < ActionController::Base
   # "which addresses count as loopback" rule can't drift between the tier
   # that sets HIVE_WEB_LOCAL_LOOPBACK and the tier that honors it.
   def local_loopback_request?
-    return false unless Hive::Web::Environment.boolean("HIVE_WEB_LOCAL_LOOPBACK")
+    return false unless local_web_mode?
 
+    # Trust the socket peer, not ActionDispatch's proxy-expanded remote_ip.
+    # Tailscale Serve connects from localhost but forwards the tailnet client's
+    # address; treating that forwarded address as the peer wrongly turns the
+    # local control plane into hivebox's GitHub owner gate.
     Hive::Web::Loopback.address?(request.get_header("REMOTE_ADDR"))
   end
 
@@ -109,11 +125,10 @@ class ApplicationController < ActionController::Base
   end
 
   def registered_projects
-    @registered_projects ||= Hive::Config.registered_projects
+    @registered_projects ||= Project.all
   end
 
   def find_project!(name)
-    registered_projects.find { |p| p["name"] == name } ||
-      raise(Hive::InvalidTaskPath, "unknown project #{name}")
+    Project.find!(name, projects: registered_projects)
   end
 end

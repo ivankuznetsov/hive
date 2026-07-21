@@ -40,6 +40,43 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
   # --- tests ---------------------------------------------------------------
 
+  test "mobile status keeps composer controls inside the viewport" do
+    create_hive_project!("topgreendeals.co.uk")
+    create_hive_project!("architecture")
+    sign_in!
+    page.current_window.resize_to(390, 844)
+    visit "/"
+
+    metrics = page.evaluate_script(<<~JS)
+      (() => {
+        const viewportWidth = document.documentElement.clientWidth
+        const selectors = [
+          ".composer",
+          ".composer select[name='project']",
+          ".composer-attach",
+          ".composer input[type='submit']",
+          ".daemon-panel"
+        ]
+        return {
+          pageWidth: document.documentElement.scrollWidth,
+          viewportWidth,
+          controls: selectors.map((selector) => {
+            const rect = document.querySelector(selector).getBoundingClientRect()
+            return { selector, left: rect.left, right: rect.right }
+          })
+        }
+      })()
+    JS
+
+    assert_equal metrics.fetch("viewportWidth"), metrics.fetch("pageWidth"),
+                 "the status page must not overflow the mobile viewport"
+    metrics.fetch("controls").each do |control|
+      assert_operator control.fetch("left"), :>=, 0, "#{control.fetch('selector')} starts off-screen"
+      assert_operator control.fetch("right"), :<=, metrics.fetch("viewportWidth"),
+                      "#{control.fetch('selector')} ends off-screen"
+    end
+  end
+
   test "login gate, composer with image, live stream update, approve" do
     # Unauthenticated → login page, nothing leaks.
     visit "/"
@@ -70,8 +107,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
     JS
     submit_idea
     assert_selector ".flash-notice", text: "Idea added", wait: 5
-    assert_equal "", find("textarea[aria-label='New idea']").value,
-                 "a submitted permanent composer must not retain a duplicate-ready draft"
+    assert page.has_field?("New idea", with: "", wait: 5),
+           "a submitted permanent composer must not retain a duplicate-ready draft"
     assert_no_selector ".chip", wait: 0
     assert_equal 0, page.evaluate_script("document.querySelector('[data-composer-target=\"files\"]').files.length"),
                  "successful submission must release the staged upload transport"
@@ -204,35 +241,50 @@ class PipelineFlowTest < ApplicationSystemTestCase
   end
 
   test "the project rail filters the grid and survives live updates" do
-    second = create_hive_project!("second-app")
-    create_task!(@project, "Demo task one")
-    create_task!(second, "Second task one")
+    filtered = create_hive_project!("rail-filter-app")
+    active = create_hive_project!("rail-active-app")
+    create_task!(filtered, "Filter task one")
+    create_task!(active, "Active task one")
     sign_in!
     visit "/"
-    assert_selector ".project-section[data-project-name='#{@project}']"
-    assert_selector ".project-section[data-project-name='second-app']"
+    assert_selector ".project-section[data-project-name='#{filtered}']"
+    assert_selector ".project-section[data-project-name='#{active}']"
 
-    click_button @project
-    assert_selector ".project-section[data-project-name='#{@project}']"
-    assert_no_selector ".project-section[data-project-name='second-app']",
+    click_project_filter(filtered)
+    assert_selector ".project-section[data-project-name='#{filtered}']"
+    assert_no_selector ".project-section[data-project-name='#{active}']",
                        wait: 5
-    assert_includes page.current_url, "project=#{@project}",
+    assert_includes page.current_url, "project=#{filtered}",
                     "the choice must reach the URL so reloads land filtered"
-    assert_equal @project, find(".composer select[name='project']").value,
+    assert_equal filtered, composer_project,
                  "filtering is a context switch — new ideas should land in that project"
 
     # The broadcast REPLACES the grid, discarding our hidden attributes —
     # the filter must re-apply itself on the fresh DOM.
-    create_task!(second, "Second task two")
-    assert_selector ".project-section[data-project-name='second-app'][hidden]",
+    create_task!(active, "Active task two")
+    assert_selector ".project-section[data-project-name='#{active}'][hidden]",
                     visible: :hidden, wait: 10
-    assert_selector ".task-row", text: "Demo task one",
+    assert_selector ".task-row", text: "Active task two", visible: :hidden, wait: 10
+    assert_selector ".task-row", text: "Filter task one",
                     count: 1
+    rail_projects = page.evaluate_script(
+      "Array.from(document.querySelectorAll('.project-nav button'), node => node.textContent.trim())"
+    )
+    assert_operator rail_projects.index(active), :<, rail_projects.index(filtered),
+                    "the rail must adopt the live activity order"
+    composer_projects = page.evaluate_script(
+      "Array.from(document.querySelectorAll(\".composer select[name='project'] option:not([disabled])\"), " \
+      "node => node.value)"
+    )
+    assert_operator composer_projects.index(active), :<, composer_projects.index(filtered),
+                    "the permanent composer must adopt the live activity order"
+    assert_equal filtered, composer_project,
+                 "reordering projects must preserve the operator's selection"
 
-    click_button "All projects"
-    assert_selector ".project-section[data-project-name='second-app']"
-    assert_selector ".task-row", text: "Second task two"
-    assert_equal @project, find(".composer select[name='project']").value,
+    click_project_filter(nil)
+    assert_selector ".project-section[data-project-name='#{active}']"
+    assert_selector ".task-row", text: "Active task two"
+    assert_equal filtered, composer_project,
                  "widening the view must not discard the composer's project choice"
 
     click_link "+ Add project"
@@ -465,6 +517,33 @@ class PipelineFlowTest < ApplicationSystemTestCase
   end
 
   private
+
+  # StatusBroadcaster replaces the project rail and composer select while this
+  # test is using them. Query and click/read in one JavaScript turn so Turbo
+  # cannot detach a Capybara node between lookup and Playwright's action.
+  def click_project_filter(name, timeout: 5)
+    target = name.to_s.to_json
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      clicked = page.evaluate_script(<<~JS)
+        (() => {
+          const button = Array.from(document.querySelectorAll(".project-nav button"))
+            .find((node) => node.dataset.projectFilterNameParam === #{target})
+          if (!button) return false
+          button.click()
+          return true
+        })()
+      JS
+      return if clicked
+      raise "project filter #{name.inspect} never appeared" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+
+      sleep 0.05
+    end
+  end
+
+  def composer_project
+    page.evaluate_script("document.querySelector(\".composer select[name='project']\")?.value")
+  end
 
   def fixture_image
     path = File.join(ENV["HIVE_TEST_HOME_ROOT"], "fixture.png")

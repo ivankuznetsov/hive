@@ -44,6 +44,14 @@ class InitSetup
       end
     end
 
+    def workflow(value)
+      value = value.to_s.strip.presence
+      return if value.nil?
+      return value if Hive::Workflows::DescriptorParser::SAFE_SLUG.match?(value)
+
+      raise Hive::Error, "invalid workflow id"
+    end
+
     def defaults
       {
         "planning_agent" => Prompts::DEFAULT_PLANNING_AGENT,

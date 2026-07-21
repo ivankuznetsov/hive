@@ -123,6 +123,14 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal "run", Hive::Bot::NotificationBuilders.verb_for_action("ready_to_run")
   end
 
+  def test_ready_actions_share_task_action_commands
+    assert_equal Hive::TaskAction::READY_COMMANDS.keys,
+                 Hive::Bot::NotificationBuilders::READY_ACTIONS
+    Hive::TaskAction::READY_COMMANDS.each do |action, command|
+      assert_equal command, Hive::Bot::NotificationBuilders.verb_for_action(action)
+    end
+  end
+
   def test_display_title_handles_name_without_id_and_slug_fallback
     named = row(action: "needs_input", marker: "waiting", display_name: "Named Only")
     legacy = row(action: "needs_input", marker: "waiting", slug: "task-260514-abcd")

@@ -16,8 +16,8 @@ require "hive/web/environment"
 module Hive
   module Commands
     # `hive doctor` is the read-only renderer for AgentSkills::Inspector.
-    # Managed skill rows combine bounded native CLI inventory with the exact
-    # filesystem resolver used at runtime; legacy tmux/QMD/config advisories
+    # Managed skill rows combine filesystem-only native inventory with the
+    # exact filesystem resolver used at runtime; legacy tmux/QMD/config advisories
     # remain separate. `--json` emits the typed hive-doctor.v2 envelope.
     class Doctor
       EXIT_SUCCESS = 0
@@ -31,14 +31,12 @@ module Hive
       attr_reader :rows
 
       def initialize(config:, project_root:, json: false, output: $stdout,
-                     inspector: nil, inspector_runner: Hive::AgentSkills::CommandRunner.new,
-                     environment: ENV)
+                     inspector: nil, environment: ENV)
         @config = config
         @project_root = project_root
         @json = json
         @output = output
         @inspector = inspector
-        @inspector_runner = inspector_runner
         @environment = environment
         @rows = nil
       end
@@ -80,8 +78,9 @@ module Hive
         inspector = @inspector || Hive::AgentSkills::Inspector.new(
           config: @config,
           project_root: @project_root,
-          runner: @inspector_runner,
-          environment: @environment
+          environment: @environment,
+          include_openclaw: true,
+          native_commands: false
         )
         inspector.inspect.map { |inspection| managed_row(inspection) }
       end

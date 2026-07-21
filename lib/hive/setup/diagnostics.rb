@@ -131,6 +131,9 @@ module Hive
           # it automatically, so still a bootstrap candidate.
           Result.new(name: "web_bundle", status: "version_too_old",
                      detail: "managed web bundle is stale", fix_command: nil, bootstrappable: true)
+        elsif !Hive::Web::AppBundle.assets_ready?
+          Result.new(name: "web_bundle", status: "missing",
+                     detail: "managed web bundle assets are missing", fix_command: nil, bootstrappable: true)
         else
           # Installed and current: a real success, NOT a bootstrap candidate
           # (the old code emitted status "ok" with bootstrappable: true — an

@@ -5,6 +5,7 @@ require "time"
 require "uri"
 require "hive/atomic_file"
 require "hive/refactor_patrol/claim_transitions"
+require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/job_indexes"
 require "hive/refactor_patrol/job_query_index"
 require "hive/refactor_patrol/job_record_validator"
@@ -20,6 +21,7 @@ module Hive
     class JobStore
       SCHEMA = "hive-refactor-patrol-job".freeze
       SCHEMA_VERSION = 2
+      SUPPORTED_DISCOVERY_PAYLOAD_SCHEMA_VERSIONS = [ 2, 3 ].freeze
       ID_PATTERN = /\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\z/
       STATES = %w[queued analyzing classified acting blocked complete].freeze
       DISPOSITIONS = %w[accepted flagged suppressed].freeze
@@ -42,8 +44,9 @@ module Hive
       POLICY_OPTIONAL_COMMAND_KEYS = %w[public_contract].freeze
       POLICY_CAP_KEYS = %w[
         single_feature_only allow_dependency_bumps allow_public_api_changes
-        max_files max_diff_lines allow_cross_feature
+        allow_cross_feature
       ].freeze
+      LEGACY_POLICY_CAP_KEYS = %w[max_files max_diff_lines].freeze
       DISPOSITION_KEYS = %w[id feature_id fingerprint score admissible reasons reference thesis family_id].freeze
       FEATURE_RESULT_KEYS = %w[feature_id complete thesis_ids errors].freeze
       ACTION_REQUIRED_KEYS = %w[
@@ -1010,6 +1013,26 @@ module Hive
         File.join(root, "indexes", "actions.json")
       end
 
+      # Historical size caps classified otherwise admissible theses as
+      # flagged. Keep that immutable classification on disk, but treat a row
+      # whose complete reason/flag set consists only of those retired cap
+      # codes as accepted when deciding current action authority.
+      def effective_disposition(disposition, item)
+        name = disposition.to_s
+        return name unless name == "flagged"
+        return name unless item.is_a?(Hash) && item["admissible"] == true
+
+        thesis = item["thesis"]
+        return name unless thesis.is_a?(Hash) && thesis["admissible"] == true
+
+        findings = Array(item["reasons"]).map(&:to_s) +
+                   Array(thesis.dig("risk", "flags")).map(&:to_s)
+        return name if findings.empty?
+        return name unless (findings - Caps::LEGACY_SIZE_FLAGS).empty?
+
+        "accepted"
+      end
+
       private
 
       def ordered_job_query_ids
@@ -1047,6 +1070,7 @@ module Hive
           raise InconsistentRecord.new("action thesis is not classified", path: path) unless entry
 
           disposition, thesis = entry
+          disposition = effective_disposition(disposition, thesis)
           validate_action_authority!(aggregate, kind, disposition, thesis, path)
           family_id = specification["family_id"].to_s unless specification["family_id"].nil?
           identity = action_identity(kind, family_id, thesis, path)
@@ -1396,7 +1420,7 @@ module Hive
 
       def assert_matching_discovery_payload!(aggregate, payload, intermediate: false)
         unless payload.is_a?(Hash) && payload["schema"] == "hive-refactor-patrol" &&
-               payload["schema_version"] == SCHEMA_VERSION && payload["ok"] == true &&
+               SUPPORTED_DISCOVERY_PAYLOAD_SCHEMA_VERSIONS.include?(payload["schema_version"]) && payload["ok"] == true &&
                [ true, false ].include?(payload["complete"]) &&
                payload["job_id"] == aggregate.fetch("job_id") &&
                payload["project"] == aggregate.dig("source", "registration") &&
@@ -1493,7 +1517,10 @@ module Hive
       def action_authorized_for?(aggregate)
         policy = aggregate.fetch("policy")
         (policy.fetch("auto_fix") && aggregate.dig("dispositions", "accepted").any?) ||
-          (policy.fetch("issue_filing") && aggregate.dig("dispositions", "flagged").any? { |item| item["admissible"] == true })
+          (policy.fetch("issue_filing") && (
+            aggregate.dig("dispositions", "accepted").any? ||
+            aggregate.dig("dispositions", "flagged").any? { |item| item["admissible"] == true }
+          ))
       end
 
       def source_from_manifest(manifest)

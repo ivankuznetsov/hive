@@ -1,6 +1,8 @@
 require "test_helper"
 require "fileutils"
 require "hive/commands/init"
+require "hive/agent_skills/canonical_skill"
+require "hive/agent_skills/directory_publisher"
 
 # Verifies the non-fatal skill preflight that runs at the end of
 # `Hive::Commands::Init#call`. Composes the existing init test
@@ -59,6 +61,19 @@ class InitDoctorPreflightTest < Minitest::Test
   # (matches the recommended-default config that `hive init` writes).
   # See `templates/project_config.yml.erb` for the reviewer roster.
   def install_all_default_skills(home)
+    roots = {
+      "claude" => File.join(home, ".claude"),
+      "codex" => File.join(home, ".codex"),
+      "pi" => File.join(home, ".pi", "agent")
+    }
+    roots.each do |platform, root|
+      publisher = Hive::AgentSkills::DirectoryPublisher.new(
+        root: root,
+        trusted_root: home,
+        projection: Hive::AgentSkills::CanonicalSkill.new.render(platform)
+      )
+      publisher.publish(expected_snapshot: publisher.report.snapshot)
+    end
     # plan stage default → /plan (user command)
     write_file("#{home}/.claude/commands/plan.md")
     # brainstorm stage default → /ce-brainstorm

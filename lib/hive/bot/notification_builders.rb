@@ -6,6 +6,7 @@ require "hive/bot/format"
 require "hive/bot/row_actions"
 require "hive/bot/title_formatter"
 require "hive/markers"
+require "hive/task_action"
 require "hive/workflows"
 
 module Hive
@@ -13,18 +14,7 @@ module Hive
     module NotificationBuilders
       module_function
 
-      READY_ACTIONS = %w[
-        ready_to_brainstorm
-        ready_to_plan
-        ready_to_develop
-        ready_to_open_pr
-        ready_for_review
-        ready_to_artifacts
-        ready_to_finalize
-        ready_to_archive
-        ready_to_advance
-        ready_to_run
-      ].freeze
+      READY_ACTIONS = Hive::TaskAction::READY_COMMANDS.keys.freeze
 
       INPUT_ACTIONS = %w[
         needs_input
@@ -638,22 +628,7 @@ module Hive
       end
 
       def verb_for_action(action)
-        {
-          "ready_to_brainstorm" => "brainstorm",
-          "ready_to_plan" => "plan",
-          "ready_to_develop" => "develop",
-          "ready_to_open_pr" => "open-pr",
-          "ready_for_review" => "review",
-          "ready_to_artifacts" => "artifacts",
-          "ready_to_finalize" => "finalize",
-          "ready_to_archive" => "archive",
-          # Generic-workflow ready rows: advance promotes the task to the
-          # next stage (`hive approve`), run dispatches the generic stage
-          # agent (`hive run`). Without these a generic row gets no Telegram
-          # button and a daemon-disabled project can't drive it from chat.
-          "ready_to_advance" => "approve",
-          "ready_to_run" => "run"
-        }[action]
+        Hive::TaskAction::READY_COMMANDS[action]
       end
 
       CALLBACK_DATA_MAX = 64

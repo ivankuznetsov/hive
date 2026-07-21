@@ -8,6 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     XDG_CACHE_HOME=/data/cache \
     HIVEBOX_REPOS_DIR=/data/repos \
     HIVE_WEB_APP_DIR=/app/web \
+    HIVEBOX_PRECOMPILED_ASSETS=1 \
     RAILS_ENV=production
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -42,7 +43,9 @@ RUN bundle install \
        bin/rails assets:precompile \
     && rm -rf /tmp/assets-build \
     # Build steps run as root; the runtime user needs tmp/ + log/ writable
-    # (Rails creates tmp/pids on every server boot).
+    # (Rails creates tmp/pids on every server boot). Hivebox declares these
+    # image-built assets through HIVEBOX_PRECOMPILED_ASSETS above; native
+    # `hive web` retains its separate compile-on-start contract.
     && mkdir -p tmp/pids log \
     && chown -R hive:hive /app/web/tmp /app/web/log
 WORKDIR /app

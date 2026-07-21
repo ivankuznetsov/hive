@@ -50,6 +50,12 @@ module Hive
         raw/notes
       ].freeze
 
+      LLM_WIKI_SHARED_RUNTIME_FILES = %w[
+        post-commit-refresh.sh
+        compile-log.sh
+        config.json
+      ].freeze
+
       # Immutable value object (Data.define, matching the Workflow/Stage/
       # AdvanceVerb convention) carrying the resolved descriptor and the
       # provenance of the choice (:flag | :prompt | :implicit). The initialize
@@ -79,7 +85,7 @@ module Hive
                      workflow_input: $stdin, workflow_output: $stderr,
                      provisioning_input: $stdin, provisioning_output: $stdout,
                      provisioning_error: $stderr, preflight_inspector: nil,
-                     setup_agents_factory: nil)
+                     setup_agents_factory: nil, agent_skill_preflight: true)
         @project_path = File.expand_path(project_path)
         @force = force
         @json = json
@@ -95,6 +101,10 @@ module Hive
         @provisioning_output = provisioning_output
         @provisioning_error = provisioning_error
         @preflight_inspector = preflight_inspector
+        unless [ true, false ].include?(agent_skill_preflight)
+          raise ArgumentError, "agent_skill_preflight must be true or false"
+        end
+        @agent_skill_preflight = agent_skill_preflight
         @setup_agents_factory = setup_agents_factory || lambda do |**kwargs|
           Hive::Commands::SetupAgents.new(**kwargs)
         end
@@ -164,7 +174,7 @@ module Hive
           print_summary(entry: entry, ops: ops, answers: answers, workflow: workflow_choice.descriptor.id)
         end
         register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
-        run_init_preflight!
+        run_init_preflight! if @agent_skill_preflight
       rescue Hive::Commands::Init::Prompts::Aborted => e
         # The interactive WORKFLOW prompt (resolve_workflow_choice, which runs
         # before collect_prompt_answers) aborts on closed stdin. Mirror
@@ -213,7 +223,7 @@ module Hive
           print_summary(entry: entry, ops: ops, answers: answers, workflow: id, scaffold_paths: paths)
         end
         register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
-        run_init_preflight!
+        run_init_preflight! if @agent_skill_preflight
       end
 
       def scaffold_descriptor_commit!(ops, id)
@@ -638,11 +648,18 @@ module Hive
         project_paths = (INIT_MAIN_CHECKOUT_PATHS + INIT_MAIN_CHECKOUT_DIRS).map do |path|
           File.join(@project_path, path)
         end
-        project_paths + [
-          File.join(@project_path, ".git", "hooks", "post-commit"),
+        common_dir = Hive::LlmWikiBootstrap.git_common_dir(@project_path)
+        shared_dir = File.join(common_dir, "llm-wiki")
+        shared_paths = [
+          File.join(common_dir, "hooks", "post-commit"),
+          *LLM_WIKI_SHARED_RUNTIME_FILES.map { |name| File.join(shared_dir, name) },
+          shared_dir
+        ]
+
+        (project_paths + shared_paths + [
           *llm_wiki_scheduler_paths,
           Hive::Config.global_config_path
-        ]
+        ]).uniq
       end
 
       def llm_wiki_scheduler_paths

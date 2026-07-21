@@ -1,9 +1,12 @@
+require "fileutils"
 require "json"
+require "tmpdir"
 require "hive"
 require "hive/config"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/workflow_package/managed_store"
+require "hive/workflow_package/runtime_policy"
 
 module Hive
   module Commands
@@ -47,10 +50,27 @@ module Hive
           @store ||= Hive::WorkflowPackage::ManagedStore.new(hive_state_path)
         end
 
+        def project_config
+          @project_config ||= Hive::Config.load(@project_root)
+        end
+
         def hive_state_path
-          @hive_state_path ||= begin
-            configured = Hive::Config.load(@project_root).fetch("hive_state_path")
-            File.expand_path(configured, @project_root)
+          @hive_state_path ||= File.expand_path(
+            project_config.fetch("hive_state_path"), @project_root
+          )
+        end
+
+        def admit_runtime!(workflow, package_root, configuration: nil)
+          configured = configuration ? configuration.apply(workflow, cfg: project_config) : workflow
+          Dir.mktmpdir("hive-workflow-admission-") do |root|
+            task_folder = File.join(root, "task")
+            FileUtils.mkdir_p(task_folder)
+            Hive::WorkflowPackage::RuntimePolicy.admit_workflow!(
+              configured,
+              task_folder: task_folder,
+              policy_dir: File.join(root, "policy"),
+              package_root: package_root
+            )
           end
         end
 

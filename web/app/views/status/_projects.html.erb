@@ -6,12 +6,12 @@
     </div>
   <% else %>
     <% projects.each do |project| %>
-      <section class="project-section" data-project-name="<%= project["name"] %>">
+      <section class="project-section" data-project-name="<%= project.name %>">
         <div class="project-title">
-          <h2><%= project["name"] %></h2>
-          <span class="muted"><%= project.fetch("tasks", []).size %> active</span>
+          <h2><%= project.name %></h2>
+          <span class="muted"><%= project.active_tasks.size %> active</span>
         </div>
-        <% tasks = project.fetch("tasks", []) %>
+        <% tasks = project.active_tasks %>
         <% if tasks.empty? %>
           <div class="empty-state">
             <p>Nothing in flight.</p>
@@ -22,8 +22,8 @@
             <% tasks.each do |task| %>
               <article class="task-row">
                 <div class="task-name">
-                  <%= link_to task_title(task), task_path(project["name"], task["slug"]) %>
-                  <span class="task-slug"><%= task["slug"] %></span>
+                  <%= link_to task.title, task_path(project.name, task.slug) %>
+                  <span class="task-slug"><%= task.slug %></span>
                 </div>
                 <%= stage_badge(task["stage"]) %>
                 <span class="task-meta">

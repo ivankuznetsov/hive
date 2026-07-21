@@ -8,6 +8,16 @@ module Hive
   # Manifest-driven inspection and provisioning for Hive-owned built-in
   # workflow capabilities. Custom user skills remain visible but unmanaged.
   module AgentSkills
+    module_function
+
+    def same_source?(actual, expected)
+      normalize_source(actual) == normalize_source(expected)
+    end
+
+    def normalize_source(value)
+      value.to_s.strip.sub(%r{\Ahttps://github\.com/}i, "").sub(/\.git\z/i, "").downcase
+    end
+
     CommandResult = Data.define(:stdout, :stderr, :exit_status, :error, :timed_out) do
       def success?
         !timed_out && error.nil? && exit_status == 0
@@ -145,7 +155,7 @@ module Hive
       end
 
       def resolve(agents: nil, skills: nil)
-        targets = []
+        targets = Manifest::AGENTS.map { |agent| operating_target(agent) }
         STAGES.each { |stage| targets << stage_target(stage) }
         Array(@config.dig("review", "reviewers")).each_with_index do |spec, index|
           name = spec["name"].to_s
@@ -169,6 +179,21 @@ module Hive
       end
 
       private
+
+      def operating_target(agent)
+        capability = @manifest.capability("hive")
+        contract = capability.agent(agent)
+        Target.new(
+          surfaces: [ "hive.operations" ].freeze,
+          kind: "operating",
+          agent: agent,
+          configured_skill: capability.id,
+          invocation: contract.invocation,
+          capability_id: capability.id,
+          package_id: capability.package_id,
+          managed: true
+        )
+      end
 
       def stage_target(stage)
         agent = (@config.dig(stage, "agent") || "claude").to_s

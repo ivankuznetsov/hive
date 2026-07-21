@@ -57,7 +57,8 @@ module Hive
         end
       end
 
-      def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false)
+      def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
+                     observation_guard: nil)
         @target = target
         @to = to
         @from = from
@@ -68,6 +69,7 @@ module Hive
         # (e.g. StageAction) that emit their own unified envelope.
         # State changes and typed exceptions still propagate normally.
         @quiet = quiet
+        @observation_guard = observation_guard
       end
 
       def call
@@ -269,6 +271,7 @@ module Hive
               destination_exists?(destination_folder(task, dest_stage))
             Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
             Hive::Attempts::Context.current&.validate_generation!(task)
+            @observation_guard&.call(task)
             new_folder = move_task!(task, dest_stage)
           end
           cleanup_orphan_task_lock(new_folder)

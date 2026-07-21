@@ -182,6 +182,38 @@ class WorkflowUpdateCommandTest < Minitest::Test
     end
   end
 
+  def test_report_inputs_are_evaluated_once
+    calls = Hash.new(0)
+    diff = Object.new
+    diff.define_singleton_method(:to_h) do
+      calls[:diff] += 1
+      { "escalation_reasons" => [] }
+    end
+    diff.define_singleton_method(:escalation?) { false }
+    resolver = Object.new
+    resolver.define_singleton_method(:actor_policy_changed?) do
+      calls[:actor_policy] += 1
+      false
+    end
+    resolver.define_singleton_method(:input_bindings_changed?) do
+      calls[:inputs] += 1
+      false
+    end
+    resolver.define_singleton_method(:configuration) { Struct.new(:digest).new("digest") }
+    resolver.define_singleton_method(:mappings) { [] }
+    resolver.define_singleton_method(:inputs) { [] }
+    candidate = Struct.new(:source_commit, :manifest_digest).new("new", "manifest")
+    updater = Hive::Commands::Workflow::Update.new(
+      "demo", project_root: Dir.pwd, json: true, stdout: StringIO.new
+    )
+
+    updater.send(
+      :payload, "dry_run", { "source_commit" => "old" }, candidate, diff, resolver
+    )
+
+    assert_equal({ diff: 1, actor_policy: 1, inputs: 1 }, calls)
+  end
+
   def test_cleanup_failure_does_not_mask_the_activation_error
     with_update_fixture do |project, store, old, candidate_root, candidate|
       command = command(

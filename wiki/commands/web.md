@@ -7,9 +7,12 @@ updated: 2026-07-20
 tags: [command, web, rails, turbo, hivebox-container]
 ---
 
-**TLDR**: `hive web` boots Hive web — a vanilla **Rails 8** app
-(importmap, Turbo, Stimulus, propshaft, solid_cable) living in `web/` at the
-repo root, shipped in the Docker image at `/app/web`. The web tier adds no
+**TLDR**: `hive web` boots the default native Hive browser UI — a vanilla
+**Rails 8** app (importmap, Turbo, Stimulus, propshaft, solid_cable) living in
+`web/` at the repo root. It is the browser counterpart to the TUI over the same
+local registry and workflow state, with no mandatory sign-in on a verified
+loopback request. Hivebox is the separate owner-gated container distribution
+of the same app at `/app/web`. The web tier adds no
 pipeline logic: status reads call `Hive::Commands::Status#json_payload` (via
 `Hive::Web::StatusFeed`), gate approval calls `Hive::Commands::Approve`
 in-process, task Drop calls `Hive::Commands::Drop` in-process, stage runs go
@@ -31,6 +34,11 @@ points at a real Rails app, the managed version-stamped app under
 `Hive::Paths.web_app_home` (refreshed when stale unless `--no-bootstrap` is
 passed), then a source checkout `web/` next to `lib/`; if none exists and
 bootstrap is allowed, it downloads/extracts the versioned web release bundle.
+Managed installation prepares a staging directory with `bundle install` and a
+production `assets:precompile`, requires usable `application.css` and
+`application.js` entrypoints, verifies every Propshaft manifest asset resolves
+to a contained file, and only then atomically activates it. Missing or corrupt
+assets make even a same-version bundle repair itself.
 Relative `HIVE_WEB_APP_DIR` values are accepted but normalized before the
 Rails env is built, so `BUNDLE_GEMFILE` points at the real app Gemfile after
 the command changes into the app directory.
@@ -39,12 +47,24 @@ It exports `SECRET_KEY_BASE` (derived from the same persisted
 recreation), `HIVE_WEB_ORIGIN` (extra Action Cable origin allow; same-origin
 host traffic is accepted without config), and
 `HIVE_WEB_STORAGE_DIR` (the solid-stack sqlite files, under
-`Hive::Paths.state_home/web-storage` so they live on the `/data` mount), runs
-`bin/rails db:prepare`, then execs `bin/rails server`. Outside the container,
-a source checkout, or a bootstrapped managed bundle the command exits 1 with
-guidance. Released package roots include `hive.gemspec`, so the managed bundle
+`Hive::Paths.state_home/web-storage` so they live on the `/data` mount). In
+production it guarantees a usable fingerprinted asset graph before Rails
+starts. Versioned managed bundles compile and validate assets while they are
+provisioned; direct source checkouts and operator-managed app overrides run
+`bin/rails assets:precompile` at startup and refuse to boot unless the resulting
+manifest and application CSS/JavaScript entrypoints are usable. Startup
+compilation uses temporary build storage rather than the live solid-stack
+databases. It then runs `bin/rails db:prepare` and execs `bin/rails server`.
+Without a container app, source checkout, or bootstrapped managed bundle, the
+command exits 1 with guidance. Released package roots include `hive.gemspec`,
+so the managed bundle
 can resolve its path dependency without a parent source checkout; the Rails
 source itself remains a separate authenticated bundle.
+
+Hivebox keeps a separate asset lifecycle: its container image compiles and
+validates the Rails asset graph during the image build, then exports the
+internal `HIVEBOX_PRECOMPILED_ASSETS=1` marker so the shared launcher does not
+repeat native web preparation at container startup.
 
 `hive web install [--force] [--json]` installs the separate `hive-web` autostart
 service using the invoked user-facing binary path; `hive web start --detach`
@@ -78,10 +98,10 @@ Foreground Rails receives resolved canonical timeout values even when the
 operator supplied an alias, and managed systemd/launchd units persist all six
 resolved settings so foreground and service-manager launches agree.
 
-## Auth
+## Access and GitHub connection
 
-GitHub **device flow** (RFC 8628, see [[decisions]] ADR-036), owner-only.
-An ownerless box is CLAIMABLE: the first successful device-flow login writes
+Hivebox uses an owner-only GitHub **device flow** (RFC 8628, see [[decisions]]
+ADR-036). An ownerless box is CLAIMABLE: the first successful device-flow login writes
 itself into `web.github.owner` (config-lock-guarded so concurrent first
 logins race safely; the claim is logged loudly) — the install path has no
 config-editing step.
@@ -103,16 +123,23 @@ usable. The local dev/test seam is exempt only for tokenless local sessions.
 Local loopback mode is a deliberate no-auth bypass for local foreground use:
 when the CLI bind address is `localhost`, `::1`, or any `127.0.0.0/8` address
 and `web.local_loopback` is not `false`, it exports `HIVE_WEB_LOCAL_LOOPBACK=1`.
-Rails checks the actual socket peer (`REMOTE_ADDR`) and authorized normalized
-Host before skipping login; an attacker-controlled Host is rejected before
-both reads and mutations even over a loopback socket. This preserves local
-access through a localhost proxy such as Tailscale Serve even when that proxy
-forwards the real remote client address.
-That connection-authenticated operator sees the complete primary navigation
-and is labelled `Local`; GitHub-dependent repository browsing stays behind an
-explicit **Connect GitHub** action instead of making the rest of Hive web look
-signed out. Completing that optional connection stores the session token but
-does not claim or rewrite `web.github.owner`.
+Rails checks both the actual socket peer in `REMOTE_ADDR` and the authorized
+normalized Host before skipping login; it deliberately ignores proxy-expanded
+`remote_ip`, and an attacker-controlled Host is rejected even over a loopback
+socket. A local reverse proxy such as Tailscale Serve therefore retains local
+access when it connects over loopback. The proxy is part of the security
+boundary: restrict and authenticate clients, because an unrestricted forwarder
+exposes the no-auth local UI. That connection-authenticated operator sees the
+complete primary navigation under the `hive` product identity and is labelled
+`Local`; GitHub-dependent repository browsing stays behind an explicit
+**Connect GitHub** action. Navigation state is grouped by the first segment of
+Rails `controller_path`, so namespaced task, workflow, and Telegram resource
+controllers retain their parent section's active link when they render a
+complete page. Completing the optional GitHub connection stores the login and
+token in the browser session but never claims or changes `web.github.owner`.
+Outside loopback mode, native installs use the `Hive web` product identity;
+the container-only `HIVEBOX_PRECOMPILED_ASSETS=1` marker preserves the
+`hivebox` identity for the Docker distribution.
 Non-loopback binds require either `--unsafe` or a configured `web.github.owner`;
 when an owner gate authorizes a non-loopback bind, the CLI warns that
 `web.github.owner` is the only login gate, and `0.0.0.0` without an HTTPS
@@ -125,6 +152,9 @@ so the login gate can run.
 
 - **Status grid (`/`)** — a TUI-left-pane-parity project rail filters the
   grid client-side ("All projects" + one button per registered project;
+  projects are ordered by descending in-flight task count, preserving registry
+  order for ties, and the grid plus permanent composer selector stay in that
+  same order across live updates without losing the current selection;
   buttons not links so the permanent composer's typed text survives; a
   `+ Add project` link navigates to Repos because adding a project is a real
   page change; choice mirrored to `?project=` via replaceState; explicit
@@ -139,9 +169,13 @@ so the login gate can run.
   `StatusFeed` suppresses unchanged snapshots by comparing with only
   `generated_at` and `age_seconds` removed while keeping `mtime` /
   `folder_mtime` as liveness signals. The broadcaster sends the status-channel
-  refresh first, then renders and replaces the `projects` frame over
-  solid_cable, so task pages without that frame still receive a morph signal if
-  the dashboard partial raises. The index opts that refresh into Turbo morphing
+  refresh first, then uses one server-sorted snapshot to replace the project
+  rail, morph the composer project selector, and replace the `projects` frame
+  over solid_cable, so task pages without those targets still receive a morph
+  signal if a dashboard partial raises. The composer's stream hook keeps the
+  browser's current project selection when that project still exists; ordering
+  belongs to the server while unfinished form state remains local. The index
+  opts that refresh into Turbo morphing
   with scroll preservation so a live row arrival does not yank the operator
   back to the top; the composer form is `data-turbo-permanent` because
   typed-but-unsent idea text and staged image chips live in browser state. Its
@@ -156,14 +190,21 @@ so the login gate can run.
   refreshes on other clients continue normally);
   the selected project remains as working context, so the next idea cannot
   accidentally resubmit the completed draft even when Turbo moves the
-  permanent node during rendering. No polling JS, no SSE. The daemon strip uses
+  permanent node during rendering. At mobile widths the composer toolbar
+  becomes a two-row grid: the project selector owns the first row and the
+  image/submit actions share the second, so long registered-project names
+  cannot widen the document beyond the viewport. The horizontal project rail
+  keeps edge padding while it scrolls. No polling JS, no SSE. The daemon strip uses
   `Hive::Daemon::StatusReport.safe_payload` directly instead of constructing a
   `Hive::Commands::Daemon` CLI object; the view also reads
   `StatusReport::BINARY_DRIFT_ACTIONABLE` for the Repair affordance, so CLI
   JSON and web drift handling share the same producer constants.
-  A running supervised hivebox daemon intentionally has no separate platform
-  service unit; the strip therefore shows CLI recovery guidance only when the
-  daemon is actually down, not merely when `service_installed` is false. A
+  It presents one compact state banner (running, warning, or stopped), hides
+  internal service-installation fields, and surfaces binary drift as the
+  human-facing “Binary path differs” repair action. A running supervised
+  hivebox daemon intentionally has no separate platform service unit; the
+  strip therefore shows CLI recovery guidance only when the daemon is actually
+  down, not merely when `service_installed` is false. A
   stopped, otherwise healthy daemon points to `hive daemon start --detach`;
   a missing or drifted service points to `hive daemon install --force`.
 - **Task page** — state-driven actions (Retry stage for red
@@ -194,7 +235,7 @@ so the login gate can run.
   reason; skipped or absent manifests render nothing. The media route applies a
   first-pass filename constraint (a single component ending in png/jpg/jpeg/gif,
   with `format: false` so a trailing `.rb` cannot masquerade as an implicit
-  format); the strict guarantee lives in the controller's `resolved_media_path`,
+  format); the strict guarantee lives in `Task#media_path`,
   which re-checks the filename against an anchored regex, requires `File.basename`
   equality, and resolves `File.realpath` to confirm containment under
   `<task>/media/` — refusing symlink and path-traversal escapes — before
@@ -211,14 +252,24 @@ so the login gate can run.
   instead of replacing it on every poll. The poll controller gives the pane
   `tail -f` semantics: it pins to the bottom while following, pauses reloads
   while the operator scrolls up to read, and resumes when scrolled back down.
-  Server-side, the polled `TasksController#log` path reads only a 256 KiB byte
+  Server-side, the polled controller delegates to `Task#latest_log`, which
+  reads only a 256 KiB byte
   window and returns the last 200 lines with a torn leading line dropped, so a
   multi-MB agent log cannot pin a Puma worker every 3 seconds.
-  The Diff route has the same bounded-subprocess discipline: it runs
+  `Task#diff` has the same bounded-subprocess discipline: it runs
   `git diff --` in its own process group, enforces
   `HIVE_WEB_DIFF_TIMEOUT_SEC` (default 15s), writes combined output to a
   tempfile, and renders at most the first 512 KiB with an explicit truncation
-  notice.
+  notice; `Tasks::DiffsController#show` only exposes that result. The model also
+  owns original-idea/title resolution and the workflow-aware passable,
+  recovery, terminal, dispatch-action, and run-verb decisions used by the
+  dashboard and task page. Displayed run verbs consume
+  `TaskAction::READY_COMMANDS`, retaining only the web-specific `run` to
+  `stage` label, so display and dispatch cannot derive separate command maps.
+  Model tests drive successful, failed, and timed-out diff subprocesses and
+  pin process-group termination, reaping, readable errors, and tempfile
+  cleanup. Status projects/tasks are wrapped before ERB, so presentation
+  helpers no longer read task files or duplicate command policy.
   Red diagnostic rows also render a danger banner from
   `tasks[].diagnostic.summary` so the page says why the row is stuck before
   offering Retry. A stopped-daemon blocker is shown only for non-terminal
@@ -243,8 +294,13 @@ so the login gate can run.
   layers recheck the selected baseline, so stale or incomplete receipts fail
   before mutation. Security expansion has a second, non-composable checkbox.
   Receipt tests cover cross-operation replay, real expiry, and missing consent
-  for every mutation. A fixture-backed integration test runs the real workflow
-  commands through the adapter for the full preview/apply lifecycle.
+  for every mutation. Rails represents lifecycle list rows as `Workflow`
+  models and preview/application state as `WorkflowChange`; the established
+  URLs route to standard `create` actions for preview and change resources.
+  The operation comes from the matched route's path parameters, so a submitted
+  `operation` field cannot redirect an install preview into another lifecycle
+  action. A fixture-backed integration test runs the real workflow commands
+  through the adapter for the full preview/apply lifecycle.
   The known legacy-vs-v2 `workflow publish` gap is stated in the page instead
   of exposing a button that opens an unusable registry PR. At mobile widths the
   primary header wraps to a second full-width row, keeping all five sections
@@ -258,9 +314,10 @@ so the login gate can run.
   control: fresh clone setup lists built-ins only (`coding`, `content`, `bench`) with
   `coding` preselected, while "Re-run setup" lists built-ins plus that
   project's authored workflows and preselects the current `default_workflow`.
-  The selected value is passed as `Hive::Commands::Init.new(..., workflow:)`;
-  it is intentionally outside the `prompts:` answers hash. The web adapter
-  also supplies a non-TTY provisioning input and a request-local error capture,
+  The selected value is passed by `Project#setup!` as
+  `Hive::Commands::Init.new(..., workflow:)`; it is intentionally outside the
+  `prompts:` answers hash. The `Project` model also supplies a non-TTY
+  provisioning input and a request-local error capture,
   so CLI preflight questions can never wait on Puma's inherited terminal and
   strand the browser on “Cloning…”. Non-interactive doctor/agent-skill findings
   return as an alert alongside the successful registration/settings notice
@@ -268,11 +325,14 @@ so the login gate can run.
   `gh repo clone` with the session token in `GH_TOKEN`, in a separate process
   group with `HIVE_WEB_CLONE_TIMEOUT_SEC` (default 180s) as a hard deadline; on
   failure or timeout the partial target is removed so retry starts clean. A
-  pre-existing directory is treated as a local checkout to re-init; a
-  pre-existing non-directory target (file/symlink/etc.) is a 422 refusal, and
-  `clone!` also refuses any existing target so its failure-path `rm_rf` only
-  deletes a partial clone it created. Every registration runs a
-  post-clone/post-existing-dir origin normalization pass:
+  pre-existing directory is treated as a local checkout to re-init; any
+  pre-existing symlink or non-directory target is a 422 refusal. The
+  `Repository` model also refuses any existing clone target so failure-path
+  cleanup only deletes a partial clone it created. Model tests exercise both
+  nonzero clone exits and hard-deadline expiry, including process-group
+  kill/reap behavior plus partial-target and tempfile cleanup. Every
+  registration runs a
+  post-clone/post-existing-dir `Repository` origin-normalization pass:
   absent or non-GitHub remotes are left alone, while GitHub SSH remotes
   (`git@github.com:owner/repo.git` or `ssh://git@github.com/owner/repo.git`)
   become `https://github.com/owner/repo.git`. The box can only push with
@@ -325,10 +385,14 @@ so the login gate can run.
   `Integer(..., exception: false)`
   before any Telegram network call or config/env write: when pairing is off,
   blank input renders 422, and handles such as `@mychannel` always render 422
-  and persist nothing.
+  and persist nothing. These rules, secret persistence, supervisor reload,
+  test delivery, and pairing lifecycle are owned by the Rails `TelegramBot`
+  model. The settings controller is limited to `show`/`update`; the existing
+  test-message and pairing-approval URLs now target standard `create` actions
+  on named resources.
 
 Task Drop is routed as `POST /tasks/:project/:slug/drop` →
-`TasksController#drop` → `Hive::Web::Dispatcher#drop` →
+`Tasks::DropsController#create` → `Hive::Web::Dispatcher#drop` →
 `Hive::Commands::Drop`. It is intentionally in-process, not a daemon dispatch:
 the task is gone after success, so the controller redirects to the grid. The
 form posts the row's rendered `stage` as `from`; if the task moved after the
@@ -336,7 +400,7 @@ page rendered, `Commands::Drop` raises `Hive::WrongStage`, Rails renders the
 typed 422 error page, and the moved task folder is left intact.
 
 Task recovery is routed as `POST /tasks/:project/:slug/recover` →
-`TasksController#recover` → `Hive::Web::Dispatcher#recover`. The controller
+`Tasks::RecoveriesController#create` → `Hive::Web::Dispatcher#recover`. The controller
 re-reads the current status row rather than trusting form-posted stage/marker
 state. The dispatcher refuses manual-only states with
 `RecoverySequence.manual_only_text`, derives the most discriminating
@@ -351,8 +415,10 @@ Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
 writing a daemon request, and `Hive::Web::Dispatcher#dispatch` wraps queue
 writer `ArgumentError`s (for example the queue's stricter slug grammar) as
 typed 422s instead of surfacing an opaque 500. CSRF is Rails-default (per-form
-tokens); every route except `/health`, `/up`, `/login`, `/logout`,
-`/auth/github*`, and the dev/test-only `/dev_login` is behind the owner gate.
+tokens). In Hivebox mode every route except `/health`, `/up`, `/login`,
+`/logout`, `/auth/github*`, and the dev/test-only `/dev_login` is behind the
+owner gate; a verified local loopback request bypasses that gate for the
+complete local UI.
 
 ## Tests
 
@@ -364,13 +430,19 @@ and the real `Commands::New`/`Approve`/`Drop` plus web recovery queue writes
 against a sandboxed `HIVE_HOME` (the suite NEVER touches the developer's real
 config — `test_helper.rb` sets the sandbox before the app loads). It pins that
 a loopback-authenticated local operator gets the full navigation and an
-explicit GitHub connection action, and that repository setup always invokes
-the CLI init adapter with non-TTY provisioning input. It also pins that
+explicit GitHub connection action. It also covers Tailscale-style forwarded
+client addresses over a loopback socket, local `hive` branding, optional
+GitHub connection without owner claim, and local logout returning to the
+usable dashboard. Managed-bundle tests pin staged dependency/asset preparation,
+same-version missing-asset repair, and preservation of the previous bundle on
+precompile failure. Repository setup always invokes the CLI init adapter with
+non-TTY provisioning input. It also pins that
 a red task page shows the diagnostic banner and Retry button, and that the
 route queues the marker-clear command plus the hidden rerun sequence. It also
 pins the Telegram first-run guide shape, strict token/chat-ID validation,
 empty-list pairing bootstrap, saved-token reuse, pending-code rendering,
-corrupt-store visibility, and consent-gated approval, repo clone target refusal
+corrupt-store visibility, consent-gated approval, and the test-message
+resource's missing-token/success rendering, repo clone target refusal
 for non-directories,
 agent-login status rendering for
 binary PTY output, Grok route reachability, and operator-ward poll flows,
@@ -466,7 +538,10 @@ Colima cannot boot a Linux VM there. Current `.github/workflows/ci.yml` does
 not run a push/PR Docker image smoke; it covers Rails web tests, the
 golden-path browser E2E, and the Windows installer harness. The smoke covers
 web and daemon health plus the front door (`/health`, `/health?deep=1`,
-claimable `/login`, owner-gated `/`). The Windows workflow cannot run Linux
+claimable `/login`, owner-gated `/`) and fetches the exact digest-stamped CSS
+and JavaScript graph advertised by that page, then runs the managed-install
+manifest predicate against the real precompile output. The Windows workflow
+cannot run Linux
 containers on hosted runners, so it syntax-checks `install-box.ps1` and runs
 `packaging/docker/test-install-box.ps1` against a stubbed Docker CLI to pin the
 installer's diagnostics and pull/run argv shape.

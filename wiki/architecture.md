@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-20
 tags: [architecture, overview]
 ---
 
@@ -71,17 +71,27 @@ without treating tests, docs, assets, generated files, or chunk boundaries as
 architectural coupling. Fixture/test manifests never become review slices. A
 mapper failure is retained as an incomplete-measurement diagnostic, so fallback
 zero signals cannot be mistaken for evidence that a component has no leverage.
-The reviewer sees only affected feature slices from the
-merge manifest, runs under provider-specific read-only enforcement, and must
-leave the registered checkout byte-for-byte unchanged. A strict run-wide thesis
+The reviewer starts from affected feature slices from the merge manifest, but a
+refactoring thesis may span mapped features when it removes duplicated ownership
+or an unstable dependency direction. Cross-feature scope is recorded rather than
+treated as a risk by itself. The prompt retains a fixed-size list of mapped
+dependency, peer-entrypoint, and test paths so the agent can inspect the relevant
+neighboring boundary without broad repository search. The reviewer runs under provider-specific read-only
+enforcement and must leave the registered checkout byte-for-byte unchanged. A strict run-wide thesis
 budget leaves later slices resumable, and every cited file/line/snippet is
 verified against the pinned checkout's real bytes before a thesis is admissible.
 The mutation boundary is intentionally narrower. Each accepted thesis is
-processed in an isolated worktree only when a certified public-contract guard,
-feature-boundary checks, configured validation, secret scanning, dependency
-and patch caps, and the independently enabled `auto_fix` policy all pass.
-Otherwise an independently enabled issue policy may publish one deduplicated
-strategic issue, or the action is durably suppressed. Architecture patrol never
+processed in an isolated worktree only when certified public-contract guards,
+root confinement, `.hive-state` control-plane protection, secret scanning,
+dependency guards, applicable
+configured validation (or the built-in diff check for inert documentation
+formats), and the
+independently enabled `auto_fix` policy all pass. Cross-feature patches remain
+eligible regardless of file count or diff size, and every changed path
+participates in trunk-overlap reanalysis. Contract-changing,
+dependency-changing, or otherwise high-risk work may instead become one
+deduplicated strategic issue when issue filing is independently enabled.
+Architecture patrol never
 merges its own PRs; an OPEN or MERGED publication succeeds only after entering
 the normal `6-review` flow.
 
@@ -297,16 +307,25 @@ sends the next question. The earlier "Codex draft-assist" flow — where
 Path A spawned Codex to draft an answer with write-draft/edit/cancel
 buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
-## Hive web pipeline
+## Hive Web and Hivebox pipeline
 
-`hive web` serves Hive web, a vanilla Rails 8 + Turbo app from `web/` (ADR-037; the
-original Sinatra/Puma + SSE tier is gone). Auth is the GitHub device flow
-(ADR-036): a configured `web.github.owner` gates entry, while an ownerless
-fresh box is claimable and the first successful login writes
+`hive web` serves the shared vanilla Rails 8 + Turbo app from `web/` (ADR-037;
+the original Sinatra/Puma + SSE tier is gone). Native Hive web is the default
+browser control plane over the same registry and workflow state as the CLI/TUI;
+loopback requests use the `hive` identity without mandatory sign-in, including
+through a local reverse proxy whose socket peer is loopback. GitHub is an
+optional connection for repository listing and cloning and does not claim
+ownership. Hivebox is the distinct owner-gated container distribution. Its
+auth is the GitHub device flow (ADR-036): a configured `web.github.owner` gates
+entry, while an ownerless fresh box is claimable and the first successful login
+writes
 `web.github.owner` under the global config lock. Owner-gated requests re-check
 the current owner on every request and evict old sessions when
 `web.github.owner` changes, so a repo-scoped session token cannot survive an
-ownership rotation. Reads render
+ownership rotation. Managed local installs stage `bundle install` plus a
+production asset precompile and verify the CSS/JavaScript manifest before the
+atomic bundle swap; same-version installs with missing assets are repaired.
+Reads render
 `Commands::Status#json_payload` snapshots; live updates flow over Turbo
 Streams, with production Action Cable accepting same-origin-as-host and
 `HIVE_WEB_ORIGIN` only as an extra allow for split-origin deployments:
@@ -326,6 +345,52 @@ push credentials without docker-exec setup. The container supervisor (tini →
 `Hive::Web::Supervisor`) runs daemon + web + optional bot, restarts crashed or
 signal-killed children with backoff, survives malformed config, and
 SIGHUP-reloads the bot set. Details: [[commands/web]].
+
+The Rails layer wraps each registry entry in a `Project` model. Project lookup,
+config-backed workflow/default/daemon behavior, and the non-interactive
+`Hive::Commands::Init` setup seam live there; controllers and views use named
+project attributes instead of passing registry hashes around. Gem adapters can
+still call `fetch` at the explicit compatibility boundary.
+
+Repository admission is a separate `Repository` model: it validates GitHub
+source/name input, owns the clone target, bounds and cleans up `gh repo clone`,
+and normalizes origins before handing the checkout to `Project#setup!`.
+`ReposController` only selects between new admission and existing-project
+setup, then renders or redirects.
+
+Workflow list rows are typed `Workflow` models rather than anonymous adapter
+hashes. The model owns the shared `Hive::Web::WorkflowLifecycle` boundary for
+listing and scaffolding. Reviewed install/update/remove state is represented by
+`WorkflowChange`: it creates the dry-run, signs the operation/project/identity
+receipt, verifies consent and expiry, preserves the separate escalation gate,
+and applies only the reviewed identity. Existing workflow URLs now enter
+`Workflows::PreviewsController#create` or
+`Workflows::ChangesController#create`; route defaults supply the operation from
+the matched route rather than accepting an operator-controlled action name.
+`WorkflowsController` is left with the collection page and authored-workflow
+creation.
+
+Telegram configuration is a `TelegramBot` model. It owns strict allowlist
+parsing, saved-token lookup/persistence, `getMe` validation, global bot config,
+supervisor reload signalling, round-trip delivery, and pending/approved
+pairings. `TelegramController` now exposes only the settings resource's
+`show`/`update`; test deliveries and pairing approvals enter
+`Telegram::TestMessagesController#create` and
+`Telegram::PairingApprovalsController#create`. The model wraps pending pairing
+rows before they reach ERB.
+
+A task page is a filesystem-backed `Task`, built from the matching status
+snapshot row and its `Project`. That model owns task
+reads and their invariants — workflow-aware artifact ordering, brainstorm
+questions, original-idea/title resolution, workflow-aware action/verb policy,
+terminal/passable/recovery predicates, bounded log tails and diffs, worktree
+presence, and media-manifest/path validation. Dashboard snapshots are wrapped
+as `Project`/`Task` models before rendering, so the grid and detail page use the
+same behavior rather than helper-owned filesystem reads or action tables.
+`TasksController` renders that resource. Namespaced task-resource
+controllers expose diff, log, media, approval, rejection, drop, run, recovery,
+answer, and intervention through standard `show`/`create` actions; each remains
+a thin HTTP boundary over `Task` or `Hive::Web::Dispatcher`.
 
 ## Dispatch flow (durable generation ownership)
 

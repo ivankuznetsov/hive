@@ -63,8 +63,7 @@ module Hive
       }
     end
 
-    def managed_prompt_preamble(slot_id)
-      context = managed_runtime_context(slot_id)
+    def managed_prompt_preamble(slot_id, context = managed_runtime_context(slot_id))
       return nil unless context
 
       lines = [
@@ -85,8 +84,8 @@ module Hive
       lines.join("\n")
     end
 
-    def managed_prompt(slot_id, body)
-      preamble = managed_prompt_preamble(slot_id)
+    def managed_prompt(slot_id, body, context = managed_runtime_context(slot_id))
+      preamble = managed_prompt_preamble(slot_id, context)
       preamble ? "#{preamble}\n\n#{body}" : body
     end
 

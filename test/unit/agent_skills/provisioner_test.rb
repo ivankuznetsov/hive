@@ -179,6 +179,35 @@ class AgentSkillsProvisionerTest < Minitest::Test
     assert_empty adapter.executed
   end
 
+  def test_unattended_consent_refusal_validates_scope_without_inspection
+    inspector = SequenceInspector.new([ row ])
+    instance = provisioner(inspector: inspector, adapters: {})
+
+    result = instance.consent_required_result(
+      agents: [ "claude" ], skills: [ "hive" ], provenance: "json_requires_yes"
+    )
+
+    assert_equal 64, result.exit_code
+    assert_equal "refused", result.classification
+    assert_equal "json_requires_yes", result.consent.fetch("provenance")
+    assert_equal({ "agents" => [ "claude" ], "skills" => [ "hive" ] }, result.preview.filters)
+    assert_match(/\A[0-9a-f]{64}\z/, result.preview.fingerprint)
+    assert_empty result.preview.inspections
+    assert_empty result.preview.operations
+    assert_empty inspector.calls
+  end
+
+  def test_unattended_consent_refusal_still_rejects_invalid_filters
+    instance = provisioner(inspector: SequenceInspector.new([ row ]), adapters: {})
+
+    assert_raises(Hive::ConfigError) do
+      instance.consent_required_result(agents: [ "ghost" ], provenance: "non_tty")
+    end
+    assert_raises(Hive::ConfigError) do
+      instance.consent_required_result(skills: [ "ghost-skill" ], provenance: "non_tty")
+    end
+  end
+
   def test_filtered_unmanaged_skill_is_rejected_before_adapter_planning
     instance = provisioner(
       inspector: SequenceInspector.new([ row(capability: "private", managed: false) ]),
@@ -190,5 +219,23 @@ class AgentSkillsProvisionerTest < Minitest::Test
     end
 
     assert_match(/unmanaged custom skill/, error.message)
+  end
+
+  def test_unattended_refusal_rejects_a_filtered_unmanaged_skill_without_inspection
+    cfg = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
+    cfg["review"]["reviewers"] << {
+      "name" => "private", "kind" => "agent", "agent" => "claude", "skill" => "private-review"
+    }
+    inspector = SequenceInspector.new([ row ])
+    instance = Hive::AgentSkills::Provisioner.new(
+      config: cfg, project_root: Dir.pwd, inspector: inspector, adapters: FakeRegistry.new({})
+    )
+
+    error = assert_raises(Hive::ConfigError) do
+      instance.consent_required_result(skills: [ "private-review" ], provenance: "non_tty")
+    end
+
+    assert_match(/unmanaged custom skill.*private-review/, error.message)
+    assert_empty inspector.calls
   end
 end

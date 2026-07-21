@@ -127,6 +127,18 @@ class StagesCouncilTest < Minitest::Test
       workflow = mixed_provider_council_workflow
       task = task_for(project, workflow: workflow)
       task.define_singleton_method(:managed_workflow?) { true }
+      context_slots = []
+      prompt_slots = []
+      task.define_singleton_method(:managed_runtime_context) do |slot|
+        context_slots << slot
+        { slot: slot }
+      end
+      task.define_singleton_method(:managed_prompt) do |slot, body, context|
+        raise "wrong managed context" unless context.fetch(:slot) == slot
+
+        prompt_slots << slot
+        "#{slot}:#{body}"
+      end
       File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
       outputs = [
         "Verdict: ready\n",
@@ -157,8 +169,69 @@ class StagesCouncilTest < Minitest::Test
           assert_equal :grok, reviser.first.fetch(:profile).name
           assert_equal "grok-child", reviser.first.fetch(:model)
           assert_nil reviser.first[:effort]
+          assert_equal(
+            {
+              "stages.review.reviewers.one" => 2,
+              "stages.review.reviewers.two" => 2,
+              "stages.review.revise" => 1
+            },
+            context_slots.tally
+          )
+          assert_equal context_slots, prompt_slots
         end
       end
+    end
+  end
+
+  def test_managed_reviewer_context_failure_replaces_working_marker
+    with_tmp_dir do |project|
+      workflow = mixed_provider_council_workflow
+      stage = workflow.stage_named("review")
+      task = task_for(project, workflow: workflow)
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:managed_runtime_context) do |_slot|
+        raise Hive::ConfigError, "pinned managed context is unavailable"
+      end
+      target = File.join(task.folder, "draft.md")
+      File.write(target, "Architecture draft\n")
+      Hive::Markers.set(task.state_file, :agent_working, phase: "council")
+      runner = Hive::Stages::Council::Reviewer.new(
+        task: task, cfg: {}, stage: stage, reviewer: stage.reviewers.first,
+        round: 1, target_path: target
+      )
+
+      assert_raises(Hive::ConfigError) { runner.run! }
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "permission_config_error", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_managed_reviser_context_failure_replaces_working_marker
+    with_tmp_dir do |project|
+      workflow = mixed_provider_council_workflow
+      stage = workflow.stage_named("review")
+      task = task_for(project, workflow: workflow)
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:managed_runtime_context) do |_slot|
+        raise Hive::ConfigError, "pinned managed context is unavailable"
+      end
+      target = File.join(task.folder, "draft.md")
+      triage = File.join(task.folder, "triage.md")
+      File.write(target, "Architecture draft\n")
+      File.write(triage, "Revise the risks.\n")
+      Hive::Markers.set(task.state_file, :agent_working, phase: "council")
+      runner = Hive::Stages::Council::Revise.new(
+        task: task, cfg: {}, stage: stage, revise: stage.council.revise,
+        round: 1, target_path: target, triage_path: triage
+      )
+
+      assert_raises(Hive::ConfigError) { runner.run! }
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "permission_config_error", marker.attrs.fetch("reason")
     end
   end
 
@@ -520,20 +593,18 @@ class StagesCouncilTest < Minitest::Test
     assert_equal "paused", Hive::Stages::Council.action_for(:paused)
   end
 
-  def test_managed_council_children_require_mapped_agents_and_wrap_revise_prompts
+  def test_managed_council_children_require_mapped_agents
     stage = Hive::Workflow::Stage.new(
       name: "review", index: 1, state_file: "review.md", kind: :council
     )
     task = Object.new
     task.define_singleton_method(:managed_workflow?) { true }
-    task.define_singleton_method(:managed_prompt) { |slot, body| "#{slot}:#{body}" }
 
     reviewer = Hive::Workflow::Reviewer.new(name: "missing", prompt: "Review", permissions: "read-only")
     reviewer_runner = Hive::Stages::Council::Reviewer.new(
       task: task, cfg: {}, stage: stage, reviewer: reviewer, round: 1, target_path: "/tmp/draft.md"
     )
     assert_raises(Hive::ConfigError) { reviewer_runner.send(:launch_identity) }
-    assert_equal "stages.review.reviewers.missing:body", reviewer_runner.send(:managed_prompt, "body")
 
     revise = Hive::Workflow::Revise.new(prompt: "Revise", permissions: "read-only")
     revise_runner = Hive::Stages::Council::Revise.new(
@@ -541,7 +612,6 @@ class StagesCouncilTest < Minitest::Test
       target_path: "/tmp/draft.md", triage_path: "/tmp/triage.md"
     )
     assert_raises(Hive::ConfigError) { revise_runner.send(:launch_identity) }
-    assert_equal "stages.review.revise:body", revise_runner.send(:managed_prompt, "body")
   end
 
   private
@@ -608,7 +678,7 @@ class StagesCouncilTest < Minitest::Test
       }
       with_replaced_singleton_method(
         Hive::Stages::Base,
-        :stage_permission_scope_or_mark!,
+        :stage_permission_scope,
         ->(*, **) { scope }
       ) { yield }
     end

@@ -69,8 +69,8 @@ Ubuntu 22.04+ / glibc Linux fallback (pin to the current release tag, not `main`
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-# Release maintainers: bump v0.6.4 in both installer URLs when cutting a new stable release.
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.4/install.sh -o "$tmpdir/hive-install.sh"
+# Release maintainers: bump v0.6.5 in both installer URLs when cutting a new stable release.
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.5/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -79,8 +79,8 @@ To inspect the installer first, run a dry-run before the real invocation. State 
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-# Release maintainers: bump v0.6.4 in both installer URLs when cutting a new stable release.
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.4/install.sh -o "$tmpdir/hive-install.sh"
+# Release maintainers: bump v0.6.5 in both installer URLs when cutting a new stable release.
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.5/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh" --dry-run
 bash "$tmpdir/hive-install.sh"
 ```
@@ -154,9 +154,15 @@ Bare Hive web remains the foreground path:
 ```
 
 It bootstraps as needed and blocks in the foreground. The untouched setup URL
-is `http://127.0.0.1:4567`; `web.local_loopback: false` requires GitHub login
-even on loopback. Never run bare `hive web` as a read-only status check. Use
-`"$hive_cmd" web status --json` instead.
+is `http://127.0.0.1:4567`. On a loopback bind it runs no-auth against the
+existing local Hive registry and workflow state; GitHub connection is optional
+and does not claim Hivebox ownership. A loopback reverse proxy such as
+Tailscale Serve retains that local behavior, so the proxy must authenticate
+and restrict its clients; an unrestricted forwarder would expose the local UI.
+Set `web.local_loopback: false` to require GitHub login even on loopback. Never
+run bare `hive web` as a read-only status check. Use
+`"$hive_cmd" web status --json` instead. The normal approved `hive setup`
+already installs the managed service unless `--no-service` is passed.
 
 Choose [Hivebox](packaging/docker/README.md) only for container isolation,
 multiple local instances, containment of untrusted agents, or reproducible

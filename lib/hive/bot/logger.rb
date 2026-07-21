@@ -137,6 +137,9 @@ module Hive
           end
 
           rotate_if_needed_locked!
+          # Rotation enters the stderr fallback itself when both the rename and
+          # the reopen fail. Keep that transition and this write under the same
+          # lock so another worker cannot clear @file between the check and puts.
           if @stderr_fallback
             warn line
             return

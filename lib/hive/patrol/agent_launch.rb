@@ -23,7 +23,7 @@ module Hive
       private_class_method :minimal_context_flags
 
       def review_turn_limit(profile, role)
-        3 if profile.respond_to?(:name) && profile.name == :claude && role.to_sym == :review
+        4 if profile.respond_to?(:name) && profile.name == :claude && role.to_sym == :review
       end
       private_class_method :review_turn_limit
     end

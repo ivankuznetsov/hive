@@ -292,11 +292,18 @@ patrol:
   # Bound expensive fix-agent work even when findings are stale or fail validation.
   max_fix_attempts_per_cycle: 6
   max_prs_per_cycle: 3
-  # Streamed usage stops each ordinary agent at the mode's per-agent token
-  # allowance. Architecture gets 2x that allowance plus 2x the per-cycle
-  # token/launch envelope, while UTC-day and native budget guards stay shared.
+  # Streamed usage stops ordinary review agents at the mode's per-agent token
+  # allowance. Fix agents get 2x per-agent headroom for edit/test/proof turns,
+  # while architecture gets 2x the ordinary allowance plus 2x the per-cycle
+  # token/launch envelope. Architecture launch count follows merged-PR demand;
+  # the shared UTC-day token and native budget guards still apply.
   # max_tokens_per_agent: 50000
+  # fix_budget_multiplier: 2
   # architecture_budget_multiplier: 2
+  # Metered architecture checks follow merge volume rather than the ordinary
+  # daily launch count. This higher, separate ceiling only stops repeated
+  # architecture launches whose provider omits all token accounting.
+  # max_architecture_unmetered_spawns_per_day: 96
   # Open ready (non-draft) PRs by default so the babysitter — which skips
   # draft PRs — picks them up. Set true to open draft PRs instead.
   draft_prs: false
@@ -354,9 +361,9 @@ patrol:
 <% end -%>
 
 # Architecture patrol is independent from ordinary patrol. Fresh init
-# recommends read-only discovery, while every external side effect remains a
-# separate explicit opt-in. Existing projects with no block keep the disabled
-# Config::DEFAULTS policy.
+# recommends discovery with confined auto-fix/PR attempts and GitHub issues as
+# the fallback review surface. Existing projects with no block keep the
+# disabled discovery policy.
 refactor_patrol:
   enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
   # Low-leverage proposals remain visible but report-only.
@@ -365,14 +372,14 @@ refactor_patrol:
   # Unfinished features remain durable and resume in a later patrol run.
   max_review_seconds_per_run: 3600
   auto_fix:
-    enabled: false
+    enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
     agent: codex
   commands:
     # Optional project-owned API/contract check for ecosystems without a
     # built-in declaration adapter. It is consulted only when auto-fix is on.
     public_contract: null
   issue_filing:
-    enabled: false
+    enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
     min_leverage_score: 0.25
 
 # Auto-rebase pre-step for `hive run` (plan

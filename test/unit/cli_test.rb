@@ -17,6 +17,8 @@ require "hive/commands/rebase_status"
 require "hive/commands/stage_action"
 require "hive/commands/adhoc_review"
 require "hive/commands/status"
+require "hive/commands/watch"
+require "hive/commands/act"
 require "hive/commands/approve"
 require "hive/commands/findings"
 require "hive/commands/finding_toggle"
@@ -204,12 +206,12 @@ class HiveCliTest < Minitest::Test
   def test_setup_wires_options_and_exits_with_command_status
     with_command_new_stub(Hive::Commands::Setup, return_value: 3) do |calls|
       _out, _err, status = with_captured_exit do
-        Hive::CLI.start([ "setup", "--json", "--service", "--no-bootstrap", "--no-init" ])
+        Hive::CLI.start([ "setup", "--json", "--yes", "--service", "--no-bootstrap", "--no-init" ])
       end
 
       assert_equal 3, status, "the CLI must exit with the Setup command's return value"
       assert_equal(
-        { json: true, service: true, no_bootstrap: true, no_init: true },
+        { json: true, service: true, no_bootstrap: true, no_init: true, yes: true },
         calls.first.fetch(:kwargs),
         "every setup flag must be forwarded to Hive::Commands::Setup.new"
       )
@@ -234,7 +236,7 @@ class HiveCliTest < Minitest::Test
 
       assert_equal 0, status
       assert_equal(
-        { json: false, service: true, no_bootstrap: false, no_init: false },
+        { json: false, service: true, no_bootstrap: false, no_init: false, yes: false },
         calls.first.fetch(:kwargs),
         "with no flags the CLI must pass the documented defaults"
       )
@@ -515,7 +517,27 @@ class HiveCliTest < Minitest::Test
   def test_status_approve_findings_and_finding_toggles_pass_options
     with_command_new_stub(Hive::Commands::Status) do |calls|
       Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "2-gather", "--write", "--force", "--json" ])
-      assert_equal({ json: true, diagnose: "slug", project: "proj", stage: "2-gather", write: true, force: true }, calls.first.fetch(:kwargs))
+      assert_equal({
+        json: true, diagnose: "slug", project: "proj", stage: "2-gather",
+        write: true, force: true, operational: false, full: false
+      }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::Status) do |calls|
+      Hive::CLI.start([ "status", "--operational", "--json" ])
+      assert_equal true, calls.first.dig(:kwargs, :operational)
+      assert_equal false, calls.first.dig(:kwargs, :full)
+    end
+
+    with_command_new_stub(Hive::Commands::Status) do |calls|
+      Hive::CLI.start([ "status", "--full" ])
+      assert_equal true, calls.first.dig(:kwargs, :full)
+    end
+
+    with_command_new_stub(Hive::Commands::Act) do |calls|
+      Hive::CLI.start([ "act", "workflow.advance", "demo:slug", "--observation", "#{'a' * 64}", "--json" ])
+      assert_equal [ "workflow.advance", "demo:slug" ], calls.first.fetch(:args)
+      assert_equal({ observation: "a" * 64, json: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Approve) do |calls|
@@ -541,6 +563,36 @@ class HiveCliTest < Minitest::Test
       assert_equal [ Hive::Commands::FindingToggle::REJECT, "slug" ], reject.fetch(:args)
       assert_equal({ ids: [ "4" ], all: false, severity: "low", pass: nil, project: "proj", stage: nil, json: true }, reject.fetch(:kwargs))
     end
+  end
+
+  def test_status_help_documents_concise_full_and_operational_modes
+    out, = capture_io { Hive::CLI.start([ "help", "status" ]) }
+
+    assert_match(/concise operational snapshot/, out)
+    assert_match(/--full/, out)
+    assert_match(/--operational/, out)
+  end
+
+  def test_watch_passes_bounded_stream_options_and_documents_json_lines
+    with_command_new_stub(Hive::Commands::Watch) do |calls|
+      Hive::CLI.start([
+        "watch", "alpha:first", "second", "--project", "alpha",
+        "--until", "completion", "--timeout", "90", "--max-events", "7",
+        "--interval", "2.5", "--json-lines"
+      ])
+
+      assert_equal({
+        targets: [ "alpha:first", "second" ], project: "alpha",
+        until_condition: "completion", timeout: 90, max_events: 7,
+        interval: 2.5, json_lines: true, json: false
+      }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    out, = capture_io { Hive::CLI.start([ "help", "watch" ]) }
+    assert_match(/--json-lines/, out)
+    assert_match(/hive-watch-event\.v1/, out)
+    assert_match(/never treated as completion/, out)
   end
 
   def test_patrol_markers_daemon_bot_and_metrics_pass_options

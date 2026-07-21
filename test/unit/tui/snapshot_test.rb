@@ -25,6 +25,7 @@ class TuiSnapshotTest < Minitest::Test
       "marker" => marker,
       "attrs" => {},
       "mtime" => "2026-04-27T12:00:00Z",
+      "observation_mtime" => "2026-04-27T11:59:30Z",
       "folder_mtime" => "2026-04-27T11:59:00Z",
       "age_seconds" => 42,
       "claude_pid" => nil,
@@ -85,6 +86,7 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal "waiting", first.marker
     assert_equal({}, first.attrs)
     assert_equal "2026-04-27T12:00:00Z", first.mtime
+    assert_equal "2026-04-27T11:59:30Z", first.observation_mtime
     assert_equal "2026-04-27T11:59:00Z", first.folder_mtime
     assert_equal 42, first.age_seconds
     assert_nil first.claude_pid
@@ -108,8 +110,9 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal [], snapshot.rows
   end
 
-  def test_from_payload_defaults_missing_folder_mtime_to_nil
+  def test_from_payload_defaults_missing_additive_mtimes_to_nil
     row = sample_task(slug: "legacy-payload")
+    row.delete("observation_mtime")
     row.delete("folder_mtime")
     payload = sample_payload([
                                {
@@ -122,6 +125,7 @@ class TuiSnapshotTest < Minitest::Test
 
     snapshot = Hive::Tui::Snapshot.from_payload(payload)
 
+    assert_nil snapshot.rows.first.observation_mtime
     assert_nil snapshot.rows.first.folder_mtime
   end
 

@@ -66,10 +66,23 @@ web bundle. `hive web` resolves `HIVE_WEB_APP_DIR`, then
 are authenticated through the release's cosign-signed checksum manifest before
 extraction or execution. A custom remote `HIVE_WEB_BUNDLE_URL` also requires
 an exact `HIVE_WEB_BUNDLE_SHA256`; local bundle directories remain a
-development-only input. The web storage directory remains under
+development-only input. `hive setup` and `hive web` prepare the managed app in
+a staging directory, install its Rails bundle, precompile production CSS and
+JavaScript, and verify the required entrypoints plus every manifest asset
+before activating it. A current bundle with missing assets is repaired on the
+next setup or launch. The deprecated `HIVEBOX_WEB_APP_DIR` alias remains
+accepted through the next major release with migration guidance. The web
+storage directory remains under
 `${XDG_STATE_HOME}/hive/web-storage`, so the TUI, daemon, and web UI operate
 on the same local registry, project `.hive-state/` directories, and task
-folders.
+folders. Local loopback requests use the `hive` identity and do not require
+GitHub; connecting GitHub only enables repository listing and cloning. Because
+the trust check uses the actual socket peer, a reverse proxy that connects over
+localhost (including Tailscale Serve) retains local mode even when it forwards
+the remote client's address. That proxy becomes part of the access boundary
+and must authenticate or restrict its clients; an unrestricted localhost
+forwarder exposes the no-auth UI. Hivebox is the separate owner-gated container
+deployment of the same Rails application.
 
 Normal `hive setup` installs, enables, starts, and probes the per-user service
 on supported Linux/macOS while preserving drifted units. Bare `hive web` is the

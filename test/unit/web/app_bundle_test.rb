@@ -58,13 +58,16 @@ class WebAppBundleTest < Minitest::Test
       ran = false
       captured_env = nil
       with_env("GEM_HOME" => "/installed/gems", "GEM_PATH" => "/installed/gems:/system/gems") do
-        Hive::Web::AppBundle.ensure!(bundle_url: source, output: nil,
-                                     runner: lambda { |argv, env|
-                                       captured_env = env
-                                       ran = true
-                                       write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
-                                       true
-                                     })
+        Hive::Web::AppBundle.ensure!(
+          bundle_url: source,
+          output: nil,
+          runner: lambda do |argv, env|
+            captured_env = env
+            ran = true
+            write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
+            true
+          end
+        )
       end
       assert ran, "bundle install runner should have run"
       # The managed bundle's Gemfile resolves the hive-cli path gem through
@@ -86,66 +89,147 @@ class WebAppBundleTest < Minitest::Test
     end
   end
 
-  def test_ensure_precompiles_and_validates_assets_before_stamping
+  def test_ensure_precompiles_and_validates_managed_assets_before_installing
     with_hive_home do
+      source = seed_source_app
       calls = []
-      Hive::Web::AppBundle.ensure!(
-        bundle_url: seed_source_app,
-        output: nil,
-        runner: lambda { |argv, env|
-          calls << [ argv, env, Dir.pwd ]
-          write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
-          true
-        }
-      )
+      runner = lambda do |argv, env|
+        calls << { argv: argv, env: env, dir: Dir.pwd }
+        write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
+        true
+      end
 
-      assert_equal [ %w[bundle install], %w[bin/rails assets:precompile] ], calls.map(&:first)
-      assert calls.all? { |_argv, _env, dir| dir.include?(".tmp.") }
-      assert_equal "production", calls.last[1]["RAILS_ENV"]
-      assert Hive::Web::AppBundle.assets_ready?
+      Hive::Web::AppBundle.ensure!(bundle_url: source, output: nil, runner: runner)
+
+      assert_equal [ %w[bundle install], %w[bin/rails assets:precompile] ], calls.map { |call| call[:argv] }
+      assert calls.all? { |call| call[:dir].include?(".tmp.") },
+             "dependencies and assets must be prepared in the staged bundle before the atomic swap"
+      asset_env = calls.last.fetch(:env)
+      assert_equal "production", asset_env["RAILS_ENV"]
+      assert asset_env["SECRET_KEY_BASE"].to_s != ""
+      assert asset_env["HIVE_WEB_STORAGE_DIR"].to_s != ""
+      assert Hive::Web::AppBundle.assets_ready?,
+             "a successfully installed managed bundle must contain fetchable CSS and JavaScript"
       assert_equal Hive::VERSION, Hive::Web::AppBundle.installed_version
     end
   end
 
-  def test_same_version_install_with_missing_assets_is_repaired
+  def test_same_version_bundle_with_missing_assets_is_repaired
     with_hive_home do
       app = Hive::Web::AppBundle.app_dir
       FileUtils.mkdir_p(File.join(app, "config"))
-      File.write(File.join(app, "config", "application.rb"), "# broken\n")
+      File.write(File.join(app, "config", "application.rb"), "# broken installed app\n")
       File.write(File.join(app, Hive::Web::AppBundle::VERSION_FILE), "#{Hive::VERSION}\n")
+      refute Hive::Web::AppBundle.assets_ready?, "precondition: the installed bundle has no compiled assets"
 
       calls = []
-      Hive::Web::AppBundle.ensure!(
-        bundle_url: seed_source_app,
-        output: nil,
-        runner: lambda { |argv, _env|
-          calls << argv
-          write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
-          true
-        }
-      )
+      runner = lambda do |argv, _env|
+        calls << argv
+        write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
+        true
+      end
+      Hive::Web::AppBundle.ensure!(bundle_url: seed_source_app, output: nil, runner: runner)
 
-      assert_includes calls, %w[bin/rails assets:precompile]
+      assert_includes calls, %w[bin/rails assets:precompile],
+                      "a matching version stamp must not hide a broken asset installation"
       assert Hive::Web::AppBundle.assets_ready?
     end
   end
 
-  def test_asset_precompile_without_output_preserves_previous_bundle
+  def test_assets_ready_rejects_manifest_paths_outside_the_asset_directory
+    Dir.mktmpdir("hive-web-assets") do |app|
+      assets = File.join(app, "public", "assets")
+      FileUtils.mkdir_p(assets)
+      File.write(File.join(app, "public", "escape.css"), "body {}\n")
+      File.write(File.join(app, "public", "escape.js"), "export {}\n")
+      File.write(
+        File.join(assets, ".manifest.json"),
+        JSON.generate(
+          "application.css" => { "digested_path" => "../escape.css" },
+          "application.js" => { "digested_path" => "../escape.js" }
+        )
+      )
+
+      refute Hive::Web::AppBundle.assets_ready?(app)
+    end
+  end
+
+  def test_assets_ready_rejects_a_missing_controller_module
+    Dir.mktmpdir("hive-web-assets") do |app|
+      write_compiled_assets(app)
+      manifest_path = File.join(app, "public", "assets", ".manifest.json")
+      manifest = JSON.parse(File.read(manifest_path))
+      manifest["controllers/status_controller.js"] = {
+        "digested_path" => "controllers/status_controller-missing.js"
+      }
+      File.write(manifest_path, JSON.generate(manifest))
+
+      refute Hive::Web::AppBundle.assets_ready?(app),
+             "every module named by the production manifest must exist before activation"
+    end
+  end
+
+  def test_assets_ready_treats_a_null_byte_path_as_missing
+    Dir.mktmpdir("hive-web-assets") do |app|
+      write_compiled_assets(app)
+      manifest_path = File.join(app, "public", "assets", ".manifest.json")
+      manifest = JSON.parse(File.read(manifest_path))
+      manifest["application.css"]["digested_path"] = "application\0.css"
+      File.write(manifest_path, JSON.generate(manifest))
+
+      refute Hive::Web::AppBundle.assets_ready?(app)
+    end
+  end
+
+  def test_assets_ready_treats_non_object_json_as_missing
+    Dir.mktmpdir("hive-web-assets") do |app|
+      assets = File.join(app, "public", "assets")
+      FileUtils.mkdir_p(assets)
+      File.write(File.join(assets, ".manifest.json"), "null\n")
+
+      refute Hive::Web::AppBundle.assets_ready?(app)
+    end
+  end
+
+  def test_asset_precompile_failure_preserves_the_previous_bundle
     with_hive_home do
       app = Hive::Web::AppBundle.app_dir
       FileUtils.mkdir_p(File.join(app, "config"))
-      File.write(File.join(app, "config", "application.rb"), "# old\n")
-      File.write(File.join(app, Hive::Web::AppBundle::VERSION_FILE), "old\n")
+      File.write(File.join(app, "config", "application.rb"), "# old app\n")
+      File.write(File.join(app, Hive::Web::AppBundle::VERSION_FILE), "0.0.0-old\n")
 
       error = assert_raises(Hive::Error) do
         Hive::Web::AppBundle.ensure!(
-          bundle_url: seed_source_app, output: nil, runner: ->(_argv, _env) { true }
+          bundle_url: seed_source_app,
+          output: nil,
+          runner: ->(argv, _env) { argv == %w[bundle install] }
         )
       end
 
-      assert_match(/asset precompile produced no usable/, error.message)
-      assert_equal "# old\n", File.read(File.join(app, "config", "application.rb"))
-      assert_equal "old", Hive::Web::AppBundle.installed_version
+      assert_match(/asset precompile failed/, error.message)
+      assert_equal "# old app\n", File.read(File.join(app, "config", "application.rb"))
+      assert_equal "0.0.0-old", Hive::Web::AppBundle.installed_version
+    end
+  end
+
+  def test_asset_precompile_without_output_preserves_the_previous_bundle
+    with_hive_home do
+      app = Hive::Web::AppBundle.app_dir
+      FileUtils.mkdir_p(File.join(app, "config"))
+      File.write(File.join(app, "config", "application.rb"), "# old app\n")
+      File.write(File.join(app, Hive::Web::AppBundle::VERSION_FILE), "0.0.0-old\n")
+
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.ensure!(
+          bundle_url: seed_source_app,
+          output: nil,
+          runner: ->(_argv, _env) { true }
+        )
+      end
+
+      assert_match(/asset precompile produced no usable CSS\/JavaScript/, error.message)
+      assert_equal "# old app\n", File.read(File.join(app, "config", "application.rb"))
+      assert_equal "0.0.0-old", Hive::Web::AppBundle.installed_version
     end
   end
 
@@ -163,7 +247,7 @@ class WebAppBundleTest < Minitest::Test
         Hive::Web::AppBundle.ensure!(bundle_url: source, output: nil,
                                      runner: ->(_argv, _env) { false })
       end
-      # bundle_install! now runs against the staged tmp dir BEFORE the swap, so
+      # prepare! now runs against the staged tmp dir BEFORE the swap, so
       # a Bundler failure never reaches FileUtils.mv — the previous working app
       # (and its stamp) is left untouched instead of being replaced with an
       # unstamped broken bundle.
@@ -229,6 +313,21 @@ class WebAppBundleTest < Minitest::Test
       end
       assert_match(/does not contain config\/application\.rb/, error.message)
       refute Hive::Web::AppBundle.present?, "a rejected bundle must not leave a managed app behind"
+    end
+  end
+
+  def test_ensure_raises_when_bundle_lacks_gemfile
+    with_hive_home do
+      src = Dir.mktmpdir("hive-web-no-gemfile")
+      FileUtils.mkdir_p(File.join(src, "config"))
+      File.write(File.join(src, "config", "application.rb"), "# app\n")
+
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.ensure!(bundle_url: src, output: nil, runner: ->(_argv, _env) { true })
+      end
+
+      assert_match(/does not contain a Gemfile/, error.message)
+      refute Hive::Web::AppBundle.present?, "a bundle without dependencies must not be installed or stamped"
     end
   end
 
@@ -545,7 +644,7 @@ class WebAppBundleTest < Minitest::Test
   end
 
   # Build a minimal "source checkout" the directory branch of
-  # fetch_and_extract copies verbatim, including a Gemfile so bundle_install!
+  # fetch_and_extract copies verbatim, including a Gemfile so prepare!
   # invokes the injected runner.
   def seed_source_app
     src = Dir.mktmpdir("hive-web-src")

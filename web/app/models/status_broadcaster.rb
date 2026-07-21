@@ -1,8 +1,7 @@
 # Bridges the gem's StatusFeed poller to Turbo Streams: one background
-# subscriber per process watches for snapshot changes and broadcasts a
-# replace of the projects frame to every connected dashboard. Pages render
-# the same snapshot synchronously on first paint, so the stream only ever
-# *updates* what the server already rendered.
+# subscriber per process watches for snapshot changes and broadcasts a Turbo
+# morph refresh. Pages render their selected Board or Grid view synchronously,
+# so the current URL and saved preference remain the only view authority.
 class StatusBroadcaster
   CHANNEL = "status".freeze
 
@@ -78,12 +77,6 @@ class StatusBroadcaster
         target: "composer-project",
         attributes: { method: :morph },
         partial: "status/composer_project",
-        locals: { projects: sorted_projects }
-      )
-      Turbo::StreamsChannel.broadcast_replace_to(
-        CHANNEL,
-        target: "projects",
-        partial: "status/projects",
         locals: { projects: sorted_projects }
       )
     end

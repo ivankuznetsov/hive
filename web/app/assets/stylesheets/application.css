@@ -270,6 +270,7 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 
 /* Project filter rail (TUI left-pane parity). */
 .status-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 30px; align-items: start; }
+.status-main { min-width: 0; }
 .project-nav { position: sticky; top: 24px; display: flex; flex-direction: column; gap: 2px; }
 .project-nav-item {
   appearance: none; background: none; border: 0; cursor: pointer;
@@ -311,6 +312,105 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .chip button:hover { background: transparent; color: var(--danger); }
 
 /* ---- Status grid ---- */
+
+.status-view-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 26px 0 18px;
+}
+.status-view-toolbar h1 { margin: 0; font-size: 1.35rem; }
+.status-view-toolbar p { margin: 4px 0 0; }
+.status-view-switch {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-sunken);
+}
+.status-view-option {
+  color: var(--ink-muted);
+  text-decoration: none;
+  padding: 6px 11px;
+  border-radius: 7px;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+.status-view-option:hover { color: var(--ink); }
+.status-view-option.active { color: var(--ink); background: var(--panel); box-shadow: var(--shadow); }
+
+.kanban-board { min-width: 0; }
+.kanban-band { margin-bottom: 38px; }
+.kanban-band-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.kanban-band-header h2 { display: inline; margin: 0 8px 0 0; }
+.kanban-workflow { color: var(--ink-faint); font-size: 0.82rem; }
+.kanban-columns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(260px, 310px);
+  gap: 12px;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 2px 2px 12px;
+  scroll-snap-type: x proximity;
+  overscroll-behavior-inline: contain;
+}
+.kanban-column {
+  display: flex;
+  flex-direction: column;
+  min-height: 170px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-sunken);
+  scroll-snap-align: start;
+}
+.kanban-column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.kanban-column-header h3 { margin: 0; font-size: 0.9rem; }
+.kanban-count {
+  min-width: 1.6rem;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink-muted);
+  font-size: 0.76rem;
+  text-align: center;
+}
+.kanban-cards { display: grid; align-content: start; gap: 9px; }
+.kanban-empty { margin: 20px 0; color: var(--ink-faint); font-size: 0.82rem; text-align: center; }
+.kanban-card {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 1px 2px rgba(40, 35, 25, 0.03);
+}
+.kanban-card:focus-within { border-color: var(--accent); }
+.kanban-card-heading { display: flex; align-items: start; gap: 8px; font-weight: 600; }
+.kanban-card-heading .status-dot { flex: 0 0 auto; margin-top: 0.42rem; }
+.kanban-card-heading a { min-width: 0; color: var(--ink); overflow-wrap: anywhere; }
+.kanban-card .task-slug { margin: 6px 0 0 17px; overflow-wrap: anywhere; }
+.kanban-card-meta { display: flex; justify-content: space-between; gap: 8px; margin-top: 10px; font-size: 0.78rem; color: var(--ink-muted); }
+.kanban-owner { margin: 8px 0 0; font-size: 0.76rem; overflow-wrap: anywhere; }
+.task-actions-compact { gap: 6px; margin: 11px 0 0; }
+.task-actions-compact form { margin: 0; }
+.task-actions-compact button,
+.task-actions-compact .btn { padding: 5px 8px; font-size: 0.76rem; }
 
 .project-section { margin-bottom: 34px; }
 .project-title { display: flex; align-items: baseline; gap: 12px; }
@@ -744,6 +844,9 @@ pre {
   .composer input[type="submit"] { width: 100%; }
   .daemon-action { margin-left: 0; }
   .task-row { grid-template-columns: 1fr; gap: 8px; }
+  .status-view-toolbar { align-items: start; }
+  .kanban-band-header { align-items: start; }
+  .kanban-columns { grid-auto-columns: minmax(78vw, 290px); }
   .task-meta { flex-wrap: wrap; white-space: normal; }
   .workflow-row { grid-template-columns: 1fr; }
   .workflow-actions { justify-content: flex-start; }

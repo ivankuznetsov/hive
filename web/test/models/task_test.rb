@@ -29,6 +29,14 @@ class TaskTest < ActiveSupport::TestCase
     assert_equal "unknown task missing", error.message
   end
 
+  test "prefers the action label when presenting task status" do
+    project = Project.new("name" => "alpha")
+
+    assert_equal "Working", Task.new(project:, attributes: { "action_label" => "Working", "marker" => "waiting" }).status_label
+    assert_equal "waiting", Task.new(project:, attributes: { "marker" => "waiting" }).status_label
+    assert_equal "idle", Task.new(project:, attributes: {}).status_label
+  end
+
   test "resolves only plain media filenames inside the real task folder" do
     root = Pathname(Dir.mktmpdir("hive-web-task-model"))
     folder = root.join("task")

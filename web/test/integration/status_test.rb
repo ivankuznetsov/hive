@@ -81,6 +81,78 @@ class StatusTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "board is the default and explicit views persist as the operator preference" do
+    sign_in!
+    with_daemon_status(
+      "running" => true,
+      "service_installed" => true,
+      "binary_drift" => "none"
+    ) do
+      get "/"
+
+      assert_response :success
+      assert_select "#status-board", 1
+      assert_select "#status-grid", 0
+      assert_select ".status-view-switch [aria-current='page']", text: "Board"
+
+      get "/grid"
+
+      assert_response :success
+      assert_select "#status-grid", 1
+      assert_select "#status-board", 0
+      assert_select ".status-view-switch [aria-current='page']", text: "Grid"
+
+      get "/"
+      assert_select "#status-grid", 1, "the explicit grid choice should become the default"
+
+      get "/board"
+      assert_select "#status-board", 1
+
+      get "/"
+      assert_select "#status-board", 1, "the explicit board choice should become the default"
+    end
+  end
+
+  test "board renders workflow columns and native task actions from the status snapshot" do
+    sign_in!
+    project_name = create_hive_project!("kanban-status-app")
+    project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
+    projects = [
+      {
+        "name" => project_name,
+        "path" => project_path,
+        "hive_state_path" => File.join(project_path, ".hive-state"),
+        "tasks" => [
+          {
+            "slug" => "ready-card-260721-abcd",
+            "display_name" => "Ready card",
+            "stage" => "3-plan",
+            "workflow" => "coding",
+            "marker" => "complete",
+            "age_seconds" => 120
+          }
+        ]
+      }
+    ]
+    with_daemon_status(
+      "running" => true,
+      "service_installed" => true,
+      "binary_drift" => "none"
+    ) do
+      with_status_snapshot("projects" => projects) do
+        get "/board"
+
+        assert_response :success
+        assert_select ".kanban-band[data-project-name='#{project_name}'][data-workflow='coding']"
+        assert_select ".kanban-column[data-stage='3-plan'] .kanban-card", text: /Ready card/
+        assert_select ".kanban-card form[action='/tasks/#{project_name}/ready-card-260721-abcd/approve'] button",
+                      text: "Approve"
+        assert_select ".kanban-card a[href='/tasks/#{project_name}/ready-card-260721-abcd']",
+                      text: "Ready card"
+      end
+    end
+  end
+
 
   test "a stopped installed daemon shows the command that resumes it" do
     sign_in!

@@ -1,0 +1,61 @@
+<div id="status-board" class="kanban-board">
+  <% if board.empty? %>
+    <div class="empty-state">
+      <p>No projects yet.</p>
+      <p class="hint"><%= link_to "Add a repository", repos_path %> to start the pipeline.</p>
+    </div>
+  <% else %>
+    <% board.bands.each_with_index do |band, band_index| %>
+      <section class="kanban-band project-section"
+               data-project-name="<%= band.project.name %>"
+               data-workflow="<%= band.workflow_id %>">
+        <header class="kanban-band-header">
+          <div>
+            <h2><%= band.project.name %></h2>
+            <span class="kanban-workflow"><%= band.workflow_id %> workflow</span>
+          </div>
+          <span class="muted"><%= pluralize(band.task_count, "active task") %></span>
+        </header>
+
+        <div class="kanban-columns" aria-label="<%= band.project.name %> <%= band.workflow_id %> workflow">
+          <% band.columns.each_with_index do |column, column_index| %>
+            <% heading_id = "kanban-column-#{band_index}-#{column_index}" %>
+            <section class="kanban-column" data-stage="<%= column.stage %>" aria-labelledby="<%= heading_id %>">
+              <header class="kanban-column-header">
+                <h3 id="<%= heading_id %>"><%= column.label %></h3>
+                <span class="kanban-count" aria-label="<%= pluralize(column.tasks.size, "task") %>"><%= column.tasks.size %></span>
+              </header>
+
+              <div class="kanban-cards">
+                <% if column.tasks.empty? %>
+                  <p class="kanban-empty">No tasks</p>
+                <% else %>
+                  <% column.tasks.each do |task| %>
+                    <article class="kanban-card" data-task-slug="<%= task.slug %>">
+                      <div class="kanban-card-heading">
+                        <%= status_dot(task) %>
+                        <%= link_to task.title, task_path(band.project.name, task.slug) %>
+                      </div>
+                      <p class="task-slug"><%= task.slug %></p>
+                      <div class="kanban-card-meta">
+                        <span><%= task.status_label %></span>
+                        <span class="faint"><%= relative_age(task["age_seconds"]) %></span>
+                      </div>
+                      <% if (owner = task.dig("implementation_identity", "stages", "execute")) %>
+                        <p class="kanban-owner faint" title="Implementation owner">
+                          <%= owner["provider"] %>/<%= truncate(owner["model"], length: 22) %>
+                        </p>
+                      <% end %>
+                      <%= render "tasks/primary_actions", task:,
+                            daemon_enabled: band.daemon_enabled, compact: true %>
+                    </article>
+                  <% end %>
+                <% end %>
+              </div>
+            </section>
+          <% end %>
+        </div>
+      </section>
+    <% end %>
+  <% end %>
+</div>

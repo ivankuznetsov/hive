@@ -85,6 +85,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_no_selector ".task-row", wait: 0
 
     sign_in!
+    visit grid_path
 
     # Composer: attach an image via the upload button; the placeholder must
     # appear in the text and a removable chip must render.
@@ -96,8 +97,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
     # Reproduce the filesystem broadcaster winning the race against the POST:
     # a page-wide refresh at submit-start must not abort the originating form.
-    # Other clients remain eligible for the refresh, and targeted grid streams
-    # on this page remain eligible too.
+    # Other clients remain eligible for the refresh.
     page.execute_script <<~JS
       document.addEventListener("turbo:submit-start", () => {
         const stream = document.createElement("turbo-stream")
@@ -246,7 +246,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     create_task!(filtered, "Filter task one")
     create_task!(active, "Active task one")
     sign_in!
-    visit "/"
+    visit grid_path
     assert_selector ".project-section[data-project-name='#{filtered}']"
     assert_selector ".project-section[data-project-name='#{active}']"
 
@@ -259,8 +259,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_equal filtered, composer_project,
                  "filtering is a context switch — new ideas should land in that project"
 
-    # The broadcast REPLACES the grid, discarding our hidden attributes —
-    # the filter must re-apply itself on the fresh DOM.
+    # The broadcast morphs the page, so the filter must re-apply itself to the
+    # refreshed project sections.
     create_task!(active, "Active task two")
     assert_selector ".project-section[data-project-name='#{active}'][hidden]",
                     visible: :hidden, wait: 10
@@ -317,7 +317,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # Enough rows to overflow the viewport so window scroll is meaningful.
     30.times { |n| create_task!(@project, "Filler idea number #{n}") }
     sign_in!
-    visit "/"
+    visit grid_path
     assert_selector ".task-row", text: "Filler idea number 29", wait: 10
     fill_in "New idea", with: "half-typed thought"
 

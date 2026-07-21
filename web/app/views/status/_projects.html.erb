@@ -1,4 +1,4 @@
-<div id="projects">
+<div id="status-grid">
   <% if projects.empty? %>
     <div class="empty-state">
       <p>No projects yet.</p>
@@ -28,7 +28,7 @@
                 <%= stage_badge(task["stage"]) %>
                 <span class="task-meta">
                   <%= status_dot(task) %>
-                  <%= task["action_label"].presence || task["marker"].presence || "idle" %>
+                  <%= task.status_label %>
                 </span>
                 <% if (owner = task.dig("implementation_identity", "stages", "execute")) %>
                   <span class="task-meta faint" title="Implementation owner">

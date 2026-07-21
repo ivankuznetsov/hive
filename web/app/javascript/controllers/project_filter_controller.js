@@ -1,9 +1,8 @@
 import { Controller } from "@hotwired/stimulus"
 
-// TUI left-pane parity: filter the status grid to one project (or all).
-// Pure client state — the grid keeps receiving full broadcasts and morphs,
-// and a MutationObserver re-applies the filter after each one (the
-// broadcast REPLACES #projects, dropping any hidden attributes we set).
+// TUI left-pane parity: filter the selected status view to one project (or all).
+// Pure client state — Turbo keeps morphing the page from fresh snapshots, and
+// the controller reapplies the filter after reconciliation.
 // The choice is mirrored into the URL (?project=) so a reload or shared
 // link lands filtered, without a navigation that would discard the
 // permanent composer's typed text.
@@ -13,11 +12,9 @@ export default class extends Controller {
   connect() {
     this.selected = new URLSearchParams(window.location.search).get("project") || ""
     // childList only: apply() toggles attributes, which must not retrigger.
-    // This covers the broadcast REPLACE of #projects. Morph refreshes are
-    // the other update path — they strip our hidden/active attributes with
-    // NO childList mutation, so the observer alone would silently lose the
-    // filter; the turbo:render listener below re-applies after each morph
-    // (same pattern as the artifacts controller).
+    // A morph can change attributes without a child-list mutation, so the
+    // turbo:render listener below also reapplies after each morph (the same
+    // pattern as the artifacts controller).
     this.observer = new MutationObserver(() => this.apply())
     this.observer.observe(this.element, { childList: true, subtree: true })
     this.reapply = this.reapply.bind(this)
@@ -64,7 +61,7 @@ export default class extends Controller {
 
   apply() {
     // A ghost deep link (?project= for a renamed/forgotten project) would
-    // hide EVERY section with no active rail button — an empty grid with
+    // hide EVERY section with no active rail button — an empty view with
     // zero explanation. Fall back to All projects and clean the URL.
     if (this.selected &&
         !this.buttonTargets.some((b) => (b.dataset.projectFilterNameParam || "") === this.selected)) {

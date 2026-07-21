@@ -1,18 +1,18 @@
 <% content_for(:title, "#{web_product_name} — status") %>
-<%# The status channel delivers BOTH a targeted #projects replace and a page
-    refresh signal (task pages need the latter). Without these metas the
+<%# The status channel delivers a page refresh signal. Without these metas the
     refresh falls back to a full-body replace — which resets window scroll to
-    the top mid-read. Morph + preserve keeps the grid updating in place. %>
+    the top mid-read. Morph + preserve keeps either status view updating in
+    place. %>
 <% content_for(:head) do %>
   <meta name="turbo-refresh-method" content="morph">
   <meta name="turbo-refresh-scroll" content="preserve">
 <% end %>
 <%= turbo_stream_from StatusBroadcaster::CHANNEL %>
 
-<%# TUI left-pane parity: the rail filters the grid client-side (buttons,
+<%# TUI left-pane parity: the rail filters the status view client-side (buttons,
     not links — a navigation would discard the permanent composer's typed
-    text). The controller wraps rail AND grid; it re-applies the filter
-    after every broadcast replace / morph via a MutationObserver. %>
+    text). The controller wraps the rail and selected view; it re-applies the
+    filter after every broadcast morph. %>
 <div class="status-layout" data-controller="project-filter">
   <%= render "status/project_nav", projects: @projects %>
   <div class="status-main">
@@ -57,6 +57,18 @@
 
 <%= render "status/daemon", daemon_status: @daemon_status %>
 
-<%= render "status/projects", projects: @projects %>
+<div class="status-view-toolbar">
+  <div>
+    <h1><%= @status_view.titleize %></h1>
+    <p class="muted">The same live Hive tasks, arranged for scanning or flow.</p>
+  </div>
+  <%= render "status/view_switch", status_view: @status_view %>
+</div>
+
+<% if @status_view == "board" %>
+  <%= render "status/board", board: @board %>
+<% else %>
+  <%= render "status/projects", projects: @projects %>
+<% end %>
   </div>
 </div>

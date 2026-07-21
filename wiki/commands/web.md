@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-20
+updated: 2026-07-21
 tags: [command, web, rails, turbo, hivebox-container]
 ---
 
@@ -157,8 +157,20 @@ so the login gate can run.
 
 ## Surfaces
 
-- **Status grid (`/`)** — a TUI-left-pane-parity project rail filters the
-  grid client-side ("All projects" + one button per registered project;
+- **Status board and grid (`/board`, `/grid`, `/`)** — Board is the first-visit
+  default, while either explicit route stores a signed browser preference that
+  `/` follows thereafter. Both are server-rendered views over the same
+  `StatusFeed` snapshot and remain equal navigation choices. `Board` groups
+  active tasks into project/workflow bands and orders columns from each
+  workflow descriptor; empty projects use their configured default workflow,
+  and an unknown live stage is appended instead of hiding its tasks. Cards
+  link to the native task resource and reuse the same Retry, Approve, Run, and
+  Diff forms as the task page. There is deliberately no parallel drag/drop,
+  drawer, cursor, transition, or audit subsystem: workflow mutation continues
+  through the existing task controllers. Each band scrolls horizontally
+  inside the page at narrow widths. `Grid` retains the compact per-project task
+  rows. A TUI-left-pane-parity project rail filters either view client-side
+  ("All projects" + one button per registered project;
   projects are ordered by descending in-flight task count, preserving registry
   order for ties, and the grid plus permanent composer selector stay in that
   same order across live updates without losing the current selection;
@@ -168,7 +180,7 @@ so the login gate can run.
   project clicks sync the composer project select so new ideas land in that
   context, while filtered deep-links preselect the composer only when it is
   unset; a MutationObserver re-applies the filter after every broadcast
-  replace/morph), composer (new idea with image attach: clipboard
+  morph), composer (new idea with image attach: clipboard
   paste AND upload button; images become `[imageN]` placeholders and land in
   the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
@@ -177,9 +189,11 @@ so the login gate can run.
   `generated_at` and `age_seconds` removed while keeping `mtime` /
   `folder_mtime` as liveness signals. The broadcaster sends the status-channel
   refresh first, then uses one server-sorted snapshot to replace the project
-  rail, morph the composer project selector, and replace the `projects` frame
-  over solid_cable, so task pages without those targets still receive a morph
-  signal if a dashboard partial raises. The composer's stream hook keeps the
+  rail and morph the composer project selector over solid_cable. The refresh
+  re-renders the current URL (or `/`'s saved preference), so Board and Grid
+  cannot be cross-patched with markup for the other view; task pages without
+  the dashboard targets still receive the same morph signal. The composer's
+  stream hook keeps the
   browser's current project selection when that project still exists; ordering
   belongs to the server while unfinished form state remains local. The index
   opts that refresh into Turbo morphing
@@ -193,8 +207,8 @@ so the login gate can run.
   while its POST is in flight, that controller suppresses only page-wide
   `refresh` stream actions on the submitting client so the background
   filesystem broadcaster cannot abort a server-successful submission before
-  Turbo delivers the success lifecycle (targeted grid replacements and
-  refreshes on other clients continue normally);
+  Turbo delivers the success lifecycle (refreshes on other clients continue
+  normally);
   the selected project remains as working context, so the next idea cannot
   accidentally resubmit the completed draft even when Turbo moves the
   permanent node during rendering. At mobile widths the composer toolbar
@@ -469,7 +483,9 @@ CLI init writes.
 `web/test/system/` runs Capybara +
 **capybara-playwright-driver**: login gate, composer image attach (upload
 button for real; clipboard paste via a synthetic DataTransfer event — the
-sanctioned JS exception), Turbo Stream live row arrival without reload, grid
+sanctioned JS exception), Board/Grid route switching with saved preference,
+descriptor-ordered board cards with native task actions, mobile board
+containment, Turbo Stream live row arrival without reload, grid
 project-rail filtering with URL sync, composer project sync, and
 `+ Add project` routing, plus re-application after a live broadcast, grid
 scroll plus composer draft preservation across a live broadcast, successful

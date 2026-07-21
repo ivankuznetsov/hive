@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-07-20
+updated: 2026-07-21
 tags: [architecture, overview]
 ---
 
@@ -331,7 +331,10 @@ Streams, with production Action Cable accepting same-origin-as-host and
 `HIVE_WEB_ORIGIN` only as an extra allow for split-origin deployments:
 `StatusBroadcaster` (self-healing subscriber loop) bridges
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
-broadcast of the projects frame over solid_cable. Mutations reuse gem
+broadcast morph refresh plus targeted project-rail/composer updates over
+solid_cable. The current route renders either the Rails-native workflow Board
+or compact Grid, so live reconciliation does not maintain a second board patch
+protocol. Mutations reuse gem
 primitives: `Commands::Approve` in-process, `Commands::Drop` in-process for
 Advanced hard deletes, daemon dispatch queue for stage runs, the bot's
 `RecoverySequence` for task-page Retry recovery (`markers clear` plus the

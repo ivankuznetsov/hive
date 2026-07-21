@@ -33,13 +33,20 @@ module Hive
         base_identity = @gateway.version_present?(@registry, @base_branch, package)
         raise_immutable_version!(base_identity, package) if base_identity
 
-        mode = @gateway.direct_permission?(@registry, login) ? "direct" : "fork"
-        head_repository = mode == "direct" ? @registry : "#{login}/#{@registry.split('/').last}"
-        base_oid = @gateway.base_oid(@registry, @base_branch)
-        receipt = prepare(receipt, login, branch, head_repository, mode, base_oid)
-        if mode == "fork"
+        if receipt.last_completed_step == "validated"
+          mode = @gateway.direct_permission?(@registry, login) ? "direct" : "fork"
+          head_repository = mode == "direct" ? @registry : "#{login}/#{@registry.split('/').last}"
+          base_oid = @gateway.base_oid(@registry, @base_branch)
+          receipt = prepare(receipt, login, branch, head_repository, mode, base_oid)
+        else
+          validate_retained_destination!(receipt, login, branch)
+          mode = receipt.data["submission_mode"] || "fork"
+          head_repository = receipt.data.fetch("head_repository")
+          base_oid = receipt.data.fetch("base_sha")
+        end
+        if mode == "fork" && !at_least?(receipt, "fork_verified")
           begin
-            receipt = save(receipt.advance("fork_create_intent"))
+            receipt = save(receipt.advance("fork_create_intent")) unless at_least?(receipt, "fork_create_intent")
             verified_fork = @gateway.ensure_fork(@registry, login)
           rescue PublishConflict
             raise
@@ -60,14 +67,19 @@ module Hive
         if remote_oid
           verify_branch!(remote_oid, commit_oid, head_repository, branch, package)
         else
-          receipt = save(receipt.advance("push_intent", commit_oid: commit_oid))
+          if at_least?(receipt, "pushed")
+            raise PublishConflict, "a previously verified publication branch was removed"
+          end
+          unless at_least?(receipt, "push_intent")
+            receipt = save(receipt.advance("push_intent", commit_oid: commit_oid))
+          end
           @gateway.push_expected_absent(checkout, branch, commit_oid)
           remote_oid = @gateway.branch_oid(head_repository, branch)
           verify_branch!(remote_oid, commit_oid, head_repository, branch, package)
         end
-        receipt = save(receipt.advance("pushed", commit_oid: commit_oid))
+        receipt = save(receipt.advance("pushed", commit_oid: commit_oid)) unless at_least?(receipt, "pushed")
 
-        receipt = save(receipt.advance("pr_create_intent"))
+        receipt = save(receipt.advance("pr_create_intent")) unless at_least?(receipt, "pr_create_intent")
         @gateway.create_pull_request(
           repository: @registry, base_branch: @base_branch,
           head_repository: head_repository, branch: branch, package: package
@@ -79,6 +91,18 @@ module Hive
       end
 
       private
+
+      def at_least?(receipt, step)
+        PublishReceipt::STEPS.index(receipt.last_completed_step) >= PublishReceipt::STEPS.index(step)
+      end
+
+      def validate_retained_destination!(receipt, login, branch)
+        unless receipt.data["destination_repository"] == @registry &&
+               receipt.data["base_branch"] == @base_branch && receipt.data["owner"] == login &&
+               receipt.data["head_branch"] == branch
+          raise PublishConflict, "retained publication destination or authenticated owner changed"
+        end
+      end
 
       def prepare(receipt, login, branch, head_repository, mode, base_oid)
         attributes = {

@@ -5,6 +5,7 @@ require "tempfile"
 require "uri"
 require "hive/gh"
 require "hive/paths"
+require "hive/workflow_package/manifest"
 require "hive/workflow_package/publish_receipt"
 require "hive/workflow_package/registry_manifest"
 
@@ -57,13 +58,13 @@ module Hive
       end
 
       def direct_permission?(repository, login)
-        data = json!(
-          [ "gh", "api", "repos/#{repository}/collaborators/#{escape(login)}/permission" ],
-          "registry permission lookup"
-        )
+        out, err, status = run([ "gh", "api", "repos/#{repository}/collaborators/#{escape(login)}/permission" ])
+        return false if !status.success? && err.to_s.match?(/\b404\b|Not Found/i)
+        raise PublishOfflineError, "registry permission lookup failed" unless status.success?
+        data = JSON.parse(out)
         %w[admin maintain write].include?(data["permission"])
-      rescue PublishOfflineError
-        false
+      rescue JSON::ParserError
+        raise PublishOfflineError, "registry permission lookup returned invalid data"
       end
 
       def ensure_fork(repository, login)
@@ -120,6 +121,7 @@ module Hive
                identity[:release_digest] == package.release_digest
           raise PublishConflict, "remote package bytes do not match the validated release"
         end
+        verify_remote_tree!(repository, ref, package)
         true
       end
 
@@ -249,6 +251,27 @@ module Hive
         raise PublishOfflineError, "registry package lookup failed"
       end
 
+      def verify_remote_tree!(repository, ref, package)
+        data = json!(
+          [ "gh", "api", "repos/#{repository}/git/trees/#{escape(ref)}?recursive=1" ],
+          "registry package tree lookup"
+        )
+        unless data.is_a?(Hash) && data["tree"].is_a?(Array) && data["truncated"] != true
+          raise PublishOfflineError, "registry package tree lookup returned incomplete data"
+        end
+        prefix = "#{package.registry_path}/"
+        actual = data.fetch("tree").filter_map do |entry|
+          path = entry["path"].to_s
+          next unless path.start_with?(prefix)
+          unless entry["type"] == "blob" && %w[100644 100755].include?(entry["mode"])
+            raise PublishConflict, "remote package tree contains a linked or special entry"
+          end
+          path.delete_prefix(prefix)
+        end.sort
+        expected = Manifest.inventory(package.root, exclude: [], require_utf8: false).keys.sort
+        raise PublishConflict, "remote package tree does not match the complete package inventory" unless actual == expected
+      end
+
       def git!(checkout, *args)
         run!([ "git", "-C", checkout, *args ], "publication git operation")
       end
@@ -260,8 +283,9 @@ module Hive
       end
 
       def json_optional(args)
-        out, _err, status = run(args)
-        return nil unless status.success?
+        out, err, status = run(args)
+        return nil if !status.success? && err.to_s.match?(/\b404\b|Not Found/i)
+        raise PublishOfflineError, "registry lookup failed" unless status.success?
         JSON.parse(out)
       rescue JSON::ParserError
         raise PublishOfflineError, "registry lookup returned invalid data"

@@ -39,7 +39,10 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
 
     def push_expected_absent(_checkout, _branch, _oid)
       @mutations << :push
-      raise Hive::WorkflowPackage::PublishAmbiguousError, "unknown" if @fail_push
+      if @fail_push
+        @pushed = true if @fail_push == :after
+        raise Hive::WorkflowPackage::PublishAmbiguousError, "unknown"
+      end
       @pushed = true
     end
 
@@ -100,6 +103,22 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
                                                        .load("ivankuznetsov/honeycomb", "demo", "1.0.0")
         assert_equal "push_intent", receipt.last_completed_step
         assert_equal "c" * 40, receipt.data.fetch("commit_oid")
+      end
+    end
+  end
+
+  def test_lost_successful_push_response_resumes_without_a_second_push
+    with_package do |package|
+      with_tmp_dir do |state|
+        gateway = FakeGateway.new(package, fail_push: :after)
+        submission = submission_for(state, gateway)
+        assert_raises(Hive::WorkflowPackage::PublishAmbiguousError) { submission.submit(package) }
+        gateway.instance_variable_set(:@fail_push, false)
+
+        result = submission.submit(package)
+        assert_equal "pr_verified", result.receipt.last_completed_step
+        assert_equal 1, gateway.mutations.count(:push)
+        assert_equal 1, gateway.mutations.count(:pr)
       end
     end
   end

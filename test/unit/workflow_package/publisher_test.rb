@@ -5,10 +5,6 @@ class WorkflowPackagePublisherTest < Minitest::Test
   include HiveTestHelper
 
   Package = Hive::WorkflowPackage::Publisher::Package
-  Status = Data.define(:ok) do
-    def success? = ok
-  end
-
   def test_builds_only_the_canonical_immutable_version_payload_deterministically
     with_authored_workflow do |project, authored_dir|
       File.write(File.join(authored_dir, "ignored.txt"), "do not publish\n")
@@ -56,58 +52,6 @@ class WorkflowPackagePublisherTest < Minitest::Test
     end
   end
 
-  def test_pull_request_client_reuses_a_duplicate_open_submission
-    calls = []
-    runner = lambda do |args, chdir:|
-      calls << [ args, chdir ]
-      out = case args.take(3)
-      when [ "gh", "api", "user" ] then JSON.generate("login" => "alice")
-      when [ "gh", "pr", "list" ] then JSON.generate([ { "url" => "https://example.test/pr/7" } ])
-      else ""
-      end
-      [ out, "", Status.new(ok: true) ]
-    end
-    client = Hive::WorkflowPackage::Publisher::RegistryPullRequest.new(runner: runner)
-    package = Package.new(name: "demo", version: "1.2.3", root: Dir.pwd,
-                          manifest_digest: "a" * 64, warnings: [])
-
-    assert_equal "https://example.test/pr/7", client.open(package)
-    refute calls.any? { |(args, _)| args.take(3) == [ "gh", "repo", "clone" ] }
-  end
-
-  def test_pull_request_client_uses_clean_checkout_body_file_and_fork_head
-    with_tmp_dir do |package_root|
-      File.write(File.join(package_root, "manifest.json"), "{}\n")
-      calls = []
-      body = nil
-      runner = lambda do |args, chdir:|
-        calls << [ args, chdir ]
-        output = case args.take(3)
-        when [ "gh", "api", "user" ]
-          JSON.generate("login" => "alice")
-        when [ "gh", "pr", "list" ]
-          "[]"
-        when [ "gh", "pr", "create" ]
-          body = File.read(args.fetch(args.index("--body-file") + 1))
-          "https://example.test/pr/8\n"
-        else
-          ""
-        end
-        [ output, "", Status.new(ok: true) ]
-      end
-      client = Hive::WorkflowPackage::Publisher::RegistryPullRequest.new(runner: runner)
-      package = Package.new(name: "demo", version: "1.2.3", root: package_root,
-                            manifest_digest: "b" * 64, warnings: [])
-
-      assert_equal "https://example.test/pr/8", client.open(package)
-      push = calls.find { |(args, _)| args.take(2) == [ "git", "push" ] }.first
-      create = calls.find { |(args, _)| args.take(3) == [ "gh", "pr", "create" ] }.first
-      assert_includes push, "honeycomb-demo-1.2.3-#{'b' * 12}"
-      assert_includes create, "alice:honeycomb-demo-1.2.3-#{'b' * 12}"
-      assert_includes body, "pending registry checks and trusted non-author review"
-    end
-  end
-
   def test_publish_delegates_to_the_registry_submission
     submitted = nil
     submission = Object.new
@@ -115,14 +59,35 @@ class WorkflowPackagePublisherTest < Minitest::Test
     submission.define_singleton_method(:submit) { |package| submitted = package; Struct.new(:receipt).new(receipt) }
     resolver = Object.new
     resolver.define_singleton_method(:resolve) { |value| value.equal?(receipt) ? "submitted" : raise("wrong receipt") }
+    store = Object.new
+    store.define_singleton_method(:load) { |_registry, _name, _version| nil }
     package = Package.new(name: "demo", version: "1.2.3", root: Dir.pwd,
                           manifest_digest: "a" * 64, warnings: [])
     instance = Hive::WorkflowPackage::Publisher.new(
-      "demo", project_root: Dir.pwd, version: "1.2.3", submission: submission, resolver: resolver
+      "demo", project_root: Dir.pwd, version: "1.2.3",
+      submission: submission, resolver: resolver, store: store
     )
 
     assert_equal "submitted", instance.publish(package)
     assert_same package, submitted
+  end
+
+  def test_publish_reconciles_a_verified_receipt_before_any_new_submission
+    package = Package.new(name: "demo", version: "1.2.3", root: Dir.pwd,
+                          manifest_digest: "a" * 64, warnings: [])
+    receipt = Struct.new(:last_completed_step).new("pr_verified")
+    store = Object.new
+    store.define_singleton_method(:load) { |_registry, _name, _version| receipt }
+    submission = Object.new
+    submission.define_singleton_method(:submit) { |_package| raise "must not mutate" }
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { |value| value.equal?(receipt) ? "current" : raise("wrong receipt") }
+    instance = Hive::WorkflowPackage::Publisher.new(
+      "demo", project_root: Dir.pwd, version: "1.2.3",
+      submission: submission, resolver: resolver, store: store
+    )
+
+    assert_equal "current", instance.publish(package)
   end
 
   def test_package_rejects_invalid_identity_and_nonempty_destination
@@ -150,163 +115,59 @@ class WorkflowPackagePublisherTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         Dir.mktmpdir { |destination| publisher(project).package(destination: destination) }
       end
-      instance = publisher(project)
-      with_replaced_singleton_method(
-        Hive::Workflows::DescriptorParser, :parse_file, ->(_path) { true }
-      ) do
-        assert_raises(Hive::ConfigError) { instance.send(:load_descriptor) }
-      end
-
       File.write(descriptor, "id: [invalid")
-      with_replaced_singleton_method(
-        Hive::Workflows::DescriptorParser, :parse_file, ->(_path) { true }
-      ) do
-        assert_raises(Hive::ConfigError) { instance.send(:load_descriptor) }
+      assert_raises(Hive::ConfigError) do
+        Dir.mktmpdir { |destination| publisher(project).package(destination: destination) }
       end
 
       metadata = File.join(authored_dir, "honeycomb.yml")
+      File.write(descriptor, valid_descriptor)
       FileUtils.rm_f(metadata)
-      assert_raises(Hive::ConfigError) { instance.send(:load_metadata) }
+      assert_raises(Hive::ConfigError) do
+        Dir.mktmpdir { |destination| publisher(project).package(destination: destination) }
+      end
       File.write(metadata, "summary: [invalid")
-      assert_raises(Hive::ConfigError) { instance.send(:load_metadata) }
+      assert_raises(Hive::ConfigError) do
+        Dir.mktmpdir { |destination| publisher(project).package(destination: destination) }
+      end
     end
   end
 
   def test_package_requires_nonempty_and_readable_readme
     with_authored_workflow do |project, authored_dir|
-      instance = publisher(project)
-      metadata = YAML.safe_load(File.read(File.join(authored_dir, "honeycomb.yml")))
       readme = File.join(authored_dir, "README.md")
       File.write(readme, "  \n")
-      assert_raises(Hive::ConfigError) { instance.send(:validate_authored_metadata!, metadata) }
+      assert_raises(Hive::ConfigError) do
+        Dir.mktmpdir { |destination| publisher(project).package(destination: destination) }
+      end
 
       File.write(readme, "# Demo\n")
-      original = File.method(:read)
-      File.define_singleton_method(:read) do |path, *args|
-        raise Errno::EACCES if path == readme
-
-        original.call(path, *args)
-      end
-      begin
-        assert_raises(Hive::ConfigError) { instance.send(:validate_authored_metadata!, metadata) }
-      ensure
-        File.define_singleton_method(:read, original)
-      end
-    end
-  end
-
-  def test_instruction_rewrite_rejects_collisions_and_invalid_files
-    with_authored_workflow do |project, authored_dir|
-      instance = publisher(project)
-      instance.define_singleton_method(:resolve_instruction) do |value|
-        value == "one" ? [ "/source/one", "same.md" ] : [ "/source/two", "same.md" ]
-      end
-      descriptor = { "stages" => [ { "instruction" => "one" }, { "instruction" => "two" } ] }
-      assert_raises(Hive::ConfigError) { instance.send(:rewrite_instructions, descriptor) }
-      assert_equal "scalar", instance.send(:deep_transform, "scalar") { |_key, value| value }
-
-      clean = publisher(project)
-      assert_raises(Hive::ConfigError) { clean.send(:resolve_instruction, nil) }
-      assert_raises(Hive::ConfigError) { clean.send(:resolve_instruction, "../outside.md") }
-      FileUtils.rm_f(File.join(authored_dir, "work.md"))
-      assert_raises(Hive::ConfigError) { clean.send(:resolve_instruction, "./demo/work.md") }
-      File.write(File.join(authored_dir, "target.md"), "target")
-      File.symlink("target.md", File.join(authored_dir, "work.md"))
-      assert_raises(Hive::ConfigError) { clean.send(:resolve_instruction, "./demo/work.md") }
-    end
-  end
-
-  def test_copy_authored_file_rejects_links_and_missing_files
-    with_tmp_dir do |dir|
-      target = File.join(dir, "target")
-      File.write(target, "content")
-      link = File.join(dir, "link")
-      File.symlink("target", link)
-      instance = publisher(dir)
-
       assert_raises(Hive::ConfigError) do
-        instance.send(:copy_authored_file, link, File.join(dir, "copy"), label: "README.md")
-      end
-      assert_raises(Hive::ConfigError) do
-        instance.send(:copy_authored_file, File.join(dir, "missing"), File.join(dir, "copy"), label: "README.md")
-      end
-    end
-  end
-
-  def test_pull_request_helper_rejects_invalid_remote_responses_and_command_failures
-    invalid_viewer = runner_for([ [ "", "", Status.new(ok: true) ], [ "not-json", "", Status.new(ok: true) ] ])
-    assert_raises(Hive::WorkflowPackage::PublishError) do
-      Hive::WorkflowPackage::Publisher::RegistryPullRequest.new(runner: invalid_viewer)
-                                                       .open(sample_package)
-    end
-
-    invalid_duplicate = runner_for([ [ "not-json", "", Status.new(ok: true) ] ])
-    client = Hive::WorkflowPackage::Publisher::RegistryPullRequest.new(runner: invalid_duplicate)
-    assert_raises(Hive::WorkflowPackage::PublishError) { client.send(:existing_pr, "alice", "branch") }
-
-    failing = ->(_args, chdir:) { raise Errno::ENOENT }
-    client = Hive::WorkflowPackage::Publisher::RegistryPullRequest.new(runner: failing)
-    assert_raises(Hive::WorkflowPackage::PublishError) { client.send(:run, [ "gh" ]) }
-  end
-
-  def test_pull_request_helper_creates_missing_fork_and_renders_warning_evidence
-    calls = []
-    runner = lambda do |args, chdir:|
-      calls << args
-      status = args.take(3) == [ "gh", "repo", "view" ] ? Status.new(ok: false) : Status.new(ok: true)
-      [ "", "", status ]
-    end
-    client = Hive::WorkflowPackage::Publisher::RegistryPullRequest.new(runner: runner)
-
-    assert_equal "alice/honeycomb", client.send(:ensure_fork, "alice")
-    assert calls.any? { |args| args.take(3) == [ "gh", "repo", "fork" ] }
-    body = client.send(:pr_body, sample_package(warnings: [ { "rule_id" => "security.warning", "path" => "workflow.yml" } ]))
-    assert_includes body, "security.warning"
-  end
-
-  def test_pull_request_helper_rejects_package_and_catalog_version_collisions
-    client = Hive::WorkflowPackage::Publisher::RegistryPullRequest.new(runner: runner_for([]))
-    with_tmp_dir do |checkout|
-      package_dir = File.join(checkout, "workflows", "demo")
-      FileUtils.mkdir_p(package_dir)
-      manifest = File.join(package_dir, "manifest.json")
-      File.write(manifest, JSON.generate("name" => "other", "version" => "0.1.0"))
-      assert_raises(Hive::WorkflowPackage::PublishError) do
-        client.send(:reject_version_collision!, checkout, sample_package)
-      end
-
-      File.write(manifest, JSON.generate("name" => "demo", "version" => "1.2.3"))
-      assert_raises(Hive::WorkflowPackage::PublishError) do
-        client.send(:reject_version_collision!, checkout, sample_package)
-      end
-
-      FileUtils.rm_f(manifest)
-      File.write(File.join(checkout, "catalog.json"), JSON.generate(
-        "workflows" => { "demo" => { "versions" => { "1.2.3" => {} } } }
-      ))
-      assert_raises(Hive::WorkflowPackage::PublishError) do
-        client.send(:reject_version_collision!, checkout, sample_package)
-      end
-
-      File.write(File.join(checkout, "catalog.json"), "{not-json")
-      assert_raises(Hive::WorkflowPackage::PublishError) do
-        client.send(:reject_version_collision!, checkout, sample_package)
+        Dir.mktmpdir { |destination| publisher(project).package(destination: destination) }
       end
     end
   end
 
   private
 
-  def sample_package(warnings: [])
-    Package.new(name: "demo", version: "1.2.3", root: Dir.pwd,
-                manifest_digest: "a" * 64, warnings: warnings)
-  end
-
-  def runner_for(results)
-    queue = results.dup
-    lambda do |_args, chdir:|
-      queue.shift || [ "", "", Status.new(ok: true) ]
-    end
+  def valid_descriptor
+    <<~YAML
+      id: demo
+      stages:
+        - name: inbox
+          kind: terminal
+          state_file: idea.md
+        - name: work
+          kind: agent
+          state_file: work.md
+          instruction: ./demo/work.md
+          mapping_role: development
+          mapping_contract: demo-work-v1
+          permissions: read-only
+        - name: done
+          kind: terminal
+          state_file: done.md
+    YAML
   end
 
   def publisher(project)

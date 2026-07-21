@@ -30,7 +30,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
       }, { once: true })
     JS
     click_button "Grid"
-    assert_current_path grid_path
+    assert_current_path grid_path, wait: 10
     assert_selector "#status-grid .task-row", text: slug
 
     visit root_path

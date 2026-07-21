@@ -27,27 +27,40 @@ module Hive
       end
 
       def call
+        emit(run)
+      rescue Hive::ConfigError, Hive::AgentSkills::Manifest::ValidationError, KeyError, ArgumentError => e
+        emit_config_error(e)
+      end
+
+      # Shared coordinator entrypoint for `hive setup`. It preserves the exact
+      # preview, consent, and revalidation lifecycle without emitting a nested
+      # JSON envelope; callers receive the typed provisioning result instead.
+      def run
+        if unattended_without_consent?
+          return @provisioner.consent_required_result(
+            agents: @agents, skills: @skills, provenance: refusal_provenance
+          )
+        end
+
         plan = @provisioner.build_plan(agents: @agents, skills: @skills)
         render_plan(plan) unless @json
-        return emit(@provisioner.noop_result(plan)) if plan.operations.empty?
+        return @provisioner.noop_result(plan) if plan.operations.empty?
 
         provenance = consent_provenance
-        return emit(@provisioner.refusal_result(plan, provenance: refusal_provenance)) unless provenance
+        return @provisioner.refusal_result(plan, provenance: refusal_provenance) unless provenance
 
         revised, changed = @provisioner.revalidate(plan)
         if changed
           plan = revised
           render_changed_plan(plan) unless @json
-          return emit(@provisioner.noop_result(plan)) if plan.operations.empty?
+          return @provisioner.noop_result(plan) if plan.operations.empty?
           unless automatic_consent?
-            return emit(@provisioner.refusal_result(plan, provenance: "revalidation_declined")) unless confirm?
+            return @provisioner.refusal_result(plan, provenance: "revalidation_declined") unless confirm?
             provenance = "interactive_revalidated"
           end
         end
 
-        emit(@provisioner.execute(plan, consent_provenance: provenance))
-      rescue Hive::ConfigError, Hive::AgentSkills::Manifest::ValidationError, KeyError, ArgumentError => e
-        emit_config_error(e)
+        @provisioner.execute(plan, consent_provenance: provenance)
       end
 
       private
@@ -75,6 +88,10 @@ module Hive
         false
       end
 
+      def unattended_without_consent?
+        !@yes && @consent_provenance.nil? && (@json || !interactive?)
+      end
+
       def confirm?
         @error.print "Proceed? [y/N]: "
         @error.flush
@@ -92,7 +109,13 @@ module Hive
           return
         end
         plan.operations.each do |operation|
-          command = operation.argv.empty? ? "(Hive atomic file write)" : Shellwords.join(operation.argv)
+          command = if operation.kind == "bundled_skill_publish"
+            "(Hive atomic directory publish)"
+          elsif operation.argv.empty?
+            "(Hive atomic file write)"
+          else
+            Shellwords.join(operation.argv)
+          end
           @output.puts "  [#{operation.id}] #{command}"
           operation.files.each { |path| @output.puts "    file: #{path}" }
           @output.puts "    after: #{operation.depends_on.join(', ')}" unless operation.depends_on.empty?

@@ -21,6 +21,19 @@ require "hive/commands/web/service_installer"
 class SetupOrchestratorTest < Minitest::Test
   include HiveTestHelper
 
+  def test_unattended_probe_uses_tty_state_and_fails_closed_on_ioerror
+    interactive = Object.new
+    interactive.define_singleton_method(:tty?) { true }
+    noninteractive = Object.new
+    noninteractive.define_singleton_method(:tty?) { false }
+    closed = Object.new
+    closed.define_singleton_method(:tty?) { raise IOError, "closed input" }
+
+    refute Hive::Commands::Setup.new(input: interactive).send(:unattended_without_yes?)
+    assert Hive::Commands::Setup.new(input: noninteractive).send(:unattended_without_yes?)
+    assert Hive::Commands::Setup.new(input: closed).send(:unattended_without_yes?)
+  end
+
   # ── diagnostics fakes ────────────────────────────────────────────────
 
   def diag(*rows, ok: nil)
@@ -94,6 +107,23 @@ class SetupOrchestratorTest < Minitest::Test
     # the class, not this test — a bare `fake_installer` call would NameError.
     daemon_installer = fake_installer
     web_installer = fake_installer
+    agent_plan = Hive::AgentSkills::ProvisioningPlan.new(
+      inspections: [].freeze,
+      operations: [].freeze,
+      conflicts: [].freeze,
+      filters: { "agents" => [], "skills" => [] }.freeze,
+      fingerprint: "none"
+    ).freeze
+    agent_result = Hive::AgentSkills::ProvisioningResult.new(
+      preview: agent_plan,
+      consent: { "granted" => false, "provenance" => "not_required" }.freeze,
+      operation_results: [].freeze,
+      final_health: [].freeze,
+      exit_code: 0,
+      classification: "no_op"
+    ).freeze
+    agent_setup = Object.new
+    agent_setup.define_singleton_method(:run) { agent_result }
     with_replaced_singleton_method(Hive::Setup::Diagnostics, :new, ->(*) { fake_diag }) do
       with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!, ->(*) { "/bundle" }) do
         with_replaced_singleton_method(Hive::Web::AppBundle, :app_dir, ->(*) { "/bundle" }) do
@@ -102,7 +132,10 @@ class SetupOrchestratorTest < Minitest::Test
               ->(**_kw) { daemon_installer }) do
               with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
                 ->(**_kw) { web_installer }) do
-                stub_web_config { yield }
+                with_replaced_singleton_method(Hive::Commands::SetupAgents, :new,
+                  ->(**_kw) { agent_setup }) do
+                  stub_web_config { yield }
+                end
               end
             end
           end
@@ -134,7 +167,7 @@ class SetupOrchestratorTest < Minitest::Test
 
     exit_code = with_all_collaborators_ok(diagnostics: diagnostics) do
       with_fake_init do
-        setup = Hive::Commands::Setup.new(json: true, output: output)
+        setup = Hive::Commands::Setup.new(json: true, yes: true, output: output)
         setup.call
       end
     end
@@ -144,7 +177,7 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal "hive-setup", payload["schema"]
     assert_equal true, payload["ok"]
     names = payload["phases"].map { |p| p["name"] }
-    assert_equal %w[diagnostics web_bundle daemon_service enroll web], names,
+    assert_equal %w[diagnostics agent_skills web_bundle daemon_service enroll web], names,
                  "phases must be recorded in provisioning order"
     assert payload["phases"].all? { |p| p["ok"] }, "every phase ok on the happy path"
   end
@@ -195,6 +228,36 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal false, JSON.parse(output.string)["ok"]
   end
 
+  def test_json_without_yes_reports_consent_required_before_any_mutation
+    output = StringIO.new
+    exit_code = with_replaced_singleton_method(Hive::Setup::Diagnostics, :new,
+      ->(*) { flunk "diagnostics must wait for unattended --yes consent" }) do
+      with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!, ->(*) { flunk "web bootstrap must wait for --yes" }) do
+        with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new,
+          ->(**_kw) { flunk "daemon install must wait for --yes" }) do
+          stub_web_config do
+            Hive::Commands::Setup.new(
+              json: true,
+              output: output,
+              setup_agents_factory: ->(**_kwargs) { flunk "agent inspection must wait for --yes" }
+            ).call
+          end
+        end
+      end
+    end
+
+    assert_equal 1, exit_code
+    payload = JSON.parse(output.string)
+    assert_equal %w[diagnostics agent_skills web], payload.fetch("phases").map { |phase| phase.fetch("name") }
+    diagnostics_phase = payload.fetch("phases").find { |phase| phase.fetch("name") == "diagnostics" }
+    assert_equal true, diagnostics_phase.fetch("skipped")
+    assert_equal "consent_required", diagnostics_phase.fetch("reason")
+    agent_phase = payload.fetch("phases").find { |phase| phase.fetch("name") == "agent_skills" }
+    assert_equal false, agent_phase.fetch("ok")
+    assert_equal "consent_required", agent_phase.fetch("classification")
+    assert_equal "json_requires_yes", agent_phase.dig("consent", "provenance")
+  end
+
   # ── --no-init: enroll skipped ────────────────────────────────────────
 
   def test_no_init_skips_enroll_phase
@@ -205,13 +268,13 @@ class SetupOrchestratorTest < Minitest::Test
     with_all_collaborators_ok(diagnostics: diagnostics) do
       with_replaced_singleton_method(Hive::Commands::Init, :new,
         ->(*_a, **_kw) { flunk "enroll must be skipped with --no-init" }) do
-        Hive::Commands::Setup.new(json: true, no_init: true, output: output).call
+        Hive::Commands::Setup.new(json: true, no_init: true, yes: true, output: output).call
       end
     end
 
     names = JSON.parse(output.string)["phases"].map { |p| p["name"] }
     refute_includes names, "enroll", "--no-init must not record an enroll phase"
-    assert_equal %w[diagnostics web_bundle daemon_service web], names
+    assert_equal %w[diagnostics agent_skills web_bundle daemon_service web], names
   end
 
   # ── --service: web service installed ─────────────────────────────────
@@ -222,7 +285,7 @@ class SetupOrchestratorTest < Minitest::Test
 
     with_all_collaborators_ok(diagnostics: diagnostics) do
       with_fake_init do
-        Hive::Commands::Setup.new(json: true, service: true, output: output).call
+        Hive::Commands::Setup.new(json: true, service: true, yes: true, output: output).call
       end
     end
 
@@ -243,7 +306,7 @@ class SetupOrchestratorTest < Minitest::Test
         with_fake_init do
           with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
             ->(**_kw) { raise Errno::EACCES, "/Library/LaunchAgents" }) do
-            Hive::Commands::Setup.new(json: true, service: true, output: output).call
+            Hive::Commands::Setup.new(json: true, service: true, yes: true, output: output).call
           end
         end
       end
@@ -400,6 +463,59 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal "enroll", phase["name"]
     assert_equal true, phase["ok"]
     assert_equal Dir.pwd, phase["path"]
+  end
+
+  def test_enroll_suppresses_nested_init_agent_skill_preflight
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    captured = nil
+    fake = Object.new
+    fake.define_singleton_method(:call) { true }
+
+    with_replaced_singleton_method(Hive::Commands::Init, :new, lambda { |*_args, **kwargs|
+      captured = kwargs
+      fake
+    }) do
+      setup.send(:enroll_project)
+    end
+
+    assert_equal false, captured.fetch(:agent_skill_preflight)
+  end
+
+  def test_agent_skill_phase_exposes_aggregate_target_states
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    target = lambda do |agent, capability|
+      Hive::AgentSkills::Target.new(
+        surfaces: [ "hive.operations" ], kind: "operating", agent: agent,
+        configured_skill: capability, invocation: "/#{capability}", capability_id: capability,
+        package_id: "hive-operations", managed: true
+      )
+    end
+    rows = {
+      "unchanged" => "healthy",
+      "unavailable" => "unavailable",
+      "drifted" => "stale",
+      "would_write" => "missing",
+      "failed" => "conflicting"
+    }.map do |capability, health|
+      Hive::AgentSkills::Inspection.new(
+        target: target.call("claude", capability), expected: {}, native: {}, resolution: {},
+        health: health, severity: "error", explanation: health, remediation: "repair"
+      )
+    end
+    operation = Hive::AgentSkills::Adapters::Operation.new(
+      id: "claude:hive:publish", agent: "claude", package_id: "hive-operations",
+      capabilities: [ "would_write" ], kind: "bundled_skill_publish", argv: [], files: [],
+      depends_on: [], preconditions: {}, metadata: {}
+    )
+    plan = Hive::AgentSkills::ProvisioningPlan.new(
+      inspections: rows, operations: [ operation ], conflicts: [],
+      filters: { "agents" => [], "skills" => [] }, fingerprint: "test"
+    )
+
+    states = setup.send(:setup_target_states, plan).to_h do |row|
+      [ row.fetch("capability"), row.fetch("state") ]
+    end
+    assert_equal %w[unchanged unavailable drifted would_write failed].sort, states.values.sort
   end
 
   def test_enroll_already_initialized_falls_back_to_daemon_enable

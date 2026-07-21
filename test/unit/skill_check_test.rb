@@ -15,6 +15,12 @@ class HiveSkillCheckParseTest < Minitest::Test
     assert_equal "ce-plan", inv.name
   end
 
+  def test_parses_codex_skill_mention
+    inv = Hive::SkillCheck.parse("$hive")
+    assert_nil inv.plugin
+    assert_equal "hive", inv.name
+  end
+
   def test_rejects_nil
     assert_raises(ArgumentError) { Hive::SkillCheck.parse(nil) }
   end

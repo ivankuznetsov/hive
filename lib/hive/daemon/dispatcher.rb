@@ -11,6 +11,7 @@ require "hive/daemon/plan_approval"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
+require "hive/daemon/operational_snapshot"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/recoverable_error_healer"
 require "hive/daemon/display_name_backfiller"
@@ -70,7 +71,8 @@ module Hive
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                      attempt_dispatcher: nil, attempt_reconciler: nil,
-                     lost_outcome_store: nil, lost_outcome_processor: nil)
+                     lost_outcome_store: nil, lost_outcome_processor: nil,
+                     operational_snapshot: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -88,6 +90,7 @@ module Hive
         @attempt_reconciler = attempt_reconciler
         @lost_outcome_store = lost_outcome_store
         @lost_outcome_processor = lost_outcome_processor
+        @operational_snapshot = operational_snapshot
         @attempt_snapshot = nil
 
         # Update-flow collaborators (plan 2026-05-27-002). The check runs
@@ -210,6 +213,7 @@ module Hive
       # deterministically.
       def tick(now: Time.now)
         @last_tick_at = now
+        publish_operational_snapshot(:begin_tick, phase: "started", now: now)
         # PR-40 follow-up #2: clear the per-tick enable cache so a
         # `daemon.enabled` flip in `<project>/.hive-state/config.yml`
         # takes effect within one poll interval. Without this, the
@@ -228,6 +232,9 @@ module Hive
         # fails, fail closed for this tick rather than admitting against an
         # unknown ownership view.
         unless reconcile_attempts(now: now)
+          publish_operational_snapshot(
+            :fail, phase: "failed", reason: "attempt_reconciliation_failed", now: now
+          )
           @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                    action: "attempt_reconciliation_failed")
           return
@@ -273,6 +280,9 @@ module Hive
         result = @status_consumer.fetch
         unless result.ok
           @logger.event(:status_failure, error: result.error)
+          publish_operational_snapshot(
+            :fail, phase: "failed", reason: "status_failure", now: now
+          )
           @logger.event(:tick_end, now: Time.now.utc.iso8601, action: "status_failure")
           return
         end
@@ -434,6 +444,8 @@ module Hive
           scope_projects: Array(result.projects).map(&:name)
         )
         refresh_tracked_state_file_mtimes(result.rows)
+
+        publish_complete_operational_snapshot(initial_rows: result.rows, now: now)
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)
@@ -920,10 +932,26 @@ module Hive
       end
 
       def handle_row(row, now:)
-        return unless project_enabled?(row.project)
-        return if @legacy_layout_projects.key?(row.project)
+        unless project_enabled?(row.project)
+          observe_operational_disposition(
+            row, decision: :project_disabled, owner: "operator",
+            reason: "daemon dispatch is disabled for this project"
+          )
+          return
+        end
+        if @legacy_layout_projects.key?(row.project)
+          observe_operational_disposition(
+            row, decision: :legacy_layout, owner: "operator",
+            reason: "project has legacy stage directories and cannot dispatch safely"
+          )
+          return
+        end
         if merged_pr_recoverable_finalize_error?(row)
           enqueue_merge_watch(row, error_reason: row.marker_attrs.to_h["reason"].to_s)
+          observe_operational_disposition(
+            row, decision: :merge_watch, owner: "scheduler",
+            reason: "merged pull request is queued for recovery finalization"
+          )
           return
         end
 
@@ -945,6 +973,7 @@ module Hive
         case decision
         when :admission_error
           log_admission_error(row)
+          observe_policy_disposition(row, decision)
         when :dispatch
           # Pass through the reason the dispatch fired so the
           # `:dispatched` logger event can distinguish plan-approval
@@ -952,10 +981,12 @@ module Hive
           # agent or operator reading daemon.log can then audit WHICH
           # policy branch fired without re-implementing Policy.decide.
           trigger = Policy.plan_approval?(row.action, row.stage, row.workflow) ? "plan_approval" : "advance"
-          dispatch_or_block(row, now: now, trigger: trigger)
+          outcome = dispatch_or_block(row, now: now, trigger: trigger)
+          observe_dispatch_outcome(row, outcome)
         when :wait_for_debounce
           @logger.event(:debouncing, project: row.project, slug: row.slug,
                                      stage: row.stage, mtime: row.state_file_mtime&.utc&.iso8601)
+          observe_policy_disposition(row, decision)
         when :record_baseline
           # First-sight kind: edit row — seed the controller with the
           # current mtime so the next tick has something to compare
@@ -968,6 +999,7 @@ module Hive
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action,
                                   reason: "baseline_recorded")
+          observe_policy_disposition(row, decision)
         when :wait_for_answers
           # Brainstorm Q&A still has unanswered questions. Each Telegram
           # answer bumps the file mtime, so without this gate the daemon
@@ -976,6 +1008,7 @@ module Hive
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action,
                                   reason: "answers_pending")
+          observe_policy_disposition(row, decision)
         when :blocked_on_dependency
           # `unresolved` distinguishes a real waiting-on-prereq block
           # (blocked_by names the prerequisite) from a mistyped/unknown
@@ -990,8 +1023,10 @@ module Hive
                                   depends_on: row.depends_on,
                                   blocked_by: row.blocked_by,
                                   dependency_stage: row.dependency_stage)
+          observe_policy_disposition(row, decision)
         when :poll_for_merge
           enqueue_merge_watch(row)
+          observe_policy_disposition(row, decision)
         when :markerless_stalled
           # A generic :agent stage exited 0 without writing a WAITING/COMPLETE
           # marker and its state file shows no progress, so it re-classifies to
@@ -1001,9 +1036,11 @@ module Hive
           @logger.event(:markerless_stalled, project: row.project, slug: row.slug,
                                               stage: row.stage, action: row.action,
                                               reason: "agent_exited_without_marker")
+          observe_policy_disposition(row, decision)
         when :skip
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action)
+          observe_policy_disposition(row, decision)
         end
       end
 
@@ -1096,13 +1133,13 @@ module Hive
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action,
                                   reason: "folder_missing_nil")
-          return
+          return :folder_missing_nil
         end
         unless File.directory?(row.folder.to_s)
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action,
                                   reason: "folder_missing")
-          return
+          return :folder_missing
         end
 
         # Per-slug in-flight gate — prevents the row scan from
@@ -1117,7 +1154,7 @@ module Hive
         if @controller.running_task?(project: row.project, slug: row.slug)
           @logger.event(:blocked, project: row.project, slug: row.slug,
                                   stage: row.stage, reason: "in_flight")
-          return
+          return :in_flight
         end
 
         gate = @controller.can_dispatch?(
@@ -1128,7 +1165,7 @@ module Hive
         unless gate == :ok
           @logger.event(:blocked, project: row.project, slug: row.slug,
                                   stage: row.stage, reason: gate.to_s)
-          return
+          return gate
         end
 
         # Plan-approval rows need a command rewrite + marker flip BEFORE
@@ -1148,11 +1185,11 @@ module Hive
             @logger.event(:skipped, project: row.project, slug: row.slug,
                                     stage: row.stage, action: row.action,
                                     reason: "plan_approval_invalid: #{e.message}")
-            return
+            return :plan_approval_invalid
           end
         end
 
-        dispatch_command(
+        dispatch_result = dispatch_command(
           command,
           project: row.project, slug: row.slug, stage: row.stage,
           state_file_mtime: row.state_file_mtime,
@@ -1160,6 +1197,172 @@ module Hive
           now: now,
           trigger: trigger
         )
+        dispatch_outcome(dispatch_result)
+      end
+
+      def dispatch_outcome(result)
+        return :dispatched unless result.is_a?(Hive::Attempts::DispatchResult)
+
+        case result.status
+        when :accepted then :dispatched
+        when :existing_live then :in_flight
+        when :terminal_replay then :attempt_terminal_replay
+        when :deferred
+          case result.reason
+          when "capacity" then :attempt_capacity
+          when "attempt_lost" then :attempt_lost
+          when "launch_handoff_failed" then :launch_handoff_failed
+          when "invalid_predecessor" then :invalid_predecessor
+          else :attempt_deferred
+          end
+        else
+          :attempt_deferred
+        end
+      end
+
+      def observe_policy_disposition(row, decision)
+        disposition = Policy.operational_disposition(decision)
+        observe_operational_disposition(row, **disposition)
+      end
+
+      def observe_dispatch_outcome(row, outcome)
+        owner, reason = case outcome.to_sym
+        when :dispatched
+          [ "scheduler", "child dispatch was accepted" ]
+        when :in_flight
+          [ "agent", "this task already has an in-flight child" ]
+        when :attempt_terminal_replay
+          [ "hive", "the matching durable attempt already reached a terminal receipt" ]
+        when :attempt_capacity
+          [ "scheduler", "durable attempt capacity is exhausted" ]
+        when :attempt_lost
+          [ "hive", "a prior durable attempt is lost and requires recovery" ]
+        when :launch_handoff_failed
+          [ "hive", "durable worker launch handoff failed" ]
+        when :invalid_predecessor
+          [ "hive", "durable successor admission found an invalid predecessor" ]
+        when :attempt_deferred
+          [ "hive", "durable attempt admission was deferred" ]
+        when :global_cap
+          [ "scheduler", "global dispatch capacity is exhausted" ]
+        when :project_cap
+          [ "scheduler", "project dispatch capacity is exhausted" ]
+        when :daily_cap
+          [ "scheduler", "project daily dispatch budget is exhausted" ]
+        when :cooldown
+          [ "scheduler", "task is inside its scheduler cooldown" ]
+        when :quarantined
+          [ "operator", "task is quarantined after repeated transient failures" ]
+        when :project_dropped
+          [ "operator", "project was dropped from this daemon generation" ]
+        when :folder_missing, :folder_missing_nil
+          [ "operator", "task folder disappeared before dispatch" ]
+        when :plan_approval_invalid
+          [ "hive", "plan approval could not be prepared safely" ]
+        else
+          [ "unknown", "dispatch outcome is not recognized" ]
+        end
+        observe_operational_disposition(row, decision: outcome, owner: owner, reason: reason)
+      end
+
+      def observe_operational_disposition(row, decision:, owner:, reason:)
+        return unless @operational_snapshot
+
+        @operational_snapshot.observe(
+          row, decision: decision, owner: owner, reason: reason
+        )
+      rescue StandardError => e
+        log_operational_snapshot_failure(phase: "observe", error: e)
+      end
+
+      def publish_complete_operational_snapshot(initial_rows:, now:)
+        return unless @operational_snapshot
+
+        verification = @status_consumer.fetch
+        completed_at = operational_snapshot_now
+        unless verification.ok
+          publish_operational_snapshot(
+            :fail, phase: "failed", reason: "revalidation_status_failure", now: completed_at
+          )
+          return
+        end
+
+        publish_operational_snapshot(
+          :complete,
+          phase: "complete",
+          initial_rows: initial_rows,
+          final_rows: verification.rows,
+          controller: @controller.operational_snapshot(now: completed_at),
+          queue: operational_queue_snapshot(now: completed_at),
+          recoveries: operational_recovery_snapshot,
+          now: completed_at
+        )
+      rescue StandardError => e
+        log_operational_snapshot_failure(phase: "complete", error: e)
+        publish_operational_snapshot(
+          :fail, phase: "failed", reason: "snapshot_assembly_failure", now: now
+        )
+      end
+
+      def operational_snapshot_now
+        Time.now.utc
+      end
+
+      def publish_operational_snapshot(method, phase:, **attributes)
+        return unless @operational_snapshot
+
+        @operational_snapshot.public_send(method, **attributes)
+      rescue StandardError => e
+        log_operational_snapshot_failure(phase: phase, error: e)
+        nil
+      end
+
+      def log_operational_snapshot_failure(phase:, error:)
+        @logger.event(
+          :operational_snapshot_publish_failed,
+          phase: phase,
+          error: "#{error.class}: #{error.message}"
+        )
+      rescue StandardError
+        nil
+      end
+
+      def operational_queue_snapshot(now:)
+        malformed = 0
+        pending = Hive::Daemon::DispatchRequestQueue.pending(
+          state_home: dispatch_request_state_home,
+          bad_handler: ->(**_attrs) { malformed += 1 }
+        )
+        claimed = Hive::Daemon::DispatchRequestQueue.claimed(
+          state_home: dispatch_request_state_home,
+          bad_handler: ->(**_attrs) { malformed += 1 }
+        )
+        oldest = pending.map(&:created_at).compact.min
+        {
+          "status" => "current",
+          "pending" => pending.size,
+          "claimed" => claimed.size,
+          "malformed" => malformed,
+          "oldest_pending_age_sec" => oldest ? [ now - oldest, 0 ].max.to_i : nil,
+          "expiry_sec" => Hive::Daemon::DispatchRequestQueue::EXPIRY_SEC
+        }
+      rescue StandardError => e
+        {
+          "status" => "unavailable",
+          "pending" => nil,
+          "claimed" => nil,
+          "malformed" => nil,
+          "oldest_pending_age_sec" => nil,
+          "expiry_sec" => Hive::Daemon::DispatchRequestQueue::EXPIRY_SEC,
+          "reason" => "#{e.class}: #{e.message}"
+        }
+      end
+
+      def operational_recovery_snapshot
+        {
+          "stale_agent" => @stale_agent_healer.operational_snapshot,
+          "recoverable_error" => @recoverable_error_healer.operational_snapshot
+        }
       end
 
       # Order rows so tasks closer to the end of the pipeline dispatch
@@ -2426,6 +2629,7 @@ module Hive
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
         @fast_poll_sec = @daemon_cfg.fetch("fast_poll_sec", 1)
+        @operational_snapshot&.reconfigure(poll_interval_sec: @poll_interval_sec)
         # R-02: push reloaded child-timeout knobs into the supervisor so
         # an operator tuning daemon.child_timeout_sec / verb overrides via
         # SIGHUP takes effect for children spawned after the reload.

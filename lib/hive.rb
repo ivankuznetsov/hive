@@ -14,6 +14,9 @@ module Hive
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
       "hive-status" => 6,
+      "hive-operational-status" => 1,
+      "hive-watch-event" => 1,
+      "hive-act" => 1,
       "hive-init" => 2,
       "hive-setup-agents" => 1,
       "hive-doctor" => 2,
@@ -241,6 +244,19 @@ module Hive
       INTERNAL = "internal".freeze
       ERROR    = "error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
+    end
+
+    module OperationalActionErrorKind
+      USAGE             = "usage".freeze
+      STALE_OBSERVATION = "stale_observation".freeze
+      AMBIGUOUS_TARGET  = "ambiguous_target".freeze
+      CONCURRENT_RUN    = "concurrent_run".freeze
+      DEPENDENCY_WAIT   = "dependency_wait".freeze
+      ADMISSION_ERROR   = "admission_error".freeze
+      CONFIG            = "config".freeze
+      INTERNAL          = "internal".freeze
+      ERROR             = "error".freeze
+      ALL = constants(false).reject { |constant| constant == :ALL }.map { |constant| const_get(constant) }.freeze
     end
 
     # Closed enum of `error_kind` values emitted by `hive status --diagnose --json`.
@@ -483,6 +499,18 @@ module Hive
   class InvalidTaskPath < Error
     def exit_code
       ExitCodes::USAGE
+    end
+  end
+
+  class OperationalActionUsageError < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
+  class StaleOperationalObservation < Error
+    def exit_code
+      ExitCodes::TEMPFAIL
     end
   end
 

@@ -53,7 +53,35 @@ module Hive
         rows.each { |row| heal_row(row, now: now, legacy_layout_projects: legacy_layout_projects) }
       end
 
+      # Bounded, read-only retry state for operational status. The shared key
+      # is project/slug/stage/reason, so consumers can attribute an exhausted
+      # recovery gate without inspecting daemon logs or private marker files.
+      def operational_snapshot
+        {
+          "enabled" => enabled?,
+          "limit" => MAX_AUTO_RETRIES,
+          "retries" => @attempts.filter_map do |key, attempts|
+            next unless attempts.to_i.positive?
+
+            recovery_entry(key).merge("attempts" => attempts.to_i)
+          end,
+          "exhausted" => @exhausted_logged.filter_map do |key, exhausted|
+            recovery_entry(key) if exhausted
+          end
+        }
+      end
+
       private
+
+      def recovery_entry(key)
+        project, slug, stage, reason = Array(key)
+        {
+          "project" => project.to_s,
+          "slug" => slug.to_s,
+          "stage" => stage.to_s,
+          "reason" => reason.to_s
+        }
+      end
 
       def heal_row(row, now:, legacy_layout_projects:)
         return if legacy_layout_projects.include?(row.project)

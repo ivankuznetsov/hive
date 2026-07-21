@@ -940,7 +940,7 @@ class CommandsStatusTest < Minitest::Test
 
       out = err = nil
       with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
-        out, err = capture_io { raising.new.call }
+        out, err = capture_io { raising.new(full: true).call }
       end
 
       assert_match(/explodes: failed to load \(boom in explodes\)/, out,
@@ -2062,6 +2062,53 @@ class CommandsStatusTest < Minitest::Test
     )
     assert_equal "ChangesPresent=unverifiable",
                  command.send(:condition_state_label, row, with_diagnostic)
+  end
+
+  def test_full_text_status_reports_an_empty_registry
+    output = with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [] }) do
+      capture_io { Hive::Commands::Status.new(full: true).call }.first
+    end
+
+    assert_equal "(no projects registered; run `hive init <path>`)\n", output
+  end
+
+  def test_operational_archive_only_message_pluralizes
+    { 1 => "task", 2 => "tasks" }.each do |count, noun|
+      payload = {
+        "summary" => { "projects_total" => 1, "active" => 0, "archived" => count }
+      }
+
+      output, = capture_io do
+        Hive::Commands::Status.new.send(:render_operational_empty_state, payload)
+      end
+
+      assert_includes output, "ARCHIVE ONLY — #{count} archived #{noun}"
+    end
+  end
+
+  def test_operational_project_context_fails_closed_when_config_is_unreadable
+    project = { "name" => "demo", "path" => "/tmp/unreadable-hive-project" }
+    context = with_replaced_singleton_method(
+      Hive::Config, :load, ->(_path) { raise Hive::ConfigError, "bad project config" }
+    ) do
+      Hive::Commands::Status.new.send(:operational_project_context, [ project ])
+    end
+
+    assert_equal false, context.dig("demo", "daemon_enabled")
+  end
+
+  def test_full_status_legacy_warning_names_counts_and_recovery
+    legacy = [
+      { "stage_dir" => "5-review", "task_count" => 2 },
+      { "stage_dir" => "6-pr", "task_count" => 1 }
+    ]
+
+    output, = capture_io do
+      Hive::Commands::Status.new.send(:render_legacy_stage_warning, legacy)
+    end
+
+    assert_includes output, "3 tasks hidden in legacy stage dirs: 5-review (2), 6-pr (1)"
+    assert_includes output, "hive migrate"
   end
 
   private

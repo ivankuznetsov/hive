@@ -2,6 +2,8 @@ require "digest"
 require "fileutils"
 
 require "hive/agent_skills/inspector"
+require "hive/agent_skills/canonical_skill"
+require "hive/agent_skills/directory_publisher"
 require "hive/atomic_file"
 
 module Hive
@@ -77,6 +79,10 @@ module Hive
             package_rows = groups.fetch(package_id)
             package = @manifest.package(package_id)
             native_spec = package.native_for(agent)
+            if package.bundled?
+              operations.concat(bundled_operations_for_package(package, native_spec, package_rows))
+              next
+            end
             package_conflicts = ownership_conflicts(native_spec, package_rows)
             conflicts.concat(package_conflicts)
             next unless package_conflicts.empty?
@@ -92,6 +98,7 @@ module Hive
 
         def execute(operation)
           return failed(operation, "operation belongs to #{operation.agent}, not #{agent}") unless operation.agent == agent
+          return execute_bundled_skill(operation) if operation.kind == "bundled_skill_publish"
           precondition_error = validate_preconditions(operation)
           return failed(operation, precondition_error) if precondition_error
           return execute_alias(operation) if operation.kind == "alias_write"
@@ -155,6 +162,29 @@ module Hive
 
         def package_state(rows)
           rows.first.native
+        end
+
+        def bundled_operations_for_package(package, bundled_spec, rows)
+          projection = CanonicalSkill.new.render(agent)
+          root = config_root(bundled_spec)
+          destination = File.join(root, projection.destination_relative)
+          snapshot = rows.first.native.dig("projection", "snapshot")
+          raise Hive::ConfigError, "bundled Hive skill inspection has no directory snapshot" unless snapshot
+
+          [ operation(
+            package: package,
+            rows: rows,
+            kind: "bundled_skill_publish",
+            argv: [],
+            files: projection.files.keys.sort.map { |path| File.join(destination, path) },
+            preconditions: { "directory" => snapshot },
+            metadata: {
+              "root" => root,
+              "trusted_root" => @environment["HOME"] || Dir.home,
+              "platform" => agent,
+              "snapshot" => snapshot
+            }
+          ) ]
         end
 
         def runner_environment
@@ -243,6 +273,27 @@ module Hive
             message: "wrote Hive-owned alias #{path}",
             exit_status: 0,
             changed_files: [ path ].freeze
+          )
+        end
+
+        def execute_bundled_skill(operation)
+          platform = operation.metadata.fetch("platform")
+          raise Hive::ConfigError, "bundled skill platform #{platform.inspect} does not match #{agent}" unless platform == agent
+
+          publisher = DirectoryPublisher.new(
+            root: operation.metadata.fetch("root"),
+            trusted_root: operation.metadata.fetch("trusted_root"),
+            projection: CanonicalSkill.new.render(platform)
+          )
+          publisher.publish(expected_snapshot: operation.metadata.fetch("snapshot"))
+          Outcome.new(
+            operation_id: operation.id,
+            agent: agent,
+            package_id: operation.package_id,
+            status: "succeeded",
+            message: "published canonical Hive operating skill for #{agent}",
+            exit_status: 0,
+            changed_files: operation.files
           )
         end
 

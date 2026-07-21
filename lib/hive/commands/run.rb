@@ -37,7 +37,7 @@ module Hive
       OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
 
       def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false,
-                     durable: false, attempt_entrypoint: nil)
+                     durable: false, attempt_entrypoint: nil, observation_guard: nil)
         @target = target
         @project_filter = project
         @stage_filter = stage
@@ -46,6 +46,7 @@ module Hive
         @no_rebase = no_rebase
         @durable = durable
         @attempt_entrypoint = attempt_entrypoint
+        @observation_guard = observation_guard
       end
 
       def call
@@ -73,6 +74,7 @@ module Hive
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
           Hive::DependencySnapshot.enforce_admission!(task)
           Hive::Attempts::Context.current&.validate_generation!(task)
+          @observation_guard&.call(task)
           cfg = Hive::Config.load(task.project_root)
           marker = Hive::Markers.current(task.state_file)
           if marker.name == :manual_steering

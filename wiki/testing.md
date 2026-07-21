@@ -1,13 +1,20 @@
 ---
 title: Testing
 type: reference
-source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, .github/workflows/release.yml, config/brakeman.ignore
+source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release}.yml, packaging/live_agent_skills/, config/brakeman.ignore
 created: 2026-04-25
 updated: 2026-07-20
-tags: [test, minitest, fixtures, honeycomb]
+tags: [test, minitest, fixtures, honeycomb, agent-skills, release-proof]
 ---
 
-**TLDR**: Minitest for unit/integration coverage, plus opt-in outer e2e, eval, install-smoke, release-verify, and hivebox image smoke layers. `test/unit/` covers modules, including the fenced language-neutral architecture-patrol lifecycle; `test/integration/` covers command/stage behaviour in-process, `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios, `test/eval/` evaluates the Telegram bot signal contract, and CI layers RuboCop, Brakeman, bundler-audit, installer checks, and Docker smoke tests on top.
+**TLDR**: Minitest covers unit/integration behavior; opt-in layers cover outer
+e2e, eval, authenticated agent skills, install verification, release proof,
+and hivebox images. Offline tests pin the agent-first status/watch/action
+contracts, coherent daemon snapshots, canonical four-platform skill
+projections, safe provisioning, and exact-artifact proof verifier. The
+protected live workflow is the only release-readiness proof for native
+OpenClaw, Claude, Codex, and Pi discovery/use; local credential skips are
+diagnostic, not green evidence.
 
 ## Run all
 
@@ -76,7 +83,10 @@ task default: :test
 | `pr_test.rb` | `Hive::Pr` — pull-request-number extraction from `/pull/<number>` URLs, including query/fragment/trailing-slash tolerance, nil for issue/non-number/subpage URLs, `identifier_to_number` acceptance/rejection for `hive review --pr`, and http(s) URL validation including invalid-URI rejection. |
 | `agent_limit_test.rb` | `Hive::AgentLimit` — provider-limit classifier for Claude usage-credit menus and common quota/rate-limit API errors; provider reset-estimate parsing for display; marker-age-only periodic retry eligibility; and the shared quota-held display/JSON helpers (`held?`, provider extraction, UTC reset display, label text, and `held` field shape), with runnable false-positive guards for source line numbers and ordinary "missing rate limit" findings. |
 | `agent_test.rb`, `agent_profile_test.rb` | `Hive::Agent` / `AgentProfile` — spawn/wait/timeout/SIGINT forwarding, version and capability checks, configured permission/workspace-write argv, Claude model/effort and verified safe-mode `cli_flags`, process-group cleanup for timed-out version/help probes and stdout-inheriting descendants, safe-mode non-leakage to unrelated launches, and provider-limit classification before generic exit-code / expected-output failures. |
-| `skill_check_test.rb` | `Hive::SkillCheck` — Claude/Codex/Pi skill invocation parsing and discovery, plugin fallback paths, Pi package/settings/git discovery, malformed invocation hints, and deterministic `npm root -g` success/timeout coverage for the global npm root probe. |
+| `skill_check_test.rb` | `Hive::SkillCheck` — exact Claude `/hive`, Codex `$hive`, and Pi `/skill:hive` invocation parsing/discovery plus existing plugin fallback paths, Pi package/settings/git discovery, malformed invocation hints, and deterministic `npm root -g` success/timeout coverage. |
+| `agent_skills/{canonical_skill,directory_publisher,inspector,openclaw}_test.rb`, `commands/{doctor,doctor_managed_skills}_test.rb`, `openclaw_skills_test.rb` | Canonical Hive operating skill and diagnosis — deterministic OpenClaw/Claude/Codex/Pi projections and invocations, canonical/file digests, Codex interface metadata, generated OpenClaw correspondence, safe whole-directory atomic publication, ownership/mode/symlink/foreign-content refusal, preview revalidation, rollback boundaries, orphan detection, filesystem-only native/ClawHub evidence, zero agent-runner calls, and byte-identical disposable homes under Doctor. |
+| `operational_status_test.rb`, `operational_action_test.rb`, `commands/{status,act,watch}_test.rb` | Agent operations — seven closed task states including dependency-blocked precedence, partial/unknown completeness, policy-complete scheduler joins/freshness, compact human bands/overflow, unchanged compatibility JSON, archive summaries, command-free tokenized actions with lock-time freshness checks and real stage/run/approve command paths, bounded semantic JSONL observation, target resolution, source/disappearance budgets, signals, EPIPE, and read-only behavior. |
+| `daemon/{operational_snapshot,concurrency_controller,dispatcher}_test.rb` | Coherent scheduler observation — owner-private atomic storage, live daemon generation/expiry/phase validation, duplicate project/slug frame rejection, identity/generation/marker/action/dependency/admission revalidation across the tick source window, task-only capacity that excludes patrol/digest workers, queue/provider/recovery evidence, and advisory publication failures that cannot stop dispatch. |
 | `wiki_log_test.rb` | `Hive::WikiLog` — fragment sorting, generated-block idempotency, stale detection for compiled `wiki/log.md`, and dropping template prose that is not a real legacy `##` entry. |
 | `schema_files_test.rb` | Published JSON schema contracts — current-version schema files exist for every `Hive::Schemas::SCHEMA_VERSIONS` entry, back-compat schema files remain for pinned consumers, producer required-key drift is pinned, `hive-status` task properties stay aligned with `Snapshot::Row` including the optional quota `held` object, `hive-dispatch-request` claimed files remain schema-valid, and every schema filename/version matches its `$id` basename or URN suffix plus `title` version text. |
 | `commands/{approve,finding_toggle,run,stage_action,status}_test.rb`, `integration/{run_error_envelope,status_error_envelope,run_findings,markers_command}_test.rb` | Shared runtime error-envelope production — command-specific schemas, closed error-kind mappings, condition-gate recovery fields, approve final-stage extras, findings operations, status/diagnose schema selection, single-document stdout guards, internal-error wrapping, and emit-time JSON failures after the producers converge on `Hive::Schemas::EnvelopeEmitter`. |
@@ -85,7 +95,8 @@ task default: :test
 | `workflow_package/*_test.rb`, `commands/workflow_{install,list,remove,update,publish}_test.rb`, `web/workflow_lifecycle_test.rb`, `workflow_lifecycle_schema_test.rb` | Legacy Honeycomb author-package canonicalization/security plus current canonical YAML/release fingerprint validation, v2 flat-catalog lifecycle and catalog/configuration snapshot materialization, exact actor mappings and optional-input redaction, exact/wildcard domain and shell/path-hook enforcement, direct-governance negation hardening, catalog/manifest/source-provenance binding, immutable store transaction/task-pin concurrency, isolated warnings for invalid selected configurations, incomplete-pin cleanup refusal, executable-mode hardening, Hivebox-to-real-CLI preview/apply delegation with package/selection/configuration identity rebinding, lifecycle preview/consent/ownership, post-commit warning semantics, closed JSON envelopes, deterministic legacy packaging, and injected fork/PR seams. |
 | `commands/digest_test.rb` | `Hive::Commands::Digest` — strict `YYYY-MM-DD` parsing, default runner invocation, dry-run message output, `hive-digest` JSON/error envelopes, merged-PR source dispatch, `--repo` implying merged-PR mode, merged-PR human wording, and `hive-merged-pr-digest` schema validation for dry-run and real-send payloads. |
 | `commands/daemon_test.rb` | `Hive::Commands::Daemon` and `Hive::Daemon::StatusReport` — lifecycle command routing, PID-file ownership/status handling, detached start/re-exec behavior, service install/enable/disable output, daemon-status service/binary fields, `safe_payload` web degradation, `binary_drift` classification including `unreadable`, queue inspection, start-path wiring of daemon/update/digest config into the dispatcher, and `daemon.auto_retry.enabled` config threading into the dispatcher. Start tests stub all three global config blocks so operator-local Telegram digest defaults cannot change unit expectations. |
-| `commands/setup/*_test.rb` | `Hive::Commands::Setup` — phase-success predicate and JSON/process-exit agreement, including the shared `phase(name)` StandardError-to-`ok:false` wrapper for QMD bootstrap, web-bundle, daemon-service, enrollment, and optional web-service phases, plus hard diagnostic failures. |
+| `commands/setup/*_test.rb` | `Hive::Commands::Setup` — agent-skills-first ordering, one consent boundary, `--yes`, JSON/non-TTY refusal before diagnostics or agent discovery, diagnose-only `--no-bootstrap`, nested-init preflight suppression, phase-success predicate and JSON/process-exit agreement, phase exception capture, and hard diagnostic failures. |
+| `packaging/live_agent_proof_test.rb`, `release_contract_test.rb` | Exact-SHA release proof — deterministic one-build candidate manifest/archive, four required evidence rows, command allowlist audit, platform-specific native-activation attestation, raw secret-pattern scan and cleanup proof, attestation digest/provenance verification, run-attempt-specific retained artifacts and Check Run binding, and executable selector fixtures that reject rebuilds, stale/wrong-SHA proof, untrusted Check Runs, wrong workflow attempts/jobs, expired or duplicate artifacts, and archive digest mismatch. |
 | `commands/{bot,daemon}/service_installer_test.rb`, `commands/service_installer/base_test.rb` | Shared service installer behavior — systemd/launchd rendering, force-upgrade backups/restarts, unsupported-platform service-state probes, Homebrew stable-binary selection, macOS launchd ProgramArguments `$0` parsing for the daemon binary, and shared launchd path substitution used by daemon/web plists. |
 | `commands/{bot,daemon}_test.rb`, `integration/daemon_command_test.rb`, `integration/bot/bot_lifecycle_test.rb` | Shared service-install result presentation — bot/daemon-specific text prefixes and schemas, every success/outcome mapping, drift exit 64, manager failure exit 70, force/backup guidance, hostile-installer fallback envelopes, and schema-valid subprocess behavior after both commands converge on `ServiceInstaller::ResultPresenter`. |
 | `digest/window_test.rb`, `digest/ship_times_test.rb`, `digest/collector_test.rb` | Digest collection primitives — local-date helpers, git-log ship-time preference (`pr_finalized`, `archived`, approval into `9-done`), registered-project grouping, missing artifact tolerance, and local timezone boundaries. |
@@ -151,7 +162,7 @@ exercise every migrated consumer. The follow-up attempt/projection slice runs
 | `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init, `--workflow` project defaults, TTY workflow prompt/default behavior, unknown-workflow fail-fast, in-flight field-less task warnings on default changes, current `hive-init.v2` JSON payload (with retained v1 schema compatibility), Claude model/effort answer/template defaults, normal reviewer rendering, patrol reviewer rendering, prompt defaults, and activation-relative llm-wiki timer scheduling. |
 | `llm_wiki_post_commit_refresh_test.rb` | Transactional wiki refresh plus the scheduled compatibility wrapper — shared-runner preference, project-local fallback, exact `--project <root> --drain` delegation, no direct provider launch, committed/template/generated copy parity, and dirty primary-checkout preservation. |
 | `bench_workflow_install_test.rb` / `workflows/bench_test.rb` | Fresh `hive init --workflow bench` installs and commits the packaged runtime under `.hive-state/bench-runtime`, creates a bench-pinned task without copying a project descriptor, and resolves the built-in stage/state contract. Legacy-upgrade coverage pins one-commit archive/runtime/config rebinding, same-process descriptor cache reset, tracked instruction archives, safe retry after a rejected commit, Ctrl-C cleanup at archive and both runtime-move boundaries, preservation after a post-commit interrupt, symlink-root and raced-target refusal, descriptor/child-name/parent-directory replacement rejection at classification, quarantine, and post-staging boundaries, dirty-config isolation, staged-index preflight, and previous-runtime retention when rollback deletion fails. The descriptor test pins Codex as the shell-control agent, campaign-sized one-hour/seven-day stage timeouts, provider-only pending generation as cooldown-aware `limits_reached` rather than manual `WAITING`, and GPT-5.6 stage-profile selection to the combined `hive-bench-runner:sol` image. |
-| `agent_skill_adapters_test.rb`, `setup_agents_test.rb` | Process-level fake Claude/Codex/Pi contracts — native argv/JSON, fresh convergence and second-run no-op, unattended refusal, unavailable skips, independent offline failure, cache/resolution verification, filtered prerequisite retention/fail-closed blocking, timed-out descendant process-group cleanup, and Codex conflict byte preservation. |
+| `agent_skill_adapters_test.rb`, `setup_agents_test.rb` | Process-level fake Claude/Codex/Pi contracts — bundled Hive projection plus native package argv/JSON, fresh convergence and second-run no-op, unattended refusal with a per-invocation tripwire proving zero native discovery calls and byte-for-byte home stability, unavailable skips, independent offline failure, cache/resolution/provenance verification, filtered prerequisite retention/fail-closed blocking, timed-out descendant process-group cleanup, and conflict byte preservation. |
 | `new_test.rb` | `hive new` — slug derivation, reserved rejection, `--workflow` task overrides, non-coding project-default pinning, coding override in non-coding projects, unknown-workflow fail-fast, marker handling for non-coding inert versus agent entries, captured commit, and per-project commit-lock serialization around the `hive/state` write. |
 | `run_brainstorm_test.rb` | `hive run` of `2-brainstorm/`. |
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
@@ -161,7 +172,7 @@ exercise every migrated consumer. The follow-up attempt/projection slice runs
 | `run_finalize_test.rb` | `hive run` of `8-finalize/` — clean/pushed verification, already-merged PR short-circuit (`merged=true`, no `gh pr ready`, no `summary.md`), PR-ready wrap-up, and summary rendering. |
 | `run_done_test.rb` | `hive run` of `9-done/` — cleanup instructions, complete marker. |
 | `run_stage_action_test.rb` | Workflow verbs — archive idempotency plus internal merged-error archive recovery, including rejection when the current `ERROR reason=` does not match the recovery reason or when the PR still reports `OPEN`. |
-| `status_test.rb` | `hive status` — empty registry, multi-stage rendering, stale-lock decoration, and stage-move race behavior through the command surface. |
+| `status_test.rb` | `hive status` — concise operational default, explicit/full/compatibility modes, empty registry, multi-stage rendering, stale-lock decoration, and stage-move race behavior through the command surface. |
 | `content_workflow_daemon_e2e_test.rb`, `content_workflow_stage_test.rb`, `content_workflow_e2e_test.rb` | Content workflow proof layers — the test-only fixture e2e advances `1-inbox -> 4-done`; the built-in `:content` tests pin per-stage slash-skill prompt rendering plus marker→runner-result mapping and drive real init/new/status/daemon/policy/approve/run to `6-done/article.md` with non-empty carried artifacts. |
 | `honeycomb_workflow_lifecycle_test.rb` | A local immutable v2 git registry fixture drives canonical `catalog.json` plus `packages/NAME/VERSION/manifest.yml` through install, no-write dry-run, update, catalog-commit task pinning, list selected/retained dimensions, remove, and offline execution of the retained task. A second fixture-backed path runs preview→apply install/update/remove through the real Hive Web adapter and command constructors. Unit lifecycle/store coverage also pins strict browser-preview source/digest identities, first-install still-unselected checks, cleanup-error cause preservation, post-commit warning envelopes, and removal rechecks inside the mutation lock. |
 | `user_workflow_e2e_test.rb` | Project-authored workflow acceptance — `hive workflow new` scaffolds a descriptor, `hive new --workflow` creates a pinned task, generic run/approve drives it from `1-inbox -> 2-work -> 3-done`, and a same-process coding capture still uses the default coding path. |
@@ -309,6 +320,54 @@ installs `ce-brainstorm` through `hive setup-agents --yes`, reruns the shared
 doctor inspector, invokes the provider headlessly, and requires structured
 native skill/plugin activation metadata rather than model prose. Production
 manifest mappings are separately pinned offline.
+
+This older three-provider smoke proves package installation/resolution only. It
+does not prove the canonical Hive operating policy or satisfy the release
+gate.
+
+## Exact-artifact Hive operating-skill proof
+
+`test/smoke/live_hive_operating_skill_smoke_test.rb` is the four-platform
+OpenClaw/Claude/Codex/Pi harness. It is disabled by default and skips with a
+diagnostic unless `HIVE_LIVE_AGENT_SKILLS=1`, an exact candidate artifact
+bundle, the selected native CLI, and its provider credential are present. With
+`HIVE_RELEASE_GATE=1`, missing prerequisites are failures rather than skips.
+
+The protected `live-agent-skills.yml` workflow is the release-readiness owner:
+
+1. validate a full SHA reachable from protected `main` and the workflow
+   revision loaded from `refs/heads/main`;
+2. build one gem, one source archive, and one deterministic four-platform skill
+   archive from that candidate;
+3. install each native CLI and exact candidate gem in a matrix job with its
+   protected environment credential exposed only to the proof step;
+4. place the exact platform projection into a disposable 0700 home and require
+   structured native discovery/activation: OpenClaw resolves the exact
+   `skills info` path, Codex's model-visible prompt inventory names the exact
+   `$hive` projection, Pi's RPC inventory exposes the exact `/skill:hive`
+   command, and Claude's typed `system/init` event lists `hive` in both its
+   loaded skills and `/hive` slash-command inventory (a generic file read is
+   insufficient);
+5. allow the agent to run only audited `hive status --operational --json` and
+   one bounded `hive watch ... --json-lines`; the argv-auditing shim delegates
+   both commands to the exact installed candidate binary against a real
+   disposable Hive task, then rotates its marker so candidate code must produce
+   the initial/transition/final records rather than receiving synthetic JSON;
+6. scan unredacted stdout/stderr and retained evidence for credentials, retain
+   no model prose, prove private-home cleanup, and upload run-attempt-specific
+   seven-day structural evidence;
+7. validate all four evidence rows, assemble the candidate/provenance-bound
+   private proof, and create a `live-agent-skills` Check Run on the exact SHA.
+
+`release.yml` invokes the repository-owned selector to resolve that Check Run
+on the tag commit and verify the Actions workflow
+identity/event/branch/repository/run attempt. The same executable requires all
+four named matrix jobs plus attestation exactly once, selects one unexpired
+run-attempt-specific artifact, and verifies the downloaded archive bytes
+against the Actions API SHA-256 before safe extraction and candidate
+verification. Fixture tests execute this selector rather than matching YAML
+fragments. Release jobs consume the attested gem and skill archive; no release
+job rebuilds either artifact.
 
 `bundle exec rake smoke` also contains older live Claude workflows and may
 incur provider cost. Normal `rake test` and `rake coverage` remain local and

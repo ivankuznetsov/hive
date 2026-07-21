@@ -647,4 +647,52 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal 0, c.daily_count_for("digest", T0),
                  "no residual daily-count entry may survive a completed digest"
   end
+
+  def test_operational_snapshot_exposes_capacity_without_executable_commands
+    c = make(global: 2, per_project: 1, daily: 5)
+    dispatch(c, 100, "p1", "s1")
+
+    snapshot = c.operational_snapshot(now: T0)
+
+    assert_equal 2, snapshot.dig("limits", "global")
+    assert_equal({ "used" => 1, "available" => 1 }, snapshot.fetch("global"))
+    assert_equal 0, snapshot.dig("projects", "p1", "available")
+    assert_equal "s1", snapshot.dig("running", 0, "slug")
+    refute snapshot.fetch("running").first.key?("command")
+  end
+
+  def test_operational_capacity_excludes_patrol_and_digest_workers_from_task_caps
+    c = make(global: 3, per_project: 2, daily: 5)
+    dispatch(c, 100, "p1", "task")
+    dispatch(c, 101, "p1", "patrol-scan", kind: :patrol_scan)
+    dispatch(c, 102, "digest", "2026-07-20", kind: :digest)
+    c.set_external_running_counts(per_project: { "p2" => 1 })
+
+    snapshot = c.operational_snapshot(now: T0)
+
+    assert_equal({ "used" => 2, "available" => 1 }, snapshot.fetch("global"))
+    assert_equal 1, snapshot.dig("projects", "p1", "used")
+    assert_equal 1, snapshot.dig("projects", "p2", "used")
+    refute snapshot.fetch("projects").key?("digest")
+    assert_equal %w[digest patrol_scan task], snapshot.fetch("running").map { |row| row.fetch("kind") }.sort
+  end
+
+  def test_operational_snapshot_exposes_active_cooldowns_and_quarantine
+    c = make
+    dispatch(c, 100, "cooldown-project", "cooldown-task")
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::WRONG_STAGE, completed_at: T0 + 1)
+    dispatch(c, 101, "quarantine-project", "quarantine-task")
+    c.record_completion(pid: 101, exit_code: Hive::ExitCodes::USAGE, completed_at: T0 + 1)
+
+    snapshot = c.operational_snapshot(now: T0 + 2)
+
+    assert_equal [ {
+      "project" => "cooldown-project",
+      "slug" => "cooldown-task",
+      "until" => (T0 + 1 + Hive::Daemon::ConcurrencyController::WRONG_STAGE_BACKOFF_SEC).iso8601
+    } ], snapshot.fetch("cooldowns")
+    assert_equal [ {
+      "project" => "quarantine-project", "slug" => "quarantine-task"
+    } ], snapshot.fetch("quarantined")
+  end
 end

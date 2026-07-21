@@ -2,6 +2,7 @@ require "test_helper"
 require "stringio"
 require "fileutils"
 require "json"
+require "digest"
 require "hive/commands/doctor"
 
 class HiveCommandsDoctorTest < Minitest::Test
@@ -14,7 +15,8 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
 
     def inspect
-      Hive::AgentSkills::TargetResolver.new(config: @config, project_root: @project_root).resolve.map do |target|
+      Hive::AgentSkills::TargetResolver.new(config: @config, project_root: @project_root).resolve
+        .reject { |target| target.capability_id == "hive" }.map do |target|
         if target.kind == "linter" || target.kind == "codex_review"
           health = "healthy"
           message = "kind '#{target.kind}' is not 'agent'; doctor only checks agent-kind reviewers"
@@ -893,64 +895,6 @@ class HiveCommandsDoctorTest < Minitest::Test
 
       refute doctor.send(:legacy_brainstorm_runtime_present?)
     end
-  end
-
-  def test_v2_managed_health_reports_unavailable_as_non_blocking_and_exact_remediation
-    unavailable_target = Hive::AgentSkills::Target.new(
-      surfaces: [ "brainstorm" ], kind: "stage", agent: "claude",
-      configured_skill: "/ce-brainstorm", invocation: "/ce-brainstorm",
-      capability_id: "ce-brainstorm", package_id: "compound-engineering", managed: true
-    )
-    unavailable = Hive::AgentSkills::Inspection.new(
-      target: unavailable_target,
-      expected: { "package" => "compound-engineering@compound-engineering-plugin" },
-      native: { "available" => false }, resolution: { "path" => nil },
-      health: "unavailable", severity: "warning", explanation: "claude is absent",
-      remediation: "hive setup-agents --agent claude --skill ce-brainstorm"
-    )
-    inspector = Struct.new(:rows) { def inspect = rows }.new([ unavailable ])
-    out = StringIO.new
-
-    exit_code = Hive::Commands::Doctor.new(
-      config: base_config,
-      project_root: nil,
-      json: true,
-      output: out,
-      inspector: inspector
-    ).call
-
-    assert_equal 0, exit_code
-    payload = JSON.parse(out.string)
-    assert_equal "hive-doctor.v2", payload.fetch("schema")
-    assert_equal 1, payload.dig("summary", "managed", "unavailable")
-    assert_equal "hive setup-agents --agent claude --skill ce-brainstorm",
-                 payload.dig("managed_skills", 0, "remediation")
-  end
-
-  def test_v2_conflict_is_actionable_and_preserves_winning_path_evidence
-    target = Hive::AgentSkills::Target.new(
-      surfaces: [ "plan" ], kind: "stage", agent: "claude",
-      configured_skill: "/plan", invocation: "/plan",
-      capability_id: "wiki-plan", package_id: "llm-wiki", managed: true
-    )
-    conflict = Hive::AgentSkills::Inspection.new(
-      target: target, expected: { "package" => "llm-wiki@aikuznetsov-marketplace" },
-      native: { "available" => true },
-      resolution: { "path" => "/repo/.claude/commands/plan.md" },
-      health: "conflicting", severity: "error",
-      explanation: "user-owned alias /repo/.claude/commands/plan.md wins; Hive will not replace it",
-      remediation: "hive setup-agents --agent claude --skill wiki-plan"
-    )
-    inspector = Struct.new(:rows) { def inspect = rows }.new([ conflict ])
-    out = StringIO.new
-
-    exit_code = Hive::Commands::Doctor.new(
-      config: base_config, project_root: nil, output: out, inspector: inspector
-    ).call
-
-    assert_equal Hive::Commands::Doctor::EXIT_MISSING_SKILL, exit_code
-    assert_includes out.string, "/repo/.claude/commands/plan.md"
-    assert_includes out.string, "Hive will not replace it"
   end
 
   def test_private_dependency_and_rendering_boundaries

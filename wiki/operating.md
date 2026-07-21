@@ -1,7 +1,7 @@
 ---
 title: Operating Hive
 type: operating
-source: README.md, bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, lib/hive/commands/setup_agents.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
 updated: 2026-07-20
 tags: [operating, daemon, bot, systemd, launchd, install, skills]
@@ -138,7 +138,9 @@ hive uninstall --force-purge-state
                           # registered project .hive-state directories
 ```
 
-Enabled built-in agent skills are diagnosed separately from CLI installation:
+Normal `hive setup` provisions the bundled Hive operating skill before its
+other workstation mutations. The same inspector/provisioner is available
+separately:
 
 ```bash
 hive doctor                    # read-only inventory + real resolution evidence
@@ -146,26 +148,30 @@ hive setup-agents              # aggregate preview, one TTY consent prompt
 hive setup-agents --yes --json # pre-authorized unattended provisioning
 ```
 
-The packaged manifest points native Claude/Codex/Pi adapters at the upstream
-Compound Engineering, llm-wiki, and Claude PR Review Toolkit packages. Hive
+The packaged manifest includes Hive's canonical operating policy for Claude
+(`/hive`), Codex (`$hive`), and Pi (`/skill:hive`), plus native adapters for
+upstream Compound Engineering, llm-wiki, and Claude PR Review Toolkit packages. Hive
 does not depend on an unpublished companion `hive-skills` package. Setup does
 not install/authenticate agent CLIs or replace user-owned conflicts; rerun it
 after correcting the scoped remediation printed by doctor.
 
-OpenClaw support now lives in-tree under `openclaw/skills/hive/`. It is one
+OpenClaw support is rendered from the same canonical `skills/hive/` source into
+`openclaw/skills/hive/`. It is one
 skill, not a TypeScript plugin and not a multi-listing bundle: the ClawHub slug
 is `hive-cli`, the install reference is `@ivankuznetsov/hive-cli`, the public
 listing is `https://clawhub.ai/ivankuznetsov/skills/hive-cli`, and the installed
-slash command is `/hive`. The checked-in skill is version `0.1.3`. ClawHub uses the skill
-frontmatter `description` as the public page summary and search text, so listing
-copy belongs in that field and in the opening `SKILL.md` body for the single
-umbrella skill. `/hive setup` guides confirmed Hive install, strict `hive`/`hv`
-version verification, and `hive setup --no-init --json` for web/daemon
-provisioning without enrollment. Initial enrollment is a separate interactive
+slash command is `/hive`. Its version is derived from `skills/hive/skill.json`.
+ClawHub uses the skill frontmatter `description` as the public page summary and
+search text, so listing copy belongs in that field and in the opening `SKILL.md`
+body for the single umbrella skill. `/hive setup` guides confirmed Hive install,
+strict `hive`/`hv` version verification, and
+`hive setup --no-init --yes --json` after approval for web/daemon provisioning
+without enrollment. Initial enrollment is a separate interactive
 `hive init .` in the user's real terminal so subscription-consuming patrol,
 architecture discovery, daemon dispatch, and babysitter defaults are reviewed;
 after setup, users pass normal CLI verbs as
-`/hive status --json`, `/hive plan <slug>`, `/hive develop <slug>`, and so on.
+`/hive status --operational --json`, `/hive watch <project>:<slug>
+--json-lines`, `/hive plan <slug>`, `/hive develop <slug>`, and so on.
 The current skill also covers `setup-agents`, Honeycomb workflow lifecycle,
 dependency/permission runtime guarantees, ordinary versus architecture patrol
 and subscription-backed token ceilings, digest/bench, TUI/web status, and
@@ -174,7 +180,7 @@ The skill also documents `/hive wiki compile-log --check` as the read-only
 aggregate-changelog verification path and tells agents to reserve mutating
 `hive wiki compile-log` runs for merge/rebase cleanup or explicit user requests.
 Its marker-recovery guidance mirrors [[modules/daemon]]: inspect first with
-`hive status --json` and `hive daemon status --json`, wait for known
+`hive status --operational --json` and `hive daemon status --json`, wait for known
 healer-managed cooldown/retry signatures, start a stopped daemon with
 `hive daemon start --detach`, and treat manual `hive markers clear` as guarded
 mutation under the skill's Safety Boundaries.

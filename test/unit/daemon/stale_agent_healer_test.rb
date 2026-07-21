@@ -72,6 +72,38 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     )
   end
 
+  def test_operational_snapshot_starts_with_bounded_empty_recovery_state
+    snapshot = @healer.operational_snapshot
+
+    assert_equal 3, snapshot.dig("limits", "error")
+    assert_empty snapshot.fetch("error_retries")
+    assert_empty snapshot.fetch("review_exhausted")
+  end
+
+  def test_operational_snapshot_serializes_retry_and_exhaustion_ownership
+    error_key = [ "project-a", "task-a", "7-artifacts", "agent_died" ]
+    review_key = [ "project-b", "task-b", "review_agent_died", "reviewers", "1", "signature" ]
+    @healer.instance_variable_get(:@error_auto_recoveries)[error_key] = 2
+    @healer.instance_variable_get(:@error_auto_recoveries)[[ "ignored", "zero" ]] = 0
+    @healer.instance_variable_get(:@review_error_auto_recoveries)[review_key] = 1
+    @healer.instance_variable_get(:@error_recovery_exhausted)[error_key] = true
+    @healer.instance_variable_get(:@review_error_recovery_exhausted)[review_key] = true
+    @healer.instance_variable_get(:@review_error_recovery_exhausted)[[ "ignored", "false" ]] = false
+
+    snapshot = @healer.operational_snapshot
+
+    assert_equal [ {
+      "project" => "project-a", "slug" => "task-a", "stage" => "7-artifacts",
+      "reason" => "agent_died", "kind" => "error", "attempts" => 2
+    } ], snapshot.fetch("error_retries")
+    assert_equal [ {
+      "project" => "project-b", "slug" => "task-b", "stage" => "6-review",
+      "reason" => "review_agent_died", "kind" => "review", "attempts" => 1
+    } ], snapshot.fetch("review_retries")
+    assert_equal "agent_died", snapshot.fetch("error_exhausted").first.fetch("reason")
+    assert_equal "review_agent_died", snapshot.fetch("review_exhausted").first.fetch("reason")
+  end
+
   def heal(rows, **opts)
     @healer.heal(rows, now: NOW, **opts)
   end

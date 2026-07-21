@@ -20,6 +20,28 @@ class CommandsRunTest < Minitest::Test
     Hive::Commands::Run.new("some-slug", **kwargs)
   end
 
+  def test_observation_guard_runs_after_the_task_lock_is_acquired
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "brainstorm.md")
+      File.write(state_file, "# state\n<!-- MANUAL_STEERING -->\n")
+      current = task(folder: dir, state_file: state_file)
+      guarded = command(
+        quiet: true,
+        observation_guard: lambda do |observed|
+          assert_same current, observed
+          assert File.exist?(File.join(dir, ".lock")), "guard must run under the task lock"
+          raise Hive::StaleOperationalObservation, "rotated"
+        end
+      )
+      guarded.define_singleton_method(:resolve_task) { current }
+
+      with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(_task) { }) do
+        assert_raises(Hive::StaleOperationalObservation) { guarded.call }
+      end
+      refute File.exist?(File.join(dir, ".lock")), "failed guard must release the task lock"
+    end
+  end
+
   def task(folder: "/tmp/hive-task", stage_name: "brainstorm", stage_index: 2,
            state_file: nil, hive_state_path: nil, workflow: Hive::Workflows::Registry.default)
     TaskDouble.new(

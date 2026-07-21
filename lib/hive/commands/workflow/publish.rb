@@ -14,6 +14,10 @@ module Hive
           def exit_code = Hive::ExitCodes::USAGE
         end
 
+        class InternalError < Hive::Error
+          def exit_code = Hive::ExitCodes::SOFTWARE
+        end
+
         def initialize(name, project_root:, version:, json: false, dry_run: false,
                        expected_release_digest: nil, stdout: $stdout, publisher: nil, clock: nil)
           super(project_root: project_root, json: json, stdout: stdout)
@@ -37,6 +41,18 @@ module Hive
             result = @publisher.publish(@last_package)
             emit_lifecycle(@last_package, result)
           end
+        end
+
+        def call
+          super
+        rescue StandardError => e
+          error = InternalError.new("workflow publication failed unexpectedly (#{e.class.name.split('::').last})")
+          if @json
+            @stdout.puts JSON.generate(error_payload(error))
+          else
+            warn "hive workflow: #{error.message}"
+          end
+          exit(error.exit_code)
         end
 
         private

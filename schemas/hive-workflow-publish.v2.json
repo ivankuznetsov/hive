@@ -12,7 +12,7 @@
     "Digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "Warning": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "required": ["rule_id", "message"],
       "properties": {
         "rule_id": {"type": "string"},

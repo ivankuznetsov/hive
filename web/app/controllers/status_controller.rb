@@ -5,7 +5,6 @@ class StatusController < ApplicationController
   def index
     explicit_view = params[:view].to_s.presence_in(VIEWS)
     saved_view = cookies.signed[VIEW_COOKIE].to_s.presence_in(VIEWS)
-    cookies.permanent.signed[VIEW_COOKIE] = explicit_view if explicit_view && explicit_view != saved_view
     @status_view = explicit_view || saved_view || "board"
     @payload = StatusBroadcaster.snapshot
     @projects = StatusBroadcaster.projects(@payload)

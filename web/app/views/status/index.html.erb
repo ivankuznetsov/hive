@@ -7,13 +7,17 @@
   <meta name="turbo-refresh-method" content="morph">
   <meta name="turbo-refresh-scroll" content="preserve">
 <% end %>
-<%= turbo_stream_from StatusBroadcaster::CHANNEL %>
-
 <%# TUI left-pane parity: the rail filters the status view client-side (buttons,
     not links — a navigation would discard the permanent composer's typed
     text). The controller wraps the rail and selected view; it re-applies the
     filter after every broadcast morph. %>
-<div class="status-layout" data-controller="project-filter">
+<div class="status-layout"
+     data-controller="project-filter status-refresh"
+     data-action="turbo:submit-start@document->status-refresh#submitting turbo:submit-end@document->status-refresh#submitted turbo:before-stream-render@document->status-refresh#beforeStreamRender">
+  <%# Keep the source inside status-refresh so it can distinguish the first
+      Cable connection from a later reconnect and catch up after missed work. %>
+  <%= turbo_stream_from StatusBroadcaster::CHANNEL, id: "status-stream-source",
+        hidden: true, data: { turbo_permanent: true } %>
   <%= render "status/project_nav", projects: @projects %>
   <div class="status-main">
 
@@ -22,7 +26,7 @@
     the server can't re-render). %>
 <%= form_with url: ideas_path, multipart: true, class: "composer", id: "composer",
               data: { controller: "composer", turbo_permanent: true,
-                      action: "turbo:submit-start->composer#submitting turbo:before-stream-render@document->composer#beforeStreamRender turbo:before-fetch-response->composer#submitted turbo:submit-end->composer#submitted" } do |f| %>
+                      action: "turbo:before-stream-render@document->composer#beforeStreamRender turbo:before-fetch-response->composer#submitted turbo:submit-end->composer#submitted" } do |f| %>
   <div class="composer-box">
     <%= f.text_area :text, placeholder: "Drop a new idea — paste or attach screenshots…",
           required: true, data: { composer_target: "text", action: "paste->composer#paste" },

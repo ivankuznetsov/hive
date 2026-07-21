@@ -5,8 +5,9 @@
       <p class="hint"><%= link_to "Add a repository", repos_path %> to start the pipeline.</p>
     </div>
   <% else %>
-    <% board.bands.each_with_index do |band, band_index| %>
-      <section class="kanban-band project-section"
+    <% board.bands.each do |band| %>
+      <% band_id = stable_dom_id("kanban-band", band.project.name, band.workflow_id) %>
+      <section id="<%= band_id %>" class="kanban-band project-section"
                data-project-name="<%= band.project.name %>"
                data-workflow="<%= band.workflow_id %>">
         <header class="kanban-band-header">
@@ -17,10 +18,17 @@
           <span class="muted"><%= pluralize(band.task_count, "active task") %></span>
         </header>
 
+        <% if band.unavailable? %>
+          <div class="state-banner state-banner-error kanban-band-warning" role="status">
+            <%= band.availability_message %>
+          </div>
+        <% end %>
+
         <div class="kanban-columns" aria-label="<%= band.project.name %> <%= band.workflow_id %> workflow">
-          <% band.columns.each_with_index do |column, column_index| %>
-            <% heading_id = "kanban-column-#{band_index}-#{column_index}" %>
-            <section class="kanban-column" data-stage="<%= column.stage %>" aria-labelledby="<%= heading_id %>">
+          <% band.columns.each do |column| %>
+            <% column_id = stable_dom_id("kanban-column", band.project.name, band.workflow_id, column.stage) %>
+            <% heading_id = "#{column_id}-heading" %>
+            <section id="<%= column_id %>" class="kanban-column" data-stage="<%= column.stage %>" aria-labelledby="<%= heading_id %>">
               <header class="kanban-column-header">
                 <h3 id="<%= heading_id %>"><%= column.label %></h3>
                 <span class="kanban-count" aria-label="<%= pluralize(column.tasks.size, "task") %>"><%= column.tasks.size %></span>
@@ -31,7 +39,8 @@
                   <p class="kanban-empty">No tasks</p>
                 <% else %>
                   <% column.tasks.each do |task| %>
-                    <article class="kanban-card" data-task-slug="<%= task.slug %>">
+                    <article id="<%= stable_dom_id("kanban-card", band.project.name, task.slug) %>"
+                             class="kanban-card" data-task-slug="<%= task.slug %>">
                       <div class="kanban-card-heading">
                         <%= status_dot(task) %>
                         <%= link_to task.title, task_path(band.project.name, task.slug) %>

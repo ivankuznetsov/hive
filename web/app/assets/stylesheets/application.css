@@ -330,15 +330,20 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
   border-radius: 10px;
   background: var(--bg-sunken);
 }
+.status-view-switch form { margin: 0; }
 .status-view-option {
+  appearance: none;
+  border: 0;
+  background: transparent;
   color: var(--ink-muted);
-  text-decoration: none;
   padding: 6px 11px;
   border-radius: 7px;
+  cursor: pointer;
+  font-family: inherit;
   font-size: 0.88rem;
   font-weight: 600;
 }
-.status-view-option:hover { color: var(--ink); }
+.status-view-option:hover { color: var(--ink); background: transparent; }
 .status-view-option.active { color: var(--ink); background: var(--panel); box-shadow: var(--shadow); }
 
 .kanban-board { min-width: 0; }
@@ -350,8 +355,10 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
   gap: 16px;
   margin-bottom: 12px;
 }
-.kanban-band-header h2 { display: inline; margin: 0 8px 0 0; }
-.kanban-workflow { color: var(--ink-faint); font-size: 0.82rem; }
+.kanban-band-header > div { min-width: 0; }
+.kanban-band-header h2 { display: inline; margin: 0 8px 0 0; overflow-wrap: anywhere; }
+.kanban-workflow { color: var(--ink-faint); font-size: 0.82rem; overflow-wrap: anywhere; }
+.kanban-band-warning { margin: 0 0 12px; }
 .kanban-columns {
   display: grid;
   grid-auto-flow: column;

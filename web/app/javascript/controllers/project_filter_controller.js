@@ -78,5 +78,19 @@ export default class extends Controller {
     this.buttonTargets.forEach((button) => {
       button.classList.toggle("active", (button.dataset.projectFilterNameParam || "") === this.selected)
     })
+    this.syncViewForms()
+  }
+
+  syncViewForms() {
+    this.element.querySelectorAll(".status-view-switch form").forEach((form) => {
+      let input = form.querySelector("input[name='project']")
+      if (!input) {
+        input = document.createElement("input")
+        input.type = "hidden"
+        input.name = "project"
+        form.appendChild(input)
+      }
+      input.value = this.selected
+    })
   }
 }

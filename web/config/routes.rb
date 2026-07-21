@@ -18,6 +18,7 @@ Rails.application.routes.draw do
   root "status#index"
   get "board" => "status#index", defaults: { view: "board" }, as: :board
   get "grid" => "status#index", defaults: { view: "grid" }, as: :grid
+  resource :status_view_preference, only: :create
   post "daemon/repair" => "daemon#repair", as: :daemon_repair
 
   post "ideas" => "ideas#create", as: :ideas

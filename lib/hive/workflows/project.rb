@@ -39,10 +39,10 @@ module Hive
       # call `reset!` afterwards — `reset!` is why Commands::Workflow#call!
       # clears the overlay so a LATER (separate) invocation discovers the new
       # descriptor; `call!` does not re-resolve in-process.
-      def load!(project_root)
+      def load!(project_root, config: nil)
         LOCK.synchronize do
           project_root = File.expand_path(project_root)
-          workflow_dir = workflow_dir_for(project_root)
+          workflow_dir = config ? workflow_dir_for(project_root, config:) : workflow_dir_for(project_root)
           fingerprint = Hive::Workflows::Loader.fingerprint(workflow_dir)
           return if @active_root == project_root && @active_fingerprint == fingerprint
 
@@ -149,8 +149,10 @@ module Hive
         @warned_skips ||= Set.new
       end
 
-      def workflow_dir_for(project_root)
-        Hive::Workflows::Loader.workflow_dir(project_root)
+      def workflow_dir_for(project_root, config: nil)
+        return Hive::Workflows::Loader.workflow_dir(project_root) unless config
+
+        Hive::Workflows::Loader.workflow_dir(project_root, config:)
       rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
         fallback = File.join(project_root, Hive::Config::DEFAULTS.fetch("hive_state_path"), "workflows")
         # Surface the fallback so a project with a CUSTOM hive_state_path whose

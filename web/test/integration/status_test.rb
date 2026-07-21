@@ -81,7 +81,7 @@ class StatusTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "board is the default and explicit views persist as the operator preference" do
+  test "board is the default and only the preference mutation changes the saved view" do
     sign_in!
     with_daemon_status(
       "running" => true,
@@ -103,13 +103,33 @@ class StatusTest < ActionDispatch::IntegrationTest
       assert_select ".status-view-switch [aria-current='page']", text: "Grid"
 
       get "/"
-      assert_select "#status-grid", 1, "the explicit grid choice should become the default"
+      assert_select "#status-board", 1, "a plain view GET must not mutate the preference"
+
+      post status_view_preference_path, params: { view: "grid" }
+      assert_redirected_to grid_path
+      follow_redirect!
+      assert_select "#status-grid", 1
+
+      get "/"
+      assert_select "#status-grid", 1, "the explicit preference mutation should change the default"
 
       get "/board"
       assert_select "#status-board", 1
 
       get "/"
-      assert_select "#status-board", 1, "the explicit board choice should become the default"
+      assert_select "#status-grid", 1, "refreshing another view must not overwrite the saved choice"
+
+      post status_view_preference_path, params: { view: "board" }
+      assert_redirected_to board_path
+      get "/"
+      assert_select "#status-board", 1
+
+      post status_view_preference_path, params: { view: "unknown" }
+      assert_response :bad_request
+      post status_view_preference_path
+      assert_response :bad_request
+      get "/"
+      assert_select "#status-board", 1, "invalid mutations must not change the saved preference"
     end
   end
 
@@ -149,6 +169,41 @@ class StatusTest < ActionDispatch::IntegrationTest
                       text: "Approve"
         assert_select ".kanban-card a[href='/tasks/#{project_name}/ready-card-260721-abcd']",
                       text: "Ready card"
+      end
+    end
+  end
+
+  test "status views expose degraded projects and unavailable workflows" do
+    sign_in!
+    project_name = create_hive_project!("kanban-degraded-status-app")
+    project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
+    projects = [
+      {
+        "name" => project_name,
+        "path" => project_path,
+        "hive_state_path" => File.join(project_path, ".hive-state"),
+        "tasks" => [ { "slug" => "visible-error-task", "stage" => "2-draft", "workflow" => "missing" } ]
+      },
+      {
+        "name" => "broken-project",
+        "path" => "/missing/project",
+        "hive_state_path" => "/missing/project/.hive-state",
+        "error" => "project_load_failed",
+        "tasks" => []
+      }
+    ]
+
+    with_daemon_status("running" => true, "service_installed" => true, "binary_drift" => "none") do
+      with_status_snapshot("projects" => projects) do
+        get board_path
+        assert_select ".kanban-band[data-workflow='missing'] .state-banner", text: /Workflow unavailable/
+        assert_select ".kanban-card[data-task-slug='visible-error-task']"
+        assert_select ".kanban-band[data-project-name='broken-project'] .state-banner",
+                      text: /Project status unavailable/
+
+        get grid_path
+        assert_select ".project-section[data-project-name='broken-project'] .state-banner",
+                      text: /Project status unavailable/
       end
     end
   end

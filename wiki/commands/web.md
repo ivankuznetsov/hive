@@ -158,12 +158,15 @@ so the login gate can run.
 ## Surfaces
 
 - **Status board and grid (`/board`, `/grid`, `/`)** — Board is the first-visit
-  default, while either explicit route stores a signed browser preference that
-  `/` follows thereafter. Both are server-rendered views over the same
+  default. The view-switch forms store a signed browser preference that `/`
+  follows thereafter; read-only visits and Turbo refreshes of either explicit
+  route do not rewrite that preference. Both are server-rendered views over the same
   `StatusFeed` snapshot and remain equal navigation choices. `Board` groups
   active tasks into project/workflow bands and orders columns from each
   workflow descriptor; empty projects use their configured default workflow,
-  and an unknown live stage is appended instead of hiding its tasks. Cards
+  an unknown live stage is appended instead of hiding its tasks, and degraded
+  projects or unavailable workflows remain visibly marked rather than looking
+  like healthy empty pipelines. Cards
   link to the native task resource and reuse the same Retry, Approve, Run, and
   Diff forms as the task page. There is deliberately no parallel drag/drop,
   drawer, cursor, transition, or audit subsystem: workflow mutation continues
@@ -192,10 +195,22 @@ so the login gate can run.
   rail and morph the composer project selector over solid_cable. The refresh
   re-renders the current URL (or `/`'s saved preference), so Board and Grid
   cannot be cross-patched with markup for the other view; task pages without
-  the dashboard targets still receive the same morph signal. The composer's
-  stream hook keeps the
+  the dashboard targets still receive the same morph signal. Stable digest IDs
+  keep project/workflow bands, columns, and task cards attached to the same DOM
+  identity across reorder morphs. A status-level submission guard defers one
+  refresh while the composer or a card action is in flight. It replays after a
+  non-redirecting response; a successful redirect's fresh GET already
+  reconciles without racing the operator back to the old URL. This prevents a
+  filesystem broadcast from aborting the mutation. The same guard keeps the
+  Action Cable source permanent across morphs, remembers its first connection
+  independently of the Stimulus controller lifecycle, and requests one full
+  catch-up refresh on a later reconnect so an update broadcast during the
+  disconnected window is not stranded. The initial connection does not
+  duplicate the fresh page GET. The composer's stream hook keeps the
   browser's current project selection when that project still exists; ordering
-  belongs to the server while unfinished form state remains local. The index
+  belongs to the server while unfinished form state remains local. A successful
+  idea POST returns to the same-origin Board/Grid URL that submitted it, so an
+  explicit deep link does not jump to the saved/default view. The index
   opts that refresh into Turbo morphing
   with scroll preservation so a live row arrival does not yank the operator
   back to the top; the composer form is `data-turbo-permanent` because
@@ -204,11 +219,9 @@ so the login gate can run.
   permanent node, revokes removed preview URLs, and clears the submitted text,
   chips, and upload transport on a successful `turbo:before-fetch-response`
   while the form is still connected (`turbo:submit-end` remains a fallback);
-  while its POST is in flight, that controller suppresses only page-wide
-  `refresh` stream actions on the submitting client so the background
-  filesystem broadcaster cannot abort a server-successful submission before
-  Turbo delivers the success lifecycle (refreshes on other clients continue
-  normally);
+  `status_refresh_controller.js` owns submission-versus-refresh ordering for
+  every form on the status surface, while refreshes on other clients continue
+  normally;
   the selected project remains as working context, so the next idea cannot
   accidentally resubmit the completed draft even when Turbo moves the
   permanent node during rendering. At mobile widths the composer toolbar

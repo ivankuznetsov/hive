@@ -29,6 +29,19 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_load_reuses_a_resolved_project_config
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "resolved-flow")
+      config = Hive::Config.load(project_root)
+
+      with_replaced_singleton_method(Hive::Config, :load, ->(*) { flunk "config should already be resolved" }) do
+        Hive::Workflows::Project.load!(project_root, config: config)
+      end
+
+      assert_equal :"resolved-flow", Hive::Workflows::Registry.fetch(:"resolved-flow").id
+    end
+  end
+
   def test_project_load_is_memoized_per_root
     with_tmp_dir do |project_root|
       workflows_dir = File.join(project_root, ".hive-state", "workflows")

@@ -133,12 +133,12 @@ module Hive
         # web.local_loopback: false to force GitHub login even on a loopback
         # bind. Only signal the bypass when both the bind is loopback AND the
         # config still allows it.
-        local_loopback = Hive::Web::Environment.boolean(
-          "HIVE_WEB_LOCAL_LOOPBACK",
+        local_loopback = Hive::Web::Environment.local_loopback_mode?(
+          bind: bind,
           environment: @environment,
           default: cfg.fetch("local_loopback", true)
         )
-        env["HIVE_WEB_LOCAL_LOOPBACK"] = loopback_bind?(bind) && local_loopback ? "1" : nil
+        env["HIVE_WEB_LOCAL_LOOPBACK"] = local_loopback ? "1" : nil
         # The child Rails process receives canonical names only. Removing a
         # supplied legacy alias prevents a second warning after the CLI has
         # already reported and translated it.

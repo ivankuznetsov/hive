@@ -116,6 +116,39 @@ class WebEnvironmentTest < Minitest::Test
     assert_match(/HIVE_WEB_LOCAL_LOOPBACK must be one of/, error.message)
   end
 
+  def test_service_resolution_enables_bypass_only_for_an_enabled_loopback_bind
+    loopback = Hive::Web::Environment.resolved_for_service(
+      config: web_config("127.12.34.56"),
+      environment: { "HIVEBOX_LOCAL_LOOPBACK" => "yes" },
+      managed_app_dir: "/managed/web"
+    )
+    non_loopback = Hive::Web::Environment.resolved_for_service(
+      config: web_config("0.0.0.0"),
+      environment: { "HIVE_WEB_LOCAL_LOOPBACK" => "1" },
+      managed_app_dir: "/managed/web"
+    )
+    explicitly_disabled = Hive::Web::Environment.resolved_for_service(
+      config: web_config("localhost"),
+      environment: {
+        "HIVE_WEB_LOCAL_LOOPBACK" => "0",
+        "HIVEBOX_LOCAL_LOOPBACK" => "1"
+      },
+      managed_app_dir: "/managed/web"
+    )
+
+    assert_equal "1", loopback.fetch("HIVE_WEB_LOCAL_LOOPBACK")
+    assert_equal "0", non_loopback.fetch("HIVE_WEB_LOCAL_LOOPBACK"),
+                 "an inherited bypass flag must not override an explicit non-loopback bind"
+    assert_equal "0", explicitly_disabled.fetch("HIVE_WEB_LOCAL_LOOPBACK"),
+                 "the canonical opt-out must keep precedence over its legacy alias"
+    assert Hive::Web::Environment.warnings(
+      environment: {
+        "HIVE_WEB_LOCAL_LOOPBACK" => "0",
+        "HIVEBOX_LOCAL_LOOPBACK" => "1"
+      }
+    ).fetch(0).fetch("ignored")
+  end
+
   def test_unknown_canonical_setting_is_rejected
     error = assert_raises(ArgumentError) do
       Hive::Web::Environment.value("HIVE_WEB_UNKNOWN", environment: {})
@@ -150,5 +183,14 @@ class WebEnvironmentTest < Minitest::Test
 
   def warnings(environment)
     Hive::Web::Environment.warnings(environment: environment)
+  end
+
+  def web_config(bind)
+    {
+      "bind" => bind,
+      "port" => 4567,
+      "origin" => "",
+      "local_loopback" => true
+    }
   end
 end

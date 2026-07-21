@@ -1,5 +1,6 @@
 require "hive"
 require "hive/paths"
+require "hive/web/loopback"
 
 module Hive
   module Web
@@ -80,6 +81,18 @@ module Hive
         current
       end
 
+      # The local no-auth mode is safe only when both the operator setting and
+      # the actual server bind agree that this is a loopback-only launch. Keep
+      # this decision shared by foreground and managed-service resolution so a
+      # stale inherited setting cannot apply loopback-only auth and Host policy
+      # to a non-loopback bind.
+      def local_loopback_mode?(bind:, environment: ENV, default: true)
+        enabled = boolean(
+          "HIVE_WEB_LOCAL_LOOPBACK", environment: environment, default: default
+        )
+        Hive::Web::Loopback.address?(bind) && enabled
+      end
+
       def legacy_names
         SETTINGS.map(&:legacy)
       end
@@ -87,6 +100,11 @@ module Hive
       def resolved_for_service(config:, environment: ENV, managed_app_dir:)
         origin_default = config["origin"].to_s.strip
         origin_default = "http://#{config.fetch('bind')}:#{config.fetch('port')}" if origin_default.empty?
+        local_loopback = local_loopback_mode?(
+          bind: config.fetch("bind"),
+          environment: environment,
+          default: config.fetch("local_loopback", true)
+        )
         {
           "HIVE_WEB_APP_DIR" => value(
             "HIVE_WEB_APP_DIR", environment: environment, default: managed_app_dir
@@ -97,11 +115,7 @@ module Hive
           "HIVE_WEB_STORAGE_DIR" => value(
             "HIVE_WEB_STORAGE_DIR", environment: environment
           ),
-          "HIVE_WEB_LOCAL_LOOPBACK" => boolean(
-            "HIVE_WEB_LOCAL_LOOPBACK",
-            environment: environment,
-            default: config.fetch("local_loopback", true)
-          ) ? "1" : "0",
+          "HIVE_WEB_LOCAL_LOOPBACK" => local_loopback ? "1" : "0",
           "HIVE_WEB_DIFF_TIMEOUT_SEC" => value(
             "HIVE_WEB_DIFF_TIMEOUT_SEC", environment: environment
           ).to_s,

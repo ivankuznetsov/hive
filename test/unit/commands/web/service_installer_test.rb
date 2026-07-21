@@ -31,6 +31,31 @@ class WebServiceInstallerTest < Minitest::Test
     end
   end
 
+  def test_linux_unit_enables_local_bypass_only_for_loopback_bind
+    with_tmp_dir do |dir|
+      {
+        "127.0.0.1" => "1",
+        "0.0.0.0" => "0"
+      }.each do |bind, expected|
+        home = File.join(dir, bind.tr(".", "-"))
+        installer = Hive::Commands::Web::ServiceInstaller.new(
+          host_os: "linux-gnu",
+          home: home,
+          binary_path: "/opt/hive/bin/hive",
+          systemctl_available: true,
+          runner: ->(_argv) { },
+          environment: { "HIVE_WEB_LOCAL_LOOPBACK" => "1" },
+          config: service_web_config(bind)
+        )
+
+        installer.install!(autostart: false)
+        rendered = File.read(File.join(home, ".config/systemd/user/hive-web.service"))
+        assert_includes rendered, "Environment=HIVE_WEB_LOCAL_LOOPBACK=#{expected}",
+                        "managed-service bypass must follow the same bind gate as foreground web"
+      end
+    end
+  end
+
   def test_macos_writes_plist_with_resolved_binary
     with_tmp_dir do |dir|
       commands = []
@@ -172,5 +197,16 @@ class WebServiceInstallerTest < Minitest::Test
       [ "launchctl", "load", "/h/Library/LaunchAgents/local.hive-web.plist" ]
     ], commands
     assert_empty installer.messages
+  end
+
+  private
+
+  def service_web_config(bind)
+    {
+      "bind" => bind,
+      "port" => 4567,
+      "origin" => "",
+      "local_loopback" => true
+    }
   end
 end

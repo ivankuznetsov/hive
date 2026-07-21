@@ -123,9 +123,13 @@ an old session is still live, `ApplicationController#require_login` resets that
 session and redirects to login so the old repo-scoped token does not remain
 usable. The local dev/test seam is exempt only for tokenless local sessions.
 
-Local loopback mode is a deliberate no-auth bypass for local foreground use:
+Local loopback mode is a deliberate no-auth bypass for local native use:
 when the CLI bind address is `localhost`, `::1`, or any `127.0.0.0/8` address
-and `web.local_loopback` is not `false`, it exports `HIVE_WEB_LOCAL_LOOPBACK=1`.
+and `web.local_loopback` is not `false`, foreground launches export
+`HIVE_WEB_LOCAL_LOOPBACK=1` and managed services persist the same value. An
+explicit non-loopback service bind always persists `0`, even when an inherited
+canonical or legacy environment setting enables local loopback mode, so service
+and foreground launches share the same bind safety boundary.
 Rails checks both the actual socket peer in `REMOTE_ADDR` and the authorized
 normalized Host before skipping login; it deliberately ignores proxy-expanded
 `remote_ip`, and an attacker-controlled Host is rejected even over a loopback

@@ -12,7 +12,15 @@ mkdir -p "$fake_bin"
 cat >"$fake_bin/docker" <<'SH'
 #!/usr/bin/env sh
 set -eu
-printf '%s\n' "$*" >>"$DOCKER_STUB_LOG"
+{
+  printf 'BEGIN argc=%s\n' "$#"
+  argument_index=1
+  for argument do
+    printf 'ARG %s=<%s>\n' "$argument_index" "$argument"
+    argument_index=$((argument_index + 1))
+  done
+  printf 'END\n'
+} >>"$DOCKER_STUB_LOG"
 case "$1" in
   info|pull) exit 0 ;;
   ps)
@@ -35,6 +43,15 @@ assert_contains() {
   }
 }
 
+assert_files_equal() {
+  expected="$1"
+  actual="$2"
+  diff -u "$expected" "$actual" || {
+    printf 'FAIL: %s did not match %s\n' "$actual" "$expected" >&2
+    exit 1
+  }
+}
+
 stub_log="$fixture_root/docker.log"
 data_dir="$fixture_root/data with spaces"
 HOME="$fixture_root/home" \
@@ -43,8 +60,35 @@ PATH="$fake_bin:$PATH" \
 HIVEBOX_DATA="$data_dir" \
   sh "$installer" >"$fixture_root/happy.out" 2>"$fixture_root/happy.err"
 
-assert_contains "$stub_log" "pull ghcr.io/ivankuznetsov/hivebox:latest"
-assert_contains "$stub_log" "run -d --name hivebox --restart unless-stopped -p 127.0.0.1:4567:4567 -v $data_dir:/data ghcr.io/ivankuznetsov/hivebox:latest"
+cat >"$fixture_root/happy.expected" <<EOF
+BEGIN argc=1
+ARG 1=<info>
+END
+BEGIN argc=4
+ARG 1=<ps>
+ARG 2=<-a>
+ARG 3=<--format>
+ARG 4=<{{.Names}}>
+END
+BEGIN argc=2
+ARG 1=<pull>
+ARG 2=<ghcr.io/ivankuznetsov/hivebox:latest>
+END
+BEGIN argc=11
+ARG 1=<run>
+ARG 2=<-d>
+ARG 3=<--name>
+ARG 4=<hivebox>
+ARG 5=<--restart>
+ARG 6=<unless-stopped>
+ARG 7=<-p>
+ARG 8=<127.0.0.1:4567:4567>
+ARG 9=<-v>
+ARG 10=<$data_dir:/data>
+ARG 11=<ghcr.io/ivankuznetsov/hivebox:latest>
+END
+EOF
+assert_files_equal "$fixture_root/happy.expected" "$stub_log"
 assert_contains "$fixture_root/happy.out" "Open:  http://localhost:4567"
 
 set +e
@@ -60,6 +104,18 @@ if [ "$existing_status" -eq 0 ]; then
   printf 'FAIL: existing Hivebox container was not refused\n' >&2
   exit 1
 fi
+cat >"$fixture_root/existing.expected" <<'EOF'
+BEGIN argc=1
+ARG 1=<info>
+END
+BEGIN argc=4
+ARG 1=<ps>
+ARG 2=<-a>
+ARG 3=<--format>
+ARG 4=<{{.Names}}>
+END
+EOF
+assert_files_equal "$fixture_root/existing.expected" "$fixture_root/existing.log"
 assert_contains "$fixture_root/existing.err" "a container named hivebox already exists"
 assert_contains "$fixture_root/existing.err" "docker start hivebox"
 

@@ -99,12 +99,12 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
   setup do
     @project = create_hive_project!("workflow-web-app")
     @lifecycle = FakeLifecycle.new
-    WorkflowsController.instance_variable_set(:@workflow_lifecycle, @lifecycle)
+    Workflow.lifecycle = @lifecycle
     sign_in!
   end
 
   teardown do
-    WorkflowsController.instance_variable_set(:@workflow_lifecycle, nil)
+    Workflow.reset_lifecycle!
   end
 
   test "page exposes built-in, authored, and managed workflows for one selected project" do
@@ -142,6 +142,7 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_equal "text/html", response.media_type,
                  "Turbo form previews must return a navigable page, not a bare stream MIME type"
+    assert_select "nav a.nav-link-active", text: "Workflows"
     assert_select "#workflow-preview-heading", text: /Review install: docs 1.2.0/
     assert_select ".permission-grid", text: /Filesystem read.*repository, task/m
     token = preview_token(install_workflow_path)
@@ -159,6 +160,18 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
     assert_equal "honeycomb/docs@1.2.0", call[2]
     assert_equal "c" * 40, call[3].fetch("source_commit")
     assert_equal "f" * 64, call[3].fetch("configuration_digest")
+  end
+
+  test "route identity cannot be replaced by a submitted operation" do
+    post preview_workflow_install_path,
+         params: {
+           project: @project, source: "honeycomb/docs@1.2.0", operation: "remove"
+         }
+
+    assert_response :success
+    assert_includes @lifecycle.calls,
+                    [ :preview_install, @project, "honeycomb/docs@1.2.0" ]
+    refute @lifecycle.calls.any? { |call| call.first == :preview_remove }
   end
 
   test "security-expanding update requires ordinary and separate escalation consent" do
@@ -221,7 +234,7 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
     post preview_workflow_remove_path, params: { project: @project, name: "demo" }
     token = preview_token(remove_workflow_path)
 
-    travel WorkflowsController::PREVIEW_TTL + 1.second do
+    travel WorkflowChange::PREVIEW_TTL + 1.second do
       post remove_workflow_path,
            params: { preview_token: token, consent: "workflow_remove" }
     end

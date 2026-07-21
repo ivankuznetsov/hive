@@ -41,11 +41,20 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
       assert_equal installed.fetch("mappings"), row.fetch("mappings")
       assert_equal [], row.fetch("optional_inputs")
 
-      removed = Hive::Commands::Workflow::Remove.new(
+      remove = Hive::Commands::Workflow::Remove.new(
         "demo", project_root: project, json: true, yes: true,
         stdout: StringIO.new, committer: ->(*) { }
-      ).call!
-      assert_equal "removed", removed.fetch("status")
+      )
+      loads = 0
+      original_load = Hive::Config.method(:load)
+      with_replaced_singleton_method(Hive::Config, :load, lambda { |root|
+        loads += 1
+        original_load.call(root)
+      }) do
+        removed = remove.call!
+        assert_equal "removed", removed.fetch("status")
+      end
+      assert_equal 1, loads
       assert_nil Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state")).selected("demo")
     end
   end
@@ -161,22 +170,24 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
 
       error = assert_raises(Hive::ConfigError) do
         Hive::Commands::Workflow::ConfigurationResolver.new(
-          workflow: changed, resolution: resolution, cfg: {}, runtime_metadata: {}, previous: previous
+          validated: validated.with(workflow: changed), resolution: resolution,
+          cfg: {}, previous: previous
         )
       end
       assert_match(/mapping contract changed/, error.message)
 
       reconfirmed = Hive::Commands::Workflow::ConfigurationResolver.new(
-        workflow: changed, resolution: resolution, cfg: {}, runtime_metadata: {}, previous: previous,
+        validated: validated.with(workflow: changed), resolution: resolution,
+        cfg: {}, previous: previous,
         mapping_overrides: { "stages.work" => { "agent" => "claude" } }
       )
       assert_equal "demo-work-v2", reconfirmed.mappings.fetch(0).fetch("mapping_contract")
 
       error = assert_raises(Hive::ConfigError) do
         Hive::Commands::Workflow::ConfigurationResolver.new(
-          workflow: validated.workflow, resolution: resolution,
+          validated: validated, resolution: resolution,
           cfg: { "agents" => { "claude" => { "bin" => "/tmp/drifted-claude" } } },
-          runtime_metadata: {}, previous: previous
+          previous: previous
         )
       end
       assert_match(/profile drifted/, error.message)

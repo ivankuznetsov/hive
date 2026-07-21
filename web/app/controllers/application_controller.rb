@@ -100,11 +100,10 @@ class ApplicationController < ActionController::Base
   end
 
   def registered_projects
-    @registered_projects ||= Hive::Config.registered_projects
+    @registered_projects ||= Project.all
   end
 
   def find_project!(name)
-    registered_projects.find { |p| p["name"] == name } ||
-      raise(Hive::InvalidTaskPath, "unknown project #{name}")
+    Project.find!(name, projects: registered_projects)
   end
 end

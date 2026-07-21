@@ -6,6 +6,37 @@ require "hive/workflow_package/manifest"
 class NewManagedWorkflowTest < Minitest::Test
   include HiveTestHelper
 
+  def test_current_selection_is_read_once_without_loading_project_config
+    with_tmp_dir do |project|
+      hive_state = File.join(project, ".hive-state")
+      store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
+      package = File.join(project, "package")
+      resolution = write_package(package, "a" * 40)
+      store.place_generation(package, resolution)
+      store.activate(resolution)
+      File.write(File.join(hive_state, "config.yml"), "not: [valid")
+      workflow = store.workflow("demo", resolution.source_commit, resolution.manifest_digest)
+      original = store.method(:selected)
+      reads = 0
+      store.define_singleton_method(:selected) do |*args, **kwargs, &block|
+        reads += 1
+        original.call(*args, **kwargs, &block)
+      end
+      command = Hive::Commands::New.new("project", "idea")
+      project_record = { "path" => project, "hive_state_path" => hive_state }
+
+      with_replaced_singleton_method(
+        Hive::WorkflowPackage::ManagedStore, :new, ->(*, **) { store }
+      ) do
+        info = command.send(:workflow_resolution, workflow, project_record, pin: true)
+
+        assert_equal 1, reads
+        assert_equal resolution.source_commit, info.fetch(:managed).fetch("source_commit")
+        assert_equal({}, info.fetch(:managed_cfg))
+      end
+    end
+  end
+
   def test_task_creation_rechecks_the_managed_selection_under_the_shared_lock
     with_tmp_dir do |dir|
       hive_state = File.join(dir, ".hive-state")

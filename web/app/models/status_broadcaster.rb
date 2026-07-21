@@ -25,7 +25,7 @@ class StatusBroadcaster
       payload.fetch("projects", [])
              .each_with_index
              .sort_by { |(project, index)| [ -project.fetch("tasks", []).size, index ] }
-             .map(&:first)
+             .map { |project, _index| Project.new(project) }
     end
 
     # Self-healing by construction: a raising broadcast (a solid_cable

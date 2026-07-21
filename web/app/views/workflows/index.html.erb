@@ -10,8 +10,8 @@
 <% else %>
   <%= form_with url: workflows_path, method: :get, class: "repo-form workflow-project-form" do |f| %>
     <%= select_tag :project,
-          options_for_select(@projects.map { |project| [project.fetch("name"), project.fetch("name")] },
-                             @selected_project&.fetch("name", nil)),
+          options_for_select(@projects.map { |project| [project.name, project.name] },
+                             @selected_project&.name),
           include_blank: @projects.many? ? "Choose a project…" : false,
           required: true, aria: { label: "Project workflows" } %>
     <%= f.submit "View workflows", data: { turbo_submits_with: "Loading…" } %>
@@ -19,54 +19,53 @@
 <% end %>
 
 <% if @selected_project %>
-  <% if @preview %>
+  <% if @workflow_change %>
     <%= render "workflows/preview",
-          preview: @preview, operation: @preview_operation,
-          token: @preview_token, project: @selected_project %>
+          change: @workflow_change, project: @selected_project %>
   <% end %>
 
   <section aria-labelledby="project-workflows-heading">
-    <h2 id="project-workflows-heading"><%= @selected_project.fetch("name") %> workflows</h2>
+    <h2 id="project-workflows-heading"><%= @selected_project.name %> workflows</h2>
     <div class="workflow-list">
-      <% @workflows.each do |row| %>
-        <article class="workflow-row" data-workflow-origin="<%= row["origin"] %>"
-                 data-workflow-selection="<%= row["selection"] %>">
+      <% @workflows.each do |workflow| %>
+        <article class="workflow-row" data-workflow-origin="<%= workflow.origin %>"
+                 data-workflow-selection="<%= workflow.selection %>">
           <div>
             <div class="workflow-title">
-              <strong><%= row.fetch("name") %></strong>
-              <span class="tag"><%= row.fetch("origin").humanize %></span>
-              <% if row["default"] %><span class="tag tag-registered">default</span><% end %>
-              <% if row["selection"] %><span class="tag tag-registered"><%= row["selection"] %></span><% end %>
-              <% if row["integrity"] %>
-                <span class="tag <%= "tag-health-conflicting" unless row["integrity"] == "verified" %>"><%= row["integrity"] %></span>
+              <strong><%= workflow.name %></strong>
+              <span class="tag"><%= workflow.origin.humanize %></span>
+              <% if workflow.default? %><span class="tag tag-registered">default</span><% end %>
+              <% if workflow.selection %><span class="tag tag-registered"><%= workflow.selection %></span><% end %>
+              <% if workflow.integrity %>
+                <span class="tag <%= "tag-health-conflicting" unless workflow.verified? %>"><%= workflow.integrity %></span>
               <% end %>
             </div>
             <p class="workflow-meta">
-              <% if row["version"] %>version <%= row["version"] %><% end %>
-              <% if row["source_commit"] %>
-                <span title="<%= row["source_commit"] %>">commit <%= row["source_commit"].to_s[0, 10] %></span>
+              <% if workflow.version %>version <%= workflow.version %><% end %>
+              <% if workflow.source_commit %>
+                <span title="<%= workflow.source_commit %>">commit <%= workflow.source_commit.to_s[0, 10] %></span>
               <% end %>
-              <% if row["catalog_visibility"] %><span><%= row["catalog_visibility"].humanize %></span><% end %>
+              <% if workflow.catalog_visibility %><span><%= workflow.catalog_visibility.humanize %></span><% end %>
             </p>
           </div>
-          <% if row["origin"] == "managed" && row["selection"] == "selected" && row["integrity"] == "verified" %>
+          <% if workflow.managed? && workflow.selected? && workflow.verified? %>
             <div class="workflow-actions">
               <%= button_to "Check update", preview_workflow_update_path,
-                    params: { project: @selected_project.fetch("name"), name: row.fetch("name") },
+                    params: { project: @selected_project.name, name: workflow.name },
                     class: "btn-ghost btn-sm", data: { turbo_submits_with: "Checking…" },
                     form: { data: { turbo: false } } %>
               <%= button_to "Review removal", preview_workflow_remove_path,
-                    params: { project: @selected_project.fetch("name"), name: row.fetch("name") },
+                    params: { project: @selected_project.name, name: workflow.name },
                     class: "btn-ghost btn-sm", data: { turbo_submits_with: "Reviewing…" },
                     form: { data: { turbo: false } } %>
             </div>
-          <% elsif row["origin"] == "managed" && row["selection"] == "selected" %>
+          <% elsif workflow.managed? && workflow.selected? %>
             <span class="faint">Repair the malformed or tampered selection from the project checkout before changing it.</span>
           <% end %>
         </article>
       <% end %>
     </div>
-    <p><%= link_to "Choose the default workflow", new_repo_path(project: @selected_project.fetch("name")), class: "btn btn-ghost btn-sm" %></p>
+    <p><%= link_to "Choose the default workflow", new_repo_path(project: @selected_project.name), class: "btn btn-ghost btn-sm" %></p>
   </section>
 
   <div class="workflow-management-grid">
@@ -77,7 +76,7 @@
           Native navigation is intentional: Turbo requires successful form
           submissions to redirect and would discard this rendered disclosure. %>
       <%= form_with url: preview_workflow_install_path, class: "form-grid", data: { turbo: false } do |f| %>
-        <%= hidden_field_tag :project, @selected_project.fetch("name") %>
+        <%= hidden_field_tag :project, @selected_project.name %>
         <div class="form-row">
           <%= f.label :source, "Reviewed package" %>
           <%= f.text_field :source, required: true, placeholder: "honeycomb/workflow-name@1.0.0" %>
@@ -90,7 +89,7 @@
       <h2 id="author-workflow-heading">Create for this project</h2>
       <p class="muted">Scaffold an owner-authored descriptor and editable stage instructions on <code>hive/state</code>.</p>
       <%= form_with url: create_workflow_path, class: "form-grid" do |f| %>
-        <%= hidden_field_tag :project, @selected_project.fetch("name") %>
+        <%= hidden_field_tag :project, @selected_project.name %>
         <div class="form-row">
           <%= f.label :id, "Workflow ID" %>
           <%= f.text_field :id, required: true, pattern: "[a-z0-9][a-z0-9-]*", placeholder: "release-notes" %>

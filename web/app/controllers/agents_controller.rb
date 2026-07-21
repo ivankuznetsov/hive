@@ -45,7 +45,7 @@ class AgentsController < ApplicationController
     end
 
     result = agent_skills.repair(project)
-    project_name = project.fetch("name")
+    project_name = project.name
     if result.fetch("exit_code", 1).to_i.zero?
       redirect_to agents_path(project: project_name),
                   notice: "Managed agent skills are ready for #{project_name}."

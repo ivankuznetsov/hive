@@ -106,6 +106,9 @@ tailnet ACLs), because an unrestricted forwarder exposes the no-auth local UI.
 That connection-authenticated operator sees the complete primary navigation
 under the `hive` product identity and is labelled `Local`; GitHub-dependent
 repository browsing stays behind an explicit **Connect GitHub** action.
+Navigation state is grouped by the first segment of Rails `controller_path`,
+so namespaced task, workflow, and Telegram resource controllers retain their
+parent section's active link when they render a complete page.
 Completing that optional connection stores the login/token in the browser
 session but never claims or changes `web.github.owner`.
 Non-loopback binds require either `--unsafe` or a configured `web.github.owner`;
@@ -200,7 +203,7 @@ origin also prints the Host-header/reverse-proxy warning.
   reason; skipped or absent manifests render nothing. The media route applies a
   first-pass filename constraint (a single component ending in png/jpg/jpeg/gif,
   with `format: false` so a trailing `.rb` cannot masquerade as an implicit
-  format); the strict guarantee lives in the controller's `resolved_media_path`,
+  format); the strict guarantee lives in `Task#media_path`,
   which re-checks the filename against an anchored regex, requires `File.basename`
   equality, and resolves `File.realpath` to confirm containment under
   `<task>/media/` — refusing symlink and path-traversal escapes — before
@@ -217,14 +220,24 @@ origin also prints the Host-header/reverse-proxy warning.
   instead of replacing it on every poll. The poll controller gives the pane
   `tail -f` semantics: it pins to the bottom while following, pauses reloads
   while the operator scrolls up to read, and resumes when scrolled back down.
-  Server-side, the polled `TasksController#log` path reads only a 256 KiB byte
+  Server-side, the polled controller delegates to `Task#latest_log`, which
+  reads only a 256 KiB byte
   window and returns the last 200 lines with a torn leading line dropped, so a
   multi-MB agent log cannot pin a Puma worker every 3 seconds.
-  The Diff route has the same bounded-subprocess discipline: it runs
+  `Task#diff` has the same bounded-subprocess discipline: it runs
   `git diff --` in its own process group, enforces
   `HIVEBOX_DIFF_TIMEOUT_SEC` (default 15s), writes combined output to a
   tempfile, and renders at most the first 512 KiB with an explicit truncation
-  notice.
+  notice; `Tasks::DiffsController#show` only exposes that result. The model also
+  owns original-idea/title resolution and the workflow-aware passable,
+  recovery, terminal, dispatch-action, and run-verb decisions used by the
+  dashboard and task page. Displayed run verbs consume
+  `TaskAction::READY_COMMANDS`, retaining only the web-specific `run` to
+  `stage` label, so display and dispatch cannot derive separate command maps.
+  Model tests drive successful, failed, and timed-out diff subprocesses and
+  pin process-group termination, reaping, readable errors, and tempfile
+  cleanup. Status projects/tasks are wrapped before ERB, so presentation
+  helpers no longer read task files or duplicate command policy.
   Red diagnostic rows also render a danger banner from
   `tasks[].diagnostic.summary` so the page says why the row is stuck before
   offering Retry. A stopped-daemon blocker is shown only for non-terminal
@@ -249,8 +262,13 @@ origin also prints the Host-header/reverse-proxy warning.
   layers recheck the selected baseline, so stale or incomplete receipts fail
   before mutation. Security expansion has a second, non-composable checkbox.
   Receipt tests cover cross-operation replay, real expiry, and missing consent
-  for every mutation. A fixture-backed integration test runs the real workflow
-  commands through the adapter for the full preview/apply lifecycle.
+  for every mutation. Rails represents lifecycle list rows as `Workflow`
+  models and preview/application state as `WorkflowChange`; the established
+  URLs route to standard `create` actions for preview and change resources.
+  The operation comes from the matched route's path parameters, so a submitted
+  `operation` field cannot redirect an install preview into another lifecycle
+  action. A fixture-backed integration test runs the real workflow commands
+  through the adapter for the full preview/apply lifecycle.
   The known legacy-vs-v2 `workflow publish` gap is stated in the page instead
   of exposing a button that opens an unusable registry PR. At mobile widths the
   primary header wraps to a second full-width row, keeping all five sections
@@ -264,9 +282,10 @@ origin also prints the Host-header/reverse-proxy warning.
   control: fresh clone setup lists built-ins only (`coding`, `content`, `bench`) with
   `coding` preselected, while "Re-run setup" lists built-ins plus that
   project's authored workflows and preselects the current `default_workflow`.
-  The selected value is passed as `Hive::Commands::Init.new(..., workflow:)`;
-  it is intentionally outside the `prompts:` answers hash. The web adapter
-  also supplies a non-TTY provisioning input and a request-local error capture,
+  The selected value is passed by `Project#setup!` as
+  `Hive::Commands::Init.new(..., workflow:)`; it is intentionally outside the
+  `prompts:` answers hash. The `Project` model also supplies a non-TTY
+  provisioning input and a request-local error capture,
   so CLI preflight questions can never wait on Puma's inherited terminal and
   strand the browser on “Cloning…”. Non-interactive doctor/agent-skill findings
   return as an alert alongside the successful registration/settings notice
@@ -274,11 +293,14 @@ origin also prints the Host-header/reverse-proxy warning.
   `gh repo clone` with the session token in `GH_TOKEN`, in a separate process
   group with `HIVEBOX_CLONE_TIMEOUT_SEC` (default 180s) as a hard deadline; on
   failure or timeout the partial target is removed so retry starts clean. A
-  pre-existing directory is treated as a local checkout to re-init; a
-  pre-existing non-directory target (file/symlink/etc.) is a 422 refusal, and
-  `clone!` also refuses any existing target so its failure-path `rm_rf` only
-  deletes a partial clone it created. Every registration runs a
-  post-clone/post-existing-dir origin normalization pass:
+  pre-existing directory is treated as a local checkout to re-init; any
+  pre-existing symlink or non-directory target is a 422 refusal. The
+  `Repository` model also refuses any existing clone target so failure-path
+  cleanup only deletes a partial clone it created. Model tests exercise both
+  nonzero clone exits and hard-deadline expiry, including process-group
+  kill/reap behavior plus partial-target and tempfile cleanup. Every
+  registration runs a
+  post-clone/post-existing-dir `Repository` origin-normalization pass:
   absent or non-GitHub remotes are left alone, while GitHub SSH remotes
   (`git@github.com:owner/repo.git` or `ssh://git@github.com/owner/repo.git`)
   become `https://github.com/owner/repo.git`. The box can only push with
@@ -331,10 +353,14 @@ origin also prints the Host-header/reverse-proxy warning.
   `Integer(..., exception: false)`
   before any Telegram network call or config/env write: when pairing is off,
   blank input renders 422, and handles such as `@mychannel` always render 422
-  and persist nothing.
+  and persist nothing. These rules, secret persistence, supervisor reload,
+  test delivery, and pairing lifecycle are owned by the Rails `TelegramBot`
+  model. The settings controller is limited to `show`/`update`; the existing
+  test-message and pairing-approval URLs now target standard `create` actions
+  on named resources.
 
 Task Drop is routed as `POST /tasks/:project/:slug/drop` →
-`TasksController#drop` → `Hive::Web::Dispatcher#drop` →
+`Tasks::DropsController#create` → `Hive::Web::Dispatcher#drop` →
 `Hive::Commands::Drop`. It is intentionally in-process, not a daemon dispatch:
 the task is gone after success, so the controller redirects to the grid. The
 form posts the row's rendered `stage` as `from`; if the task moved after the
@@ -342,7 +368,7 @@ page rendered, `Commands::Drop` raises `Hive::WrongStage`, Rails renders the
 typed 422 error page, and the moved task folder is left intact.
 
 Task recovery is routed as `POST /tasks/:project/:slug/recover` →
-`TasksController#recover` → `Hive::Web::Dispatcher#recover`. The controller
+`Tasks::RecoveriesController#create` → `Hive::Web::Dispatcher#recover`. The controller
 re-reads the current status row rather than trusting form-posted stage/marker
 state. The dispatcher refuses manual-only states with
 `RecoverySequence.manual_only_text`, derives the most discriminating
@@ -383,7 +409,8 @@ a red task page shows the diagnostic banner and Retry button, and that the
 route queues the marker-clear command plus the hidden rerun sequence. It also
 pins the Telegram first-run guide shape, strict token/chat-ID validation,
 empty-list pairing bootstrap, saved-token reuse, pending-code rendering,
-corrupt-store visibility, and consent-gated approval, repo clone target refusal
+corrupt-store visibility, consent-gated approval, and the test-message
+resource's missing-token/success rendering, repo clone target refusal
 for non-directories,
 agent-login status rendering for
 binary PTY output, Grok route reachability, and operator-ward poll flows,

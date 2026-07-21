@@ -190,11 +190,11 @@ module Hive
 
       def workflow_resolution(descriptor, project, pin:)
         store = Hive::WorkflowPackage::ManagedStore.new(project.fetch("hive_state_path"))
-        managed = store.selected(descriptor.id.to_s)
-        cfg = managed ? managed_project_config(project) : {}
+        cfg = {}
+        managed = store.selected(descriptor.id.to_s) { cfg = managed_project_config(project) }
         {
           descriptor: descriptor, pin: pin,
-          managed: managed && store.selected(descriptor.id.to_s, cfg: cfg), managed_cfg: cfg
+          managed: managed, managed_cfg: cfg
         }
       end
 

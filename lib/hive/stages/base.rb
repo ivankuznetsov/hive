@@ -1,4 +1,3 @@
-require "digest"
 require "erb"
 require "fileutils"
 require "securerandom"
@@ -137,19 +136,19 @@ module Hive
                                  base_add_dirs: [ task.folder ],
                                  default_allowed_tools: nil,
                                  explicit_permission_spec: MISSING_EXPLICIT_PERMISSION_SPEC,
-                                 managed_slot: nil)
+                                 managed_slot: nil,
+                                 managed_context: nil)
         if task.respond_to?(:managed_workflow?) && task.managed_workflow?
           require "hive/workflow_package/runtime_policy"
           if explicit_permission_spec.equal?(MISSING_EXPLICIT_PERMISSION_SPEC)
             raise Hive::ConfigError, "managed executable actor #{managed_slot || stage_name} is missing exact permissions"
           end
           slot_id = managed_slot || "stages.#{stage_name}"
-          context = task.managed_runtime_context(slot_id)
+          context = managed_context || task.managed_runtime_context(slot_id)
           runtime_policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
             explicit_permission_spec,
             task_folder: task.folder, profile: profile,
-            package_root: context.fetch(:package_root), environment: context.fetch(:environment),
-            policy_dir: managed_policy_dir(task, stage_name)
+            package_root: context.fetch(:package_root), environment: context.fetch(:environment)
           )
           return {
             add_dirs: runtime_policy.directories,
@@ -190,12 +189,20 @@ module Hive
         }
       end
 
-      # Policy files are enforcement state, so they must not live below the
-      # task directory that managed agents can write. The digest also keeps
-      # task and stage policy material isolated without exposing task names.
-      def managed_policy_dir(task, stage_name)
-        identity = ::Digest::SHA256.hexdigest("#{File.expand_path(task.folder)}\0#{stage_name}")
-        File.join(task.hive_state_path, ".managed-policies", identity)
+      # Prepare one actor launch from one managed snapshot, so its prompt and
+      # permission scope cannot observe different configuration generations.
+      def actor_prompt_and_scope(cfg, stage_name, task, profile, prompt:,
+                                 managed_slot: "stages.#{stage_name}", **scope_kwargs)
+        with_permission_config_error_marker(task) do
+          context = task.managed_runtime_context(managed_slot) if
+            task.respond_to?(:managed_workflow?) && task.managed_workflow?
+          prompt = task.managed_prompt(managed_slot, prompt, context) if context
+          scope = stage_permission_scope(
+            cfg, stage_name, task, profile,
+            managed_slot: managed_slot, managed_context: context, **scope_kwargs
+          )
+          [ prompt, scope ]
+        end
       end
 
       # The three tool-scoping kwargs every spawn site forwards from a
@@ -212,6 +219,18 @@ module Hive
         }
         kwargs[:runtime_policy] = scope[:runtime_policy] if scope[:runtime_policy]
         kwargs
+      end
+
+      # Generic agent and council stages use the same state-file marker
+      # vocabulary when naming their durable hive-state commits.
+      def marker_commit_action(marker_name)
+        case marker_name
+        when :waiting then "round_waiting"
+        when :complete then "complete"
+        when :error then "error"
+        when :none then nil
+        else marker_name.to_s
+        end
       end
 
       # The per-spec explicit-permission passthrough every reviewer
@@ -245,7 +264,13 @@ module Hive
       # outer Review.run! rescue maps the same ConfigError to :review_error
       # against the real task (see review.rb).
       def stage_permission_scope_or_mark!(cfg, stage_name, task, profile, **kwargs)
-        stage_permission_scope(cfg, stage_name, task, profile, **kwargs)
+        with_permission_config_error_marker(task) do
+          stage_permission_scope(cfg, stage_name, task, profile, **kwargs)
+        end
+      end
+
+      def with_permission_config_error_marker(task)
+        yield
       rescue Hive::ConfigError => e
         Hive::Markers.set(task.state_file, :error,
                           reason: "permission_config_error",

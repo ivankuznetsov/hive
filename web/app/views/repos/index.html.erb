@@ -12,11 +12,11 @@
     <% @projects.each do |project| %>
       <article class="repo-row">
         <div>
-          <span class="repo-name"><%= project["name"] %></span>
-          <span class="repo-desc"><%= project["path"] %></span>
+          <span class="repo-name"><%= project.name %></span>
+          <span class="repo-desc"><%= project.path %></span>
         </div>
         <span class="repo-actions">
-          <%= link_to "Settings", new_repo_path(project: project["name"]), class: "btn btn-ghost btn-sm" %>
+          <%= link_to "Settings", new_repo_path(project: project.name), class: "btn btn-ghost btn-sm" %>
           <span class="tag tag-registered">registered</span>
         </span>
       </article>

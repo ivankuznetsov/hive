@@ -345,6 +345,52 @@ push credentials without docker-exec setup. The container supervisor (tini →
 signal-killed children with backoff, survives malformed config, and
 SIGHUP-reloads the bot set. Details: [[commands/web]].
 
+The Rails layer wraps each registry entry in a `Project` model. Project lookup,
+config-backed workflow/default/daemon behavior, and the non-interactive
+`Hive::Commands::Init` setup seam live there; controllers and views use named
+project attributes instead of passing registry hashes around. Gem adapters can
+still call `fetch` at the explicit compatibility boundary.
+
+Repository admission is a separate `Repository` model: it validates GitHub
+source/name input, owns the clone target, bounds and cleans up `gh repo clone`,
+and normalizes origins before handing the checkout to `Project#setup!`.
+`ReposController` only selects between new admission and existing-project
+setup, then renders or redirects.
+
+Workflow list rows are typed `Workflow` models rather than anonymous adapter
+hashes. The model owns the shared `Hive::Web::WorkflowLifecycle` boundary for
+listing and scaffolding. Reviewed install/update/remove state is represented by
+`WorkflowChange`: it creates the dry-run, signs the operation/project/identity
+receipt, verifies consent and expiry, preserves the separate escalation gate,
+and applies only the reviewed identity. Existing workflow URLs now enter
+`Workflows::PreviewsController#create` or
+`Workflows::ChangesController#create`; route defaults supply the operation from
+the matched route rather than accepting an operator-controlled action name.
+`WorkflowsController` is left with the collection page and authored-workflow
+creation.
+
+Telegram configuration is a `TelegramBot` model. It owns strict allowlist
+parsing, saved-token lookup/persistence, `getMe` validation, global bot config,
+supervisor reload signalling, round-trip delivery, and pending/approved
+pairings. `TelegramController` now exposes only the settings resource's
+`show`/`update`; test deliveries and pairing approvals enter
+`Telegram::TestMessagesController#create` and
+`Telegram::PairingApprovalsController#create`. The model wraps pending pairing
+rows before they reach ERB.
+
+A task page is a filesystem-backed `Task`, built from the matching status
+snapshot row and its `Project`. That model owns task
+reads and their invariants — workflow-aware artifact ordering, brainstorm
+questions, original-idea/title resolution, workflow-aware action/verb policy,
+terminal/passable/recovery predicates, bounded log tails and diffs, worktree
+presence, and media-manifest/path validation. Dashboard snapshots are wrapped
+as `Project`/`Task` models before rendering, so the grid and detail page use the
+same behavior rather than helper-owned filesystem reads or action tables.
+`TasksController` renders that resource. Namespaced task-resource
+controllers expose diff, log, media, approval, rejection, drop, run, recovery,
+answer, and intervention through standard `show`/`create` actions; each remains
+a thin HTTP boundary over `Task` or `Hive::Web::Dispatcher`.
+
 ## Dispatch flow (durable generation ownership)
 
 Every task-stage producer resolves through one semantic admission protocol.

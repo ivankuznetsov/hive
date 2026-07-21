@@ -92,7 +92,7 @@ task default: :test
 | `commands/{approve,finding_toggle,run,stage_action,status}_test.rb`, `integration/{run_error_envelope,status_error_envelope,run_findings,markers_command}_test.rb` | Shared runtime error-envelope production — command-specific schemas, closed error-kind mappings, condition-gate recovery fields, approve final-stage extras, findings operations, status/diagnose schema selection, single-document stdout guards, internal-error wrapping, and emit-time JSON failures after the producers converge on `Hive::Schemas::EnvelopeEmitter`. |
 | `cli_test.rb` | `Hive::CLI` — command delegation and option threading for the Thor surface, including `hive workflow new`, `hive generate-name` lookup scoping, and internal archive recovery flags. |
 | `commands/bench_submit_test.rb` | `Hive::Commands::BenchSubmit` — resolves completed `9-done` tasks from registered projects, derives the source repo from GitHub `origin`, requires `worktree.yml` + `pr.md`, aborts before PR creation on local secret findings, and surfaces missing slugs/checkouts as usage errors. Coverage now includes the default local secret scanner, JSON/text reporting, `run_git`, extractor invocation against a stub `harness/extract.rb`, and PR opening through stub `git`/`gh` binaries; no real hive-bench validator, `git push`, or GitHub PR is exercised. |
-| `workflow_package/*_test.rb`, `commands/workflow_{install,list,remove,update,publish}_test.rb`, `web/workflow_lifecycle_test.rb`, `workflow_lifecycle_schema_test.rb` | Legacy Honeycomb author-package canonicalization/security plus current canonical YAML/release fingerprint validation, v2 flat-catalog lifecycle and catalog/configuration snapshot materialization, exact actor mappings and optional-input redaction, exact/wildcard domain and shell/path-hook enforcement, direct-governance negation hardening, catalog/manifest/source-provenance binding, immutable store transaction/task-pin concurrency, isolated warnings for invalid selected configurations, incomplete-pin cleanup refusal, executable-mode hardening, Hivebox-to-real-CLI preview/apply delegation with package/selection/configuration identity rebinding, lifecycle preview/consent/ownership, post-commit warning semantics, closed JSON envelopes, deterministic legacy packaging, and injected fork/PR seams. |
+| `workflow_package/*_test.rb`, `commands/workflow_{install,list,remove,update,publish}_test.rb`, `web/workflow_lifecycle_test.rb`, `workflow_lifecycle_schema_test.rb` | Legacy Honeycomb author-package canonicalization/security plus current canonical YAML/release fingerprint validation, v2 flat-catalog lifecycle and catalog/configuration snapshot materialization, exact actor mappings and optional-input redaction, exact/wildcard domain and shell/path-hook enforcement, direct-governance negation hardening, catalog/manifest/source-provenance binding, immutable store transaction/task-pin concurrency, isolated warnings for invalid selected configurations, incomplete-pin cleanup refusal, executable-mode hardening, Hivebox-to-real-CLI preview/apply delegation with package/selection/configuration identity rebinding, Rails `Workflow` row modelling, route-bound workflow-change operations, lifecycle preview/consent/ownership, post-commit warning semantics, closed JSON envelopes, deterministic legacy packaging, and injected fork/PR seams. |
 | `commands/digest_test.rb` | `Hive::Commands::Digest` — strict `YYYY-MM-DD` parsing, default runner invocation, dry-run message output, `hive-digest` JSON/error envelopes, merged-PR source dispatch, `--repo` implying merged-PR mode, merged-PR human wording, and `hive-merged-pr-digest` schema validation for dry-run and real-send payloads. |
 | `commands/daemon_test.rb` | `Hive::Commands::Daemon` and `Hive::Daemon::StatusReport` — lifecycle command routing, PID-file ownership/status handling, detached start/re-exec behavior, service install/enable/disable output, daemon-status service/binary fields, `safe_payload` web degradation, `binary_drift` classification including `unreadable`, queue inspection, start-path wiring of daemon/update/digest config into the dispatcher, and `daemon.auto_retry.enabled` config threading into the dispatcher. Start tests stub all three global config blocks so operator-local Telegram digest defaults cannot change unit expectations. |
 | `commands/setup/*_test.rb` | `Hive::Commands::Setup` — agent-skills-first ordering, one consent boundary, `--yes`, JSON/non-TTY refusal before diagnostics or agent discovery, diagnose-only `--no-bootstrap`, nested-init preflight suppression, phase-success predicate and JSON/process-exit agreement, phase exception capture, and hard diagnostic failures. |
@@ -253,7 +253,7 @@ unrelated third-party apt outage does not hide the verifier's actual behavior.
 inert per-prefix `systemctl`/`launchctl` stubs enter `PATH` before any installed
 Hive command can contact the host's live user service manager.
 
-The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, plain `/health` versus daemon-backed `/health?deep=1`, ideas with uploads, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, bounded oversized task diff rendering, media route streaming/refusal plus captured/skipped/failed Demo gallery rendering, repos questionnaire, Repos SSH-origin normalization, non-directory clone-target refusal, Agents-page binary PTY rendering plus operator-ward login polling, favicon/icon serving, Telegram setup/pairing, and workflow lifecycle preview/receipt/consent flows) and `web/test/system/*` (Capybara + Playwright: login gate, composer image attach both paths, successful response cleanup before permanent-node rendering, failed-submit retention, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, artifact open-state preservation across broadcast-triggered morphs with live content refresh, real workflow scaffolding, exact-permission managed install review, visible Demo media, and failed-capture banners). CI runs them in the `web` job, installs the root bundle into `vendor/root-bundle`, passes that path as `GOLDEN_E2E_BUNDLE_PATH`, and explicitly runs `web/test/e2e/golden_path_e2e.rb`. The golden-path E2E pins `BUNDLE_GEMFILE`, points `BUNDLE_PATH` at the supplied root bundle, deletes inherited web-bundle deployment/config keys, and preflights the daemon spawn environment with `bundle exec ruby -Ilib bin/hive --version` before starting the foreground daemon, so a broken Bundler/Ruby env fails with the real stderr/stdout instead of a later browser timeout.
+The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, plain `/health` versus daemon-backed `/health?deep=1`, ideas with uploads, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, bounded oversized task diff rendering, media route streaming/refusal plus captured/skipped/failed Demo gallery rendering, repos questionnaire, Repos SSH-origin normalization, non-directory clone-target refusal, Agents-page binary PTY rendering plus operator-ward login polling, favicon/icon serving, Telegram setup/pairing, and workflow lifecycle preview/receipt/consent flows) and `web/test/system/*` (Capybara + Playwright: login gate, composer image attach both paths, successful response cleanup before permanent-node rendering, failed-submit retention, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, artifact open-state preservation across broadcast-triggered morphs with live content refresh, real workflow scaffolding, exact-permission managed install review, visible Demo media, and failed-capture banners). Focused model coverage also drives Repository clone and Task diff subprocesses through nonzero and timed-out outcomes, pinning negative-PID process-group termination, reaping, operator errors, partial-target removal, and tempfile cleanup. Integration assertions keep Status, Workflows, and Telegram navigation active when the response is rendered by a namespaced resource controller. CI runs these tests in the `web` job, installs the root bundle into `vendor/root-bundle`, passes that path as `GOLDEN_E2E_BUNDLE_PATH`, and explicitly runs `web/test/e2e/golden_path_e2e.rb`. The golden-path E2E pins `BUNDLE_GEMFILE`, points `BUNDLE_PATH` at the supplied root bundle, deletes inherited web-bundle deployment/config keys, and preflights the daemon spawn environment with `bundle exec ruby -Ilib bin/hive --version` before starting the foreground daemon, so a broken Bundler/Ruby env fails with the real stderr/stdout instead of a later browser timeout.
 `web/test/test_helper.rb#create_task!` wraps real `Hive::Commands::New`
 task creation. Because generated task slugs use a 16-bit random suffix and
 many web tests intentionally reuse the same task title inside a persistent
@@ -264,7 +264,11 @@ Browser tests never retain a `.task-row` Capybara element across daemon-driven
 Turbo replacements, because a grid broadcast can detach the row while
 Playwright is preparing a click. The system test visits the route from the task
 folder it just created; the golden-path E2E resolves the slug from one
-current-DOM query and visits that stable route directly. Before submitting the
+current-DOM query and visits that stable route directly. The project-rail test
+uses the same discipline for the broadcaster-replaced rail and composer:
+button lookup/click and ordered-value reads each happen in one current-DOM
+JavaScript turn, so Turbo cannot detach a saved node between lookup and action.
+Before submitting the
 brainstorm answer, it waits for the daemon to classify the
 `needs_input` row and for the current `brainstorm.md` mtime second to pass, so
 the answer write is strictly newer than the daemon's edit-resume baseline even
@@ -439,13 +443,16 @@ bundle exec brakeman --force --no-pager --quiet --format github --ignore-config 
 `config/brakeman.ignore` is the root ignore file for scanner false positives.
 Each entry carries a rationale for the trust boundary Brakeman cannot see,
 such as argv-form subprocess calls, integer coercion before shell use, or
-registry-laundered filesystem paths. Commit `83f0a800` added the current
-task-log-path ignore: `TasksController#latest_log` receives the project through
-`ApplicationController#find_project!`, which resolves only registered project
-entries before exposing `hive_state_path`; the route constrains `:slug`, and
-the log path still applies `File.basename(params[:slug])` before joining under
-that registry-derived log root. See [[commands/web]] for the task log-tail
-surface.
+registry-laundered filesystem paths. The old task-log-path ignore from commit
+`83f0a800` is no longer needed: `Tasks::LogsController#show` loads a `Task`
+only after registered-project resolution, and moving the bounded path read to
+`Task#latest_log` lets Brakeman see no controller file sink. `Task#diff` now
+owns the similarly bounded process/tempfile read used by the diff resource,
+while focused model coverage pins title/original-idea, canonical
+`TaskAction::READY_COMMANDS` verb projection, workflow-specific dispatch, and
+the failed/timed-out subprocess cleanup paths. Focused integration
+coverage rejects unknown projects and valid-shaped unknown task slugs on the
+log route. See [[commands/web]] for the task log-tail surface.
 
 Brakeman still scans the packaged benchmark runtime even though RuboCop defers
 its style ownership to hive-bench. Its profile probe, Codex judge, and sqlite
@@ -457,8 +464,8 @@ snapshot.
 
 The hivebox task media route also carries a Brakeman file-access ignore. The
 route constrains `:filename` to a single PNG/JPEG/GIF component, then
-`TasksController#resolved_media_path` applies `File.basename`, repeats the
-extension check, resolves the real task folder and media directory, refuses a
+`Task#media_path` requires `File.basename` equality, repeats the extension
+check, resolves the real task folder and media directory, refuses a
 symlinked `media/` root, and streams only files whose realpath remains below
 that media root. `web/test/integration/tasks_test.rb` covers inline streaming,
 traversal/extension/missing-file refusal, and symlinked media-root refusal.

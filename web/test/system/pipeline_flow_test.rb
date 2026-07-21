@@ -250,13 +250,13 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_selector ".project-section[data-project-name='#{filtered}']"
     assert_selector ".project-section[data-project-name='#{active}']"
 
-    click_button filtered
+    click_project_filter(filtered)
     assert_selector ".project-section[data-project-name='#{filtered}']"
     assert_no_selector ".project-section[data-project-name='#{active}']",
                        wait: 5
     assert_includes page.current_url, "project=#{filtered}",
                     "the choice must reach the URL so reloads land filtered"
-    assert_equal filtered, find(".composer select[name='project']").value,
+    assert_equal filtered, composer_project,
                  "filtering is a context switch — new ideas should land in that project"
 
     # The broadcast REPLACES the grid, discarding our hidden attributes —
@@ -267,19 +267,24 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_selector ".task-row", text: "Active task two", visible: :hidden, wait: 10
     assert_selector ".task-row", text: "Filter task one",
                     count: 1
-    rail_projects = all(".project-nav button").map(&:text)
+    rail_projects = page.evaluate_script(
+      "Array.from(document.querySelectorAll('.project-nav button'), node => node.textContent.trim())"
+    )
     assert_operator rail_projects.index(active), :<, rail_projects.index(filtered),
                     "the rail must adopt the live activity order"
-    composer_projects = all(".composer select[name='project'] option:not([disabled])").map(&:value)
+    composer_projects = page.evaluate_script(
+      "Array.from(document.querySelectorAll(\".composer select[name='project'] option:not([disabled])\"), " \
+      "node => node.value)"
+    )
     assert_operator composer_projects.index(active), :<, composer_projects.index(filtered),
                     "the permanent composer must adopt the live activity order"
-    assert_equal filtered, find(".composer select[name='project']").value,
+    assert_equal filtered, composer_project,
                  "reordering projects must preserve the operator's selection"
 
-    click_button "All projects"
+    click_project_filter(nil)
     assert_selector ".project-section[data-project-name='#{active}']"
     assert_selector ".task-row", text: "Active task two"
-    assert_equal filtered, find(".composer select[name='project']").value,
+    assert_equal filtered, composer_project,
                  "widening the view must not discard the composer's project choice"
 
     click_link "+ Add project"
@@ -512,6 +517,33 @@ class PipelineFlowTest < ApplicationSystemTestCase
   end
 
   private
+
+  # StatusBroadcaster replaces the project rail and composer select while this
+  # test is using them. Query and click/read in one JavaScript turn so Turbo
+  # cannot detach a Capybara node between lookup and Playwright's action.
+  def click_project_filter(name, timeout: 5)
+    target = name.to_s.to_json
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      clicked = page.evaluate_script(<<~JS)
+        (() => {
+          const button = Array.from(document.querySelectorAll(".project-nav button"))
+            .find((node) => node.dataset.projectFilterNameParam === #{target})
+          if (!button) return false
+          button.click()
+          return true
+        })()
+      JS
+      return if clicked
+      raise "project filter #{name.inspect} never appeared" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+
+      sleep 0.05
+    end
+  end
+
+  def composer_project
+    page.evaluate_script("document.querySelector(\".composer select[name='project']\")?.value")
+  end
 
   def fixture_image
     path = File.join(ENV["HIVE_TEST_HOME_ROOT"], "fixture.png")

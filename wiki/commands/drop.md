@@ -122,7 +122,7 @@ In [[commands/web]], the task page's Advanced section posts its Drop card to:
 POST /tasks/:project/:slug/drop
 ```
 
-`TasksController#drop` calls `Hive::Web::Dispatcher#drop`, which constructs the
+`Tasks::DropsController#create` calls `Hive::Web::Dispatcher#drop`, which constructs the
 same `Hive::Commands::Drop` command in-process with `project:` and the rendered
 row stage as `from:`. The `from` parameter is load-bearing: a stale page whose
 task already moved to another stage raises `Hive::WrongStage`, which the Rails

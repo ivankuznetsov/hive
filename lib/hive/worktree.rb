@@ -151,10 +151,7 @@ module Hive
       if File.exist?(path) || list_worktree_paths.include?(path)
         raise WorktreeError, "strict worktree path already exists without a matching handoff receipt: #{path}"
       end
-      _out, _err, branch_status = Open3.capture3(
-        "git", "-C", @project_root, "show-ref", "--verify", "refs/heads/#{branch}"
-      )
-      if branch_status.success?
+      if self.class.local_branch_ref_exists?(@project_root, branch)
         raise WorktreeError, "task branch #{branch} already exists without a matching handoff receipt"
       end
 

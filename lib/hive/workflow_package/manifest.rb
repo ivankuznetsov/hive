@@ -62,7 +62,7 @@ module Hive
         fail!("manifest.unreadable", FILE_NAME, "manifest is missing or unreadable")
       end
 
-      def self.inventory(root, exclude: [ FILE_NAME ])
+      def self.inventory(root, exclude: [ FILE_NAME ], require_utf8: true)
         root = File.realpath(root)
         entries = []
         seen_case = {}
@@ -95,7 +95,9 @@ module Hive
           fail!("package.file_too_large", relative, "package file exceeds #{MAX_FILE_BYTES} bytes") if stat.size > MAX_FILE_BYTES
           bytes = File.binread(absolute)
           utf8 = bytes.dup.force_encoding(Encoding::UTF_8)
-          fail!("package.invalid_encoding", relative, "package payload files must be valid UTF-8") unless utf8.valid_encoding?
+          if require_utf8 && !utf8.valid_encoding?
+            fail!("package.invalid_encoding", relative, "package payload files must be valid UTF-8")
+          end
 
           total += stat.size
           fail!("package.too_large", ".", "package exceeds #{MAX_PACKAGE_BYTES} bytes") if total > MAX_PACKAGE_BYTES

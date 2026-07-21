@@ -66,7 +66,10 @@ module Hive
           )
         end
 
-        actual = Manifest.inventory(@root, exclude: [ Manifest::FILE_NAME, RegistryManifest::FILE_NAME ])
+        actual = Manifest.inventory(
+          @root, exclude: [ Manifest::FILE_NAME, RegistryManifest::FILE_NAME ],
+          require_utf8: !manifest.is_a?(RegistryManifest)
+        )
         expected = manifest.file_entries
         compare_inventory(expected, actual, diagnostics)
         descriptor_path = File.join(@root, manifest.descriptor)

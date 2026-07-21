@@ -19,6 +19,7 @@ module Hive
       SHA256 = Manifest::SHA256
       SLOT_ID = /\Astages\.[a-z0-9][a-z0-9_-]*(?:\.reviewers\.[a-z0-9][a-z0-9_-]*|\.revise)?\z/
       ROLES = Hive::Workflow::MAPPING_ROLES
+      MAPPING_RECOMMENDATION_EFFORTS = %w[low medium high].freeze
 
       Slot = Data.define(:id, :role, :contract, :actor, :permissions, :authorized_inputs)
 
@@ -31,14 +32,16 @@ module Hive
         raise Hive::ConfigError, "workflow mapping contains unknown slot(s): #{unknown.sort.join(', ')}" unless unknown.empty?
 
         reviewer_defaults = reviewer_agents(cfg)
+        recommendations = mapping_recommendations(runtime_metadata)
         mappings = slots.each_with_index.to_h do |slot, index|
           override = normalize_override(normalized_overrides.fetch(slot.id, {}), slot.id)
+          recommendation = recommendations.fetch(slot.id, {})
           suggested = suggested_agent(slot.role, cfg, reviewer_defaults, index)
           suggested = policy_compatible_suggestion(slot, suggested, cfg) unless override.key?("agent")
           agent = override.fetch("agent", suggested).to_s
           profile = Hive::AgentProfiles.lookup(agent, cfg: cfg)
           model = override.key?("model") ? normalize_optional(override["model"]) : suggested_model(slot.role, cfg, profile)
-          effort = override.key?("effort") ? normalize_optional(override["effort"]) : suggested_effort(slot.role, cfg, profile)
+          effort = resolved_effort(override, recommendation, slot.role, cfg, profile)
           validate_pin_support!(profile, slot.id, model: model, effort: effort)
           [ slot.id, {
             "mapping_role" => slot.role,
@@ -269,6 +272,22 @@ module Hive
           value = cfg.dig(role == "planning" ? "plan" : "execute", "effort")
           value ||= cfg.dig("claude", "effort") if profile.name == :claude
           normalize_optional(value)
+        end
+
+        def resolved_effort(override, recommendation, role, cfg, profile)
+          return normalize_optional(override["effort"]) if override.key?("effort")
+          unless recommendation.key?("effort")
+            return suggested_effort(role, cfg, profile)
+          end
+          return nil unless profile.effort_argument_builder && profile.model_argument_builder
+
+          normalize_optional(recommendation["effort"])
+        end
+
+        def mapping_recommendations(runtime_metadata)
+          Array(runtime_metadata["mapping_recommendations"]).to_h do |entry|
+            [ entry.fetch("slot"), entry ]
+          end
         end
 
         def normalize_override(value, slot)

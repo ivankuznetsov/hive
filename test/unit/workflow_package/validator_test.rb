@@ -329,6 +329,71 @@ class WorkflowPackageValidatorTest < Minitest::Test
     assert_includes rules, "x-hive.invalid_input_slots"
   end
 
+  def test_registry_mapping_recommendations_accept_only_sorted_executable_effort_entries
+    validator = Hive::WorkflowPackage::Validator.new(
+      Dir.pwd, expected_name: nil, expected_manifest_digest: nil, managed: true
+    )
+    workflow = recommendation_workflow
+    manifest_type = Struct.new(:data, :file_entries)
+    extension = lambda do |recommendations|
+      manifest_type.new({
+        "x-hive" => {
+          "mapping_recommendations" => recommendations,
+          "optional_inputs" => [],
+          "tools" => []
+        }
+      }, [])
+    end
+
+    diagnostics = []
+    validator.send(
+      :validate_hive_extension,
+      extension.call([
+        { "slot" => "stages.draft", "effort" => "medium" },
+        { "slot" => "stages.review", "effort" => "high" }
+      ]),
+      workflow,
+      diagnostics
+    )
+    assert_empty diagnostics
+
+    diagnostics = []
+    validator.send(
+      :validate_hive_extension,
+      extension.call([ { "slot" => "stages.draft" } ]),
+      workflow,
+      diagnostics
+    )
+    assert_empty diagnostics
+
+    malformed = [
+      [ { "slot" => "stages.draft", "effort" => "turbo" } ],
+      [ { "slot" => "stages.draft", "agent" => "codex" } ],
+      [ { "slot" => "stages.draft", "model" => "gpt" } ],
+      [ { "slot" => "stages.draft", "unknown" => true } ]
+    ]
+    malformed.each do |recommendations|
+      diagnostics = []
+      validator.send(:validate_hive_extension, extension.call(recommendations), workflow, diagnostics)
+      assert_includes diagnostics.map(&:rule_id), "x-hive.invalid_mapping_recommendations"
+    end
+
+    [
+      [ { "slot" => "stages.review" }, { "slot" => "stages.draft" } ],
+      [ { "slot" => "stages.draft" }, { "slot" => "stages.draft", "effort" => "medium" } ]
+    ].each do |recommendations|
+      diagnostics = []
+      validator.send(:validate_hive_extension, extension.call(recommendations), workflow, diagnostics)
+      assert_includes diagnostics.map(&:rule_id), "x-hive.invalid_mapping_recommendation_order"
+    end
+
+    %w[stages.missing stages.done].each do |slot|
+      diagnostics = []
+      validator.send(:validate_hive_extension, extension.call([ { "slot" => slot } ]), workflow, diagnostics)
+      assert_includes diagnostics.map(&:rule_id), "x-hive.invalid_mapping_recommendation_slots"
+    end
+  end
+
   private
 
   def metadata
@@ -376,5 +441,26 @@ class WorkflowPackageValidatorTest < Minitest::Test
       YAML
       yield root
     end
+  end
+
+  def recommendation_workflow
+    Hive::Workflow.new(
+      id: :demo,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "draft", index: 1, state_file: "draft.md", kind: :agent,
+          instruction: "/tmp/draft.md", permissions: "yolo",
+          mapping_role: "development", mapping_contract: "draft-v1"
+        ),
+        Hive::Workflow::Stage.new(
+          name: "review", index: 2, state_file: "review.md", kind: :agent,
+          instruction: "/tmp/review.md", permissions: "yolo",
+          mapping_role: "reviewer", mapping_contract: "review-v1"
+        ),
+        Hive::Workflow::Stage.new(
+          name: "done", index: 3, state_file: "done.md", kind: :inert
+        )
+      ]
+    )
   end
 end

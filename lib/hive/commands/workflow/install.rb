@@ -122,7 +122,11 @@ module Hive
 
         def human_disclosure(resolution, resolver, verb: "installed")
           mapping_lines = resolver.mappings.map do |mapping|
-            identity = [ mapping.fetch("agent"), mapping["model"], mapping["effort"] ].compact.join(" / ")
+            identity = [
+              mapping.fetch("agent"),
+              "model=#{mapping['model'] || 'unpinned'}",
+              "effort=#{mapping['effort'] || 'unpinned'}"
+            ].join(" / ")
             "map: #{mapping.fetch('slot')} -> #{identity} (#{mapping.fetch('mapping_role')})"
           end
           permissions = resolution.permissions
@@ -160,16 +164,41 @@ module Hive
           answer = @stdin.gets
           return resolver if answer.nil? || !%w[n no].include?(answer.strip.downcase)
 
-          overrides = resolver.mappings.map do |mapping|
+          agent_overrides = resolver.mappings.to_h do |mapping|
             slot = mapping.fetch("slot")
             @stdout.print "#{slot} agent [#{mapping.fetch('agent')}]: "
             agent = @stdin.gets.to_s.strip
             agent = mapping.fetch("agent") if agent.empty?
-            "#{slot}=#{agent}"
+            selected = { "agent" => agent }
+            if agent == mapping.fetch("agent")
+              selected["model"] = mapping["model"]
+              selected["effort"] = mapping["effort"]
+            end
+            [ slot, selected ]
+          end
+          remapped = configuration_resolver(
+            validated, resolution, overrides: agent_overrides, previous: previous
+          )
+          overrides = remapped.mappings.to_h do |mapping|
+            slot = mapping.fetch("slot")
+            [ slot, {
+              "agent" => mapping.fetch("agent"),
+              "model" => interactive_pin(slot, "model", mapping["model"]),
+              "effort" => interactive_pin(slot, "effort", mapping["effort"])
+            } ]
           end
           configured = configuration_resolver(validated, resolution, overrides: overrides, previous: previous)
           human_disclosure(resolution, configured, verb: "proposed").each { |line| @stdout.puts line }
           configured
+        end
+
+        def interactive_pin(slot, name, current)
+          @stdout.print "#{slot} #{name} [#{current || 'unpinned'}]: "
+          answer = @stdin.gets.to_s.strip
+          return current if answer.empty?
+          return nil if %w[default inherit unpinned].include?(answer.downcase)
+
+          answer
         end
 
         def escalation_confirmed?(resolver, resolution)

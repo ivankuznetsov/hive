@@ -47,7 +47,10 @@ Managed storage is
 `workflows/NAME/configurations/CONFIGURATION_DIGEST.json` plus
 `workflows/NAME/honeycomb.lock.json`. Install enumerates each active stage,
 reviewer, and reviser, shows one complete suggested mapping summary, and lets an
-interactive operator accept the defaults or edit each slot. New tasks copy the
+interactive operator accept the defaults or edit each slot's agent, model, and
+effort. Changing an agent recomputes its model/effort suggestions before those
+prompts, and entering `unpinned` clears a pin. Mapping output names absent
+model/effort pins as `unpinned`. New tasks copy the
 catalog commit, release digest, and configuration digest into `meta.yml`;
 update/remove retain every identity referenced by an in-flight task. When the
 selected pointer is a legacy schema-v1 lock, Hive derives its compatibility
@@ -76,7 +79,13 @@ produce a misleading "not installed" result.
 Package descriptors cannot select agent/model/effort; immutable installation
 configuration overlays those choices in memory. Planning/development defaults
 follow the project's init choices and reviewer roles cycle configured review
-agents. If a suggested agent cannot enforce a slot's non-`yolo` tool scope,
+agents. A registry package may provide a sorted, identity-free
+`x-hive.mapping_recommendations` list for known executable slots. Its optional
+portable `effort` value (`low`, `medium`, or `high`) is only an install
+suggestion: explicit `--mapping` fields win, a compatible installed mapping wins
+on update, and the project default is used only when neither applies. A
+recommended effort stays unpinned when the selected agent cannot express it;
+an explicit unsupported pin still fails closed. If a suggested agent cannot enforce a slot's non-`yolo` tool scope,
 the suggestion falls back to Claude; explicit choices remain exact and an
 incompatible explicit mapping fails runtime admission before mutation. Updates
 preserve only slots whose stable ID, role, and

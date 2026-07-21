@@ -113,7 +113,13 @@ weakening owner-authored descriptor compatibility:
   operator-selected agent/model/effort identity, mapping role/contract, profile
   fingerprint, and per-actor policy fingerprint. Snapshot construction rejects
   non-null pins that the selected profile cannot express as native arguments;
-  unsupported project defaults remain nil. Automatic agent suggestions also
+  unsupported project defaults remain nil. Strict registry metadata may carry
+  sorted `mapping_recommendations` for known executable slots, containing no
+  agent/model identity and only an optional portable `low`/`medium`/`high`
+  effort. Resolution is field-stable: an explicit install override wins, then a
+  compatible installed mapping, then the package recommendation, then the
+  project default. Unsupported recommended effort is recorded and disclosed as
+  unpinned rather than failing or falling through to another default. Automatic agent suggestions also
   fall back to Claude when the project-default profile cannot enforce a
   non-`yolo` actor scope; explicit mappings are preserved for the existing
   fail-closed runtime admission check. Managed council reviewers and

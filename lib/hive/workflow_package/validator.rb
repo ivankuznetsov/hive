@@ -255,16 +255,21 @@ module Hive
 
       def validate_hive_extension(manifest, workflow, diagnostics)
         extension = manifest.data.fetch("x-hive", { "tools" => [], "optional_inputs" => [] })
-        valid_keys = [ %w[optional_inputs tools], %w[optional_inputs prompt_assets tools] ]
-        unless extension.is_a?(Hash) && valid_keys.include?(extension.keys.sort)
+        required_keys = %w[optional_inputs tools]
+        optional_keys = %w[mapping_recommendations prompt_assets]
+        unless extension.is_a?(Hash) && (required_keys - extension.keys).empty? &&
+               (extension.keys - required_keys - optional_keys).empty?
           diagnostics << diagnostic("x-hive.invalid_shape", RegistryManifest::FILE_NAME,
-                                    "x-hive must contain only optional_inputs, prompt_assets, and tools")
+                                    "x-hive must contain optional_inputs and tools plus only supported optional fields")
           return
         end
         slots = Configuration.slots_for(workflow).map(&:id)
         validate_hive_tools(extension["tools"], manifest, diagnostics)
         validate_hive_prompt_assets(extension.fetch("prompt_assets", []), manifest, diagnostics)
         validate_hive_inputs(extension["optional_inputs"], slots, diagnostics)
+        validate_hive_mapping_recommendations(
+          extension.fetch("mapping_recommendations", []), slots, diagnostics
+        )
       end
 
       def validate_hive_tools(tools, manifest, diagnostics)
@@ -318,6 +323,36 @@ module Hive
             diagnostics << diagnostic("x-hive.invalid_input_slots", RegistryManifest::FILE_NAME,
                                       "optional input #{entry.fetch('name')} must authorize known sorted stable slots")
           end
+        end
+      end
+
+      def validate_hive_mapping_recommendations(recommendations, slots, diagnostics)
+        valid_shape = recommendations.is_a?(Array) && recommendations.all? do |entry|
+          keys = entry.is_a?(Hash) && entry.keys.sort
+          keys && [ %w[slot], %w[effort slot] ].include?(keys) &&
+            entry["slot"].is_a?(String) &&
+            (!entry.key?("effort") || Configuration::MAPPING_RECOMMENDATION_EFFORTS.include?(entry["effort"]))
+        end
+        unless valid_shape
+          diagnostics << diagnostic(
+            "x-hive.invalid_mapping_recommendations", RegistryManifest::FILE_NAME,
+            "x-hive mapping recommendations must contain only slot and an optional portable effort"
+          )
+          return
+        end
+
+        recommended_slots = recommendations.map { |entry| entry.fetch("slot") }
+        unless recommended_slots == recommended_slots.sort.uniq
+          diagnostics << diagnostic(
+            "x-hive.invalid_mapping_recommendation_order", RegistryManifest::FILE_NAME,
+            "x-hive mapping recommendation slots must be sorted and unique"
+          )
+        end
+        unless (recommended_slots - slots).empty?
+          diagnostics << diagnostic(
+            "x-hive.invalid_mapping_recommendation_slots", RegistryManifest::FILE_NAME,
+            "x-hive mapping recommendations must name known executable slots"
+          )
         end
       end
 

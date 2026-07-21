@@ -1152,6 +1152,191 @@ class StagesAgentTest < Minitest::Test
     assert_kind_of String, Hive::Stages::Base.render("agent_prompt.md.erb", bindings)
   end
 
+  def test_worktree_stage_resumes_terminal_receipts_before_and_after_prepare
+    with_tmp_dir do |project|
+      task = task_for(project, "fix", descriptor: worktree_workflow)
+      terminal = { "phase" => "terminal", "terminal_outcome" => "blocked" }
+      resumed = { commit: "handoff_recovered", status: :error }
+      context = Hive::Stages::AgentWorktree::Context.new(
+        worktree_path: project, task_branch: task.slug, base_branch: "main",
+        base_oid: "a" * 40, repository: "github.com/acme/widgets"
+      )
+
+      with_replaced_singleton_method(Hive::Stages::AgentWorktree, :terminal_receipt, ->(_task) { terminal }) do
+        with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :resume_terminal!, ->(*) { resumed }) do
+          assert_equal resumed, Hive::Stages::AgentWorktree.run!(task, {})
+        end
+      end
+
+      with_replaced_singleton_method(Hive::Stages::AgentWorktree, :terminal_receipt, ->(_task) { nil }) do
+        with_replaced_singleton_method(Hive::Stages::AgentWorktree, :prepare!, ->(*) { context }) do
+          with_replaced_singleton_method(Hive::DraftPrReceipt, :read, ->(*) { terminal }) do
+            with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :resume_terminal!, ->(*) { resumed }) do
+              assert_equal resumed, Hive::Stages::AgentWorktree.run!(task, {})
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_worktree_stage_resumes_noninitial_handoff_from_validated_report
+    with_tmp_dir do |project|
+      task = task_for(project, "fix", descriptor: worktree_workflow)
+      source = valid_fix_report
+      digest = Digest::SHA256.hexdigest(source)
+      receipt = { "phase" => "push_intent", "report_sha256" => digest }
+      context = Hive::Stages::AgentWorktree::Context.new(
+        worktree_path: project, task_branch: task.slug, base_branch: "main",
+        base_oid: "a" * 40, repository: "github.com/acme/widgets"
+      )
+      state = Hive::Stages::AgentReport::RepositoryState.new(
+        head_oid: "b" * 40, commit_count: 1, clean: true
+      )
+      captured = nil
+      captured_digest = nil
+
+      with_replaced_singleton_method(Hive::Stages::AgentWorktree, :terminal_receipt, ->(_task) { nil }) do
+        with_replaced_singleton_method(Hive::Stages::AgentWorktree, :prepare!, ->(*) { context }) do
+          with_replaced_singleton_method(Hive::DraftPrReceipt, :read, ->(*) { receipt }) do
+            with_replaced_singleton_method(
+              Hive::Stages::DraftPrHandoff, :report_source_for_resume,
+              ->(_path, expected_sha256:) { captured_digest = expected_sha256; source }
+            ) do
+              with_replaced_singleton_method(
+                Hive::Stages::AgentReport, :validate_repository!, ->(_report, _context) { state }
+              ) do
+                with_replaced_singleton_method(
+                  Hive::Stages::DraftPrHandoff, :run!,
+                  ->(*args, **kwargs) { captured = [ args, kwargs ]; { status: :complete } }
+                ) do
+                  assert_equal({ status: :complete }, Hive::Stages::AgentWorktree.run!(task, {}))
+                end
+              end
+            end
+          end
+        end
+      end
+      assert_equal digest, captured_digest
+      assert_equal state, captured.last.fetch(:repository_state)
+      assert_equal source, captured.last.fetch(:report_source)
+    end
+  end
+
+  def test_managed_failure_classifies_limits_and_resource_exhaustion
+    with_tmp_dir do |project|
+      task = task_for(project, "fix", descriptor: worktree_workflow)
+      cases = [
+        [ { limit_text: "budget exhausted" }, "limits_reached" ],
+        [ { resource_exhaustion: { reason: "quota_exhausted" } }, "quota_exhausted" ],
+        [ { resource_exhaustion: { reason: "" } }, "managed_agent_failed" ]
+      ]
+      cases.each do |result, reason|
+        actual = Hive::Stages::AgentWorktree.send(:managed_failure_result, task, result: result)
+        assert_equal reason, actual.fetch(:commit)
+        assert_equal reason, Hive::Markers.current(File.join(task.folder, "fix-report.md")).attrs.fetch("reason")
+      end
+    end
+  end
+
+  def test_agent_worktree_private_failures_are_typed_and_bounded
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    with_replaced_singleton_method(Open3, :capture3, ->(*) { [ "stdout detail", "", failed ] }) do
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::AgentWorktree.send(:git_path!, "/tmp/repo", "--absolute-git-dir")
+      end
+      assert_includes error.message, "stdout detail"
+    end
+
+    with_tmp_dir do |dir|
+      path = File.join(dir, "fix-report.md")
+      with_replaced_singleton_method(File, :lstat, ->(_path) { raise Errno::EACCES, path }) do
+        error = assert_raises(Hive::StageError) do
+          Hive::Stages::AgentWorktree.send(:prepare_report_output!, path)
+        end
+        assert_includes error.message, "could not prepare"
+      end
+    end
+
+    depends = Struct.new(:depends_on).new("parent-task")
+    error = assert_raises(Hive::WorktreeError) do
+      Hive::Stages::AgentWorktree.prepare!(depends, {})
+    end
+    assert_includes error.message, "do not support depends_on"
+  end
+
+  def test_agent_worktree_repository_identity_helpers_fail_closed
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+
+    with_replaced_singleton_method(
+      Hive::Gh, :repository_identity, ->(*, **) { { "host" => "github.com" } }
+    ) do
+      assert_raises(Hive::WorktreeError) do
+        Hive::Stages::AgentWorktree.send(:controller_repository!, "/repo", {})
+      end
+    end
+
+    failures = [
+      ->(*) { [ "", "cannot read", failed ] },
+      ->(*) { [ "one\ntwo\n", "", ok ] },
+      ->(*) { [ "https://gitlab.com/acme/widgets.git\n", "", ok ] },
+      ->(*) { [ "not a remote\n", "", ok ] }
+    ]
+    failures.each do |capture|
+      with_replaced_singleton_method(Hive::Gh, :capture3, capture) do
+        assert_raises(Hive::WorktreeError) do
+          Hive::Stages::AgentWorktree.send(:controller_fetch_repository!, "/repo", {})
+        end
+      end
+    end
+
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3,
+      ->(*_args, **_kwargs) { [ "git@github.com:acme/widgets.git\n", "", ok ] }
+    ) do
+      assert_equal "github.com/acme/widgets",
+                   Hive::Stages::AgentWorktree.send(:controller_fetch_repository!, "/repo", {})
+    end
+
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3,
+      ->(*_args, **_kwargs) { [ "stdout detail", "", failed ] }
+    ) do
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Stages::AgentWorktree.send(:controller_fetch_repository!, "/repo", {})
+      end
+      assert_includes error.message, "stdout detail"
+    end
+
+    with_replaced_singleton_method(
+      Hive::Stages::AgentWorktree, :controller_repository!, ->(*) { "github.com/acme/other" }
+    ) do
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Stages::AgentWorktree.send(
+          :validate_repository_match!, "/repo", "github.com/acme/widgets"
+        )
+      end
+      assert_includes error.message, "does not match recorded repository"
+    end
+  end
+
+  def test_agent_worktree_prepare_rejects_fetch_push_repository_mismatch
+    task = Struct.new(:depends_on, :base_branch, :project_root).new(nil, "main", "/repo")
+    with_replaced_singleton_method(
+      Hive::Stages::AgentWorktree, :controller_repository!, ->(*) { "github.com/acme/widgets" }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Stages::AgentWorktree, :controller_fetch_repository!, ->(*) { "github.com/acme/other" }
+      ) do
+        error = assert_raises(Hive::WorktreeError) do
+          Hive::Stages::AgentWorktree.prepare!(task, {})
+        end
+        assert_includes error.message, "does not match push repository"
+      end
+    end
+  end
+
   private
 
     # U3-focused tests stop at the validated local boundary. U4 owns the

@@ -70,6 +70,49 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_strict_origin_fetch_rejects_missing_remote_ref_after_success
+    with_initialized_project do |dir, root|
+      run!("git", "-C", dir, "remote", "add", "origin", dir)
+      ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+      wt = Hive::Worktree.new(dir, "strict-missing", worktree_root: root)
+      with_replaced_singleton_method(Hive::Worktree, :fetch_origin_branch, ->(*) { [ "", "", ok ] }) do
+        with_replaced_singleton_method(Hive::Worktree, :origin_branch_ref_exists?, ->(*) { false }) do
+          error = assert_raises(Hive::WorktreeError) { wt.fetch_strict_origin_base!("master") }
+          assert_includes error.message, "was not found after fetch"
+        end
+      end
+    end
+  end
+
+  def test_strict_origin_creation_rejects_moved_base_and_existing_path
+    with_initialized_project do |dir, root|
+      origin = "#{dir}.strict-origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin)
+        run!("git", "-C", dir, "remote", "add", "origin", origin)
+        wt = Hive::Worktree.new(dir, "strict-path", worktree_root: root)
+        base_oid = wt.fetch_strict_origin_base!("master")
+        File.write(File.join(dir, "advanced.txt"), "advanced\n")
+        run!("git", "-C", dir, "add", "advanced.txt")
+        run!("git", "-C", dir, "commit", "-m", "advance locally", "--quiet")
+        advanced_oid = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+
+        moved = assert_raises(Hive::WorktreeError) do
+          wt.create_strict_origin!("strict-path", base_branch: "master", base_oid: advanced_oid)
+        end
+        assert_includes moved.message, "moved while preparing"
+
+        FileUtils.mkdir_p(wt.path)
+        exists = assert_raises(Hive::WorktreeError) do
+          wt.create_strict_origin!("strict-path", base_branch: "master", base_oid: base_oid)
+        end
+        assert_includes exists.message, "path already exists"
+      ensure
+        FileUtils.rm_rf(origin)
+      end
+    end
+  end
+
   def test_strict_branch_validation_rejects_hidden_ref_components
     assert_raises(Hive::WorktreeError) do
       Hive::Worktree.validate_branch_name!("release/.hidden")
@@ -1258,6 +1301,54 @@ class WorktreeTest < Minitest::Test
         Hive::Worktree.read_strict_pointer(folder, expected_root: folder)
       end
       assert_includes error.message, "exceeds"
+    end
+  end
+
+  def test_strict_pointer_rejects_missing_symlink_malformed_and_identity_mismatch
+    with_tmp_dir do |root|
+      folder = File.join(root, "task")
+      worktree_root = File.join(root, "worktrees")
+      FileUtils.mkdir_p(folder)
+      path = File.join(folder, "worktree.yml")
+
+      assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_strict_pointer(folder, expected_root: worktree_root)
+      end
+      File.write(path, "path: [unterminated\n")
+      assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_strict_pointer(folder, expected_root: worktree_root)
+      end
+      FileUtils.rm_f(path)
+      target = File.join(root, "target.yml")
+      File.write(target, "{}\n")
+      File.symlink(target, path)
+      assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_strict_pointer(folder, expected_root: worktree_root)
+      end
+      FileUtils.rm_f(path)
+
+      valid = {
+        "path" => File.join(worktree_root, "fix-ui"), "branch" => "fix-ui",
+        "base_branch" => "main", "base_oid" => "a" * 40,
+        "repository" => "github.com/acme/widgets"
+      }
+      [
+        valid.merge("base_oid" => "bad"),
+        valid.merge("repository" => "gitlab.com/acme/widgets")
+      ].each do |data|
+        File.write(path, data.to_yaml)
+        assert_raises(Hive::WorktreeError) do
+          Hive::Worktree.read_strict_pointer(folder, expected_root: worktree_root)
+        end
+      end
+      File.write(path, valid.to_yaml)
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_strict_pointer(
+          folder, expected_root: worktree_root,
+          expected: valid.merge("repository" => "github.com/acme/other")
+        )
+      end
+      assert_includes error.message, "contradicts saved task state"
     end
   end
 

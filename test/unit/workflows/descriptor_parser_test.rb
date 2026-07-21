@@ -402,6 +402,29 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     end
   end
 
+  def test_workspace_handoff_validation_fails_closed_for_non_agent_stage_objects
+    stage_class = Struct.new(
+      :name, :kind, :state_file, :deliverable, :workspace, :handoff,
+      keyword_init: true
+    )
+    handoff = stage_class.new(
+      name: "done", kind: :inert, state_file: "fix-report.md",
+      deliverable: "fix-report.md", workspace: :worktree, handoff: :draft_pr
+    )
+    workspace = stage_class.new(
+      name: "done", kind: :inert, state_file: "done.md",
+      deliverable: nil, workspace: :worktree, handoff: nil
+    )
+
+    [ handoff, workspace ].each do |stage|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.new("/tmp/bad.yml")
+                                         .send(:validate_workspace_handoff!, [ stage ])
+      end
+      assert_includes error.message, "agent stage"
+    end
+  end
+
   def test_workspace_and_handoff_are_terminal_stage_only
     %w[workspace handoff].each do |field|
       work = {

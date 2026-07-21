@@ -574,6 +574,28 @@ def test_push_exact_oid_names_immutable_source_and_never_forces
   refute captured.any? { |arg| arg.include?("force") }
 end
 
+def test_push_exact_oid_returns_bounded_failure_for_invalid_identity
+  invalid_oid = Hive::Gh.push_exact_oid("/tmp/wt", "not-an-oid", "feature")
+  refute invalid_oid.success?
+  assert_includes invalid_oid.stderr, "OID is invalid"
+
+  invalid_branch = Hive::Gh.push_exact_oid("/tmp/wt", "a" * 40, "feature//bad")
+  refute invalid_branch.success?
+  assert_includes invalid_branch.stderr, "branch name is invalid"
+end
+
+def test_managed_origin_push_url_uses_hardened_git_boundary
+  captured = nil
+  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |path, *args, **_kwargs|
+    captured = [ path, *args ]
+    [ "git@github.com:acme/widgets.git\n", "", ok ]
+  }) do
+    assert_equal "git@github.com:acme/widgets.git", Hive::Gh.origin_push_url("/tmp/wt", managed: true)
+  end
+  assert_equal [ "/tmp/wt", "remote", "get-url", "--push", "--all", "origin" ], captured
+end
+
 def test_managed_remote_branch_lookup_uses_hardened_git_boundary
   captured = nil
   ok = Hive::Gh::CommandStatus.new(exitstatus: 0)

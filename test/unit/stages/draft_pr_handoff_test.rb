@@ -458,6 +458,368 @@ class StagesDraftPrHandoffTest < Minitest::Test
     refute File.exist?(body_path), "temporary PR body must be removed"
   end
 
+  def test_blocked_and_unknown_agent_decisions_fail_closed
+    with_handoff_fixture do |fixture|
+      blocked = Hive::Stages::AgentReport::Report.new(
+        **fixture.fetch(:report).to_h.merge(decision: :blocked)
+      )
+      result = Hive::Stages::DraftPrHandoff.run!(
+        fixture.fetch(:task), context: fixture.fetch(:context), report: blocked,
+        repository_state: fixture.fetch(:state), report_source: fixture.fetch(:report_source), cfg: {}
+      )
+      assert_equal "blocked", result.fetch(:commit)
+      assert_equal Hive::DraftPrReceipt::AGENT_BLOCKED_REASON,
+                   read_receipt(fixture).fetch("error_reason")
+    end
+
+    with_handoff_fixture do |fixture|
+      unknown = Hive::Stages::AgentReport::Report.new(
+        **fixture.fetch(:report).to_h.merge(decision: :unknown)
+      )
+      result = Hive::Stages::DraftPrHandoff.run!(
+        fixture.fetch(:task), context: fixture.fetch(:context), report: unknown,
+        repository_state: fixture.fetch(:state), report_source: fixture.fetch(:report_source), cfg: {}
+      )
+      assert_equal "identity_blocked", result.fetch(:commit)
+    end
+  end
+
+  def test_terminal_resume_rejects_nonterminal_receipt
+    error = assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+      Hive::Stages::DraftPrHandoff.resume_terminal!(
+        TaskStub.new(folder: "/tmp/task", slug: "fix", project_root: "/repo"),
+        { "phase" => "agent_validated" }
+      )
+    end
+    assert_includes error.message, "non-terminal"
+  end
+
+  def test_publication_rejects_changed_scan_and_agent_validation_identity
+    with_handoff_fixture do |fixture|
+      root = File.dirname(fixture.fetch(:context).worktree_path)
+      receipt = Hive::Stages::DraftPrHandoff.send(
+        :record_agent_validation!, fixture.fetch(:task), read_receipt(fixture),
+        fixture.fetch(:report_source), fixture.fetch(:state), root
+      )
+      Hive::DraftPrReceipt.update!(
+        fixture.fetch(:task).folder, phase: receipt.fetch("phase"),
+        attributes: { "scan_sha256" => "f" * 64 }, worktree_root: root
+      )
+      result = run_handoff(fixture)
+      assert_equal "identity_blocked", result.fetch(:commit)
+    end
+
+    task = TaskStub.new(folder: "/tmp/task", slug: "fix", project_root: "/repo")
+    state = Hive::Stages::AgentReport::RepositoryState.new(
+      head_oid: "b" * 40, commit_count: 1, clean: true
+    )
+    receipt = {
+      "phase" => "agent_validated", "head_oid" => "c" * 40,
+      "report_sha256" => Digest::SHA256.hexdigest(VALID_REPORT)
+    }
+    assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+      Hive::Stages::DraftPrHandoff.send(
+        :record_agent_validation!, task, receipt, VALID_REPORT, state, "/tmp"
+      )
+    end
+    receipt["head_oid"] = state.head_oid
+    receipt["report_sha256"] = "d" * 64
+    assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+      Hive::Stages::DraftPrHandoff.send(
+        :record_agent_validation!, task, receipt, VALID_REPORT, state, "/tmp"
+      )
+    end
+  end
+
+  def test_publish_loop_handles_terminal_and_rejects_unknown_phase
+    context = Hive::Stages::AgentWorktree::Context.new(
+      worktree_path: "/tmp/worktrees/fix", task_branch: "fix", base_branch: "main",
+      base_oid: "a" * 40, repository: "github.com/acme/widgets"
+    )
+    task = TaskStub.new(folder: "/tmp/task", slug: "fix", project_root: "/repo")
+    receipt = {
+      "phase" => "agent_validated", "head_oid" => "b" * 40,
+      "scan_sha256" => "c" * 64
+    }
+    projected = Hive::Stages::DraftPrHandoff::Result.new(title: "Fix", body: "Body")
+    report = Hive::Stages::AgentReport.parse(VALID_REPORT)
+
+    with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :preflight_remote!, ->(*) { }) do
+      with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :assert_local_identity!, ->(*) { }) do
+        with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :project_report, ->(*) { projected }) do
+          with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :scan_publication!, ->(*) { "c" * 64 }) do
+            with_replaced_singleton_method(
+              Hive::Stages::DraftPrHandoff, :resume_terminal!, ->(*) { { status: :complete } }
+            ) do
+              with_replaced_singleton_method(
+                Hive::DraftPrReceipt, :read,
+                ->(*) { { "phase" => "terminal", "terminal_outcome" => "blocked" } }
+              ) do
+                result = Hive::Stages::DraftPrHandoff.send(
+                  :publish!, task, context, report, VALID_REPORT, receipt, "/tmp", {}
+                )
+                assert_equal :complete, result.fetch(:status)
+              end
+            end
+            with_replaced_singleton_method(Hive::DraftPrReceipt, :read, ->(*) { { "phase" => "mystery" } }) do
+              assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+                Hive::Stages::DraftPrHandoff.send(
+                  :publish!, task, context, report, VALID_REPORT, receipt, "/tmp", {}
+                )
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_push_reconciliation_requires_recorded_attempt_before_adopting_remote
+    context = Hive::Stages::AgentWorktree::Context.new(
+      worktree_path: "/repo", task_branch: "fix", base_branch: "main",
+      base_oid: "a" * 40, repository: "github.com/acme/widgets"
+    )
+    task = TaskStub.new(folder: "/tmp/task", slug: "fix", project_root: "/repo")
+    receipt = { "phase" => "push_intent", "head_oid" => "b" * 40 }
+    with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :assert_local_identity!, ->(*) { }) do
+      with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :preflight_remote!, ->(*) { }) do
+        with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :reconcile_prs!, ->(*) { [] }) do
+          with_replaced_singleton_method(Hive::Gh, :remote_branch_oid, ->(*) { "b" * 40 }) do
+            assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+              Hive::Stages::DraftPrHandoff.send(
+                :reconcile_or_push!, task, context, receipt, "/tmp", {}
+              )
+            end
+            advanced = { "phase" => "branch_pushed" }
+            with_replaced_singleton_method(Hive::DraftPrReceipt, :advance!, ->(*) { advanced }) do
+              assert_equal advanced, Hive::Stages::DraftPrHandoff.send(
+                :reconcile_or_push!, task, context,
+                receipt.merge("push_attempted_at" => "2026-07-21T12:00:00Z"), "/tmp", {}
+              )
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_create_transport_error_reconciles_once_then_parks
+    context = Hive::Stages::AgentWorktree::Context.new(
+      worktree_path: "/repo", task_branch: "fix", base_branch: "main",
+      base_oid: "a" * 40, repository: "github.com/acme/widgets"
+    )
+    task = TaskStub.new(folder: "/tmp/task", slug: "fix", project_root: "/repo")
+    receipt = { "phase" => "pr_create_intent", "head_oid" => "b" * 40 }
+    projected = Hive::Stages::DraftPrHandoff::Result.new(title: "Fix", body: "Body")
+    validated = { "number" => 7, "url" => "https://github.com/acme/widgets/pull/7" }
+
+    with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :assert_local_identity!, ->(*) { }) do
+      with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :preflight_remote!, ->(*) { }) do
+        with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :assert_remote_head!, ->(*) { }) do
+          with_replaced_singleton_method(Hive::DraftPrReceipt, :update!, ->(*) { receipt }) do
+            with_replaced_singleton_method(Hive::Gh, :create_draft_pr, ->(*) { raise Hive::GhError, "lost response" }) do
+              calls = 0
+              lookup = lambda do |*|
+                calls += 1
+                calls == 1 ? [] : [ validated ]
+              end
+              with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :reconcile_prs!, lookup) do
+                with_replaced_singleton_method(Hive::DraftPrReceipt, :advance!, ->(*) { { "phase" => "pr_observed" } }) do
+                  result = Hive::Stages::DraftPrHandoff.send(
+                    :reconcile_or_create_pr!, task, context, receipt, projected, "/tmp", {}
+                  )
+                  assert_equal "pr_observed", result.fetch("phase")
+                end
+              end
+
+              with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :reconcile_prs!, ->(*) { [] }) do
+                assert_raises(Hive::Stages::DraftPrHandoff::RecoverableError) do
+                  Hive::Stages::DraftPrHandoff.send(
+                    :reconcile_or_create_pr!, task, context, receipt, projected, "/tmp", {}
+                  )
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_pr_validation_accepts_string_repository_and_rejects_bad_number
+    receipt = {
+      "repository" => "github.com/acme/widgets", "task_branch" => "fix",
+      "head_oid" => "b" * 40, "base_branch" => "main", "base_oid" => "a" * 40
+    }
+    pr = {
+      "state" => "OPEN", "headRepository" => "acme/widgets.git",
+      "headRefName" => "fix", "headRefOid" => "b" * 40,
+      "baseRefName" => "main", "baseRefOid" => "a" * 40,
+      "number" => 7, "url" => "https://github.com/acme/widgets/pull/7"
+    }
+    assert_equal 7, Hive::Stages::DraftPrHandoff.send(:validate_pr!, pr, receipt).fetch("number")
+    assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+      Hive::Stages::DraftPrHandoff.send(:validate_pr!, pr.merge("number" => "bad"), receipt)
+    end
+  end
+
+  def test_observed_and_remote_identity_mismatches_are_rejected
+    context = Hive::Stages::AgentWorktree::Context.new(
+      worktree_path: "/repo", task_branch: "fix", base_branch: "main",
+      base_oid: "a" * 40, repository: "github.com/acme/widgets"
+    )
+    receipt = { "head_oid" => "b" * 40, "pr_number" => 7, "pr_url" => "url" }
+    with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :preflight_remote!, ->(*) { }) do
+      with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :assert_local_identity!, ->(*) { }) do
+        with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :assert_remote_head!, ->(*) { }) do
+          with_replaced_singleton_method(
+            Hive::Stages::DraftPrHandoff, :reconcile_prs!,
+            ->(*) { [ { "number" => 8, "url" => "other" } ] }
+          ) do
+            assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+              Hive::Stages::DraftPrHandoff.send(:verify_observed_pr!, context, receipt, {})
+            end
+          end
+        end
+      end
+    end
+    with_replaced_singleton_method(Hive::Gh, :remote_branch_oid, ->(*) { "c" * 40 }) do
+      assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+        Hive::Stages::DraftPrHandoff.send(:assert_remote_head!, context, receipt, {})
+      end
+    end
+  end
+
+  def test_remote_preflight_distinguishes_base_transport_and_malformed_identity
+    context = Hive::Stages::AgentWorktree::Context.new(
+      worktree_path: "/repo", task_branch: "fix", base_branch: "main",
+      base_oid: "a" * 40, repository: "github.com/acme/widgets"
+    )
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    identity = ->(*) { { "host" => "github.com", "repository" => "acme/widgets" } }
+    fetch = ->(*) { [ "git@github.com:acme/widgets.git\n", "", ok ] }
+    with_replaced_singleton_method(Hive::Gh, :ensure_authenticated!, ->(*) { }) do
+      with_replaced_singleton_method(Hive::Gh, :repository_identity, identity) do
+        with_replaced_singleton_method(Hive::ManagedGit, :capture3, fetch) do
+          with_replaced_singleton_method(Hive::Gh, :remote_branch_oid, ->(*) { raise Hive::GhError, "offline" }) do
+            assert_raises(Hive::Stages::DraftPrHandoff::RecoverableError) do
+              Hive::Stages::DraftPrHandoff.send(:preflight_remote!, context, {})
+            end
+          end
+        end
+      end
+      with_replaced_singleton_method(
+        Hive::Gh, :repository_identity, ->(*) { { "repository" => "acme/widgets" } }
+      ) do
+        assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+          Hive::Stages::DraftPrHandoff.send(:preflight_remote!, context, {})
+        end
+      end
+    end
+  end
+
+  def test_publication_scanner_rejects_aggregate_history_and_binary_content
+    context = Hive::Stages::AgentWorktree::Context.new(
+      worktree_path: "/repo", task_branch: "fix", base_branch: "main",
+      base_oid: "a" * 40, repository: "github.com/acme/widgets"
+    )
+    projected = Hive::Stages::DraftPrHandoff::Result.new(title: "Fix", body: "Body")
+    assert_raises(Hive::Stages::DraftPrHandoff::QuarantineError) do
+      Hive::Stages::DraftPrHandoff.send(
+        :scan_publication!, context, "b" * 40,
+        "x" * (Hive::Stages::DraftPrHandoff::MAX_SCAN_BYTES + 1), projected
+      )
+    end
+
+    commits = (1..(Hive::Stages::DraftPrHandoff::MAX_COMMITS + 1)).map { |i| "%040x" % i }.join("\n")
+    with_replaced_singleton_method(
+      Hive::Stages::DraftPrHandoff, :git_binary!, ->(*) { commits }
+    ) do
+      assert_raises(Hive::Stages::DraftPrHandoff::QuarantineError) do
+        Hive::Stages::DraftPrHandoff.send(
+          :scan_publication!, context, "b" * 40, VALID_REPORT, projected
+        )
+      end
+    end
+    assert_raises(Hive::Stages::DraftPrHandoff::QuarantineError) do
+      Hive::Stages::DraftPrHandoff.send(:scan_blob!, "bad\0bytes", source: "blob")
+    end
+  end
+
+  def test_no_fix_cleanup_handles_absent_unregistered_removed_and_git_errors
+    with_tmp_dir do |root|
+      task = TaskStub.new(folder: root, slug: "fix", project_root: "/repo")
+      target = File.join(root, "worktree")
+      ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+      failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+
+      with_replaced_singleton_method(Hive::ManagedGit, :capture3, ->(*) { [ "detail", "", failed ] }) do
+        assert_raises(Hive::WorktreeError) do
+          Hive::Stages::DraftPrHandoff.send(:cleanup_no_fix_worktree, task, target)
+        end
+      end
+      with_replaced_singleton_method(Hive::ManagedGit, :capture3, ->(*) { [ "", "", ok ] }) do
+        assert_equal :absent,
+                     Hive::Stages::DraftPrHandoff.send(:cleanup_no_fix_worktree, task, target)
+      end
+
+      FileUtils.mkdir_p(target)
+      with_replaced_singleton_method(Hive::ManagedGit, :capture3, ->(*) { [ "", "", ok ] }) do
+        assert_raises(Hive::WorktreeError) do
+          Hive::Stages::DraftPrHandoff.send(:cleanup_no_fix_worktree, task, target)
+        end
+      end
+      calls = 0
+      registered = "worktree #{target}\n"
+      with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |*|
+        calls += 1
+        calls == 1 ? [ registered, "", ok ] : [ "", "", ok ]
+      }) do
+        assert_equal :removed,
+                     Hive::Stages::DraftPrHandoff.send(:cleanup_no_fix_worktree, task, target)
+      end
+      calls = 0
+      with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |*|
+        calls += 1
+        calls == 1 ? [ registered, "", ok ] : [ "remove stdout", "", failed ]
+      }) do
+        error = assert_raises(Hive::WorktreeError) do
+          Hive::Stages::DraftPrHandoff.send(:cleanup_no_fix_worktree, task, target)
+        end
+        assert_includes error.message, "remove stdout"
+      end
+    end
+  end
+
+  def test_handoff_io_failures_are_typed_and_binary_capture_handles_esrch
+    task = TaskStub.new(folder: "/tmp/task", slug: "fix", project_root: "/repo")
+    with_replaced_singleton_method(File, :open, ->(*) { raise Errno::EACCES, "fix-report.md" }) do
+      assert_raises(Hive::StageError) do
+        Hive::Stages::DraftPrHandoff.send(:redact_quarantined_report!, task)
+      end
+    end
+
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    with_replaced_singleton_method(Hive::ManagedGit, :capture3, ->(*) { [ "stdout", "", failed ] }) do
+      assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+        Hive::Stages::DraftPrHandoff.send(:git!, "/repo", "status")
+      end
+      assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+        Hive::Stages::DraftPrHandoff.send(:git_binary!, "/repo", "show")
+      end
+    end
+
+    with_handoff_fixture do |fixture|
+      with_replaced_singleton_method(Process, :kill, ->(*) { raise Errno::ESRCH }) do
+        assert_raises(Hive::Stages::DraftPrHandoff::QuarantineError) do
+          Hive::Stages::DraftPrHandoff.send(
+            :git_binary!, fixture.fetch(:repo), "show", "HEAD:app.rb", max_bytes: 1
+          )
+        end
+      end
+    end
+  end
+
   private
 
   def with_handoff_fixture(create_visible: true)

@@ -35,6 +35,8 @@ class DraftPrReceiptTest < Minitest::Test
       task = File.join(root, "task")
       FileUtils.mkdir_p(task)
       path = File.join(task, "handoff.yml")
+      assert_raises(Hive::WorktreeError) { Hive::DraftPrReceipt.read(task, worktree_root: root) }
+
       duplicate = attributes(File.join(root, "worktrees", "fix-ui")).to_yaml + "phase: tampered\n"
       File.write(path, duplicate)
 
@@ -88,6 +90,12 @@ class DraftPrReceiptTest < Minitest::Test
         task, expected: attributes(File.join(worktree_root, "fix-ui")),
         worktree_root: worktree_root
       )
+      assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.advance!(
+          task, from: "push_intent", to: "branch_pushed", attributes: {},
+          worktree_root: worktree_root
+        )
+      end
       receipt = Hive::DraftPrReceipt.advance!(
         task, from: "worktree_created", to: "agent_validated",
         attributes: { "head_oid" => "b" * 40, "report_sha256" => "c" * 64 },
@@ -103,6 +111,12 @@ class DraftPrReceiptTest < Minitest::Test
       assert_raises(Hive::WorktreeError) do
         Hive::DraftPrReceipt.update!(
           task, phase: "agent_validated", attributes: { "head_oid" => "d" * 40 },
+          worktree_root: worktree_root
+        )
+      end
+      assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.update!(
+          task, phase: "push_intent", attributes: { "scan_sha256" => "e" * 64 },
           worktree_root: worktree_root
         )
       end
@@ -138,6 +152,60 @@ class DraftPrReceiptTest < Minitest::Test
         Hive::DraftPrReceipt.read(task, worktree_root: File.join(root, "worktrees"))
       end
       assert_includes error.message, "contradicts"
+    end
+  end
+
+  def test_validation_rejects_each_bounded_receipt_identity_shape
+    with_tmp_dir do |root|
+      worktree_root = File.join(root, "worktrees")
+      base = attributes(File.join(worktree_root, "fix-ui"))
+      terminal = base.merge(
+        "phase" => "terminal", "head_oid" => "b" * 40,
+        "report_sha256" => "c" * 64, "terminal_outcome" => "blocked",
+        "terminal_at" => "2026-07-21T12:00:00Z",
+        "error_reason" => Hive::DraftPrReceipt::IDENTITY_REASON
+      )
+
+      invalid = [
+        base.merge("repository" => "gitlab.com/acme/widgets"),
+        terminal.merge("report_sha256" => "not-a-digest"),
+        terminal.merge("push_intent_id" => "not-an-intent"),
+        terminal.merge("observed_remote_oid" => "d" * 40),
+        terminal.merge("pr_number" => 0),
+        terminal.merge("pr_number" => "not-a-number"),
+        terminal.merge("pr_url" => "http://github.com/acme/widgets/pull/7"),
+        terminal.merge("pr_state" => "CLOSED"),
+        terminal.merge("terminal_outcome" => "unknown"),
+        terminal.merge("error_reason" => "unknown"),
+        terminal.merge("terminal_at" => "2026-07-21T13:00:00+01:00"),
+        terminal.merge("terminal_at" => "not-a-time")
+      ]
+      invalid.each do |data|
+        assert_raises(Hive::WorktreeError) do
+          Hive::DraftPrReceipt.send(:validate, data, worktree_root: worktree_root)
+        end
+      end
+
+      pr_opened = terminal.merge(
+        "terminal_outcome" => "pr-opened", "error_reason" => nil
+      )
+      assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.send(:validate, pr_opened, worktree_root: worktree_root)
+      end
+      assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.send(
+          :validate,
+          terminal.merge("terminal_outcome" => "blocked", "error_reason" => nil),
+          worktree_root: worktree_root
+        )
+      end
+      assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.send(
+          :validate,
+          terminal.merge("terminal_outcome" => "no-fix"),
+          worktree_root: worktree_root
+        )
+      end
     end
   end
 

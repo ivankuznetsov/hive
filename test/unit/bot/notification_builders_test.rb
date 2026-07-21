@@ -938,6 +938,21 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal [ "Show details" ], labels
   end
 
+  def test_managed_handoff_manual_recovery_replies_name_the_preserved_state
+    expected = {
+      Hive::DraftPrReceipt::RECOVERABLE_REASON => "preserved the validated branch",
+      Hive::DraftPrReceipt::QUARANTINE_REASON => "prohibited local content",
+      Hive::DraftPrReceipt::IDENTITY_REASON => "repository, branch, or PR identity changed",
+      Hive::DraftPrReceipt::AGENT_BLOCKED_REASON => "repair agent reported a blocked outcome"
+    }
+    expected.each do |reason, text|
+      reply = Hive::Bot::NotificationBuilders.send(
+        :manual_only_reply, marker: "error", attrs: { "reason" => reason }
+      )
+      assert_includes reply, text
+    end
+  end
+
   def test_cause_sentence_for_review_error_reviewer_partial_failure
     r = row(action: "recover_review", marker: "review_error",
             attrs: { "phase" => "reviewers", "reason" => "reviewer_partial_failure", "pass" => "1" },

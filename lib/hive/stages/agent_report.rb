@@ -199,10 +199,6 @@ module Hive
         unless positions == positions.sort
           raise Hive::StageError, "fix-report.md sections are out of order"
         end
-        unless names.take(REQUIRED_SECTIONS.length) == REQUIRED_SECTIONS
-          raise Hive::StageError, "fix-report.md required sections must use the documented order"
-        end
-
         sections.to_h.merge(suggested_pr_title: suggested_title)
       end
       private_class_method :parse_sections

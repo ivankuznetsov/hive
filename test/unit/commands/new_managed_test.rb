@@ -87,6 +87,25 @@ class NewManagedWorkflowTest < Minitest::Test
     end
   end
 
+  def test_managed_draft_pr_base_reports_an_unreadable_project_config
+    with_tmp_dir do |project|
+      hive_state = File.join(project, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      command = Hive::Commands::New.new("project", "idea")
+      workflow = Struct.new(:draft_pr_handoff?).new(true)
+      record = { "path" => project, "hive_state_path" => hive_state }
+
+      with_replaced_singleton_method(
+        Hive::Config, :load, ->(_path) { raise Hive::ConfigError, "unreadable" }
+      ) do
+        error = assert_raises(Hive::Commands::New::ProjectConfigUnreadable) do
+          command.send(:effective_base_branch, record, workflow)
+        end
+        assert_equal File.join(hive_state, "config.yml"), error.value
+      end
+    end
+  end
+
   private
 
   def write_package(root, commit)

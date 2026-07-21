@@ -97,6 +97,22 @@ class StagesAgentReportTest < Minitest::Test
     assert_raises(Hive::StageError) do
       Hive::Stages::AgentReport.parse(VALID_REPORT + "\nCompact plan:\n\n")
     end
+    assert_raises(Hive::StageError) do
+      Hive::Stages::AgentReport.parse(
+        VALID_REPORT.sub(
+          "Reproduced the failing request locally.",
+          "x" * (Hive::Stages::AgentReport::MAX_SECTION_CHARS + 1)
+        )
+      )
+    end
+    assert_raises(Hive::StageError) do
+      Hive::Stages::AgentReport.parse(VALID_REPORT + "\nRequired content after title\n")
+    end
+    assert_raises(Hive::StageError) do
+      Hive::Stages::AgentReport.parse(
+        VALID_REPORT + "\nReproduction:\nrequired content after title\n"
+      )
+    end
   end
 
   def test_read_rejects_missing_empty_directory_symlink_and_invalid_utf8
@@ -123,6 +139,17 @@ class StagesAgentReportTest < Minitest::Test
 
       File.binwrite(path, VALID_REPORT + ("x" * Hive::Stages::AgentReport::MAX_BYTES))
       assert_raises(Hive::StageError) { Hive::Stages::AgentReport.read(path) }
+    end
+  end
+
+  def test_read_wraps_unexpected_filesystem_errors
+    with_replaced_singleton_method(
+      File, :open, ->(*_args, **_kwargs) { raise Errno::EACCES, "fix-report.md" }
+    ) do
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::AgentReport.read("/tmp/fix-report.md")
+      end
+      assert_includes error.message, "unreadable"
     end
   end
 
@@ -234,6 +261,32 @@ class StagesAgentReportTest < Minitest::Test
       )
     end
     assert_includes error.message, "git symbolic-ref"
+  end
+
+  def test_repository_validation_rejects_non_numeric_commit_count
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    calls = 0
+    fake_git = lambda do |_path, *args, **_kwargs|
+      calls += 1
+      out = case args.first
+      when "symbolic-ref" then "fix-task\n"
+      when "merge-base" then ""
+      when "rev-parse" then "b" * 40
+      when "rev-list" then "not-a-number\n"
+      else ""
+      end
+      [ out, "", ok ]
+    end
+    context = context_for("/tmp/repo", "a" * 40)
+    with_replaced_singleton_method(Hive::ManagedGit, :capture3, fake_git) do
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::AgentReport.validate_repository!(
+          Hive::Stages::AgentReport.parse(VALID_REPORT), context
+        )
+      end
+      assert_includes error.message, "could not count agent commits"
+    end
+    assert_operator calls, :>=, 4
   end
 
   private

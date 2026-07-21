@@ -536,6 +536,16 @@ Open-PR and finalize pointer-entry tests exercise the shared
 existing warnings for both a missing `worktree.yml` and a pointer whose
 directory has disappeared.
 
+## Launch-path fixtures
+
+`test/unit/launch_path_fixture_test.rb` pins the public Build and Content
+walkthrough fixtures under `docs/fixtures/launch-paths/`. It requires both
+paths to preserve their input and stage artifacts, marks every file as a
+deterministic replay fixture, rejects provider-completion or measured-time
+claims, and checks the published state words against the native web/status
+source strings. The fixture suite is structural evidence only; clean live
+provider replays and timing remain separate verification gates.
+
 ## Backlinks
 
 - [[architecture]]

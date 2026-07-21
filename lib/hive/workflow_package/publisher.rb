@@ -6,6 +6,7 @@ require "tmpdir"
 require "yaml"
 require "hive/gh"
 require "hive/workflow_package/authoring_metadata"
+require "hive/workflow_package/authoring_lint"
 require "hive/workflow_package/manifest"
 require "hive/workflow_package/registry_manifest"
 require "hive/workflow_package/registry_manifest_builder"
@@ -68,13 +69,16 @@ module Hive
           destination, expected_name: @name,
           expected_manifest_digest: build.release_digest
         )
+        lint = AuthoringLint.verify!(destination, manifest: build.manifest)
         admit_runtime!(result.workflow, build.manifest.data.fetch("permissions"), package_root: destination)
+        warnings = result.warnings.map(&:to_h) + lint.warnings.map(&:to_h)
         Package.new(
           name: @name, version: @version, root: destination,
           package_digest: build.package_digest,
           release_digest: build.release_digest,
-          warnings: result.warnings.map(&:to_h).freeze,
-          findings: result.diagnostics.map(&:to_h).freeze
+          warnings: warnings.freeze,
+          lint_contract: lint.contract,
+          findings: (result.diagnostics.map(&:to_h) + lint.findings.map(&:to_h)).freeze
         ).freeze
       end
 

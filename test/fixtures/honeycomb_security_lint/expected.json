@@ -1,0 +1,10 @@
+{
+  "malicious_rules": [
+    "deny.credential-read",
+    "deny.pipe-to-shell",
+    "review.command",
+    "review.network",
+    "secret.anthropic-key",
+    "secret.openai-key"
+  ]
+}

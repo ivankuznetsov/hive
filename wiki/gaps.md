@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-20
+updated: 2026-07-21
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -12,10 +12,14 @@ tags: [gap, todo, release-proof, agent-skills]
 ## Current release gap
 
 - Native package-layout integration now proves that an installed gem plus
-  authenticated managed bundle resolves `hive-cli` from the package root and
-  reaches the setup service seam without a parent checkout. There is still no
-  checked-in artifact from a newly published Homebrew/AUR/install.sh release
-  proving a real service manager reaches ready state on both Linux and macOS.
+  authenticated, real `git archive` managed bundle resolves `hive-cli` from
+  the package root and reaches the setup service seam without a parent
+  checkout. The tag workflow also runs the installed proven gem through setup
+  against the exact archive bytes later signed and published. There is still
+  no checked-in artifact from a newly published Homebrew/AUR/install.sh release
+  proving a real service manager reaches ready state on both Linux and macOS,
+  nor a live measurement establishing whether the current mutating cold-boot
+  readiness window is sufficient on constrained hosts.
 - The separately maintained `hive-site` source must mirror the native-first
   setup, foreground, opt-out, Windows/WSL, alias, and package contracts before
   website publication. This repository intentionally has no build-time import

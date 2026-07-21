@@ -345,6 +345,69 @@ class WebAppBundleTest < Minitest::Test
     end
   end
 
+  def test_bundle_install_restores_authenticated_lockfile_bytes_and_mode
+    Dir.mktmpdir("hive-web-app") do |app|
+      lockfile = File.join(app, "Gemfile.lock")
+      File.write(File.join(app, "Gemfile"), "source 'https://rubygems.org'\n")
+      File.binwrite(lockfile, "authenticated lockfile\n")
+      FileUtils.chmod(0o640, lockfile)
+
+      result = Hive::Web::AppBundle.bundle_install!(
+        dir: app,
+        output: nil,
+        runner: lambda do |argv, _env|
+          assert_equal %w[bundle install], argv
+          File.binwrite(lockfile, "machine-local rewrite\n")
+          FileUtils.chmod(0o600, lockfile)
+          true
+        end
+      )
+
+      assert_equal app, result
+      assert_equal "authenticated lockfile\n", File.binread(lockfile)
+      assert_equal 0o640, File.stat(lockfile).mode & 0o777
+    end
+  end
+
+  def test_prepare_restores_lockfile_after_asset_compilation
+    Dir.mktmpdir("hive-web-app") do |app|
+      lockfile = File.join(app, "Gemfile.lock")
+      File.write(File.join(app, "Gemfile"), "source 'https://rubygems.org'\n")
+      File.binwrite(lockfile, "authenticated lockfile\n")
+      FileUtils.chmod(0o644, lockfile)
+
+      result = Hive::Web::AppBundle.prepare!(
+        dir: app,
+        output: nil,
+        runner: lambda do |argv, _env|
+          File.binwrite(lockfile, "rewrite from #{argv.join(' ')}\n")
+          write_compiled_assets(app) if argv == %w[bin/rails assets:precompile]
+          true
+        end
+      )
+
+      assert_equal app, result
+      assert Hive::Web::AppBundle.assets_ready?(app)
+      assert_equal "authenticated lockfile\n", File.binread(lockfile)
+      assert_equal 0o644, File.stat(lockfile).mode & 0o777
+      refute Dir.exist?(File.join(app, "tmp", "assets-build-storage"))
+    end
+  end
+
+  def test_default_runner_routes_stdout_and_stderr_to_selected_output
+    Dir.mktmpdir("hive-web-runner") do |dir|
+      output_path = File.join(dir, "command.log")
+      File.open(output_path, "w+") do |output|
+        runner = Hive::Web::AppBundle.default_runner(output)
+        assert runner.call([ "/bin/sh", "-c", "printf stdout; printf stderr >&2" ], {})
+        output.rewind
+        combined = output.read
+        assert_includes combined, "stdout"
+        assert_includes combined, "stderr"
+      end
+    end
+  end
+
   def test_default_bundle_url_prefers_env_override_then_falls_back_to_release_url
     with_env("HIVE_WEB_BUNDLE_URL" => "https://example.test/custom-bundle.tar.gz") do
       assert_equal "https://example.test/custom-bundle.tar.gz", Hive::Web::AppBundle.default_bundle_url
@@ -617,6 +680,43 @@ class WebAppBundleTest < Minitest::Test
 
     assert_match(/timed out/, error.message)
     assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 3
+  end
+
+  def test_bounded_capture_returns_stdout_stderr_and_status
+    stdout, stderr, status = Hive::Web::AppBundle.capture3_bounded(
+      "/bin/sh", "-c", "printf stdout; printf stderr >&2", timeout_sec: 2
+    )
+
+    assert_equal "stdout", stdout
+    assert_equal "stderr", stderr
+    assert status.success?
+  end
+
+  def test_process_group_cleanup_escalates_when_term_does_not_stop_child
+    joins = []
+    wait_thread = Object.new
+    wait_thread.define_singleton_method(:join) do |timeout|
+      joins << timeout
+      joins.length > 1
+    end
+    kills = []
+
+    with_replaced_singleton_method(Process, :kill, lambda { |signal, pid|
+      kills << [ signal, pid ]
+    }) do
+      assert Hive::Web::AppBundle.terminate_process_group(1234, wait_thread)
+    end
+
+    assert_equal [ [ "TERM", -1234 ], [ "KILL", -1234 ] ], kills
+    assert_equal [ 2, 2 ], joins
+  end
+
+  def test_process_group_cleanup_tolerates_an_already_exited_child
+    with_replaced_singleton_method(Process, :kill, lambda { |_signal, _pid|
+      raise Errno::ESRCH
+    }) do
+      assert_nil Hive::Web::AppBundle.terminate_process_group(1234, Object.new)
+    end
   end
 
   private

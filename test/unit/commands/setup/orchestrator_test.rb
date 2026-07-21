@@ -544,6 +544,43 @@ class SetupOrchestratorTest < Minitest::Test
     assert_match(/Errno::EACCES/, phase["message"], "the raised class+message must be recorded")
   end
 
+  def test_observed_web_service_failure_records_safe_fallback_state
+    environment = { "HIVE_WEB_LOCAL_LOOPBACK" => "1" }
+    setup = Hive::Commands::Setup.new(output: StringIO.new, environment: environment)
+    fallback = {
+      "platform" => "unsupported", "unit_path" => nil,
+      "service_installed" => false, "service_enabled" => false,
+      "service_running" => false, "service_manager_available" => false,
+      "url" => "http://127.0.0.1:4567", "ready" => false,
+      "readiness" => "manager_unavailable"
+    }
+    snapshot_args = nil
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/usr/bin/hive" }) do
+      with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
+        ->(**_kw) { raise Errno::EACCES, "/Library/LaunchAgents" }) do
+        with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot, lambda { |**kwargs|
+          snapshot_args = kwargs
+          fallback
+        }) do
+          stub_web_config do
+            setup.send(:observe_web_service, mutation: "blocked", ok: false, message: "bundle failed")
+          end
+        end
+      end
+    end
+
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal false, phase["ok"]
+    assert_equal "blocked", phase["mutation"]
+    assert_match(/Errno::EACCES/, phase["message"])
+    assert_equal [], phase["messages"]
+    assert_equal false, phase["service_manager_available"]
+    assert_nil snapshot_args[:installer]
+    assert_equal environment, snapshot_args[:environment]
+    assert_equal fallback, setup.instance_variable_get(:@web_service)
+  end
+
   def test_drifted_web_service_is_preserved_with_explicit_repair_guidance
     setup = Hive::Commands::Setup.new(output: StringIO.new)
     installer = fake_installer(success: false, wire: "drifted")

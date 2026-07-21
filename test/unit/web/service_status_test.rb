@@ -76,6 +76,19 @@ class WebServiceStatusTest < Minitest::Test
     assert_equal "manager_unavailable", result["readiness"]
   end
 
+  def test_snapshot_without_an_installer_reports_unsupported_manager
+    result = Hive::Web::ServiceStatus.snapshot(
+      installer: nil,
+      config: config,
+      probe: ->(*) { flunk "an unavailable manager must not trigger a health probe" }
+    )
+
+    assert_equal "unsupported", result["platform"]
+    assert_equal false, result["service_manager_available"]
+    assert_equal false, result["ready"]
+    assert_equal "manager_unavailable", result["readiness"]
+  end
+
   def test_snapshot_prefers_rich_lifecycle_state
     state = {
       "platform" => "linux", "unit_path" => "/unit", "service_installed" => false,
@@ -122,6 +135,41 @@ class WebServiceStatusTest < Minitest::Test
     assert result["service_running"]
     assert result["ready"]
     assert_equal "ready", result["readiness"]
+  end
+
+  def test_snapshot_stops_waiting_when_service_becomes_disabled
+    states = [
+      {
+        "platform" => "macos", "unit_path" => "/unit", "service_installed" => true,
+        "service_enabled" => true, "service_running" => false, "service_manager_available" => true
+      },
+      {
+        "platform" => "macos", "unit_path" => "/unit", "service_installed" => true,
+        "service_enabled" => false, "service_running" => false, "service_manager_available" => true
+      }
+    ]
+    samples = 0
+    sleeps = []
+    rich_installer = Object.new
+    rich_installer.define_singleton_method(:service_lifecycle_state) do
+      state = states.fetch([ samples, states.length - 1 ].min)
+      samples += 1
+      state
+    end
+
+    result = Hive::Web::ServiceStatus.snapshot(
+      installer: rich_installer,
+      config: config,
+      wait_for_running: true,
+      attempts: 3,
+      interval: 0.1,
+      sleeper: ->(duration) { sleeps << duration }
+    )
+
+    assert_equal 2, samples
+    assert_equal [ 0.1 ], sleeps
+    assert_equal false, result["service_enabled"]
+    assert_equal "disabled", result["readiness"]
   end
 
   def test_read_only_status_snapshot_probes_health_once

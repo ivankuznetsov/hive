@@ -66,7 +66,7 @@ class StagesDraftPrHandoffTest < Minitest::Test
       )
       File.write(File.join(fixture.fetch(:task).folder, "fix-report.md"), source)
       cleaned = []
-      cleanup = ->(task, context) { cleaned << [ task.slug, context.worktree_path ] }
+      cleanup = ->(task, path) { cleaned << [ task.slug, path ] }
 
       with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :cleanup_no_fix_worktree, cleanup) do
         result = run_handoff(fixture)
@@ -95,6 +95,128 @@ class StagesDraftPrHandoffTest < Minitest::Test
       result = run_handoff(fixture, report_source: source)
       assert_equal "pr-opened", result.fetch(:outcome)
       assert_equal 1, fixture.fetch(:calls).count { |call| call.first == :create }
+    end
+  end
+
+  def test_ambiguous_remote_mutations_are_not_repeated_on_retry
+    with_handoff_fixture(create_visible: false) do |fixture|
+      first = run_handoff(fixture)
+      assert_equal :error, first.fetch(:status)
+      source = Hive::Stages::DraftPrHandoff.report_source_for_resume(
+        File.join(fixture.fetch(:task).folder, "fix-report.md"),
+        expected_sha256: read_receipt(fixture).fetch("report_sha256")
+      )
+
+      second = run_handoff(fixture, report_source: source)
+      assert_equal :error, second.fetch(:status)
+      assert_equal "pr_create_intent", read_receipt(fixture).fetch("phase")
+      assert_equal 1, fixture.fetch(:calls).count { |call| call.first == :create }
+    end
+
+    with_handoff_fixture do |fixture|
+      fixture.fetch(:remote)[:push_observed_oid] = nil
+      first = run_handoff(fixture)
+      assert_equal :error, first.fetch(:status)
+      source = Hive::Stages::DraftPrHandoff.report_source_for_resume(
+        File.join(fixture.fetch(:task).folder, "fix-report.md"),
+        expected_sha256: read_receipt(fixture).fetch("report_sha256")
+      )
+
+      second = run_handoff(fixture, report_source: source)
+      assert_equal :error, second.fetch(:status)
+      assert_equal "push_intent", read_receipt(fixture).fetch("phase")
+      assert_equal 1, fixture.fetch(:calls).count { |call| call.first == :push }
+    end
+  end
+
+  def test_recoverable_marker_round_trips_the_exact_validated_report_bytes
+    variants = [
+      VALID_REPORT.delete_suffix("\n"),
+      VALID_REPORT,
+      "#{VALID_REPORT}\n",
+      "#{VALID_REPORT.delete_suffix("\n")}  "
+    ]
+    variants.each do |source|
+      with_handoff_fixture(create_visible: false) do |fixture|
+        fixture[:report_source] = source
+        fixture[:report] = Hive::Stages::AgentReport.parse(source)
+        fixture[:state] = Hive::Stages::AgentReport.validate_repository!(
+          fixture.fetch(:report), fixture.fetch(:context)
+        )
+        File.binwrite(File.join(fixture.fetch(:task).folder, "fix-report.md"), source)
+
+        first = run_handoff(fixture)
+        assert_equal :error, first.fetch(:status)
+        resumed_source = Hive::Stages::DraftPrHandoff.report_source_for_resume(
+          File.join(fixture.fetch(:task).folder, "fix-report.md"),
+          expected_sha256: read_receipt(fixture).fetch("report_sha256")
+        )
+        assert_equal source, resumed_source
+      end
+    end
+  end
+
+  def test_resume_rejects_changed_oversized_and_symlinked_reports
+    with_tmp_dir do |dir|
+      path = File.join(dir, "fix-report.md")
+      digest = Digest::SHA256.hexdigest(VALID_REPORT)
+
+      File.write(path, VALID_REPORT.sub("response mapper", "response transformer"))
+      assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+        Hive::Stages::DraftPrHandoff.report_source_for_resume(path, expected_sha256: digest)
+      end
+
+      File.write(path, "#{VALID_REPORT}<!-- COMPLETE -->\nuntrusted tail\n")
+      assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+        Hive::Stages::DraftPrHandoff.report_source_for_resume(path, expected_sha256: digest)
+      end
+
+      File.binwrite(path, "x" * (Hive::Stages::AgentReport::MAX_BYTES + 1))
+      assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+        Hive::Stages::DraftPrHandoff.report_source_for_resume(path, expected_sha256: digest)
+      end
+
+      target = File.join(dir, "outside.md")
+      File.write(target, VALID_REPORT)
+      FileUtils.rm_f(path)
+      File.symlink(target, path)
+      assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+        Hive::Stages::DraftPrHandoff.report_source_for_resume(path, expected_sha256: digest)
+      end
+    end
+  end
+
+  def test_no_fix_terminal_resume_retries_controller_cleanup
+    with_handoff_fixture do |fixture|
+      run!("git", "-C", fixture.fetch(:repo), "reset", "--hard", fixture.fetch(:base), "--quiet")
+      source = VALID_REPORT.sub("Decision: ready", "Decision: no-fix")
+      fixture[:report_source] = source
+      fixture[:report] = Hive::Stages::AgentReport.parse(source)
+      fixture[:state] = Hive::Stages::AgentReport.validate_repository!(
+        fixture.fetch(:report), fixture.fetch(:context)
+      )
+      File.write(File.join(fixture.fetch(:task).folder, "fix-report.md"), source)
+      cleanup_calls = 0
+      cleanup = lambda do |_task, _path|
+        cleanup_calls += 1
+        raise Hive::WorktreeError, "busy" if cleanup_calls == 1
+      end
+
+      with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :cleanup_no_fix_worktree, cleanup) do
+        first = run_handoff(fixture)
+        assert_equal :error, first.fetch(:status)
+        assert_equal "no_fix_cleanup_failed", first.fetch(:commit)
+
+        resumed = Hive::Stages::DraftPrHandoff.resume_terminal!(
+          fixture.fetch(:task), read_receipt(fixture)
+        )
+        assert_equal :complete, resumed.fetch(:status)
+        assert_equal "handoff_recovered", resumed.fetch(:commit)
+        assert_equal 2, cleanup_calls
+        marker = Hive::Markers.current(File.join(fixture.fetch(:task).folder, "fix-report.md"))
+        assert_equal :complete, marker.name
+        assert_equal "no-fix", marker.attrs.fetch("outcome")
+      end
     end
   end
 
@@ -238,6 +360,50 @@ class StagesDraftPrHandoffTest < Minitest::Test
     end
   end
 
+  def test_quarantine_terminal_resume_retries_report_redaction
+    with_handoff_fixture do |fixture|
+      token = "github_pat_#{'R' * 40}"
+      source = VALID_REPORT.sub("Low; the change is limited to one mapper.", "Leaked #{token}")
+      fixture[:report_source] = source
+      fixture[:report] = Hive::Stages::AgentReport.parse(source)
+      File.write(File.join(fixture.fetch(:task).folder, "fix-report.md"), source)
+      original = Hive::Stages::DraftPrHandoff.method(:redact_quarantined_report!)
+      calls = 0
+      redact = lambda do |task|
+        calls += 1
+        raise Hive::StageError, "synthetic redaction interruption" if calls == 1
+
+        original.call(task)
+      end
+
+      with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :redact_quarantined_report!, redact) do
+        assert_raises(Hive::StageError) { run_handoff(fixture) }
+        assert_equal "terminal", read_receipt(fixture).fetch("phase")
+
+        resumed = Hive::Stages::DraftPrHandoff.resume_terminal!(
+          fixture.fetch(:task), read_receipt(fixture)
+        )
+        assert_equal :error, resumed.fetch(:status)
+        assert_equal "handoff_recovered", resumed.fetch(:commit)
+      end
+      persisted = File.read(File.join(fixture.fetch(:task).folder, "fix-report.md"))
+      refute_includes persisted, token
+      assert_includes persisted, "[REDACTED:github_fine_grained_pat]"
+    end
+  end
+
+  def test_post_push_unfamiliar_remote_oid_is_an_identity_block
+    with_handoff_fixture do |fixture|
+      fixture.fetch(:remote)[:push_observed_oid] = "f" * 40
+
+      result = run_handoff(fixture)
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "identity_blocked", result.fetch(:commit)
+      assert_equal "draft_pr_identity_blocked", read_receipt(fixture).fetch("error_reason")
+    end
+  end
+
   def test_terminal_resume_repairs_missing_controller_artifacts_without_remote_mutation
     with_handoff_fixture do |fixture|
       result = run_handoff(fixture)
@@ -252,6 +418,7 @@ class StagesDraftPrHandoffTest < Minitest::Test
       receipt = read_receipt(fixture)
       resumed = Hive::Stages::DraftPrHandoff.resume_terminal!(fixture.fetch(:task), receipt)
       assert_equal "pr-opened", resumed.fetch(:outcome)
+      assert_equal "handoff_recovered", resumed.fetch(:commit)
       assert File.exist?(File.join(fixture.fetch(:task).folder, "pr.md"))
       assert_equal :complete, Hive::Markers.current(File.join(fixture.fetch(:task).folder, "fix-report.md")).name
       assert_equal calls, fixture.fetch(:calls).length
@@ -348,7 +515,9 @@ class StagesDraftPrHandoffTest < Minitest::Test
       calls << [ :auth ]
       raise Hive::GhError, "auth denied" if remote[:auth_error]
     end
-    identity = ->(_path, cfg: nil) { { "host" => "github.com", "repository" => "acme/widgets" } }
+    identity = lambda do |_path, cfg: nil, **_kwargs|
+      { "host" => "github.com", "repository" => "acme/widgets" }
+    end
     capture = lambda do |*argv, **_kwargs|
       if argv[0, 6] == [ "git", "-C", context.worktree_path, "remote", "get-url", "--all" ]
         [ "git@github.com:acme/widgets.git\n", "", Hive::Gh::CommandStatus.new(exitstatus: 0) ]
@@ -368,7 +537,7 @@ class StagesDraftPrHandoffTest < Minitest::Test
     end
     push = lambda do |_path, oid, branch, **_kwargs|
       calls << [ :push, oid, branch ]
-      remote[:task_oid] = oid
+      remote[:task_oid] = remote.fetch(:push_observed_oid, oid)
       Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
     end
     create = lambda do |_path, **_kwargs|

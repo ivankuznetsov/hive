@@ -3,7 +3,9 @@ require "time"
 require "timeout"
 require "uri"
 require "yaml"
+require "hive/git_ref"
 require "hive/gh/repository_identity"
+require "hive/managed_git"
 require "hive/secret_patterns"
 
 module Hive
@@ -104,15 +106,16 @@ module Hive
       raise Hive::GhError, "git push failed: #{result.stderr.strip.empty? ? result.stdout : result.stderr}"
     end
 
-    def remote_branch_oid(worktree_path, branch, cfg: nil, remote: "origin")
+    def remote_branch_oid(worktree_path, branch, cfg: nil, remote: "origin", managed: false)
       name = validated_branch_name(branch)
       remote = validated_remote_target(remote)
 
       ref = "refs/heads/#{name}"
-      out, err, status = capture3(
-        "git", "-C", worktree_path, "ls-remote", "--heads", remote, ref,
-        cfg: cfg
-      )
+      out, err, status = if managed
+        Hive::ManagedGit.capture3(worktree_path, "ls-remote", "--heads", remote, ref)
+      else
+        capture3("git", "-C", worktree_path, "ls-remote", "--heads", remote, ref, cfg: cfg)
+      end
       unless status.success?
         raise Hive::GhError,
               "git ls-remote failed: #{err.to_s.strip.empty? ? out : err}"
@@ -143,8 +146,8 @@ module Hive
       name = validated_branch_name(branch)
       target = validated_remote_target(remote)
       refspec = "#{oid}:refs/heads/#{name}"
-      out, err, status = capture3(
-        "git", "-C", worktree_path, "push", target, refspec, cfg: cfg
+      out, err, status = Hive::ManagedGit.capture3(
+        worktree_path, "push", target, refspec
       )
       PushResult.new(success: status.success?, stdout: out, stderr: err)
     rescue Hive::GhError => e
@@ -248,13 +251,9 @@ module Hive
     end
 
     def validated_branch_name(branch)
-      value = branch.to_s
-      unless value.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._\/-]{0,240}\z/) &&
-             !value.include?("..") && !value.end_with?("/", ".")
-        raise Hive::GhError, "remote branch name is invalid"
-      end
-
-      value
+      Hive::GitRef.validate_branch_name(branch)
+    rescue ArgumentError
+      raise Hive::GhError, "remote branch name is invalid"
     end
     private_class_method :validated_branch_name
 
@@ -318,17 +317,25 @@ module Hive
       repository_identity(worktree_path, cfg: cfg).fetch("repository")
     end
 
-    def repository_identity(worktree_path, cfg: nil, timeout_sec: nil)
+    def repository_identity(worktree_path, cfg: nil, timeout_sec: nil, managed: false)
       repository_identity_from_remote(
-        origin_push_url(worktree_path, cfg: cfg, timeout_sec: timeout_sec)
+        origin_push_url(
+          worktree_path, cfg: cfg, timeout_sec: timeout_sec, managed: managed
+        )
       )
     end
 
-    def origin_push_url(worktree_path, cfg: nil, timeout_sec: nil)
-      out, err, status = capture3(
-        "git", "-C", worktree_path, "remote", "get-url", "--push", "--all", "origin",
-        cfg: cfg, timeout_sec: timeout_sec
-      )
+    def origin_push_url(worktree_path, cfg: nil, timeout_sec: nil, managed: false)
+      out, err, status = if managed
+        Hive::ManagedGit.capture3(
+          worktree_path, "remote", "get-url", "--push", "--all", "origin"
+        )
+      else
+        capture3(
+          "git", "-C", worktree_path, "remote", "get-url", "--push", "--all", "origin",
+          cfg: cfg, timeout_sec: timeout_sec
+        )
+      end
       unless status.success?
         raise Hive::GhError,
               "`git remote get-url --push --all origin` failed in #{worktree_path}: " \

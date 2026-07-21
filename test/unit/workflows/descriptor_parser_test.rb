@@ -454,6 +454,47 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     end
   end
 
+  def test_worktree_requires_draft_pr_handoff
+    error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          {
+            "name" => "fix", "kind" => "agent", "state_file" => "fix-report.md",
+            "skill" => "/fix", "deliverable" => "fix-report.md",
+            "workspace" => "worktree"
+          }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+
+    assert_includes error.message, "workspace: worktree requires handoff: draft_pr"
+  end
+
+  def test_draft_pr_requires_canonical_report_contract
+    [
+      [ "report.md", "fix-report.md" ],
+      [ "fix-report.md", "report.md" ]
+    ].each do |state_file, deliverable|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            {
+              "name" => "fix", "kind" => "agent", "state_file" => state_file,
+              "skill" => "/fix", "deliverable" => deliverable,
+              "workspace" => "worktree", "handoff" => "draft_pr"
+            }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, "state_file and deliverable fix-report.md"
+    end
+  end
+
   def test_parse_file_wraps_yaml_errors_with_path
     with_tmp_dir do |dir|
       path = File.join(dir, "broken.yml")

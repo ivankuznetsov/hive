@@ -1,6 +1,8 @@
 require "hive/config"
+require "hive/atomic_file"
 require "hive/draft_pr_receipt"
 require "hive/gh"
+require "hive/markers"
 require "hive/protected_files"
 require "hive/stages/agent"
 require "hive/stages/agent_report"
@@ -19,6 +21,7 @@ module Hive
 
       MAX_INSTRUCTION_CHARS = 16_000
       MAX_INSTRUCTION_BYTES = MAX_INSTRUCTION_CHARS * 4
+      MANAGED_AGENT_FAILURE_REASON = "managed_agent_failed".freeze
       PROTECTED_FILES = (
         Hive::ProtectedFiles::ORCHESTRATOR_OWNED + %w[meta.yml handoff.yml pr.md]
       ).uniq.freeze
@@ -70,6 +73,8 @@ module Hive
         )
         resource_limits = Hive::Stages::Base.stage_resource_limits(cfg || {}, stage)
 
+        git_control_paths = git_control_paths!(context.worktree_path)
+        git_controls_before = Hive::ProtectedFiles.snapshot_paths(git_control_paths)
         protected_before = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
         result = nil
         spawn_error = nil
@@ -92,18 +97,22 @@ module Hive
           spawn_error = e
         ensure
           protected_after = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
+          git_controls_after = Hive::ProtectedFiles.snapshot_paths(git_control_paths)
         end
         tampered = Hive::ProtectedFiles.diff(protected_before, protected_after)
         unless tampered.empty?
           raise Hive::StageError,
                 "worktree agent modified protected task files: #{tampered.join(', ')}"
         end
-        raise spawn_error if spawn_error
+        git_tampered = Hive::ProtectedFiles.diff(git_controls_before, git_controls_after)
+        unless git_tampered.empty?
+          raise Hive::StageError,
+                "worktree agent modified protected Git control files: #{git_tampered.join(', ')}"
+        end
+        return managed_failure_result(task, error: spawn_error, context: context) if spawn_error
 
         unless result.is_a?(Hash) && result[:status] == :ok
-          return (result.is_a?(Hash) ? result : { status: :error }).merge(
-            commit: nil, worktree_context: context
-          )
+          return managed_failure_result(task, result: result, context: context)
         end
 
         report_source = Hive::Stages::AgentReport.read_source(report_path)
@@ -116,7 +125,79 @@ module Hive
           worktree_context: context, report: report,
           repository_state: repository_state, agent_result: result
         )
+      rescue Hive::StageError, Hive::WorktreeError, Hive::GhError => e
+        managed_failure_result(task, error: e)
       end
+
+      def managed_failure_result(task, result: nil, error: nil, context: nil)
+        result = result.is_a?(Hash) ? result : {}
+        reason = if !result[:limit_text].to_s.empty?
+          "limits_reached"
+        elsif result[:timed_out] || result[:status] == :timeout
+          "timeout"
+        elsif result[:resource_exhaustion].is_a?(Hash)
+          result[:resource_exhaustion][:reason].to_s.empty? ? MANAGED_AGENT_FAILURE_REASON :
+            result[:resource_exhaustion][:reason].to_s
+        else
+          MANAGED_AGENT_FAILURE_REASON
+        end
+        attrs = {
+          reason: reason,
+          message: "The managed repair agent did not produce a controller-validated result."
+        }
+        attrs[:exception_class] = error.class.name if error
+        write_failure_marker!(task, attrs)
+        result.merge(
+          status: :error, commit: reason, worktree_context: context,
+          error: error&.class&.name
+        ).compact
+      end
+      private_class_method :managed_failure_result
+
+      def write_failure_marker!(task, attrs)
+        path = File.join(task.folder, "fix-report.md")
+        # The failed report is untrusted and may itself be a symlink or contain
+        # credentials. Replace it with a controller-only marker while keeping
+        # the isolated repository/worktree intact for manual inspection.
+        Hive::AtomicFile.write(path, "", mode: 0o600)
+        Hive::Markers.set(path, :error, attrs)
+        File.chmod(0o600, path)
+      end
+      private_class_method :write_failure_marker!
+
+      def git_control_paths!(worktree_path)
+        common = git_path!(worktree_path, "--path-format=absolute", "--git-common-dir")
+        git_dir = git_path!(worktree_path, "--absolute-git-dir")
+        paths = {
+          "worktree .git pointer" => File.join(worktree_path, ".git"),
+          "repository config" => File.join(common, "config"),
+          "worktree config" => File.join(git_dir, "config.worktree")
+        }
+        home = ENV["HOME"].to_s
+        unless home.empty?
+          paths["global Git config"] = File.join(home, ".gitconfig")
+          paths["XDG Git config"] = File.join(home, ".config", "git", "config")
+        end
+        xdg = ENV["XDG_CONFIG_HOME"].to_s
+        paths["explicit XDG Git config"] = File.join(xdg, "git", "config") unless xdg.empty?
+        global = ENV["GIT_CONFIG_GLOBAL"].to_s
+        paths["global Git config override"] = global unless global.empty?
+        system = ENV["GIT_CONFIG_SYSTEM"].to_s
+        paths["system Git config override"] = system unless system.empty?
+        paths
+      end
+      private_class_method :git_control_paths!
+
+      def git_path!(worktree_path, *args)
+        out, err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", *args)
+        unless status.success?
+          detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
+          raise Hive::StageError, "managed worktree Git control path is unavailable: #{detail[0, 200]}"
+        end
+
+        File.expand_path(out.to_s.strip, worktree_path)
+      end
+      private_class_method :git_path!
 
       def terminal_receipt(task)
         receipt_path = Hive::DraftPrReceipt.path(task.folder)
@@ -136,6 +217,10 @@ module Hive
           "agent_worktree_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
             worktree_path: context.worktree_path,
+            repository: context.repository,
+            task_branch: context.task_branch,
+            base_branch: context.base_branch,
+            base_oid: context.base_oid,
             report_path: report_path,
             instruction_body: instruction,
             prior_context: prior,

@@ -11,10 +11,14 @@ require "hive/rebase"
 class HiveCommandsRunNoRebaseTest < Minitest::Test
   include HiveTestHelper
 
-  FakeTask = Struct.new(:slug, :folder, :worktree_path, :stage_name, :project_root)
+  FakeWorkflow = Struct.new(:draft_pr_handoff?)
+  FakeTask = Struct.new(:slug, :folder, :worktree_path, :stage_name, :project_root, :workflow)
 
-  def fake_task
-    FakeTask.new("demo-260514-bbbb", "/tmp/folder", "/tmp/wt", "4-execute", "/tmp/proj")
+  def fake_task(draft_pr_handoff: false)
+    FakeTask.new(
+      "demo-260514-bbbb", "/tmp/folder", "/tmp/wt", "4-execute", "/tmp/proj",
+      FakeWorkflow.new(draft_pr_handoff)
+    )
   end
 
   def test_no_rebase_short_circuits_with_cli_override_reason
@@ -53,12 +57,28 @@ class HiveCommandsRunNoRebaseTest < Minitest::Test
     assert_match(/rebase --abort/, err)
   end
 
+  def test_managed_draft_pr_handoff_never_runs_auto_rebase
+    cmd = Hive::Commands::Run.new("demo-260514-bbbb")
+    original = Hive::Rebase.singleton_class.instance_method(:perform)
+    Hive::Rebase.define_singleton_method(:perform) do |*_args|
+      raise "Hive::Rebase.perform must not rewrite a managed handoff worktree"
+    end
+    begin
+      result = cmd.send(:perform_rebase, fake_task(draft_pr_handoff: true), {})
+      assert_equal :managed_draft_pr_handoff, result.reason
+      refute result.attempted
+    ensure
+      Hive::Rebase.singleton_class.define_method(:perform, original)
+    end
+  end
+
   def test_other_skipped_states_stay_quiet
     # Disabled / no_worktree / cli_override are intentionally silent
     # — they are expected operating modes, not failures. P2 fix
     # mustn't make every skip state spammy.
     cmd = Hive::Commands::Run.new("demo-260514-bbbb")
-    [ :disabled, :no_worktree, :cli_override, :dirty_worktree, :detached_head ].each do |reason|
+    [ :disabled, :no_worktree, :cli_override, :managed_draft_pr_handoff,
+      :dirty_worktree, :detached_head ].each do |reason|
       result = Hive::Rebase::Result.skipped(reason)
       _, err = capture_io { cmd.send(:log_rebase_outcome, fake_task, result) }
       assert_equal "", err, "reason=#{reason} must stay silent (still skip-state, attempted=false)"

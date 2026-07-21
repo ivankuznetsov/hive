@@ -86,7 +86,8 @@ class WorkflowUpdateCommandTest < Minitest::Test
       FileUtils.mkdir_p(task)
       creator.send(
         :write_task_meta, task, id: 1, slug: File.basename(task), depends_on: nil,
-        workflow: raw_workflow, workflow_info: workflow_info, hive_state: store.hive_state_path
+        base_branch: nil, workflow: raw_workflow, workflow_info: workflow_info,
+        hive_state: store.hive_state_path
       )
 
       assert File.file?(store.configuration_path("demo", pinned_digest)),

@@ -170,23 +170,28 @@ module Hive
       def validate_managed_stage_contracts(workflow, diagnostics)
         last_index = workflow.stages.length - 1
         workflow.stages.each_with_index do |stage, index|
-          if stage.workspace &&
-             (stage.workspace != :worktree || stage.kind != :agent || index != last_index)
+          valid = managed_draft_pr_stage?(stage, index, last_index)
+          if stage.workspace && !valid
             diagnostics << diagnostic(
               "workspace.invalid_contract", "workflow.yml",
-              "stage #{stage.name} workspace must be worktree on the terminal agent stage"
+              "stage #{stage.name} workspace must use the complete terminal draft-PR contract"
             )
           end
 
           next unless stage.handoff
-          next if stage.handoff == :draft_pr && stage.kind == :agent &&
-                  index == last_index && stage.workspace == :worktree && stage.deliverable
+          next if valid
 
           diagnostics << diagnostic(
             "handoff.invalid_contract", "workflow.yml",
-            "stage #{stage.name} handoff must be draft_pr on a terminal worktree agent stage with an explicit deliverable"
+            "stage #{stage.name} handoff must be draft_pr on a terminal worktree agent stage using fix-report.md"
           )
         end
+      end
+
+      def managed_draft_pr_stage?(stage, index, last_index)
+        stage.workspace == :worktree && stage.handoff == :draft_pr &&
+          stage.kind == :agent && index == last_index &&
+          stage.state_file == "fix-report.md" && stage.deliverable == "fix-report.md"
       end
 
       def actor_label(slot)

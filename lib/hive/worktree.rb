@@ -2,6 +2,7 @@ require "open3"
 require "fileutils"
 require "yaml"
 require "hive/config"
+require "hive/git_ref"
 require "hive/git_ops"
 require "hive/atomic_file"
 
@@ -478,16 +479,9 @@ module Hive
     end
 
     def self.validate_branch_name!(branch_name)
-      value = branch_name.to_s.strip
-      valid = value.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._\/-]{0,240}\z/) &&
-              !value.include?("..") && !value.include?("@{") && !value.include?("//") &&
-              !value.end_with?("/", ".") &&
-              value.split("/").none? do |segment|
-                segment.empty? || segment.start_with?(".") || segment.end_with?(".lock")
-              end
-      raise WorktreeError, "invalid Git branch name #{branch_name.inspect}" unless valid
-
-      value
+      Hive::GitRef.validate_branch_name(branch_name)
+    rescue ArgumentError => e
+      raise WorktreeError, e.message
     end
 
     def self.fetch_origin_branch(project_root, branch_name, timeout_sec: FETCH_TIMEOUT_SEC)

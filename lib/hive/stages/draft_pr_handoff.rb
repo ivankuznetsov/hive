@@ -7,6 +7,7 @@ require "hive/atomic_file"
 require "hive/draft_pr_receipt"
 require "hive/gh"
 require "hive/markers"
+require "hive/managed_git"
 require "hive/secret_patterns"
 require "hive/worktree"
 
@@ -32,6 +33,7 @@ module Hive
       RECOVERABLE_REASON = Hive::DraftPrReceipt::RECOVERABLE_REASON
       QUARANTINE_REASON = Hive::DraftPrReceipt::QUARANTINE_REASON
       IDENTITY_REASON = Hive::DraftPrReceipt::IDENTITY_REASON
+      NO_FIX_CLEANUP_REASON = "no_fix_cleanup_failed".freeze
 
       Result = Data.define(:title, :body)
 
@@ -47,15 +49,13 @@ module Hive
         )
 
         if receipt.fetch("phase") == "terminal"
-          ensure_terminal_artifacts!(task, receipt)
-          return terminal_result(receipt)
+          return resume_terminal!(task, receipt)
         end
 
         case report.decision
         when :"no-fix"
           terminal!(task, receipt, root, outcome: "no-fix")
-          cleanup_no_fix_worktree(task, context)
-          { commit: "no_fix", status: :complete, outcome: "no-fix" }
+          complete_no_fix_cleanup(task, context.worktree_path, commit: "no_fix")
         when :blocked
           terminal!(
             task, receipt, root, outcome: "blocked",
@@ -84,8 +84,14 @@ module Hive
           raise IdentityError, "cannot resume a non-terminal handoff as terminal"
         end
 
+        if receipt.fetch("terminal_outcome") == "no-fix"
+          cleanup = complete_no_fix_cleanup(
+            task, receipt.fetch("worktree_path"), commit: "handoff_recovered"
+          )
+          return cleanup unless cleanup.fetch(:status) == :complete
+        end
         ensure_terminal_artifacts!(task, receipt)
-        terminal_result(receipt)
+        terminal_result(receipt, commit: "handoff_recovered")
       end
 
       def report_source_for_resume(path, expected_sha256:)
@@ -105,7 +111,13 @@ module Hive
           unless trailing.strip.empty? && %i[complete error].include?(last[:name].downcase.to_sym)
             raise IdentityError, "fix-report.md contains an unexpected controller marker"
           end
-          source = source[0...last.begin(0)].rstrip + "\n"
+          prefix = source[0...last.begin(0)]
+          candidates = [ prefix ]
+          candidates << prefix.delete_suffix("\n") if prefix.end_with?("\n")
+          source = candidates.find do |candidate|
+            ::Digest::SHA256.hexdigest(candidate) == expected_sha256
+          end
+          raise IdentityError, "fix-report.md changed after agent validation" unless source
         end
         digest = ::Digest::SHA256.hexdigest(source)
         unless digest == expected_sha256
@@ -170,7 +182,7 @@ module Hive
               pr_url: receipt.fetch("pr_url")
             }
           when "terminal"
-            return terminal_result(receipt)
+            return resume_terminal!(task, receipt)
           else
             raise IdentityError, "handoff phase #{receipt.fetch('phase').inspect} is not publishable"
           end
@@ -206,7 +218,7 @@ module Hive
         preflight_remote!(context, cfg)
         reconcile_prs!(context, receipt, cfg, allow_owned: false)
         remote_oid = Hive::Gh.remote_branch_oid(
-          context.worktree_path, context.task_branch, cfg: cfg
+          context.worktree_path, context.task_branch, cfg: cfg, managed: true
         )
         if remote_oid == receipt.fetch("head_oid")
           unless receipt["push_attempted_at"]
@@ -230,9 +242,10 @@ module Hive
           cfg: cfg
         )
         observed = Hive::Gh.remote_branch_oid(
-          context.worktree_path, context.task_branch, cfg: cfg
+          context.worktree_path, context.task_branch, cfg: cfg, managed: true
         )
         return record_branch_pushed!(task, receipt, root) if observed == receipt.fetch("head_oid")
+        raise IdentityError, "remote task branch moved to unfamiliar work" if observed
 
         detail = result.success? ? "exact remote OID was not observable" : "ordinary non-force push failed"
         raise RecoverableError, detail
@@ -364,14 +377,18 @@ module Hive
       private_class_method :verify_observed_pr!
 
       def assert_remote_unowned!(context, receipt, cfg)
-        remote = Hive::Gh.remote_branch_oid(context.worktree_path, context.task_branch, cfg: cfg)
+        remote = Hive::Gh.remote_branch_oid(
+          context.worktree_path, context.task_branch, cfg: cfg, managed: true
+        )
         raise IdentityError, "task branch already exists remotely without controller intent" if remote
         reconcile_prs!(context, receipt, cfg, allow_owned: false)
       end
       private_class_method :assert_remote_unowned!
 
       def assert_remote_head!(context, receipt, cfg)
-        remote = Hive::Gh.remote_branch_oid(context.worktree_path, context.task_branch, cfg: cfg)
+        remote = Hive::Gh.remote_branch_oid(
+          context.worktree_path, context.task_branch, cfg: cfg, managed: true
+        )
         return if remote == receipt.fetch("head_oid")
 
         raise IdentityError, "remote task branch no longer matches the scanned head"
@@ -384,12 +401,12 @@ module Hive
         rescue Hive::GhError
           raise RecoverableError, "GitHub authentication is unavailable for draft-PR handoff"
         end
-        identity = Hive::Gh.repository_identity(context.worktree_path, cfg: cfg)
+        identity = Hive::Gh.repository_identity(context.worktree_path, cfg: cfg, managed: true)
         observed = "#{identity.fetch('host').downcase}/#{identity.fetch('repository').downcase}"
         raise IdentityError, "origin push repository changed after agent execution" unless observed == context.repository
 
-        fetch_out, fetch_err, fetch_status = Hive::Gh.capture3(
-          "git", "-C", context.worktree_path, "remote", "get-url", "--all", "origin", cfg: cfg
+        fetch_out, fetch_err, fetch_status = Hive::ManagedGit.capture3(
+          context.worktree_path, "remote", "get-url", "--all", "origin"
         )
         raise IdentityError, "origin fetch repository is unavailable" unless fetch_status.success?
         urls = fetch_out.lines.map(&:strip).reject(&:empty?)
@@ -399,7 +416,9 @@ module Hive
         raise IdentityError, "origin fetch repository changed after agent execution" unless fetch_repo == context.repository
 
         begin
-          base = Hive::Gh.remote_branch_oid(context.worktree_path, context.base_branch, cfg: cfg)
+          base = Hive::Gh.remote_branch_oid(
+            context.worktree_path, context.base_branch, cfg: cfg, managed: true
+          )
         rescue Hive::GhError
           raise RecoverableError, "recorded base branch could not be observed remotely"
         end
@@ -416,8 +435,8 @@ module Hive
         raise IdentityError, "worktree HEAD changed after publication scan" unless head == expected_head
         status = git!(context.worktree_path, "status", "--porcelain=v1", "--untracked-files=all")
         raise IdentityError, "worktree became dirty after agent validation" unless status.empty?
-        _out, _err, ancestry = Open3.capture3(
-          "git", "-C", context.worktree_path, "merge-base", "--is-ancestor", context.base_oid, head
+        _out, _err, ancestry = Hive::ManagedGit.capture3(
+          context.worktree_path, "merge-base", "--is-ancestor", context.base_oid, head
         )
         raise IdentityError, "worktree head is no longer descended from recorded base" unless ancestry.success?
       end
@@ -583,22 +602,55 @@ module Hive
       end
       private_class_method :terminal!
 
-      def terminal_result(receipt)
+      def terminal_result(receipt, commit: nil)
         case receipt.fetch("terminal_outcome")
         when "pr-opened"
-          { commit: nil, status: :complete, outcome: "pr-opened", pr_url: receipt.fetch("pr_url") }
+          { commit: commit, status: :complete, outcome: "pr-opened", pr_url: receipt.fetch("pr_url") }
         when "no-fix"
-          { commit: nil, status: :complete, outcome: "no-fix" }
+          { commit: commit, status: :complete, outcome: "no-fix" }
         else
-          { commit: nil, status: :error, outcome: "blocked" }
+          { commit: commit, status: :error, outcome: "blocked" }
         end
       end
       private_class_method :terminal_result
 
-      def cleanup_no_fix_worktree(task, context)
-        Hive::Worktree.new(task.project_root, task.slug).remove!(path: context.worktree_path)
-      rescue Hive::WorktreeError => e
-        warn "hive: clean no-fix worktree cleanup deferred (#{e.class})"
+      def complete_no_fix_cleanup(task, path, commit:)
+        cleanup_no_fix_worktree(task, path)
+        { commit: commit, status: :complete, outcome: "no-fix" }
+      rescue Hive::WorktreeError
+        marker_error!(
+          task, NO_FIX_CLEANUP_REASON,
+          "The clean no-fix worktree could not be removed; run the task again to retry cleanup."
+        )
+        { commit: "no_fix_cleanup_failed", status: :error, outcome: "no-fix" }
+      end
+      private_class_method :complete_no_fix_cleanup
+
+      def cleanup_no_fix_worktree(task, path)
+        target = File.expand_path(path)
+        out, err, status = Hive::ManagedGit.capture3(
+          task.project_root, "worktree", "list", "--porcelain"
+        )
+        unless status.success?
+          detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
+          raise Hive::WorktreeError, "git worktree list failed: #{detail[0, 200]}"
+        end
+        registered = out.lines.filter_map do |line|
+          File.expand_path(line.delete_prefix("worktree ").strip) if line.start_with?("worktree ")
+        end
+        return :absent unless registered.include?(target) || File.exist?(target)
+
+        unless registered.include?(target)
+          raise Hive::WorktreeError, "no-fix worktree path is not registered"
+        end
+
+        remove_out, remove_err, remove_status = Hive::ManagedGit.capture3(
+          task.project_root, "worktree", "remove", target
+        )
+        return :removed if remove_status.success?
+
+        detail = remove_err.to_s.strip.empty? ? remove_out.to_s.strip : remove_err.to_s.strip
+        raise Hive::WorktreeError, "git worktree remove failed: #{detail[0, 200]}"
       end
       private_class_method :cleanup_no_fix_worktree
 
@@ -618,6 +670,7 @@ module Hive
             marker.name == :complete && marker.attrs["outcome"] == "no-fix"
         when "blocked"
           reason = receipt["error_reason"] || IDENTITY_REASON
+          redact_quarantined_report!(task) if reason == QUARANTINE_REASON
           marker = Hive::Markers.current(path)
           marker_error!(task, reason, "Draft-PR handoff is blocked; inspect preserved local state.") unless
             marker.name == :error && marker.attrs["reason"] == reason
@@ -648,10 +701,9 @@ module Hive
         redacted = Hive::SecretPatterns.redact(source)
         redacted = redact_sensitive_identifiers(redacted)
         Hive::AtomicFile.write(path, redacted, mode: 0o600)
-      rescue SystemCallError, IOError
-        # Marker text remains redacted even when the untrusted report cannot be
-        # rewritten; the quarantined worktree is never published or auto-run.
-        nil
+      rescue SystemCallError, IOError => e
+        raise Hive::StageError,
+              "quarantined fix-report.md could not be rewritten safely: #{e.class}"
       end
       private_class_method :redact_quarantined_report!
 
@@ -708,7 +760,7 @@ module Hive
       private_class_method :write_pr_metadata!
 
       def git!(path, *args)
-        out, err, status = Open3.capture3("git", "-C", path, *args)
+        out, err, status = Hive::ManagedGit.capture3(path, *args)
         return out if status.success?
 
         detail = err.to_s.strip
@@ -721,7 +773,7 @@ module Hive
         out, err, status, overflow = if max_bytes
           capture_git_binary(path, args, max_bytes)
         else
-          [ *Open3.capture3("git", "-C", path, *args, binmode: true), false ]
+          [ *Hive::ManagedGit.capture3(path, *args, binmode: true), false ]
         end
         if overflow
           raise QuarantineError, "git #{args.first} output exceeds #{max_bytes} bytes"
@@ -740,7 +792,7 @@ module Hive
         err = String.new(capacity: MAX_GIT_ERROR_BYTES, encoding: Encoding::BINARY)
         overflow = false
         status = nil
-        Open3.popen3("git", "-C", path, *args, pgroup: true) do |stdin, stdout, stderr, wait|
+        Hive::ManagedGit.popen3(path, *args, pgroup: true) do |stdin, stdout, stderr, wait|
           stdin.close
           stdout.binmode
           stderr.binmode

@@ -156,9 +156,9 @@ module Hive
                 "stage #{stage.name.inspect} handoff: draft_pr requires workspace: worktree"
               )
             end
-            unless stage.deliverable
+            unless stage.deliverable == "fix-report.md" && stage.state_file == "fix-report.md"
               raise descriptor_error(
-                "stage #{stage.name.inspect} handoff: draft_pr requires an explicit deliverable"
+                "stage #{stage.name.inspect} handoff: draft_pr requires state_file and deliverable fix-report.md"
               )
             end
           end
@@ -170,10 +170,15 @@ module Hive
               "stage #{stage.name.inspect} workspace is only valid on an agent stage"
             )
           end
-          next if index == last_index
+          unless index == last_index
+            raise descriptor_error(
+              "stage #{stage.name.inspect} workspace is only valid on the last stage"
+            )
+          end
+          next if stage.handoff == :draft_pr
 
           raise descriptor_error(
-            "stage #{stage.name.inspect} workspace is only valid on the last stage"
+            "stage #{stage.name.inspect} workspace: worktree requires handoff: draft_pr"
           )
         end
       end

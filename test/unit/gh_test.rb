@@ -34,6 +34,16 @@ class GhUnitTest < Minitest::Test
 
   # --- with_network_timeout --------------------------------------------
 
+  def test_remote_branch_validation_matches_worktree_contract
+    %w[feature//nested feature/.hidden feature/locked.lock feature@{upstream}].each do |branch|
+      error = assert_raises(Hive::GhError) do
+        Hive::Gh.send(:validated_branch_name, branch)
+      end
+      assert_match(/branch name is invalid/, error.message)
+    end
+    assert_equal "feature/nested", Hive::Gh.send(:validated_branch_name, " feature/nested ")
+  end
+
   def test_with_network_timeout_raises_typed_error_on_timeout
     err = assert_raises(Hive::GhError) do
       Hive::Gh.with_network_timeout do
@@ -552,16 +562,30 @@ def test_push_exact_oid_names_immutable_source_and_never_forces
   captured = nil
   ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
   oid = "a" * 40
-  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
-    captured = cmd
+  with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |path, *args, **_kwargs|
+    captured = [ path, *args ]
     [ "", "", ok ]
   }) do
     result = Hive::Gh.push_exact_oid("/tmp/wt", oid, "feature")
     assert result.success?
   end
 
-  assert_equal [ "git", "-C", "/tmp/wt", "push", "origin", "#{oid}:refs/heads/feature" ], captured
+  assert_equal [ "/tmp/wt", "push", "origin", "#{oid}:refs/heads/feature" ], captured
   refute captured.any? { |arg| arg.include?("force") }
+end
+
+def test_managed_remote_branch_lookup_uses_hardened_git_boundary
+  captured = nil
+  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |path, *args, **_kwargs|
+    captured = [ path, *args ]
+    [ "#{'a' * 40}\trefs/heads/feature\n", "", ok ]
+  }) do
+    oid = Hive::Gh.remote_branch_oid("/tmp/wt", "feature", managed: true)
+    assert_equal "a" * 40, oid
+  end
+
+  assert_equal [ "/tmp/wt", "ls-remote", "--heads", "origin", "refs/heads/feature" ], captured
 end
 
 def test_create_draft_pr_uses_explicit_args_and_always_removes_body_tempfile

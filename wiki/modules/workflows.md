@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/workflow_package/
 created: 2026-04-26
-updated: 2026-07-19
+updated: 2026-07-21
 tags: [module, workflow, verbs, selection, honeycomb, registry]
 ---
 
@@ -42,6 +42,11 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
 - `instruction:` paths are resolved relative to the descriptor directory and stored on the stage as absolute paths.
 - `permissions:` values are validated through `Hive::PermissionScope` at load time and later passed to the generic agent runner as the explicit permission spec.
 - the last stage may be inert, agent, or council. Active terminal stages require both `COMPLETE` and a non-empty deliverable before `TaskAction` classifies them as archived.
+- `workspace: worktree` plus `handoff: draft_pr` is one closed terminal-agent
+  contract. Both fields must appear together and both `state_file` and
+  `deliverable` must equal task-root `fix-report.md`. Parser and managed-package
+  validation reject every partial or alternate shape, including workflows
+  constructed directly in Ruby rather than parsed from YAML.
 
 `Hive::Workflows::Loader` discovers project descriptors, and `Hive::Workflows::Project.load!(project_root, config: nil)` is the idempotent boundary call. Callers that already resolved the project config may pass it so descriptor discovery does not parse the same file again; legacy callers keep the existing self-loading behavior. It swaps the active project overlay in `Hive::Workflows::Registry`, rejects collisions with built-in/runtime ids, and resets the memoized cross-workflow stage unions (`all_stage_dirs`, `all_stage_names`, `all_terminal_stage_dirs`). `Task`, `WorkflowSelection`, `init`, `new`, `status`, `drop`, and stage-filtered resolver paths call it before resolving workflow ids or stage refs.
 

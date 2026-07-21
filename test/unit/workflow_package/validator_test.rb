@@ -237,6 +237,24 @@ class WorkflowPackageValidatorTest < Minitest::Test
             workspace: :worktree, handoff: :draft_pr
           )
         ]
+      ),
+      Hive::Workflow.new(
+        id: :demo,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "fix", index: 1, state_file: "fix-report.md", kind: :agent,
+            deliverable: "fix-report.md", workspace: :worktree
+          )
+        ]
+      ),
+      Hive::Workflow.new(
+        id: :demo,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "fix", index: 1, state_file: "report.md", kind: :agent,
+            deliverable: "report.md", workspace: :worktree, handoff: :draft_pr
+          )
+        ]
       )
     ]
     validator = Hive::WorkflowPackage::Validator.new(
@@ -250,7 +268,8 @@ class WorkflowPackageValidatorTest < Minitest::Test
     end
 
     assert_includes rules, "workspace.invalid_contract"
-    assert_operator rules.count("handoff.invalid_contract"), :>=, 2
+    assert_operator rules.count("workspace.invalid_contract"), :>=, 2
+    assert_operator rules.count("handoff.invalid_contract"), :>=, 3
   end
 
   def test_managed_worktree_handoff_still_rejects_embedded_execution_identity

@@ -298,13 +298,20 @@ module Hive
             # IO#each_line is the boundary buffer: provider writes can split a
             # credential across arbitrary stdout/stderr chunks, but both
             # streams share this pipe and are assembled before any bytes reach
-            # the durable log. Redact that assembled record first.
-            safe_line = Hive::SecretPatterns.redact(line)
-            log.write("[stream] #{Time.now.utc.iso8601} #{safe_line}")
-            log.write("\n") unless line.end_with?("\n")
-            log.flush
+            # the durable log. Structured message events are different: one
+            # logical message can span multiple newline-delimited JSON events,
+            # so per-line regex redaction cannot safely retain their payloads.
             json = parse_json_line(line)
-            if json && (message = Hive::Agent::MessageExtractor.extract(json))
+            message = json && Hive::Agent::MessageExtractor.extract(json)
+            safe_line = if message
+              "[structured message omitted type=#{json.fetch('type', 'unknown')}]\n"
+            else
+              Hive::SecretPatterns.redact(line)
+            end
+            log.write("[stream] #{Time.now.utc.iso8601} #{safe_line}")
+            log.write("\n") unless safe_line.end_with?("\n")
+            log.flush
+            if message
               if Hive::Agent::MessageExtractor.streaming_text_event?(json)
                 final_message = +"" unless streaming_text
                 final_message << message

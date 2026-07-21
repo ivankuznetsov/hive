@@ -1,4 +1,4 @@
-require "open3"
+require "hive/managed_git"
 require "hive/markers"
 
 module Hive
@@ -94,8 +94,8 @@ module Hive
                 "agent worktree is on branch #{branch.inspect}; expected #{context.task_branch.inspect}"
         end
 
-        ancestry_out, ancestry_err, ancestry_status = Open3.capture3(
-          "git", "-C", path, "merge-base", "--is-ancestor", context.base_oid, "HEAD"
+        ancestry_out, ancestry_err, ancestry_status = Hive::ManagedGit.capture3(
+          path, "merge-base", "--is-ancestor", context.base_oid, "HEAD"
         )
         unless ancestry_status.success?
           detail = ancestry_err.to_s.strip
@@ -213,7 +213,7 @@ module Hive
       private_class_method :label_for
 
       def git!(path, *args)
-        out, err, status = Open3.capture3("git", "-C", path, *args)
+        out, err, status = Hive::ManagedGit.capture3(path, *args)
         return out if status.success?
 
         detail = err.to_s.strip

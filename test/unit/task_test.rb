@@ -455,7 +455,7 @@ class TaskTest < Minitest::Test
       assert_nil task.display_name
       assert_nil task.depends_on
       assert_equal "add-foo", task.display_label
-      assert_match(/depends_on, workflow dropped/, err)
+      assert_match(/depends_on, workflow, base_branch dropped/, err)
     end
   end
 
@@ -465,6 +465,21 @@ class TaskTest < Minitest::Test
       FileUtils.mkdir_p(folder)
       task = Hive::Task.new(folder)
       assert_nil task.worktree_path
+    end
+  end
+
+  def test_worktree_path_uses_explicit_pointer_for_low_generic_stages
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-inbox", "add-foo")
+      FileUtils.mkdir_p(folder)
+      File.write(
+        File.join(folder, "worktree.yml"),
+        { "path" => "/some/where/add-foo", "branch" => "add-foo" }.to_yaml
+      )
+
+      task = Hive::Task.new(folder)
+
+      assert_equal "/some/where/add-foo", task.worktree_path
     end
   end
 

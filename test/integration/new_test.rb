@@ -515,8 +515,8 @@ class NewTest < Minitest::Test
       stages: [
         Hive::Workflow::Stage.new(name: "inbox", index: 1, state_file: "request.md", kind: :inert),
         Hive::Workflow::Stage.new(
-          name: "fix", index: 2, state_file: "report.md", kind: :agent,
-          workspace: :worktree, handoff: :draft_pr, deliverable: "report.md"
+          name: "fix", index: 2, state_file: "fix-report.md", kind: :agent,
+          workspace: :worktree, handoff: :draft_pr, deliverable: "fix-report.md"
         )
       ]
     )

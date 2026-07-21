@@ -472,6 +472,12 @@ no credentials, report prose, logs, or remote error payloads. Existing
 non-nil fields are immutable; malformed, contradictory, skipped, or regressed
 phases fail closed.
 
+An explicit `worktree.yml` pointer is visible to status and recovery at every
+workflow stage, including generic stage indexes below coding's `4-execute`;
+the stage-index guard now applies only to deriving an absent legacy coding
+pointer. `hive run` also skips automatic rebase for any workflow with this
+managed handoff, preserving the receipt's exact validated base/head identity.
+
 `push_intent` and `pr_create_intent` distinguish a crash before a mutation from
 an ambiguous crash after an attempt. Resume always reconciles first: a proven
 remote result advances without repeating the mutation, while an attempted but
@@ -481,6 +487,13 @@ daemon-dispatchable. Quarantined secret/binary/LFS state and contradictory
 repository/branch/PR identity terminate as non-retryable blocked outcomes.
 Verified `pr-opened` writes the existing `pr.md` frontmatter shape and a
 controller-owned `COMPLETE outcome=pr-opened pr_url=...` marker.
+Terminal replay returns a durable `handoff_recovered` action, repairs missing
+PR/marker artifacts without repeating remote mutation, retries a failed
+clean-`no-fix` worktree removal until the registered path is absent, and
+retries quarantine redaction before acknowledging the blocked terminal state.
+Recoverable report markers preserve the exact pre-marker bytes for digest
+verification, including reports without a final newline or with trailing
+whitespace.
 
 ## Review artefacts
 

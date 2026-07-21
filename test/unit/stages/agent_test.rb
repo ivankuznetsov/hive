@@ -223,6 +223,9 @@ class StagesAgentTest < Minitest::Test
               assert_includes call.fetch(:prompt), File.join(task.folder, "fix-report.md")
               assert_includes call.fetch(:prompt), "<#{tag} content_type=\"prior_artifacts\">"
               assert_includes call.fetch(:prompt), "Fix the nil response."
+              assert_includes call.fetch(:prompt), "Trusted repository identity: github.com/acme/widgets"
+              assert_includes call.fetch(:prompt), "Current task branch: #{task.slug}"
+              assert_includes call.fetch(:prompt), "Recorded base: master at #{result.fetch(:worktree_context).base_oid}"
               assert_includes call.fetch(:prompt), "Do not run `gh`"
               refute_includes call.fetch(:prompt), "<!-- COMPLETE -->"
             end
@@ -266,8 +269,10 @@ class StagesAgentTest < Minitest::Test
           result = Hive::Stages::AgentWorktree.run!(task, {})
           assert_equal :error, result.fetch(:status)
           assert_equal "provider quota", result.fetch(:error_message)
-          refute File.exist?(File.join(task.folder, "fix-report.md")),
-                 "a stale report must be removed before a failed fresh spawn"
+          assert_equal "managed_agent_failed", result.fetch(:commit)
+          marker = Hive::Markers.current(File.join(task.folder, "fix-report.md"))
+          assert_equal :error, marker.name
+          assert_equal "managed_agent_failed", marker.attrs.fetch("reason")
         end
       end
 
@@ -278,7 +283,8 @@ class StagesAgentTest < Minitest::Test
           ->(_task, **_kwargs) { { status: :timeout, timed_out: true } }
         ) do
           result = Hive::Stages::AgentWorktree.run!(task, {})
-          assert_equal :timeout, result.fetch(:status)
+          assert_equal :error, result.fetch(:status)
+          assert_equal "timeout", result.fetch(:commit)
           refute result.key?(:report)
         end
         with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(_task, **_kwargs) { nil }) do
@@ -289,8 +295,9 @@ class StagesAgentTest < Minitest::Test
           Hive::Stages::Base, :spawn_agent,
           ->(_task, **_kwargs) { raise IOError, "stream failed" }
         ) do
-          error = assert_raises(IOError) { Hive::Stages::AgentWorktree.run!(task, {}) }
-          assert_equal "stream failed", error.message
+          error_result = Hive::Stages::AgentWorktree.run!(task, {})
+          assert_equal :error, error_result.fetch(:status)
+          assert_equal "managed_agent_failed", error_result.fetch(:commit)
         end
       end
     end
@@ -312,10 +319,59 @@ class StagesAgentTest < Minitest::Test
 
         with_fake_github_controller do
           with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
-            error = assert_raises(Hive::StageError) do
-              Hive::Stages::AgentWorktree.run!(task, {})
+            result = Hive::Stages::AgentWorktree.run!(task, {})
+            assert_equal :error, result.fetch(:status)
+            assert_equal "managed_agent_failed", result.fetch(:commit)
+            marker = Hive::Markers.current(File.join(task.folder, "fix-report.md"))
+            assert_equal "Hive::StageError", marker.attrs.fetch("exception_class")
+          end
+        end
+      end
+    end
+  end
+
+  def test_worktree_stage_rejects_git_configuration_tampering
+    with_draft_pr_task do |task, _worktree_root|
+      run_command = method(:run!)
+      spawn = lambda do |_task, **kwargs|
+        run_command.call(
+          "git", "-C", kwargs.fetch(:cwd), "config", "core.hooksPath", "/tmp/agent-hooks"
+        )
+        { status: :ok, exit_code: 0 }
+      end
+
+      with_fake_github_controller do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          result = Hive::Stages::AgentWorktree.run!(task, {})
+
+          assert_equal :error, result.fetch(:status)
+          assert_equal "managed_agent_failed", result.fetch(:commit)
+          assert_equal "Hive::StageError", result.fetch(:error)
+          marker = Hive::Markers.current(File.join(task.folder, "fix-report.md"))
+          assert_equal "managed_agent_failed", marker.attrs.fetch("reason")
+        end
+      end
+    end
+  end
+
+  def test_worktree_stage_rejects_global_git_configuration_tampering
+    with_draft_pr_task do |task, _worktree_root|
+      with_tmp_dir do |agent_home|
+        run_command = method(:run!)
+        spawn = lambda do |_task, **_kwargs|
+          run_command.call("git", "config", "--global", "credential.helper", "attacker")
+          { status: :ok, exit_code: 0 }
+        end
+
+        with_env("HOME" => agent_home) do
+          with_fake_github_controller do
+            with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+              result = Hive::Stages::AgentWorktree.run!(task, {})
+
+              assert_equal :error, result.fetch(:status)
+              assert_equal "managed_agent_failed", result.fetch(:commit)
+              assert_equal "Hive::StageError", result.fetch(:error)
             end
-            assert_includes error.message, protected_name
           end
         end
       end
@@ -341,10 +397,10 @@ class StagesAgentTest < Minitest::Test
 
       with_fake_github_controller do
         with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
-          error = assert_raises(Hive::StageError) do
-            Hive::Stages::AgentWorktree.run!(task, {})
-          end
-          assert_includes error.message, "not a symlink"
+          result = Hive::Stages::AgentWorktree.run!(task, {})
+          assert_equal :error, result.fetch(:status)
+          assert_equal "Hive::StageError", result.fetch(:error)
+          refute File.symlink?(File.join(task.folder, "fix-report.md"))
         end
       end
     end
@@ -359,11 +415,9 @@ class StagesAgentTest < Minitest::Test
 
       with_fake_github_controller do
         with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
-          error = assert_raises(Hive::StageError) do
-            Hive::Stages::AgentWorktree.run!(task, {})
-          end
-          assert_includes error.message, "pr.md"
-          refute_includes error.message, "stream failed"
+          result = Hive::Stages::AgentWorktree.run!(task, {})
+          assert_equal :error, result.fetch(:status)
+          assert_equal "Hive::StageError", result.fetch(:error)
         end
       end
     end
@@ -383,10 +437,9 @@ class StagesAgentTest < Minitest::Test
 
       with_replaced_singleton_method(Hive::Stages::AgentWorktree, :prepare!, ->(_task, _cfg) { context }) do
         with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { calls += 1 }) do
-          error = assert_raises(Hive::StageError) do
-            Hive::Stages::AgentWorktree.run!(task, {})
-          end
-          assert_includes error.message, "meta.yml"
+          result = Hive::Stages::AgentWorktree.run!(task, {})
+          assert_equal :error, result.fetch(:status)
+          assert_equal "Hive::StageError", result.fetch(:error)
         end
       end
       assert_equal 0, calls
@@ -439,9 +492,9 @@ class StagesAgentTest < Minitest::Test
       calls = 0
       with_replaced_singleton_method(Hive::Stages::AgentWorktree, :prepare!, ->(_task, _cfg) { context }) do
         with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { calls += 1 }) do
-          assert_raises(Hive::StageError) do
-            Hive::Stages::AgentWorktree.run!(task, {})
-          end
+          result = Hive::Stages::AgentWorktree.run!(task, {})
+          assert_equal :error, result.fetch(:status)
+          assert_equal "Hive::StageError", result.fetch(:error)
         end
       end
       assert_equal 0, calls

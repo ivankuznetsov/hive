@@ -110,4 +110,16 @@ class ProtectedFilesTest < Minitest::Test
       assert_equal [ "plan.md" ], Hive::ProtectedFiles.diff(before, after)
     end
   end
+
+  def test_snapshot_paths_detects_labeled_absolute_control_file_changes
+    with_tmp_dir do |dir|
+      config = File.join(dir, "config")
+      File.write(config, "safe\n")
+      before = Hive::ProtectedFiles.snapshot_paths("repository config" => config)
+      File.write(config, "unsafe\n")
+      after = Hive::ProtectedFiles.snapshot_paths("repository config" => config)
+
+      assert_equal [ "repository config" ], Hive::ProtectedFiles.diff(before, after)
+    end
+  end
 end

@@ -1,7 +1,7 @@
 ---
 title: Hive::Worktree
 type: module
-source: lib/hive/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/stages/agent_worktree.rb
+source: lib/hive/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/managed_git.rb, lib/hive/stages/agent_worktree.rb
 created: 2026-04-25
 updated: 2026-07-21
 tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
@@ -81,6 +81,16 @@ task-root `fix-report.md`, and validates the reported decision against the
 actual branch, base ancestry, cleanliness, and descendant commit count. Remote
 push/PR reconciliation is a later controller phase; the agent report alone has
 no publication or terminal-marker authority.
+
+The prompt includes the controller-recorded repository, task branch, base
+branch, and base OID as trusted identity context. Across the spawn Hive hashes
+the task-owned control files plus the worktree `.git` pointer and repository,
+worktree, global, XDG, and configured Git config paths. Any change replaces
+untrusted report output with a private controller `ERROR
+reason=managed_agent_failed` marker. Every subsequent Git read, scan, cleanup,
+remote observation, and exact push uses `Hive::ManagedGit`, which ignores
+global/system config and disables hooks, fsmonitor, external diff/textconv,
+custom transports, and arbitrary credential/SSH helpers.
 
 ### `freshest_base(default_branch)` — origin-first base resolution
 
@@ -178,6 +188,10 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
   failure, exact pointer/receipt creation, matching resume, incomplete-state
   preservation, exact-cwd one-agent execution, protected-state enforcement,
   and runtime/report outcome separation.
+- `test/unit/managed_git_test.rb` — proves agent-selected fsmonitor and
+  `.gitattributes` external-diff helpers execute under ordinary Git but never
+  at the managed controller boundary; also pins environment and command
+  allowlists.
 - `test/unit/stages/agent_report_test.rb` — strict evidence grammar plus actual
   branch, ancestry, cleanliness, and commit-count validation.
 

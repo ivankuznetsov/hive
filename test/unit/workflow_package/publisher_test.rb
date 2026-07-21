@@ -108,17 +108,17 @@ class WorkflowPackagePublisherTest < Minitest::Test
     end
   end
 
-  def test_publish_delegates_to_the_pull_request_client
+  def test_publish_delegates_to_the_registry_submission
     submitted = nil
-    pull_request = Object.new
-    pull_request.define_singleton_method(:open) { |package| submitted = package; "https://example.test/pr/9" }
+    submission = Object.new
+    submission.define_singleton_method(:submit) { |package| submitted = package; "submitted" }
     package = Package.new(name: "demo", version: "1.2.3", root: Dir.pwd,
                           manifest_digest: "a" * 64, warnings: [])
     instance = Hive::WorkflowPackage::Publisher.new(
-      "demo", project_root: Dir.pwd, version: "1.2.3", pull_request: pull_request
+      "demo", project_root: Dir.pwd, version: "1.2.3", submission: submission
     )
 
-    assert_equal "https://example.test/pr/9", instance.publish(package)
+    assert_equal "submitted", instance.publish(package)
     assert_same package, submitted
   end
 

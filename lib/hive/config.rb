@@ -18,6 +18,10 @@ module Hive
       "worktree_root" => nil,
       "default_branch" => nil,
       "default_workflow" => "coding",
+      "honeycomb" => {
+        "repository" => "ivankuznetsov/honeycomb",
+        "base_branch" => "main"
+      },
       "dependency_gate_stage" => "8-finalize", # coding-scoped: default dependency gate is the coding finalize stage
       # Durable task-attempt timers are top-level because a detached wrapper
       # enforces them even when no daemon exists. Tests may shorten all four.

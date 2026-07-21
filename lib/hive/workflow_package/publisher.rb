@@ -5,11 +5,13 @@ require "tempfile"
 require "tmpdir"
 require "yaml"
 require "hive/gh"
+require "hive/config"
 require "hive/workflow_package/authoring_metadata"
 require "hive/workflow_package/authoring_lint"
 require "hive/workflow_package/manifest"
 require "hive/workflow_package/registry_manifest"
 require "hive/workflow_package/registry_manifest_builder"
+require "hive/workflow_package/registry_submission"
 require "hive/workflow_package/runtime_policy"
 require "hive/workflow_package/source_snapshot"
 require "hive/workflow_package/validator"
@@ -44,11 +46,12 @@ module Hive
         def registry_path = "packages/#{name}/#{version}"
       end
 
-      def initialize(name, project_root:, version:, pull_request: nil)
+      def initialize(name, project_root:, version:, submission: nil, config: nil)
         @name = name.to_s
         @project_root = File.expand_path(project_root)
         @version = version.to_s
-        @pull_request = pull_request || RegistryPullRequest.new
+        @submission = submission
+        @config = config
       end
 
       def package(destination:)
@@ -83,7 +86,13 @@ module Hive
       end
 
       def publish(package)
-        @pull_request.open(package)
+        config = @config || Hive::Config.load(@project_root)
+        registry = config.fetch("honeycomb", {})
+        submission = @submission || RegistrySubmission.new(
+          registry: registry.fetch("repository", OFFICIAL_REPOSITORY),
+          base_branch: registry.fetch("base_branch", "main")
+        )
+        submission.submit(package)
       end
 
       private

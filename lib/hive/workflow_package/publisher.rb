@@ -5,8 +5,12 @@ require "tempfile"
 require "tmpdir"
 require "yaml"
 require "hive/gh"
+require "hive/workflow_package/authoring_metadata"
 require "hive/workflow_package/manifest"
+require "hive/workflow_package/registry_manifest"
+require "hive/workflow_package/registry_manifest_builder"
 require "hive/workflow_package/runtime_policy"
+require "hive/workflow_package/source_snapshot"
 require "hive/workflow_package/validator"
 require "hive/workflows/descriptor_parser"
 require "hive/workflows/loader"
@@ -19,9 +23,25 @@ module Hive
       OFFICIAL_REPOSITORY = "ivankuznetsov/honeycomb".freeze
       METADATA_FILE = "honeycomb.yml".freeze
       README_FILE = "README.md".freeze
-      PLACEHOLDERS = [ "your name", "describe what this workflow does" ].freeze
+      class Package < Data.define(
+        :name, :version, :root, :package_digest, :release_digest, :warnings,
+        :lint_contract, :findings
+      )
+        def initialize(name:, version:, root:, package_digest: nil, release_digest: nil,
+                       manifest_digest: nil, warnings: [], lint_contract: nil, findings: [])
+          release_digest ||= manifest_digest
+          package_digest ||= manifest_digest
+          super(
+            name: name, version: version, root: root,
+            package_digest: package_digest, release_digest: release_digest,
+            warnings: warnings.freeze, lint_contract: lint_contract,
+            findings: findings.freeze
+          )
+        end
 
-      Package = Data.define(:name, :version, :root, :manifest_digest, :warnings)
+        def manifest_digest = release_digest
+        def registry_path = "packages/#{name}/#{version}"
+      end
 
       def initialize(name, project_root:, version:, pull_request: nil)
         @name = name.to_s
@@ -34,33 +54,28 @@ module Hive
         validate_identity!
         destination = File.expand_path(destination)
         ensure_empty_destination!(destination)
-        descriptor = load_descriptor
         metadata = load_metadata
-        validate_authored_metadata!(metadata)
-
-        FileUtils.mkdir_p(destination)
-        rewritten, instructions = rewrite_instructions(descriptor)
-        File.binwrite(File.join(destination, "workflow.yml"), YAML.dump(rewritten))
-        copy_authored_file(readme_path, File.join(destination, README_FILE), label: README_FILE)
-        copy_authored_file(metadata_path, File.join(destination, METADATA_FILE), label: METADATA_FILE)
-        copy_instructions(instructions, destination)
-
-        manifest = Manifest.build(
-          destination,
-          metadata: metadata.merge("name" => @name, "version" => @version, "descriptor" => "workflow.yml")
+        snapshot = SourceSnapshot.capture(
+          name: @name, workflows_dir: workflows_dir, descriptor_path: descriptor_path,
+          authored_dir: authored_dir, metadata: metadata
         )
-        File.binwrite(File.join(destination, Manifest::FILE_NAME), manifest.bytes)
-        result = Validator.validate!(destination, expected_name: @name, expected_manifest_digest: manifest.digest)
-        admit_runtime!(result.workflow, manifest.data.fetch("permissions"))
+        AuthoringMetadata.validate_readme!(snapshot.files.fetch(README_FILE).bytes, path: README_FILE)
+        build = RegistryManifestBuilder.build!(
+          destination: destination, name: @name, version: @version,
+          metadata: metadata, snapshot: snapshot
+        )
+        result = Validator.validate!(
+          destination, expected_name: @name,
+          expected_manifest_digest: build.release_digest
+        )
+        admit_runtime!(result.workflow, build.manifest.data.fetch("permissions"), package_root: destination)
         Package.new(
           name: @name, version: @version, root: destination,
-          manifest_digest: manifest.digest,
-          warnings: result.warnings.map(&:to_h).freeze
+          package_digest: build.package_digest,
+          release_digest: build.release_digest,
+          warnings: result.warnings.map(&:to_h).freeze,
+          findings: result.diagnostics.map(&:to_h).freeze
         ).freeze
-      rescue StandardError
-        FileUtils.rm_rf(destination) if destination
-        FileUtils.mkdir_p(destination) if destination
-        raise
       end
 
       def publish(package)
@@ -70,10 +85,10 @@ module Hive
       private
 
       def validate_identity!
-        unless Hive::Workflows::DescriptorParser::SAFE_SLUG.match?(@name)
-          raise Hive::ConfigError, "workflow publish requires a valid authored workflow id"
+        unless RegistryManifest::NAME.match?(@name)
+          raise Hive::ConfigError, "workflow publish id is not a valid Honeycomb registry name"
         end
-        unless Manifest::SEMVER.match?(@version)
+        unless RegistryManifest::SEMVER.match?(@version)
           raise Hive::ConfigError, "workflow publish requires --version with a semantic version such as 1.2.3"
         end
       end
@@ -106,24 +121,12 @@ module Hive
       end
 
       def load_metadata
-        value = YAML.safe_load(File.read(metadata_path), aliases: false)
-        raise Hive::ConfigError, "#{METADATA_FILE} must contain a metadata map" unless value.is_a?(Hash)
-
-        value.to_h { |key, child| [ key.to_s, child ] }
-      rescue Errno::ENOENT, Errno::EACCES, IOError
-        raise Hive::ConfigError, "workflow publish requires #{metadata_path}"
-      rescue Psych::Exception
-        raise Hive::ConfigError, "#{METADATA_FILE} is invalid YAML"
+        AuthoringMetadata.load(metadata_path)
       end
 
       def validate_authored_metadata!(metadata)
-        text = [ metadata["summary"], metadata.dig("author", "name") ].join(" ").downcase
-        if PLACEHOLDERS.any? { |placeholder| text.include?(placeholder) }
-          raise Hive::ConfigError, "edit #{METADATA_FILE} summary and author before publishing"
-        end
-        unless File.file?(readme_path) && !File.read(readme_path).strip.empty?
-          raise Hive::ConfigError, "workflow publish requires a non-empty #{readme_path}"
-        end
+        metadata || load_metadata
+        AuthoringMetadata.validate_readme!(File.binread(readme_path), path: README_FILE)
       rescue Errno::EACCES, IOError
         raise Hive::ConfigError, "workflow publish requires a readable #{readme_path}"
       end
@@ -200,13 +203,13 @@ module Hive
         end
       end
 
-      def admit_runtime!(workflow, permissions)
+      def admit_runtime!(workflow, permissions, package_root:)
         Dir.mktmpdir("hive-workflow-publish-admission-") do |root|
           task_folder = File.join(root, "task")
           FileUtils.mkdir_p(task_folder)
           RuntimePolicy.admit_workflow!(
             workflow, permissions, task_folder: task_folder,
-            policy_dir: File.join(root, "policy")
+            policy_dir: File.join(root, "policy"), package_root: package_root
           )
         end
       end

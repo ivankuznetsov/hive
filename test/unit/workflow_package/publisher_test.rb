@@ -9,18 +9,25 @@ class WorkflowPackagePublisherTest < Minitest::Test
     def success? = ok
   end
 
-  def test_packages_only_descriptor_referenced_instructions_readme_and_metadata_deterministically
+  def test_builds_only_the_canonical_immutable_version_payload_deterministically
     with_authored_workflow do |project, authored_dir|
       File.write(File.join(authored_dir, "ignored.txt"), "do not publish\n")
       manifests = 2.times.map do
         Dir.mktmpdir("publisher-test-") do |destination|
           package = publisher(project).package(destination: destination)
-          assert_equal %w[README.md honeycomb.yml instructions/work.md manifest.json workflow.yml],
+          assert_equal %w[README.md instructions/work.md manifest.yml workflow.yml],
                        Dir.glob(File.join(destination, "**", "*"), File::FNM_DOTMATCH)
                           .select { |path| File.file?(path) }
                           .map { |path| path.delete_prefix("#{destination}/") }.sort
           assert_includes File.read(File.join(destination, "workflow.yml")), "instructions/work.md"
-          File.binread(File.join(destination, "manifest.json"))
+          document = YAML.safe_load(File.binread(File.join(destination, "manifest.yml")))
+          assert_equal "honeycomb-manifest/v1", document.fetch("schema")
+          assert_equal "demo", document.fetch("name")
+          assert_equal "1.2.3", document.fetch("version")
+          assert document.fetch("files").keys.all? { |path| path.start_with?("packages/demo/1.2.3/") }
+          assert_equal package.release_digest, document.fetch("release_sha256")
+          assert_equal package.package_digest, Digest::SHA256.file(File.join(destination, "manifest.yml")).hexdigest
+          File.binread(File.join(destination, "manifest.yml"))
         end
       end
 
@@ -320,27 +327,41 @@ class WorkflowPackagePublisherTest < Minitest::Test
             kind: agent
             state_file: work.md
             instruction: ./demo/work.md
+            mapping_role: development
+            mapping_contract: demo-work-v1
             permissions: read-only
           - name: done
             kind: terminal
             state_file: done.md
       YAML
       File.write(File.join(authored, "work.md"), instruction)
-      File.write(File.join(authored, "README.md"), "# Demo\n\nA concise workflow.\n")
+      File.write(File.join(authored, "README.md"), <<~MARKDOWN)
+        # Demo
+
+        ## Behavior
+        Produces a concise result.
+        ## Prerequisites
+        Requires readable task files.
+        ## Inputs
+        Reads the task brief.
+        ## Outputs
+        Writes a concise result.
+        ## Permissions and Risks
+        Uses read-only file access.
+        ## Recovery
+        Retry from the same immutable inputs.
+      MARKDOWN
       File.write(File.join(authored, "honeycomb.yml"), <<~YAML)
-        summary: Produce a concise result
+        description: Produce a concise result
         author:
           name: Test Author
-        dependencies: {}
-        permissions:
-          tools:
-            - Read
-          deny:
-            - Bash
-          directories: []
-          commands: []
-          domains: []
-          credentials: []
+          url: https://example.test/authors/test
+        license: MIT
+        hive_min_version: #{Hive::VERSION}
+        source:
+          url: https://example.test/source/demo
+          revision: #{"a" * 40}
+        assets: []
       YAML
       yield project, authored
     end

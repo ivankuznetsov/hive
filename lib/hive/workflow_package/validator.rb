@@ -1,7 +1,9 @@
 require "digest"
 require "rubygems/version"
 require "set"
+require "yaml"
 require "hive/workflow_package/manifest"
+require "hive/workflow_package/permission_projection"
 require "hive/workflow_package/registry_manifest"
 require "hive/workflow_package/runtime_policy"
 require "hive/workflow_package/security_scanner"
@@ -155,7 +157,7 @@ module Hive
               "policy.raw_council_command", "workflow.yml", raw_command_message(slot.kind)
             )
           end
-          if actor.skill
+          if actor.skill && !registry
             diagnostics << diagnostic(
               "policy.external_skill", "workflow.yml", external_skill_message(slot.kind)
             )
@@ -235,6 +237,14 @@ module Hive
       end
 
       def validate_permission_disclosure(manifest, workflow, diagnostics)
+        expected = PermissionProjection.derive!(manifest_descriptor_hash)
+        unless manifest.permissions == expected
+          diagnostics << diagnostic(
+            "policy.disclosure_mismatch", RegistryManifest::FILE_NAME,
+            "manifest permission disclosure must exactly match the conservative actor-policy projection"
+          )
+          return
+        end
         reasons = RuntimePolicy.workflow_escalation_reasons(workflow)
         return if reasons.empty?
 
@@ -259,9 +269,11 @@ module Hive
       end
 
       def validate_hive_extension(manifest, workflow, diagnostics)
-        extension = manifest.data.fetch("x-hive", { "tools" => [], "optional_inputs" => [] })
+        extension = manifest.data.fetch(
+          "x-hive", { "tools" => [], "optional_inputs" => [], "external_skills" => [] }
+        )
         required_keys = %w[optional_inputs tools]
-        optional_keys = %w[mapping_recommendations prompt_assets]
+        optional_keys = %w[external_skills mapping_recommendations prompt_assets]
         unless extension.is_a?(Hash) && (required_keys - extension.keys).empty? &&
                (extension.keys - required_keys - optional_keys).empty?
           diagnostics << diagnostic("x-hive.invalid_shape", RegistryManifest::FILE_NAME,
@@ -274,6 +286,27 @@ module Hive
         validate_hive_inputs(extension["optional_inputs"], slots, diagnostics)
         validate_hive_mapping_recommendations(
           extension.fetch("mapping_recommendations", []), slots, diagnostics
+        )
+        validate_external_skills(extension.fetch("external_skills", []), workflow, diagnostics)
+      end
+
+      def validate_external_skills(values, workflow, diagnostics)
+        valid = values.is_a?(Array) && values.all? do |value|
+          value.is_a?(String) && value.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._:\/-]{0,127}\z/)
+        end
+        unless valid && values == values.sort.uniq
+          diagnostics << diagnostic(
+            "x-hive.invalid_external_skills", RegistryManifest::FILE_NAME,
+            "x-hive external_skills must be a sorted unique dependency-name set"
+          )
+          return
+        end
+        expected = workflow.executable_slots.filter_map { |slot| slot.actor.skill }.sort.uniq
+        return if values == expected
+
+        diagnostics << diagnostic(
+          "x-hive.external_skill_mismatch", RegistryManifest::FILE_NAME,
+          "x-hive external_skills must exactly match descriptor skill dependencies"
         )
       end
 
@@ -402,6 +435,13 @@ module Hive
         return false unless left.bytesize == right.bytesize
 
         left.bytes.zip(right.bytes).reduce(0) { |memo, (a, b)| memo | (a ^ b) }.zero?
+      end
+
+      def manifest_descriptor_hash
+        bytes = File.binread(File.join(@root, "workflow.yml"))
+        YAML.safe_load(bytes, permitted_classes: [], permitted_symbols: [], aliases: false)
+      rescue Psych::Exception, SystemCallError, IOError
+        raise Hive::ConfigError, "package workflow descriptor is unavailable for permission projection"
       end
     end
   end

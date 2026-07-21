@@ -159,6 +159,11 @@ module Hive
         label: "Needs your input",
         command: "run"
       },
+      recover_draft_pr: {
+        key: Hive::Schemas::TaskActionKind::RECOVER_DRAFT_PR,
+        label: "Retry draft PR handoff manually",
+        command: "run"
+      },
       done: {
         key: Hive::Schemas::TaskActionKind::ARCHIVED,
         label: "Archived",
@@ -326,6 +331,9 @@ module Hive
       if marker.name == :agent_working
         return ACTIONS.fetch(:error) if stale_agent_reason
         return ACTIONS.fetch(:agent_running)
+      end
+      if marker.name == :error && marker.attrs["reason"].to_s == "draft_pr_handoff_failed"
+        return ACTIONS.fetch(:recover_draft_pr)
       end
       return ACTIONS.fetch(:error) if marker.name == :error
       return ACTIONS.fetch(:manual_steering) if marker.name == :manual_steering

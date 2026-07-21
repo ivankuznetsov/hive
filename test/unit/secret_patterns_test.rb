@@ -165,6 +165,14 @@ class SecretPatternsTest < Minitest::Test
     assert_match_name("token = ghp_abcdefghijklmnopqrstuvwxyz0123456789", :github_token)
   end
 
+  def test_current_fine_grained_github_pat_is_detected_and_redacted
+    token = "github_pat_#{'AbC123_' * 8}"
+    assert_match_name("token=#{token}", :github_fine_grained_pat)
+    redacted = Hive::SecretPatterns.redact("token=#{token}")
+    refute_includes redacted, token
+    assert_includes redacted, "[REDACTED:github_fine_grained_pat]"
+  end
+
   def test_scan_returns_empty_for_blank_input
     assert_empty Hive::SecretPatterns.scan("")
     assert_empty Hive::SecretPatterns.scan(nil)

@@ -3,7 +3,7 @@ title: Hive::Gh
 type: module
 source: lib/hive/gh.rb, lib/hive/gh/repository_identity.rb
 created: 2026-06-08
-updated: 2026-07-18
+updated: 2026-07-21
 tags: [github, gh, module, pr]
 ---
 
@@ -17,6 +17,8 @@ tags: [github, gh, module, pr]
 | `push_branch(worktree_path, branch, cfg: nil, remote: "origin", ...)` | Runs `git push` and returns `PushResult(success:, stdout:, stderr:)`; supports upstream tracking plus exact expected-OID and expected-absence leases. Finalize keeps the default `-u origin` path, while architecture patrol supplies its captured URL with upstream writes disabled. |
 | `push_branch!(worktree_path, branch, cfg: nil, remote: "origin", ...)` | Hard-fail wrapper around `push_branch`; architecture patrol binds it to one already-validated URL instead of re-resolving mutable `origin`. |
 | `remote_branch_oid(worktree_path, branch, cfg: nil, remote: "origin")` | Reads one exact `refs/heads/<branch>` OID through `git ls-remote`; validates the branch/response and can query the same captured URL later used for push. |
+| `push_exact_oid(worktree_path, head_oid, branch, ...)` | Managed draft-PR-only publication: pushes `<validated-oid>:refs/heads/<branch>` with an ordinary non-force refspec. It never sets upstream state and has no force/lease mode. |
+| `create_draft_pr(..., head:, base:, title:, body:)` | Creates one PR with explicit repository, `--draft`, plain head branch, base, title, and a mode-0600 temporary `--body-file` that is removed on every exit path. The response is not publication proof; the caller must reconcile PR identity. |
 | `origin_push_url(worktree_path, cfg: nil, timeout_sec: nil)` | Reads `git remote get-url --push --all origin` and requires exactly one record. Multiple push URLs fail closed because a normal named-remote push can target all of them. Architecture patrol supplies its remaining project-step deadline. |
 | `lookup_prs_for_branch(worktree_path, branch, repository: nil, host: nil, cfg: nil)` | Runs `gh pr list --head <branch> --state all --json ...` from the worktree cwd, optionally pinned to an explicit GitHub/GHES repository. Fail-loud on CLI or JSON shape errors. |
 | `lookup_existing_pr(...)` | Returns only `OPEN` PRs from `lookup_prs_for_branch`; closed/merged PRs are excluded from the normal open-pr path. |
@@ -67,6 +69,13 @@ positives rather than masking an unvalidated shell boundary.
 
 Normal workflow commands do not treat a PR URL as sufficient proof that a task can advance. `lookup_existing_pr` intentionally ignores closed and merged PRs; `scan_pr_for_secrets` fails loud when the remote PR body cannot be fetched; and `pr_state` re-checks GitHub state immediately before the internal `hive archive --recover-merged-error-reason` path accepts an `8-finalize` `ERROR` marker. That recovery path also requires the current marker's `reason=` to exactly match the daemon-provided flag, so a stale merge-watch entry cannot advance a newer error. Ad-hoc review is similarly explicit: `pr_metadata` is number-based and repository-context-driven by `gh`; the project still comes from the current registered checkout or `--project`, not from parsing the PR URL host/path.
 
+Managed `handoff: draft_pr` stages use the narrower exact-OID APIs. The
+controller records mutation intent before each push/create attempt, observes
+the remote branch and all PR states before and after mutation, and accepts an
+OPEN draft or human-promoted OPEN PR only when repository/base/head identity
+matches the receipt. It never calls `push_branch`, force-pushes, marks a PR
+ready, edits, closes, merges, releases, publishes, or deploys.
+
 Architecture patrol strengthens that boundary for external transactions through
 `Hive::RefactorPatrol::GithubGateway`. The
 source manifest supplies repository identity plus a PR URL whose host is
@@ -96,7 +105,7 @@ generation remain owned by [[commands/refactor-patrol]]'s job aggregate.
 
 ## Tests
 
-- `test/unit/gh_test.rb` covers shared frontmatter, secret-scan, PR lookup, remote-OID/lease, repository identity, subprocess, and status APIs. The same file exercises `GithubGateway`'s created-PR proof, exact-host merged-PR detail intake, and GraphQL pagination through an injected transport, including the single-qualifier exact timestamp range used for merge catch-up.
+- `test/unit/gh_test.rb` covers shared frontmatter, secret-scan, PR lookup, remote-OID/lease, immutable exact-OID non-force push, restrictive draft-PR body tempfiles, repository identity, subprocess, and status APIs. The same file exercises `GithubGateway`'s created-PR proof, exact-host merged-PR detail intake, and GraphQL pagination through an injected transport, including the single-qualifier exact timestamp range used for merge catch-up.
 - `test/unit/gh_issue_helpers_test.rb` covers `GithubGateway`'s full paginated inventory, pull-request exclusion, exact-marker delegation, explicit host/repository issue creation, and malformed/cross-repository fail-closed behavior. `test/unit/refactor_patrol/issue_filer_test.rb` covers exact-marker precedence plus strict legacy semantic grouping, malformed historical bodies, and pairwise-ambiguous matches.
 - `test/unit/refactor_patrol/pr_opener_test.rb` pins exact absence/OID leases and pre-create trunk checks. `test/unit/refactor_patrol/action_runner_test.rb` covers the real-git crash/restart path from a durably pushed stale generation through supersession, exact old-OID replacement, one verified PR, and one mandatory review handoff.
 - `test/unit/daemon/pr_merge_watcher_test.rb`, `test/unit/daemon/dispatcher_test.rb`, and `test/integration/run_stage_action_test.rb` cover the merged-finalize-error archive path that uses `pr_state`.

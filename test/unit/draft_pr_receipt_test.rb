@@ -49,6 +49,13 @@ class DraftPrReceiptTest < Minitest::Test
       File.write(target, attributes(File.join(root, "worktrees", "fix-ui")).to_yaml)
       File.symlink(target, path)
       assert_raises(Hive::WorktreeError) { Hive::DraftPrReceipt.read(task, worktree_root: root) }
+
+      FileUtils.rm_f(path)
+      File.binwrite(path, "x" * (Hive::DraftPrReceipt::MAX_BYTES + 1))
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.read(task, worktree_root: root)
+      end
+      assert_includes error.message, "exceeds"
     end
   end
 
@@ -69,6 +76,68 @@ class DraftPrReceiptTest < Minitest::Test
       assert_raises(Hive::WorktreeError) do
         Hive::DraftPrReceipt.read(task, expected: contradictory, worktree_root: worktree_root)
       end
+    end
+  end
+
+  def test_phase_machine_is_atomic_monotonic_and_immutable
+    with_tmp_dir do |root|
+      task = File.join(root, "task")
+      worktree_root = File.join(root, "worktrees")
+      FileUtils.mkdir_p(task)
+      Hive::DraftPrReceipt.initialize!(
+        task, expected: attributes(File.join(worktree_root, "fix-ui")),
+        worktree_root: worktree_root
+      )
+      receipt = Hive::DraftPrReceipt.advance!(
+        task, from: "worktree_created", to: "agent_validated",
+        attributes: { "head_oid" => "b" * 40, "report_sha256" => "c" * 64 },
+        worktree_root: worktree_root
+      )
+      assert_equal "agent_validated", receipt.fetch("phase")
+      assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.advance!(
+          task, from: "agent_validated", to: "pr_observed", attributes: {},
+          worktree_root: worktree_root
+        )
+      end
+      assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.update!(
+          task, phase: "agent_validated", attributes: { "head_oid" => "d" * 40 },
+          worktree_root: worktree_root
+        )
+      end
+      assert_equal "b" * 40,
+                   Hive::DraftPrReceipt.read(task, worktree_root: worktree_root).fetch("head_oid")
+      premature = Hive::DraftPrReceipt.read(task, worktree_root: worktree_root)
+                                           .merge("pr_url" => "https://github.com/acme/widgets/pull/7")
+      File.write(File.join(task, "handoff.yml"), premature.to_yaml)
+      assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.read(task, worktree_root: worktree_root)
+      end
+      refute Dir.children(task).any? { |name| name.include?("handoff.yml.tmp") }
+    end
+  end
+
+  def test_rejects_pr_url_that_contradicts_recorded_repository_or_number
+    with_tmp_dir do |root|
+      data = attributes(File.join(root, "worktrees", "fix-ui")).merge(
+        "phase" => "terminal",
+        "head_oid" => "b" * 40,
+        "report_sha256" => "c" * 64,
+        "terminal_outcome" => "blocked",
+        "terminal_at" => "2026-07-21T12:00:00Z",
+        "error_reason" => "draft_pr_identity_blocked",
+        "pr_number" => 7,
+        "pr_url" => "https://github.com/other/repository/pull/8"
+      )
+      task = File.join(root, "task")
+      FileUtils.mkdir_p(task)
+      File.write(File.join(task, "handoff.yml"), data.to_yaml)
+
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.read(task, worktree_root: File.join(root, "worktrees"))
+      end
+      assert_includes error.message, "contradicts"
     end
   end
 

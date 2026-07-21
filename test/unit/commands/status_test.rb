@@ -1951,6 +1951,19 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_pr_url_for_reads_verified_metadata_for_generic_draft_pr_handoff
+    cmd = Hive::Commands::Status.new
+    with_tmp_dir do |folder|
+      url = "https://github.com/acme/widgets/pull/17"
+      File.write(File.join(folder, "pr.md"), "---\npr_url: #{url}\npr_number: 17\n---\n")
+      stage = Struct.new(:handoff).new(:draft_pr)
+      workflow = Struct.new(:id, :stages).new(:async_fix, [ stage ])
+      task = Struct.new(:workflow, :folder, :stage_index).new(workflow, folder, 1)
+
+      assert_equal url, cmd.send(:pr_url_for, task)
+    end
+  end
+
   def test_project_name_and_error_envelope_fallback_branches
     cmd = Hive::Commands::Status.new
 

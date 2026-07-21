@@ -131,6 +131,47 @@ module Hive
       oid.downcase
     end
 
+    # Publish one immutable, already-scanned commit without naming a mutable
+    # local branch. This is intentionally separate from #push_branch: managed
+    # draft-PR handoffs never use force, leases, upstream mutation, or a branch
+    # source that can move between validation and process spawn.
+    def push_exact_oid(worktree_path, head_oid, branch, cfg: nil, remote: "origin")
+      oid = head_oid.to_s.downcase
+      unless oid.match?(/\A[0-9a-f]{40,64}\z/)
+        raise Hive::GhError, "exact push OID is invalid"
+      end
+      name = validated_branch_name(branch)
+      target = validated_remote_target(remote)
+      refspec = "#{oid}:refs/heads/#{name}"
+      out, err, status = capture3(
+        "git", "-C", worktree_path, "push", target, refspec, cfg: cfg
+      )
+      PushResult.new(success: status.success?, stdout: out, stderr: err)
+    rescue Hive::GhError => e
+      PushResult.new(success: false, stdout: "", stderr: e.message)
+    end
+
+    # One explicit draft-PR creation attempt. The body is passed by restrictive
+    # tempfile, never argv, and the file is unlinked by Tempfile on every exit
+    # path including command failure, timeout, and interruption unwinding.
+    def create_draft_pr(worktree_path, repository:, host:, head:, base:, title:, body:, cfg: nil)
+      require "tempfile"
+
+      target = RepositoryIdentity.github_repository_target(repository, host)
+      Tempfile.create([ "hive-draft-pr-", ".md" ], mode: File::RDWR, perm: 0o600) do |file|
+        file.write(body)
+        file.flush
+        args = [
+          "gh", "pr", "create", "--repo", target, "--draft",
+          "--head", validated_branch_name(head),
+          "--base", validated_branch_name(base),
+          "--title", title.to_s,
+          "--body-file", file.path
+        ]
+        capture3(*args, chdir: worktree_path, cfg: cfg)
+      end
+    end
+
     # Look up all pull requests for `branch`. Returns the raw array from
     # `gh pr list --state all`; callers decide which states matter.
     # Raises Hive::GhError when `gh pr list` itself fails or returns

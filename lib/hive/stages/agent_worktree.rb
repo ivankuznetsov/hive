@@ -4,6 +4,7 @@ require "hive/gh"
 require "hive/protected_files"
 require "hive/stages/agent"
 require "hive/stages/agent_report"
+require "hive/stages/draft_pr_handoff"
 require "hive/stages/base"
 require "hive/worktree"
 require "open3"
@@ -26,10 +27,32 @@ module Hive
       )
 
       def run!(task, cfg)
-        context = prepare!(task, cfg)
         stage = task.workflow.stage_named(task.stage_name)
         stage or raise Hive::StageError, "no agent stage #{task.stage_name}"
         report_path = report_path!(task, stage)
+        validate_protected_files!(task.folder)
+        if (receipt = terminal_receipt(task))
+          return Hive::Stages::DraftPrHandoff.resume_terminal!(task, receipt)
+        end
+
+        context = prepare!(task, cfg)
+        receipt = Hive::DraftPrReceipt.read(
+          task.folder, worktree_root: File.dirname(context.worktree_path)
+        )
+        if receipt.fetch("phase") == "terminal"
+          return Hive::Stages::DraftPrHandoff.resume_terminal!(task, receipt)
+        end
+        unless receipt.fetch("phase") == Hive::DraftPrReceipt::INITIAL_PHASE
+          source = Hive::Stages::DraftPrHandoff.report_source_for_resume(
+            report_path, expected_sha256: receipt.fetch("report_sha256")
+          )
+          report = Hive::Stages::AgentReport.parse(source)
+          repository_state = Hive::Stages::AgentReport.validate_repository!(report, context)
+          return Hive::Stages::DraftPrHandoff.run!(
+            task, context: context, report: report,
+            repository_state: repository_state, report_source: source, cfg: cfg || {}
+          )
+        end
         prepare_report_output!(report_path)
 
         profile = Hive::Stages::Base.stage_profile(
@@ -46,7 +69,6 @@ module Hive
         )
         resource_limits = Hive::Stages::Base.stage_resource_limits(cfg || {}, stage)
 
-        validate_protected_files!(task.folder)
         protected_before = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
         result = nil
         spawn_error = nil
@@ -85,15 +107,40 @@ module Hive
 
         report = Hive::Stages::AgentReport.read(report_path)
         repository_state = Hive::Stages::AgentReport.validate_repository!(report, context)
-        {
-          commit: "agent_validated",
-          status: report.decision,
-          worktree_context: context,
-          report: report,
-          repository_state: repository_state,
-          agent_result: result
-        }
+        report_source = read_report_source!(report_path)
+        Hive::Stages::DraftPrHandoff.run!(
+          task, context: context, report: report,
+          repository_state: repository_state, report_source: report_source, cfg: cfg || {}
+        ).merge(
+          worktree_context: context, report: report,
+          repository_state: repository_state, agent_result: result
+        )
       end
+
+      def read_report_source!(path)
+        File.open(path, File::RDONLY | File::NOFOLLOW, encoding: "UTF-8") do |file|
+          raise Hive::StageError, "fix-report.md must remain a regular file" unless file.stat.file?
+
+          source = file.read(Hive::Stages::AgentReport::MAX_BYTES + 1)
+          if source.bytesize > Hive::Stages::AgentReport::MAX_BYTES
+            raise Hive::StageError, "fix-report.md exceeds the validated size limit"
+          end
+          source
+        end
+      rescue Errno::ELOOP
+        raise Hive::StageError, "fix-report.md must remain a regular file, not a symlink"
+      end
+      private_class_method :read_report_source!
+
+      def terminal_receipt(task)
+        receipt_path = Hive::DraftPrReceipt.path(task.folder)
+        return nil unless File.exist?(receipt_path) || File.symlink?(receipt_path)
+
+        root = Hive::Worktree.new(task.project_root, task.slug).worktree_root
+        receipt = Hive::DraftPrReceipt.read(task.folder, worktree_root: root)
+        receipt.fetch("phase") == "terminal" ? receipt : nil
+      end
+      private_class_method :terminal_receipt
 
       def render_prompt(task, stage, context, report_path)
         instruction = read_instruction(stage)

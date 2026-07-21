@@ -548,6 +548,46 @@ def test_push_branch_force_passes_force_with_lease
   end
 end
 
+def test_push_exact_oid_names_immutable_source_and_never_forces
+  captured = nil
+  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  oid = "a" * 40
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+    captured = cmd
+    [ "", "", ok ]
+  }) do
+    result = Hive::Gh.push_exact_oid("/tmp/wt", oid, "feature")
+    assert result.success?
+  end
+
+  assert_equal [ "git", "-C", "/tmp/wt", "push", "origin", "#{oid}:refs/heads/feature" ], captured
+  refute captured.any? { |arg| arg.include?("force") }
+end
+
+def test_create_draft_pr_uses_explicit_args_and_always_removes_body_tempfile
+  captured = nil
+  failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
+    captured = [ cmd, kwargs, File.stat(cmd.fetch(cmd.index("--body-file") + 1)).mode & 0o777 ]
+    [ "", "timed out", failed ]
+  }) do
+    _out, _err, status = Hive::Gh.create_draft_pr(
+      "/tmp/wt", repository: "acme/demo", host: "github.com",
+      head: "feature", base: "main", title: "Focused fix", body: "private body"
+    )
+    refute status.success?
+  end
+
+  argv, kwargs, mode = captured
+  assert_equal 0o600, mode
+  assert_equal "/tmp/wt", kwargs.fetch(:chdir)
+  assert_includes argv, "--draft"
+  assert_equal "feature", argv.fetch(argv.index("--head") + 1)
+  assert_equal "main", argv.fetch(argv.index("--base") + 1)
+  refute_includes argv, "private body"
+  refute File.exist?(argv.fetch(argv.index("--body-file") + 1))
+end
+
 def test_push_branch_uses_exact_expected_oid_lease
   captured = nil
   ok = Hive::Gh::CommandStatus.new(exitstatus: 0)

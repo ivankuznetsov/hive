@@ -348,7 +348,10 @@ module Hive
       # `ensure_clean_on_exit_failed` automatically first (bounded, then
       # parks); only once those retries are spent does an operator see this
       # "inspect manually" routing — at which point human eyes are warranted.
-      ERROR_MANUAL_ONLY_REASONS = %w[dirty_worktree ensure_clean_on_exit_failed].freeze
+      ERROR_MANUAL_ONLY_REASONS = %w[
+        dirty_worktree ensure_clean_on_exit_failed draft_pr_handoff_failed
+        draft_pr_quarantined draft_pr_identity_blocked agent_blocked
+      ].freeze
 
       # Single source of truth for "this state has no auto-recovery".
       # Pass attrs: nil from callers that only have the marker name
@@ -376,6 +379,14 @@ module Hive
         attrs = attrs ? attrs.to_h.transform_keys(&:to_s) : {}
         if marker == "review_error" && attrs["reason"].to_s == "fix_status_check_failed"
           "Hive can't auto-recover a worktree whose Git status cannot be read. Open the worktree, repair Git state, then rerun review."
+        elsif marker == "error" && attrs["reason"].to_s == "draft_pr_handoff_failed"
+          "Hive preserved the validated branch. Run the task manually to reconcile the remote draft-PR handoff."
+        elsif marker == "error" && attrs["reason"].to_s == "draft_pr_quarantined"
+          "Hive blocked publication after finding prohibited local content. Inspect and securely clean the preserved isolated worktree."
+        elsif marker == "error" && attrs["reason"].to_s == "draft_pr_identity_blocked"
+          "Hive blocked publication because repository, branch, or PR identity changed. Inspect the preserved local and remote state."
+        elsif marker == "error" && attrs["reason"].to_s == "agent_blocked"
+          "The mapped repair agent reported a blocked outcome. Inspect its preserved report and isolated worktree."
         elsif marker == "error" && ERROR_MANUAL_ONLY_REASONS.include?(attrs["reason"].to_s)
           "Hive can't auto-recover a dirty worktree. Open the worktree and commit or discard the changes, then tap Autofix."
         else

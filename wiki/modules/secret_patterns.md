@@ -3,7 +3,7 @@ title: Hive::SecretPatterns
 type: module
 source: lib/hive/secret_patterns.rb
 created: 2026-04-26
-updated: 2026-05-17
+updated: 2026-07-21
 tags: [security, secrets, regex, secret-scan, redact]
 ---
 
@@ -26,6 +26,7 @@ Hive::SecretPatterns.redact(text) # → String with each match replaced by "[RED
 | `aws_access_key` | `\b(AKIA|ASIA)[0-9A-Z]{16}\b` | Long-term and temporary session tokens. |
 | `aws_secret_access_key` | `aws[_- ]secret[_- ]access[_- ]key…40-byte b64` | Case-insensitive, optional quotes. |
 | `github_token` | `gh[psou]_[A-Za-z0-9]{36,}` | PAT (`ghp`), server-to-server (`ghs`), OAuth (`gho`), user (`ghu`). |
+| `github_fine_grained_pat` | `github_pat_[A-Za-z0-9_]{20,}` | Current fine-grained GitHub personal access tokens. |
 | `generic_api_key` | `\bapi[_-]?key\b[\s:=]{0,3}['"]?…20+ chars` | Quoted or unquoted assignments. |
 | `pem_private_key` | `-----BEGIN … PRIVATE KEY-----…-----END … PRIVATE KEY-----` (`/m`) | Block form — redacts the base64 body, not just the BEGIN header. PR #84 #3. |
 | `password_assignment` | `\b(password|passwd|pwd)\b[\s:=]{0,3}['"]?…6+ chars` | Catches shell / env / YAML assignment shapes. |
@@ -44,6 +45,7 @@ Hive::SecretPatterns.redact(text) # → String with each match replaced by "[RED
 - `Hive::Stages::Review::FixGuardrail` — the `secrets_pattern_match` default pattern dispatches to `SecretPatterns.scan` for added lines in the post-fix diff.
 - `Hive::TaskAction#diagnostic` — calls `SecretPatterns.redact` on the bounded summary / detail before emission to JSON consumers (TUI, bot, daemon).
 - `Hive::DiagnosisAgent#artifact_body` — calls `SecretPatterns.redact` on the agent-produced body before writing `diagnostics/red-status.md`.
+- `Hive::Stages::DraftPrHandoff` — scans the exact new commit/object range, final changed files, repair report, and projected PR title/body before any publication; quarantined reports are redacted before Hive appends its marker.
 
 ## Tests
 

@@ -190,24 +190,26 @@ class StagesAgentTest < Minitest::Test
 
       with_fake_github_controller do
         with_fixed_user_supplied_tag do |tag|
-          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
-            result = Hive::Stages::AgentWorktree.run!(
-              task, "fix" => { "agent" => "codex" }
-            )
+          with_deferred_draft_handoff do
+            with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+              result = Hive::Stages::AgentWorktree.run!(
+                task, "fix" => { "agent" => "codex" }
+              )
 
-            assert_equal :ready, result.fetch(:status)
-            assert_equal "agent_validated", result.fetch(:commit)
-            assert_equal 1, result.fetch(:repository_state).commit_count
-            assert_equal 1, captured.length
-            call = captured.first
-            assert_equal result.fetch(:worktree_context).worktree_path, call.dig(:kwargs, :cwd)
-            assert_equal :exit_code_only, call.dig(:kwargs, :status_mode)
-            assert_equal :codex, call.dig(:kwargs, :profile).name
-            assert_includes call.fetch(:prompt), File.join(task.folder, "fix-report.md")
-            assert_includes call.fetch(:prompt), "<#{tag} content_type=\"prior_artifacts\">"
-            assert_includes call.fetch(:prompt), "Fix the nil response."
-            assert_includes call.fetch(:prompt), "Do not run `gh`"
-            refute_includes call.fetch(:prompt), "<!-- COMPLETE -->"
+              assert_equal :ready, result.fetch(:status)
+              assert_equal "agent_validated", result.fetch(:commit)
+              assert_equal 1, result.fetch(:repository_state).commit_count
+              assert_equal 1, captured.length
+              call = captured.first
+              assert_equal result.fetch(:worktree_context).worktree_path, call.dig(:kwargs, :cwd)
+              assert_equal :exit_code_only, call.dig(:kwargs, :status_mode)
+              assert_equal :codex, call.dig(:kwargs, :profile).name
+              assert_includes call.fetch(:prompt), File.join(task.folder, "fix-report.md")
+              assert_includes call.fetch(:prompt), "<#{tag} content_type=\"prior_artifacts\">"
+              assert_includes call.fetch(:prompt), "Fix the nil response."
+              assert_includes call.fetch(:prompt), "Do not run `gh`"
+              refute_includes call.fetch(:prompt), "<!-- COMPLETE -->"
+            end
           end
         end
       end
@@ -227,10 +229,12 @@ class StagesAgentTest < Minitest::Test
         { status: :ok, exit_code: 0 }
       end
       with_fake_github_controller do
-        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
-          result = Hive::Stages::AgentWorktree.run!(task, {})
-          assert_equal :"no-fix", result.fetch(:status)
-          assert_equal 1, calls
+        with_deferred_draft_handoff do
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+            result = Hive::Stages::AgentWorktree.run!(task, {})
+            assert_equal :"no-fix", result.fetch(:status)
+            assert_equal 1, calls
+          end
         end
       end
 
@@ -1080,6 +1084,18 @@ class StagesAgentTest < Minitest::Test
   end
 
   private
+
+    # U3-focused tests stop at the validated local boundary. U4 owns the
+    # controller publication state machine and has its own default-deny suite.
+    def with_deferred_draft_handoff
+      handoff = lambda do |_task, report:, repository_state:, **_kwargs|
+        {
+          commit: "agent_validated", status: report.decision,
+          repository_state: repository_state
+        }
+      end
+      with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :run!, handoff) { yield }
+    end
 
     def resource_workflow(name:, budget_usd:, timeout_sec:)
       Hive::Workflow.new(

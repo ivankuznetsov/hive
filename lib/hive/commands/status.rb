@@ -1131,8 +1131,11 @@ module Hive
         # task reusing a >= 5 stage index isn't probed for a pr.md it never
         # writes — inert today (generic tasks have no pr.md → nil) but keeps the
         # coding PR gate from leaking onto generic rows.
-        return nil unless Hive::Workflows.coding_id?(task.workflow.id) # coding-scoped: PR metadata exists only in the coding workflow
-        return nil if task.stage_index < OPEN_PR_STAGE_INDEX
+        managed_draft_pr = task.workflow.stages.any? { |stage| stage.handoff == :draft_pr }
+        unless managed_draft_pr
+          return nil unless Hive::Workflows.coding_id?(task.workflow.id) # coding-scoped: PR metadata exists only in the coding workflow
+          return nil if task.stage_index < OPEN_PR_STAGE_INDEX
+        end
 
         value = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"]
         value = value.to_s.strip
@@ -1222,6 +1225,7 @@ module Hive
         "Ready to plan",
         "Ready to develop",
         "Needs recovery",
+        "Retry draft PR handoff manually",
         "Agent running",
         "Ready to open PR",
         "Ready for review",

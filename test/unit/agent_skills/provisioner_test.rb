@@ -220,4 +220,22 @@ class AgentSkillsProvisionerTest < Minitest::Test
 
     assert_match(/unmanaged custom skill/, error.message)
   end
+
+  def test_unattended_refusal_rejects_a_filtered_unmanaged_skill_without_inspection
+    cfg = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
+    cfg["review"]["reviewers"] << {
+      "name" => "private", "kind" => "agent", "agent" => "claude", "skill" => "private-review"
+    }
+    inspector = SequenceInspector.new([ row ])
+    instance = Hive::AgentSkills::Provisioner.new(
+      config: cfg, project_root: Dir.pwd, inspector: inspector, adapters: FakeRegistry.new({})
+    )
+
+    error = assert_raises(Hive::ConfigError) do
+      instance.consent_required_result(skills: [ "private-review" ], provenance: "non_tty")
+    end
+
+    assert_match(/unmanaged custom skill.*private-review/, error.message)
+    assert_empty inspector.calls
+  end
 end

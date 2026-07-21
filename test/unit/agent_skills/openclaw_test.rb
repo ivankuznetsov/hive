@@ -175,4 +175,106 @@ class AgentSkillsOpenClawTest < Minitest::Test
       assert_equal File.join(publisher.destination, "SKILL.md"), evidence.resolution.fetch("path")
     end
   end
+
+  def test_multiple_filesystem_candidates_are_reported_as_conflicting
+    with_tmp_dir do |home|
+      bin = File.join(home, "bin", "openclaw")
+      executable(bin)
+      publisher, workspace, canonical = projection_at(home)
+      publisher.publish(expected_snapshot: publisher.report.snapshot)
+      write_clawhub_metadata(base: publisher.destination, lock_root: workspace, canonical: canonical)
+
+      duplicate = File.join(home, ".openclaw", "skills", "hive", "SKILL.md")
+      FileUtils.mkdir_p(File.dirname(duplicate), mode: 0o700)
+      File.write(duplicate, canonical.files.fetch("SKILL.md"))
+
+      evidence = inspect(home, bin)
+
+      assert_equal "conflicting", evidence.health
+      assert_match(/multiple OpenClaw Hive skill directories/, evidence.explanation)
+      assert_equal 2, evidence.resolution.fetch("candidates").length
+    end
+  end
+
+  def test_malformed_filesystem_inventory_is_incompatible
+    with_tmp_dir do |home|
+      bin = File.join(home, "bin", "openclaw")
+      executable(bin)
+      state = File.join(home, ".openclaw")
+      FileUtils.mkdir_p(state, mode: 0o700)
+      File.write(File.join(state, "openclaw.json"), "{")
+
+      malformed = inspect(home, bin)
+      assert_equal "incompatible", malformed.health
+      assert_match(/filesystem inventory is malformed/, malformed.explanation)
+
+      File.write(File.join(state, "openclaw.json"), JSON.generate([]))
+      wrong_shape = inspect(home, bin)
+      assert_equal "incompatible", wrong_shape.health
+      assert_match(/must contain an object/, wrong_shape.explanation)
+    end
+  end
+
+  def test_publisher_errors_are_reported_as_conflicting
+    with_tmp_dir do |home|
+      bin = File.join(home, "bin", "openclaw")
+      executable(bin)
+      adapter = Hive::AgentSkills::Adapters::OpenClaw.new(
+        environment: { "HOME" => home, "PATH" => "", "OPENCLAW_BIN" => bin }
+      )
+      skill = File.join(home, ".openclaw", "workspace", "skills", "hive", "SKILL.md")
+      FileUtils.mkdir_p(File.dirname(skill), mode: 0o700)
+      File.write(skill, "---\nname: hive\n---\n")
+      adapter.define_singleton_method(:projection_report) do |**|
+        raise Hive::AgentSkills::DirectoryPublisher::Error, "unsafe OpenClaw skill directory"
+      end
+
+      evidence = adapter.inspect
+
+      assert_equal "conflicting", evidence.health
+      assert_equal "unsafe OpenClaw skill directory", evidence.explanation
+    end
+  end
+
+  def test_valid_clawhub_metadata_with_old_version_is_stale
+    with_tmp_dir do |home|
+      bin = File.join(home, "bin", "openclaw")
+      executable(bin)
+      publisher, workspace, canonical = projection_at(home)
+      publisher.publish(expected_snapshot: publisher.report.snapshot)
+      write_clawhub_metadata(base: publisher.destination, lock_root: workspace, canonical: canonical)
+
+      origin_path = File.join(publisher.destination, ".clawhub", "origin.json")
+      origin = JSON.parse(File.read(origin_path))
+      origin["installedVersion"] = "0.0.1"
+      File.write(origin_path, JSON.generate(origin))
+      lock_path = File.join(workspace, ".clawhub", "lock.json")
+      lock = JSON.parse(File.read(lock_path))
+      lock.dig("skills", "hive-cli")["version"] = "0.0.1"
+      File.write(lock_path, JSON.generate(lock))
+
+      evidence = inspect(home, bin)
+
+      assert_equal "stale", evidence.health
+      assert_match(/0\.0\.1 does not match/, evidence.explanation)
+    end
+  end
+
+  def test_binary_resolution_searches_path_and_handles_a_path_miss
+    with_tmp_dir do |home|
+      bin = File.join(home, "bin", "openclaw")
+      executable(bin)
+
+      found = Hive::AgentSkills::Adapters::OpenClaw.new(
+        environment: { "HOME" => home, "PATH" => File.dirname(bin) }
+      ).inspect
+      assert_equal "missing", found.health
+      assert_equal bin, found.native.fetch("bin")
+
+      missing = Hive::AgentSkills::Adapters::OpenClaw.new(
+        environment: { "HOME" => home, "PATH" => "" }
+      ).inspect
+      assert_equal "unavailable", missing.health
+    end
+  end
 end

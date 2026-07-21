@@ -48,6 +48,8 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     refute projections.fetch("claude").files.key?("agents/openai.yaml")
 
     projections.each do |platform, projection|
+      assert_equal platform, projection.to_h.fetch("platform")
+      assert_equal projection.files.keys.sort, projection.to_h.fetch("files")
       manifest = JSON.parse(projection.files.fetch(".hive-skill.json"))
       assert_equal platform, manifest.fetch("platform")
       assert_equal projection.invocation, manifest.fetch("invocation")
@@ -125,6 +127,105 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
         Hive::AgentSkills::CanonicalSkill.new(root: root).canonical_digest
       end
       assert_match(/missing reference/, error.message)
+    end
+  end
+
+  def test_rejects_invalid_metadata_contracts
+    invalid_documents = [
+      [ ->(document) { document["unexpected"] = true }, /contain exactly/ ],
+      [ ->(document) { document["schema_version"] = 2 }, /identity or schema version/ ],
+      [ ->(document) { document["references"] << document.fetch("references").first }, /unique array/ ],
+      [ ->(document) { document["version"] = "not a version!" }, /version must be semantic/ ]
+    ]
+
+    invalid_documents.each do |mutate, message|
+      with_canonical_copy do |root|
+        path = File.join(root, "skill.json")
+        document = JSON.parse(File.read(path))
+        mutate.call(document)
+        File.write(path, JSON.pretty_generate(document))
+
+        error = assert_raises(Hive::AgentSkills::CanonicalSkill::ValidationError) do
+          Hive::AgentSkills::CanonicalSkill.new(root: root).metadata
+        end
+        assert_match message, error.message
+      end
+    end
+
+    with_canonical_copy do |root|
+      File.write(File.join(root, "skill.json"), "{")
+
+      error = assert_raises(Hive::AgentSkills::CanonicalSkill::ValidationError) do
+        Hive::AgentSkills::CanonicalSkill.new(root: root).metadata
+      end
+      assert_match(/skill\.json is invalid/, error.message)
+    end
+  end
+
+  def test_rejects_invalid_frontmatter_contracts
+    invalid_skills = [
+      [ "---\nname: hive\ndescription: valid\nextra: true\n---\nbody\n", /contain only name and description/ ],
+      [ "---\nname: other\ndescription: valid\n---\nbody\n", /name or description is invalid/ ],
+      [ "---\nname: [\n---\nbody\n", /frontmatter is invalid/ ]
+    ]
+
+    invalid_skills.each do |content, message|
+      with_canonical_copy do |root|
+        File.write(File.join(root, "SKILL.md"), content)
+
+        error = assert_raises(Hive::AgentSkills::CanonicalSkill::ValidationError) do
+          Hive::AgentSkills::CanonicalSkill.new(root: root).frontmatter
+        end
+        assert_match message, error.message
+      end
+    end
+  end
+
+  def test_rejects_reference_inventory_drift_and_unknown_templates
+    with_canonical_copy do |root|
+      File.write(File.join(root, "references", "undeclared.md"), "undeclared\n")
+
+      error = assert_raises(Hive::AgentSkills::CanonicalSkill::ValidationError) do
+        Hive::AgentSkills::CanonicalSkill.new(root: root).reference_paths
+      end
+      assert_match(/declared references do not match canonical files/, error.message)
+    end
+
+    with_canonical_copy do |root|
+      path = File.join(root, "SKILL.md")
+      File.write(path, File.read(path).sub(/\n\z/, "\n{{UNKNOWN_TEMPLATE}}\n"))
+
+      error = assert_raises(Hive::AgentSkills::CanonicalSkill::ValidationError) do
+        Hive::AgentSkills::CanonicalSkill.new(root: root).body
+      end
+      assert_match(/unknown template variable/, error.message)
+    end
+  end
+
+  def test_rejects_missing_or_escaping_top_level_sources
+    with_canonical_copy do |root|
+      FileUtils.rm_f(File.join(root, "skill.json"))
+
+      error = assert_raises(Hive::AgentSkills::CanonicalSkill::ValidationError) do
+        Hive::AgentSkills::CanonicalSkill.new(root: root).metadata
+      end
+      assert_match(/cannot read skill\.json/, error.message)
+    end
+
+    Dir.mktmpdir("hive-canonical-outside") do |dir|
+      outside = File.join(dir, "outside.json")
+      File.write(outside, "{}")
+
+      with_canonical_copy do |root|
+        source = File.join(root, "skill.json")
+        FileUtils.rm_f(source)
+        File.symlink(outside, source)
+
+        error = assert_raises(Hive::AgentSkills::CanonicalSkill::ValidationError) do
+          Hive::AgentSkills::CanonicalSkill.new(root: root).metadata
+        end
+        assert_match(/source path escapes canonical skill root/, error.message)
+      end
     end
   end
 

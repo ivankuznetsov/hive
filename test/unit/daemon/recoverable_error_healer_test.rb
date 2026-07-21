@@ -229,6 +229,11 @@ class HiveDaemonRecoverableErrorHealerTest < Minitest::Test
       assert_equal :error, Hive::Markers.current(state_file).name
       exhausted = @logger.events.select { |name, _attrs| name == :auto_retry_exhausted }
       assert_equal 1, exhausted.size
+      snapshot = h.operational_snapshot
+      assert_equal 2, snapshot.fetch("retries").first.fetch("attempts")
+      assert_equal({
+        "project" => "p", "slug" => "s", "stage" => "4-execute", "reason" => "implementer_failed"
+      }, snapshot.fetch("exhausted").first)
     end
   end
 

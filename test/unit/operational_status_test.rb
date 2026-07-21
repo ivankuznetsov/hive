@@ -138,6 +138,44 @@ class OperationalStatusTest < Minitest::Test
     refute_equal "idle", result.dig("summary", "overall_state")
   end
 
+  def test_legacy_stage_issue_names_hidden_directories_and_task_counts
+    payload = status_payload(task(action: "ready_to_plan", slug: "visible"))
+    payload.dig("projects", 0)["legacy_stage_dirs"] = [
+      { "stage_dir" => "5-implement", "task_count" => 2 },
+      { "stage_dir" => "6-review", "task_count" => 1 }
+    ]
+    payload.dig("projects", 0)["legacy_migrate_command"] = "hive migrate demo"
+
+    issue = project(payload).fetch("issues").find { |entry| entry.fetch("code") == "legacy_stage_dirs" }
+
+    assert_equal "3 tasks hidden in legacy stage dirs: 5-implement (2), 6-review (1)", issue.fetch("message")
+    assert_equal "hive migrate demo", issue.fetch("remediation")
+
+    payload.dig("projects", 0)["legacy_stage_dirs"] = [
+      { "stage_dir" => "5-implement", "task_count" => 1 }
+    ]
+    singular = project(payload).fetch("issues").find { |entry| entry.fetch("code") == "legacy_stage_dirs" }
+    assert_equal "1 task hidden in legacy stage dirs: 5-implement (1)", singular.fetch("message")
+  end
+
+  def test_runner_and_condition_warning_reasons_preserve_available_evidence
+    live_agent = task(action: "agent_running", slug: "live-agent").merge(
+      "claude_pid" => 4242,
+      "claude_pid_alive" => true
+    )
+    warned = task(action: "ready_to_plan", slug: "warned").merge(
+      "condition_warning" => "review evidence could not be verified"
+    )
+
+    rows = project(status_payload(live_agent, warned)).fetch("tasks").to_h do |row|
+      [ row.dig("identity", "slug"), row ]
+    end
+
+    assert_equal "agent process 4242 is alive", rows.fetch("live-agent").fetch("reason")
+    assert_includes rows.fetch("warned").fetch("reasons").map { |reason| reason.fetch("code") },
+                    "condition_warning"
+  end
+
   def test_empty_registry_is_complete_and_not_scheduler_degraded
     result = project(status_payload)
 
@@ -158,6 +196,124 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "unavailable", result.dig("scheduler", "status")
     assert_equal "unknown", result.dig("summary", "overall_state")
     assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_unavailable"
+  end
+
+  def test_rejects_an_unsuccessful_status_payload
+    payload = status_payload
+    payload["ok"] = false
+
+    error = assert_raises(ArgumentError) { project(payload) }
+
+    assert_equal "operational status requires a successful hive-status payload", error.message
+  end
+
+  def test_noncurrent_scheduler_snapshot_propagates_its_freshness
+    source_task = task(action: "ready_to_plan", slug: "stale-scheduler")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    ).merge("status" => "stale", "reason" => "observation expired")
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "partial", result.fetch("completeness")
+    assert_equal "stale", result.dig("tasks", 0, "freshness", "scheduler_status")
+    assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_stale"
+  end
+
+  def test_current_scheduler_snapshot_reports_a_missing_task
+    source_task = task(action: "ready_to_plan", slug: "missing-from-snapshot")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot["tasks"] = []
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "partial", result.fetch("completeness")
+    assert_equal "unavailable", result.dig("tasks", 0, "freshness", "scheduler_status")
+    assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_task_missing"
+  end
+
+  def test_current_scheduler_snapshot_reports_an_incomplete_disposition
+    source_task = task(action: "ready_to_plan", slug: "changed-during-tick")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot.dig("tasks", 0, "disposition")["status"] = "unavailable"
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "partial", result.fetch("completeness")
+    assert_equal "unavailable", result.dig("tasks", 0, "freshness", "scheduler_status")
+    assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_task_changed"
+  end
+
+  def test_scheduler_match_canonicalizes_symbol_keys_inside_arrays
+    source_task = task(
+      action: "ready_to_plan",
+      slug: "canonical-policy",
+      attrs: { "policy" => [ { "provider" => "codex" } ] }
+    )
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot.dig("tasks", 0)["marker_attrs"] = { policy: [ { provider: "codex" } ] }
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "complete", result.fetch("completeness")
+    assert_equal "current", result.dig("tasks", 0, "freshness", "scheduler_status")
+  end
+
+  def test_scheduler_dispositions_map_to_closed_operational_states
+    expectations = {
+      "provider_hold" => [ "waiting_on_provider_or_scheduler", "provider" ],
+      "dispatched" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
+      "wait_for_answers" => [ "waiting_on_you", "operator" ],
+      "quarantined" => [ "needs_repair", "scheduler" ],
+      "skip" => [ "idle", "scheduler" ]
+    }
+
+    expectations.each do |decision, (state, owner)|
+      source_task = task(action: "ready_to_plan", slug: decision)
+      snapshot = scheduler_snapshot_for(
+        source_task,
+        decision: decision,
+        reason: "scheduler chose #{decision}"
+      )
+      projected = project(
+        status_payload(source_task),
+        project_context: { "demo" => { "daemon_enabled" => true } },
+        scheduler_snapshot: snapshot
+      ).fetch("tasks").first
+
+      assert_equal state, projected.fetch("state"), decision
+      assert_equal owner, projected.fetch("blocker_owner"), decision
+    end
   end
 
   def test_matching_complete_daemon_observation_explains_scheduler_gate

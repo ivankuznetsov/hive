@@ -71,12 +71,14 @@ and rejects stale tokens or recommendations that are no longer routine. It is
 not a general command executor and cannot represent destructive, release, or
 administrative actions.
 
-For markerless descriptor tasks, status and the locked recheck use the stable
-task `meta.yml` mtime when present rather than the task-directory mtime. Task
-lock creation changes the directory mtime, so using it would make a freshly
-issued generic `ready_to_run` action reject itself after acquiring its own
-lock. Real-command tests cover workflow stage actions plus generic `run` and
-`approve` branches from status-issued tokens.
+For markerless descriptor tasks, `observation_mtime` and the locked recheck use
+the stable task `meta.yml` mtime when present rather than the task-directory
+mtime. Task lock creation changes the directory mtime, so using it would make a
+freshly issued generic `ready_to_run` action reject itself after acquiring its
+own lock. The compatibility `mtime` keeps its state-file-or-directory meaning
+so daemon dispatch baselines still observe stage moves. Real-command tests
+cover workflow stage actions plus generic `run` and `approve` branches from
+status-issued tokens.
 
 Full text/JSON status and daemon snapshots read the complete on-disk graph.
 The TUI's steady-state active-only refresh combines freshly parsed active
@@ -109,7 +111,7 @@ and the unchanged compatibility JSON where relevant.
     🤖 —    —     add-cache-260424-9a8b agent_working pid=1234   - 5m ago
 ```
 
-`hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by task-observation mtime (newest first). The human identity column renders `#id PR display_name` when available, falls back to `#id PR slug`, and uses `— PR slug` when pre-migration/counter-failed tasks have no id. The PR slot is fixed-width: rows with no parseable PR URL render `—`, while pull-request URLs render `#<number>` and become OSC 8 hyperlinks only when stdout is a TTY. Commands and internal paths continue to use the slug. Raw slug, id, display name, stage, folder, and timestamps remain available in `--json`. JSON rows include both `mtime` (normally the state-file mtime; for a markerless descriptor task, stable `meta.yml` precedes the legacy directory fallback) and `folder_mtime` (the task directory mtime, emitted from `collect_rows` even when the state file exists). Both JSON timestamps are ISO8601 with six fractional digits so daemon consumers preserve the subsecond `File.mtime` ordering they compare against dispatch baselines. `folder_mtime` is useful for consumers that need folder-level aging, especially archived task rows where the terminal marker file may not reflect later directory-level activity.
+`hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by task mtime (newest first). The human identity column renders `#id PR display_name` when available, falls back to `#id PR slug`, and uses `— PR slug` when pre-migration/counter-failed tasks have no id. The PR slot is fixed-width: rows with no parseable PR URL render `—`, while pull-request URLs render `#<number>` and become OSC 8 hyperlinks only when stdout is a TTY. Commands and internal paths continue to use the slug. Raw slug, id, display name, stage, folder, and timestamps remain available in `--json`. JSON rows include `mtime` (state-file mtime when present, otherwise the directory mtime), `observation_mtime` (the stable action-token source: state file, then `meta.yml`, then directory), and `folder_mtime` (always the task-directory mtime). All three timestamps are ISO8601 with six fractional digits. Keeping the scheduler-facing `mtime` distinct from the action-facing `observation_mtime` lets stage moves invalidate dispatch baselines without letting lock-directory churn invalidate an action token. `folder_mtime` remains useful for consumers that need folder-level aging, especially archived task rows where the terminal marker file may not reflect later directory-level activity.
 
 Rows also include `workflow`, the descriptor id that resolved the task (`"coding"` for legacy/default rows, or the `meta.yml workflow:`/project default id for registered non-coding tasks). Row-based consumers such as the daemon and Telegram bot use it to keep coding-only plan/brainstorm/review/finalize behavior from firing for generic tasks.
 
@@ -208,7 +210,7 @@ The `legacy_stage_dirs` field was an additive extension of status v2. Task `id` 
 
 ## How tasks are discovered
 
-For each stage in `Hive::Workflows.all_stage_dirs` (the union of every live registered descriptor; coding remains the default source of truth via `Hive::Stages::DIRS`), `collect_rows` globs `<hive_state>/stages/<stage>/*` directories through the `stage_task_entries(stage_dir)` seam. Each entry is parsed via `Hive::Task.new(entry)`; non-conforming directories (no slug match, or a folder whose `workflow` selector does not contain that stage) are silently skipped via `rescue InvalidTaskPath`. Marker is read with `Hive::Markers.current(task.state_file)`. `folder_mtime` is always `File.mtime(entry)`; `mtime` is the state-file mtime when the state file exists, otherwise the task `meta.yml` mtime when present, then the directory mtime as the legacy fallback.
+For each stage in `Hive::Workflows.all_stage_dirs` (the union of every live registered descriptor; coding remains the default source of truth via `Hive::Stages::DIRS`), `collect_rows` globs `<hive_state>/stages/<stage>/*` directories through the `stage_task_entries(stage_dir)` seam. Each entry is parsed via `Hive::Task.new(entry)`; non-conforming directories (no slug match, or a folder whose `workflow` selector does not contain that stage) are silently skipped via `rescue InvalidTaskPath`. Marker is read with `Hive::Markers.current(task.state_file)`. `folder_mtime` is always `File.mtime(entry)`; `mtime` is the state-file mtime when the state file exists and otherwise the directory mtime; `observation_mtime` is the state-file mtime when present, then `meta.yml`, then the directory fallback.
 
 Stage moves are treated as a normal filesystem race. If an entry disappears between the stage glob and any in-folder row read, `collect_rows` rescues `Errno::ENOENT`, re-checks the folder path, and skips it only when the folder is gone. The rescue is deliberately folder-level: an `ENOENT` while the task folder still exists is re-raised as a real status command failure, because in-place state-file writers may truncate content but should not make the state file transiently absent inside a surviving folder. A forward stage move can resurface under the later stage in the same scan; a backward move to an already-scanned stage can disappear for one poll and then reappear on the next refresh. After all stages are scanned, `drop_transient_stage_moves` looks only at duplicate-slug groups and removes every duplicate row whose folder no longer exists. If two live folders still share a slug, both rows remain and `annotate_actions` still passes `stage_collision: true` into `Hive::TaskAction`. This keeps `hive status --json` and TUI snapshots from briefly showing an old-stage and new-stage copy during a normal `mv`, without hiding persistent duplicate state.
 

@@ -340,4 +340,87 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assert_equal "invalid", reader.read(now: T0).fetch("status")
     end
   end
+
+  def test_assembler_normalizes_hash_rows_strings_arrays_and_times
+    with_tmp_dir do |dir|
+      _store, assembler, _reader = build(File.join(dir, "snapshot", "state.json"))
+
+      assert_equal "symbol", assembler.send(:value, { field: "symbol" }, :field)
+      assert_equal "string", assembler.send(:value, { "field" => "string" }, :field)
+      assert_nil assembler.send(:value, {}, :field)
+      assert_equal "already-normalized", assembler.send(:time_string, "already-normalized")
+      assert_equal(
+        [ { "at" => T0.iso8601(6) } ],
+        assembler.send(:canonical, [ { at: T0 } ])
+      )
+    end
+  end
+
+  def test_reader_distinguishes_missing_and_unreadable_snapshots
+    with_tmp_dir do |dir|
+      missing = Hive::Daemon::OperationalSnapshot::Reader.new(
+        path: File.join(dir, "missing", "state.json"), expected_daemon: IDENTITY
+      ).read(now: T0)
+      assert_equal "unavailable", missing.fetch("status")
+      assert_equal "snapshot_missing", missing.fetch("reason")
+
+      parent = File.join(dir, "snapshot")
+      FileUtils.mkdir_p(parent, mode: 0o700)
+      path = File.join(parent, "state.json")
+      File.write(path, "{}", mode: "w", perm: 0o600)
+      original_read = File.method(:read)
+      unreadable = with_replaced_singleton_method(File, :read, lambda { |candidate, *args|
+        raise Errno::EIO, "forced read failure" if candidate == path
+
+        original_read.call(candidate, *args)
+      }) do
+        Hive::Daemon::OperationalSnapshot::Reader.new(
+          path: path, expected_daemon: IDENTITY
+        ).read(now: T0)
+      end
+
+      assert_equal "unavailable", unreadable.fetch("status")
+      assert_equal "snapshot_unreadable", unreadable.fetch("reason")
+      assert_match(/Errno::EIO/, unreadable.fetch("detail"))
+    end
+  end
+
+  def test_auto_daemon_identity_validates_pid_record_and_process_generation
+    with_tmp_dir do |dir|
+      pid_path = File.join(dir, ".daemon.pid")
+      reader = Hive::Daemon::OperationalSnapshot::Reader.new(
+        path: File.join(dir, "state.json"), pid_path: pid_path
+      )
+
+      File.write(pid_path, YAML.dump([]))
+      assert_equal :unavailable, reader.send(:expected_daemon)
+
+      File.write(pid_path, YAML.dump("pid" => "bad", "process_start_time" => ""))
+      assert_equal :unavailable, reader.send(:expected_daemon)
+
+      File.write(pid_path, YAML.dump("pid" => 12_345, "process_start_time" => "process-start-1"))
+      identity = with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { true }) do
+        with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { "process-start-1" }) do
+          reader.send(:expected_daemon)
+        end
+      end
+      assert_equal Hive::Daemon::OperationalSnapshot.daemon_identity(
+        pid: 12_345, process_start_time: "process-start-1"
+      ), identity
+
+      mismatch = with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { true }) do
+        with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { "different-start" }) do
+          reader.send(:expected_daemon)
+        end
+      end
+      assert_equal :unavailable, mismatch
+
+      gone = with_replaced_singleton_method(
+        Process, :kill, ->(_signal, _pid) { raise Errno::ESRCH, "gone" }
+      ) do
+        reader.send(:expected_daemon)
+      end
+      assert_equal :unavailable, gone
+    end
+  end
 end

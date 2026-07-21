@@ -452,6 +452,7 @@ module Hive
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
           "mtime" => row[:mtime].utc.iso8601(6),
+          "observation_mtime" => (row[:observation_mtime] || row[:mtime]).utc.iso8601(6),
           "folder_mtime" => row[:folder_mtime].utc.iso8601(6),
           "age_seconds" => (Time.now - row[:mtime]).to_i,
           "claude_pid" => row[:claude_pid],
@@ -945,13 +946,18 @@ module Hive
               marker = Hive::Markers.current(task.state_file)
               marker, projection = status_projection(task, marker)
               folder_mtime = File.mtime(entry)
+              mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
               # Generic markerless tasks still carry meta.yml. Use that stable
-              # task-owned file before falling back to the directory mtime:
+              # task-owned file for the action observation before falling back
+              # to the directory mtime. Keep `mtime` on its long-standing
+              # state-file/directory meaning because the daemon's dispatch
+              # baseline relies on a stage move changing that value.
+              #
               # acquiring `.lock` changes the directory mtime and would make a
               # freshly emitted operational action invalidate itself inside
               # the command's lock.
               observation_source = Hive::OperationalAction.observation_mtime_source(task)
-              mtime = observation_source == entry ? folder_mtime : File.mtime(observation_source)
+              observation_mtime = observation_source == entry ? folder_mtime : File.mtime(observation_source)
               lock_holder = task_lock_holder(task)
               live_holder = live_task_lock_holder(lock_holder)
               icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: !live_holder.nil?)
@@ -985,6 +991,7 @@ module Hive
                 icon: icon,
                 state_label: state_label,
                 mtime: mtime,
+                observation_mtime: observation_mtime,
                 folder_mtime: folder_mtime,
                 age: humanise_age(mtime),
                 claude_pid: claude_pid,

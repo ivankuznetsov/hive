@@ -123,9 +123,13 @@ module Hive
         legacy = Array(project["legacy_stage_dirs"])
         next if legacy.empty?
 
+        total = legacy.sum { |entry| entry.fetch("task_count") }
+        dirs = legacy.map do |entry|
+          "#{entry.fetch('stage_dir')} (#{entry.fetch('task_count')})"
+        end.join(", ")
         issues << issue(
           code: "legacy_stage_dirs", source: "task_graph", project: project["name"],
-          message: "#{legacy.sum { |entry| entry.fetch('task_count') }} tasks are hidden in legacy stage directories",
+          message: "#{total} task#{total == 1 ? '' : 's'} hidden in legacy stage dirs: #{dirs}",
           remediation: project["legacy_migrate_command"] || "hive migrate"
         )
       end

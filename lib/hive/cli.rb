@@ -1102,7 +1102,10 @@ module Hive
       publication actions must use their direct commands after operator
       confirmation.
     DESC
-    option :observation, type: :string, required: true,
+    # Commands::Act owns the typed usage error. Keeping this optional at the
+    # Thor layer prevents the required-option banner from widening every help
+    # row enough to truncate unrelated command summaries.
+    option :observation, type: :string,
                          desc: "opaque observation token from operational status"
     def act(action_id, target)
       require "hive/commands/act"

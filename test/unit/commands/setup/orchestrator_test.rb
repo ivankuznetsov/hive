@@ -21,6 +21,19 @@ require "hive/commands/web/service_installer"
 class SetupOrchestratorTest < Minitest::Test
   include HiveTestHelper
 
+  def test_unattended_probe_uses_tty_state_and_fails_closed_on_ioerror
+    interactive = Object.new
+    interactive.define_singleton_method(:tty?) { true }
+    noninteractive = Object.new
+    noninteractive.define_singleton_method(:tty?) { false }
+    closed = Object.new
+    closed.define_singleton_method(:tty?) { raise IOError, "closed input" }
+
+    refute Hive::Commands::Setup.new(input: interactive).send(:unattended_without_yes?)
+    assert Hive::Commands::Setup.new(input: noninteractive).send(:unattended_without_yes?)
+    assert Hive::Commands::Setup.new(input: closed).send(:unattended_without_yes?)
+  end
+
   # ── diagnostics fakes ────────────────────────────────────────────────
 
   def diag(*rows, ok: nil)

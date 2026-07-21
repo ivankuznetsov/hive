@@ -97,7 +97,13 @@ class AgentSkillsManifestTest < Minitest::Test
       "unsafe sources" => ->(doc) { doc["packages"].first["agents"]["claude"]["source"] = "repo; rm -rf /" },
       "unsafe aliases" => ->(doc) { doc["capabilities"].find { |c| c["id"] == "wiki-plan" }["agents"]["claude"]["alias"]["path"] = "../plan.md" },
       "missing providers" => ->(doc) { doc["packages"].first["agents"]["claude"].delete("provider") },
-      "malformed versions" => ->(doc) { doc["packages"].first["version"] = "not a requirement (" }
+      "malformed versions" => lambda do |doc|
+        doc["packages"].find { |row| row["id"] == "compound-engineering" }["version"] = "not a requirement ("
+      end,
+      "non-native invocations" => lambda do |doc|
+        doc["capabilities"].find { |row| row["id"] == "ce-brainstorm" }
+          .dig("agents", "claude")["invocation"] = "not-native"
+      end
     }
 
     cases.each do |label, mutate|

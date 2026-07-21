@@ -504,6 +504,177 @@ class CommandsWatchTest < Minitest::Test
     assert_equal "interrupted", final.fetch("reason")
   end
 
+  def test_default_source_projects_one_collected_compatibility_graph
+    projects = [ "/tmp/demo" ]
+    full_graph = { "ok" => true, "projects" => [] }
+    operational = { "ok" => true, "tasks" => [] }
+    calls = []
+    status = Object.new
+    status.define_singleton_method(:json_payload) do |received|
+      calls << [ :json_payload, received ]
+      full_graph
+    end
+    status.define_singleton_method(:operational_payload) do |received, status_payload:|
+      calls << [ :operational_payload, received, status_payload ]
+      operational
+    end
+
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+      with_replaced_singleton_method(Hive::Commands::Status, :new, ->(json:) {
+        calls << [ :status_new, json ]
+        status
+      }) do
+        result = Hive::Commands::Watch::DefaultSource.new.fetch
+
+        assert_same full_graph, result.full_graph
+        assert_same operational, result.operational
+      end
+    end
+
+    assert_equal [
+      [ :status_new, true ],
+      [ :json_payload, projects ],
+      [ :operational_payload, projects, full_graph ]
+    ], calls
+  end
+
+  def test_rejects_each_invalid_bounded_watch_option
+    base = {
+      source: FakeSource.new(snapshot(task)), targets: [ "demo:task" ],
+      output: StringIO.new, signal_checker: -> { nil }
+    }
+    cases = [
+      [ { until_condition: "forever" }, /--until must be settled or completion/ ],
+      [ { interval: 0 }, /--interval must be a positive finite number/ ],
+      [ { max_events: 1.5 }, /--max-events must be a positive integer/ ],
+      [ { targets: [], project: "" }, /--project must not be empty/ ],
+      [ { targets: [], project: nil }, /pass at least one TARGET/ ],
+      [ { targets: [ "" ] }, /TARGET must not be empty/ ]
+    ]
+
+    cases.each do |overrides, message|
+      error = assert_raises(Hive::Commands::Watch::UsageError) do
+        Hive::Commands::Watch.new(**base.merge(overrides)).call
+      end
+      assert_match message, error.message
+    end
+  end
+
+  def test_initial_source_errors_and_invalid_snapshots_are_status_unavailable
+    sources = [
+      [ FakeSource.new(IOError.new("offline")), /initial status source unavailable: IOError: offline/ ],
+      [ FakeSource.new(Object.new), /watch source returned an invalid snapshot/ ],
+      [ FakeSource.new(Hive::Commands::Watch::SourceSnapshot.new(
+        operational: { "ok" => false }, full_graph: { "ok" => true }
+      )), /watch source returned an unsuccessful status payload/ ]
+    ]
+
+    sources.each do |source, message|
+      error = assert_raises(Hive::Commands::Watch::StatusUnavailableError) do
+        build_watch(source: source, targets: [ "demo:task" ], output: StringIO.new).call
+      end
+      assert_match message, error.message
+    end
+
+    watch = build_watch(
+      source: FakeSource.new(snapshot(task)), targets: [ "demo:task" ],
+      output: StringIO.new, timeout: 1
+    )
+    assert_raises(Hive::Commands::Watch::DeadlineExceeded) do
+      watch.send(:within_deadline, -2) { flunk "expired deadlines must not yield" }
+    end
+  end
+
+  def test_selection_errors_distinguish_unknown_empty_missing_and_incomplete_graphs
+    cases = [
+      [ snapshot(task), [], { project: "unknown" }, /unknown project "unknown"/ ],
+      [ snapshot(nil, archived: [ legacy_task(action: "archived") ]), [],
+        { project: "demo" }, /no active tasks selected for project "demo"/ ],
+      [ snapshot(task), [ ":missing" ], {}, /qualified TARGET must be PROJECT:SLUG/ ],
+      [ snapshot(task), [ "demo:missing" ], {}, /no task matches "demo:missing"/ ],
+      [ snapshot(task), [ "missing" ], { project: "demo" }, /no task matches "demo:missing"/ ]
+    ]
+
+    cases.each do |source_snapshot, targets, options, message|
+      error = assert_raises(Hive::Commands::Watch::UsageError) do
+        build_watch(
+          source: FakeSource.new(source_snapshot), targets: targets,
+          output: StringIO.new, **options
+        ).call
+      end
+      assert_match message, error.message
+    end
+
+    incomplete = snapshot(task)
+    incomplete.operational.dig("source", "task_graph")["status"] = "partial"
+    error = assert_raises(Hive::Commands::Watch::StatusUnavailableError) do
+      build_watch(
+        source: FakeSource.new(incomplete), targets: [ "demo:missing" ],
+        output: StringIO.new
+      ).call
+    end
+    assert_match(/cannot resolve.*incomplete task graph \(partial\)/, error.message)
+  end
+
+  def test_candidate_fallback_and_physical_identity_fail_closed
+    full_only = snapshot(nil, archived: [ legacy_task(action: "ready_to_run") ])
+    watch = build_watch(
+      source: FakeSource.new(full_only), targets: [ "demo:task" ], output: StringIO.new
+    )
+    candidates = watch.send(:candidate_index, full_only)
+
+    assert_equal false, candidates.fetch("demo:task").first.fetch(:archived)
+
+    orphan = snapshot(task(project: "orphan"))
+    orphan_candidates = watch.send(:candidate_index, orphan)
+    assert watch.send(:known_project?, orphan, "orphan", orphan_candidates)
+    assert_nil watch.send(:task_physical_identity, "/definitely/missing/hive-watch-task")
+  end
+
+  def test_active_target_projects_provider_and_action_policy_without_secrets
+    enriched = task(state: "waiting_on_you", owner: "operator", reason: "choose")
+    enriched["provider"] = {
+      "name" => "codex", "retry_after" => "2026-07-20T12:05:00Z", "private" => "drop"
+    }
+    enriched["action"] = {
+      "action_id" => "workflow.advance", "risk_class" => "routine_idempotent",
+      "confirmation_required" => true, "observation_token" => "drop"
+    }
+
+    events, = run_json_watch(source: FakeSource.new(snapshot(enriched)), targets: [ "demo:task" ])
+    projected = events.first.fetch("targets").first
+
+    assert_equal({ "name" => "codex", "retry_after" => "2026-07-20T12:05:00Z" },
+                 projected.fetch("provider"))
+    assert_equal({
+      "action_id" => "workflow.advance", "risk_class" => "routine_idempotent",
+      "confirmation_required" => true
+    }, projected.fetch("action_policy"))
+  end
+
+  def test_default_signal_handlers_are_installed_for_the_bounded_call
+    traps = []
+    trap = lambda do |signal, handler = nil, &block|
+      traps << [ signal, handler || :block ]
+      block&.call if signal == "TERM"
+      "DEFAULT"
+    end
+    events = nil
+    with_replaced_singleton_method(Signal, :trap, trap) do
+      events, = run_json_watch(
+        source: FakeSource.new(snapshot(task(state: "waiting_on_you", owner: "operator"))),
+        targets: [ "demo:task" ], signal_checker: nil
+      )
+    end
+
+    assert_equal %w[initial final], events.map { |event| event.fetch("event") }
+    assert_equal "settled", events.last.fetch("reason")
+    assert_equal [
+      [ "INT", :block ], [ "TERM", :block ],
+      [ "INT", "DEFAULT" ], [ "TERM", "DEFAULT" ]
+    ], traps
+  end
+
   private
 
   def build_watch(source:, targets:, output:, clock: FakeClock.new, project: nil,

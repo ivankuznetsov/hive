@@ -919,6 +919,123 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  def test_legacy_layout_row_publishes_operator_disposition_without_dispatch
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
+    dispatcher.instance_variable_set(:@legacy_layout_projects, { "p1" => true })
+    observed = row
+
+    dispatcher.send(:handle_row, observed, now: T0)
+
+    assert_empty supervisor.spawned
+    disposition = snapshot.calls.last.last
+    assert_equal :legacy_layout, disposition.fetch(:decision)
+    assert_equal "operator", disposition.fetch(:owner)
+  end
+
+  def test_unknown_durable_admission_results_defer_safely
+    dispatcher, = make_dispatcher
+    deferred = Hive::Attempts::DispatchResult.new(
+      status: :deferred, attempt: nil, receipt: nil, attach_descriptor: nil, reason: "future_reason"
+    )
+    future = deferred.with(status: :future_status, reason: nil)
+
+    assert_equal :attempt_deferred, dispatcher.send(:dispatch_outcome, deferred)
+    assert_equal :attempt_deferred, dispatcher.send(:dispatch_outcome, future)
+  end
+
+  def test_dispatch_outcome_dispositions_cover_scheduler_and_unknown_states
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, = make_dispatcher(operational_snapshot: snapshot)
+    observed = row
+    expected = {
+      attempt_deferred: [ "hive", "durable attempt admission was deferred" ],
+      daily_cap: [ "scheduler", "project daily dispatch budget is exhausted" ],
+      cooldown: [ "scheduler", "task is inside its scheduler cooldown" ],
+      quarantined: [ "operator", "task is quarantined after repeated transient failures" ],
+      project_dropped: [ "operator", "project was dropped from this daemon generation" ],
+      future_outcome: [ "unknown", "dispatch outcome is not recognized" ]
+    }
+
+    expected.each do |outcome, (owner, reason)|
+      dispatcher.send(:observe_dispatch_outcome, observed, outcome)
+      disposition = snapshot.calls.last.last
+      assert_equal owner, disposition.fetch(:owner), outcome
+      assert_equal reason, disposition.fetch(:reason), outcome
+    end
+  end
+
+  def test_operational_snapshot_revalidation_and_assembly_failures_publish_failed_state
+    snapshot = FakeOperationalSnapshot.new
+    failed = Hive::Daemon::StatusConsumer::Result.new(
+      ok: false, rows: [], projects: [], error: "revalidation failed"
+    )
+    dispatcher, = make_dispatcher(status_result: failed, operational_snapshot: snapshot)
+
+    dispatcher.send(:publish_complete_operational_snapshot, initial_rows: [], now: T0)
+
+    assert_equal :fail, snapshot.calls.last.first
+    assert_equal "revalidation_status_failure", snapshot.calls.last.last.fetch(:reason)
+
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(operational_snapshot: snapshot)
+    status = dispatcher.instance_variable_get(:@status_consumer)
+    status.define_singleton_method(:fetch) { raise IOError, "status assembly failed" }
+
+    dispatcher.send(:publish_complete_operational_snapshot, initial_rows: [], now: T0)
+
+    assert_equal "snapshot_assembly_failure", snapshot.calls.last.last.fetch(:reason)
+    assert logger.events.any? { |name, attrs|
+      name == :operational_snapshot_publish_failed && attrs.fetch(:phase) == "complete"
+    }
+  end
+
+  def test_operational_snapshot_failure_logging_never_breaks_dispatcher
+    dispatcher, = make_dispatcher
+    logger = Object.new
+    logger.define_singleton_method(:event) { |*| raise IOError, "logger unavailable" }
+    dispatcher.instance_variable_set(:@logger, logger)
+
+    assert_nil dispatcher.send(
+      :log_operational_snapshot_failure, phase: "complete", error: IOError.new("snapshot unavailable")
+    )
+  end
+
+  def test_operational_queue_snapshot_counts_malformed_entries_and_degrades_on_failure
+    dispatcher, = make_dispatcher
+    pending = Struct.new(:created_at).new(T0 - 5)
+    pending_reader = lambda do |state_home:, bad_handler:|
+      bad_handler.call(path: File.join(state_home.to_s, "bad-pending.json"))
+      [ pending ]
+    end
+    claimed_reader = lambda do |state_home:, bad_handler:|
+      bad_handler.call(path: File.join(state_home.to_s, "bad-claimed.json"))
+      [ Object.new ]
+    end
+
+    snapshot = with_replaced_singleton_method(
+      Hive::Daemon::DispatchRequestQueue, :pending, pending_reader
+    ) do
+      with_replaced_singleton_method(
+        Hive::Daemon::DispatchRequestQueue, :claimed, claimed_reader
+      ) do
+        dispatcher.send(:operational_queue_snapshot, now: T0)
+      end
+    end
+
+    assert_equal "current", snapshot.fetch("status")
+    assert_equal 2, snapshot.fetch("malformed")
+    assert_equal 5, snapshot.fetch("oldest_pending_age_sec")
+
+    unavailable = with_replaced_singleton_method(
+      Hive::Daemon::DispatchRequestQueue, :pending, ->(**) { raise Errno::EACCES, "queue denied" }
+    ) do
+      dispatcher.send(:operational_queue_snapshot, now: T0)
+    end
+    assert_equal "unavailable", unavailable.fetch("status")
+    assert_match(/Errno::EACCES/, unavailable.fetch("reason"))
+  end
+
   def test_advance_action_dispatches_workflow_verb
     rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
     dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)

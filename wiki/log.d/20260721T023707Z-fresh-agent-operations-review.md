@@ -26,3 +26,13 @@ dispatched for this candidate. Until all four native jobs and attestation pass
 and the exact-SHA Check Run exists, the implementation is locally validated but
 not release-proven. No tag, package release, ClawHub publish, or deployment was
 performed.
+
+**Hosted CI follow-up:** Exact-head coverage exposed integration contracts that
+the focused suites had not exercised. Scheduler `mtime` is now distinct from
+action-token `observation_mtime`, concise legacy-layout warnings retain exact
+directory evidence and grammar, and `Commands::Act` owns missing-token usage
+errors so Thor does not truncate unrelated command summaries. The typed act
+envelope now also classifies `AmbiguousSlug` before its `InvalidTaskPath`
+parent, preserving the closed `ambiguous_target` error vocabulary. Defensive
+coverage now exercises watch input/source boundaries, skill inventory and
+publication failures, scheduler snapshot joins, and recovery fallbacks.

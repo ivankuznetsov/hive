@@ -111,7 +111,7 @@
       "required": [
         "stage", "slug", "id", "display_name", "depends_on", "blocked_by",
         "dependency_stage", "blocked", "admission_error", "folder", "state_file",
-        "worktree_path", "pr_url", "marker", "attrs", "mtime", "folder_mtime",
+        "worktree_path", "pr_url", "marker", "attrs", "mtime", "observation_mtime", "folder_mtime",
         "age_seconds", "claude_pid", "claude_pid_alive", "live_task_lock",
         "attempt_id", "task_generation",
         "task_lock_pid", "task_lock_process_start_time", "task_lock_id",
@@ -166,6 +166,7 @@
           }
         },
         "mtime": { "type": "string", "format": "date-time" },
+        "observation_mtime": { "type": "string", "format": "date-time" },
         "folder_mtime": { "type": "string", "format": "date-time" },
         "age_seconds": { "type": "integer", "minimum": 0 },
         "claude_pid": { "type": ["integer", "null"], "minimum": 1 },

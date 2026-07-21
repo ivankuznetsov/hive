@@ -263,4 +263,22 @@ class SetupAgentsCommandTest < Minitest::Test
 
     assert_equal 64, command(provisioner: fake, input: input).call
   end
+
+  def test_human_plan_labels_hive_managed_directory_and_file_writes
+    directory = operation.with(
+      id: "claude:hive:publish", kind: "bundled_skill_publish", argv: [], files: [ "/tmp/.claude/skills/hive" ]
+    )
+    file = operation.with(
+      id: "claude:wiki:alias", kind: "alias_write", argv: [], files: [ "/tmp/.claude/commands/plan.md" ]
+    )
+    output = StringIO.new
+    fake = FakeProvisioner.new(plan: plan(operations: [ directory, file ]))
+
+    assert_equal 0, command(
+      provisioner: fake, input: TtyInput.new("y\n"), output: output
+    ).call
+
+    assert_includes output.string, "(Hive atomic directory publish)"
+    assert_includes output.string, "(Hive atomic file write)"
+  end
 end

@@ -676,4 +676,23 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     refute snapshot.fetch("projects").key?("digest")
     assert_equal %w[digest patrol_scan task], snapshot.fetch("running").map { |row| row.fetch("kind") }.sort
   end
+
+  def test_operational_snapshot_exposes_active_cooldowns_and_quarantine
+    c = make
+    dispatch(c, 100, "cooldown-project", "cooldown-task")
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::WRONG_STAGE, completed_at: T0 + 1)
+    dispatch(c, 101, "quarantine-project", "quarantine-task")
+    c.record_completion(pid: 101, exit_code: Hive::ExitCodes::USAGE, completed_at: T0 + 1)
+
+    snapshot = c.operational_snapshot(now: T0 + 2)
+
+    assert_equal [ {
+      "project" => "cooldown-project",
+      "slug" => "cooldown-task",
+      "until" => (T0 + 1 + Hive::Daemon::ConcurrencyController::WRONG_STAGE_BACKOFF_SEC).iso8601
+    } ], snapshot.fetch("cooldowns")
+    assert_equal [ {
+      "project" => "quarantine-project", "slug" => "quarantine-task"
+    } ], snapshot.fetch("quarantined")
+  end
 end

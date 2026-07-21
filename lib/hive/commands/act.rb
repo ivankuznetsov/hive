@@ -35,9 +35,9 @@ module Hive
 
       def envelope_error_kind(error)
         case error
+        when Hive::AmbiguousSlug then "ambiguous_target"
         when Hive::OperationalActionUsageError, Hive::InvalidTaskPath then "usage"
         when Hive::StaleOperationalObservation, Hive::WrongStage then "stale_observation"
-        when Hive::AmbiguousSlug then "ambiguous_target"
         when Hive::ConcurrentRunError then "concurrent_run"
         when Hive::DependencyWaitError then "dependency_wait"
         when Hive::DependencyAdmissionError then "admission_error"

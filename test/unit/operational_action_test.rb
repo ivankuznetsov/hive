@@ -61,6 +61,65 @@ class OperationalActionTest < Minitest::Test
     assert_match(/unknown operational action/, error.message)
   end
 
+  def test_invalid_target_is_rejected_before_project_lookup
+    executor = Hive::OperationalAction::Executor.new
+
+    [ "", "demo", "demo:", "demo:path/to-task" ].each do |target|
+      error = assert_raises(Hive::OperationalActionUsageError, target) do
+        executor.execute(
+          action_id: Hive::OperationalAction::ACTION_ID,
+          target: target,
+          observation_token: "a" * 64
+        )
+      end
+      assert_match(/exact project:slug/, error.message)
+    end
+  end
+
+  def test_task_resolution_preserves_ambiguity_and_converts_missing_task_to_stale
+    require "hive/task_resolver"
+    executor = Hive::OperationalAction::Executor.new
+    ambiguous = Object.new
+    ambiguous.define_singleton_method(:resolve) do
+      raise Hive::AmbiguousSlug.new("ambiguous", slug: "task", candidates: [])
+    end
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { ambiguous }) do
+      assert_raises(Hive::AmbiguousSlug) { executor.send(:resolve_task, "task", "demo") }
+    end
+
+    missing = Object.new
+    missing.define_singleton_method(:resolve) { raise Hive::InvalidTaskPath, "task disappeared" }
+    error = with_replaced_singleton_method(
+      Hive::TaskResolver, :new, ->(*_args, **_kwargs) { missing }
+    ) do
+      assert_raises(Hive::StaleOperationalObservation) do
+        executor.send(:resolve_task, "task", "demo")
+      end
+    end
+    assert_match(/task disappeared/, error.message)
+  end
+
+  def test_dispatch_rejects_a_state_without_a_routine_action
+    error = assert_raises(Hive::StaleOperationalObservation) do
+      Hive::OperationalAction::Executor.new.send(
+        :dispatch, nil, { "action" => "wait" }, "demo", nil
+      )
+    end
+
+    assert_match(/no confirmation-free operational action/, error.message)
+  end
+
+  def test_result_reports_archived_when_the_task_disappears_after_action
+    executor = Hive::OperationalAction::Executor.new
+    executor.define_singleton_method(:resolve_task) do |*|
+      raise Hive::StaleOperationalObservation, "archived"
+    end
+
+    assert_equal({
+      "task_state" => "archived", "stage" => nil, "marker" => nil
+    }, executor.send(:result_for, "demo", "task"))
+  end
+
   def test_executor_advances_a_fresh_stage_action_through_the_real_command_path
     with_tmp_global_config do
       with_tmp_git_repo do |project_root|
@@ -169,6 +228,42 @@ class OperationalActionTest < Minitest::Test
           ensure
             Hive::Stages::Base.define_singleton_method(:spawn_agent, original)
           end
+        end
+      end
+    end
+  end
+
+  def test_status_keeps_dispatch_mtime_distinct_from_markerless_action_observation
+    descriptor = dispatch_workflow
+    with_registered_workflow(descriptor) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |project_root|
+          capture_io { Hive::Commands::Init.new(project_root).call }
+          project = Hive::Config.registered_projects.find do |entry|
+            File.expand_path(entry.fetch("path")) == File.expand_path(project_root)
+          end
+          slug = "generic-mtime-260721-real"
+          folder = File.join(project_root, ".hive-state", "stages", "1-intake", slug)
+          FileUtils.mkdir_p(folder)
+          Hive::TaskMeta.write(
+            folder, id: 202, slug: slug,
+            display_name: "Generic mtime split", workflow: descriptor.id.to_s
+          )
+          meta_path = File.join(folder, "meta.yml")
+          File.utime(Time.now - 10, Time.now - 10, meta_path)
+          File.utime(Time.now + 10, Time.now + 10, folder)
+
+          row = Hive::Commands::Status.new.json_payload([ project ])
+            .fetch("projects").first.fetch("tasks")
+            .find { |entry| entry.fetch("slug") == slug }
+
+          assert_equal File.mtime(folder).utc.iso8601(6), row.fetch("mtime"),
+                       "daemon dispatch must still observe markerless stage-directory moves"
+          assert_equal File.mtime(meta_path).utc.iso8601(6), row.fetch("observation_mtime"),
+                       "action tokens must use the stable markerless task metadata"
+          assert_equal Hive::OperationalAction.descriptor_for_task(
+            Hive::Task.new(folder), project: project.fetch("name")
+          ), Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row)
         end
       end
     end

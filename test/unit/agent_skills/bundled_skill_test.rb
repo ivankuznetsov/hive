@@ -181,4 +181,59 @@ class AgentSkillsBundledSkillTest < Minitest::Test
       assert_empty provisioner.build_plan(agents: [ "claude" ], skills: [ "hive" ]).operations
     end
   end
+
+  def test_bundled_skill_root_outside_home_is_a_conflict
+    with_tmp_dir do |home|
+      project = File.join(home, "project")
+      Dir.mkdir(project, 0o700)
+      bin = File.join(home, "bin", "claude")
+      make_executable(bin)
+      outside = File.join(File.dirname(home), "outside-claude-#{Process.pid}")
+      inspector = Hive::AgentSkills::Inspector.new(
+        config: config(bin), project_root: project,
+        runner: Runner.new([ bin, "--version" ] => result(stdout: "2.1.179\n")),
+        environment: { "HOME" => home, "PATH" => "", "CLAUDE_CONFIG_DIR" => outside }
+      )
+
+      row = inspector.inspect(agents: [ "claude" ], skills: [ "hive" ]).fetch(0)
+
+      assert_equal "conflicting", row.health
+      assert_match(/beneath the trusted user root/, row.explanation)
+    ensure
+      FileUtils.rm_rf(outside) if outside
+    end
+  end
+
+  def test_bundled_resolution_reports_missing_and_system_errors
+    with_tmp_dir do |home|
+      project = File.join(home, "project")
+      destination = File.join(home, ".claude", "skills", "hive")
+      FileUtils.mkdir_p(destination, mode: 0o700)
+      bin = File.join(home, "bin", "claude")
+      make_executable(bin)
+      inspector = Hive::AgentSkills::Inspector.new(
+        config: config(bin), project_root: project, runner: Runner.new({}),
+        environment: { "HOME" => home, "PATH" => "", "CLAUDE_CONFIG_DIR" => File.join(home, ".claude") }
+      )
+      target = Hive::AgentSkills::TargetResolver.new(
+        config: config(bin), project_root: project
+      ).resolve(agents: [ "claude" ], skills: [ "hive" ]).fetch(0)
+      contract = Hive::AgentSkills::Manifest.load.capability("hive").agent("claude")
+      resolver = Object.new
+      resolver.define_singleton_method(:resolve) do |*|
+        Hive::SkillCheck::Resolution.new(
+          status: :missing, path: nil, message: "not resolved", candidates: [], parse_errors: []
+        )
+      end
+      inspector.define_singleton_method(:skill_module) { |_| resolver }
+
+      missing = inspector.send(:inspect_bundled_resolution, target, contract, destination)
+      assert_match(/installed Hive operating skill does not resolve/, missing.fetch("issues").first.last)
+
+      resolver.define_singleton_method(:resolve) { |*| raise Errno::EACCES, destination }
+      failure = inspector.send(:inspect_bundled_resolution, target, contract, destination)
+      assert_equal "missing", failure.fetch("status")
+      assert_match(/could not inspect bundled skill resolution/, failure.fetch("issues").first.last)
+    end
+  end
 end

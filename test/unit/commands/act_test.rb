@@ -83,4 +83,40 @@ class CommandsActTest < Minitest::Test
     assert_match(/--observation/, error.message)
     assert_empty executor.calls
   end
+
+  def test_missing_action_or_target_is_a_usage_error_before_executor_call
+    [ [ "", "demo:task" ], [ "workflow.advance", "" ] ].each do |action_id, target|
+      executor = FakeExecutor.new
+
+      error = assert_raises(Hive::OperationalActionUsageError) do
+        Hive::Commands::Act.new(action_id, target, observation: "a" * 64, executor: executor).call
+      end
+
+      assert_match(/ACTION_ID and TARGET are required/, error.message)
+      assert_empty executor.calls
+    end
+  end
+
+  def test_error_kinds_cover_the_closed_operational_failure_vocabulary
+    command = Hive::Commands::Act.new("workflow.advance", "demo:task", observation: "a" * 64)
+    errors = {
+      Hive::OperationalActionUsageError.new("usage") => "usage",
+      Hive::InvalidTaskPath.new("path") => "usage",
+      Hive::StaleOperationalObservation.new("stale") => "stale_observation",
+      Hive::WrongStage.new("wrong") => "stale_observation",
+      Hive::AmbiguousSlug.new("ambiguous", slug: "task", candidates: []) => "ambiguous_target",
+      Hive::ConcurrentRunError.new("locked") => "concurrent_run",
+      Hive::DependencyWaitError.new("wait", offending_ref: "dep", safe_correction: "retry") => "dependency_wait",
+      Hive::DependencyAdmissionError.new(
+        "rejected", reason_code: "bad_dependency", offending_ref: "dep", safe_correction: "fix config"
+      ) => "admission_error",
+      Hive::ConfigError.new("config") => "config",
+      Hive::InternalError.new("internal") => "internal",
+      StandardError.new("unexpected") => "error"
+    }
+
+    errors.each do |error, kind|
+      assert_equal kind, command.envelope_error_kind(error), error.class.name
+    end
+  end
 end

@@ -65,7 +65,13 @@ module Hive
 
       def token(project:, row:)
         fields = TOKEN_FIELDS.to_h do |field|
-          value = field == "project" ? project : row[field]
+          value = if field == "project"
+            project
+          elsif field == "mtime"
+            row["observation_mtime"] || row["mtime"]
+          else
+            row[field]
+          end
           [ field, value ]
         end
         ::Digest::SHA256.hexdigest(Hive::WorkflowPackage::CanonicalJSON.generate(fields))

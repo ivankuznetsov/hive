@@ -46,6 +46,19 @@ launching OpenClaw and points missing or stale installations to
 `openclaw skills install/update @ivankuznetsov/hive-cli`;
 `hive setup-agents` never writes OpenClaw state.
 
+On supported Linux/macOS, the approved guided setup reports the loopback URL
+and distinct installed, enabled, running, and ready state for the default
+managed Hive web service alongside daemon setup. Use
+`/hive web status --json` for read-only web state. Bare `/hive web` is the
+explicit blocking foreground path, not a status probe. The skill never creates
+LAN/public binding or Tailscale exposure; it only reports a non-loopback origin
+that an operator explicitly configured through Hive's existing gates.
+
+Choose Hivebox when the user needs container isolation, multiple local
+instances, containment for untrusted agents, or reproducible server/NAS
+deployment. Windows can use WSL with systemd for native Hive web or Hivebox
+through Docker Desktop; do not invent a separate Windows service manager.
+
 ## Local projection test
 
 From the Hive repository root:

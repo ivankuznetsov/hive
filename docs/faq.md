@@ -31,6 +31,15 @@ database or hosted control plane. Loopback access, optional GitHub login,
 service installation, reverse-proxy boundaries, and the separate Hivebox
 container mode are documented in [the web reference](../wiki/commands/web.md).
 
+### When should I choose Hivebox instead of native Hive web?
+
+Run `hive setup` for the ordinary single-instance Linux/macOS experience: it
+installs the loopback-only native Hive web service by default. Choose
+[Hivebox](../packaging/docker/README.md) when you need container isolation,
+multiple local instances, containment for untrusted agents, or a reproducible
+server/NAS deployment. Windows users can use WSL with systemd for the native
+path or Hivebox for the container path.
+
 ### Why more than one agent?
 
 Hive treats agent CLIs as profiles. Planning, implementation, review, and browser testing can use different tools because their strengths and output contracts differ.

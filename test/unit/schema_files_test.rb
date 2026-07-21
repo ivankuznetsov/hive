@@ -29,6 +29,89 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_native_web_schema_files_accept_versioned_success_and_error_shapes
+    service = {
+      "platform" => "linux", "unit_path" => "/tmp/hive-web.service",
+      "service_installed" => true, "service_enabled" => true,
+      "service_running" => true, "service_manager_available" => true,
+      "url" => "http://127.0.0.1:4567", "ready" => true, "readiness" => "ready"
+    }
+    samples = {
+      "hive-setup" => {
+        "schema" => "hive-setup", "schema_version" => 1, "ok" => true,
+        "mode" => "managed_service", "url" => service.fetch("url"),
+        "service" => service, "warnings" => [],
+        "phases" => [ { "name" => "web", "ok" => true, "available" => true } ]
+      },
+      "hive-web-status" => {
+        "schema" => "hive-web-status", "schema_version" => 1,
+        "ok" => true, "mode" => "managed_service", "warnings" => []
+      }.merge(service),
+      "hive-web-install" => {
+        "schema" => "hive-web-install", "schema_version" => 1, "ok" => true,
+        "mode" => "managed_service",
+        "outcome" => "written", "platform" => "linux",
+        "target_path" => "/tmp/hive-web.service", "backup_path" => nil,
+        "restarted" => false, "messages" => [], "warnings" => []
+      }.merge(service)
+    }
+
+    samples.each do |name, payload|
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(name))))
+      assert_empty schemer.validate(payload).to_a, "#{name} success payload must validate"
+
+      extras = if name == "hive-setup"
+        {
+          "mode" => "managed_service", "url" => service.fetch("url"),
+          "service" => service, "warnings" => []
+        }
+      else
+        { "mode" => "managed_service", "warnings" => [] }.merge(service)
+      end
+      error_kind = name == "hive-setup" ? "usage" : "invalid_task_path"
+      error = Hive::Schemas::ErrorEnvelope.build(
+        schema: name,
+        error: Hive::InvalidTaskPath.new("usage"),
+        error_kind: error_kind,
+        extras: extras
+      )
+      assert_empty schemer.validate(error).to_a, "#{name} usage payload must validate"
+    end
+
+    status_error = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-web-status",
+      error: Hive::ConfigError.new("invalid web config"),
+      error_kind: "config_error",
+      extras: { "mode" => "managed_service", "warnings" => [] }.merge(service)
+    )
+    status_schema = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-status")))
+    )
+    assert_empty status_schema.validate(status_error).to_a,
+                 "hive web status configuration errors must retain the v1 envelope"
+  end
+
+  def test_native_web_schemas_reject_incomplete_success_unknown_readiness_and_bad_warning
+    %w[hive-web-status hive-web-install].each do |name|
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(name))))
+      incomplete = { "schema" => name, "schema_version" => 1, "ok" => true }
+      refute_empty schemer.validate(incomplete).to_a
+    end
+
+    status = {
+      "schema" => "hive-web-status", "schema_version" => 1, "ok" => true,
+      "mode" => "managed_service", "platform" => "linux", "unit_path" => nil,
+      "service_installed" => true, "service_enabled" => true, "service_running" => true,
+      "service_manager_available" => true, "url" => "http://127.0.0.1:4567",
+      "ready" => false, "readiness" => "mystery", "warnings" => [ { "alias" => "old" } ]
+    }
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-status"))))
+    errors = schemer.validate(status).to_a
+    refute_empty errors
+    assert errors.any? { |error| error["data_pointer"] == "/readiness" }
+    assert errors.any? { |error| error["data_pointer"].start_with?("/warnings/0") }
+  end
+
   def test_doctor_v1_schema_remains_available_and_v2_payload_validates
     assert File.exist?(Hive::Schemas.schema_path("hive-doctor", version: 1))
     target = Hive::AgentSkills::Target.new(
@@ -48,11 +131,17 @@ class SchemaFilesTest < Minitest::Test
       project_root: nil,
       json: true,
       output: output,
-      inspector: inspector
+      inspector: inspector,
+      environment: { "HIVEBOX_ORIGIN" => "https://legacy.example" }
     ).call
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-doctor"))))
 
-    assert_empty schemer.validate(JSON.parse(output.string)).to_a
+    payload = JSON.parse(output.string)
+    assert_empty schemer.validate(payload).to_a
+    alias_row = payload.fetch("checks").find { |row| row["alias"] == "HIVEBOX_ORIGIN" }
+    refute_nil alias_row
+    assert_equal "HIVE_WEB_ORIGIN", alias_row["replacement"]
+    assert_equal false, alias_row["ignored"]
   end
 
   def test_setup_agents_schema_file_accepts_command_payload

@@ -48,6 +48,8 @@ for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
 `web/Gemfile` is deliberately separate from the gem payload: `hive web`
 execs the Rails app from a source checkout or Docker image, and
 `test/unit/gemspec_test.rb` pins that the gem does not package `web/`.
+Managed release bundles authenticate `SHA256SUMS` against the exact release
+workflow identity and expected version tag before dependency installation.
 
 Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.3),
 propshaft, sqlite3, puma, importmap-rails, turbo-rails, stimulus-rails,

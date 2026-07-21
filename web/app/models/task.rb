@@ -1,9 +1,10 @@
 require "tempfile"
+require "hive/web/environment"
 
 class Task
   ARTIFACT_ORDER = %w[idea.md brainstorm.md plan.md task.md pr.md summary.md artifact.md].freeze
   MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif)\z/i
-  DIFF_TIMEOUT_SEC = Integer(ENV.fetch("HIVEBOX_DIFF_TIMEOUT_SEC", 15))
+  DIFF_TIMEOUT_SEC = Integer(Hive::Web::Environment.value("HIVE_WEB_DIFF_TIMEOUT_SEC"))
   DIFF_MAX_BYTES = 512 * 1024
   RECOVERY_ACTIONS = %w[recover_execute recover_review error].freeze
   STAGE_DISPATCH_ACTIONS = {

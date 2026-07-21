@@ -88,7 +88,7 @@ class LaunchPathFixtureTest < Minitest::Test
     assert_includes guide, "hive setup --service"
     assert_includes guide, "hive daemon status || hive daemon start --detach"
     assert_includes guide, "hive web start --detach"
-    assert_includes setup_source, "install_web_service if @service"
+    assert_match(/if @service.*?if web_bundle\["ok"\].*?install_web_service/m, setup_source)
     assert_includes plan, response
     assert_includes outcome, response
     assert_includes patch, 'VERSION = "0.1.0"'

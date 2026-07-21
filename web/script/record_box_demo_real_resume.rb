@@ -72,7 +72,7 @@ end
 
 puts "==> booting rails + daemon"
 port = TCPServer.open(0) { |s| s.addr[1] }
-server_env = env_base.merge("HIVEBOX_STORAGE_DIR" => File.join(sandbox, "storage"),
+server_env = env_base.merge("HIVE_WEB_STORAGE_DIR" => File.join(sandbox, "storage"),
                             "RAILS_ENV" => "development",
                             "BUNDLE_GEMFILE" => File.join(WEB_ROOT, "Gemfile"))
 server_pid = Process.spawn(server_env, "bin/rails", "server", "-p", port.to_s,

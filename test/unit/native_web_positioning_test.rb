@@ -14,6 +14,7 @@ class NativeWebPositioningTest < Minitest::Test
     docs/RELEASING.md
     openclaw/README.md
     openclaw/skills/hive/SKILL.md
+    skills/hive/references/setup-and-platforms.md
     wiki/index.md
     wiki/cli.md
     wiki/commands.md
@@ -30,7 +31,7 @@ class NativeWebPositioningTest < Minitest::Test
     docs/getting-started.md
     docs/hive-site-companion.md
     openclaw/README.md
-    openclaw/skills/hive/SKILL.md
+    skills/hive/references/setup-and-platforms.md
     wiki/index.md
     wiki/commands.md
     wiki/operating.md
@@ -87,6 +88,26 @@ class NativeWebPositioningTest < Minitest::Test
     refute_includes installer, '"$hive_cmd" setup --no-init --json'
     refute_includes installer, '"$hive_cmd" setup --no-service --json'
     refute_includes installer, '"$hive_cmd" setup --json'
+  end
+
+  def test_canonical_agent_setup_exposes_the_managed_web_service_contract
+    setup = read("skills/hive/references/setup-and-platforms.md")
+
+    assert_includes setup, "hive setup --no-init --yes --json"
+    assert_includes setup, "hive setup --no-init --no-service --yes --json"
+    assert_match(/installs,\s+enables, starts, and bounded-probes the loopback Hive web service/m, setup)
+    %w[
+      service_manager_available
+      service_installed
+      service_enabled
+      service_running
+      ready
+      readiness
+      url
+    ].each { |field| assert_includes setup, "service.#{field}" }
+    assert_includes setup, "hive web status --json"
+    assert_match(/read-only follow-up.*without installing, enabling, starting, or restarting/m, setup)
+    assert_match(/Prefer this native managed-service path.*Choose Hivebox/m, setup)
   end
 
   def test_legacy_native_aliases_are_confined_to_explicit_migration_docs

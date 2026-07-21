@@ -101,6 +101,7 @@ class ReleaseContractTest < Minitest::Test
 
     refute jobs.key?("build")
     refute_includes body, "gem build hive.gemspec"
+    assert_equal "web-bundle", gate.fetch("needs")
     assert_equal "proof-gate", jobs.fetch("install-gate").fetch("needs")
     assert_equal [ "proof-gate", "install-gate" ], jobs.fetch("release-finalize").fetch("needs")
     assert_includes body, "commits/${candidate_sha}/check-runs"
@@ -115,6 +116,32 @@ class ReleaseContractTest < Minitest::Test
     assert_includes body, "hive-proven-candidate"
     assert_includes body, "hive-agent-skills-*.tar.gz"
     assert_equal "Verify exact-SHA live agent proof", gate.fetch("name")
+  end
+
+  def test_release_builds_and_proves_the_exact_managed_web_archive_before_finalize
+    workflow = YAML.safe_load_file(RELEASE_WORKFLOW, aliases: true)
+    jobs = workflow.fetch("jobs")
+    web_bundle = jobs.fetch("web-bundle")
+    proof = jobs.fetch("proof-gate")
+    finalize = jobs.fetch("release-finalize")
+
+    package_step = web_bundle.fetch("steps").find do |step|
+      step["name"] == "Build exact managed web archive"
+    end
+    refute_nil package_step
+    assert_includes package_step.fetch("run"), "git archive --format=tar.gz"
+    assert_includes package_step.fetch("run"), 'echo "sha256=$web_sha" >> "$GITHUB_OUTPUT"'
+    assert_equal "${{ steps.archive.outputs.sha256 }}", web_bundle.dig("outputs", "sha256")
+
+    proof_body = proof.fetch("steps").filter_map { |step| step["run"] }.join("\n")
+    assert_equal "web-bundle", proof.fetch("needs")
+    assert_includes proof_body, "EXPECTED_WEB_SHA"
+    assert_includes proof_body, "verify-managed-web-setup.sh"
+    assert_includes proof_body, "cp \"$web_archive\" proven/"
+
+    finalize_body = finalize.fetch("steps").filter_map { |step| step["run"] }.join("\n")
+    refute_includes finalize_body, "git archive"
+    refute finalize.fetch("steps").any? { |step| step["name"] == "Package managed web bundle" }
   end
 
   def test_release_selector_executes_the_trusted_exact_sha_fixture_contract

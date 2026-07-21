@@ -12,9 +12,42 @@ permissions:
   contents: read
 
 jobs:
+  web-bundle:
+    name: Build exact managed web archive
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.archive.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build exact managed web archive
+        id: archive
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${REF_NAME#v}"
+          mkdir -p web-candidate
+          web_archive="web-candidate/hive-web-${version}.tar.gz"
+          # One git-archive invocation defines the bytes that every later gate
+          # proves and release-finalize publishes. Tracked files only; the Rails
+          # app root remains the archive root AppBundle.ensure! expects.
+          git archive --format=tar.gz --output "$web_archive" HEAD:web
+          web_sha="$(sha256sum "$web_archive" | awk '{print $1}')"
+          echo "sha256=$web_sha" >> "$GITHUB_OUTPUT"
+          echo "packaged $web_archive (sha256=$web_sha)"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hive-web-candidate
+          path: web-candidate
+          if-no-files-found: error
+          retention-days: 1
+
   proof-gate:
     name: Verify exact-SHA live agent proof
     runs-on: ubuntu-24.04
+    needs: web-bundle
     permissions:
       actions: read
       checks: read
@@ -108,6 +141,40 @@ jobs:
           skill_path="$(jq -er '.skills' <<<"$result")"
           cp "$gem_path" "$skill_path" proven/
           ( cd proven && sha256sum * )
+      - uses: actions/download-artifact@v8
+        with:
+          name: hive-web-candidate
+          path: web-candidate
+      - name: Install and exercise the exact managed web candidate
+        env:
+          EXPECTED_WEB_SHA: ${{ needs.web-bundle.outputs.sha256 }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${REF_NAME#v}"
+          web_archive="web-candidate/hive-web-${version}.tar.gz"
+          [[ -s "$web_archive" ]] || { echo "missing exact managed web candidate" >&2; exit 1; }
+          actual_web_sha="$(sha256sum "$web_archive" | awk '{print $1}')"
+          [[ "$actual_web_sha" == "$EXPECTED_WEB_SHA" ]] || {
+            echo "managed web candidate changed across the artifact boundary" >&2
+            exit 1
+          }
+          cp "$web_archive" proven/
+
+          gem_file="$(ls proven/hive-cli-*.gem | head -n 1)"
+          sandbox="$RUNNER_TEMP/proven-managed-web"
+          mkdir -p "$sandbox/gems" "$sandbox/verify"
+          GEM_HOME="$sandbox/gems" GEM_PATH="$sandbox/gems" gem install "$gem_file" \
+            --install-dir "$sandbox/gems" \
+            --bindir "$sandbox/gems/bin" \
+            --no-document \
+            --source https://rubygems.org
+          GEM_HOME="$sandbox/gems" GEM_PATH="$sandbox/gems" \
+          packaging/verify-managed-web-setup.sh \
+            --hive-bin="$sandbox/gems/bin/hive" \
+            --archive="$web_archive" \
+            --sha256="$EXPECTED_WEB_SHA" \
+            --prefix="$sandbox/verify"
       - uses: actions/upload-artifact@v7
         with:
           name: hive-proven-candidate
@@ -179,20 +246,6 @@ jobs:
         with:
           name: hive-proven-candidate
           path: dist
-      - name: Package managed web bundle
-        env:
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          # The CLI's local web mode (`hive web` / `hive setup`) downloads
-          # hive-web-<version>.tar.gz from this release and unpacks it as the
-          # managed Rails app (lib/hive/web/app_bundle.rb). Package the tracked
-          # web/ tree — `git archive` skips untracked/ignored dev cruft — with
-          # config/application.rb at the archive root, matching what
-          # AppBundle#ensure! expects.
-          version="${REF_NAME#v}"
-          mkdir -p dist
-          git archive --format=tar.gz -o "dist/hive-web-${version}.tar.gz" HEAD:web
-          echo "packaged dist/hive-web-${version}.tar.gz"
       - name: Build checksums
         run: |
           cd dist

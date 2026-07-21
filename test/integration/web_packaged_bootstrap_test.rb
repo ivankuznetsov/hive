@@ -1,7 +1,10 @@
 require "test_helper"
+require "digest"
 require "json"
 require "open3"
 require "rbconfig"
+require "rubygems/package"
+require "zlib"
 
 class WebPackagedBootstrapTest < Minitest::Test
   ROOT = File.expand_path("../..", __dir__)
@@ -39,7 +42,22 @@ class WebPackagedBootstrapTest < Minitest::Test
         executable_source.sub("require \"hive\"\n", "require \"hive\"\n#{injection}")
       )
 
-      source = File.join(ROOT, "web")
+      archive = File.join(tmp, "hive-web-#{Hive::VERSION}.tar.gz")
+      archive_out, archive_err, archive_status = Open3.capture3(
+        "git", "archive", "--format=tar.gz", "--output", archive, "HEAD:web",
+        chdir: ROOT
+      )
+      assert archive_status.success?, "git archive failed: #{archive_out}\n#{archive_err}"
+      archive_entries = read_archive(archive)
+      tracked_out, tracked_err, tracked_status = Open3.capture3(
+        "git", "ls-tree", "-r", "--name-only", "HEAD:web",
+        chdir: ROOT
+      )
+      assert tracked_status.success?, "git ls-tree failed: #{tracked_err}"
+      tracked_files = tracked_out.lines(chomp: true)
+      assert_equal tracked_files.sort, archive_entries.keys.sort,
+                   "the release archive must contain every tracked web file exactly once"
+
       env = {
         "GEM_HOME" => gem_home,
         "GEM_PATH" => [ gem_home, *Gem.path ].join(File::PATH_SEPARATOR),
@@ -52,13 +70,14 @@ class WebPackagedBootstrapTest < Minitest::Test
       File.write(preload, setup_fixture_source)
       setup_env = env.merge(
         "HIVE_HOME" => setup_home,
-        "HIVE_WEB_BUNDLE_URL" => source,
+        "HIVE_WEB_BUNDLE_URL" => archive,
+        "HIVE_WEB_BUNDLE_SHA256" => Digest::SHA256.file(archive).hexdigest,
         "HIVE_EXPECTED_CLI_ROOT" => installed_root,
         "HIVE_PACKAGE_CAPTURE" => capture,
         "HIVE_SETUP_FIXTURE" => preload
       )
       stdout, setup_stderr, setup_status = Open3.capture3(
-        setup_env, File.join(gem_home, "bin", "hive"), "setup", "--json", "--no-init", "--yes",
+        setup_env, File.join(gem_home, "bin", "hive"), "setup", "--no-init", "--yes", "--json",
         chdir: tmp
       )
 
@@ -77,10 +96,37 @@ class WebPackagedBootstrapTest < Minitest::Test
              "the real Bundler install must populate the managed dependency directory"
       assets = File.join(setup_home, "web", "public", "assets", ".manifest.json")
       assert File.file?(assets), "the real Rails assets:precompile must write a manifest"
+
+      archive_entries.each do |relative, entry|
+        installed_path = File.join(setup_home, "web", relative)
+        assert File.file?(installed_path), "tracked archive file was not extracted: #{relative}"
+        assert_equal entry.fetch(:content), File.binread(installed_path),
+                     "managed setup changed tracked archive bytes for #{relative}"
+        assert_equal entry.fetch(:executable), File.executable?(installed_path),
+                     "managed setup changed the executable bit for #{relative}"
+      end
     end
   end
 
   private
+
+  def read_archive(path)
+    entries = {}
+    Zlib::GzipReader.open(path) do |gzip|
+      Gem::Package::TarReader.new(gzip) do |tar|
+        tar.each do |entry|
+          next if entry.directory?
+
+          relative = entry.full_name.sub(%r{\A\./}, "")
+          entries.fetch(relative) { entries[relative] = {
+            content: entry.read,
+            executable: (entry.header.mode & 0o111).positive?
+          } }
+        end
+      end
+    end
+    entries
+  end
 
   def setup_fixture_source
     <<~'RUBY'

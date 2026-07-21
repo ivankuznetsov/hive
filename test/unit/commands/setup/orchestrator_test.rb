@@ -1,5 +1,6 @@
 require "test_helper"
 require "open3"
+require "json_schemer"
 require "hive/commands/setup"
 require "hive/setup/diagnostics"
 require "hive/web/app_bundle"
@@ -175,6 +176,41 @@ class SetupOrchestratorTest < Minitest::Test
     end
     with_replaced_singleton_method(Hive::Commands::Init, :new, ->(*_a, **_kw) { fake }) do
       yield
+    end
+  end
+
+  def with_manager_unavailable_web(diagnostics:, success: true, wire: "unsupported")
+    state = {
+      "platform" => "linux", "unit_path" => "/tmp/hive-web.service",
+      "service_installed" => true, "service_enabled" => false,
+      "service_running" => false, "service_manager_available" => false
+    }
+    installer = fake_installer(
+      success: success,
+      wire: wire,
+      target_path: state.fetch("unit_path"),
+      messages: [
+        "systemd not detected; web unit was written but autostart was not enabled. " \
+          "Enable systemd in WSL or run `hive web start` manually."
+      ],
+      state: state
+    )
+    snapshot = state.merge(
+      "url" => "http://127.0.0.1:4567",
+      "ready" => false,
+      "readiness" => "manager_unavailable"
+    )
+
+    with_all_collaborators_ok(diagnostics: diagnostics) do
+      with_fake_init do
+        with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
+          ->(**) { installer }) do
+          with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot,
+            ->(**) { snapshot }) do
+            yield
+          end
+        end
+      end
     end
   end
 
@@ -359,6 +395,73 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal true, web_service["ready"]
   end
 
+  def test_manager_unavailable_is_a_successful_json_platform_exception
+    output = StringIO.new
+
+    exit_code = with_manager_unavailable_web(diagnostics: diag(ok_row)) do
+      Hive::Commands::Setup.new(json: true, yes: true, output: output).call
+    end
+
+    assert_equal 0, exit_code
+    payload = JSON.parse(output.string)
+    assert_equal true, payload["ok"]
+    assert_equal false, payload.dig("service", "service_manager_available")
+    assert_equal true, payload.dig("service", "service_installed")
+    assert_equal false, payload.dig("service", "service_enabled")
+    assert_equal false, payload.dig("service", "service_running")
+    assert_equal false, payload.dig("service", "ready")
+    assert_equal "manager_unavailable", payload.dig("service", "readiness")
+
+    web_service = payload.fetch("phases").find { |phase| phase.fetch("name") == "web_service" }
+    assert_equal true, web_service["ok"]
+    assert_equal "unsupported", web_service["outcome"]
+    assert_match(/foreground/, web_service["message"])
+    assert_match(/Hivebox/, web_service["message"])
+
+    web = payload.fetch("phases").find { |phase| phase.fetch("name") == "web" }
+    assert_equal true, web["ok"]
+    assert_equal false, web["available"]
+    assert_equal "manager_unavailable", web["readiness"]
+
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-setup"))))
+    assert_empty schemer.validate(payload).to_a,
+                 "manager-unavailable setup success must validate against hive-setup.v1"
+  end
+
+  def test_manager_unavailable_human_output_reports_foreground_and_hivebox_recovery
+    output = StringIO.new
+
+    exit_code = with_manager_unavailable_web(diagnostics: diag(ok_row)) do
+      Hive::Commands::Setup.new(json: false, yes: true, output: output).call
+    end
+
+    assert_equal 0, exit_code
+    assert_includes output.string, "hive setup: web_service ok"
+    assert_includes output.string,
+                    "manager_available=false installed=true enabled=false running=false ready=false"
+    assert_includes output.string, "foreground command: `hive web`"
+    assert_includes output.string, "enable systemd in WSL"
+    assert_includes output.string, "Hivebox"
+  end
+
+  def test_manager_unavailable_does_not_hide_a_failed_install
+    output = StringIO.new
+
+    exit_code = with_manager_unavailable_web(
+      diagnostics: diag(ok_row), success: false, wire: "failed"
+    ) do
+      Hive::Commands::Setup.new(json: true, yes: true, output: output).call
+    end
+
+    assert_equal 1, exit_code
+    payload = JSON.parse(output.string)
+    assert_equal false, payload["ok"]
+    assert_equal false,
+                 payload.fetch("phases").find { |phase| phase.fetch("name") == "web_service" }.fetch("ok")
+    assert_equal false,
+                 payload.fetch("phases").find { |phase| phase.fetch("name") == "web" }.fetch("ok")
+  end
+
   def test_no_service_performs_no_service_mutation_and_reports_observed_state
     output = StringIO.new
     diagnostics = diag(ok_row)
@@ -481,6 +584,7 @@ class SetupOrchestratorTest < Minitest::Test
     phase = setup.instance_variable_get(:@phases).last
     assert_equal false, phase["ok"]
     assert_match(/did not reach installed, enabled, running, and ready state/, phase["message"])
+    refute setup.send(:successful?, diag(ok_row)), "active-but-not-ready must remain nonzero"
   end
 
   def test_refreshed_bundle_restarts_an_already_running_service

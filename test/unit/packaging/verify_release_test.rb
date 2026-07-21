@@ -6,6 +6,7 @@ class PackagingVerifyReleaseTest < Minitest::Test
   HIVEBOX_SMOKE = File.expand_path("../../../packaging/docker/smoke.sh", __dir__).freeze
   RELEASE_WORKFLOW = File.expand_path("../../../.github/workflows/release.yml", __dir__).freeze
   INSTALL_SMOKE_WORKFLOW = File.expand_path("../../../.github/workflows/install-smoke.yml", __dir__).freeze
+  MANAGED_WEB_SETUP = File.expand_path("../../../packaging/verify-managed-web-setup.sh", __dir__).freeze
 
   def test_service_manager_is_stubbed_before_any_installed_hive_command_runs
     body = File.read(SCRIPT)
@@ -70,6 +71,22 @@ class PackagingVerifyReleaseTest < Minitest::Test
                     '\\.github/workflows/release\\.yml@refs/tags/${HIVE_VERSION}$"'
     assert_includes body, "sha256sum -c -"
     assert_operator body.index("cosign verify-blob"), :<, body.index("sha256sum -c -")
+  end
+
+  def test_release_verifier_runs_consent_approved_managed_setup_from_the_authenticated_archive
+    verifier = File.read(SCRIPT)
+    setup = File.read(MANAGED_WEB_SETUP)
+
+    assert_includes verifier, "verify-managed-web-setup.sh"
+    assert_operator verifier.index("cosign verify-blob"), :<,
+                    verifier.index("verify-managed-web-setup.sh")
+    assert_includes setup, 'HIVE_WEB_BUNDLE_URL="$WEB_ARCHIVE"'
+    assert_includes setup, 'HIVE_WEB_BUNDLE_SHA256="$WEB_SHA256"'
+    assert_includes setup, '"$HIVE_BIN" setup --no-init --yes --json'
+    assert_includes setup, 'select(.name == "agent_skills")'
+    assert_includes setup, "for phase in web_bundle daemon_service web_service web"
+    assert_includes setup, "select(.name == \$phase)"
+    assert_includes setup, 'SERVICE_MANAGER_BIN="$SANDBOX/service-manager-bin"'
   end
 
   def test_verify_release_job_requires_the_managed_web_asset_on_the_pinned_release

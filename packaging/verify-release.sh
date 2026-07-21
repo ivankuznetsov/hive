@@ -342,6 +342,20 @@ else
 fi
 ok "managed web bundle signature, identity, and checksum verified"
 
+step "managed hive setup from authenticated web bundle"
+EXPECTED_WEB_SHA="$(grep -E "^[a-f0-9]{64}  (\\./)?${WEB_BUNDLE}$" "$WEB_TRUST_DIR/SHA256SUMS" | awk '{print $1}')"
+if "$REPO_ROOT/packaging/verify-managed-web-setup.sh" \
+     --hive-bin="$XDG_BIN_HOME/hive" \
+     --archive="$WEB_TRUST_DIR/$WEB_BUNDLE" \
+     --sha256="$EXPECTED_WEB_SHA" \
+     --prefix="$PREFIX/managed-web-proof" \
+     >"$PREFIX/managed-web-setup.log" 2>"$PREFIX/managed-web-setup.err"; then
+  ok "consent-approved managed setup installed the authenticated web bundle"
+else
+  cat "$PREFIX/managed-web-setup.log" "$PREFIX/managed-web-setup.err" >&2 2>/dev/null || true
+  fail "managed hive setup failed against the authenticated web bundle"
+fi
+
 if [[ -x "$XDG_BIN_HOME/hive" ]]; then
   ok "binary at \$XDG_BIN_HOME/hive is executable"
 else

@@ -211,14 +211,19 @@ URL is announced.
 The release ceremony exercises the published artifact end-to-end via
 [`packaging/verify-release.sh`](../packaging/verify-release.sh). The
 script installs a published release into an isolated XDG/HIVE_HOME/HOME
-tmp prefix, authenticates the managed web bundle, walks the command surface (`hive --version`, `hive doctor`,
-`hive init`, `hive new`, `hive status --json`, `hive setup --json`, `hive daemon install
+tmp prefix, authenticates the managed web bundle, and runs consent-approved
+managed `hive setup --no-init --yes --json` from that exact digest-pinned
+archive before walking the remaining command surface (`hive --version`, `hive doctor`,
+`hive init`, `hive new`, `hive status --json`, `hive daemon install
 [--force] --json`, `hive uninstall`), validates JSON envelopes against
 the published schemas, and asserts no state leaks outside the prefix. It also
 prepends inert `systemctl`/`launchctl` stubs inside that prefix: a rewritten
 `HOME` confines unit files but does not isolate the live per-user service
 manager, so verifier lifecycle calls must never reach the operator's actual
-Hive services.
+Hive services. The tag workflow applies the same harness before publication:
+`web-bundle` creates one tracked-file archive and digest, `proof-gate` installs
+the proven gem against those bytes, and `release-finalize` signs and publishes
+the same archive without rebuilding it.
 
 Local usage:
 

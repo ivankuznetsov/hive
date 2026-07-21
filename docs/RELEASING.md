@@ -27,21 +27,26 @@ proof.
 Only after that proof should a maintainer create a `vX.Y.Z` tag on the same
 commit. The tag triggers `.github/workflows/release.yml`, which:
 
-1. Resolves the successful `live-agent-skills` Check Run on the exact tag
+1. Builds `hive-web-X.Y.Z.tar.gz` once from the tracked `web/` tree and records
+   its SHA-256 before any release proof or install gate runs.
+2. Resolves the successful `live-agent-skills` Check Run on the exact tag
    commit, validates its workflow/run/attempt/jobs and private artifact digest,
-   then verifies the attestation and candidate provenance. It does not rebuild
-   the gem or skill archive.
-2. Gem-installs the exact proven gem on macOS and native arm64 Linux.
-3. Builds the managed web bundle, then creates and cosign-signs `SHA256SUMS`
-   for the proven gem, four-platform skill archive, and web bundle. The GitHub
-   Release contains those assets and `SHA256SUMS{,.sig,.pem}`.
-4. Dispatches a `hive-release` `repository_dispatch` to the Homebrew tap
+   verifies the attestation/candidate provenance, and installs the proven gem
+   against that exact web archive through consent-approved managed
+   `hive setup --no-init --yes --json` under inert service-manager stubs. It
+   does not rebuild the gem, skill archive, or web archive.
+3. Gem-installs the exact proven gem on macOS and native arm64 Linux.
+4. Creates and cosign-signs `SHA256SUMS` for the proven gem, four-platform
+   skill archive, and the already-proven web archive. `release-finalize`
+   publishes those same web bytes; it never rebuilds them. The GitHub Release
+   contains those assets and `SHA256SUMS{,.sig,.pem}`.
+5. Dispatches a `hive-release` `repository_dispatch` to the Homebrew tap
    (gated on `HOMEBREW_TAP_TOKEN`).
-5. Runs the `aur-publish` job (gated on `AUR_SSH_PRIVATE_KEY`): cosign-verifies
+6. Runs the `aur-publish` job (gated on `AUR_SSH_PRIVATE_KEY`): cosign-verifies
    the released gem, renders `PKGBUILD` from `packaging/aur/PKGBUILD.template`
    via `packaging/render.rb`, regenerates `.SRCINFO` with
    `makepkg --printsrcinfo`, and pushes a version bump to the AUR package.
-6. Announces the release on Discord with the supported `hive update` command
+7. Announces the release on Discord with the supported `hive update` command
    when `DISCORD_RELEASE_WEBHOOK` is configured. Announcement failures are
    non-fatal and do not block package publication.
 
@@ -234,10 +239,12 @@ version until you bump it manually or set the token.
    git tag vX.Y.Z "$candidate_sha"
    git push origin vX.Y.Z
    ```
-5. Watch the run: **proof-gate → install-gate → release-finalize →
+5. Watch the run: **web-bundle → proof-gate → install-gate → release-finalize →
    aur-publish**. Confirm:
+   - `web-bundle` built the managed archive once and exposed its exact digest.
    - `proof-gate` downloaded and verified the exact attested candidate instead
-     of rebuilding it.
+     of rebuilding it, then exercised managed setup against the digest-pinned
+     web candidate under the isolated service-manager harness.
    - The GitHub Release has `hive-cli-X.Y.Z.gem`, the four-platform Hive skill
      archive, `hive-web-X.Y.Z.tar.gz`, and `SHA256SUMS{,.sig,.pem}`.
    - The tap committed `Formula/hive.rb` at `X.Y.Z` (if `HOMEBREW_TAP_TOKEN` is set).
@@ -269,9 +276,12 @@ by `packaging/verify-channel.sh` and the reusable `.github/workflows/install-ver
    `release.yml`) — builds once before the tag, proves native Hive skill
    discovery/use on OpenClaw, Claude, Codex, and Pi, then binds the candidate
    gem/skill archive and evidence to the exact SHA, workflow revision, run,
-   attempt, and artifact digests. The tag workflow accepts only the trusted
-   GitHub Actions Check Run and downloads that private proof artifact; it never
-   rebuilds the candidate.
+   attempt, and artifact digests. On the tag, `web-bundle` builds the tracked
+   managed web archive once before `proof-gate`; the proof gate digest-checks
+   it and runs the installed proven gem through managed setup from that archive.
+   The tag workflow accepts only the trusted GitHub Actions Check Run and
+   downloads that private proof artifact; no downstream job rebuilds a proven
+   candidate.
 2. **Pre-release install gate** (`install-gate` in `release.yml`) — `gem
    install`s the exact proven gem on `macos-15` + `ubuntu-24.04-arm` before
    publishing. `release-finalize` needs it, so a gem that will not install never

@@ -25,6 +25,7 @@ module Hive
         @output = output
         @error = error
         @environment = environment
+        @web_service_platform_exception = false
         @setup_agents_factory = setup_agents_factory || lambda do |**kwargs|
           Hive::Commands::SetupAgents.new(**kwargs)
         end
@@ -255,6 +256,7 @@ module Hive
       def install_web_service
         require "hive/commands/web/service_installer"
         installer = nil
+        @web_service_platform_exception = false
         begin
           installer = Hive::Commands::Web::ServiceInstaller.new(
             binary_path: Hive::InvokedBinary.path,
@@ -273,7 +275,10 @@ module Hive
             wait_for_running: true
           )
           @web_service = state
-          ok = outcome.success? && state["ready"]
+          @web_service_platform_exception = outcome.success? &&
+                                            outcome.wire_outcome == "unsupported" &&
+                                            state["readiness"] == "manager_unavailable"
+          ok = outcome.success? && (state["ready"] || web_service_platform_exception?)
           data = {
             "mutation" => "attempted",
             "outcome" => outcome.wire_outcome,
@@ -287,9 +292,14 @@ module Hive
             else
               "web service did not reach installed, enabled, running, and ready state"
             end
+          else
+            data["message"] = "managed Hive web autostart is unavailable on this host; " \
+                              "use foreground `hive web`, enable systemd in WSL, or choose Hivebox" \
+                              if web_service_platform_exception?
           end
           add_phase("web_service", ok, data)
         rescue StandardError => e
+          @web_service_platform_exception = false
           state = Hive::Web::ServiceStatus.snapshot(
             installer: installer, config: web_config, environment: @environment
           )
@@ -306,6 +316,7 @@ module Hive
       end
 
       def observe_web_service(mutation: "opted_out", ok: true, message: nil)
+        @web_service_platform_exception = false
         begin
           require "hive/commands/web/service_installer"
           installer = Hive::Commands::Web::ServiceInstaller.new(
@@ -375,11 +386,15 @@ module Hive
         }
         managed = @service
         add_phase(
-          "web", managed ? state["ready"] == true : true,
+          "web", managed ? state["ready"] == true || web_service_platform_exception? : true,
           "url" => state["url"],
           "available" => state["ready"] == true,
           "readiness" => state["readiness"]
         )
+      end
+
+      def web_service_platform_exception?
+        @web_service_platform_exception == true
       end
 
       def emit(diagnostics)
@@ -427,6 +442,9 @@ module Hive
           end
           if @web_service && @web_service["ready"]
             @output.puts "hive setup: Hive web ready at #{@web_service["url"]}"
+          elsif @service && web_service_platform_exception?
+            @output.puts "hive setup: Hive web autostart is unavailable on this host; " \
+                         "foreground command: `hive web`; enable systemd in WSL or choose Hivebox"
           elsif @service && !@no_bootstrap
             @output.puts "hive setup: Hive web is not ready at #{web_url}; inspect `hive web status`"
           else

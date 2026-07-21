@@ -118,6 +118,15 @@ module Hive
         end
 
         runner ||= default_runner(output)
+        lockfile = File.join(dir, "Gemfile.lock")
+        # Bundler rewrites a relative path source (`remote: ..`) to the
+        # installed gem's absolute HIVE_CLI_ROOT. That machine-local path is
+        # not application state and would make the activated app differ from
+        # the authenticated release archive. Preserve the tracked lockfile
+        # bytes/mode while still letting Bundler resolve and install against
+        # the real packaged gem root.
+        lockfile_bytes = File.binread(lockfile) if File.file?(lockfile)
+        lockfile_mode = File.stat(lockfile).mode & 0o777 if lockfile_bytes
         env = {
           "BUNDLE_GEMFILE" => File.join(dir, "Gemfile"),
           "BUNDLE_PATH" => dependency_dir,
@@ -132,10 +141,18 @@ module Hive
 
         output.puts "hive web: installed Rails bundle in #{dir}" if output
         dir
+      ensure
+        if lockfile_bytes
+          File.binwrite(lockfile, lockfile_bytes)
+          FileUtils.chmod(lockfile_mode, lockfile)
+        end
       end
 
       def prepare!(dir: app_dir, runner: nil, output: $stderr)
         runner ||= default_runner(output)
+        lockfile = File.join(dir, "Gemfile.lock")
+        lockfile_bytes = File.binread(lockfile) if File.file?(lockfile)
+        lockfile_mode = File.stat(lockfile).mode & 0o777 if lockfile_bytes
         bundle_install!(dir: dir, runner: runner, output: nil)
         asset_storage = File.join(dir, "tmp", "assets-build-storage")
         asset_env = {
@@ -158,6 +175,10 @@ module Hive
         dir
       ensure
         FileUtils.rm_rf(asset_storage) if asset_storage
+        if lockfile_bytes
+          File.binwrite(lockfile, lockfile_bytes)
+          FileUtils.chmod(lockfile_mode, lockfile)
+        end
       end
 
       def default_runner(output)

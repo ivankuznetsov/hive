@@ -252,7 +252,16 @@ errors, the workflow disables those Microsoft source files and retries so an
 unrelated third-party apt outage does not hide the verifier's actual behavior.
 `test/unit/packaging/verify_release_test.rb` pins the safety boundary that
 inert per-prefix `systemctl`/`launchctl` stubs enter `PATH` before any installed
-Hive command can contact the host's live user service manager.
+Hive command can contact the host's live user service manager. It also pins the
+published-release path through `packaging/verify-managed-web-setup.sh`: after
+cosign identity and checksum validation, the installed binary must run managed
+`hive setup --no-init --yes --json` from the authenticated archive. The release
+contract tests require `web-bundle` to build and digest that archive before
+`proof-gate`, require the proof gate to exercise it, and forbid
+`release-finalize` from rebuilding it. The packaged-bootstrap integration test
+uses a real `git archive HEAD:web`, checks its members against the tracked web
+tree, and verifies setup preserves every tracked file's bytes and executable
+bit after extraction and asset preparation.
 
 The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, plain `/health` versus daemon-backed `/health?deep=1`, ideas with uploads, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, bounded oversized task diff rendering, media route streaming/refusal plus captured/skipped/failed Demo gallery rendering, repos questionnaire, Repos SSH-origin normalization, non-directory clone-target refusal, Agents-page binary PTY rendering plus operator-ward login polling, favicon/icon serving, Telegram setup/pairing, and workflow lifecycle preview/receipt/consent flows) and `web/test/system/*` (Capybara + Playwright: login gate, composer image attach both paths, successful response cleanup before permanent-node rendering, failed-submit retention, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, artifact open-state preservation across broadcast-triggered morphs with live content refresh, real workflow scaffolding, exact-permission managed install review, visible Demo media, and failed-capture banners). Focused model coverage also drives Repository clone and Task diff subprocesses through nonzero and timed-out outcomes, pinning negative-PID process-group termination, reaping, operator errors, partial-target removal, and tempfile cleanup. Integration assertions keep Status, Workflows, and Telegram navigation active when the response is rendered by a namespaced resource controller. CI runs these tests in the `web` job, installs the root bundle into `vendor/root-bundle`, passes that path as `GOLDEN_E2E_BUNDLE_PATH`, and explicitly runs `web/test/e2e/golden_path_e2e.rb`. The golden-path E2E pins `BUNDLE_GEMFILE`, points `BUNDLE_PATH` at the supplied root bundle, deletes inherited web-bundle deployment/config keys, and preflights the daemon spawn environment with `bundle exec ruby -Ilib bin/hive --version` before starting the foreground daemon, so a broken Bundler/Ruby env fails with the real stderr/stdout instead of a later browser timeout.
 `web/test/test_helper.rb#create_task!` wraps real `Hive::Commands::New`

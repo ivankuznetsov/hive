@@ -64,7 +64,7 @@ class Repository
     log = Tempfile.create("hivebox-clone")
     pid = Process.spawn(env, "gh", "repo", "clone", source, path,
                         pgroup: true, out: log.path, err: log.path)
-    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + CLONE_TIMEOUT_SEC
+    deadline = monotonic_now + CLONE_TIMEOUT_SEC
     status = wait_for_clone(pid, deadline)
     return if status.success?
 
@@ -80,7 +80,7 @@ class Repository
       _, status = Process.waitpid2(pid, Process::WNOHANG)
       return status if status
 
-      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      if monotonic_now > deadline
         Process.kill("KILL", -pid) rescue nil
         Process.waitpid2(pid) rescue nil
         FileUtils.rm_rf(path)
@@ -88,6 +88,10 @@ class Repository
       end
       sleep 0.2
     end
+  end
+
+  def monotonic_now
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end
 
   def normalize_origin!

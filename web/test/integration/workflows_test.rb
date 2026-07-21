@@ -142,6 +142,7 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_equal "text/html", response.media_type,
                  "Turbo form previews must return a navigable page, not a bare stream MIME type"
+    assert_select "nav a.nav-link-active", text: "Workflows"
     assert_select "#workflow-preview-heading", text: /Review install: docs 1.2.0/
     assert_select ".permission-grid", text: /Filesystem read.*repository, task/m
     token = preview_token(install_workflow_path)

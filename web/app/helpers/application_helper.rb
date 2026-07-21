@@ -8,7 +8,7 @@ module ApplicationHelper
   }.freeze
 
   def nav_class(section)
-    active = NAV_SECTIONS.fetch(section).call(controller_name)
+    active = NAV_SECTIONS.fetch(section).call(controller_path.split("/", 2).first)
     class_names("nav-link", "nav-link-active": active)
   end
 

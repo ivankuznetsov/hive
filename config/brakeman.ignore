@@ -29,7 +29,7 @@
       "note": "False positive. Open3.capture3 array form: each argument is a discrete argv element passed to execve(2), not a shell. branch_name is interpolated only into a refspec literal that becomes a single argv member; no shell ever sees it."
     },
     {
-      "fingerprint": "54a1723a7af9ea78b80bfe0d6212b7722a57c5f6ad922704fd99fb750fb5b0c9",
+      "fingerprint": "16f5545d46b233b019499a2f8a183cd447239c4b107032e7e1e042a5a69ac770",
       "note": "False positive. The task media route constrains filename to a single png/jpg/jpeg/gif component. Task#media_path requires File.basename equality and revalidates the extension, resolves the real task folder/media directory, refuses a symlinked media root, and returns only files whose realpath stays under that media root. Integration tests cover traversal, disallowed extensions, missing files, symlinked media roots, and inline image streaming."
     },
     {

@@ -640,6 +640,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     get "/tasks/#{@project}/#{@slug}/diff"
 
     assert_response :success
+    assert_select "nav a.nav-link-active", text: "Status"
     assert_match "Diff truncated to the first 512", response.body
     assert response.body.bytesize < 700 * 1024,
            "the rendered diff must be capped (got #{response.body.bytesize} bytes)"

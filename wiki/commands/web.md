@@ -106,6 +106,9 @@ tailnet ACLs), because an unrestricted forwarder exposes the no-auth local UI.
 That connection-authenticated operator sees the complete primary navigation
 under the `hive` product identity and is labelled `Local`; GitHub-dependent
 repository browsing stays behind an explicit **Connect GitHub** action.
+Navigation state is grouped by the first segment of Rails `controller_path`,
+so namespaced task, workflow, and Telegram resource controllers retain their
+parent section's active link when they render a complete page.
 Completing that optional connection stores the login/token in the browser
 session but never claims or changes `web.github.owner`.
 Non-loopback binds require either `--unsafe` or a configured `web.github.owner`;
@@ -228,8 +231,13 @@ origin also prints the Host-header/reverse-proxy warning.
   notice; `Tasks::DiffsController#show` only exposes that result. The model also
   owns original-idea/title resolution and the workflow-aware passable,
   recovery, terminal, dispatch-action, and run-verb decisions used by the
-  dashboard and task page. Status projects/tasks are wrapped before ERB, so
-  presentation helpers no longer read task files or duplicate command policy.
+  dashboard and task page. Displayed run verbs consume
+  `TaskAction::READY_COMMANDS`, retaining only the web-specific `run` to
+  `stage` label, so display and dispatch cannot derive separate command maps.
+  Model tests drive successful, failed, and timed-out diff subprocesses and
+  pin process-group termination, reaping, readable errors, and tempfile
+  cleanup. Status projects/tasks are wrapped before ERB, so presentation
+  helpers no longer read task files or duplicate command policy.
   Red diagnostic rows also render a danger banner from
   `tasks[].diagnostic.summary` so the page says why the row is stuck before
   offering Retry. A stopped-daemon blocker is shown only for non-terminal
@@ -288,7 +296,10 @@ origin also prints the Host-header/reverse-proxy warning.
   pre-existing directory is treated as a local checkout to re-init; any
   pre-existing symlink or non-directory target is a 422 refusal. The
   `Repository` model also refuses any existing clone target so failure-path
-  cleanup only deletes a partial clone it created. Every registration runs a
+  cleanup only deletes a partial clone it created. Model tests exercise both
+  nonzero clone exits and hard-deadline expiry, including process-group
+  kill/reap behavior plus partial-target and tempfile cleanup. Every
+  registration runs a
   post-clone/post-existing-dir `Repository` origin-normalization pass:
   absent or non-GitHub remotes are left alone, while GitHub SSH remotes
   (`git@github.com:owner/repo.git` or `ssh://git@github.com/owner/repo.git`)

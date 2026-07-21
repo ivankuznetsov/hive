@@ -116,6 +116,7 @@ class TelegramTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
+    assert_select "nav a.nav-link-active", text: "Telegram"
     assert_select ".flash-notice", text: /Sent a test message to 2 chat\(s\)/
   end
 

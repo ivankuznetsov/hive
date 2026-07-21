@@ -165,9 +165,9 @@ class Task
   def run_verb
     action = dispatch_action
     return unless action
-    return "stage" if action == "ready_to_run"
 
-    action.sub(/\Aready_(?:to|for)_/, "").tr("_", "-")
+    command = Hive::TaskAction::READY_COMMANDS.fetch(action)
+    command == "run" ? "stage" : command
   end
 
   def terminal?
@@ -182,7 +182,7 @@ class Task
     log = Tempfile.create("hivebox-diff")
     pid = Process.spawn("git", "-C", worktree_path, "diff", "--",
                         pgroup: true, out: log.path, err: log.path)
-    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + DIFF_TIMEOUT_SEC
+    deadline = monotonic_now + DIFF_TIMEOUT_SEC
     status = wait_for_diff(pid, deadline)
     raise Hive::Error, "git diff failed: #{File.read(log.path).strip}" unless status.success?
 
@@ -224,13 +224,17 @@ class Task
       _, status = Process.waitpid2(pid, Process::WNOHANG)
       return status if status
 
-      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      if monotonic_now > deadline
         Process.kill("KILL", -pid) rescue nil
         Process.waitpid2(pid) rescue nil
         raise Hive::Error, "git diff timed out after #{DIFF_TIMEOUT_SEC}s"
       end
       sleep 0.1
     end
+  end
+
+  def monotonic_now
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end
 
   def artifact_order

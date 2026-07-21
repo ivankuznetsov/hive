@@ -4,7 +4,7 @@
   and web no longer maintain independent command maps.
 - Kept web dispatch narrower by projecting the shared map through the daemon
   queue allowlist; `ready_to_advance` remains an in-process approve action.
-- Closed the corresponding Hivebox residual in `wiki/gaps.md`.
+- Closed the corresponding Hivebox residual in [[gaps]].
 - Made `Hive::Workflow#executable_slots` the shared actor topology for
   configuration, managed validation, and runtime admission.
 - Moved redacted mapping/input presentation onto the configuration snapshot and

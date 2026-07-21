@@ -1,6 +1,10 @@
 require "test_helper"
 
 class TaskTest < ActiveSupport::TestCase
+  ProcessStatus = Data.define(:successful) do
+    def success? = successful
+  end
+
   test "finds the task in its project snapshot" do
     project = Project.new("name" => "alpha", "path" => "/tmp/alpha", "hive_state_path" => "/tmp/alpha/.hive-state")
     attributes = { "slug" => "ship-it-260720-abcd", "stage" => "3-plan" }
@@ -87,6 +91,16 @@ class TaskTest < ActiveSupport::TestCase
     assert_equal "stage", generic.run_verb
     assert_nil advancing.dispatch_action
     assert_nil advancing.run_verb
+
+    Task::STAGE_DISPATCH_ACTIONS.each do |stage, action|
+      task = Task.new(
+        project: Project.new("name" => "alpha"),
+        attributes: { "stage" => "#{stage}-step" }
+      )
+      command = Hive::TaskAction::READY_COMMANDS.fetch(action)
+
+      assert_equal(command == "run" ? "stage" : command, task.run_verb, action)
+    end
   end
 
   test "refuses a diff when the task has no materialized worktree" do
@@ -98,5 +112,84 @@ class TaskTest < ActiveSupport::TestCase
     error = assert_raises(Hive::InvalidTaskPath) { task.diff }
 
     assert_equal "no worktree for no-worktree-260720-abcd", error.message
+  end
+
+  test "diff reports a failed git process and removes its tempfile" do
+    worktree = Pathname(Dir.mktmpdir("hive-web-task-diff-failure"))
+    log_path = worktree.join("diff.log")
+    task = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: {
+        "slug" => "failed-diff-260720-abcd", "worktree_path" => worktree.to_s
+      }
+    )
+    spawns = []
+    spawn = lambda do |*argv, **options|
+      spawns << [ argv, options ]
+      File.write(options.fetch(:out), "bad worktree")
+      12_345
+    end
+    wait = ->(pid, flags = nil) { [ pid, ProcessStatus.new(false) ] if flags }
+    tempfile = ->(*) { File.open(log_path, File::RDWR | File::CREAT | File::TRUNC, 0o600) }
+
+    with_replaced_singleton_method(Tempfile, :create, tempfile) do
+      with_replaced_singleton_method(Process, :spawn, spawn) do
+        with_replaced_singleton_method(Process, :waitpid2, wait) do
+          error = assert_raises(Hive::Error) { task.diff }
+
+          assert_equal "git diff failed: bad worktree", error.message
+        end
+      end
+    end
+
+    assert_equal 1, spawns.size
+    assert_equal [ "git", "-C", worktree.to_s, "diff", "--" ], spawns.first.fetch(0)
+    assert spawns.first.fetch(1).fetch(:pgroup)
+    refute_path_exists log_path
+  ensure
+    FileUtils.remove_entry(worktree) if worktree&.exist?
+  end
+
+  test "timed out diff kills and reaps its process group" do
+    worktree = Pathname(Dir.mktmpdir("hive-web-task-diff-timeout"))
+    log_path = worktree.join("diff.log")
+    task = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: {
+        "slug" => "timed-out-diff-260720-abcd", "worktree_path" => worktree.to_s
+      }
+    )
+    signals = []
+    waits = []
+    expired = Task::DIFF_TIMEOUT_SEC + 1.0
+    times = [ 0.0, expired ]
+    spawn = ->(*_argv, **_options) { 54_321 }
+    clock = -> { times.shift || expired }
+    wait = lambda do |pid, flags = nil|
+      waits << [ pid, flags ]
+      flags ? nil : [ pid, ProcessStatus.new(false) ]
+    end
+    kill = ->(signal, pid) { signals << [ signal, pid ] }
+    tempfile = ->(*) { File.open(log_path, File::RDWR | File::CREAT | File::TRUNC, 0o600) }
+
+    with_replaced_singleton_method(Tempfile, :create, tempfile) do
+      with_replaced_singleton_method(Process, :spawn, spawn) do
+        with_replaced_singleton_method(task, :monotonic_now, clock) do
+          with_replaced_singleton_method(Process, :waitpid2, wait) do
+            with_replaced_singleton_method(Process, :kill, kill) do
+              error = assert_raises(Hive::Error) { task.diff }
+
+              assert_equal "git diff timed out after #{Task::DIFF_TIMEOUT_SEC}s", error.message
+            end
+          end
+        end
+      end
+    end
+
+    assert_equal [ [ "KILL", -54_321 ] ], signals
+    assert_equal [ [ 54_321, Process::WNOHANG ], [ 54_321, nil ] ], waits
+    refute_path_exists log_path
+  ensure
+    FileUtils.remove_entry(worktree) if worktree&.exist?
   end
 end

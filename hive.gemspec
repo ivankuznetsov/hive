@@ -49,6 +49,7 @@ Gem::Specification.new do |spec|
     "CHANGELOG.md",
     "LICENSE",
     "README.md",
+    "hive.gemspec",
   ]
 
   spec.bindir      = "bin"

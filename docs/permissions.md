@@ -24,8 +24,8 @@ an agent, declare `permissions:` on a pipeline stage or a review reviewer.
 Permission scoping is tool/MCP-level, enforced by the agent's allowed tool set.
 It is not an OS sandbox. The agent runs as the same OS user; `read-only` limits
 accidental over-reach, but it does not contain a determined or mis-prompted
-agent. For real isolation, run hive under a sandboxed user or container, such as
-hivebox.
+agent. For real isolation, run Hive under a sandboxed user or choose the
+[Hivebox container distribution](../packaging/docker/README.md).
 
 ## Managed Honeycomb Policy
 

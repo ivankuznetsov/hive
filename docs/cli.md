@@ -6,6 +6,10 @@ This page documents the command surface exposed by `bin/hive` in this checkout. 
 
 | Command | Use it for | Example |
 |---|---|---|
+| `hive setup [--no-service] [--no-bootstrap] [--no-init] [--json]` | Diagnose and provision the normal native experience; web service installation is default on supported Linux/macOS. | `hive setup --json` |
+| `hive web` | Bootstrap and run Hive web in the foreground; this command blocks. | `hive web` |
+| `hive web status [--json]` | Observe installed, enabled, running, and readiness state without mutation. | `hive web status --json` |
+| `hive web install [--force] [--json]` | Install or explicitly repair the managed per-user web service. | `hive web install --force` |
 | `hive status` | See active tasks grouped by next action. | `hive status` |
 | `hive new PROJECT TEXT` | Capture an idea in `1-inbox/`. | `hive new xbookmark "save bookmarks"` |
 | `hive brainstorm TARGET` | Promote inbox to brainstorm or re-run brainstorm. | `hive brainstorm <slug>` |
@@ -19,6 +23,13 @@ This page documents the command surface exposed by `bin/hive` in this checkout. 
 | `hive archive TARGET` | Move finalized work to `9-done/`. | `hive archive <slug> --from 8-finalize` |
 
 The workflow verbs promote then run when the task is at the previous stage. If the task is already at the target stage, they only run that stage.
+
+The untouched setup path is loopback-only at `http://127.0.0.1:4567` and never
+creates LAN/public or Tailscale exposure. `--no-service` performs the other
+setup work and only observes any existing web service; it does not stop or
+disable one. `--no-bootstrap` is diagnose-only and suppresses all provisioning.
+If a customized unit has drifted, setup preserves it and points to the explicit
+`hive web install --force` repair path.
 
 `hive review --pr PR` is the disambiguated ad-hoc path for reviewing a PR Hive did not open. `PR` may be `197`, `#197`, or a GitHub `/pull/197` URL. The command must run inside a repo already registered by `hive init` unless `--project NAME` selects one explicitly. It creates a synthetic `6-review/adhoc-review-pr-197/` task, fetches the PR head into a normal Hive worktree, then runs the same review stage. Re-running the command reuses that task; if another Hive task already owns the PR, Hive refuses to create a duplicate. The bare form `hive review 197` is unchanged and still resolves task id `197`.
 
@@ -157,7 +168,7 @@ never prompts; without `--yes`, planned mutation returns 64.
 
 ## JSON Output
 
-Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), patrol (`patrol`), architecture-patrol job inspection (`refactor-patrol --list` / `--show`), diagnostics/setup (`status`, `doctor`, `setup-agents`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), workflow lifecycle (`workflow new/install/list/update/remove/publish`), `init`, and daemon control support `--json` where documented and emit typed envelopes. `hive doctor --json` emits `hive-doctor.v2`; `hive setup-agents --json --yes` emits `hive-setup-agents.v1`, never prompts, and requires `--yes` whenever mutation is planned. `hive init --json` emits a single `hive-init.v2` success payload with resolved answers and project metadata; architecture-patrol list/show emits `hive-refactor-patrol-jobs.v1`. Workflow verbs emit a `hive-stage-action` envelope; Honeycomb lifecycle schemas are `hive-workflow-{install,list,update,remove,publish}.v1`. Non-TTY/JSON mutations require `--yes`, and an escalating workflow update separately requires `--allow-escalation`. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `new`, `migrate`) are still text-only.
+Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), patrol (`patrol`), architecture-patrol job inspection (`refactor-patrol --list` / `--show`), diagnostics/setup (`status`, `setup`, `doctor`, `setup-agents`, `web status`, `web install`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), workflow lifecycle (`workflow new/install/list/update/remove/publish`), `init`, and daemon control support `--json` where documented and emit typed envelopes. Native setup uses `hive-setup.v1`; web observation and installation use `hive-web-status.v1` and `hive-web-install.v1`. These contracts keep `mode`, effective `url`, compatibility `warnings`, and service installed/enabled/running/readiness distinct. `hive doctor --json` emits `hive-doctor.v2`; `hive setup-agents --json --yes` emits `hive-setup-agents.v1`, never prompts, and requires `--yes` whenever mutation is planned. `hive init --json` emits a single `hive-init.v2` success payload with resolved answers and project metadata; architecture-patrol list/show emits `hive-refactor-patrol-jobs.v1`. Workflow verbs emit a `hive-stage-action` envelope; Honeycomb lifecycle schemas are `hive-workflow-{install,list,update,remove,publish}.v1`. Non-TTY/JSON mutations require `--yes`, and an escalating workflow update separately requires `--allow-escalation`. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `new`, `migrate`) are still text-only.
 
 ## Exit Codes
 

@@ -58,12 +58,12 @@ class AgentsTest < ActionDispatch::IntegrationTest
 
     # This scenario exercises the first-login CTA, independent of whether the
     # developer running the suite has real Grok credentials in their home.
-    original = Hive::AgentProfiles.method(:logged_in?)
+    original_logged_in = Hive::AgentProfiles.method(:logged_in?)
     begin
       Hive::AgentProfiles.define_singleton_method(:logged_in?) { |_agent| false }
       get agents_path
     ensure
-      Hive::AgentProfiles.define_singleton_method(:logged_in?, original)
+      Hive::AgentProfiles.define_singleton_method(:logged_in?, original_logged_in)
     end
 
     assert_response :success

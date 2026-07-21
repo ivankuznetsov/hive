@@ -219,13 +219,24 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_setup_no_service_uses_the_canonical_negative_boolean
+    with_command_new_stub(Hive::Commands::Setup, return_value: 0) do |calls|
+      _out, _err, status = with_captured_exit do
+        Hive::CLI.start([ "setup", "--no-service" ])
+      end
+
+      assert_equal 0, status
+      assert_equal false, calls.first.fetch(:kwargs).fetch(:service)
+    end
+  end
+
   def test_setup_defaults_when_no_flags_given
     with_command_new_stub(Hive::Commands::Setup, return_value: 0) do |calls|
       _out, _err, status = with_captured_exit { Hive::CLI.start([ "setup" ]) }
 
       assert_equal 0, status
       assert_equal(
-        { json: false, service: false, no_bootstrap: false, no_init: false, yes: false },
+        { json: false, service: true, no_bootstrap: false, no_init: false, yes: false },
         calls.first.fetch(:kwargs),
         "with no flags the CLI must pass the documented defaults"
       )

@@ -8,7 +8,7 @@ tags: [commands, api, skills, agents, operational, provisioning]
 ---
 
 **TLDR**: Hive's external interaction surface is the Thor CLI (`hive` plus the
-`hv` fallback launcher), the opt-in e2e harness, the hivebox web command/routes
+`hv` fallback launcher), the opt-in e2e harness, the Hive web command/routes
 documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
 setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
 corpus producer, `hive digest` as the daily shipped digest producer,
@@ -131,12 +131,15 @@ non-project-scoped child after local midnight when `digest.enabled: true`. See
 [[commands/digest]] and [[modules/digest]].
 
 `hive setup` is the local workstation provisioning bridge for installs that
-want the same first-run shape as hivebox without Docker: it first previews and
-provisions the bundled Hive operating skill for supported agents, then emits a
-`hive-setup` phase report, installs/repairs Hive-owned QMD and managed web
-bundle assets, installs the daemon, enrolls the project unless disabled, and
-can install the web service. One interactive confirmation covers the run;
-JSON/non-TTY requires `--yes` or performs no mutation. See
+`hive setup` is the normal native workstation provisioning bridge: it first
+previews and provisions the bundled Hive operating skill for supported agents,
+then emits a `hive-setup.v1` phase report, installs/repairs Hive-owned QMD and
+authenticated managed web bundle assets, installs the daemon service, enrolls
+the current project unless disabled, and installs/starts/probes the separate
+loopback Hive web service by default. One interactive confirmation covers the
+run; JSON/non-TTY requires `--yes` or performs no mutation. `--no-service` opts
+out of web-service mutation while leaving other approved setup work enabled;
+`--no-bootstrap` is diagnose-only. See
 [[commands/setup]].
 
 `hive pairing` lists and approves Telegram pairing requests minted by unknown
@@ -169,14 +172,17 @@ provision supported skills with explicit consent, and use
 `hive setup --no-init --yes --json` only after approval. Enrollment remains a
 separate `hive init .` in the user's real terminal so Hive can disclose its
 defaults and ask for confirmation. Package-manager confirmation is preserved;
-the skill does not use unattended Arch install flags.
+the skill does not use unattended Arch install flags. The setup report includes
+the loopback URL plus distinct Hive web installed, enabled, running, and ready
+state alongside daemon setup.
 
 For normal use, the slash-command text after `/hive` is treated as arguments
 for the detected Hive CLI binary. Examples in the skill include
 `/hive status --operational --json`, `/hive watch <project>:<slug>
 --json-lines`, `/hive new . "build this feature"`, `/hive plan
 <task-slug>`, `/hive develop <task-slug>`, `/hive review <task-slug>`,
-`/hive web`, `/hive tui`, `/hive setup-agents`, reviewed Honeycomb workflow
+`/hive web status --json`, foreground `/hive web`, `/hive tui`, `/hive
+setup-agents`, reviewed Honeycomb workflow
 lifecycle commands, ordinary and architecture patrol, digest/bench, and
 `/hive wiki compile-log --check`. The patrol section distinguishes subscription
 use from additional payment, documents the higher architecture allowance plus
@@ -199,9 +205,9 @@ OpenClaw/ClawHub installs or updates that projection. The protected
 live-agent-skills workflow proves all four native surfaces against one exact
 candidate before the tag workflow can consume its gem/skill archive.
 
-### Hivebox Web
+### Hive web
 
-`hive web` boots the hivebox Rails 8 + Turbo app from `web/` or the managed
+`hive web` boots the shared Rails 8 + Turbo app from `web/` or the managed
 version-stamped bundle (see [[commands/web]]): it derives SECRET_KEY_BASE from
 the persisted session secret, keeps the solid-stack sqlite under state_home,
 runs db:prepare, and execs `bin/rails server`. The web app reuses the same status, approval, daemon-queue,
@@ -209,7 +215,7 @@ task-drop, agent-auth, repo, and Telegram setup contracts as the
 CLI/bot/daemon stack; it does not introduce a separate workflow engine. GitHub
 device-flow auth can either use a pre-pinned `web.github.owner` or first-login
 claim on an ownerless box. Production Action Cable accepts same-origin-as-host,
-with `web.origin` / `HIVEBOX_ORIGIN` only as an extra allow for split-origin
+with `web.origin` / `HIVE_WEB_ORIGIN` only as an extra allow for split-origin
 deploys. Task Drop is deliberately not daemon-queued: the web handler calls
 `Hive::Web::Dispatcher#drop`, which runs `Commands::Drop` in-process with the
 rendered `from` stage as a stale-page guard. Repo setup clones through `gh`,
@@ -226,9 +232,9 @@ mount persistent data, and print the local URL; the PowerShell script is the
 native Windows shape for Docker Desktop hosts where `sh` or MSYS path conversion
 would be the wrong interface. The release workflow publishes versioned and
 `latest` multi-arch hivebox images to GHCR after `release-finalize`. The gem
-deliberately does NOT package the Rails app in the gem itself (gemspec_test pins
-this); the local CLI can fetch the versioned release bundle into Hive's data
-home, and the app also ships in the Docker image at `/app/web` or runs from a
+packages the gem metadata required for the managed app's installed-root path
+dependency; the Rails source remains in the authenticated versioned release
+bundle. The app also ships in the Hivebox image at `/app/web` or runs from a
 source checkout.
 
 ### E2E Harness

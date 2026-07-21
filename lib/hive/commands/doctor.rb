@@ -11,6 +11,7 @@ require "hive/agent_profiles/codex"
 require "hive/agent_profiles/pi"
 require "hive/claude_launcher"
 require "hive/agent_skills/inspector"
+require "hive/web/environment"
 
 module Hive
   module Commands
@@ -41,7 +42,8 @@ module Hive
       end
 
       def call
-        legacy_rows = check_tmux + check_llm_wiki_qmd + check_legacy_brainstorm_runtime
+        legacy_rows = check_tmux + check_llm_wiki_qmd + check_legacy_brainstorm_runtime +
+                      check_web_environment_aliases
         managed_rows = managed_skill_rows
         @rows = legacy_rows + managed_rows
         if @json
@@ -247,6 +249,23 @@ module Hive
                    "  claude:\n    mode: tmux"
         )
         rows
+      end
+
+      def check_web_environment_aliases
+        Hive::Web::Environment.warnings(environment: @environment).map do |warning|
+          warning_row(
+            stage: "web",
+            label: "web/environment",
+            agent: "environment",
+            configured_skill: warning.fetch("alias"),
+            skill: warning.fetch("replacement"),
+            message: warning.fetch("message")
+          ).merge(
+            alias: warning.fetch("alias"),
+            replacement: warning.fetch("replacement"),
+            ignored: warning.fetch("ignored")
+          )
+        end
       end
 
       def legacy_brainstorm_runtime_present?

@@ -58,6 +58,8 @@ hive setup-agents --json
 hive setup-agents --yes --json
 # Only after the user approves core provisioning:
 hive setup --no-init --yes --json
+# If approval excludes persistent Hive web service changes:
+hive setup --no-init --no-service --yes --json
 ```
 
 `hive doctor` is read-only and inspects durable filesystem evidence without
@@ -72,7 +74,29 @@ user-edited destinations are conflicts, not overwrite targets.
 JSON or non-interactive setup without `--yes` returns a typed refusal before
 diagnostics or native agent discovery. After approval,
 `hive setup --no-init --yes --json` provisions the managed skills, web assets,
-and daemon without enrolling the repository.
+and daemon without enrolling the repository. On supported Linux/macOS, this
+approved default setup is also a persistent service change: it installs,
+enables, starts, and bounded-probes the loopback Hive web service. Include that
+default web-service mutation in the consent explanation. If it is not approved,
+use `--no-service`; setup may report an existing unit but must not install,
+enable, start, stop, or disable it.
+
+Keep service lifecycle separate from application readiness. The
+`hive-setup.v1` response reports `service.service_manager_available`,
+`service.service_installed`, `service.service_enabled`,
+`service.service_running`, `service.ready`, `service.readiness`, and
+`service.url`; do not collapse those fields into one "running" claim. For a
+read-only follow-up, use `hive web status --json`. It samples the existing
+service immediately without installing, enabling, starting, or restarting it;
+bare `hive web` starts the blocking foreground server and is not a status
+probe.
+
+Prefer this native managed-service path for an ordinary Linux/macOS
+workstation. Choose Hivebox when the user needs container isolation, multiple
+local instances, containment for untrusted agents, or a reproducible
+server/NAS deployment. On Windows, use WSL with systemd for the native path or
+Hivebox through Docker Desktop; do not invent a separate Windows service
+manager.
 
 Initial project enrollment is a separate consent boundary. Explain that a
 non-TTY `hive init` takes defaults that enable medium patrol, architecture

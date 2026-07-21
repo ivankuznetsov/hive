@@ -1,7 +1,8 @@
 # Releasing hive
 
-Hive ships as the `hive-cli` rubygem attached to a signed GitHub Release. All
-three install channels download that same gem:
+Hive ships the `hive-cli` rubygem and managed `hive-web-X.Y.Z.tar.gz` bundle in
+one signed GitHub Release. All three native install channels download the same
+gem, and `hive setup` authenticates and installs the matching web bundle:
 
 - **install.sh** — already works; auto-resolves the latest release.
 - **Homebrew** — `brew install ivankuznetsov/hive/hive` via the
@@ -26,21 +27,26 @@ proof.
 Only after that proof should a maintainer create a `vX.Y.Z` tag on the same
 commit. The tag triggers `.github/workflows/release.yml`, which:
 
-1. Resolves the successful `live-agent-skills` Check Run on the exact tag
+1. Builds `hive-web-X.Y.Z.tar.gz` once from the tracked `web/` tree and records
+   its SHA-256 before any release proof or install gate runs.
+2. Resolves the successful `live-agent-skills` Check Run on the exact tag
    commit, validates its workflow/run/attempt/jobs and private artifact digest,
-   then verifies the attestation and candidate provenance. It does not rebuild
-   the gem or skill archive.
-2. Gem-installs the exact proven gem on macOS and native arm64 Linux.
-3. Builds the managed web bundle, then creates and cosign-signs `SHA256SUMS`
-   for the proven gem and four-platform skill archive. The GitHub Release
-   contains those assets, the web bundle, and `SHA256SUMS{,.sig,.pem}`.
-4. Dispatches a `hive-release` `repository_dispatch` to the Homebrew tap
+   verifies the attestation/candidate provenance, and installs the proven gem
+   against that exact web archive through consent-approved managed
+   `hive setup --no-init --yes --json` under inert service-manager stubs. It
+   does not rebuild the gem, skill archive, or web archive.
+3. Gem-installs the exact proven gem on macOS and native arm64 Linux.
+4. Creates and cosign-signs `SHA256SUMS` for the proven gem, four-platform
+   skill archive, and the already-proven web archive. `release-finalize`
+   publishes those same web bytes; it never rebuilds them. The GitHub Release
+   contains those assets and `SHA256SUMS{,.sig,.pem}`.
+5. Dispatches a `hive-release` `repository_dispatch` to the Homebrew tap
    (gated on `HOMEBREW_TAP_TOKEN`).
-5. Runs the `aur-publish` job (gated on `AUR_SSH_PRIVATE_KEY`): cosign-verifies
+6. Runs the `aur-publish` job (gated on `AUR_SSH_PRIVATE_KEY`): cosign-verifies
    the released gem, renders `PKGBUILD` from `packaging/aur/PKGBUILD.template`
    via `packaging/render.rb`, regenerates `.SRCINFO` with
    `makepkg --printsrcinfo`, and pushes a version bump to the AUR package.
-6. Announces the release on Discord with the supported `hive update` command
+7. Announces the release on Discord with the supported `hive update` command
    when `DISCORD_RELEASE_WEBHOOK` is configured. Announcement failures are
    non-fatal and do not block package publication.
 
@@ -67,8 +73,8 @@ big versions.
   stable.
 
 **How to cut a release:** bump `VERSION` in `lib/hive.rb`, sync **both**
-`Gemfile.lock` and `web/Gemfile.lock` (`hive-cli (X.Y.Z)` — the hivebox web app
-depends on the gem via `path: ".."`, so a stale web lock fails its frozen
+`Gemfile.lock` and `web/Gemfile.lock` (`hive-cli (X.Y.Z)` — Hive web
+depends on the gem via `path: ".."` in a source checkout, so a stale web lock fails its frozen
 `bundle install`), bump the `vX.Y.Z` installer-URL refs in `README.md` /
 `install.md`, add a `## X.Y.Z` CHANGELOG section, and merge the release-prep PR.
 Dispatch the live-agent proof for that full protected-main SHA and wait for its
@@ -233,12 +239,14 @@ version until you bump it manually or set the token.
    git tag vX.Y.Z "$candidate_sha"
    git push origin vX.Y.Z
    ```
-5. Watch the run: **proof-gate → install-gate → release-finalize →
+5. Watch the run: **web-bundle → proof-gate → install-gate → release-finalize →
    aur-publish**. Confirm:
+   - `web-bundle` built the managed archive once and exposed its exact digest.
    - `proof-gate` downloaded and verified the exact attested candidate instead
-     of rebuilding it.
+     of rebuilding it, then exercised managed setup against the digest-pinned
+     web candidate under the isolated service-manager harness.
    - The GitHub Release has `hive-cli-X.Y.Z.gem`, the four-platform Hive skill
-     archive, the web bundle, and `SHA256SUMS{,.sig,.pem}`.
+     archive, `hive-web-X.Y.Z.tar.gz`, and `SHA256SUMS{,.sig,.pem}`.
    - The tap committed `Formula/hive.rb` at `X.Y.Z` (if `HOMEBREW_TAP_TOKEN` is set).
    - `https://aur.archlinux.org/packages/hive-bin` shows `X.Y.Z` (if `AUR_SSH_PRIVATE_KEY` is set).
 6. Smoke each channel:
@@ -247,6 +255,14 @@ version until you bump it manually or set the token.
    brew install ivankuznetsov/hive/hive && hive --version    # macOS / Linuxbrew
    yay -S hive-bin && hive --version                          # Arch (test aarch64 too)
    ```
+
+   Then run `hive setup --json` in the isolated verification environment and
+   require the same package-root dependency and service-state contract as a
+   normal install. The default release URL is trusted only after cosign
+   verification of `SHA256SUMS` against `.github/workflows/release.yml` at the
+   exact expected `vX.Y.Z` tag, followed by exact archive-digest verification. A
+   custom remote `HIVE_WEB_BUNDLE_URL` must be paired with the documented exact
+   `HIVE_WEB_BUNDLE_SHA256`; never weaken that requirement to diagnose a mirror.
 
 ---
 
@@ -260,9 +276,12 @@ by `packaging/verify-channel.sh` and the reusable `.github/workflows/install-ver
    `release.yml`) — builds once before the tag, proves native Hive skill
    discovery/use on OpenClaw, Claude, Codex, and Pi, then binds the candidate
    gem/skill archive and evidence to the exact SHA, workflow revision, run,
-   attempt, and artifact digests. The tag workflow accepts only the trusted
-   GitHub Actions Check Run and downloads that private proof artifact; it never
-   rebuilds the candidate.
+   attempt, and artifact digests. On the tag, `web-bundle` builds the tracked
+   managed web archive once before `proof-gate`; the proof gate digest-checks
+   it and runs the installed proven gem through managed setup from that archive.
+   The tag workflow accepts only the trusted GitHub Actions Check Run and
+   downloads that private proof artifact; no downstream job rebuilds a proven
+   candidate.
 2. **Pre-release install gate** (`install-gate` in `release.yml`) — `gem
    install`s the exact proven gem on `macos-15` + `ubuntu-24.04-arm` before
    publishing. `release-finalize` needs it, so a gem that will not install never
@@ -273,7 +292,7 @@ by `packaging/verify-channel.sh` and the reusable `.github/workflows/install-ver
 4. **Weekly canary** (`install-canary.yml`, Mondays 06:00 UTC + `workflow_dispatch`)
    — re-installs the latest release to catch dependency / base-image drift.
 
-The hivebox image gate is daemon-deep: `packaging/docker/smoke.sh` waits for
+The Hivebox image gate is daemon-deep: `packaging/docker/smoke.sh` waits for
 Rails `/health`, then requires daemon-backed `/health?deep=1` to stay healthy
 across the supervisor's ten-second fast-failure window before checking the
 claimable login and owner gate. It probes deep health again afterward. This
@@ -324,7 +343,7 @@ Arch-Linux-ARM image).
 - **Tap not updated** → `HOMEBREW_TAP_TOKEN` is unset or expired. Renew the PAT
   and re-set the secret; the tap stays at its last version meanwhile.
 - **`cosign verify-blob` fails in `aur-publish`** → the released gem's signing
-  identity didn't match the pinned identity. This is the supply-chain gate
+  identity didn't match the pinned release workflow and version tag. This is the supply-chain gate
   working; do **not** loosen the `--certificate-identity-regexp`. Investigate
   the release artifact.
 - **`Host key verification failed` in `aur-publish`** → the AUR SSH first-contact

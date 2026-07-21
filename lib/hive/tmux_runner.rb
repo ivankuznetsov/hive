@@ -228,6 +228,7 @@ module Hive
     def tmux_server_unavailable?(err)
       err.include?("can't find session") ||
         err.include?("session not found") ||
+        err.include?("no current target") ||
         err.include?("no server running") ||
         err.include?("no current server") ||
         err.include?("server exited unexpectedly") ||

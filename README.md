@@ -37,7 +37,7 @@ The result Hive built in that reel lives at [ivankuznetsov/shipped](https://gith
 
 ## Install
 
-Hive ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed with cosign keyless attestation. Each available channel below downloads the same `.gem`, verifies the signature, and runs `gem install` against it. The bash installer also installs Hive's managed QMD wiki indexer under `${XDG_DATA_HOME:-~/.local/share}/hive/qmd` when npm is available, and agent-assisted installs repair/install QMD after Homebrew or AUR installs. The `install.sh` channel then runs `hive daemon install` automatically; the Homebrew and AUR packages print a one-line reminder to run it once, and `hive init .` also ensures it. Either way the per-user systemd-user (Linux) or launchd (macOS) daemon service ends up enabled by default, and `hive init .` only decides whether that project is enrolled for daemon dispatch.
+Hive ships as a rubygem (`hive-cli`) plus a managed Hive web bundle attached to each GitHub Release. A cosign-signed checksum manifest authenticates both artifacts before installation or extraction. Each native channel installs the same gem; the normal `hive setup` then installs Hive-owned dependencies, the daemon, and the managed loopback web service. Project initialization still controls daemon enrollment independently.
 
 | Platform | Channel |
 |----------|---------|
@@ -45,7 +45,7 @@ Hive ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed wit
 | Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.5/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
 | Arch Linux x86_64/aarch64 | [`yay -S hive-bin`](https://aur.archlinux.org/packages/hive-bin) |
 
-Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, `grok` ≥ 0.2.90 when selected, authenticated `gh`, `tmux` ≥ 3.0 when the project uses the default `claude.mode: tmux`, and Node.js/npm for managed QMD install/repair. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `gem`, checksum tool) on first run; if npm is missing, Hive still installs and `hive doctor` reports the QMD gap non-fatally.
+Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, `grok` ≥ 0.2.90 when selected, authenticated `gh`, `tmux` ≥ 3.0 when the project uses the default `claude.mode: tmux`, `cosign` for release identity verification, and Node.js/npm for managed QMD install/repair. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `cosign`, `gem`, checksum tool) on first run; if npm is missing, Hive still installs and `hive doctor` reports the QMD gap non-fatally.
 
 The vendored gems land under `${XDG_DATA_HOME:-~/.local/share}/hive/gems/` so the install is self-contained and uninstall is a clean `rm -rf`. Full install matrix, XDG paths, Apache Hive collision behavior (`hv` shim), update, uninstall, and autostart details live in [wiki/operating.md#install](wiki/operating.md#install) and [wiki/operating.md#autostart](wiki/operating.md#autostart).
 
@@ -61,36 +61,42 @@ mkdir -p ~/.local/bin
 ln -sf ~/Dev/hive/bin/hive ~/.local/bin/hive
 ```
 
-If `~/.local/bin` is not on `PATH`, put the symlink in a directory that is. Verify with `hive --version`, then run `hive daemon install` once to install and enable the per-user daemon service from that symlink. The dev-clone path skips signed-release verification, but the same daemon installer writes the current systemd-user or launchd template.
+If `~/.local/bin` is not on `PATH`, put the symlink in a directory that is. Verify with `hive --version`, then run `hive setup`. A source checkout is the explicit development input and does not download a release bundle; setup still uses the same systemd-user or launchd installers.
 
-### Local Web UI
+### Hive web (default native experience)
 
-Hive can run the Rails web UI locally without Docker:
+On supported Linux and macOS installations, the normal first run is:
 
 ```bash
 hive setup
-hive web
 ```
 
 `hive setup` checks Ruby 3.4, git, tmux, `gh`, Claude, Codex, Node/npm,
 QMD, SQLite, and the Rails bundle. Before other mutations it previews and
 provisions Hive's operating skill for Claude, Codex, and Pi. It then installs
-Hive-owned pieces it can manage, installs the daemon service, and enrolls the
-current project. Interactive setup confirms once; JSON or non-TTY setup must
-pass `--yes` or it makes no changes. Bare
-`hive web` serves `http://127.0.0.1:4567` in the foreground with
-loopback-only no-auth mode over the same local project registry and workflow
-state as the TUI. GitHub is an optional connection for repository browsing and
-cloning, not a prerequisite or ownership claim. An authenticated, access-
-restricted local reverse proxy such as Tailscale Serve (with tailnet ACLs) can
-forward to that loopback listener. Because Hive trusts the proxy's localhost
-connection, do not expose an unrestricted forwarder to it. Set
-`web.local_loopback: false` to require GitHub login even there (see
-[wiki/commands/web.md](wiki/commands/web.md)).
-For autostart, run `hive setup --service` or
-`hive web install` and `hive web start --detach`; the web service is separate
-from the daemon service. Docker/hivebox is the separate owner-gated,
-container-first deployment mode.
+the Hive-owned pieces it can manage, installs the daemon and Hive web services,
+enrolls the current project, and reports the effective URL plus installed,
+enabled, running, and readiness state. Interactive setup confirms once; JSON
+or non-TTY setup must pass `--yes` or it makes no changes. The untouched
+configuration is loopback-only at `http://127.0.0.1:4567`; setup never creates
+LAN/public binding or Tailscale exposure. Use `hive setup --no-service` to skip
+every web-service mutation, or bare `hive web` to bootstrap as needed and serve
+in the foreground. Explicit repair remains `hive web install --force`.
+
+Bare `hive web` uses loopback-only no-auth mode over the same local project
+registry and workflow state as the TUI. GitHub is an optional connection for
+repository browsing and cloning, not a prerequisite or ownership claim. A
+local reverse proxy such as Tailscale Serve remains part of the access boundary
+because Hive sees its loopback connection; authenticate and restrict its
+clients, and never expose an unrestricted forwarder. Set
+`web.local_loopback: false` to require GitHub login even there. See
+[wiki/commands/web.md](wiki/commands/web.md).
+
+Windows users should run the native path inside WSL with systemd enabled, or
+use Hivebox. **Choose [Hivebox](packaging/docker/README.md) when you need
+container isolation, multiple local instances, containment for untrusted
+agents, or a reproducible server/NAS deployment.** Hivebox remains fully
+supported; it is the container distribution of the same Rails app.
 
 ### Install via a coding agent
 
@@ -115,10 +121,12 @@ setup:
 
 The guided setup keeps package-manager confirmation visible, verifies
 `hive`/`hv`, and—after approval—runs
-`hive setup --no-init --yes --json` for core provisioning. Project enrollment
-is a separate `hive init .` in the user's real terminal so patrol, architecture,
-daemon, and babysitter defaults can be reviewed before confirmation. After
-setup, pass Hive CLI commands through `/hive ...`, for example
+`hive setup --no-init --yes --json` for core provisioning. The result reports
+the effective native Hive web URL and distinct installed, enabled, running, and
+readiness state alongside the daemon outcome. Project enrollment is a separate
+`hive init .` in the user's real terminal so patrol, architecture, daemon, and
+babysitter defaults can be reviewed before confirmation. After setup, pass Hive
+CLI commands through `/hive ...`, for example
 `/hive status --operational --json`, `/hive watch <project>:<task>`,
 `/hive new . "build this feature"`, and `/hive review <task-slug>`.
 
@@ -315,6 +323,7 @@ The TUI is the recommended human interface and an agent-driven CLI is the recomm
 
 | Group | Verbs | What it's for |
 |---|---|---|
+| Native setup & web | `hive setup`, `hive web`, `hive web status/install/start/stop` | Provision the default loopback Hive web service, run the foreground server, or observe/repair the managed unit. `--no-service` opts out of web-service mutation. See [docs/cli.md#day-to-day-workflow](docs/cli.md#day-to-day-workflow). |
 | Workflow | `hive new`, `hive brainstorm`, `hive plan`, `hive develop`, `hive open-pr`, `hive review`, `hive artifacts`, `hive finalize`, `hive archive`, `hive run`, `hive approve` | Drive a single stage of a single task by hand. `--from <stage>` lets you re-run a stage in place. See [docs/cli.md#day-to-day-workflow](docs/cli.md#day-to-day-workflow). |
 | Workflow authoring | `hive workflow new` | Scaffold a project-local workflow descriptor under `.hive-state/workflows/` (`--template research` seeds from a sample). See [Custom Workflows](#custom-workflows) and [docs/workflows.md](docs/workflows.md). |
 | Review findings | `hive findings`, `hive accept-finding`, `hive reject-finding` | Inspect GFM-checkbox findings from the latest review pass and tick which ones should feed the next fix pass. See [docs/cli.md#findings-triage](docs/cli.md#findings-triage). |
@@ -338,5 +347,5 @@ Full per-command reference, every flag, every envelope field, and every exit cod
 - **[docs/condition-rollout.md](docs/condition-rollout.md)** — Operator runbook for execute-stage marker/shadow/condition authority, projection repair, divergence triage, explicit promotion, and lossless rollback.
 - **[wiki/operating.md](wiki/operating.md)** — Day-2 operations: install matrix, XDG paths, autostart (systemd-user on Linux, launchd on macOS), enrolling existing projects, the mandatory `--dry-run` shakedown, bot setup, tuning concurrency, cost-runaway response, troubleshooting. Read this before running the daemon live and any time you operate Hive across more than one project.
 - **[docs/recipes.md](docs/recipes.md)** — Concrete end-to-end workflows, including the xbookmark dogfood replay (linked to the real PR and a committed transcript of the run). Read this when you want to see what a complete idea-to-PR run looks like before trying it yourself.
-- **[docs/faq.md](docs/faq.md)** — Troubleshooting and design-rationale answers: why folders instead of a database, why per-stage subprocesses instead of a long-running orchestrator, why commit `.hive-state/` to an orphan branch, why project-level daemon enrollment, why no built-in web UI. Read this when you hit a surprise or want to know "why is it like this?".
+- **[docs/faq.md](docs/faq.md)** — Troubleshooting and design-rationale answers: why folders instead of a database, why per-stage subprocesses instead of a long-running orchestrator, why commit `.hive-state/` to an orphan branch, why project-level daemon enrollment, and when to use Hivebox instead of native Hive web. Read this when you hit a surprise or want to know "why is it like this?".
 - **[wiki/index.md](wiki/index.md)** — The catalog of the LLM-maintained engineering wiki under `wiki/`, which is the deepest source of reference material for every command, module, and stage. Read this when the user-facing docs above don't have the depth you need.

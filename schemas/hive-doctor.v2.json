@@ -59,7 +59,10 @@
       "required": ["kind", "stage", "label", "agent", "configured_skill", "skill", "status", "message"],
       "properties": {
         "kind": { "enum": ["dependency", "warning"] },
-        "status": { "enum": ["present", "missing", "version_too_old", "warning", "not_applicable"] }
+        "status": { "enum": ["present", "missing", "version_too_old", "warning", "not_applicable"] },
+        "alias": { "type": "string" },
+        "replacement": { "type": "string" },
+        "ignored": { "type": "boolean" }
       }
     }
   }

@@ -13,11 +13,19 @@ class WorkflowLifecycleSchemaTest < Minitest::Test
     end
 
     SCHEMAS.each do |name|
-      payload = {
+      payload = if name == "hive-workflow-publish"
+        {
+          "schema" => name, "schema_version" => 2, "ok" => false,
+          "error_class" => "PublishOfflineError", "error_kind" => "offline",
+          "exit_code" => 69, "message" => "unavailable", "retryable" => true
+        }
+      else
+        {
         "schema" => name, "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(name), "ok" => false,
         "error_class" => "RegistryError", "error_kind" => "registry",
         "exit_code" => 69, "message" => "unavailable"
-      }
+        }
+      end
       assert schemer(name).valid?(payload), "#{name} must accept the shared error envelope"
     end
   end
@@ -134,10 +142,11 @@ class WorkflowLifecycleSchemaTest < Minitest::Test
         "warnings" => [ "cleanup failed after selection changed" ]
       },
       "hive-workflow-publish" => {
-        "schema" => "hive-workflow-publish", "schema_version" => 1, "ok" => true,
-        "status" => "pending_review", "name" => "demo", "version" => "1.0.0",
-        "manifest_digest" => "c" * 64, "warnings" => [],
-        "pr_url" => "https://example.test/pull/1", "listed" => false
+        "schema" => "hive-workflow-publish", "schema_version" => 2, "ok" => true,
+        "state" => "pending_review", "freshness" => "current",
+        "name" => "demo", "version" => "1.0.0",
+        "package_digest" => "b" * 64, "release_digest" => "c" * 64, "warnings" => [],
+        "observed_at" => "2026-07-21T12:00:00Z", "pr_url" => "https://example.test/pull/1"
       }
     }
   end

@@ -1,4 +1,5 @@
 require "fileutils"
+require "digest"
 require "json"
 require "pathname"
 require "tempfile"
@@ -11,6 +12,9 @@ require "hive/workflow_package/authoring_lint"
 require "hive/workflow_package/manifest"
 require "hive/workflow_package/registry_manifest"
 require "hive/workflow_package/registry_manifest_builder"
+require "hive/workflow_package/publish_resolver"
+require "hive/workflow_package/publish_store"
+require "hive/workflow_package/registry_client"
 require "hive/workflow_package/registry_submission"
 require "hive/workflow_package/runtime_policy"
 require "hive/workflow_package/source_snapshot"
@@ -46,11 +50,13 @@ module Hive
         def registry_path = "packages/#{name}/#{version}"
       end
 
-      def initialize(name, project_root:, version:, submission: nil, config: nil)
+      def initialize(name, project_root:, version:, submission: nil, resolver: nil, store: nil, config: nil)
         @name = name.to_s
         @project_root = File.expand_path(project_root)
         @version = version.to_s
         @submission = submission
+        @resolver = resolver
+        @store = store
         @config = config
       end
 
@@ -74,28 +80,103 @@ module Hive
         )
         lint = AuthoringLint.verify!(destination, manifest: build.manifest)
         admit_runtime!(result.workflow, build.manifest.data.fetch("permissions"), package_root: destination)
-        warnings = result.warnings.map(&:to_h) + lint.warnings.map(&:to_h)
+        warnings = result.warnings.map { |warning| publication_finding(warning) } + lint.warnings.map(&:to_h)
         Package.new(
           name: @name, version: @version, root: destination,
           package_digest: build.package_digest,
           release_digest: build.release_digest,
           warnings: warnings.freeze,
           lint_contract: lint.contract,
-          findings: (result.diagnostics.map(&:to_h) + lint.findings.map(&:to_h)).freeze
+          findings: (result.diagnostics.map { |finding| publication_finding(finding) } + lint.findings.map(&:to_h)).freeze
         ).freeze
       end
 
       def publish(package)
-        config = @config || Hive::Config.load(@project_root)
-        registry = config.fetch("honeycomb", {})
-        submission = @submission || RegistrySubmission.new(
-          registry: registry.fetch("repository", OFFICIAL_REPOSITORY),
-          base_branch: registry.fetch("base_branch", "main")
-        )
-        submission.submit(package)
+        components = publication_components
+        submitted = components.fetch(:submission).submit(package)
+        components.fetch(:resolver).resolve(submitted.receipt)
+      end
+
+      # Real publication adopts a valid retained receipt before consulting
+      # mutable authored files. When those files still exist, rebuilding them
+      # remains a mandatory digest assertion. Dry-run intentionally calls
+      # #package directly and therefore cannot touch durable state.
+      def prepare(destination:)
+        validate_identity!
+        registry, = publication_destination
+        return package(destination: destination) unless retained_receipt_path?(registry)
+
+        components = publication_components
+        receipt = components.fetch(:store).load(registry, @name, @version)
+        raise PublishRecoveryError, "publication receipt disappeared during recovery" unless receipt
+
+        root = components.fetch(:store).verify_bundle(receipt)
+        manifest = RegistryManifest.load(File.join(root, RegistryManifest::FILE_NAME))
+        current_lint = AuthoringLint.verify!(root, manifest: manifest)
+        if authored_inputs_available?
+          rebuilt = package(destination: destination)
+          unless rebuilt.package_digest == receipt.package_digest && rebuilt.release_digest == receipt.release_digest
+            raise PublishConflict, "authored workflow bytes conflict with the retained immutable submission"
+          end
+        end
+        Package.new(
+          name: receipt.name, version: receipt.version, root: root,
+          package_digest: receipt.package_digest, release_digest: receipt.release_digest,
+          warnings: current_lint.warnings.map(&:to_h), findings: current_lint.findings.map(&:to_h),
+          lint_contract: receipt.lint_contract
+        ).freeze
+      end
+
+      def receipt_for(package)
+        components = publication_components
+        components.fetch(:store).load(components.fetch(:registry), package.name, package.version)
       end
 
       private
+
+      def publication_finding(diagnostic)
+        {
+          "rule_id" => diagnostic.rule_id, "severity" => diagnostic.severity.to_s,
+          "path" => diagnostic.path, "line" => diagnostic.line,
+          "column" => diagnostic.column, "message" => diagnostic.message
+        }.compact.freeze
+      end
+
+      def publication_components
+        return @publication_components if @publication_components
+        registry, base_branch = publication_destination
+        store = @store || PublishStore.new
+        gateway = RegistryGateway.new
+        submission = @submission || RegistrySubmission.new(
+          registry: registry, base_branch: base_branch, gateway: gateway, store: store
+        )
+        catalogue = RegistryClient.new(repository: "https://github.com/#{registry}.git")
+        resolver = @resolver || PublishResolver.new(
+          registry: registry, gateway: gateway, catalogue: catalogue, store: store
+        )
+        @publication_components = {
+          registry: registry, store: store, submission: submission, resolver: resolver
+        }.freeze
+      end
+
+      def publication_destination
+        config = @config || Hive::Config.load(@project_root)
+        honeycomb = config.fetch("honeycomb", {})
+        [
+          honeycomb.fetch("repository", OFFICIAL_REPOSITORY).to_s,
+          honeycomb.fetch("base_branch", "main").to_s
+        ]
+      end
+
+      def retained_receipt_path?(registry)
+        key = Digest::SHA256.hexdigest([ registry, @name, @version ].join("\0"))
+        path = File.join(Hive::Paths.workflow_publish_receipts_root, "#{key}.json")
+        File.exist?(path) || File.symlink?(path)
+      end
+
+      def authored_inputs_available?
+        [ descriptor_path, metadata_path, readme_path ].all? { |path| File.file?(path) && !File.symlink?(path) }
+      end
 
       def validate_identity!
         unless RegistryManifest::NAME.match?(@name)

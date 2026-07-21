@@ -111,11 +111,14 @@ class WorkflowPackagePublisherTest < Minitest::Test
   def test_publish_delegates_to_the_registry_submission
     submitted = nil
     submission = Object.new
-    submission.define_singleton_method(:submit) { |package| submitted = package; "submitted" }
+    receipt = Object.new
+    submission.define_singleton_method(:submit) { |package| submitted = package; Struct.new(:receipt).new(receipt) }
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { |value| value.equal?(receipt) ? "submitted" : raise("wrong receipt") }
     package = Package.new(name: "demo", version: "1.2.3", root: Dir.pwd,
                           manifest_digest: "a" * 64, warnings: [])
     instance = Hive::WorkflowPackage::Publisher.new(
-      "demo", project_root: Dir.pwd, version: "1.2.3", submission: submission
+      "demo", project_root: Dir.pwd, version: "1.2.3", submission: submission, resolver: resolver
     )
 
     assert_equal "submitted", instance.publish(package)

@@ -113,6 +113,34 @@ class LiveHiveOperatingSkillSmokeTest < Minitest::Test
     end
   end
 
+  def test_claude_activation_requires_native_init_skill_inventory
+    discovery = {
+      "kind" => "claude-native-command", "name" => "/hive",
+      "file_path_sha256" => "a" * 64
+    }
+    generic_read = {
+      "type" => "assistant",
+      "message" => {
+        "content" => [
+          { "type" => "tool_use", "name" => "Read", "input" => {
+            "file_path" => "/tmp/.claude/skills/hive/SKILL.md"
+          } }
+        ]
+      }
+    }
+    native_init = {
+      "type" => "system", "subtype" => "init",
+      "skills" => [ "hive" ], "slash_commands" => [ "hive", "compact" ]
+    }
+
+    refute structured_activation?("claude", discovery, [ generic_read ])
+    refute structured_activation?(
+      "claude", discovery, [ native_init.merge("slash_commands" => [ "compact" ]) ]
+    )
+    assert structured_activation?("claude", discovery, [ native_init ])
+    refute_includes agent_argv("claude", "claude", "/hive prove it"), "--bare"
+  end
+
   def test_pi_discovery_requires_the_exact_native_skill_command
     with_tmp_dir do |root|
       workspace = File.join(root, "workspace")
@@ -195,7 +223,8 @@ class LiveHiveOperatingSkillSmokeTest < Minitest::Test
       commands = read_audited_commands(audit_path)
       assert_native_observation_commands(commands)
       events = parse_native_events(stdout)
-      assert structured_activation?(platform, native_discovery, events),
+      native_activation = native_activation_claim(platform, native_discovery, events)
+      refute_nil native_activation,
              "#{platform} emitted no structured Hive skill discovery/activation evidence (event types: #{event_types(events).inspect})"
       # Scan the unredacted process streams. Evidence and failure messages are
       # redacted separately; scanning only those redacted copies would make a
@@ -221,6 +250,7 @@ class LiveHiveOperatingSkillSmokeTest < Minitest::Test
           "canonical_digest" => projection.fetch("canonical_digest"),
           "projection_manifest_sha256" => Digest::SHA256.file(File.join(skill_root, ".hive-skill.json")).hexdigest
         },
+        "native_activation" => native_activation,
         "hive_commands" => commands,
         "secret_scan" => { "status" => "passed", "scanner" => "hive-live-agent-proof/v1" }
       )
@@ -421,6 +451,9 @@ class LiveHiveOperatingSkillSmokeTest < Minitest::Test
       { "kind" => "codex-model-input", "name" => "hive",
         "file_path_sha256" => Digest::SHA256.hexdigest(skill_path),
         "model_input_sha256" => Digest::SHA256.hexdigest(serialized) }
+    when "claude"
+      { "kind" => "claude-native-command", "name" => "/hive",
+        "file_path_sha256" => Digest::SHA256.hexdigest(skill_path) }
     when "pi"
       request = JSON.generate("id" => "hive-proof", "type" => "get_commands") + "\n"
       stdout, stderr, status = run_bounded(
@@ -471,7 +504,7 @@ class LiveHiveOperatingSkillSmokeTest < Minitest::Test
     when "openclaw"
       [ binary, "agent", "--local", "--agent", "main", "--message", prompt, "--timeout", "180", "--json" ]
     when "claude"
-      argv = [ binary, "-p", "--bare", "--output-format", "stream-json", "--verbose",
+      argv = [ binary, "-p", "--output-format", "stream-json", "--verbose",
                "--no-session-persistence", "--tools", "Bash", "--dangerously-skip-permissions" ]
       argv.concat([ "--model", model ]) unless model.empty?
       argv << prompt
@@ -550,11 +583,38 @@ class LiveHiveOperatingSkillSmokeTest < Minitest::Test
   end
 
   def structured_activation?(platform, discovery, events)
-    return discovery["kind"] == "openclaw-skills-info" if platform == "openclaw"
-    return discovery["kind"] == "pi-rpc-command" if platform == "pi"
+    !native_activation_claim(platform, discovery, events).nil?
+  end
+
+  def native_activation_claim(platform, discovery, events)
+    kind = case platform
+    when "openclaw"
+      "openclaw-skills-info" if discovery["kind"] == "openclaw-skills-info"
+    when "claude"
+      "claude-system-init-skill" if claude_native_activation?(discovery, events)
+    when "codex"
+      if discovery["kind"] == "codex-model-input" && events.any? { |event|
+        structured_skill_key?(event) || structured_skill_access?(event)
+      }
+        "codex-structured-skill-access"
+      end
+    when "pi"
+      "pi-rpc-command" if discovery["kind"] == "pi-rpc-command"
+    end
+    return unless kind
+
+    { "kind" => kind, "invocation" => INVOCATIONS.fetch(platform) }
+  end
+
+  def claude_native_activation?(discovery, events)
+    return false unless discovery["kind"] == "claude-native-command" && discovery["name"] == "/hive"
 
     events.any? do |event|
-      structured_skill_key?(event) || structured_skill_access?(event)
+      next false unless event.is_a?(Hash) && event["type"] == "system" && event["subtype"] == "init"
+
+      skills = Array(event["skills"]).map { |name| name.to_s.delete_prefix("/") }
+      commands = Array(event["slash_commands"]).map { |name| name.to_s.delete_prefix("/") }
+      skills.include?("hive") && commands.include?("hive")
     end
   end
 

@@ -8,6 +8,8 @@ require "hive/commands/watch"
 class CommandsWatchTest < Minitest::Test
   include HiveTestHelper
 
+  FAKE_IDENTITY_RESOLVER = ->(folder) { [ "test", folder ] }
+
   class FakeClock
     attr_reader :monotonic
 
@@ -38,6 +40,35 @@ class CommandsWatchTest < Minitest::Test
       raise value if value.is_a?(Exception)
 
       value
+    end
+  end
+
+  class BlockingSource
+    attr_reader :fetches
+
+    def initialize(initial)
+      @initial = initial
+      @fetches = 0
+    end
+
+    def fetch
+      @fetches += 1
+      return @initial if @fetches == 1
+
+      sleep 5
+    end
+  end
+
+  class BlockingFirstSource
+    attr_reader :fetches
+
+    def initialize
+      @fetches = 0
+    end
+
+    def fetch
+      @fetches += 1
+      sleep 5
     end
   end
 
@@ -107,6 +138,145 @@ class CommandsWatchTest < Minitest::Test
     assert_equal [ "alpha:same" ], events.first.fetch("targets").map { |target| target.fetch("target") }
   end
 
+  def test_duplicate_project_slug_across_stages_is_rejected_without_collapsing_rows
+    rows = [
+      task(
+        slug: "same", stage: "4-execute",
+        folder: "/tmp/demo/stages/4-execute/same"
+      ),
+      task(
+        slug: "same", stage: "5-open-pr",
+        folder: "/tmp/demo/stages/5-open-pr/same"
+      )
+    ]
+
+    error = assert_raises(Hive::Commands::Watch::UsageError) do
+      build_watch(
+        source: FakeSource.new(snapshot(*rows)), targets: [ "demo:same" ],
+        output: StringIO.new
+      ).call
+    end
+
+    assert_includes error.message, "4-execute"
+    assert_includes error.message, "/tmp/demo/stages/4-execute/same"
+    assert_includes error.message, "5-open-pr"
+    assert_includes error.message, "/tmp/demo/stages/5-open-pr/same"
+  end
+
+  def test_duplicate_project_slug_appearing_during_watch_exhausts_source_budget
+    collision = [
+      task(slug: "task", id: 41, stage: "4-execute", folder: "/tmp/demo/4-execute/task"),
+      task(slug: "task", id: 41, stage: "5-open-pr", folder: "/tmp/demo/5-open-pr/task")
+    ]
+    source = FakeSource.new(
+      snapshot(task(id: 41)), snapshot(*collision), snapshot(*collision), snapshot(*collision)
+    )
+    output = StringIO.new
+
+    error = assert_raises(Hive::Commands::Watch::StatusUnavailableError) do
+      build_watch(source: source, targets: [ "demo:task" ], output: output).call
+    end
+
+    assert_includes error.message, "status source unavailable"
+    events = json_events(output)
+    assert_equal 3, events.count { |event| event["reason"] == "source_failure" }
+    assert_equal "status_unavailable", events.last.fetch("reason")
+  end
+
+  def test_watch_keeps_selected_task_id_when_a_replacement_reuses_the_slug
+    original = task(id: 41)
+    replacement = task(id: 42, state: "running", reason: "replacement is running")
+    archived_original = legacy_task(id: 41, action: "archived")
+    source = FakeSource.new(
+      snapshot(original), snapshot(replacement, archived: [ archived_original ])
+    )
+
+    events, = run_json_watch(
+      source: source, targets: [ "demo:task" ], until_condition: "completion"
+    )
+
+    assert_equal %w[initial transition final], events.map { |event| event.fetch("event") }
+    assert_equal true, events[1].dig("targets", 0, "archived")
+    assert_equal "task is archived", events[1].dig("targets", 0, "reason")
+    assert_equal "completion", events.last.fetch("reason")
+    refute events.any? { |event| event.dig("targets", 0, "reason") == "replacement is running" }
+  end
+
+  def test_watch_does_not_follow_a_replacement_when_the_selected_id_disappears
+    original = task(id: 41)
+    replacement = task(id: 42, state: "running", reason: "replacement is running")
+    source = FakeSource.new(
+      snapshot(original), snapshot(replacement), snapshot(replacement), snapshot(replacement)
+    )
+    output = StringIO.new
+
+    assert_raises(Hive::Commands::Watch::StatusUnavailableError) do
+      build_watch(source: source, targets: [ "demo:task" ], output: output).call
+    end
+
+    events = json_events(output)
+    warnings = events.select { |event| event["reason"] == "task_disappeared" }
+    assert_equal 3, warnings.size
+    assert warnings.all? { |event| event.dig("targets", 0, "present") == false }
+    refute events.any? { |event| event.dig("targets", 0, "reason") == "replacement is running" }
+  end
+
+  def test_watch_adopts_a_backfilled_id_for_the_same_physical_task
+    with_tmp_dir do |dir|
+      folder = File.join(dir, "stages", "4-execute", "task")
+      FileUtils.mkdir_p(folder)
+      source = FakeSource.new(
+        snapshot(task(folder: folder)),
+        snapshot(
+          task(
+            folder: folder, id: 41, state: "waiting_on_you",
+            owner: "operator", reason: "choose"
+          )
+        )
+      )
+      output = StringIO.new
+      watch = build_watch(
+        source: source, targets: [ "demo:task" ], output: output,
+        identity_resolver: nil
+      )
+
+      watch.call
+
+      events = json_events(output)
+      assert_equal %w[initial transition final], events.map { |event| event.fetch("event") }
+      refute events.any? { |event| event["reason"] == "task_disappeared" }
+      assert_equal "41", watch.instance_variable_get(:@selection).first.id
+    end
+  end
+
+  def test_idless_active_archive_collision_fails_closed_during_watch
+    active_folder = "/tmp/demo/4-execute/task"
+    archived_folder = "/tmp/demo/9-done/task"
+    collision = snapshot(
+      task(state: "running", folder: active_folder),
+      archived: [ legacy_task(action: "archived", folder: archived_folder) ]
+    )
+    source = FakeSource.new(snapshot(task(folder: active_folder)), collision, collision, collision)
+    output = StringIO.new
+    same_physical_task = ->(_folder) { [ "test", "same-task" ] }
+
+    assert_raises(Hive::Commands::Watch::StatusUnavailableError) do
+      build_watch(
+        source: source, targets: [ "demo:task" ], output: output,
+        identity_resolver: same_physical_task
+      ).call
+    end
+
+    events = json_events(output)
+    warnings = events.select { |event| event["reason"] == "source_failure" }
+    assert_equal 3, warnings.size
+    warnings.each do |event|
+      assert_includes event.fetch("message"), "active at 4-execute (#{active_folder})"
+      assert_includes event.fetch("message"), "archived at 9-done (#{archived_folder})"
+    end
+    assert_equal "status_unavailable", events.last.fetch("reason")
+  end
+
   def test_project_selection_is_stable_and_rejects_more_than_one_hundred_targets
     rows = 101.times.map { |index| task(slug: "task-#{index}") }
     source = FakeSource.new(snapshot(*rows))
@@ -131,6 +301,17 @@ class CommandsWatchTest < Minitest::Test
     assert_equal 2.0, clock.monotonic
   end
 
+  def test_idless_selection_fails_closed_without_physical_identity
+    error = assert_raises(Hive::Commands::Watch::StatusUnavailableError) do
+      build_watch(
+        source: FakeSource.new(snapshot(task)), targets: [ "demo:task" ],
+        output: StringIO.new, identity_resolver: ->(_folder) { nil }
+      ).call
+    end
+
+    assert_includes error.message, "task-directory identity is unavailable"
+  end
+
   def test_source_failure_budget_emits_warnings_final_and_status_unavailable_exit
     source = FakeSource.new(
       snapshot(task), IOError.new("down-1"), IOError.new("down-2"), IOError.new("down-3")
@@ -147,6 +328,112 @@ class CommandsWatchTest < Minitest::Test
                  events.map { |event| event.fetch("event") }
     assert_equal false, events.last.fetch("ok")
     assert_equal "status_unavailable", events.last.fetch("reason")
+  end
+
+  def test_source_timeout_error_does_not_impersonate_the_overall_deadline
+    source = FakeSource.new(
+      snapshot(task), Timeout::Error.new("upstream read timed out"),
+      Timeout::Error.new("upstream read timed out"), Timeout::Error.new("upstream read timed out")
+    )
+    output = StringIO.new
+
+    error = assert_raises(Hive::Commands::Watch::StatusUnavailableError) do
+      build_watch(source: source, targets: [ "demo:task" ], output: output).call
+    end
+
+    events = json_events(output)
+    assert_includes error.message, "status source unavailable"
+    assert_equal 3, events.count { |event| event["reason"] == "source_failure" }
+    assert_equal false, events.last.fetch("ok")
+    assert_equal "status_unavailable", events.last.fetch("reason")
+    refute events.any? { |event| event["reason"] == "timeout" }
+  end
+
+  def test_overall_timeout_bounds_a_blocked_status_fetch
+    source = BlockingSource.new(snapshot(task))
+    output = StringIO.new
+    clock = Hive::Commands::Watch::Clock.new
+    watch = build_watch(
+      source: source, targets: [ "demo:task" ], output: output,
+      clock: clock, sleeper: ->(seconds) { sleep(seconds) }, timeout: 0.05,
+      interval: 0.01
+    )
+
+    started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    watch.call
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
+    assert_operator elapsed, :<, 0.5
+    assert_equal 2, source.fetches
+    assert_equal "timeout", json_events(output).last.fetch("reason")
+  end
+
+  def test_overall_timeout_bounds_the_initial_status_fetch
+    source = BlockingFirstSource.new
+    output = StringIO.new
+    clock = Hive::Commands::Watch::Clock.new
+    watch = build_watch(
+      source: source, targets: [ "demo:task" ], output: output,
+      clock: clock, sleeper: ->(seconds) { sleep(seconds) }, timeout: 0.05,
+      interval: 0.01
+    )
+
+    started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    error = assert_raises(Hive::Commands::Watch::StatusUnavailableError) { watch.call }
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
+    assert_operator elapsed, :<, 0.5
+    assert_equal 1, source.fetches
+    assert_includes error.message, "initial status source exceeded the overall timeout"
+    assert_empty output.string
+  end
+
+  def test_overall_timeout_bounds_initial_physical_identity_resolution
+    output = StringIO.new
+    clock = Hive::Commands::Watch::Clock.new
+    watch = build_watch(
+      source: FakeSource.new(snapshot(task)), targets: [ "demo:task" ], output: output,
+      clock: clock, sleeper: ->(seconds) { sleep(seconds) }, timeout: 0.05,
+      interval: 0.01, identity_resolver: ->(_folder) { sleep 5 }
+    )
+
+    started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    error = assert_raises(Hive::Commands::Watch::StatusUnavailableError) { watch.call }
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
+    assert_operator elapsed, :<, 0.5
+    assert_includes error.message, "identity resolution exceeded"
+    assert_empty output.string
+  end
+
+  def test_overall_timeout_bounds_later_physical_identity_resolution
+    calls = 0
+    resolver = lambda do |folder|
+      calls += 1
+      next [ "test", folder ] if calls <= 2
+
+      sleep 5
+    end
+    output = StringIO.new
+    clock = Hive::Commands::Watch::Clock.new
+    source = FakeSource.new(
+      snapshot(task), snapshot(task(id: 41, state: "waiting_on_you", owner: "operator"))
+    )
+    watch = build_watch(
+      source: source, targets: [ "demo:task" ], output: output,
+      clock: clock, sleeper: ->(seconds) { sleep(seconds) }, timeout: 0.05,
+      interval: 0.01, identity_resolver: resolver
+    )
+
+    started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    watch.call
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
+    events = json_events(output)
+    assert_operator elapsed, :<, 0.5
+    assert_equal %w[initial final], events.map { |event| event.fetch("event") }
+    assert_equal "timeout", events.last.fetch("reason")
+    refute events.any? { |event| event["event"] == "transition" }
   end
 
   def test_unexplained_disappearance_is_not_completion_and_exhausts_budget
@@ -221,7 +508,11 @@ class CommandsWatchTest < Minitest::Test
 
   def build_watch(source:, targets:, output:, clock: FakeClock.new, project: nil,
                   until_condition: "settled", timeout: 30, max_events: 100,
-                  interval: 1, json_lines: true, json: false, signal_checker: -> { nil })
+                  interval: 1, json_lines: true, json: false, signal_checker: -> { nil },
+                  sleeper: nil, identity_resolver: FAKE_IDENTITY_RESOLVER)
+    sleeper ||= lambda do |seconds|
+      clock.respond_to?(:advance) ? clock.advance(seconds) : sleep(seconds)
+    end
     Hive::Commands::Watch.new(
       targets: targets,
       project: project,
@@ -233,9 +524,10 @@ class CommandsWatchTest < Minitest::Test
       json: json,
       source: source,
       clock: clock,
-      sleeper: ->(seconds) { clock.advance(seconds) },
+      sleeper: sleeper,
       output: output,
-      signal_checker: signal_checker
+      signal_checker: signal_checker,
+      identity_resolver: identity_resolver
     )
   end
 
@@ -251,14 +543,16 @@ class CommandsWatchTest < Minitest::Test
   end
 
   def task(project: "demo", slug: "task", state: "idle", owner: "scheduler",
-           reason: "ready", generated_at: "2026-07-20T12:00:00Z")
+           reason: "ready", generated_at: "2026-07-20T12:00:00Z",
+           stage: "4-execute", folder: nil, id: nil)
+    folder ||= "/tmp/#{project}/#{slug}"
     {
       "identity" => {
-        "project" => project, "slug" => slug, "id" => nil,
-        "display_name" => slug, "folder" => "/tmp/#{project}/#{slug}"
+        "project" => project, "slug" => slug, "id" => id,
+        "display_name" => slug, "folder" => folder
       },
       "workflow" => "coding",
-      "position" => { "stage" => "4-execute", "marker" => "waiting" },
+      "position" => { "stage" => stage, "marker" => "waiting" },
       "liveness" => {
         "status" => state == "running" ? "running" : "not_running",
         "pid" => nil, "attempt_id" => nil, "task_generation" => nil
@@ -274,10 +568,13 @@ class CommandsWatchTest < Minitest::Test
     }
   end
 
-  def legacy_task(project: "demo", slug: "task", action: "ready_to_run")
+  def legacy_task(project: "demo", slug: "task", action: "ready_to_run",
+                  stage: nil, folder: nil, id: nil)
+    stage ||= action == "archived" ? "9-done" : "4-execute"
+    folder ||= "/tmp/#{project}/#{slug}"
     {
-      "project" => project, "slug" => slug, "folder" => "/tmp/#{project}/#{slug}",
-      "workflow" => "coding", "stage" => action == "archived" ? "9-done" : "4-execute",
+      "project" => project, "slug" => slug, "id" => id, "folder" => folder,
+      "workflow" => "coding", "stage" => stage,
       "marker" => "complete", "action" => action
     }
   end
@@ -286,7 +583,9 @@ class CommandsWatchTest < Minitest::Test
     active = rows.compact
     legacy_rows = active.map do |row|
       legacy_task(
-        project: row.dig("identity", "project"), slug: row.dig("identity", "slug")
+        project: row.dig("identity", "project"), slug: row.dig("identity", "slug"),
+        id: row.dig("identity", "id"), folder: row.dig("identity", "folder"),
+        stage: row.dig("position", "stage")
       )
     end + archived
     Hive::Commands::Watch::SourceSnapshot.new(

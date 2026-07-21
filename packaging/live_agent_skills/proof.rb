@@ -7,7 +7,20 @@ require "tmpdir"
 
 module HiveLiveAgentProof
   SCHEMA_VERSION = 1
+  WORKFLOW_PATH = ".github/workflows/live-agent-skills.yml".freeze
   PLATFORMS = %w[openclaw claude codex pi].freeze
+  INVOCATIONS = {
+    "openclaw" => "/hive",
+    "claude" => "/hive",
+    "codex" => "$hive",
+    "pi" => "/skill:hive"
+  }.freeze
+  NATIVE_ACTIVATION_KINDS = {
+    "openclaw" => "openclaw-skills-info",
+    "claude" => "claude-system-init-skill",
+    "codex" => "codex-structured-skill-access",
+    "pi" => "pi-rpc-command"
+  }.freeze
   STATUS_ARGV = [ "status", "--operational", "--json" ].freeze
   WATCH_ARGV = [
     "watch", "proof:live-agent-skill", "--until", "settled",
@@ -96,6 +109,12 @@ module HiveLiveAgentProof
       findings << "exact-secret:#{index}" if text.include?(secret)
     end
     findings
+  end
+
+  def valid_native_activation?(platform, value)
+    value.is_a?(Hash) && value.keys.sort == %w[invocation kind] &&
+      value["kind"] == NATIVE_ACTIVATION_KINDS.fetch(platform) &&
+      value["invocation"] == INVOCATIONS.fetch(platform)
   end
 
   class Builder
@@ -211,7 +230,7 @@ module HiveLiveAgentProof
         "schema_version" => SCHEMA_VERSION,
         "candidate_sha" => @candidate_sha,
         "workflow" => {
-          "path" => ".github/workflows/live-agent-skills.yml",
+          "path" => WORKFLOW_PATH,
           "revision" => @workflow_revision,
           "event" => "workflow_dispatch",
           "repository" => @repository,
@@ -281,6 +300,9 @@ module HiveLiveAgentProof
              row.dig("skill", "skill_version") == manifest["skill_version"]
         raise Error, "#{platform} evidence canonical provenance mismatch"
       end
+      unless HiveLiveAgentProof.valid_native_activation?(platform, row["native_activation"])
+        raise Error, "#{platform} native activation evidence is invalid"
+      end
       unless row.dig("secret_scan", "status") == "passed" && row.dig("cleanup", "status") == "passed"
         raise Error, "#{platform} evidence lacks secret-scan or cleanup proof"
       end
@@ -342,7 +364,7 @@ module HiveLiveAgentProof
       unless @attestation["schema"] == "hive-live-agent-skills-attestation" &&
              @attestation["schema_version"] == SCHEMA_VERSION &&
              @attestation["candidate_sha"] == @candidate_sha &&
-             workflow.is_a?(Hash) && workflow["path"] == ".github/workflows/live-agent-skills.yml" &&
+             workflow.is_a?(Hash) && workflow["path"] == WORKFLOW_PATH &&
              workflow["event"] == "workflow_dispatch" && workflow["revision"] == @workflow_revision &&
              workflow["repository"] == @repository && workflow["run_id"] == @run_id &&
              workflow["run_attempt"] == @run_attempt
@@ -364,6 +386,9 @@ module HiveLiveAgentProof
                row.dig("cleanup", "status") == "passed" &&
                row.dig("skill", "canonical_digest") == manifest["canonical_digest"]
           raise Error, "#{platform} attested evidence is incomplete"
+        end
+        unless HiveLiveAgentProof.valid_native_activation?(platform, row["native_activation"])
+          raise Error, "#{platform} attested native activation evidence is invalid"
         end
       end
     end

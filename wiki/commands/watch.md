@@ -27,7 +27,18 @@ Targets are either exact `PROJECT:SLUG` identities or bare slugs. A bare slug
 must resolve uniquely, with `--project` available to disambiguate. With no
 positional targets, `--project` selects that project's active tasks. Selection
 is resolved exactly once from a full `hive-status` graph and is capped at 100
-tasks; a later task with the same slug is not silently added to the watch.
+tasks. The watch pins the selected task id when one is available, so a later
+task that reuses the same `PROJECT:SLUG` cannot replace it in the stream; the
+original task must either remain present, appear in the verified archive, or
+be reported missing. An initially id-less task is provisionally pinned by its
+directory device/inode identity. If the daemon backfills an id onto that same
+directory, the watch adopts and then pins the new id; it does not confuse the
+repair with task replacement. If active/archive materialization exposes
+multiple physical rows for the selected identity, including an id-less
+active/archive collision, selection refuses the collision and reports the
+distinct row type, stage, and folder alternatives instead of silently
+collapsing them. If an id-less task's physical identity cannot be established,
+selection fails closed before starting the stream.
 
 Defaults are `--interval 15`, `--timeout 1800`, `--max-events 100`, and
 `--until settled`. Interval/timeout must be positive finite numbers and the
@@ -63,7 +74,14 @@ misses fail as `status_unavailable` rather than fabricating success.
 ## Termination and exits
 
 Timeout and event-cap finals are bounded successful observations, not task
-success claims. Three consecutive source failures emit a final
+success claims. The overall timeout bounds every status-source fetch, physical
+identity resolution, and poll sleep, so neither a blocked source nor task-path
+lookup can overrun the requested deadline or publish a late transition. A
+source's own timeout exception still counts against the source-failure budget;
+only Hive's private overall-deadline interrupt produces a successful `timeout`
+final. A
+same-identity row collision discovered after selection counts as a source
+failure rather than choosing one row. Three consecutive source failures emit a final
 `status_unavailable` event and fail the command. `SIGINT` and `SIGTERM` emit a
 final `interrupted`/`terminated` event and exit 130/143. A closed downstream
 pipe is handled cleanly. Initial selection/source errors fail before a useful
@@ -76,8 +94,10 @@ fresh `hive status --operational --json` snapshot and use `hive act`.
 ## Tests
 
 - `test/unit/commands/watch_test.rb` covers target resolution, ambiguity,
-  project selection, bounds, transition deduplication, settled/completion
-  termination, archive verification, disappearance/source failure budgets,
+  task-id pinning across slug reuse, verified id backfill, physical-row
+  collisions and their repair evidence, project selection, bounds, transition
+  deduplication, settled/completion termination, archive verification,
+  disappearance/source failure budgets, source/identity deadlines,
   timeout/event caps, signals, EPIPE, JSON Lines, and read-only behavior.
 - `test/e2e/scenarios/watch_semantic_transitions.yml` pins the subprocess
   scenario contract.

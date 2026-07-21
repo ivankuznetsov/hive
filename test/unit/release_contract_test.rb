@@ -1,11 +1,20 @@
 require "test_helper"
+require "digest"
 require "json"
+require "open3"
+require "rbconfig"
 require "hive/agent_skills/canonical_skill"
 
 class ReleaseContractTest < Minitest::Test
+  include HiveTestHelper
+
   ROOT = File.expand_path("../..", __dir__)
   RELEASE_WORKFLOW = File.join(ROOT, ".github/workflows/release.yml")
   LIVE_AGENT_WORKFLOW = File.join(ROOT, ".github/workflows/live-agent-skills.yml")
+  RELEASE_SELECTOR = File.join(ROOT, "packaging/live_agent_skills/select_release_proof.rb")
+  CANDIDATE_SHA = "a" * 40
+  WORKFLOW_SHA = "b" * 40
+  ATTESTATION_SHA256 = "c" * 64
 
   def test_release_metadata_matches_runtime_version
     version = Regexp.escape(Hive::VERSION)
@@ -85,6 +94,7 @@ class ReleaseContractTest < Minitest::Test
 
   def test_tag_release_consumes_attested_artifacts_without_rebuilding
     body = File.read(RELEASE_WORKFLOW)
+    selector = read("packaging/live_agent_skills/release_selector.rb")
     workflow = YAML.safe_load_file(RELEASE_WORKFLOW, aliases: true)
     jobs = workflow.fetch("jobs")
     gate = jobs.fetch("proof-gate")
@@ -94,14 +104,12 @@ class ReleaseContractTest < Minitest::Test
     assert_equal "proof-gate", jobs.fetch("install-gate").fetch("needs")
     assert_equal [ "proof-gate", "install-gate" ], jobs.fetch("release-finalize").fetch("needs")
     assert_includes body, "commits/${candidate_sha}/check-runs"
-    assert_includes body, '.app.slug == "github-actions"'
-    assert_includes body, ".path == $path"
-    assert_includes body, '.event == "workflow_dispatch"'
-    assert_includes body, "OpenClaw live Hive operating skill"
+    assert_includes body, "packaging/live_agent_skills/select_release_proof.rb"
+    assert_includes selector, "OpenClaw live Hive operating skill"
     assert_includes body, "live-agent-skills-proof"
     assert_includes body, "proof_run_attempt"
     assert_includes body, "proof_artifact_digest"
-    assert_includes body, "downloaded proof archive digest does not match"
+    assert_includes selector, "downloaded proof archive digest does not match"
     assert_includes body, "proof archive contains a symbolic link"
     assert_includes body, "packaging/live_agent_skills/verify.rb"
     assert_includes body, "hive-proven-candidate"
@@ -109,9 +117,129 @@ class ReleaseContractTest < Minitest::Test
     assert_equal "Verify exact-SHA live agent proof", gate.fetch("name")
   end
 
+  def test_release_selector_executes_the_trusted_exact_sha_fixture_contract
+    with_release_selector_fixture do |paths|
+      out, err, status = run_release_selector("select", *paths.values_at(:checks, :run, :jobs, :artifacts))
+
+      assert status.success?, err
+      selection = JSON.parse(out)
+      assert_equal CANDIDATE_SHA, selection.fetch("candidate_sha")
+      assert_equal WORKFLOW_SHA, selection.fetch("workflow_revision")
+      assert_equal 42, selection.fetch("proof_run_id")
+      assert_equal 2, selection.fetch("proof_run_attempt")
+      assert_equal 77, selection.fetch("proof_artifact_id")
+      assert_equal "sha256:#{'d' * 64}", selection.fetch("proof_artifact_digest")
+      assert_equal ATTESTATION_SHA256, selection.fetch("attestation_sha256")
+    end
+  end
+
+  def test_release_selector_rejects_untrusted_or_incomplete_fixtures
+    cases = {
+      "candidate SHA" => ->(fixture) { fixture.fetch(:checks).fetch("check_runs").first["head_sha"] = "e" * 40 },
+      "GitHub Actions app" => ->(fixture) { fixture.fetch(:checks).fetch("check_runs").first["app"]["slug"] = "other" },
+      "run attempt" => ->(fixture) { fixture.fetch(:run)["run_attempt"] = 3 },
+      "required proof job" => ->(fixture) { fixture.fetch(:jobs).fetch("jobs").shift },
+      "nonexpired artifact" => ->(fixture) { fixture.fetch(:artifacts).fetch("artifacts").first["expired"] = true },
+      "unique artifact" => lambda { |fixture|
+        fixture.fetch(:artifacts).fetch("artifacts") << fixture.fetch(:artifacts).fetch("artifacts").first.dup
+      },
+      "trusted digest" => ->(fixture) { fixture.fetch(:artifacts).fetch("artifacts").first["digest"] = "sha256:short" }
+    }
+
+    cases.each do |label, mutate|
+      with_release_selector_fixture(mutate: mutate) do |paths|
+        _out, err, status = run_release_selector(
+          "select", *paths.values_at(:checks, :run, :jobs, :artifacts)
+        )
+        refute status.success?, "#{label} fixture should fail"
+        refute_empty err
+      end
+    end
+  end
+
+  def test_release_selector_executes_downloaded_archive_digest_verification
+    with_tmp_dir do |dir|
+      archive = File.join(dir, "proof.zip")
+      File.write(archive, "proof archive bytes")
+      digest = "sha256:#{Digest::SHA256.file(archive).hexdigest}"
+
+      _out, err, status = run_release_selector("digest", digest, archive, include_identity: false)
+      assert status.success?, err
+
+      _out, err, status = run_release_selector(
+        "digest", "sha256:#{'0' * 64}", archive, include_identity: false
+      )
+      refute status.success?
+      assert_includes err, "digest does not match"
+    end
+  end
+
   private
 
   def read(path)
     File.read(File.join(ROOT, path))
+  end
+
+  def run_release_selector(command, *paths, include_identity: true)
+    argv = [ RbConfig.ruby, RELEASE_SELECTOR, command ]
+    argv.concat([ CANDIDATE_SHA, "ivankuznetsov/hive" ]) if include_identity
+    Open3.capture3(*argv, *paths)
+  end
+
+  def with_release_selector_fixture(mutate: nil)
+    fixture = release_selector_fixture
+    mutate&.call(fixture)
+    with_tmp_dir do |dir|
+      paths = fixture.to_h do |name, payload|
+        path = File.join(dir, "#{name}.json")
+        File.write(path, JSON.generate(payload))
+        [ name, path ]
+      end
+      yield paths
+    end
+  end
+
+  def release_selector_fixture
+    external_id = "live-agent-skills:v1:42:2:#{ATTESTATION_SHA256}"
+    required_jobs = [
+      "OpenClaw live Hive operating skill",
+      "Claude live Hive operating skill",
+      "Codex live Hive operating skill",
+      "Pi live Hive operating skill",
+      "Attest exact-SHA live agent proof"
+    ]
+    {
+      checks: {
+        "check_runs" => [ {
+          "name" => "live-agent-skills", "head_sha" => CANDIDATE_SHA,
+          "status" => "completed", "conclusion" => "success",
+          "app" => { "slug" => "github-actions" },
+          "completed_at" => "2026-07-20T12:00:00Z", "external_id" => external_id,
+          "details_url" => "https://github.com/ivankuznetsov/hive/actions/runs/42"
+        } ]
+      },
+      run: {
+        "id" => 42, "run_attempt" => 2, "head_sha" => WORKFLOW_SHA,
+        "path" => ".github/workflows/live-agent-skills.yml",
+        "event" => "workflow_dispatch", "head_branch" => "main",
+        "status" => "completed", "conclusion" => "success",
+        "head_repository" => { "full_name" => "ivankuznetsov/hive" }
+      },
+      jobs: {
+        "jobs" => required_jobs.map do |name|
+          {
+            "name" => name, "status" => "completed", "conclusion" => "success",
+            "run_id" => 42, "run_attempt" => 2
+          }
+        end
+      },
+      artifacts: {
+        "artifacts" => [ {
+          "id" => 77, "name" => "live-agent-skills-proof-2", "expired" => false,
+          "digest" => "sha256:#{'d' * 64}",
+          "workflow_run" => { "id" => 42, "head_sha" => WORKFLOW_SHA }
+        } ]
+      }
+    }
   end
 end

@@ -82,6 +82,37 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_act_json_usage_errors_preserve_required_action_identity
+    cases = [
+      [ %w[act --json], "", "" ],
+      [ %w[act workflow.advance --json], "workflow.advance", "" ],
+      [ %w[act workflow.advance demo:task --json], "workflow.advance", "demo:task" ],
+      [
+        [ "act", "workflow.advance", "demo:task", "extra", "--observation", "a" * 64, "--json" ],
+        "workflow.advance",
+        "demo:task"
+      ]
+    ]
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-act"))))
+
+    with_tmp_global_config do |home|
+      cases.each do |argv, action_id, target|
+        out, _err, status = run_hive(home, *argv)
+
+        refute status.success?, "#{argv.inspect} should fail"
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        payload = JSON.parse(out)
+        assert_equal "hive-act", payload.fetch("schema")
+        assert_equal false, payload.fetch("ok")
+        assert_equal "usage", payload.fetch("error_kind")
+        assert_equal action_id, payload.fetch("action_id")
+        assert_equal target, payload.fetch("target")
+        assert_empty schemer.validate(payload).map { |error| error.fetch("error") },
+                     "#{argv.inspect} envelope must validate against hive-act"
+      end
+    end
+  end
+
   def test_status_mode_conflicts_are_usage_errors_with_the_selected_schema
     with_tmp_global_config do |home|
       out, _err, status = run_hive(home, "status", "--full", "--json")

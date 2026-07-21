@@ -49,7 +49,7 @@ module Hive
         allowed_extra_files = validate_allowed_extra_files!(allowed_extra_files)
         orphans = orphan_paths - ignore_orphans
         unless File.exist?(destination)
-          snapshot = snapshot_for("absent", {}, nil, orphans)
+          snapshot = snapshot_for("absent", {}, orphans)
           issues = [ [ "missing", "Hive operating skill is not installed at #{destination}" ] ]
           issues.unshift(orphan_issue(orphans)) unless orphans.empty?
           return Report.new(
@@ -81,7 +81,7 @@ module Hive
           issues << [ "stale", "managed Hive operating skill does not match canonical #{projection.skill_version}" ]
         end
         issues.unshift(orphan_issue(orphans)) unless orphans.empty?
-        snapshot = snapshot_for(state, files, manifest, orphans)
+        snapshot = snapshot_for(state, files, orphans)
         Report.new(
           state: state, destination: destination, manifest: public_manifest(manifest),
           files: public_files(files), snapshot: snapshot, issues: issues.freeze
@@ -90,7 +90,7 @@ module Hive
         files ||= {}
         foreign_report(files, nil, orphan_paths, "projection manifest is invalid JSON: #{e.message}")
       rescue UnsafePath => e
-        snapshot = snapshot_for("unsafe", {}, nil, []) rescue minimal_snapshot("unsafe")
+        snapshot = snapshot_for("unsafe", {}, []) rescue minimal_snapshot("unsafe")
         Report.new(
           state: "unsafe", destination: destination, manifest: nil, files: {}.freeze,
           snapshot: snapshot,
@@ -405,7 +405,7 @@ module Hive
         issues.unshift(orphan_issue(orphans)) unless orphans.empty?
         Report.new(
           state: "foreign", destination: destination, manifest: public_manifest(manifest),
-          files: public_files(files), snapshot: snapshot_for("foreign", files, manifest, orphans),
+          files: public_files(files), snapshot: snapshot_for("foreign", files, orphans),
           issues: issues.freeze
         ).freeze
       end
@@ -492,7 +492,7 @@ module Hive
         manifest&.dup&.freeze
       end
 
-      def snapshot_for(state, files, manifest, orphans)
+      def snapshot_for(state, files, orphans)
         public = public_files(files)
         {
           "state" => state,

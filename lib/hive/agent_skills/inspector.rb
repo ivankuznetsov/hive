@@ -86,7 +86,7 @@ module Hive
           kind: "openclaw",
           agent: "openclaw",
           configured_skill: "hive",
-          invocation: "/hive",
+          invocation: evidence.expected.fetch("invocation"),
           capability_id: "hive",
           package_id: "hive-operations",
           managed: false

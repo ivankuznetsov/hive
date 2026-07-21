@@ -23,6 +23,7 @@ require "hive/brainstorm_parser"
 require "hive/gh"
 require "hive/pr"
 require "hive/process_kill"
+require "hive/operational_action"
 require "hive/operational_status"
 require "hive/daemon/operational_snapshot"
 require "hive/terminal_text"
@@ -949,13 +950,8 @@ module Hive
               # acquiring `.lock` changes the directory mtime and would make a
               # freshly emitted operational action invalidate itself inside
               # the command's lock.
-              mtime = if File.exist?(task.state_file)
-                File.mtime(task.state_file)
-              elsif File.exist?(task.meta_yml_path)
-                File.mtime(task.meta_yml_path)
-              else
-                folder_mtime
-              end
+              observation_source = Hive::OperationalAction.observation_mtime_source(task)
+              mtime = observation_source == entry ? folder_mtime : File.mtime(observation_source)
               lock_holder = task_lock_holder(task)
               live_holder = live_task_lock_holder(lock_holder)
               icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: !live_holder.nil?)

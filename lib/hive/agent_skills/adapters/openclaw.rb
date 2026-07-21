@@ -80,10 +80,10 @@ module Hive
           resolution = {
             "status" => "present",
             "path" => skill_path,
-            "message" => "OpenClaw resolves /hive from #{skill_path}",
+            "message" => "OpenClaw resolves #{@projection.invocation} from #{skill_path}",
             "candidates" => candidates.map { |path| File.join(path, "SKILL.md") }.freeze,
             "parse_errors" => [].freeze,
-            "invocation" => "/hive",
+            "invocation" => @projection.invocation,
             "source" => source,
             "eligible" => nil,
             "user_invocable" => nil
@@ -258,7 +258,7 @@ module Hive
 
         def empty_resolution
           { "status" => "unavailable", "path" => nil, "message" => nil,
-            "candidates" => [], "parse_errors" => [], "invocation" => "/hive" }.freeze
+            "candidates" => [], "parse_errors" => [], "invocation" => @projection.invocation }.freeze
         end
       end
     end

@@ -1,6 +1,7 @@
 require "digest"
 require "json"
 require "time"
+require "timeout"
 require "hive/commands/status"
 require "hive/config"
 require "hive/terminal_text"
@@ -12,12 +13,15 @@ module Hive
     # changes and never interpret a missing row as successful completion.
     class Watch
       SourceSnapshot = Data.define(:operational, :full_graph)
-      Selection = Data.define(:project, :slug) do
+      Selection = Data.define(:project, :slug, :id, :physical_identity) do
         def target = "#{project}:#{slug}"
       end
 
       class UsageError < Hive::InvalidTaskPath; end
       class StatusUnavailableError < Hive::UnavailableError; end
+      # The overall-deadline interrupt must bypass broad StandardError rescues
+      # inside a status source. It is always caught at this command boundary.
+      class DeadlineExceeded < Exception; end # rubocop:disable Lint/InheritException
 
       DEFAULT_INTERVAL = 15.0
       DEFAULT_TIMEOUT = 1_800.0
@@ -56,7 +60,7 @@ module Hive
                      timeout: DEFAULT_TIMEOUT, max_events: DEFAULT_MAX_EVENTS,
                      interval: DEFAULT_INTERVAL, json_lines: false, json: false,
                      source: nil, clock: nil, sleeper: nil, output: $stdout,
-                     signal_checker: nil)
+                     signal_checker: nil, identity_resolver: nil)
         @targets = Array(targets).map(&:to_s)
         @project = project&.to_s
         @until_condition = until_condition.to_s
@@ -70,6 +74,7 @@ module Hive
         @sleeper = sleeper || ->(seconds) { sleep(seconds) }
         @output = output
         @signal_checker = signal_checker
+        @identity_resolver = identity_resolver || method(:task_physical_identity)
         @received_signal = nil
       end
 
@@ -85,14 +90,14 @@ module Hive
       def run
         validate_options!
         started_at = @clock.monotonic
-        snapshot = initial_snapshot!
-        @selection = resolve_selection(snapshot)
-        current = materialize(snapshot)
+        snapshot = initial_snapshot!(started_at)
+        current, current_fingerprint = initial_projection!(snapshot, started_at)
         missing_counts = Hash.new(0)
         non_final_events = 0
 
         emit(event_payload("initial", non_final_events, current))
         non_final_events += 1
+        return emit_final("timeout", current, non_final_events) if timed_out?(started_at)
         return emit_terminal_final(current, non_final_events) if terminal?(current)
         return emit_final("event_cap", current, non_final_events) if non_final_events >= @max_events
 
@@ -108,8 +113,14 @@ module Hive
           return emit_final("timeout", current, non_final_events) if timed_out?(started_at)
 
           begin
-            next_snapshot = fetch_snapshot!
+            next_snapshot = fetch_snapshot!(started_at)
+            next_targets, next_fingerprint = within_deadline(started_at) do
+              targets = materialize(next_snapshot)
+              [ targets, semantic_fingerprint(targets) ]
+            end
             source_failures = 0
+          rescue DeadlineExceeded
+            return emit_final("timeout", current, non_final_events)
           rescue StandardError => error
             source_failures += 1
             emit(event_payload(
@@ -131,7 +142,8 @@ module Hive
             next
           end
 
-          next_targets = materialize(next_snapshot)
+          return emit_final("timeout", current, non_final_events) if timed_out?(started_at)
+
           missing = next_targets.reject { |target| target.fetch("present") }
           @selection.each do |selection|
             key = selection.target
@@ -144,6 +156,7 @@ module Hive
 
           unless missing.empty?
             current = next_targets
+            current_fingerprint = next_fingerprint
             worst = missing.map { |target| missing_counts.fetch(target.fetch("target")) }.max
             emit(event_payload(
               "source_warning", non_final_events, current,
@@ -164,13 +177,14 @@ module Hive
             next
           end
 
-          if semantic_fingerprint(next_targets) != semantic_fingerprint(current)
+          if next_fingerprint != current_fingerprint
             current = next_targets
             emit(event_payload("transition", non_final_events, current))
             non_final_events += 1
           else
             current = next_targets
           end
+          current_fingerprint = next_fingerprint
 
           return emit_terminal_final(current, non_final_events) if terminal?(current)
           return emit_final("event_cap", current, non_final_events) if non_final_events >= @max_events
@@ -211,15 +225,29 @@ module Hive
         value.to_f
       end
 
-      def initial_snapshot!
-        fetch_snapshot!
+      def initial_snapshot!(started_at)
+        fetch_snapshot!(started_at)
+      rescue DeadlineExceeded => error
+        raise StatusUnavailableError,
+              "initial status source exceeded the overall timeout: #{error.message}"
       rescue StandardError => error
         raise StatusUnavailableError,
               "initial status source unavailable: #{error.class}: #{error.message}"
       end
 
-      def fetch_snapshot!
-        snapshot = @source.fetch
+      def initial_projection!(snapshot, started_at)
+        within_deadline(started_at) do
+          @selection = resolve_selection(snapshot)
+          targets = materialize(snapshot)
+          [ targets, semantic_fingerprint(targets) ]
+        end
+      rescue DeadlineExceeded => error
+        raise StatusUnavailableError,
+              "initial task identity resolution exceeded the overall timeout: #{error.message}"
+      end
+
+      def fetch_snapshot!(started_at)
+        snapshot = within_deadline(started_at) { @source.fetch }
         unless snapshot.is_a?(SourceSnapshot) && snapshot.operational.is_a?(Hash) &&
                snapshot.full_graph.is_a?(Hash)
           raise TypeError, "watch source returned an invalid snapshot"
@@ -231,20 +259,34 @@ module Hive
         snapshot
       end
 
+      def within_deadline(started_at, &block)
+        remaining = @timeout - elapsed(started_at)
+        unless remaining.positive?
+          raise DeadlineExceeded, "watch status source exceeded the overall timeout"
+        end
+
+        Timeout.timeout(
+          remaining, DeadlineExceeded, "watch status source exceeded the overall timeout", &block
+        )
+      end
+
       def resolve_selection(snapshot)
         candidates = candidate_index(snapshot)
         selected = if @targets.empty?
           candidates.values
-                    .select { |entry| entry.fetch(:project) == @project && !entry.fetch(:archived) }
-                    .sort_by { |entry| entry.fetch(:target) }
-                    .map { |entry| Selection.new(project: entry.fetch(:project), slug: entry.fetch(:slug)) }
+                    .select do |entries|
+                      entries.first.fetch(:project) == @project &&
+                        entries.none? { |entry| entry.fetch(:archived) }
+                    end
+                    .sort_by { |entries| entries.first.fetch(:target) }
+                    .map { |entries| selection_for_entries!(entries, entries.first.fetch(:target)) }
         else
           @targets.map { |target| resolve_target(target, candidates, snapshot) }
         end
         selected = selected.uniq { |entry| entry.target }
 
         if selected.empty?
-          if @targets.empty? && !known_project?(snapshot, @project)
+          if @targets.empty? && !known_project?(snapshot, @project, candidates)
             raise UsageError, "unknown project #{@project.inspect}"
           end
           raise UsageError, "no active tasks selected for project #{@project.inspect}"
@@ -265,21 +307,22 @@ module Hive
           if @project && project != @project
             raise UsageError, "target #{target.inspect} contradicts --project #{@project}"
           end
-          entry = candidates[target]
-          return Selection.new(project: project, slug: slug) if entry
+          entries = candidates[target]
+          return selection_for_entries!(entries, target) if entries
 
           return missing_target!(target, snapshot)
         end
 
-        matches = candidates.values.select do |entry|
+        matches = candidates.values.select do |entries|
+          entry = entries.first
           entry.fetch(:slug) == target && (@project.nil? || entry.fetch(:project) == @project)
         end
         if matches.size > 1
-          alternatives = matches.map { |entry| entry.fetch(:target) }.sort
+          alternatives = matches.map { |entries| entries.first.fetch(:target) }.sort
           raise UsageError,
                 "ambiguous target #{target.inspect}; use one of: #{alternatives.join(', ')}"
         end
-        return Selection.new(project: matches[0].fetch(:project), slug: target) if matches.one?
+        return selection_for_entries!(matches.first, target) if matches.one?
 
         missing_target!(@project ? "#{@project}:#{target}" : target, snapshot)
       end
@@ -295,60 +338,193 @@ module Hive
       end
 
       def candidate_index(snapshot)
-        index = {}
+        full = Hash.new { |hash, key| hash[key] = [] }
         Array(snapshot.full_graph["projects"]).each do |project|
           Array(project["tasks"]).each do |row|
-            project_name = row["project"] || project["name"]
-            slug = row["slug"]
+            project_name = (row["project"] || project["name"]).to_s
+            slug = row["slug"].to_s
             next if project_name.to_s.empty? || slug.to_s.empty?
 
             target = "#{project_name}:#{slug}"
-            index[target] = {
+            full[target] << {
               target: target, project: project_name, slug: slug,
+              id: normalized_task_id(row["id"]), stage: row["stage"]&.to_s,
+              folder: row["folder"]&.to_s,
               archived: row["action"] == "archived"
             }
           end
         end
+        operational = Hash.new { |hash, key| hash[key] = [] }
         Array(snapshot.operational["tasks"]).each do |row|
-          project_name = row.dig("identity", "project")
-          slug = row.dig("identity", "slug")
+          project_name = row.dig("identity", "project").to_s
+          slug = row.dig("identity", "slug").to_s
           next if project_name.to_s.empty? || slug.to_s.empty?
 
           target = "#{project_name}:#{slug}"
-          index[target] = { target: target, project: project_name, slug: slug, archived: false }
+          operational[target] << {
+            target: target, project: project_name, slug: slug,
+            id: normalized_task_id(row.dig("identity", "id")),
+            stage: row.dig("position", "stage")&.to_s,
+            folder: row.dig("identity", "folder")&.to_s,
+            archived: false
+          }
         end
-        index
+
+        (full.keys | operational.keys).sort.to_h do |target|
+          entries = operational[target]
+          if entries.empty?
+            active = full[target].reject { |entry| entry.fetch(:archived) }
+            entries = active.empty? ? full[target] : active
+          end
+          [ target, entries ]
+        end
       end
 
-      def known_project?(snapshot, project_name)
+      def known_project?(snapshot, project_name, candidates)
         Array(snapshot.full_graph["projects"]).any? { |project| project["name"] == project_name } ||
-          candidate_index(snapshot).values.any? { |entry| entry.fetch(:project) == project_name }
+          candidates.values.flatten.any? { |entry| entry.fetch(:project) == project_name }
       end
 
       def materialize(snapshot)
-        active = Array(snapshot.operational["tasks"]).to_h do |row|
-          [ [ row.dig("identity", "project"), row.dig("identity", "slug") ], row ]
+        selected = @selection.to_h do |selection|
+          [ [ selection.project, selection.slug ], true ]
         end
-        archived = {}
+        active = Hash.new { |hash, key| hash[key] = [] }
+        Array(snapshot.operational["tasks"]).each do |row|
+          key = [ row.dig("identity", "project"), row.dig("identity", "slug") ]
+          active[key] << row if selected.key?(key)
+        end
+        archived = Hash.new { |hash, key| hash[key] = [] }
         Array(snapshot.full_graph["projects"]).each do |project|
           Array(project["tasks"]).each do |row|
             next unless row["action"] == "archived"
 
             project_name = row["project"] || project["name"]
-            archived[[ project_name, row["slug"] ]] = row
+            key = [ project_name, row["slug"] ]
+            archived[key] << row if selected.key?(key)
           end
         end
 
-        @selection.map do |selection|
+        promoted_selections = []
+        targets = @selection.map do |selection|
           key = [ selection.project, selection.slug ]
-          if active[key]
-            active_target(selection, active.fetch(key))
-          elsif archived[key]
-            archived_target(selection, archived.fetch(key))
+          active_rows = matching_rows(selection, active.fetch(key, []), archived: false)
+          archived_rows = matching_rows(selection, archived.fetch(key, []), archived: true)
+          ensure_single_materialized_row!(selection, active_rows, archived: false)
+          ensure_single_materialized_row!(selection, archived_rows, archived: true)
+          ensure_no_cross_view_collision!(selection, active_rows, archived_rows)
+          row = active_rows.first || archived_rows.first
+          effective_selection = promote_selection_id(selection, row, archived: active_rows.empty?)
+          promoted_selections << effective_selection
+          if active_rows.one?
+            active_target(effective_selection, active_rows.first)
+          elsif archived_rows.one?
+            archived_target(effective_selection, archived_rows.first)
           else
-            absent_target(selection)
+            absent_target(effective_selection)
           end
         end
+        @selection = promoted_selections
+        targets
+      end
+
+      def selection_for_entries!(entries, target)
+        if entries.size > 1
+          alternatives = entries.sort_by { |entry| [ entry.fetch(:stage).to_s, entry.fetch(:folder).to_s ] }
+                                .map { |entry| candidate_label(entry) }
+          raise UsageError,
+                "ambiguous target #{target.inspect}; multiple task rows share this identity: " \
+                "#{alternatives.join('; ')}"
+        end
+
+        entry = entries.first
+        id = entry.fetch(:id)
+        physical_identity = resolve_physical_identity(entry.fetch(:folder)) if id.nil?
+        if id.nil? && physical_identity.nil?
+          raise StatusUnavailableError,
+                "cannot safely watch id-less task #{entry.fetch(:target)}; " \
+                "task-directory identity is unavailable"
+        end
+        Selection.new(
+          project: entry.fetch(:project), slug: entry.fetch(:slug), id: id,
+          physical_identity: physical_identity
+        )
+      end
+
+      def candidate_label(entry)
+        stage = entry.fetch(:stage).to_s.empty? ? "unknown-stage" : entry.fetch(:stage)
+        folder = entry.fetch(:folder).to_s.empty? ? "unknown-folder" : entry.fetch(:folder)
+        "#{entry.fetch(:target)} at #{stage} (#{folder})"
+      end
+
+      def ensure_single_materialized_row!(selection, rows, archived:)
+        return if rows.size <= 1
+
+        alternatives = rows.map { |row| materialized_row_label(row, archived: archived) }.sort
+        raise StatusUnavailableError,
+              "status returned multiple rows for #{selection.target}: #{alternatives.join('; ')}"
+      end
+
+      def ensure_no_cross_view_collision!(selection, active_rows, archived_rows)
+        return if active_rows.empty? || archived_rows.empty?
+
+        alternatives = active_rows.map { |row| materialized_row_label(row, archived: false) }
+        alternatives.concat(
+          archived_rows.map { |row| materialized_row_label(row, archived: true) }
+        )
+        raise StatusUnavailableError,
+              "status returned active and archived rows for #{selection.target}: " \
+              "#{alternatives.sort.join('; ')}"
+      end
+
+      def materialized_row_label(row, archived:)
+        stage = archived ? row["stage"] : row.dig("position", "stage")
+        folder = archived ? row["folder"] : row.dig("identity", "folder")
+        kind = archived ? "archived" : "active"
+        "#{kind} at #{stage || 'unknown-stage'} (#{folder || 'unknown-folder'})"
+      end
+
+      def matching_rows(selection, rows, archived:)
+        rows.select do |row|
+          id = archived ? row["id"] : row.dig("identity", "id")
+          if selection.id
+            normalized_task_id(id) == selection.id
+          else
+            folder = archived ? row["folder"] : row.dig("identity", "folder")
+            resolve_physical_identity(folder) == selection.physical_identity
+          end
+        end
+      end
+
+      def promote_selection_id(selection, row, archived:)
+        return selection if selection.id || row.nil?
+
+        id = archived ? row["id"] : row.dig("identity", "id")
+        id = normalized_task_id(id)
+        return selection unless id
+
+        Selection.new(
+          project: selection.project, slug: selection.slug, id: id,
+          physical_identity: selection.physical_identity
+        )
+      end
+
+      def normalized_task_id(value)
+        id = value&.to_s
+        id unless id.nil? || id.empty?
+      end
+
+      def resolve_physical_identity(folder)
+        return if folder.to_s.empty?
+
+        @identity_resolver.call(folder.to_s)
+      end
+
+      def task_physical_identity(folder)
+        stat = File.stat(folder)
+        [ stat.dev, stat.ino ].freeze
+      rescue SystemCallError
+        nil
       end
 
       def active_target(selection, row)

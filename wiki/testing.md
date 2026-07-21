@@ -86,7 +86,7 @@ task default: :test
 | `skill_check_test.rb` | `Hive::SkillCheck` — exact Claude `/hive`, Codex `$hive`, and Pi `/skill:hive` invocation parsing/discovery plus existing plugin fallback paths, Pi package/settings/git discovery, malformed invocation hints, and deterministic `npm root -g` success/timeout coverage. |
 | `agent_skills/{canonical_skill,directory_publisher,inspector,openclaw}_test.rb`, `commands/{doctor,doctor_managed_skills}_test.rb`, `openclaw_skills_test.rb` | Canonical Hive operating skill and diagnosis — deterministic OpenClaw/Claude/Codex/Pi projections and invocations, canonical/file digests, Codex interface metadata, generated OpenClaw correspondence, safe whole-directory atomic publication, ownership/mode/symlink/foreign-content refusal, preview revalidation, rollback boundaries, orphan detection, filesystem-only native/ClawHub evidence, zero agent-runner calls, and byte-identical disposable homes under Doctor. |
 | `operational_status_test.rb`, `operational_action_test.rb`, `commands/{status,act,watch}_test.rb` | Agent operations — seven closed task states including dependency-blocked precedence, partial/unknown completeness, policy-complete scheduler joins/freshness, compact human bands/overflow, unchanged compatibility JSON, archive summaries, command-free tokenized actions with lock-time freshness checks and real stage/run/approve command paths, bounded semantic JSONL observation, target resolution, source/disappearance budgets, signals, EPIPE, and read-only behavior. |
-| `daemon/{operational_snapshot,concurrency_controller,dispatcher}_test.rb` | Coherent scheduler observation — owner-private atomic storage, live daemon generation/expiry/phase validation, identity/generation/marker/action/dependency/admission revalidation across the tick source window, task-only capacity that excludes patrol/digest workers, queue/provider/recovery evidence, and advisory publication failures that cannot stop dispatch. |
+| `daemon/{operational_snapshot,concurrency_controller,dispatcher}_test.rb` | Coherent scheduler observation — owner-private atomic storage, live daemon generation/expiry/phase validation, duplicate project/slug frame rejection, identity/generation/marker/action/dependency/admission revalidation across the tick source window, task-only capacity that excludes patrol/digest workers, queue/provider/recovery evidence, and advisory publication failures that cannot stop dispatch. |
 | `wiki_log_test.rb` | `Hive::WikiLog` — fragment sorting, generated-block idempotency, stale detection for compiled `wiki/log.md`, and dropping template prose that is not a real legacy `##` entry. |
 | `schema_files_test.rb` | Published JSON schema contracts — current-version schema files exist for every `Hive::Schemas::SCHEMA_VERSIONS` entry, back-compat schema files remain for pinned consumers, producer required-key drift is pinned, `hive-status` task properties stay aligned with `Snapshot::Row` including the optional quota `held` object, `hive-dispatch-request` claimed files remain schema-valid, and every schema filename/version matches its `$id` basename or URN suffix plus `title` version text. |
 | `commands/{approve,finding_toggle,run,stage_action,status}_test.rb`, `integration/{run_error_envelope,status_error_envelope,run_findings,markers_command}_test.rb` | Shared runtime error-envelope production — command-specific schemas, closed error-kind mappings, condition-gate recovery fields, approve final-stage extras, findings operations, status/diagnose schema selection, single-document stdout guards, internal-error wrapping, and emit-time JSON failures after the producers converge on `Hive::Schemas::EnvelopeEmitter`. |
@@ -96,7 +96,7 @@ task default: :test
 | `commands/digest_test.rb` | `Hive::Commands::Digest` — strict `YYYY-MM-DD` parsing, default runner invocation, dry-run message output, `hive-digest` JSON/error envelopes, merged-PR source dispatch, `--repo` implying merged-PR mode, merged-PR human wording, and `hive-merged-pr-digest` schema validation for dry-run and real-send payloads. |
 | `commands/daemon_test.rb` | `Hive::Commands::Daemon` and `Hive::Daemon::StatusReport` — lifecycle command routing, PID-file ownership/status handling, detached start/re-exec behavior, service install/enable/disable output, daemon-status service/binary fields, `safe_payload` web degradation, `binary_drift` classification including `unreadable`, queue inspection, start-path wiring of daemon/update/digest config into the dispatcher, and `daemon.auto_retry.enabled` config threading into the dispatcher. Start tests stub all three global config blocks so operator-local Telegram digest defaults cannot change unit expectations. |
 | `commands/setup/*_test.rb` | `Hive::Commands::Setup` — agent-skills-first ordering, one consent boundary, `--yes`, JSON/non-TTY refusal before diagnostics or agent discovery, diagnose-only `--no-bootstrap`, nested-init preflight suppression, phase-success predicate and JSON/process-exit agreement, phase exception capture, and hard diagnostic failures. |
-| `packaging/live_agent_proof_test.rb`, `release_contract_test.rb` | Exact-SHA release proof — deterministic one-build candidate manifest/archive, four required evidence rows, command allowlist audit, raw secret-pattern scan and cleanup proof, attestation digest/provenance verification, run-attempt-specific retained artifacts and Check Run binding, and tag workflow rejection of rebuilds or stale/wrong-SHA proof. |
+| `packaging/live_agent_proof_test.rb`, `release_contract_test.rb` | Exact-SHA release proof — deterministic one-build candidate manifest/archive, four required evidence rows, command allowlist audit, platform-specific native-activation attestation, raw secret-pattern scan and cleanup proof, attestation digest/provenance verification, run-attempt-specific retained artifacts and Check Run binding, and executable selector fixtures that reject rebuilds, stale/wrong-SHA proof, untrusted Check Runs, wrong workflow attempts/jobs, expired or duplicate artifacts, and archive digest mismatch. |
 | `commands/{bot,daemon}/service_installer_test.rb`, `commands/service_installer/base_test.rb` | Shared service installer behavior — systemd/launchd rendering, force-upgrade backups/restarts, unsupported-platform service-state probes, Homebrew stable-binary selection, macOS launchd ProgramArguments `$0` parsing for the daemon binary, and shared launchd path substitution used by daemon/web plists. |
 | `commands/{bot,daemon}_test.rb`, `integration/daemon_command_test.rb`, `integration/bot/bot_lifecycle_test.rb` | Shared service-install result presentation — bot/daemon-specific text prefixes and schemas, every success/outcome mapping, drift exit 64, manager failure exit 70, force/backup guidance, hostile-installer fallback envelopes, and schema-valid subprocess behavior after both commands converge on `ServiceInstaller::ResultPresenter`. |
 | `digest/window_test.rb`, `digest/ship_times_test.rb`, `digest/collector_test.rb` | Digest collection primitives — local-date helpers, git-log ship-time preference (`pr_finalized`, `archived`, approval into `9-done`), registered-project grouping, missing artifact tolerance, and local timezone boundaries. |
@@ -345,7 +345,9 @@ The protected `live-agent-skills.yml` workflow is the release-readiness owner:
    structured native discovery/activation: OpenClaw resolves the exact
    `skills info` path, Codex's model-visible prompt inventory names the exact
    `$hive` projection, Pi's RPC inventory exposes the exact `/skill:hive`
-   command, and Claude emits native activation metadata;
+   command, and Claude's typed `system/init` event lists `hive` in both its
+   loaded skills and `/hive` slash-command inventory (a generic file read is
+   insufficient);
 5. allow the agent to run only audited `hive status --operational --json` and
    one bounded `hive watch ... --json-lines`; the argv-auditing shim delegates
    both commands to the exact installed candidate binary against a real
@@ -357,11 +359,14 @@ The protected `live-agent-skills.yml` workflow is the release-readiness owner:
 7. validate all four evidence rows, assemble the candidate/provenance-bound
    private proof, and create a `live-agent-skills` Check Run on the exact SHA.
 
-`release.yml` then resolves that Check Run on the tag commit, verifies the
-Actions workflow identity/event/branch/repository/run attempt, requires all
-four named matrix jobs plus attestation exactly once, checks the unexpired
-artifact's Actions API SHA-256, safely extracts it, and runs the candidate's
-verifier. Release jobs consume the attested gem and skill archive; no release
+`release.yml` invokes the repository-owned selector to resolve that Check Run
+on the tag commit and verify the Actions workflow
+identity/event/branch/repository/run attempt. The same executable requires all
+four named matrix jobs plus attestation exactly once, selects one unexpired
+run-attempt-specific artifact, and verifies the downloaded archive bytes
+against the Actions API SHA-256 before safe extraction and candidate
+verification. Fixture tests execute this selector rather than matching YAML
+fragments. Release jobs consume the attested gem and skill archive; no release
 job rebuilds either artifact.
 
 `bundle exec rake smoke` also contains older live Claude workflows and may

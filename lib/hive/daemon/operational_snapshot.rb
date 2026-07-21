@@ -102,10 +102,14 @@ module Hive
         def initialize(store:, daemon_identity:, poll_interval_sec:)
           @store = store
           @daemon_identity = stringify_keys(daemon_identity)
-          @validity_sec = [ Integer(poll_interval_sec), 1 ].max * MAX_VALIDITY_MULTIPLIER
+          reconfigure(poll_interval_sec: poll_interval_sec)
           @tick_sequence = 0
           @started_at = nil
           @observations = {}
+        end
+
+        def reconfigure(poll_interval_sec:)
+          @validity_sec = [ Integer(poll_interval_sec), 1 ].max * MAX_VALIDITY_MULTIPLIER
         end
 
         def begin_tick(now: Time.now.utc)
@@ -139,10 +143,21 @@ module Hive
         end
 
         def complete(initial_rows:, final_rows:, controller:, queue:, recoveries:, now: Time.now.utc)
-          tasks = revalidated_tasks(Array(initial_rows), Array(final_rows))
+          initial_rows = Array(initial_rows)
+          final_rows = Array(final_rows)
+          duplicate_keys = duplicate_row_keys(initial_rows) | duplicate_row_keys(final_rows)
+          unless duplicate_keys.empty?
+            identities = duplicate_keys.sort.map { |project, slug| "#{project}:#{slug}" }
+            return fail(reason: "duplicate_task_identity: #{identities.join(', ')}", now: now)
+          end
+
+          tasks = revalidated_tasks(initial_rows, final_rows)
+          task_index = tasks.to_h do |task|
+            [ [ task.dig("identity", "project"), task.dig("identity", "slug") ], task ]
+          end
           holds = provider_holds(final_rows)
-          overlay_recovery_dispositions!(tasks, recoveries || {})
-          overlay_provider_dispositions!(tasks, holds)
+          overlay_recovery_dispositions!(task_index, recoveries || {})
+          overlay_provider_dispositions!(task_index, holds)
           @store.write(
             base_record(phase: "complete", now: now).merge(
               "reason" => nil,
@@ -177,14 +192,18 @@ module Hive
         def revalidated_tasks(initial_rows, final_rows)
           initial = initial_rows.to_h { |row| [ row_key(row), row ] }
           final = final_rows.to_h { |row| [ row_key(row), row ] }
+          initial_records = initial.transform_values { |row| task_record(row) }
+          final_records = final.transform_values { |row| task_record(row) }
           (initial.keys | final.keys).sort.map do |key|
             before = initial[key]
             after = final[key]
+            before_record = initial_records[key]
+            after_record = final_records[key]
             disposition = if before.nil?
               unavailable("added_during_tick")
             elsif after.nil?
               unavailable("removed_during_tick")
-            elsif row_fingerprint(before) != row_fingerprint(after)
+            elsif record_fingerprint(before_record) != record_fingerprint(after_record)
               unavailable("changed_during_tick")
             else
               @observations.fetch(
@@ -197,7 +216,7 @@ module Hive
                 }
               )
             end
-            task_record(after || before).merge("disposition" => disposition)
+            (after_record || before_record).merge("disposition" => disposition)
           end
         end
 
@@ -230,12 +249,18 @@ module Hive
           }
         end
 
-        def row_fingerprint(row)
-          ::Digest::SHA256.hexdigest(JSON.generate(task_record(row)))
+        def record_fingerprint(record)
+          ::Digest::SHA256.hexdigest(JSON.generate(record))
         end
 
         def row_key(row)
           [ value(row, :project).to_s, value(row, :slug).to_s ]
+        end
+
+        def duplicate_row_keys(rows)
+          rows.group_by { |row| row_key(row) }
+              .select { |_key, grouped_rows| grouped_rows.size > 1 }
+              .keys
         end
 
         def provider_holds(rows)
@@ -253,14 +278,14 @@ module Hive
           end
         end
 
-        def overlay_recovery_dispositions!(tasks, recoveries)
+        def overlay_recovery_dispositions!(task_index, recoveries)
           stale = recoveries.fetch("stale_agent", {})
           generic = recoveries.fetch("recoverable_error", {})
           exhausted = Array(stale["error_exhausted"]) +
                       Array(stale["review_exhausted"]) +
                       Array(generic["exhausted"])
           exhausted.each do |entry|
-            task = find_task(tasks, entry)
+            task = find_task(task_index, entry)
             next unless task && task.dig("disposition", "status") == "available"
 
             task["disposition"] = {
@@ -272,9 +297,9 @@ module Hive
           end
         end
 
-        def overlay_provider_dispositions!(tasks, holds)
+        def overlay_provider_dispositions!(task_index, holds)
           holds.each do |hold|
-            task = find_task(tasks, hold)
+            task = find_task(task_index, hold)
             next unless task && task.dig("disposition", "status") == "available"
 
             provider = hold["provider"] || "provider"
@@ -288,11 +313,15 @@ module Hive
           end
         end
 
-        def find_task(tasks, identity)
-          tasks.find do |task|
-            task.dig("identity", "project") == identity["project"].to_s &&
-              task.dig("identity", "slug") == identity["slug"].to_s
-          end
+        def find_task(task_index, identity)
+          key = [ identity["project"].to_s, identity["slug"].to_s ]
+          task = task_index[key]
+          return unless task
+          return unless identity["stage"].to_s.empty? || task["stage"] == identity["stage"].to_s
+          return unless identity["reason"].to_s.empty? ||
+                        task.dig("marker_attrs", "reason").to_s == identity["reason"].to_s
+
+          task
         end
 
         def value(row, name)

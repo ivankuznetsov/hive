@@ -24,9 +24,11 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
   def row(stage: "4-execute", marker: "waiting", task_generation: "task-generation-1",
           slug: "ship-it", marker_attrs: { "marker_id" => "marker-1" },
           state_file_mtime: T0, action: "ready_to_run", depends_on: nil,
-          blocked_by: nil, dependency_stage: nil, blocked: false, admission_error: nil)
+          blocked_by: nil, dependency_stage: nil, blocked: false, admission_error: nil,
+          folder: nil)
+    folder ||= "/tmp/#{slug}"
     Row.new(
-      project: "demo", slug: slug, folder: "/tmp/#{slug}",
+      project: "demo", slug: slug, folder: folder,
       workflow: "coding", stage: stage, marker: marker,
       marker_attrs: marker_attrs,
       task_generation: task_generation, condition_task_generation: "condition-1",
@@ -72,6 +74,129 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assert_equal 0o700, File.stat(File.dirname(path)).mode & 0o777
       assert_equal 0o600, File.stat(path).mode & 0o777
       assert_empty Dir.glob(File.join(File.dirname(path), ".*tmp*"))
+    end
+  end
+
+  def test_reconfigured_validity_is_measured_from_tick_completion
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      observed = row
+
+      assembler.begin_tick(now: T0)
+      assembler.reconfigure(poll_interval_sec: 5)
+      assembler.complete(
+        initial_rows: [ observed ], final_rows: [ observed ],
+        controller: {}, queue: {}, recoveries: {}, now: T0 + 40
+      )
+
+      current = reader.read(now: T0 + 54)
+      assert_equal "current", current.fetch("status")
+      assert_equal T0.iso8601(6), current.dig("source_window", "started_at")
+      assert_equal (T0 + 40).iso8601(6), current.dig("source_window", "completed_at")
+      assert_equal (T0 + 55).iso8601(6), current.fetch("valid_until")
+      assert_equal "stale", reader.read(now: T0 + 56).fetch("status")
+    end
+  end
+
+  def test_recovery_exhaustion_matches_current_stage_and_marker_reason
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      stage_changed = row(
+        slug: "stage-changed", stage: "5-open-pr", marker: "error",
+        marker_attrs: { "reason" => "old_failure" }
+      )
+      reason_changed = row(
+        slug: "reason-changed", stage: "4-execute", marker: "error",
+        marker_attrs: { "reason" => "current_failure" }
+      )
+      matching = row(
+        slug: "matching", stage: "4-execute", marker: "error",
+        marker_attrs: { "reason" => "old_failure" }
+      )
+      recoveries = {
+        "recoverable_error" => {
+          "exhausted" => [
+            {
+              "project" => "demo", "slug" => "stage-changed",
+              "stage" => "4-execute", "reason" => "old_failure"
+            },
+            {
+              "project" => "demo", "slug" => "reason-changed",
+              "stage" => "4-execute", "reason" => "old_failure"
+            },
+            {
+              "project" => "demo", "slug" => "matching",
+              "stage" => "4-execute", "reason" => "old_failure"
+            }
+          ]
+        }
+      }
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        initial_rows: [ stage_changed, reason_changed, matching ],
+        final_rows: [ stage_changed, reason_changed, matching ],
+        controller: {}, queue: {}, recoveries: recoveries, now: T0 + 1
+      )
+
+      decisions = reader.read(now: T0 + 2).fetch("tasks").to_h do |task|
+        [ task.dig("identity", "slug"), task.dig("disposition", "decision") ]
+      end
+      assert_equal "not_evaluated", decisions.fetch("stage-changed")
+      assert_equal "not_evaluated", decisions.fetch("reason-changed")
+      assert_equal "recovery_exhausted", decisions.fetch("matching")
+    end
+  end
+
+  def test_provider_hold_without_stage_or_reason_still_matches_the_current_task
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      held = row(
+        marker: "error",
+        marker_attrs: {
+          "reason" => "limits_reached", "provider" => "codex",
+          "retry_after" => (T0 + 3_600).iso8601
+        }
+      )
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        initial_rows: [ held ], final_rows: [ held ], controller: {}, queue: {},
+        recoveries: {}, now: T0 + 1
+      )
+
+      task = reader.read(now: T0 + 2).fetch("tasks").first
+      assert_equal "provider_hold", task.dig("disposition", "decision")
+      assert_equal "provider", task.dig("disposition", "owner")
+      assert_includes task.dig("disposition", "reason"), "codex quota hold"
+    end
+  end
+
+  def test_duplicate_project_slug_rows_fail_the_whole_snapshot_closed
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      held = row(
+        stage: "4-execute", marker: "error", folder: "/tmp/4-execute/ship-it",
+        marker_attrs: { "reason" => "limits_reached", "provider" => "codex" }
+      )
+      replacement = row(stage: "5-open-pr", folder: "/tmp/5-open-pr/ship-it")
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        initial_rows: [ held, replacement ], final_rows: [ held, replacement ],
+        controller: {}, queue: {}, recoveries: {}, now: T0 + 1
+      )
+
+      snapshot = reader.read(now: T0 + 2)
+      assert_equal "unavailable", snapshot.fetch("status")
+      assert_equal "failed", snapshot.fetch("phase")
+      assert_equal "duplicate_task_identity: demo:ship-it", snapshot.fetch("reason")
+      assert_empty snapshot.fetch("tasks")
+      assert_empty snapshot.fetch("provider_holds")
     end
   end
 

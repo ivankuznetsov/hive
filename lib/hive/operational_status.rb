@@ -179,7 +179,7 @@ module Hive
 
       # U2 replaces this unavailable branch with the validated atomic daemon
       # record. Keeping the shape now pins the task-only degradation contract.
-      return scheduler_from_snapshot(@scheduler_snapshot, enabled) if @scheduler_snapshot
+      return scheduler_from_snapshot(@scheduler_snapshot) if @scheduler_snapshot
 
       {
         "status" => "unavailable",
@@ -198,7 +198,7 @@ module Hive
       }
     end
 
-    def scheduler_from_snapshot(snapshot, _enabled)
+    def scheduler_from_snapshot(snapshot)
       @daemon_snapshot = snapshot
       status = snapshot.fetch("status", "unavailable")
       @scheduler_task_index = if status == "current"

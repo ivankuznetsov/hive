@@ -1189,7 +1189,7 @@ module Hive
           end
         end
 
-        dispatch_command(
+        dispatch_result = dispatch_command(
           command,
           project: row.project, slug: row.slug, stage: row.stage,
           state_file_mtime: row.state_file_mtime,
@@ -1197,7 +1197,27 @@ module Hive
           now: now,
           trigger: trigger
         )
-        :dispatched
+        dispatch_outcome(dispatch_result)
+      end
+
+      def dispatch_outcome(result)
+        return :dispatched unless result.is_a?(Hive::Attempts::DispatchResult)
+
+        case result.status
+        when :accepted then :dispatched
+        when :existing_live then :in_flight
+        when :terminal_replay then :attempt_terminal_replay
+        when :deferred
+          case result.reason
+          when "capacity" then :attempt_capacity
+          when "attempt_lost" then :attempt_lost
+          when "launch_handoff_failed" then :launch_handoff_failed
+          when "invalid_predecessor" then :invalid_predecessor
+          else :attempt_deferred
+          end
+        else
+          :attempt_deferred
+        end
       end
 
       def observe_policy_disposition(row, decision)
@@ -1211,6 +1231,18 @@ module Hive
           [ "scheduler", "child dispatch was accepted" ]
         when :in_flight
           [ "agent", "this task already has an in-flight child" ]
+        when :attempt_terminal_replay
+          [ "hive", "the matching durable attempt already reached a terminal receipt" ]
+        when :attempt_capacity
+          [ "scheduler", "durable attempt capacity is exhausted" ]
+        when :attempt_lost
+          [ "hive", "a prior durable attempt is lost and requires recovery" ]
+        when :launch_handoff_failed
+          [ "hive", "durable worker launch handoff failed" ]
+        when :invalid_predecessor
+          [ "hive", "durable successor admission found an invalid predecessor" ]
+        when :attempt_deferred
+          [ "hive", "durable attempt admission was deferred" ]
         when :global_cap
           [ "scheduler", "global dispatch capacity is exhausted" ]
         when :project_cap
@@ -1247,9 +1279,10 @@ module Hive
         return unless @operational_snapshot
 
         verification = @status_consumer.fetch
+        completed_at = operational_snapshot_now
         unless verification.ok
           publish_operational_snapshot(
-            :fail, phase: "failed", reason: "revalidation_status_failure", now: now
+            :fail, phase: "failed", reason: "revalidation_status_failure", now: completed_at
           )
           return
         end
@@ -1259,16 +1292,20 @@ module Hive
           phase: "complete",
           initial_rows: initial_rows,
           final_rows: verification.rows,
-          controller: @controller.operational_snapshot(now: now),
-          queue: operational_queue_snapshot(now: now),
+          controller: @controller.operational_snapshot(now: completed_at),
+          queue: operational_queue_snapshot(now: completed_at),
           recoveries: operational_recovery_snapshot,
-          now: now
+          now: completed_at
         )
       rescue StandardError => e
         log_operational_snapshot_failure(phase: "complete", error: e)
         publish_operational_snapshot(
           :fail, phase: "failed", reason: "snapshot_assembly_failure", now: now
         )
+      end
+
+      def operational_snapshot_now
+        Time.now.utc
       end
 
       def publish_operational_snapshot(method, phase:, **attributes)
@@ -2592,6 +2629,7 @@ module Hive
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
         @fast_poll_sec = @daemon_cfg.fetch("fast_poll_sec", 1)
+        @operational_snapshot&.reconfigure(poll_interval_sec: @poll_interval_sec)
         # R-02: push reloaded child-timeout knobs into the supervisor so
         # an operator tuning daemon.child_timeout_sec / verb overrides via
         # SIGHUP takes effect for children spawned after the reload.

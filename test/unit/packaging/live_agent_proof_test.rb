@@ -86,6 +86,18 @@ class LiveAgentProofTest < Minitest::Test
         attest(artifacts, evidence, File.join(dir, "proof-unsafe"))
       end
       assert_includes error.message, "exactly one operational status"
+
+      evidence = prepare_evidence(dir, artifacts)
+      row_path = File.join(evidence, "claude.json")
+      row = JSON.parse(File.read(row_path))
+      row["native_activation"] = {
+        "kind" => "generic-file-read", "invocation" => "/hive"
+      }
+      HiveLiveAgentProof.write_json(row_path, row)
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(artifacts, evidence, File.join(dir, "proof-generic-activation"))
+      end
+      assert_includes error.message, "native activation"
     end
   end
 
@@ -155,6 +167,10 @@ class LiveAgentProofTest < Minitest::Test
           "invocation" => Hive::AgentSkills::CanonicalSkill.new.render(platform).invocation,
           "skill_version" => manifest.fetch("skill_version"),
           "canonical_digest" => manifest.fetch("canonical_digest")
+        },
+        "native_activation" => {
+          "kind" => HiveLiveAgentProof::NATIVE_ACTIVATION_KINDS.fetch(platform),
+          "invocation" => HiveLiveAgentProof::INVOCATIONS.fetch(platform)
         },
         "hive_commands" => HiveLiveAgentProof::OBSERVATION_COMMANDS,
         "secret_scan" => { "status" => "passed" },

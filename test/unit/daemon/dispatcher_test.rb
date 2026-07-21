@@ -768,6 +768,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
       record(:complete, attributes)
     end
 
+    def reconfigure(**attributes)
+      record(:reconfigure, attributes)
+    end
+
     private
 
     def record(method, attributes)
@@ -816,6 +820,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
         rows: [ observed ], operational_snapshot: snapshot,
         dispatch_request_state_home: state_home
       )
+      completed_at = T0 + 5
+      dispatcher.define_singleton_method(:operational_snapshot_now) { completed_at }
 
       dispatcher.tick(now: T0)
 
@@ -825,6 +831,49 @@ class HiveDaemonDispatcherTest < Minitest::Test
       assert_equal [ observed ], complete.fetch(:initial_rows)
       assert_equal [ observed ], complete.fetch(:final_rows)
       assert_equal "current", complete.dig(:queue, "status")
+      assert_equal completed_at, complete.fetch(:now)
+    end
+  end
+
+  def test_durable_dispatch_publishes_the_actual_admission_outcome
+    attempt = Struct.new(:attempt_id, :task_generation, :state)
+                    .new("attempt-1", "generation-1", "running")
+    admissions = [
+      [ :accepted, nil, :dispatched, "scheduler" ],
+      [ :existing_live, nil, :in_flight, "agent" ],
+      [ :terminal_replay, nil, :attempt_terminal_replay, "hive" ],
+      [ :deferred, "capacity", :attempt_capacity, "scheduler" ],
+      [ :deferred, "attempt_lost", :attempt_lost, "hive" ],
+      [ :deferred, "launch_handoff_failed", :launch_handoff_failed, "hive" ],
+      [ :deferred, "invalid_predecessor", :invalid_predecessor, "hive" ]
+    ]
+    results = admissions.map do |status, reason, _outcome, _owner|
+      Hive::Attempts::DispatchResult.new(
+        status: status, attempt: status == :deferred ? nil : attempt,
+        receipt: nil, attach_descriptor: nil, reason: reason
+      )
+    end
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |*_args, **_options|
+      results.shift
+    end
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, = make_dispatcher(
+      rows: [], attempt_dispatcher: attempt_dispatcher,
+      operational_snapshot: snapshot
+    )
+    observed = row(
+      stage: "4-execute", action: "ready_to_run",
+      command: "hive run s1 --json"
+    )
+
+    admissions.each do |_status, _reason, expected_outcome, expected_owner|
+      outcome = dispatcher.send(:dispatch_or_block, observed, now: T0)
+      assert_equal expected_outcome, outcome
+      dispatcher.send(:observe_dispatch_outcome, observed, outcome)
+      disposition = snapshot.calls.last.last
+      assert_equal expected_outcome, disposition.fetch(:decision)
+      assert_equal expected_owner, disposition.fetch(:owner)
     end
   end
 
@@ -1277,6 +1326,18 @@ class HiveDaemonDispatcherTest < Minitest::Test
       reload_event&.last,
       "the reload event must expose the effective limits to machine consumers"
     )
+  end
+
+  def test_reload_config_reconfigures_operational_snapshot_validity
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, = make_dispatcher(rows: [], operational_snapshot: snapshot)
+    new_cfg = Hive::Config::DEFAULTS.fetch("daemon").merge("poll_interval_sec" => 45)
+
+    with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { new_cfg }) do
+      dispatcher.send(:reload_config!)
+    end
+
+    assert_includes snapshot.calls, [ :reconfigure, { poll_interval_sec: 45 } ]
   end
 
   def test_answer_digest_scheduler_dispatches_global_answer_digest_without_project_gate

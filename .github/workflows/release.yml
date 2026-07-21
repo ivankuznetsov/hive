@@ -38,88 +38,31 @@ jobs:
             exit 1
           }
 
-          checks="$(gh api \
+          checks_path="$RUNNER_TEMP/live-agent-check-runs.json"
+          run_path="$RUNNER_TEMP/live-agent-proof-run.json"
+          jobs_path="$RUNNER_TEMP/live-agent-proof-jobs.json"
+          artifacts_path="$RUNNER_TEMP/live-agent-proof-artifacts.json"
+          gh api \
             -H 'Accept: application/vnd.github+json' \
-            "repos/${GITHUB_REPOSITORY}/commits/${candidate_sha}/check-runs?per_page=100")"
-          check="$(jq -cer --arg sha "$candidate_sha" '
-            [.check_runs[]
-              | select(.name == "live-agent-skills")
-              | select(.head_sha == $sha)
-              | select(.status == "completed" and .conclusion == "success")
-              | select(.app.slug == "github-actions")]
-            | sort_by(.completed_at)
-            | last // error("no trusted live-agent-skills Check Run")
-          ' <<<"$checks")"
-          external_id="$(jq -er '.external_id' <<<"$check")"
-          [[ "$external_id" =~ ^live-agent-skills:v1:([0-9]+):([0-9]+):([0-9a-f]{64})$ ]] || {
-            echo "trusted Check Run has malformed external_id" >&2
-            exit 1
-          }
-          proof_run_id="${BASH_REMATCH[1]}"
-          proof_run_attempt="${BASH_REMATCH[2]}"
-          attestation_sha256="${BASH_REMATCH[3]}"
-          expected_details="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${proof_run_id}"
-          [[ "$(jq -r '.details_url' <<<"$check")" == "$expected_details" ]] || {
-            echo "trusted Check Run details URL does not identify its proof run" >&2
-            exit 1
-          }
+            "repos/${GITHUB_REPOSITORY}/commits/${candidate_sha}/check-runs?per_page=100" \
+            > "$checks_path"
+          check_identity="$(ruby packaging/live_agent_skills/select_release_proof.rb \
+            check "$candidate_sha" "$GITHUB_REPOSITORY" "$checks_path")"
+          proof_run_id="$(jq -er '.proof_run_id' <<<"$check_identity")"
 
-          proof_run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${proof_run_id}")"
-          workflow_revision="$(jq -er '.head_sha' <<<"$proof_run")"
-          [[ "$(jq -er '.run_attempt' <<<"$proof_run")" == "$proof_run_attempt" ]] || {
-            echo "trusted Check Run does not identify the latest proof attempt" >&2
-            exit 1
-          }
-          jq -e \
-            --arg path ".github/workflows/live-agent-skills.yml" \
-            --arg repository "$GITHUB_REPOSITORY" '
-              .path == $path and
-              .event == "workflow_dispatch" and
-              .head_branch == "main" and
-              .status == "completed" and
-              .conclusion == "success" and
-              .head_repository.full_name == $repository
-            ' <<<"$proof_run" >/dev/null || {
-              echo "proof run identity, event, branch, repository, or conclusion is invalid" >&2
-              exit 1
-            }
-          [[ "$workflow_revision" =~ ^[0-9a-f]{40}$ ]]
-
-          jobs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${proof_run_id}/jobs?filter=latest&per_page=100")"
-          for required in \
-            "OpenClaw live Hive operating skill" \
-            "Claude live Hive operating skill" \
-            "Codex live Hive operating skill" \
-            "Pi live Hive operating skill"; do
-            count="$(jq --arg name "$required" \
-              '[.jobs[] | select(.name == $name and .status == "completed" and .conclusion == "success")] | length' \
-              <<<"$jobs")"
-            [[ "$count" == "1" ]] || {
-              echo "required non-skipped proof job did not succeed exactly once: $required" >&2
-              exit 1
-            }
-          done
-          jq -e '[.jobs[] | select(.name == "Attest exact-SHA live agent proof" and .conclusion == "success")] | length == 1' \
-            <<<"$jobs" >/dev/null || {
-              echo "proof attestation job is absent or unsuccessful" >&2
-              exit 1
-            }
-
-          artifacts="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${proof_run_id}/artifacts?per_page=100")"
-          proof_artifact_name="live-agent-skills-proof-${proof_run_attempt}"
-          proof_artifact="$(jq -cer --arg name "$proof_artifact_name" '
-            [.artifacts[] | select(.name == $name and .expired == false)]
-            | if length == 1 then .[0] else error("proof artifact is absent or ambiguous") end
-          ' <<<"$artifacts")" || {
-            echo "private proof artifact is absent, ambiguous, or expired" >&2
-            exit 1
-          }
-          proof_artifact_id="$(jq -er '.id' <<<"$proof_artifact")"
-          proof_artifact_digest="$(jq -er '.digest' <<<"$proof_artifact")"
-          [[ "$proof_artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-            echo "private proof artifact has no trusted SHA-256 digest" >&2
-            exit 1
-          }
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${proof_run_id}" > "$run_path"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${proof_run_id}/jobs?filter=latest&per_page=100" \
+            > "$jobs_path"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${proof_run_id}/artifacts?per_page=100" \
+            > "$artifacts_path"
+          selection="$(ruby packaging/live_agent_skills/select_release_proof.rb \
+            select "$candidate_sha" "$GITHUB_REPOSITORY" "$checks_path" \
+            "$run_path" "$jobs_path" "$artifacts_path")"
+          workflow_revision="$(jq -er '.workflow_revision' <<<"$selection")"
+          proof_run_attempt="$(jq -er '.proof_run_attempt' <<<"$selection")"
+          proof_artifact_id="$(jq -er '.proof_artifact_id' <<<"$selection")"
+          proof_artifact_digest="$(jq -er '.proof_artifact_digest' <<<"$selection")"
+          attestation_sha256="$(jq -er '.attestation_sha256' <<<"$selection")"
           {
             echo "candidate_sha=$candidate_sha"
             echo "workflow_revision=$workflow_revision"
@@ -145,10 +88,8 @@ jobs:
           mkdir -p "$proof_dir" proven
           proof_zip="$RUNNER_TEMP/live-agent-skills-proof.zip"
           gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${PROOF_ARTIFACT_ID}/zip" > "$proof_zip"
-          [[ "sha256:$(sha256sum "$proof_zip" | awk '{print $1}')" == "$PROOF_ARTIFACT_DIGEST" ]] || {
-            echo "downloaded proof archive digest does not match the Actions API" >&2
-            exit 1
-          }
+          ruby packaging/live_agent_skills/select_release_proof.rb \
+            digest "$PROOF_ARTIFACT_DIGEST" "$proof_zip" >/dev/null
           while IFS= read -r entry; do
             [[ -n "$entry" && "$entry" != /* && "/$entry/" != *"/../"* ]] || {
               echo "proof archive contains an unsafe path" >&2

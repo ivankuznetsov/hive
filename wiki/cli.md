@@ -67,6 +67,11 @@ sibling shape, `setup` keeps the unversioned `hive-setup` shape, and Screenote
 pre-dispatch usage failure uses the `hive-patrol` schema with
 `error_kind: "error"`.
 
+Partial `hive act ... --json` invocations use the `hive-act` usage envelope and
+preserve whichever required positionals were available as `action_id` and
+`target`; a missing positional is represented by an empty string. This lets an
+agent correlate a rejected action without parsing Thor's prose.
+
 The pre-dispatch resolver is command/subcommand-aware for JSON surfaces whose
 schema varies by argv. It distinguishes status diagnostics, web install/status,
 pairing list/approve, and shipped/merged-PR digest errors; it also covers Thor

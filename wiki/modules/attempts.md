@@ -108,8 +108,10 @@ For Hive workers, startup is held behind a second inherited-FD gate. The
 supervisor first persists the worker PID, start fingerprint, session, and
 process group, then releases the gate. `Context` installs only when the record
 is running and its capability, exact process identity, argv, resolved task,
-and intended stage all match. Immediately before the first task mutation, the
-worker recomputes its generation while the task lock is held and rejects a
+and intended stage all match. `hive run` and generic `hive approve` bind that
+stage to the task's current descriptor position; stage-specific workflow verbs
+bind it to their registered target. Immediately before the first task mutation,
+the worker recomputes its generation while the task lock is held and rejects a
 stale admission; this closes the dispatch-to-execution window for task or
 dependency changes. It immediately deletes every inherited
 `HIVE_ATTEMPT_*` key, so agent processes and nested Hive commands cannot inherit

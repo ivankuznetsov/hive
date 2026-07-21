@@ -4,15 +4,14 @@ Gem::Specification.new do |spec|
   spec.name        = "hive-cli"
   spec.version     = Hive::VERSION
   spec.authors     = [ "Ivan Kuznetsov" ]
-  spec.summary     = "Multi-agent orchestrator that ships software ideas from rough note to merge-ready PR"
+  spec.summary     = "Durable, local-first workflow engine for AI agents"
   spec.description = <<~DESC
-    Hive drives software work from a rough idea to a merged pull request through a
-    folder-as-agent pipeline: brainstorm pins down requirements, plan fixes the
-    approach, execute writes the code, review hardens it, and finalize ships the
-    PR. Every task is a directory of plain markdown artefacts you can edit, and
-    the dashboard (`hive tui`) drives stage agents on single keystrokes. The CLI
-    surface is `--json`-clean so coding agents (Claude Code, Codex, Grok, Pi)
-    can drive it programmatically.
+    Hive is a durable, local-first workflow engine for AI agents. It runs coding,
+    content, benchmark, and owner-authored workflows as folder-as-agent pipelines
+    with inspectable artifacts and recoverable stage state. Its flagship coding
+    workflow carries a rough idea through planning, implementation, pull request,
+    review, and finalization. Humans and agents can operate the same local state
+    through the TUI, native web UI, files, or structured CLI output.
   DESC
   spec.homepage    = "https://github.com/ivankuznetsov/hive"
   spec.license     = "MIT"

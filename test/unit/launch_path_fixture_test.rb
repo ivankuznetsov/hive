@@ -50,7 +50,7 @@ class LaunchPathFixtureTest < Minitest::Test
 
   def test_each_cross_surface_label_is_grounded_in_its_native_producer
     helper = File.read(File.join(ROOT, "web/app/helpers/application_helper.rb"))
-    task_state = File.read(File.join(ROOT, "web/app/views/tasks/_state.html.erb"))
+    task_actions = File.read(File.join(ROOT, "web/app/views/tasks/_primary_actions.html.erb"))
     task_page = File.read(File.join(ROOT, "web/app/views/tasks/show.html.erb"))
     status_view = File.read(File.join(ROOT, "web/app/views/status/index.html.erb"))
     run_controller = File.read(File.join(ROOT, "web/app/controllers/tasks/runs_controller.rb"))
@@ -67,7 +67,7 @@ class LaunchPathFixtureTest < Minitest::Test
       "terminal_failure" => task_action,
       "success" => task_action,
       "artifact_inspection" => task_page,
-      "retry_resume" => task_state,
+      "retry_resume" => task_actions,
       "next_action" => task_action
     }
     EXPECTED_LABELS.each do |key, label|

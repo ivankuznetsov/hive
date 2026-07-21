@@ -1,5 +1,6 @@
 module Hive
   module StageLabel
+    # coding-scoped (block): canonical display labels for the built-in coding workflow stage dirs
     KNOWN = {
       "1-inbox" => "Inbox",
       "2-brainstorm" => "Brainstorm",

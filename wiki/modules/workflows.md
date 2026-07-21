@@ -169,9 +169,15 @@ weakening owner-authored descriptor compatibility:
 - `SemanticDiff` reports prompt/descriptor changes by hash (never prompt text),
   dependency and policy set changes, file inventory changes, and semantic
   escalation reasons.
-- `Publisher` rewrites referenced authored instructions into the registry
-  layout, packages deterministically, runs the shared validator/runtime
-  admission, then delegates to a fork-aware PR client.
+- `Publisher`, `AuthoringMetadata`, and `SourceSnapshot` enforce disjoint
+  descriptor/metadata/README ownership and snapshot referenced instructions
+  plus declared assets once without following links. `RegistryManifestBuilder`
+  emits the immutable Honeycomb version directory and canonical digests;
+  `AuthoringLint` runs the pinned pure-analysis policy before publication.
+- `PublishStore` retains owner-private immutable bundles and monotonic receipts;
+  `RegistrySubmission` journals mutation intent and verifies direct/fork branch,
+  commit, package, and PR identity; `PublishResolver` combines exact current
+  catalogue evidence with PR state and labels offline prior evidence cached.
 
 Status dispatch adapters share the classifier's derived
 `TaskAction::READY_COMMANDS` lookup. The bot exposes every ready command,
@@ -199,8 +205,9 @@ tampering after content validation. Snapshots store environment variable names
 only and inject a current value only into its executing slot. Each actor spawn
 loads that immutable runtime context once for both prompt and permission setup;
 preset actor compilation is in-memory and does not create empty policy state.
-`gh` and `qmd` remain baseline Hive dependencies. `Publisher` remains on the
-legacy submission layout and is not a v2 package authoring path.
+`gh` and `qmd` remain baseline Hive dependencies. New publication is v2-only:
+it does not detect, convert, resubmit, or bulk-migrate legacy registry layouts,
+and it exposes no separate public status or Hivebox mutation route.
 
 ## Constants
 

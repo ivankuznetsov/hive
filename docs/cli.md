@@ -107,7 +107,8 @@ returns every flat patch and supersession receipt.
 | `hive workflow list` | Show built-in, authored, selected, and retained workflows with integrity/provenance; JSON v2 includes the active managed configuration and redacted input availability. |
 | `hive workflow update NAME [--dry-run]` | Report a semantic/security diff and atomically advance after consent. |
 | `hive workflow remove NAME` | Disable a managed selection while retaining task-pinned generations. |
-| `hive workflow publish ID --version X.Y.Z` | Package an authored workflow and submit a fork PR as pending review. |
+| `hive workflow publish ID --version X.Y.Z --dry-run --json` | Build, consumer-validate, and security-lint the immutable Honeycomb package without remote or receipt effects. |
+| `hive workflow publish ID --version X.Y.Z --expected-release-digest SHA256 --json` | Submit or reconcile the exact confirmed package through the schema-v2 lifecycle. |
 | `hive tree` | Print the Thor command tree. |
 
 Use these when building scripts, recovering a task, or checking idempotency.

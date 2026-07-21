@@ -304,6 +304,16 @@ hive workflow install honeycomb/writing --yes
 hive workflow install honeycomb/seo-content --yes --allow-escalation
 ```
 
+Authors can preflight and submit a new immutable package without a separate
+status command. The real call is bound to the exact locally validated release
+digest; it opens or resumes a non-draft review PR and never merges or lists it:
+
+```bash
+hive workflow publish my-flow --version 1.0.0 --dry-run --json
+hive workflow publish my-flow --version 1.0.0 \
+  --expected-release-digest <confirmed-release-digest> --json
+```
+
 Scaffold one from a sample and run it:
 
 ```bash

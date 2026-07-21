@@ -14,10 +14,13 @@ tags: [security, secrets, regex, secret-scan, redact]
 ```ruby
 Hive::SecretPatterns::PATTERNS    # → frozen Hash<Symbol, Regexp>
 Hive::SecretPatterns.scan(text)   # → [{name: :aws_access_key, snippet: "AKIA..."}, …]
+Hive::SecretPatterns.match?(text) # → boolean, short-circuiting on the first match
 Hive::SecretPatterns.redact(text) # → String with each match replaced by "[REDACTED:<name>]"
 ```
 
-`scan` snippets are truncated to 80 characters. `redact` coerces binary input to UTF-8 with invalid bytes replaced (so a binary log tail with `\xff` bytes never raises `Encoding::CompatibilityError` when gsubbed against the UTF-8 PATTERNS regexes — the failure path that previously aborted the entire `hive status --json` snapshot, PR #84 review finding #4).
+`scan` snippets are truncated to 80 characters. Callers that only need a
+publication gate use `match?` so credential-dense input cannot allocate a match
+record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes replaced (so a binary log tail with `\xff` bytes never raises `Encoding::CompatibilityError` when gsubbed against the UTF-8 PATTERNS regexes — the failure path that previously aborted the entire `hive status --json` snapshot, PR #84 review finding #4).
 
 ## Pattern catalogue
 

@@ -18,6 +18,7 @@ module Hive
       module_function
 
       MAX_INSTRUCTION_CHARS = 16_000
+      MAX_INSTRUCTION_BYTES = MAX_INSTRUCTION_CHARS * 4
       PROTECTED_FILES = (
         Hive::ProtectedFiles::ORCHESTRATOR_OWNED + %w[meta.yml handoff.yml pr.md]
       ).uniq.freeze
@@ -105,9 +106,9 @@ module Hive
           )
         end
 
-        report = Hive::Stages::AgentReport.read(report_path)
+        report_source = Hive::Stages::AgentReport.read_source(report_path)
+        report = Hive::Stages::AgentReport.parse(report_source)
         repository_state = Hive::Stages::AgentReport.validate_repository!(report, context)
-        report_source = read_report_source!(report_path)
         Hive::Stages::DraftPrHandoff.run!(
           task, context: context, report: report,
           repository_state: repository_state, report_source: report_source, cfg: cfg || {}
@@ -116,21 +117,6 @@ module Hive
           repository_state: repository_state, agent_result: result
         )
       end
-
-      def read_report_source!(path)
-        File.open(path, File::RDONLY | File::NOFOLLOW, encoding: "UTF-8") do |file|
-          raise Hive::StageError, "fix-report.md must remain a regular file" unless file.stat.file?
-
-          source = file.read(Hive::Stages::AgentReport::MAX_BYTES + 1)
-          if source.bytesize > Hive::Stages::AgentReport::MAX_BYTES
-            raise Hive::StageError, "fix-report.md exceeds the validated size limit"
-          end
-          source
-        end
-      rescue Errno::ELOOP
-        raise Hive::StageError, "fix-report.md must remain a regular file, not a symlink"
-      end
-      private_class_method :read_report_source!
 
       def terminal_receipt(task)
         receipt_path = Hive::DraftPrReceipt.path(task.folder)
@@ -161,7 +147,15 @@ module Hive
       def read_instruction(stage)
         return nil unless stage.instruction
 
-        body = File.read(stage.instruction)
+        body = File.open(stage.instruction, File::RDONLY | File::NOFOLLOW) do |file|
+          raise Hive::StageError, "worktree agent instruction must be a regular file" unless file.stat.file?
+
+          file.read(MAX_INSTRUCTION_BYTES + 1)
+        end
+        if body.bytesize > MAX_INSTRUCTION_BYTES
+          raise Hive::StageError,
+                "worktree agent instruction exceeds #{MAX_INSTRUCTION_CHARS} characters"
+        end
         if body.length > MAX_INSTRUCTION_CHARS
           raise Hive::StageError,
                 "worktree agent instruction exceeds #{MAX_INSTRUCTION_CHARS} characters"

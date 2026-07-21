@@ -128,18 +128,18 @@ module Hive
 
         slug = @slug_override || derive_slug(@text)
         validate_slug!(slug)
-        depends_on = normalize_dependency(@depends_on)
+        depends_on = normalize_optional(@depends_on)
         depends_on = validate_dependency!(depends_on) if depends_on
         workflow_info = resolve_workflow(project)
         workflow = workflow_info.fetch(:descriptor)
-        draft_pr = draft_pr_workflow?(workflow)
+        draft_pr = workflow.draft_pr_handoff?
         if depends_on && draft_pr
           raise InvalidDraftPrCombination.new(
             "workflow #{workflow.id} uses draft-PR handoff and does not support --depends-on stacking",
             value: depends_on
           )
         end
-        if normalize_base(@base) && !draft_pr
+        if normalize_optional(@base) && !draft_pr
           raise InvalidDraftPrCombination.new(
             "--base is only valid for a workflow with draft-PR handoff",
             value: @base
@@ -195,7 +195,7 @@ module Hive
       end
 
       def resolve_workflow(project)
-        override = normalize_workflow(@workflow_name)
+        override = normalize_optional(@workflow_name)
         # With an explicit --workflow the project default is irrelevant (an
         # override always pins), so don't read config.yml at all — an
         # unreadable/corrupt config must not block a fully-specified `hive new`.
@@ -289,19 +289,15 @@ module Hive
         )
       end
 
-      def normalize_workflow(value)
+      def normalize_optional(value)
         string = value.to_s.strip
         string.empty? ? nil : string
       end
 
-      def draft_pr_workflow?(workflow)
-        workflow.stages.any? { |stage| stage.handoff == :draft_pr }
-      end
-
       def effective_base_branch(project, workflow)
-        return nil unless draft_pr_workflow?(workflow)
+        return nil unless workflow.draft_pr_handoff?
 
-        explicit = normalize_base(@base)
+        explicit = normalize_optional(@base)
         return validate_base!(explicit) if explicit
 
         cfg = Hive::Config.load(project.fetch("path"))
@@ -314,10 +310,6 @@ module Hive
           "could not resolve draft-PR base from #{cfg_path} (#{e.class}: #{e.message})",
           value: cfg_path
         )
-      end
-
-      def normalize_base(value)
-        value.to_s.strip.then { |string| string.empty? ? nil : string }
       end
 
       def validate_base!(value)
@@ -358,11 +350,6 @@ module Hive
         return unless RESERVED_SLUGS.include?(slug.downcase) || slug.include?("..") || slug.include?("/") || slug.include?("@")
 
         raise InvalidSlugError.new("reserved or unsafe slug '#{slug}'", value: slug)
-      end
-
-      def normalize_dependency(value)
-        string = value.to_s.strip
-        string.empty? ? nil : string
       end
 
       def validate_dependency!(value)

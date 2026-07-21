@@ -1958,6 +1958,7 @@ class CommandsStatusTest < Minitest::Test
       File.write(File.join(folder, "pr.md"), "---\npr_url: #{url}\npr_number: 17\n---\n")
       stage = Struct.new(:handoff).new(:draft_pr)
       workflow = Struct.new(:id, :stages).new(:async_fix, [ stage ])
+      workflow.define_singleton_method(:draft_pr_handoff?) { true }
       task = Struct.new(:workflow, :folder, :stage_index).new(workflow, folder, 1)
 
       assert_equal url, cmd.send(:pr_url_for, task)

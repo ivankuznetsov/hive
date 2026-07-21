@@ -10,6 +10,7 @@ require "hive/conditions/migration"
 require "hive/plan_frontmatter"
 require "hive/task_projection/store"
 require "hive/markers"
+require "hive/draft_pr_receipt"
 
 module Hive
   # Classifier that turns a (Task, Marker) pair into a user-facing
@@ -332,7 +333,7 @@ module Hive
         return ACTIONS.fetch(:error) if stale_agent_reason
         return ACTIONS.fetch(:agent_running)
       end
-      if marker.name == :error && marker.attrs["reason"].to_s == "draft_pr_handoff_failed"
+      if marker.name == :error && marker.attrs["reason"].to_s == Hive::DraftPrReceipt::RECOVERABLE_REASON
         return ACTIONS.fetch(:recover_draft_pr)
       end
       return ACTIONS.fetch(:error) if marker.name == :error

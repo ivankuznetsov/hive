@@ -140,8 +140,9 @@ repository: github.com/owner/name # strict draft-PR path only
 
 `read_pointer` parses with `YAML.safe_load` and validates the result is a Hash; raises `WorktreeError` otherwise. `Hive::Stages::Base.worktree_pointer_or_exit` owns the stricter stage-entry policy shared by open-PR and finalize: the pointer must contain `path`, that directory must still exist, and either failure preserves the established warning and exit status 1.
 
-The strict reader additionally rejects symlinks, malformed or duplicate
-fields, out-of-root paths, invalid branch/OID/repository values, and
+The strict reader uses a bounded owner-side no-follow read and additionally
+rejects symlinks, oversized input, malformed or duplicate fields, out-of-root
+paths, invalid branch/OID/repository values, and
 contradictions with controller-expected state. The companion `handoff.yml`
 starts at schema `version: 1`, phase `worktree_created`; it contains only the
 canonical repository, base branch/OID, task branch, and worktree path—never

@@ -7,8 +7,9 @@
   including intermediate add-then-remove content, plus final changed files and
   bounded PR text. Binary, LFS, oversized, credential, and unsafe identity
   states fail closed before publication; controller receipts and resume reports
-  use bounded no-follow reads, and current `github_pat_` tokens are detected
-  and redacted.
+  use bounded no-follow reads, bounded Git output is stopped at its limit,
+  credential gates short-circuit on the first match, and current `github_pat_`
+  tokens are detected and redacted.
 - Draft-PR publication now uses an ordinary immutable-OID refspec and an
   explicit `gh pr create --draft --head --base --title --body-file` call.
   Resume reconciles exact remote branch/PR identity and never force-pushes or

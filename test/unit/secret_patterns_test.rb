@@ -178,6 +178,12 @@ class SecretPatternsTest < Minitest::Test
     assert_empty Hive::SecretPatterns.scan(nil)
   end
 
+  def test_match_short_circuits_when_only_presence_is_needed
+    assert Hive::SecretPatterns.match?("token=github_pat_#{'A' * 40}")
+    refute Hive::SecretPatterns.match?("ordinary diagnostic text")
+    refute Hive::SecretPatterns.match?(nil)
+  end
+
   # ── multi-pattern + truncation pinning ─────────────────────────────────
 
   def test_multi_pattern_input_returns_matches_for_each_pattern

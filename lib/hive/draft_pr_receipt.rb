@@ -3,6 +3,7 @@ require "time"
 require "uri"
 require "yaml"
 require "hive/atomic_file"
+require "hive/stringify_keys"
 require "hive/worktree"
 
 module Hive
@@ -16,6 +17,10 @@ module Hive
     VERSION = 1
     MAX_BYTES = 64 * 1024
     INITIAL_PHASE = "worktree_created".freeze
+    AGENT_BLOCKED_REASON = "agent_blocked".freeze
+    RECOVERABLE_REASON = "draft_pr_handoff_failed".freeze
+    QUARANTINE_REASON = "draft_pr_quarantined".freeze
+    IDENTITY_REASON = "draft_pr_identity_blocked".freeze
     PHASES = %w[
       worktree_created
       agent_validated
@@ -82,9 +87,9 @@ module Hive
       "terminal" => []
     }.freeze
     TERMINAL_OUTCOMES = %w[pr-opened no-fix blocked].freeze
-    ERROR_REASONS = %w[
-      agent_blocked draft_pr_handoff_failed draft_pr_quarantined
-      draft_pr_identity_blocked
+    ERROR_REASONS = [
+      AGENT_BLOCKED_REASON, RECOVERABLE_REASON, QUARANTINE_REASON,
+      IDENTITY_REASON
     ].freeze
 
     def path(task_folder)
@@ -305,7 +310,7 @@ module Hive
     private_class_method :validate_time!
 
     def stringify(value)
-      value.to_h.transform_keys(&:to_s)
+      Hive::StringifyKeys.call(value.to_h)
     end
     private_class_method :stringify
 

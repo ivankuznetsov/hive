@@ -161,6 +161,18 @@ class StagesDraftPrHandoffTest < Minitest::Test
     end
   end
 
+  def test_bounded_git_capture_stops_retaining_output_at_the_limit
+    with_handoff_fixture do |fixture|
+      error = assert_raises(Hive::Stages::DraftPrHandoff::QuarantineError) do
+        Hive::Stages::DraftPrHandoff.send(
+          :git_binary!, fixture.fetch(:repo), "show", "HEAD:app.rb", max_bytes: 1
+        )
+      end
+
+      assert_includes error.message, "output exceeds 1 bytes"
+    end
+  end
+
   def test_remote_drift_and_unowned_pr_block_without_mutation
     with_handoff_fixture do |fixture|
       fixture.fetch(:remote)[:task_oid] = "f" * 40

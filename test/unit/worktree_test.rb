@@ -1247,6 +1247,20 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_strict_pointer_rejects_oversized_input_before_yaml_parsing
+    Dir.mktmpdir do |folder|
+      File.binwrite(
+        File.join(folder, "worktree.yml"),
+        "x" * (Hive::Worktree::STRICT_POINTER_MAX_BYTES + 1)
+      )
+
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_strict_pointer(folder, expected_root: folder)
+      end
+      assert_includes error.message, "exceeds"
+    end
+  end
+
   def test_read_pointer_raises_worktree_error_for_non_hash_root
     Dir.mktmpdir do |folder|
       File.write(File.join(folder, "worktree.yml"), "just a string\n")

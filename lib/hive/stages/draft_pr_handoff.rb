@@ -28,9 +28,10 @@ module Hive
       MAX_SCAN_BYTES = 24 * 1024 * 1024
       MAX_OBJECT_LIST_BYTES = 256 * 1024
       MAX_PATH_LIST_BYTES = 256 * 1024
-      RECOVERABLE_REASON = "draft_pr_handoff_failed".freeze
-      QUARANTINE_REASON = "draft_pr_quarantined".freeze
-      IDENTITY_REASON = "draft_pr_identity_blocked".freeze
+      MAX_GIT_ERROR_BYTES = 16 * 1024
+      RECOVERABLE_REASON = Hive::DraftPrReceipt::RECOVERABLE_REASON
+      QUARANTINE_REASON = Hive::DraftPrReceipt::QUARANTINE_REASON
+      IDENTITY_REASON = Hive::DraftPrReceipt::IDENTITY_REASON
 
       Result = Data.define(:title, :body)
 
@@ -56,8 +57,14 @@ module Hive
           cleanup_no_fix_worktree(task, context)
           { commit: "no_fix", status: :complete, outcome: "no-fix" }
         when :blocked
-          terminal!(task, receipt, root, outcome: "blocked", error_reason: "agent_blocked")
-          marker_error!(task, "agent_blocked", "Mapped repair agent reported a blocked outcome.")
+          terminal!(
+            task, receipt, root, outcome: "blocked",
+            error_reason: Hive::DraftPrReceipt::AGENT_BLOCKED_REASON
+          )
+          marker_error!(
+            task, Hive::DraftPrReceipt::AGENT_BLOCKED_REASON,
+            "Mapped repair agent reported a blocked outcome."
+          )
           { commit: "blocked", status: :error, outcome: "blocked" }
         when :ready
           publish!(task, context, report, report_source, receipt, root, cfg)
@@ -283,8 +290,7 @@ module Hive
       end
       private_class_method :reconcile_or_create_pr!
 
-      def record_pr_observed!(task, receipt, pr, root)
-        validated = validate_pr!(pr, receipt)
+      def record_pr_observed!(task, receipt, validated, root)
         Hive::DraftPrReceipt.advance!(
           task.folder, from: "pr_create_intent", to: "pr_observed",
           attributes: {
@@ -309,8 +315,7 @@ module Hive
         unless allow_owned && receipt["pr_create_intent_id"]
           raise IdentityError, "pull request exists without a controller mutation intent"
         end
-        validate_pr!(prs.first, receipt)
-        prs
+        [ validate_pr!(prs.first, receipt) ]
       end
       private_class_method :reconcile_prs!
 
@@ -350,7 +355,7 @@ module Hive
         assert_remote_head!(context, receipt, cfg)
         prs = reconcile_prs!(context, receipt, cfg, allow_owned: true)
         raise IdentityError, "observed pull request is no longer uniquely visible" unless prs.one?
-        validated = validate_pr!(prs.first, receipt)
+        validated = prs.first
         unless validated["number"] == receipt.fetch("pr_number") &&
                validated["url"] == receipt.fetch("pr_url")
           raise IdentityError, "observed pull request changed identity"
@@ -426,7 +431,7 @@ module Hive
           "Tests" => report.tests,
           "Risks" => report.risks
         }.transform_values { |value| safe_summary(value) }
-        title = safe_summary(report.suggested_pr_title, max: MAX_PR_TITLE_CHARS, single_line: true)
+        title = safe_summary(report.suggested_pr_title, max: MAX_PR_TITLE_CHARS)
         body = fields.map { |label, value| "## #{label}\n#{value}" }.join("\n\n")
         body = body[0, MAX_PR_BODY_CHARS]
         scan_text!(title, source: "PR title")
@@ -435,19 +440,24 @@ module Hive
       end
       private_class_method :project_report
 
-      def safe_summary(value, max: MAX_SUMMARY_CHARS, single_line: false)
+      def safe_summary(value, max: MAX_SUMMARY_CHARS)
         text = value.to_s.encode("UTF-8", invalid: :replace, undef: :replace, replace: "?")
-        text = text.gsub(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/, "[redacted email]")
-        text = text.gsub(%r{(?:/home|/Users|/tmp|/private/tmp|/var/folders)/[^\s)`'\"]+}, "[redacted local path]")
-        text = text.gsub(/[A-Za-z]:\\[^\s)`'\"]+/, "[redacted local path]")
-        text = text.gsub(%r{(?:https?|file)://[^\s)`'\"]+}, "[redacted URL]")
-        text = text.gsub(/[\r\n\t ]+/, single_line ? " " : " ").strip
+        text = redact_sensitive_identifiers(text)
+        text = text.gsub(/[\r\n\t ]+/, " ").strip
         text = text[0, max].to_s.strip
         raise QuarantineError, "report evidence cannot be summarized safely" if text.empty?
 
         text
       end
       private_class_method :safe_summary
+
+      def redact_sensitive_identifiers(text)
+        text = text.gsub(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/, "[redacted email]")
+        text = text.gsub(%r{(?:/home|/Users|/tmp|/private/tmp|/var/folders)/[^\s)`'\"]+}, "[redacted local path]")
+        text = text.gsub(/[A-Za-z]:\\[^\s)`'\"]+/, "[redacted local path]")
+        text.gsub(%r{(?:https?|file)://[^\s)`'\"]+}, "[redacted URL]")
+      end
+      private_class_method :redact_sensitive_identifiers
 
       def scan_publication!(context, head_oid, report_source, projected)
         digest = ::Digest::SHA256.new
@@ -549,8 +559,9 @@ module Hive
       private_class_method :scan_blob!
 
       def scan_text!(text, source:)
-        hits = Hive::SecretPatterns.scan(text.to_s)
-        raise QuarantineError, "#{source} contains prohibited credential material" unless hits.empty?
+        if Hive::SecretPatterns.match?(text.to_s)
+          raise QuarantineError, "#{source} contains prohibited credential material"
+        end
       end
       private_class_method :scan_text!
 
@@ -635,10 +646,7 @@ module Hive
           file.read(Hive::Stages::AgentReport::MAX_BYTES + 1)
         end
         redacted = Hive::SecretPatterns.redact(source)
-        redacted = redacted.gsub(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/, "[redacted email]")
-        redacted = redacted.gsub(%r{(?:/home|/Users|/tmp|/private/tmp|/var/folders)/[^\s)`'\"]+}, "[redacted local path]")
-        redacted = redacted.gsub(/[A-Za-z]:\\[^\s)`'\"]+/, "[redacted local path]")
-        redacted = redacted.gsub(%r{(?:https?|file)://[^\s)`'\"]+}, "[redacted URL]")
+        redacted = redact_sensitive_identifiers(redacted)
         Hive::AtomicFile.write(path, redacted, mode: 0o600)
       rescue SystemCallError, IOError
         # Marker text remains redacted even when the untrusted report cannot be
@@ -710,11 +718,15 @@ module Hive
       private_class_method :git!
 
       def git_binary!(path, *args, max_bytes: nil)
-        out, err, status = Open3.capture3("git", "-C", path, *args, binmode: true)
+        out, err, status, overflow = if max_bytes
+          capture_git_binary(path, args, max_bytes)
+        else
+          [ *Open3.capture3("git", "-C", path, *args, binmode: true), false ]
+        end
+        if overflow
+          raise QuarantineError, "git #{args.first} output exceeds #{max_bytes} bytes"
+        end
         if status.success?
-          if max_bytes && out.bytesize > max_bytes
-            raise QuarantineError, "git #{args.first} output exceeds #{max_bytes} bytes"
-          end
           return out
         end
 
@@ -722,6 +734,46 @@ module Hive
         raise IdentityError, "git #{args.first} failed during publication scan: #{detail[0, 200]}"
       end
       private_class_method :git_binary!
+
+      def capture_git_binary(path, args, max_bytes)
+        out = String.new(capacity: [ max_bytes, 16 * 1024 ].min, encoding: Encoding::BINARY)
+        err = String.new(capacity: MAX_GIT_ERROR_BYTES, encoding: Encoding::BINARY)
+        overflow = false
+        status = nil
+        Open3.popen3("git", "-C", path, *args, pgroup: true) do |stdin, stdout, stderr, wait|
+          stdin.close
+          stdout.binmode
+          stderr.binmode
+          streams = { stdout => [ out, max_bytes ], stderr => [ err, MAX_GIT_ERROR_BYTES ] }
+          until streams.empty?
+            readable = IO.select(streams.keys)&.first || []
+            readable.each do |stream|
+              chunk = stream.read_nonblock(16 * 1024, exception: false)
+              if chunk.nil?
+                streams.delete(stream)
+                next
+              end
+              next if chunk == :wait_readable
+
+              target, limit = streams.fetch(stream)
+              available = limit - target.bytesize
+              target << chunk.byteslice(0, available) if available.positive?
+              next unless stream.equal?(stdout) && chunk.bytesize > available && !overflow
+
+              overflow = true
+              Process.kill("KILL", -wait.pid)
+            rescue Errno::ESRCH
+              nil
+            end
+          end
+          status = wait.value
+        ensure
+          stdout.close unless stdout.closed?
+          stderr.close unless stderr.closed?
+        end
+        [ out, err, status, overflow ]
+      end
+      private_class_method :capture_git_binary
     end
   end
 end

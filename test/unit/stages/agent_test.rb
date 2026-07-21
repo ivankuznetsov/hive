@@ -154,6 +154,22 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_worktree_instruction_reader_rejects_oversized_input
+    with_tmp_dir do |root|
+      path = File.join(root, "instruction.md")
+      File.binwrite(
+        path,
+        "x" * (Hive::Stages::AgentWorktree::MAX_INSTRUCTION_BYTES + 1)
+      )
+      stage = Struct.new(:instruction).new(path)
+
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::AgentWorktree.send(:read_instruction, stage)
+      end
+      assert_includes error.message, "exceeds"
+    end
+  end
+
   def test_worktree_setup_preserves_incomplete_resume_state_and_blocks
     with_draft_pr_task do |task, worktree_root|
       with_fake_github_controller do

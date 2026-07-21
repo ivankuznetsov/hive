@@ -66,7 +66,8 @@ class NewManagedWorkflowTest < Minitest::Test
       assert_raises(Hive::ConcurrentRunError) do
         command.send(
           :write_task_meta, File.join(dir, "task"), id: 1, slug: "task", depends_on: nil,
-          workflow: workflow, workflow_info: { managed: baseline, pin: true }, hive_state: hive_state
+          base_branch: nil, workflow: workflow,
+          workflow_info: { managed: baseline, pin: true }, hive_state: hive_state
         )
       end
     end

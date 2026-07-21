@@ -66,6 +66,7 @@ module Hive
     # built each call, so freezing it can't surprise a caller.
     def stage_names = map(&:name).freeze
     def stage_dirs = map(&:dir).freeze
+    def draft_pr_handoff? = any? { |stage| stage.handoff == :draft_pr }
 
     # Canonical managed-runtime topology. Configuration snapshots, package
     # validation, and admission all consume these same stable actor slots.

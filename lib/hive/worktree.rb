@@ -7,6 +7,7 @@ require "hive/atomic_file"
 
 module Hive
   class Worktree
+    STRICT_POINTER_MAX_BYTES = 64 * 1024
     NONINTERACTIVE_FETCH_ENV = {
       "GIT_TERMINAL_PROMPT" => "0",
       "GIT_SSH_COMMAND" => "ssh -oBatchMode=yes -oConnectTimeout=10",
@@ -387,11 +388,15 @@ module Hive
 
     def self.read_strict_pointer(task_folder, expected_root:, expected: nil)
       pointer_path = File.join(task_folder, "worktree.yml")
-      stat = File.lstat(pointer_path)
-      raise WorktreeError, "worktree.yml must be a regular file, not a symlink" if stat.symlink?
-      raise WorktreeError, "worktree.yml must be a regular file" unless stat.file?
+      source = File.open(pointer_path, File::RDONLY | File::NOFOLLOW) do |file|
+        raise WorktreeError, "worktree.yml must be a regular file" unless file.stat.file?
 
-      source = File.read(pointer_path)
+        value = file.read(STRICT_POINTER_MAX_BYTES + 1)
+        if value.bytesize > STRICT_POINTER_MAX_BYTES
+          raise WorktreeError, "worktree.yml exceeds #{STRICT_POINTER_MAX_BYTES} bytes"
+        end
+        value
+      end
       keys = source.lines.filter_map { |line| line[/\A([A-Za-z_][A-Za-z0-9_]*):(?:\s|$)/, 1] }
       duplicates = keys.tally.select { |_key, count| count > 1 }.keys
       raise WorktreeError, "worktree.yml contains duplicate keys: #{duplicates.join(', ')}" unless duplicates.empty?
@@ -425,6 +430,8 @@ module Hive
       data
     rescue Errno::ENOENT
       raise WorktreeError, "worktree.yml is missing"
+    rescue Errno::ELOOP
+      raise WorktreeError, "worktree.yml must be a regular file, not a symlink"
     rescue Psych::Exception => e
       raise WorktreeError, "worktree.yml is invalid YAML: #{e.message}"
     end

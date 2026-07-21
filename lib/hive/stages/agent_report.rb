@@ -13,6 +13,7 @@ module Hive
       MAX_SECTION_CHARS = 4_000
       MAX_TITLE_CHARS = 120
       DECISIONS = %i[ready no-fix blocked].freeze
+      DECISION_LINE = /\ADecision: (#{DECISIONS.map { |decision| Regexp.escape(decision.to_s) }.join('|')})\z/
       REQUIRED_SECTIONS = %i[reproduction cause changes tests risks].freeze
       OPTIONAL_SECTIONS = %i[compact_plan debug_trace].freeze
       SECTION_LABELS = {
@@ -32,10 +33,10 @@ module Hive
       RepositoryState = Data.define(:head_oid, :commit_count, :clean)
 
       def read(path)
-        initial_stat = File.lstat(path)
-        if initial_stat.symlink?
-          raise Hive::StageError, "fix-report.md must be a regular file, not a symlink"
-        end
+        parse(read_source(path))
+      end
+
+      def read_source(path)
         source = File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
           stat = file.stat
           raise Hive::StageError, "fix-report.md must be a regular file" unless stat.file?
@@ -47,9 +48,11 @@ module Hive
         source.force_encoding(Encoding::UTF_8)
         raise Hive::StageError, "fix-report.md must be valid UTF-8" unless source.valid_encoding?
 
-        parse(source)
+        source
       rescue Errno::ENOENT
         raise Hive::StageError, "fix-report.md is missing"
+      rescue Errno::ELOOP
+        raise Hive::StageError, "fix-report.md must be a regular file, not a symlink"
       rescue SystemCallError, IOError => e
         raise Hive::StageError, "fix-report.md is unreadable: #{e.class}: #{e.message}"
       end
@@ -65,7 +68,7 @@ module Hive
 
         lines = text.lines(chomp: true)
         decision_line = lines.shift
-        decision_match = decision_line&.match(/\ADecision: (ready|no-fix|blocked)\z/)
+        decision_match = decision_line&.match(DECISION_LINE)
         raise Hive::StageError, "fix-report.md must start with Decision: ready|no-fix|blocked" unless decision_match
 
         fields = parse_sections(lines)

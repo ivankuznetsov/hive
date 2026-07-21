@@ -76,6 +76,12 @@ module Hive
       matches
     end
 
+    def match?(text)
+      return false if text.nil? || text.empty?
+
+      PATTERNS.each_value.any? { |regex| regex.match?(text) }
+    end
+
     # Replace every PATTERNS match in `text` with a `[REDACTED:<name>]`
     # placeholder. Shared helper so consumers (TaskAction#diagnostic,
     # DiagnosisAgent#artifact_body, etc.) cannot diverge on which

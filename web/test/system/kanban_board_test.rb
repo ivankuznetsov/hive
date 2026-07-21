@@ -13,6 +13,11 @@ class KanbanBoardTest < ApplicationSystemTestCase
     assert_selector ".kanban-card", text: "Move through a native board"
 
     execute_script(<<~JS)
+      document.addEventListener("submit", () => {
+        const stream = document.createElement("turbo-stream")
+        stream.setAttribute("action", "refresh")
+        document.documentElement.appendChild(stream)
+      }, { once: true })
       document.addEventListener("turbo:submit-start", () => {
         const stream = document.createElement("turbo-stream")
         stream.setAttribute("action", "refresh")
@@ -215,6 +220,22 @@ class KanbanBoardTest < ApplicationSystemTestCase
 
     assert_selector "turbo-cable-stream-source[connected]", visible: :all, wait: 10
     assert_selector ".kanban-card[data-task-slug='#{slug}']", wait: 10
+  end
+
+  test "a restored Board catches up after its cached Cable source reconnects" do
+    project = create_hive_project!("kanban-history-reconnect-app")
+    original_slug = create_task!(project, "Open this before history restore")
+    visit dev_login_path(as: "alice")
+    assert_selector "turbo-cable-stream-source[connected]", visible: :all, wait: 10
+
+    find(".kanban-card[data-task-slug='#{original_slug}'] a").click
+    assert_current_path task_path(project, original_slug)
+    restored_slug = create_task!(project, "Visible after history restore")
+
+    page.go_back
+
+    assert_selector "turbo-cable-stream-source[connected]", visible: :all, wait: 10
+    assert_selector ".kanban-card[data-task-slug='#{restored_slug}']", wait: 10
   end
 
   private

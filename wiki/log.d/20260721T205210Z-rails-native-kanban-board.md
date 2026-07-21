@@ -16,13 +16,15 @@ Run, and Diff forms.
 Live reconciliation stays with the existing Turbo morph refresh. The rebuild
 does not retain the superseded PR's drag/drop, drawer, cursor, targeted board
 patch, transition, lock, or audit layers. Stable digest IDs preserve card and
-band identity across reorder morphs, and a shared status submission guard keeps
-background refreshes from aborting composer or card mutations. The guard also
+band identity across reorder morphs, and a shared status submission guard marks
+the native submit boundary so background refreshes cannot abort composer or
+card mutations. The guard also
 lets successful redirects reconcile from their fresh destination GET instead
-of racing a replay against the old URL. Its permanent Action Cable source
-remembers connection history across Stimulus lifecycles and requests one
-catch-up refresh after a reconnect, without duplicating the fresh initial page
-load, so a broadcast missed while offline cannot strand the page. Board assembly
+of racing a replay against the old URL. Its permanent Action Cable source keeps
+connection history on a clone-stable DOM attribute across Stimulus lifecycles
+and Turbo cache clones, then requests one catch-up refresh after a reconnect
+without duplicating the fresh initial page load, so a broadcast missed while
+offline cannot strand the page. Board assembly
 reuses one parsed config per project, and shared `Hive::StageLabel` formatting
 keeps web/bot stage names consistent. Focused model/integration tests and
 Playwright coverage pin route preference, board rendering/actions, existing

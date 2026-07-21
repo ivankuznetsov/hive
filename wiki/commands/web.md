@@ -197,16 +197,18 @@ so the login gate can run.
   cannot be cross-patched with markup for the other view; task pages without
   the dashboard targets still receive the same morph signal. Stable digest IDs
   keep project/workflow bands, columns, and task cards attached to the same DOM
-  identity across reorder morphs. A status-level submission guard defers one
-  refresh while the composer or a card action is in flight. It replays after a
+  identity across reorder morphs. A status-level submission guard marks the
+  mutation at the native submit-bubble boundary and defers one refresh while
+  the composer or a card action is in flight. It replays after a
   non-redirecting response; a successful redirect's fresh GET already
   reconciles without racing the operator back to the old URL. This prevents a
   filesystem broadcast from aborting the mutation. The same guard keeps the
   Action Cable source permanent across morphs, remembers its first connection
-  independently of the Stimulus controller lifecycle, and requests one full
-  catch-up refresh on a later reconnect so an update broadcast during the
-  disconnected window is not stranded. The initial connection does not
-  duplicate the fresh page GET. The composer's stream hook keeps the
+  on a source-owned DOM attribute across Stimulus lifecycles and Turbo
+  history-cache clones, and requests one full catch-up refresh on a later
+  reconnect so an update broadcast during the disconnected window is not
+  stranded. The initial
+  connection does not duplicate the fresh page GET. The composer's stream hook keeps the
   browser's current project selection when that project still exists; ordering
   belongs to the server while unfinished form state remains local. A successful
   idea POST returns to the same-origin Board/Grid URL that submitted it, so an

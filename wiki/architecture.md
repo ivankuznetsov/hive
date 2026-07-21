@@ -336,12 +336,15 @@ solid_cable. The current route renders either the Rails-native workflow Board
 or compact Grid, so live reconciliation does not maintain a second board patch
 protocol. Digest-based DOM identities preserve the owning band/card across
 reorder morphs, and the status-level refresh guard defers background refreshes
-while native status forms submit, using a successful redirect's fresh GET as
-the reconciliation instead of racing a replay against the old URL. It also
-keeps first-connection history on the permanent status Action Cable source and
-issues one catch-up refresh on later reconnects, closing the window in which
-the only filesystem broadcast could be missed without duplicating the fresh
-initial page load. The
+from the native submit-bubble boundary while status forms submit, using a
+successful redirect's fresh GET as the reconciliation instead of racing a
+replay against the old URL. It also
+keeps first-connection history on the permanent status Action Cable source as
+a clone-stable DOM attribute, surviving both Stimulus disconnects and Turbo
+history restoration without leaking across fresh sources, and issues one
+catch-up refresh on later reconnects. That closes the window in
+which the only filesystem broadcast could be missed without duplicating the
+fresh initial page load. The
 request-local Rails `Project` wrapper
 reuses one parsed config for Board defaults, daemon state, and workflow-overlay
 loading. `Hive::StageLabel` gives web and bot surfaces one acronym-aware stage

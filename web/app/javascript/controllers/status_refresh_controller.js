@@ -1,9 +1,10 @@
 import { Controller } from "@hotwired/stimulus"
 
-// Stimulus can disconnect while Turbo preserves the actual Cable source.
-// Keep first-connection history on the source object rather than the
-// controller instance so a later reconnect is never mistaken for page boot.
-const connectedSources = new WeakSet()
+// Stimulus can disconnect while Turbo preserves the Cable source, and Turbo's
+// history cache can later restore a clone of it. A source-owned attribute
+// survives both paths but is absent from fresh server markup, so a reconnect
+// is never confused with either page boot or another page's first connection.
+const CONNECTED_ONCE_ATTRIBUTE = "status-connected-once"
 
 // A status refresh has no Turbo request ID because it comes from a background
 // filesystem subscriber. Defer it while any form in this status surface is
@@ -15,7 +16,7 @@ export default class extends Controller {
     this.redirecting = false
     this.streamSource = this.element.querySelector("turbo-cable-stream-source")
     this.cableConnected = this.streamSource?.hasAttribute("connected") || false
-    if (this.cableConnected) connectedSources.add(this.streamSource)
+    if (this.cableConnected) this.streamSource.setAttribute(CONNECTED_ONCE_ATTRIBUTE, "")
     this.connectionObserver = new MutationObserver(this.connectionChanged.bind(this))
     if (this.streamSource) {
       this.connectionObserver.observe(this.streamSource, {
@@ -73,8 +74,8 @@ export default class extends Controller {
       // old value lets us process a batched disconnect+reconnect in order.
       const connected = record.oldValue === null
       if (connected && !this.cableConnected) {
-        const reconnect = connectedSources.has(this.streamSource)
-        connectedSources.add(this.streamSource)
+        const reconnect = this.streamSource.hasAttribute(CONNECTED_ONCE_ATTRIBUTE)
+        this.streamSource.setAttribute(CONNECTED_ONCE_ATTRIBUTE, "")
         if (reconnect) this.requestRefresh()
       }
 

@@ -11,6 +11,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
 
     assert_selector "#status-board"
     assert_selector ".kanban-card", text: "Move through a native board"
+    assert_status_refresh_ready
 
     execute_script(<<~JS)
       document.addEventListener("submit", () => {
@@ -30,7 +31,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
       }, { once: true })
     JS
     click_button "Grid"
-    assert_current_path grid_path, wait: 10
+    assert_current_path grid_path
     assert_selector "#status-grid .task-row", text: slug
 
     visit root_path
@@ -239,6 +240,18 @@ class KanbanBoardTest < ApplicationSystemTestCase
   end
 
   private
+
+  def assert_status_refresh_ready
+    page.document.synchronize(10) do
+      ready = evaluate_script(<<~JS)
+        (() => {
+          const element = document.querySelector("[data-controller~='status-refresh']")
+          return Boolean(element && window.Stimulus?.getControllerForElementAndIdentifier(element, "status-refresh"))
+        })()
+      JS
+      raise Capybara::ElementNotFound, "status-refresh controller did not connect" unless ready
+    end
+  end
 
   def disable_daemon!(project)
     path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project, ".hive-state", "config.yml")

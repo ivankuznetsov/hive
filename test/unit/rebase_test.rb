@@ -426,6 +426,31 @@ class HiveRebaseTest < Minitest::Test
     teardown_dirs(worktree, folder)
   end
 
+  def test_publication_exception_keeps_successful_rebase_and_warns
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 2
+    git.current_branch_value = "feature"
+
+    result = nil
+    _out, err = capture_io do
+      with_replaced_singleton_method(Hive::Gh, :remote_branch_oid,
+                                     ->(*_args, **_kwargs) { "a" * 40 }) do
+        with_replaced_singleton_method(Hive::Gh, :push_branch,
+                                       ->(*_args, **_kwargs) { raise Hive::GhError, "offline" }) do
+          stub_gitops!(git) { result = Hive::Rebase.perform(task, base_cfg) }
+        end
+      end
+    end
+
+    assert result.succeeded
+    assert(result.post_rebase_warnings.any? { |warning| warning.include?("Hive::GhError: offline") })
+    assert_match(/remote history was left unchanged/, err)
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
   def test_rebase_does_not_publish_when_remote_head_was_not_contained_locally
     worktree, folder = make_worktree_and_folder
     task = make_task(worktree: worktree, folder: folder)

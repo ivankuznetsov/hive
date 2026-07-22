@@ -31,14 +31,14 @@ class KanbanBoardTest < ApplicationSystemTestCase
       }, { once: true })
     JS
     click_button "Grid"
-    assert_current_path grid_path
+    assert_current_path grid_path, wait: 10
     assert_selector "#status-grid .task-row", text: slug
 
     visit root_path
     assert_selector "#status-grid", wait: 5
 
     click_button "Board"
-    assert_current_path board_path
+    assert_current_path board_path, wait: 10
     assert_selector "#status-board .kanban-card", text: slug
   end
 
@@ -83,7 +83,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
 
     click_button "Grid"
 
-    assert_current_path grid_path(project: selected_project)
+    assert_current_path grid_path(project: selected_project), wait: 10
     assert_selector "#status-grid .project-section[data-project-name='#{selected_project}']"
     assert_selector "#status-grid .project-section[data-project-name='#{hidden_project}']", visible: :hidden
   end

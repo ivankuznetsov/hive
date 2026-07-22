@@ -259,6 +259,87 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_draft_pr_workflow_persists_explicit_base_branch
+    with_registered_workflow(draft_pr_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+
+          capture_io do
+            Hive::Commands::New.new(
+              project, "fix the settings form", workflow: "async_fix", base: "release/next"
+            ).call
+          end
+
+          folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "fix-the-settings-form-*")].first
+          assert_equal "release/next", Hive::TaskMeta.read(folder)[:base_branch]
+          assert_equal "release/next", Hive::Task.new(folder).base_branch
+        end
+      end
+    end
+  end
+
+  def test_draft_pr_workflow_persists_project_default_base_branch
+    with_registered_workflow(draft_pr_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+
+          capture_io do
+            Hive::Commands::New.new(project, "fix default base", workflow: "async_fix").call
+          end
+
+          folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "fix-default-base-*")].first
+          assert_equal "master", Hive::TaskMeta.read(folder)[:base_branch]
+        end
+      end
+    end
+  end
+
+  def test_draft_pr_workflow_rejects_invalid_base_without_seeding
+    with_registered_workflow(draft_pr_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+
+          _out, err, status = with_captured_exit do
+            Hive::Commands::New.new(
+              project, "bad base", workflow: "async_fix", base: "--upload-pack=steal"
+            ).call
+          end
+
+          assert_equal Hive::ExitCodes::USAGE, status
+          assert_includes err, "invalid base branch"
+          assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", "bad-base-*")]
+        end
+      end
+    end
+  end
+
+  def test_draft_pr_workflow_rejects_dependency_stacking_without_seeding
+    with_registered_workflow(draft_pr_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+
+          _out, err, status = with_captured_exit do
+            Hive::Commands::New.new(
+              project, "stacked fix", workflow: "async_fix", depends_on: "base-task"
+            ).call
+          end
+
+          assert_equal Hive::ExitCodes::USAGE, status
+          assert_includes err, "does not support --depends-on"
+          assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", "stacked-fix-*")]
+        end
+      end
+    end
+  end
+
   def test_creates_ideas_with_numeric_and_cross_project_dependency_syntax
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -426,6 +507,19 @@ class NewTest < Minitest::Test
         Hive::Commands::New.name_generator_spawn = previous
       end
     end
+  end
+
+  def draft_pr_workflow
+    Hive::Workflow.new(
+      id: :async_fix,
+      stages: [
+        Hive::Workflow::Stage.new(name: "inbox", index: 1, state_file: "request.md", kind: :inert),
+        Hive::Workflow::Stage.new(
+          name: "fix", index: 2, state_file: "fix-report.md", kind: :agent,
+          workspace: :worktree, handoff: :draft_pr, deliverable: "fix-report.md"
+        )
+      ]
+    )
   end
 
   def test_unicode_text_falls_back_to_task_slug

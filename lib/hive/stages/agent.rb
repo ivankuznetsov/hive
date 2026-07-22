@@ -18,6 +18,10 @@ module Hive
         cfg ||= {}
         stage = task.workflow.stage_named(task.stage_name)
         stage or raise Hive::StageError, "no agent stage #{task.stage_name}"
+        if stage.workspace == :worktree
+          require "hive/stages/agent_worktree"
+          return Hive::Stages::AgentWorktree.run!(task, cfg)
+        end
         output_path = File.join(task.folder, stage.state_file)
         profile = Hive::Stages::Base.stage_profile(cfg, task.stage_name, explicit_agent: stage.agent)
 

@@ -597,3 +597,16 @@ artifact sizes are intentionally absent from this public gap record. A reviewed
 terminal article and measured first-artifact/full-completion times were not yet
 available. Keep the fixture and live evidence classes separate until clean
 replays close this gap.
+
+## Managed draft-PR handoff needs hosted crash-recovery smoke (2026-07-21)
+
+The terminal worktree-agent and draft-PR handoff are locally pinned with real
+Git worktrees plus injected remote/GitHub seams. Tests cover hardened
+post-agent Git, exact-OID push intent, PR create intent, ambiguous-result
+reconciliation, byte-exact report resume, terminal artifact repair, no-fix
+cleanup retry, and quarantine redaction retry. No checked-in artifact yet runs
+the complete path against a disposable GitHub repository: ordinary exact-OID
+push, draft PR creation/reconciliation, and process death after each mutation
+intent followed by a separate-process resume. Keep this as an operational
+verification gap; the controller remains fail-closed when a result is not
+uniquely observable.

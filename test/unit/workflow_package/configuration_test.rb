@@ -114,6 +114,51 @@ class WorkflowPackageConfigurationTest < Minitest::Test
     Hive::AgentProfiles.register(:pi, Hive::AgentProfiles::PI)
   end
 
+  def test_package_effort_recommendation_precedes_project_default_and_explicit_effort_wins
+    recommended = build_configuration(
+      overrides: { "stages.draft" => { "agent" => "codex" } },
+      cfg: { "execute" => { "agent" => "codex", "effort" => "high" } },
+      runtime_metadata: recommendation_metadata("medium")
+    )
+    explicit = %w[low high].to_h do |effort|
+      [ effort, build_configuration(
+        overrides: { "stages.draft" => { "agent" => "codex", "effort" => effort } },
+        cfg: { "execute" => { "agent" => "codex", "effort" => "high" } },
+        runtime_metadata: recommendation_metadata("medium")
+      ) ]
+    end
+
+    assert_equal "medium", recommended.data.dig("mappings", "stages.draft", "effort")
+    assert_equal "low", explicit.fetch("low").data.dig("mappings", "stages.draft", "effort")
+    assert_equal "high", explicit.fetch("high").data.dig("mappings", "stages.draft", "effort")
+  end
+
+  def test_unpinnable_profile_keeps_recommended_effort_explicitly_unpinned
+    pinless = Hive::AgentProfile.new(
+      name: :pi,
+      bin_default: "pi",
+      headless_flag: "-p",
+      version_flag: "--version",
+      skill_syntax_format: "/skill:%{skill}"
+    )
+    Hive::AgentProfiles.register(:pi, pinless)
+
+    configuration = build_configuration(
+      overrides: { "stages.draft" => { "agent" => "pi" } },
+      cfg: { "execute" => { "effort" => "high" } },
+      runtime_metadata: recommendation_metadata("medium")
+    )
+
+    assert_nil configuration.data.dig("mappings", "stages.draft", "effort")
+  ensure
+    Hive::AgentProfiles.register(:pi, Hive::AgentProfiles::PI)
+  end
+
+  def test_manifest_without_recommendations_retains_legacy_configuration_digest
+    assert_equal "efc0eb0c09c9ae9ba9d741893a925330dab75f824b62ab8251c2a1c954327e7d",
+                 build_configuration.digest
+  end
+
   def test_supported_configuration_pins_translate_to_native_launch_arguments
     mapping = build_configuration.data.fetch("mappings").fetch("stages.draft")
     profile = Hive::AgentProfiles.lookup(mapping.fetch("agent"))
@@ -239,7 +284,7 @@ class WorkflowPackageConfigurationTest < Minitest::Test
 
   private
 
-  def build_configuration(overrides: nil, input_bindings: {}, cfg: {})
+  def build_configuration(overrides: nil, input_bindings: {}, cfg: {}, runtime_metadata: self.runtime_metadata)
     overrides ||= {
       "stages.draft" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" },
       "stages.review.reviewers.security" => { "agent" => "codex" }
@@ -251,6 +296,12 @@ class WorkflowPackageConfigurationTest < Minitest::Test
       },
       cfg: cfg, overrides: overrides, input_bindings: input_bindings,
       runtime_metadata: runtime_metadata
+    )
+  end
+
+  def recommendation_metadata(effort)
+    runtime_metadata.merge(
+      "mapping_recommendations" => [ { "slot" => "stages.draft", "effort" => effort } ]
     )
   end
 

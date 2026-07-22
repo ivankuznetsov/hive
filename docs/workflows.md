@@ -217,6 +217,12 @@ Rules:
   `deliverable:` are rejected on `kind: terminal` stages.
 - `instruction:` is resolved relative to the descriptor file and must point to a readable file (any extension; `.md` is conventional but not required).
 - `permissions:` is optional and uses the same syntax as [permissions.md](permissions.md).
+- `workspace: worktree` and `handoff: draft_pr` are one closed v1 pair on the
+  final `kind: agent` stage. Both `state_file:` and `deliverable:` must be the
+  canonical task-root `fix-report.md`; worktree-only, handoff-only, alternate
+  report names, inert/council use, and nonterminal use are rejected. The pair
+  creates a controller-owned exact-origin worktree and controller-owned draft
+  PR delivery without embedding an agent, model, or effort choice.
 - The last stage may be `kind: terminal`, `kind: agent`, or `kind: council`.
   A terminal agent/council stage is archived only when it has a terminal
   `COMPLETE` marker and a non-empty deliverable. `deliverable:` defaults to the
@@ -270,6 +276,9 @@ stage name.
 The automatic implementation-owner policy applies only to the built-in coding workflow's `execute`, `open_pr`, `review.fix`, and `review.ci` boundaries. Descriptor-backed agent and council stages continue to resolve their own optional `agent`, `model`, and `effort` fields, and council reviewers are never inherited from the coding execute owner.
 
 Existing workflow descriptors continue to load: all new fields are optional.
+Stages that omit both `workspace:` and `handoff:` retain task-folder execution
+and their existing completion behavior. The fields may not be enabled
+independently.
 Workflows that used a prompt-encoded review panel can replace it with
 `kind: council`. Workflows that appended a dummy final `kind: terminal` stage
 only to satisfy the old parser can drop it and mark the producing agent/council

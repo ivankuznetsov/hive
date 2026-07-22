@@ -141,20 +141,24 @@ module Hive
       meta[:depends_on]
     end
 
+    def base_branch
+      meta[:base_branch]
+    end
+
     def display_label
       display_name || slug
     end
 
     def worktree_path
-      # Worktree first appears in 4-execute and carries through open-pr,
-      # review, artifacts, and finalize; earlier stages don't have one. 9-done is post-PR; the
-      # worktree may still exist (cleanup happens after merge).
-      return nil if @stage_index < 4
-
+      # An explicit pointer is authoritative for every workflow. Generic
+      # managed workflows may create a worktree before coding's 4-execute
+      # stage, while legacy coding tasks still derive a path only from stage 4.
       if File.exist?(worktree_yml_path)
         data = YAML.safe_load(File.read(worktree_yml_path)) || {}
         return data["path"] if data.is_a?(Hash) && data["path"]
       end
+      return nil if @stage_index < 4
+
       derive_worktree_path
     end
 

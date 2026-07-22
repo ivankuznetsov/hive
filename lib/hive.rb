@@ -197,6 +197,10 @@ module Hive
       READY_TO_ARCHIVE    = "ready_to_archive".freeze
       READY_TO_ADVANCE    = "ready_to_advance".freeze
       READY_TO_RUN        = "ready_to_run".freeze
+      # Explicit operator-only retry for a validated draft-PR handoff. The
+      # daemon's Policy does not dispatch this key; status still exposes the
+      # exact `hive run` command for a human-controlled retry.
+      RECOVER_DRAFT_PR    = "recover_draft_pr".freeze
       # A clean ad-hoc PR review that has completed: it stays PARKED at
       # 6-review rather than advancing to 7-artifacts. Deliberately NOT in
       # Daemon::Policy::ADVANCE_ACTIONS, so a daemon-enrolled project never

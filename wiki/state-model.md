@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-19
+updated: 2026-07-21
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, dependencies, admission, web]
 ---
 
@@ -36,7 +36,7 @@ The constant `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-op
 
 `Hive::Task::PATH_RE` (`lib/hive/task.rb:16`) is the only validator for task paths and parses `<root>/.hive-state/stages/<N>-<stage>/<slug>/`.
 
-`hive status --json` exposes two task timestamps from this layout: `mtime` is the current stage state-file mtime (or the folder mtime fallback when the state file is missing), while `folder_mtime` is always the task folder's own `File.mtime`. Daemon edit-resume decisions continue to use `mtime`; consumers that need directory-level aging can use `folder_mtime` without re-walking the filesystem. Status also exposes `pr_url` from `pr.md` frontmatter for tasks at `5-open-pr` and later, returning `null` before PR creation or when the sidecar is absent/unparseable. See [[commands/status]].
+`hive status --json` exposes two task timestamps from this layout: `mtime` is the current stage state-file mtime (or the folder mtime fallback when the state file is missing), while `folder_mtime` is always the task folder's own `File.mtime`. Daemon edit-resume decisions continue to use `mtime`; consumers that need directory-level aging can use `folder_mtime` without re-walking the filesystem. Status also exposes `pr_url` from `pr.md` frontmatter for coding tasks at `5-open-pr` and later and for generic workflows whose descriptor declares `handoff: draft_pr`, returning `null` before verified PR metadata exists or when the sidecar is absent/unparseable. See [[commands/status]].
 
 ## Per-stage state file
 
@@ -450,6 +450,50 @@ execute_base_head: <sha>
 ```
 
 `Hive::Worktree.read_pointer` is the only reader; `Hive::Worktree.validate_pointer_path` rejects paths outside the configured `worktree_root` prefix. See [[modules/worktree]].
+
+### Managed draft-PR receipt
+
+A terminal generic agent stage declaring `workspace: worktree` and
+`handoff: draft_pr` adds owner-private `handoff.yml` beside `worktree.yml`.
+`Hive::DraftPrReceipt` is a strict, versioned, atomically rewritten phase
+machine:
+
+```
+worktree_created -> agent_validated -> push_intent -> branch_pushed
+                 -> pr_create_intent -> pr_observed -> terminal
+```
+
+The receipt preserves canonical repository, base branch/OID, task branch,
+confined worktree path, validated head/report/scan digests, mutation intent and
+attempt timestamps, observed remote OID, and verified PR identity. Object,
+commit, diff, path-list, and aggregate scan ceilings fail closed before remote
+publication. The receipt and resume report use no-follow, bounded reads. It contains
+no credentials, report prose, logs, or remote error payloads. Existing
+non-nil fields are immutable; malformed, contradictory, skipped, or regressed
+phases fail closed.
+
+An explicit `worktree.yml` pointer is visible to status and recovery at every
+workflow stage, including generic stage indexes below coding's `4-execute`;
+the stage-index guard now applies only to deriving an absent legacy coding
+pointer. `hive run` also skips automatic rebase for any workflow with this
+managed handoff, preserving the receipt's exact validated base/head identity.
+
+`push_intent` and `pr_create_intent` distinguish a crash before a mutation from
+an ambiguous crash after an attempt. Resume always reconciles first: a proven
+remote result advances without repeating the mutation, while an attempted but
+unobserved result parks as `ERROR reason=draft_pr_handoff_failed`. That error
+surfaces an explicit operator `hive run <task>` action whose action kind is not
+daemon-dispatchable. Quarantined secret/binary/LFS state and contradictory
+repository/branch/PR identity terminate as non-retryable blocked outcomes.
+Verified `pr-opened` writes the existing `pr.md` frontmatter shape and a
+controller-owned `COMPLETE outcome=pr-opened pr_url=...` marker.
+Terminal replay returns a durable `handoff_recovered` action, repairs missing
+PR/marker artifacts without repeating remote mutation, retries a failed
+clean-`no-fix` worktree removal until the registered path is absent, and
+retries quarantine redaction before acknowledging the blocked terminal state.
+Recoverable report markers preserve the exact pre-marker bytes for digest
+verification, including reports without a final newline or with trailing
+whitespace.
 
 ## Review artefacts
 

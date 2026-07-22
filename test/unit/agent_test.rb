@@ -112,6 +112,58 @@ class AgentTest < Minitest::Test
       assert_equal :waiting, result[:status]
       assert_equal :waiting, Hive::Markers.current(task.state_file).name
       assert File.exist?(result[:log_file])
+      assert_equal 0o600, File.stat(result[:log_file]).mode & 0o777
+    end
+  end
+
+  def test_log_omits_prompt_bearing_argv_and_redacts_whole_and_split_credentials
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      prompt_secret = "prompt-only-#{'q' * 32}"
+      token = "ghp_#{'A' * 36}"
+      split_token = "ghp_#{'B' * 36}"
+      split_bin = File.join(dir, "split-stream-agent")
+      File.write(split_bin, <<~SH)
+        #!/bin/sh
+        printf '%s\n' 'whole=#{token}'
+        printf 'split=ghp_'
+        printf '#{'B' * 18}' >&2
+        printf '%s\n' '#{'B' * 18}'
+      SH
+      File.chmod(0o755, split_bin)
+      ENV["HIVE_CLAUDE_BIN"] = split_bin
+
+      result = Hive::Agent.new(
+        task: task, prompt: prompt_secret, max_budget_usd: 1,
+        timeout_sec: 5, status_mode: :exit_code_only
+      ).run!
+      log = File.read(result.fetch(:log_file))
+
+      refute_includes log, prompt_secret
+      refute_includes log, token
+      refute_includes log, split_token
+      assert_includes log, "[REDACTED:github_token]"
+      assert_includes log, "profile=claude"
+      refute_includes log, "cmd=["
+      assert_equal 0o600, File.stat(result[:log_file]).mode & 0o777
+    end
+  end
+
+  def test_private_log_open_refuses_symlinks
+    with_tmp_dir do |dir|
+      target = File.join(dir, "outside.log")
+      link = File.join(dir, "agent.log")
+      File.write(target, "preserve\n")
+      File.symlink(target, link)
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "safe", max_budget_usd: 1,
+        timeout_sec: 5, status_mode: :exit_code_only
+      )
+
+      assert_raises(SystemCallError) do
+        agent.send(:open_private_log, link) { |log| log.write("tampered\n") }
+      end
+      assert_equal "preserve\n", File.read(target)
     end
   end
 
@@ -188,6 +240,38 @@ class AgentTest < Minitest::Test
       assert_equal :ok, result[:status]
       assert_equal "Here&apos;s a summary", result[:final_message]
       assert_equal :structured, result[:final_message_source]
+    end
+  end
+
+  def test_structured_message_chunks_never_persist_to_the_agent_log
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      first = "ghp_#{'C' * 18}"
+      second = "#{'C' * 18}"
+      bin = File.join(dir, "structured-message-agent")
+      File.write(bin, <<~SH)
+        #!/bin/sh
+        printf '%s\n' '{"type":"text","data":"#{first}"}'
+        printf '%s\n' '{"type":"text","data":"#{second}"}'
+        printf '%s\n' '{"type":"end","stopReason":"end_turn"}'
+      SH
+      File.chmod(0o755, bin)
+      profile = Hive::AgentProfile.new(
+        name: :grok, bin_default: bin, headless_flag: "-p",
+        prompt_style: :headless_flag_value, version_flag: "--version",
+        skill_syntax_format: "/%{skill}", status_detection_mode: :exit_code_only
+      )
+
+      result = Hive::Agent.new(
+        task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5, profile: profile
+      ).run!
+      log = File.read(result.fetch(:log_file))
+
+      assert_equal "#{first}#{second}", result.fetch(:final_message)
+      refute_includes log, first
+      refute_includes log, second
+      refute_includes log, "#{first}#{second}"
+      assert_equal 2, log.scan("[structured message omitted type=text]").length
     end
   end
 

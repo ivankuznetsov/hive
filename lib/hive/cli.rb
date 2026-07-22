@@ -529,6 +529,11 @@ module Hive
       `dependency_gate_stage`). Use a prerequisite task id or slug for the
       same project, or project:slug for an explicit cross-project dependency.
 
+      --base selects the GitHub base branch for a workflow whose terminal agent
+      declares workspace: worktree and handoff: draft_pr. When omitted, Hive
+      records the project's exact default-branch name. Base selection is task
+      metadata; Hive never infers it from the free-text request.
+
       Examples:
 
         hive new myproj --workflow content "write the launch post"
@@ -543,6 +548,8 @@ module Hive
                         desc: "depend on a same-project id/slug or explicit project:slug; hold daemon " \
                               "auto-advance until it reaches the dependency gate stage " \
                               "(8-finalize by default)"
+    option :base, type: :string,
+                  desc: "base branch for a worktree/draft-PR workflow"
     option :workflow, type: :string, desc: workflow_option_desc
     def new_task(project, *text_parts)
       require "hive/commands/new"
@@ -552,6 +559,7 @@ module Hive
       Hive::Commands::New.new(
         project,
         text,
+        base: options[:base],
         depends_on: options[:depends_on],
         workflow: options[:workflow]
       ).call

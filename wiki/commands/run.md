@@ -3,7 +3,7 @@ title: hive run
 type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-21
 tags: [command, dispatcher, stages, json, rebase, dependencies, admission]
 ---
 
@@ -70,6 +70,12 @@ workflow-verb composition cannot bypass this check.
 
 `hive run` checks whether the task's worktree branch is behind `origin/<default_branch>` and, if so, attempts a rebase before dispatching the stage runner. This prevents the failure mode where a long-running task's branch drifts behind main and reviewers in 5-review see "phantom deletions" of code that landed on main after the branch was created (originating incident: `i-want-to-be-able-260507-7682` at REVIEW_STALE pass=4).
 
+Workflows declaring `handoff: draft_pr` are the exception: Run returns
+`Result.skipped(:managed_draft_pr_handoff)` before calling `Hive::Rebase`.
+Their controller receipt pins an exact base/head pair, so rewriting the branch
+would invalidate already-validated handoff identity and could introduce a
+second conflict-resolution agent into a one-agent workflow.
+
 **Trigger:** stages 4-execute, 5-open-pr, 6-review, 7-artifacts, and 8-finalize. Stages 2-brainstorm and 3-plan have no worktree (`task.worktree_path` is nil), so the trigger silently no-ops; 1-inbox doesn't enter `hive run`; 9-done is terminal.
 
 **Pre-rebase guards (in order, before any fetch):**
@@ -127,6 +133,7 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 |--------|---------|
 | `disabled` | `cfg.rebase.enabled = false` in this project |
 | `cli_override` | `--no-rebase` was passed for this run |
+| `managed_draft_pr_handoff` | The task workflow owns an exact receipt-backed draft-PR handoff; auto-rebase is prohibited |
 | `no_worktree` | Stage has no worktree (brainstorm/plan) or worktree directory missing |
 | `pre_existing_rebase` | `.git/rebase-merge/` or `.git/rebase-apply/` already exists; operator cleanup required |
 | `dirty_worktree` | Uncommitted changes; rebase requires a clean tree |

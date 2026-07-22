@@ -29,6 +29,8 @@ module Hive
         reviewers
         council
         deliverable
+        workspace
+        handoff
         conditions
         permissions
         mapping_role
@@ -58,6 +60,8 @@ module Hive
       MAPPING_ROLES = Hive::Workflow::MAPPING_ROLES
       REVIEWER_INSTRUCTION_KEYS = %w[skill instruction prompt command].freeze
       EXIT_RULES = %w[consensus human].freeze
+      WORKSPACES = { "worktree" => :worktree }.freeze
+      HANDOFFS = { "draft_pr" => :draft_pr }.freeze
 
       def self.parse_file(path) = new(path).parse_file
       def self.parse_hash(data, path:) = new(path).parse_hash(data)
@@ -91,6 +95,7 @@ module Hive
         validate_filename_id!(id)
         stages = parse_stages(descriptor["stages"], id: id)
         validate_terminal_last_stage!(stages)
+        validate_workspace_handoff!(stages)
         validate_deliverable_position!(stages)
 
         build_workflow(id, stages)
@@ -123,6 +128,57 @@ module Hive
 
           raise descriptor_error(
             "stage #{stage.name.inspect} deliverable is only consumed on the last stage"
+          )
+        end
+      end
+
+      # Worktree execution and draft-PR delivery are two closed, controller-owned
+      # runtime capabilities. Keep them on the producing terminal agent so an
+      # opt-in cannot silently change the working directory or publish from an
+      # intermediate/council stage. A draft PR additionally needs an explicit
+      # report artifact for the controller to validate and summarize.
+      def validate_workspace_handoff!(stages)
+        last_index = stages.length - 1
+        stages.each_with_index do |stage, index|
+          if stage.handoff
+            unless stage.kind == :agent
+              raise descriptor_error(
+                "stage #{stage.name.inspect} handoff is only valid on an agent stage"
+              )
+            end
+            unless index == last_index
+              raise descriptor_error(
+                "stage #{stage.name.inspect} handoff is only valid on the last stage"
+              )
+            end
+            unless stage.workspace == :worktree
+              raise descriptor_error(
+                "stage #{stage.name.inspect} handoff: draft_pr requires workspace: worktree"
+              )
+            end
+            unless stage.deliverable == "fix-report.md" && stage.state_file == "fix-report.md"
+              raise descriptor_error(
+                "stage #{stage.name.inspect} handoff: draft_pr requires state_file and deliverable fix-report.md"
+              )
+            end
+          end
+
+          next unless stage.workspace
+
+          unless stage.kind == :agent
+            raise descriptor_error(
+              "stage #{stage.name.inspect} workspace is only valid on an agent stage"
+            )
+          end
+          unless index == last_index
+            raise descriptor_error(
+              "stage #{stage.name.inspect} workspace is only valid on the last stage"
+            )
+          end
+          next if stage.handoff == :draft_pr
+
+          raise descriptor_error(
+            "stage #{stage.name.inspect} workspace: worktree requires handoff: draft_pr"
           )
         end
       end
@@ -190,6 +246,8 @@ module Hive
         permissions = parse_permissions(stage, id: id, stage_name: name, label: label)
         input = optional_string(stage["input"], label: "#{label} input")
         deliverable = parse_deliverable(stage["deliverable"], label: label)
+        workspace = parse_closed_enum(stage["workspace"], WORKSPACES, label: "#{label} workspace")
+        handoff = parse_closed_enum(stage["handoff"], HANDOFFS, label: "#{label} handoff")
         condition_policy = parse_condition_policy(stage["conditions"], label: label)
         reviewers = parse_reviewers(stage["reviewers"], id: id, label: label) if kind == :council
         council = parse_council(stage["council"], id: id, label: label, reviewer_count: reviewers&.length) if kind == :council
@@ -212,6 +270,8 @@ module Hive
           reviewers: reviewers,
           council: council,
           deliverable: deliverable,
+          workspace: workspace,
+          handoff: handoff,
           condition_policy: condition_policy,
           permissions: permissions,
           mapping_role: parse_mapping_role(stage["mapping_role"], label: label),
@@ -292,6 +352,14 @@ module Hive
         return nil if value.nil?
 
         parse_state_file(value, label: "#{label} deliverable")
+      end
+
+      def parse_closed_enum(value, allowed, label:)
+        raw = optional_string(value, label: label)
+        return nil if raw.nil?
+        return allowed.fetch(raw) if allowed.key?(raw)
+
+        raise descriptor_error("#{label} #{raw.inspect} must be one of #{allowed.keys.inspect}")
       end
 
       def parse_condition_policy(value, label:)
@@ -491,7 +559,7 @@ module Hive
       def reject_agent_only_fields!(stage, kind:, label:)
         return if [ :agent, :council ].include?(kind)
 
-        present = %w[skill instruction agent model effort budget_usd timeout_sec input reviewers council deliverable permissions mapping_role mapping_contract]
+        present = %w[skill instruction agent model effort budget_usd timeout_sec input reviewers council deliverable workspace handoff permissions mapping_role mapping_contract]
                   .select { |key| stage.key?(key) }
         return if present.empty?
 
@@ -514,7 +582,7 @@ module Hive
       # `permissions` are shared and stay valid on both. Reject the mismatches
       # here (fail-fast, same contract as reject_agent_only_fields!).
       COUNCIL_ONLY_FIELDS = %w[input reviewers council].freeze
-      AGENT_ONLY_FIELDS = %w[skill instruction].freeze
+      AGENT_ONLY_FIELDS = %w[skill instruction workspace handoff].freeze
 
       def reject_wrong_kind_fields!(stage, kind:, label:)
         case kind

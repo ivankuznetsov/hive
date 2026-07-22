@@ -2,10 +2,13 @@ require "open3"
 require "fileutils"
 require "yaml"
 require "hive/config"
+require "hive/git_ref"
 require "hive/git_ops"
+require "hive/atomic_file"
 
 module Hive
   class Worktree
+    STRICT_POINTER_MAX_BYTES = 64 * 1024
     NONINTERACTIVE_FETCH_ENV = {
       "GIT_TERMINAL_PROMPT" => "0",
       "GIT_SSH_COMMAND" => "ssh -oBatchMode=yes -oConnectTimeout=10",
@@ -105,6 +108,86 @@ module Hive
       end
 
       :created
+    end
+
+    # Resolve one remote branch to an exact commit without any local fallback.
+    # Managed draft-PR workflows use this fail-closed path; the older create!
+    # behavior intentionally remains offline-friendly for coding workflows.
+    def fetch_strict_origin_base!(base_branch)
+      branch = self.class.validate_branch_name!(base_branch)
+      raise WorktreeError, "strict worktree requires exactly one origin remote" unless self.class.origin_configured?(@project_root)
+
+      _out, err, status = self.class.fetch_origin_branch(@project_root, branch)
+      unless status.success?
+        raise WorktreeError,
+              "git fetch origin #{branch} failed; strict worktree creation has no local fallback: #{err.to_s.strip[0, 300]}"
+      end
+      unless self.class.origin_branch_ref_exists?(@project_root, branch)
+        raise WorktreeError, "origin/#{branch} was not found after fetch"
+      end
+
+      self.class.run_materialize_git!(
+        @project_root, "rev-parse", "--verify", "refs/remotes/origin/#{branch}^{commit}"
+      ).strip
+    end
+
+    # Create a new task branch only when both its path and ref are unfamiliar.
+    # Existing refs are never attached, reset, or deleted: only a matching
+    # pointer+receipt may authorize validate_strict_resume! on a later run.
+    def create_strict_origin!(branch_name, base_branch:, base_oid:)
+      branch = self.class.validate_branch_name!(branch_name)
+      base = self.class.validate_branch_name!(base_branch)
+      expected = self.class.run_materialize_git!(
+        @project_root, "rev-parse", "--verify", "#{base_oid}^{commit}"
+      ).strip
+      fetched = self.class.run_materialize_git!(
+        @project_root, "rev-parse", "--verify", "refs/remotes/origin/#{base}^{commit}"
+      ).strip
+      unless fetched == expected
+        raise WorktreeError,
+              "origin/#{base} moved while preparing the strict worktree (expected #{expected}, observed #{fetched})"
+      end
+
+      if File.exist?(path) || list_worktree_paths.include?(path)
+        raise WorktreeError, "strict worktree path already exists without a matching handoff receipt: #{path}"
+      end
+      if self.class.local_branch_ref_exists?(@project_root, branch)
+        raise WorktreeError, "task branch #{branch} already exists without a matching handoff receipt"
+      end
+
+      FileUtils.mkdir_p(File.dirname(path))
+      self.class.run_materialize_git!(
+        @project_root, "worktree", "add", path, "-b", branch, expected
+      )
+      validate_strict_resume!(branch_name: branch, base_oid: expected)
+      :created
+    end
+
+    # Resume only exact controller-owned state. This is deliberately read-only:
+    # any mismatch preserves the worktree and branch for operator recovery.
+    def validate_strict_resume!(branch_name:, base_oid:)
+      branch = self.class.validate_branch_name!(branch_name)
+      expected = self.class.run_materialize_git!(
+        @project_root, "rev-parse", "--verify", "#{base_oid}^{commit}"
+      ).strip
+      raise WorktreeError, "strict worktree #{path} is missing or unregistered" unless exists?
+
+      checked_out = self.class.run_materialize_git!(path, "branch", "--show-current").strip
+      unless checked_out == branch
+        raise WorktreeError, "strict worktree #{path} is on branch #{checked_out.inspect}, expected #{branch}"
+      end
+      head = self.class.run_materialize_git!(path, "rev-parse", "HEAD").strip
+      local_head = self.class.run_materialize_git!(
+        @project_root, "rev-parse", "--verify", "refs/heads/#{branch}^{commit}"
+      ).strip
+      raise WorktreeError, "task branch #{branch} does not match worktree HEAD" unless local_head == head
+
+      begin
+        self.class.run_materialize_git!(path, "merge-base", "--is-ancestor", expected, head)
+      rescue WorktreeError
+        raise WorktreeError, "task branch #{branch} does not descend from recorded base #{expected}"
+      end
+      head
     end
 
     # Create a deterministic branch from one exact, already-present commit.
@@ -271,14 +354,18 @@ module Hive
       out.split("\n").select { |l| l.start_with?("worktree ") }.map { |l| l.sub(/\Aworktree /, "").strip }
     end
 
-    def write_pointer!(task_folder, branch_name, execute_base_head: nil)
+    def write_pointer!(task_folder, branch_name, execute_base_head: nil, base_branch: nil,
+                       base_oid: nil, repository: nil)
       data = {
         "path" => path,
         "branch" => branch_name,
         "created_at" => Time.now.utc.iso8601
       }
       data["execute_base_head"] = execute_base_head if execute_base_head
-      File.write(File.join(task_folder, "worktree.yml"), data.to_yaml)
+      data["base_branch"] = base_branch if base_branch
+      data["base_oid"] = base_oid if base_oid
+      data["repository"] = repository if repository
+      Hive::AtomicFile.write(File.join(task_folder, "worktree.yml"), data.to_yaml, mode: 0o600)
     end
 
     def self.read_pointer(task_folder)
@@ -295,6 +382,56 @@ module Hive
       raise WorktreeError, "worktree.yml must be a hash" unless data.is_a?(Hash)
 
       data
+    end
+
+    def self.read_strict_pointer(task_folder, expected_root:, expected: nil)
+      pointer_path = File.join(task_folder, "worktree.yml")
+      source = File.open(pointer_path, File::RDONLY | File::NOFOLLOW) do |file|
+        raise WorktreeError, "worktree.yml must be a regular file" unless file.stat.file?
+
+        value = file.read(STRICT_POINTER_MAX_BYTES + 1)
+        if value.bytesize > STRICT_POINTER_MAX_BYTES
+          raise WorktreeError, "worktree.yml exceeds #{STRICT_POINTER_MAX_BYTES} bytes"
+        end
+        value
+      end
+      keys = source.lines.filter_map { |line| line[/\A([A-Za-z_][A-Za-z0-9_]*):(?:\s|$)/, 1] }
+      duplicates = keys.tally.select { |_key, count| count > 1 }.keys
+      raise WorktreeError, "worktree.yml contains duplicate keys: #{duplicates.join(', ')}" unless duplicates.empty?
+
+      raw = YAML.safe_load(source, permitted_classes: [], permitted_symbols: [], aliases: false)
+      raise WorktreeError, "worktree.yml must be a hash" unless raw.is_a?(Hash)
+
+      required = %w[path branch base_branch base_oid repository]
+      missing = required.reject { |key| raw.key?(key) }
+      raise WorktreeError, "worktree.yml is missing keys: #{missing.join(', ')}" unless missing.empty?
+
+      data = {
+        "path" => validate_pointer_path(raw["path"], expected_root),
+        "branch" => validate_branch_name!(raw["branch"]),
+        "base_branch" => validate_branch_name!(raw["base_branch"]),
+        "base_oid" => raw["base_oid"].to_s.downcase,
+        "repository" => raw["repository"].to_s.strip.downcase
+      }
+      unless data["base_oid"].match?(/\A[0-9a-f]{40,64}\z/)
+        raise WorktreeError, "worktree.yml base_oid is invalid"
+      end
+      unless data["repository"].match?(/\Agithub\.com\/[a-z0-9_.-]+\/[a-z0-9_.-]+\z/i)
+        raise WorktreeError, "worktree.yml repository is invalid"
+      end
+      if expected
+        mismatches = expected.keys.reject { |key| data[key] == expected[key] }
+        unless mismatches.empty?
+          raise WorktreeError, "worktree.yml contradicts saved task state for: #{mismatches.join(', ')}"
+        end
+      end
+      data
+    rescue Errno::ENOENT
+      raise WorktreeError, "worktree.yml is missing"
+    rescue Errno::ELOOP
+      raise WorktreeError, "worktree.yml must be a regular file, not a symlink"
+    rescue Psych::Exception => e
+      raise WorktreeError, "worktree.yml is invalid YAML: #{e.message}"
     end
 
     # Base dir under which per-project worktree roots live by default
@@ -336,6 +473,12 @@ module Hive
       _, _, has_origin = Open3.capture3("git", "-C", project_root,
                                         "config", "remote.origin.url")
       has_origin.success?
+    end
+
+    def self.validate_branch_name!(branch_name)
+      Hive::GitRef.validate_branch_name(branch_name)
+    rescue ArgumentError => e
+      raise WorktreeError, e.message
     end
 
     def self.fetch_origin_branch(project_root, branch_name, timeout_sec: FETCH_TIMEOUT_SEC)

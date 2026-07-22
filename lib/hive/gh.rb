@@ -3,7 +3,9 @@ require "time"
 require "timeout"
 require "uri"
 require "yaml"
+require "hive/git_ref"
 require "hive/gh/repository_identity"
+require "hive/managed_git"
 require "hive/secret_patterns"
 
 module Hive
@@ -104,15 +106,16 @@ module Hive
       raise Hive::GhError, "git push failed: #{result.stderr.strip.empty? ? result.stdout : result.stderr}"
     end
 
-    def remote_branch_oid(worktree_path, branch, cfg: nil, remote: "origin")
+    def remote_branch_oid(worktree_path, branch, cfg: nil, remote: "origin", managed: false)
       name = validated_branch_name(branch)
       remote = validated_remote_target(remote)
 
       ref = "refs/heads/#{name}"
-      out, err, status = capture3(
-        "git", "-C", worktree_path, "ls-remote", "--heads", remote, ref,
-        cfg: cfg
-      )
+      out, err, status = if managed
+        Hive::ManagedGit.capture3(worktree_path, "ls-remote", "--heads", remote, ref)
+      else
+        capture3("git", "-C", worktree_path, "ls-remote", "--heads", remote, ref, cfg: cfg)
+      end
       unless status.success?
         raise Hive::GhError,
               "git ls-remote failed: #{err.to_s.strip.empty? ? out : err}"
@@ -129,6 +132,47 @@ module Hive
       end
 
       oid.downcase
+    end
+
+    # Publish one immutable, already-scanned commit without naming a mutable
+    # local branch. This is intentionally separate from #push_branch: managed
+    # draft-PR handoffs never use force, leases, upstream mutation, or a branch
+    # source that can move between validation and process spawn.
+    def push_exact_oid(worktree_path, head_oid, branch, cfg: nil, remote: "origin")
+      oid = head_oid.to_s.downcase
+      unless oid.match?(/\A[0-9a-f]{40,64}\z/)
+        raise Hive::GhError, "exact push OID is invalid"
+      end
+      name = validated_branch_name(branch)
+      target = validated_remote_target(remote)
+      refspec = "#{oid}:refs/heads/#{name}"
+      out, err, status = Hive::ManagedGit.capture3(
+        worktree_path, "push", target, refspec
+      )
+      PushResult.new(success: status.success?, stdout: out, stderr: err)
+    rescue Hive::GhError => e
+      PushResult.new(success: false, stdout: "", stderr: e.message)
+    end
+
+    # One explicit draft-PR creation attempt. The body is passed by restrictive
+    # tempfile, never argv, and the file is unlinked by Tempfile on every exit
+    # path including command failure, timeout, and interruption unwinding.
+    def create_draft_pr(worktree_path, repository:, host:, head:, base:, title:, body:, cfg: nil)
+      require "tempfile"
+
+      target = RepositoryIdentity.github_repository_target(repository, host)
+      Tempfile.create([ "hive-draft-pr-", ".md" ], mode: File::RDWR, perm: 0o600) do |file|
+        file.write(body)
+        file.flush
+        args = [
+          "gh", "pr", "create", "--repo", target, "--draft",
+          "--head", validated_branch_name(head),
+          "--base", validated_branch_name(base),
+          "--title", title.to_s,
+          "--body-file", file.path
+        ]
+        capture3(*args, chdir: worktree_path, cfg: cfg)
+      end
     end
 
     # Look up all pull requests for `branch`. Returns the raw array from
@@ -207,13 +251,9 @@ module Hive
     end
 
     def validated_branch_name(branch)
-      value = branch.to_s
-      unless value.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._\/-]{0,240}\z/) &&
-             !value.include?("..") && !value.end_with?("/", ".")
-        raise Hive::GhError, "remote branch name is invalid"
-      end
-
-      value
+      Hive::GitRef.validate_branch_name(branch)
+    rescue ArgumentError
+      raise Hive::GhError, "remote branch name is invalid"
     end
     private_class_method :validated_branch_name
 
@@ -277,17 +317,25 @@ module Hive
       repository_identity(worktree_path, cfg: cfg).fetch("repository")
     end
 
-    def repository_identity(worktree_path, cfg: nil, timeout_sec: nil)
+    def repository_identity(worktree_path, cfg: nil, timeout_sec: nil, managed: false)
       repository_identity_from_remote(
-        origin_push_url(worktree_path, cfg: cfg, timeout_sec: timeout_sec)
+        origin_push_url(
+          worktree_path, cfg: cfg, timeout_sec: timeout_sec, managed: managed
+        )
       )
     end
 
-    def origin_push_url(worktree_path, cfg: nil, timeout_sec: nil)
-      out, err, status = capture3(
-        "git", "-C", worktree_path, "remote", "get-url", "--push", "--all", "origin",
-        cfg: cfg, timeout_sec: timeout_sec
-      )
+    def origin_push_url(worktree_path, cfg: nil, timeout_sec: nil, managed: false)
+      out, err, status = if managed
+        Hive::ManagedGit.capture3(
+          worktree_path, "remote", "get-url", "--push", "--all", "origin"
+        )
+      else
+        capture3(
+          "git", "-C", worktree_path, "remote", "get-url", "--push", "--all", "origin",
+          cfg: cfg, timeout_sec: timeout_sec
+        )
+      end
       unless status.success?
         raise Hive::GhError,
               "`git remote get-url --push --all origin` failed in #{worktree_path}: " \

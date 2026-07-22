@@ -328,6 +328,194 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_nil work.agent
     assert_nil work.model
     assert_nil work.effort
+    assert_nil work.workspace
+    assert_nil work.handoff
+  end
+
+  def test_terminal_agent_parses_worktree_draft_pr_handoff
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "managed-fix",
+        "stages" => [
+          { "name" => "inbox", "kind" => "terminal", "state_file" => "idea.md" },
+          {
+            "name" => "fix",
+            "kind" => "agent",
+            "state_file" => "fix-report.md",
+            "skill" => "/fix",
+            "deliverable" => "fix-report.md",
+            "workspace" => "worktree",
+            "handoff" => "draft_pr"
+          }
+        ]
+      },
+      path: "/tmp/managed-fix.yml"
+    )
+
+    fix = workflow.stage_named("fix")
+    assert_equal :worktree, fix.workspace
+    assert_equal :draft_pr, fix.handoff
+    assert fix.frozen?
+  end
+
+  def test_workspace_and_handoff_reject_unknown_enum_values
+    {
+      "workspace" => "checkout",
+      "handoff" => "pull_request"
+    }.each do |field, value|
+      stage = {
+        "name" => "fix", "kind" => "agent", "state_file" => "fix-report.md",
+        "skill" => "/fix", "deliverable" => "fix-report.md",
+        "workspace" => "worktree", "handoff" => "draft_pr"
+      }
+      stage[field] = value
+
+      error = assert_config_error(
+        { "id" => "bad", "stages" => [ stage ] },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, "/tmp/bad.yml"
+      assert_includes error.message, "stage 1 #{field}"
+    end
+  end
+
+  def test_workspace_and_handoff_are_agent_only
+    %w[workspace handoff].each do |field|
+      [
+        { "name" => "done", "kind" => "terminal", "state_file" => "done.md" },
+        {
+          "name" => "review", "kind" => "council", "state_file" => "review.md",
+          "reviewers" => [ { "name" => "one", "prompt" => "Review." } ]
+        }
+      ].each do |stage|
+        stage[field] = field == "workspace" ? "worktree" : "draft_pr"
+        error = assert_config_error(
+          { "id" => "bad", "stages" => [ stage ] },
+          path: "/tmp/bad.yml"
+        )
+
+        assert_includes error.message, "/tmp/bad.yml"
+        assert_includes error.message, field
+        assert_includes error.message, "agent stage"
+      end
+    end
+  end
+
+  def test_workspace_handoff_validation_fails_closed_for_non_agent_stage_objects
+    stage_class = Struct.new(
+      :name, :kind, :state_file, :deliverable, :workspace, :handoff,
+      keyword_init: true
+    )
+    handoff = stage_class.new(
+      name: "done", kind: :inert, state_file: "fix-report.md",
+      deliverable: "fix-report.md", workspace: :worktree, handoff: :draft_pr
+    )
+    workspace = stage_class.new(
+      name: "done", kind: :inert, state_file: "done.md",
+      deliverable: nil, workspace: :worktree, handoff: nil
+    )
+
+    [ handoff, workspace ].each do |stage|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.new("/tmp/bad.yml")
+                                         .send(:validate_workspace_handoff!, [ stage ])
+      end
+      assert_includes error.message, "agent stage"
+    end
+  end
+
+  def test_workspace_and_handoff_are_terminal_stage_only
+    %w[workspace handoff].each do |field|
+      work = {
+        "name" => "work", "kind" => "agent", "state_file" => "work.md",
+        "skill" => "/fix",
+        "workspace" => "worktree"
+      }
+      if field == "handoff"
+        work["deliverable"] = "work.md"
+        work["handoff"] = "draft_pr"
+      end
+
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            work,
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, "/tmp/bad.yml"
+      assert_includes error.message, field
+      assert_includes error.message, "last stage"
+    end
+  end
+
+  def test_draft_pr_requires_worktree_and_explicit_deliverable
+    [
+      [ {}, "workspace: worktree" ],
+      [ { "workspace" => "worktree" }, "deliverable" ]
+    ].each do |extra, message|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            {
+              "name" => "fix", "kind" => "agent", "state_file" => "fix-report.md",
+              "skill" => "/fix", "handoff" => "draft_pr"
+            }.merge(extra)
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, "/tmp/bad.yml"
+      assert_includes error.message, message
+    end
+  end
+
+  def test_worktree_requires_draft_pr_handoff
+    error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          {
+            "name" => "fix", "kind" => "agent", "state_file" => "fix-report.md",
+            "skill" => "/fix", "deliverable" => "fix-report.md",
+            "workspace" => "worktree"
+          }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+
+    assert_includes error.message, "workspace: worktree requires handoff: draft_pr"
+  end
+
+  def test_draft_pr_requires_canonical_report_contract
+    [
+      [ "report.md", "fix-report.md" ],
+      [ "fix-report.md", "report.md" ]
+    ].each do |state_file, deliverable|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            {
+              "name" => "fix", "kind" => "agent", "state_file" => state_file,
+              "skill" => "/fix", "deliverable" => deliverable,
+              "workspace" => "worktree", "handoff" => "draft_pr"
+            }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, "state_file and deliverable fix-report.md"
+    end
   end
 
   def test_parse_file_wraps_yaml_errors_with_path

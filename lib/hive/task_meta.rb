@@ -10,7 +10,7 @@ module Hive
     FILENAME = "meta.yml".freeze
     WRITABLE_FIELDS = %i[
       id slug display_name depends_on workflow workflow_commit
-      workflow_manifest_digest workflow_configuration_digest
+      workflow_manifest_digest workflow_configuration_digest base_branch
     ].freeze
 
     class InvalidMetadata < StandardError; end
@@ -36,6 +36,9 @@ module Hive
         depends_on: normalize_string(raw["depends_on"] || raw[:depends_on]),
         workflow: normalize_string(raw["workflow"] || raw[:workflow])
       }
+      if raw.key?("base_branch") || raw.key?(:base_branch)
+        data[:base_branch] = normalize_string(raw["base_branch"] || raw[:base_branch])
+      end
       if raw.key?("workflow_commit") || raw.key?(:workflow_commit)
         data[:workflow_commit] = normalize_string(raw["workflow_commit"] || raw[:workflow_commit])
       end
@@ -63,19 +66,21 @@ module Hive
       # are observable instead of failing the gate open in silence.
       warn "hive: task_meta: failed to read #{path(task_folder)} " \
            "(#{e.class}: #{e.message}); treating meta as empty " \
-           "(depends_on, workflow dropped; managed provenance dropped)"
+           "(depends_on, workflow, base_branch dropped; managed provenance dropped)"
       empty
     end
 
     def read_for_admission(task_folder)
       source = File.read(path(task_folder))
-      if Hive::Dependencies.duplicate_top_level_key?(source, "depends_on")
-        return AdmissionRead.new(
-          status: :invalid,
-          data: empty,
-          error: "#{path(task_folder)} contains duplicate depends_on declarations",
-          reason: :metadata_invalid
-        )
+      %w[depends_on base_branch].each do |field|
+        if Hive::Dependencies.duplicate_top_level_key?(source, field)
+          return AdmissionRead.new(
+            status: :invalid,
+            data: empty,
+            error: "#{path(task_folder)} contains duplicate #{field} declarations",
+            reason: :metadata_invalid
+          )
+        end
       end
       raw = YAML.safe_load(source)
       unless raw.nil? || raw.is_a?(Hash)
@@ -121,11 +126,12 @@ module Hive
       )
     end
 
-    def write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil,
+    def write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil, base_branch: nil,
               workflow_commit: nil, workflow_manifest_digest: nil, workflow_configuration_digest: nil)
       FileUtils.mkdir_p(task_folder)
       normalized_depends_on = normalize_string(depends_on)
       normalized_workflow = normalize_string(workflow)
+      normalized_base_branch = normalize_string(base_branch)
       normalized_commit = normalize_string(workflow_commit)
       normalized_digest = normalize_string(workflow_manifest_digest)
       normalized_configuration_digest = normalize_string(workflow_configuration_digest)
@@ -142,6 +148,7 @@ module Hive
       }
       data["depends_on"] = normalized_depends_on if normalized_depends_on
       data["workflow"] = normalized_workflow if normalized_workflow
+      data["base_branch"] = normalized_base_branch if normalized_base_branch
       data["workflow_commit"] = normalized_commit if normalized_commit
       data["workflow_manifest_digest"] = normalized_digest if normalized_digest
       data["workflow_configuration_digest"] = normalized_configuration_digest if normalized_configuration_digest
@@ -151,6 +158,7 @@ module Hive
       result = data.transform_keys(&:to_sym).merge(
         depends_on: normalized_depends_on, workflow: normalized_workflow
       )
+      result[:base_branch] = normalized_base_branch if normalized_base_branch
       if normalized_commit
         result[:workflow_commit] = normalized_commit
         result[:workflow_manifest_digest] = normalized_digest
@@ -197,6 +205,7 @@ module Hive
         display_name: normalize_string(fetch(raw, "display_name")),
         depends_on: normalize_string(fetch(raw, "depends_on")),
         workflow: normalize_string(fetch(raw, "workflow")),
+        base_branch: normalize_string(fetch(raw, "base_branch")),
         workflow_commit: normalize_string(fetch(raw, "workflow_commit")),
         workflow_manifest_digest: normalize_string(fetch(raw, "workflow_manifest_digest")),
         workflow_configuration_digest: normalize_string(fetch(raw, "workflow_configuration_digest"))

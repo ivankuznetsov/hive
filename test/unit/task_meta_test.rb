@@ -60,6 +60,18 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_read_for_admission_rejects_duplicate_base_branch_keys
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "meta.yml"), "base_branch: main\nbase_branch: release/next\n")
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :invalid, result.status
+      assert_match(/duplicate base_branch/, result.error)
+      assert_equal :metadata_invalid, result.reason
+    end
+  end
+
   def test_read_for_admission_reports_non_yaml_read_errors
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "meta.yml"))
@@ -150,6 +162,25 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_base_branch_round_trips_and_survives_metadata_updates
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(
+        dir, id: 42, slug: "fix-ui", display_name: nil,
+        workflow: "async-fix", base_branch: "release/next"
+      )
+
+      assert_equal "release/next", Hive::TaskMeta.read(dir)[:base_branch]
+
+      Hive::TaskMeta.update_display_name(dir, "Fix UI")
+      Hive::TaskMeta.update_id(dir, 43)
+
+      meta = Hive::TaskMeta.read(dir)
+      assert_equal "release/next", meta[:base_branch]
+      assert_equal "Fix UI", meta[:display_name]
+      assert_equal 43, meta[:id]
+    end
+  end
+
   def test_read_surfaces_workflow_selector
     with_tmp_dir do |dir|
       File.write(File.join(dir, "meta.yml"), "workflow: research\n")
@@ -213,7 +244,7 @@ class TaskMetaTest < Minitest::Test
       result = nil
       _out, err = capture_io { result = Hive::TaskMeta.read(dir) }
       assert_equal Hive::TaskMeta.empty, result
-      assert_match(/depends_on, workflow dropped; managed provenance dropped/, err,
+      assert_match(/depends_on, workflow, base_branch dropped; managed provenance dropped/, err,
                    "a YAML parse failure must warn that depends_on (and the " \
                    "workflow selector) were dropped")
     end

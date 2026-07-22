@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hv, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-07-20
+updated: 2026-07-21
 tags: [cli, api, skills, agents, operational, provisioning]
 ---
 
@@ -35,10 +35,10 @@ values can be treated as a command argument or task target. `hive new` has a
 special lift-and-rebuild path: standalone allow-listed options are lifted from
 before the project, between project and text, or after text, then the remaining
 `PROJECT TEXT...` tail is protected with `--` so Thor does not parse literal
-task text as options. The allow-list is `--workflow`/`--depends-on` (whose value
+task text as options. The allow-list is `--workflow`/`--depends-on`/`--base` (whose value
 is the next token, but only when that token exists and is not option-like — a
-trailing or value-less `--workflow`/`--depends-on` stays literal text rather than
-swallowing PROJECT), their `--workflow=VALUE`/`--depends-on=VALUE` `name=`-prefix
+trailing or value-less `--workflow`/`--depends-on`/`--base` stays literal text rather than
+swallowing PROJECT), their `--workflow=VALUE`/`--depends-on=VALUE`/`--base=VALUE` `name=`-prefix
 forms, and JSON booleans lifted only in their exact accepted forms (`--json`,
 `--json=true`, `--no-json`, etc.). Non-allow-listed tokens such
 as `--help`, unsupported-looking `--json=...` assignments after `PROJECT`,
@@ -88,7 +88,7 @@ contracts retain their established unversioned or schema-less shapes.
 | Command | Synopsis | Routes to | Page |
 |---------|----------|-----------|------|
 | `hive init [PROJECT_PATH] [--json] [--refactor-patrol\|--no-refactor-patrol]` | Bootstrap `.hive-state` plus managed llm-wiki context; fresh projects enable architecture discovery by default, and the boolean flag resolves it before any state write; `--json` emits `hive-init.v2` | `Hive::Commands::Init` | [[commands/init]] |
-| `hive new PROJECT TEXT...` | Create a task in `1-inbox/` of a registered project, writing `idea.md` plus `meta.yml`; stdout prints a next-step hint that uses the numeric task id when allocation succeeds | `Hive::Commands::New` | [[commands/new]] |
+| `hive new PROJECT TEXT... [--workflow ID] [--depends-on TASK] [--base BRANCH] [--json]` | Create a task in `1-inbox/` of a registered project, writing the request plus `meta.yml`; `--base` records the exact non-stacked origin base for managed draft-PR workflows, and stdout uses the numeric task id when allocation succeeds | `Hive::Commands::New` | [[commands/new]] |
 | `hive workflow new ID [--json]` | Scaffold a blank per-project workflow descriptor plus placeholder instruction under `<hive_state_path>/workflows/` | `Hive::Commands::Workflow` | [[commands/workflow]] |
 | `hive generate-name TARGET [--project NAME] [--stage STAGE]` | Generate and persist a short display title for a task; target resolves by path, slug, or numeric id | `Hive::Commands::GenerateName` | [[commands/generate-name]] |
 | `hive status [--operational [--json] \| --full \| --diagnose SLUG ...]` | Default/`--operational` is the concise closed-state human view; `--operational --json` emits `hive-operational-status.v1`; bare `--json` retains complete `hive-status.v6`; `--full` retains the detailed table. Diagnosis keeps its existing bounded read/write surface. | `Hive::Commands::Status` | [[commands/status]] |

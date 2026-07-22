@@ -119,7 +119,13 @@ module Hive
         # `--no-rebase` flag: one-off override of `cfg.rebase.enabled`.
         # Use the same shape as the cfg-disabled path so JSON consumers
         # see the disabled result; distinguish by reason for ops debugging.
-        if @no_rebase
+        if task.workflow.draft_pr_handoff?
+          # Managed handoff receipts pin an exact base/head pair. Rewriting the
+          # task worktree before receipt reconciliation would invalidate the
+          # controller's already-scanned identity and could invoke a second
+          # conflict-resolution agent on a one-agent workflow.
+          result = Hive::Rebase::Result.skipped(:managed_draft_pr_handoff)
+        elsif @no_rebase
           result = Hive::Rebase::Result.skipped(:cli_override)
         else
           result = Hive::Rebase.perform(task, cfg)

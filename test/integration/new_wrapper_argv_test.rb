@@ -142,6 +142,18 @@ class NewWrapperArgvTest < Minitest::Test
     end
   end
 
+  def test_base_option_is_lifted_and_rejected_as_structured_input_for_non_handoff_workflow
+    with_cli_project do |home, project_root, project|
+      _out, err, status = run_hive(
+        home, "new", project, "ordinary task", "--base", "release/next", chdir: project_root
+      )
+
+      refute status.success?
+      assert_includes err, "--base is only valid for a workflow with draft-PR handoff"
+      assert_empty task_folders(project_root), "structured --base must not be swallowed into task text"
+    end
+  end
+
   def test_literal_double_dash_keeps_following_options_as_text
     with_cli_project do |home, project_root, project|
       _out, err, status = run_hive(home, "new", project, "--", "--workflow", "id", "text", chdir: project_root)

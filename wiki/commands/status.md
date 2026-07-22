@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-07-20
+updated: 2026-07-21
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, dependencies, scheduler]
 ---
 
@@ -115,7 +115,13 @@ and the unchanged compatibility JSON where relevant.
 
 Rows also include `workflow`, the descriptor id that resolved the task (`"coding"` for legacy/default rows, or the `meta.yml workflow:`/project default id for registered non-coding tasks). Row-based consumers such as the daemon and Telegram bot use it to keep coding-only plan/brainstorm/review/finalize behavior from firing for generic tasks.
 
-Rows also include `pr_url`: once a coding task reaches `5-open-pr` or later, status reads `<task>/pr.md` frontmatter through `Hive::Gh.pr_frontmatter` and emits a stripped non-empty `pr_url`; before a PR exists, or when `pr.md` is missing, blank, or malformed, the field is `null`. This is a sibling task-payload field, not copied out of marker attrs, so consumers do not need to scrape `<!-- COMPLETE pr_url=... -->`.
+Rows also include `pr_url`: coding tasks expose it from `5-open-pr` onward,
+while any workflow declaring `handoff: draft_pr` exposes it as soon as the
+controller has written verified `<task>/pr.md` metadata. Status reads that
+frontmatter through `Hive::Gh.pr_frontmatter` and emits a stripped non-empty
+URL; before verification, or when `pr.md` is missing, blank, or malformed, the
+field is `null`. This is a sibling task-payload field, not copied out of marker
+attrs, so consumers do not need to scrape `<!-- COMPLETE pr_url=... -->`.
 
 Condition-aware rows add `condition_task_generation`, `commit_generation`,
 `current_attempt`, `conditions`, `condition_history`, `evidence`,

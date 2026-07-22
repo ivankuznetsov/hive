@@ -3,8 +3,8 @@ title: hive new
 type: command
 source: bin/hive, lib/hive/commands/new.rb, templates/idea.md.erb
 created: 2026-04-25
-updated: 2026-07-16
-tags: [command, capture, slug, task-id, commit-lock, workflow, dependencies]
+updated: 2026-07-21
+tags: [command, capture, slug, task-id, commit-lock, workflow, dependencies, base-branch]
 ---
 
 **TLDR**: `hive new PROJECT TEXT...` captures an idea: derives a slug, resolves the effective workflow (`--workflow` override, project `default_workflow`, then `coding`), scaffolds the descriptor's entry-stage folder plus state file and `meta.yml`, commits it on the `hive/state` branch, and best-effort starts display-name generation after the commit.
@@ -12,7 +12,7 @@ tags: [command, capture, slug, task-id, commit-lock, workflow, dependencies]
 ## Usage
 
 ```
-hive new PROJECT [--workflow NAME] [--depends-on ID_OR_SLUG_OR_PROJECT_SLUG] TEXT...
+hive new PROJECT [--workflow NAME] [--base BRANCH] [--depends-on ID_OR_SLUG_OR_PROJECT_SLUG] TEXT...
 ```
 
 `PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into the workflow entry state's file. Empty text raises `Hive::Error("missing task text")`. `--workflow NAME` is validated against `Hive::Workflows::Registry`; unknown names fail before seeding a task and list valid names.
@@ -24,8 +24,16 @@ cross-project form. Lists, mappings, blanks, malformed separators, and
 normalized value; existence, repository identity, cycles, plan agreement, and
 gate reachability are revalidated at status/dispatch boundaries.
 
+`--base BRANCH` is structured input for a workflow whose terminal agent
+declares `workspace: worktree` plus `handoff: draft_pr`. Hive validates and
+stores it as `base_branch:`; it is never inferred from the task prose. When
+omitted for such a workflow, Hive records the project's configured Git default
+branch (or Git's detected default when configuration is blank). Other workflows
+reject `--base`, and draft-PR workflows reject `--depends-on` stacking in v1.
+
 The executable wrapper lifts standalone allow-listed `new` options from anywhere
-outside an explicit `--`: `--workflow NAME`, `--workflow=NAME`,
+outside an explicit `--`: `--workflow NAME`, `--workflow=NAME`, `--base BRANCH`,
+`--base=BRANCH`,
 `--depends-on VALUE`, `--depends-on=VALUE`, and Thor-style JSON booleans. The
 first remaining positional is `PROJECT`; the rest remains literal task text
 behind a `--` sentinel. That makes the canonical workflow-authoring hint work:
@@ -77,7 +85,7 @@ A `slug_override:` keyword is reserved on the constructor but not exposed as a C
 
 1. `Hive::Config.find_project(name)` → resolve `hive_state_path`. Exits 1 if not found.
 2. Validate slug → exits 1 with `"invalid slug"` or `"reserved or unsafe slug"` on failure.
-3. Parse `--depends-on` through `Hive::Dependencies.parse_reference`, then resolve the effective workflow. A CLI override wins over project `default_workflow`, which wins over `coding`.
+3. Parse `--depends-on` through `Hive::Dependencies.parse_reference`, then resolve the effective workflow. A CLI override wins over project `default_workflow`, which wins over `coding`. Draft-PR workflows reject dependency stacking and resolve an explicit or project-default `base_branch` before creating the task folder.
 4. `mkdir -p <hive_state_path>/stages/<entry-stage>/<slug>` — exits 1 with `"slug collision"` if the directory already exists (rare; user retries to regenerate the random suffix).
 5. Write the entry state from `templates/idea.md.erb`. Frontmatter:
    ```
@@ -109,9 +117,10 @@ id: 1
 slug: add-inbox-filter-260603-abcd
 display_name:
 depends_on: api:base-task-260716-abcd
+base_branch: main
 ```
 
-`id` comes from the process-global counter at `Hive::Paths.task_counter_path` (`<state_home>/task-counter.yml`), protected by `<state_home>/.task-counter.lock`. `display_name` starts nil; `Hive::Task#display_label` falls back to the slug until name generation succeeds. `depends_on` is omitted when not supplied and remains the authoritative scheduling declaration when present. `workflow:` is omitted for plain coding captures, but set for explicit overrides and non-coding project defaults.
+`id` comes from the process-global counter at `Hive::Paths.task_counter_path` (`<state_home>/task-counter.yml`), protected by `<state_home>/.task-counter.lock`. `display_name` starts nil; `Hive::Task#display_label` falls back to the slug until name generation succeeds. `depends_on` is omitted when not supplied and remains the authoritative scheduling declaration when present. `workflow:` is omitted for plain coding captures, but set for explicit overrides and non-coding project defaults. `base_branch:` is omitted outside draft-PR workflows and is authoritative when present.
 
 ## Tests
 

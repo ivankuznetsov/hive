@@ -10,6 +10,7 @@ require "hive/conditions/migration"
 require "hive/plan_frontmatter"
 require "hive/task_projection/store"
 require "hive/markers"
+require "hive/draft_pr_receipt"
 
 module Hive
   # Classifier that turns a (Task, Marker) pair into a user-facing
@@ -157,6 +158,11 @@ module Hive
       generic_needs_input: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
         label: "Needs your input",
+        command: "run"
+      },
+      recover_draft_pr: {
+        key: Hive::Schemas::TaskActionKind::RECOVER_DRAFT_PR,
+        label: "Retry draft PR handoff manually",
         command: "run"
       },
       done: {
@@ -326,6 +332,9 @@ module Hive
       if marker.name == :agent_working
         return ACTIONS.fetch(:error) if stale_agent_reason
         return ACTIONS.fetch(:agent_running)
+      end
+      if marker.name == :error && marker.attrs["reason"].to_s == Hive::DraftPrReceipt::RECOVERABLE_REASON
+        return ACTIONS.fetch(:recover_draft_pr)
       end
       return ACTIONS.fetch(:error) if marker.name == :error
       return ACTIONS.fetch(:manual_steering) if marker.name == :manual_steering

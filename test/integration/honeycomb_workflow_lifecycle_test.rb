@@ -123,6 +123,102 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
     end
   end
 
+  def test_mapping_recommendation_precedence_and_preview_apply_parity
+    with_tmp_git_repo do |registry|
+      versions = {}
+      publish_version(
+        registry, versions, "1.0.0", "Inspect the task.\n",
+        mapping_recommendations: [ { "slot" => "stages.work", "effort" => "medium" } ]
+      )
+      with_project do |project|
+        lifecycle = Hive::Web::WorkflowLifecycle.new(
+          registry_client_factory: lambda do
+            Hive::WorkflowPackage::RegistryClient.new(repository: registry)
+          end,
+          committer: ->(*) { }
+        )
+        web_project = { "path" => project }
+        preview = lifecycle.preview_install(web_project, source: "honeycomb/demo@1.0.0")
+        installed = lifecycle.install(
+          web_project,
+          source: "honeycomb/demo@1.0.0",
+          expected: preview.slice(
+            "name", "version", "catalog_commit", "source_commit", "manifest_digest",
+            "configuration_digest"
+          )
+        )
+
+        assert_equal "medium", preview.dig("mappings", 0, "effort")
+        assert_equal preview.fetch("configuration_digest"), installed.fetch("configuration_digest")
+        assert_equal preview.fetch("mappings"), installed.fetch("mappings")
+
+        publish_version(
+          registry, versions, "1.1.0", "Inspect the task and report clearly.\n",
+          mapping_recommendations: [ { "slot" => "stages.work", "effort" => "low" } ]
+        )
+        update_preview = lifecycle.preview_update(web_project, name: "demo")
+        assert_equal "medium", update_preview.dig("mappings", 0, "effort")
+
+        updated = lifecycle.update(
+          web_project,
+          name: "demo",
+          expected: update_preview.slice(
+            "from_commit", "from_manifest_digest", "from_configuration_digest",
+            "to_commit", "manifest_digest", "configuration_digest"
+          ),
+          allow_escalation: false
+        )
+        assert_equal update_preview.fetch("configuration_digest"), updated.fetch("configuration_digest")
+        assert_equal update_preview.fetch("mappings"), updated.fetch("mappings")
+      end
+    end
+  end
+
+  def test_interactive_install_displays_and_can_customize_recommended_effort
+    with_tmp_git_repo do |registry|
+      versions = {}
+      publish_version(
+        registry, versions, "1.0.0", "Inspect the task.\n",
+        mapping_recommendations: [ { "slot" => "stages.work", "effort" => "medium" } ]
+      )
+      with_project do |project|
+        output = StringIO.new
+        payload = Hive::Commands::Workflow::Install.new(
+          "honeycomb/demo@1.0.0", project_root: project, json: false, dry_run: true,
+          stdin: TTYInput.new("no\n\n\nhigh\n"), stdout: output,
+          registry_client: Hive::WorkflowPackage::RegistryClient.new(repository: registry),
+          committer: ->(*) { }
+        ).call!
+
+        assert_equal "high", payload.dig("mappings", 0, "effort")
+        assert_includes output.string, "effort=medium"
+        assert_includes output.string, "stages.work model [unpinned]"
+        assert_includes output.string, "stages.work effort [medium]"
+        assert_includes output.string, "effort=high"
+      end
+    end
+  end
+
+  def test_interactive_unpinned_value_clears_recommended_effort
+    with_tmp_git_repo do |registry|
+      versions = {}
+      publish_version(
+        registry, versions, "1.0.0", "Inspect the task.\n",
+        mapping_recommendations: [ { "slot" => "stages.work", "effort" => "medium" } ]
+      )
+      with_project do |project|
+        payload = Hive::Commands::Workflow::Install.new(
+          "honeycomb/demo@1.0.0", project_root: project, json: false, dry_run: true,
+          stdin: TTYInput.new("no\n\n\nunpinned\n"), stdout: StringIO.new,
+          registry_client: Hive::WorkflowPackage::RegistryClient.new(repository: registry),
+          committer: ->(*) { }
+        ).call!
+
+        assert_nil payload.dig("mappings", 0, "effort")
+      end
+    end
+  end
+
   def test_install_discloses_same_name_optional_input_without_persisting_or_printing_its_value
     with_tmp_git_repo do |registry|
       versions = {}
@@ -332,10 +428,13 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
     }
   end
 
-  def publish_version(repository, versions, version, instruction)
+  def publish_version(repository, versions, version, instruction, mapping_recommendations: nil)
     package = File.join(repository, "packages", "demo", version)
     source_revision = Digest::SHA1.hexdigest("demo-#{version}")
-    manifest = write_package(package, version, instruction, source_revision: source_revision)
+    manifest = write_package(
+      package, version, instruction, source_revision: source_revision,
+      mapping_recommendations: mapping_recommendations
+    )
     run!("git", "-C", repository, "add", "packages/demo/#{version}")
     run!("git", "-C", repository, "commit", "-m", "package #{version}", "--quiet")
     review_head = run!("git", "-C", repository, "rev-parse", "HEAD").strip
@@ -355,7 +454,7 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
     { source_commit: catalog_commit, manifest_digest: manifest.fetch("release_sha256") }
   end
 
-  def write_package(package, version, instruction, source_revision:)
+  def write_package(package, version, instruction, source_revision:, mapping_recommendations: nil)
     FileUtils.mkdir_p(File.join(package, "instructions"))
     FileUtils.mkdir_p(File.join(package, "assets"))
     File.write(File.join(package, "README.md"), "# Demo #{version}\n")
@@ -399,6 +498,7 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
         "tools" => []
       }
     }
+    manifest.fetch("x-hive")["mapping_recommendations"] = mapping_recommendations if mapping_recommendations
     manifest["release_sha256"] = Digest::SHA256.hexdigest(
       Hive::WorkflowPackage::CanonicalYAML.dump_manifest(manifest, include_release: false)
     )

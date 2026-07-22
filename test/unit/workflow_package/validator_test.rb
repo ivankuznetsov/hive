@@ -99,6 +99,27 @@ class WorkflowPackageValidatorTest < Minitest::Test
     end
   end
 
+  def test_managed_package_rejects_malformed_worktree_handoff_descriptor
+    with_package do |root|
+      File.write(File.join(root, "workflow.yml"), <<~YAML)
+        id: demo
+        stages:
+          - name: fix
+            kind: agent
+            state_file: fix-report.md
+            instruction: instructions/work.md
+            deliverable: fix-report.md
+            handoff: draft_pr
+      YAML
+      write_manifest(root)
+
+      result = Hive::WorkflowPackage::Validator.validate(root, expected_name: "demo")
+
+      refute result.valid?
+      assert_includes result.errors.map(&:rule_id), "descriptor.invalid"
+    end
+  end
+
   def test_unexpected_descriptor_config_errors_are_redacted
     validator = Hive::WorkflowPackage::Validator.new(
       Dir.pwd, expected_name: nil, expected_manifest_digest: nil, managed: true
@@ -188,6 +209,94 @@ class WorkflowPackageValidatorTest < Minitest::Test
     assert_includes rules, "mapping.invalid_role"
   end
 
+  def test_managed_validation_rejects_malformed_worktree_handoff_contracts
+    workflows = [
+      Hive::Workflow.new(
+        id: :demo,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "done", index: 1, state_file: "done.md", kind: :inert,
+            workspace: :worktree
+          )
+        ]
+      ),
+      Hive::Workflow.new(
+        id: :demo,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "fix", index: 1, state_file: "fix-report.md", kind: :agent,
+            deliverable: "fix-report.md", handoff: :draft_pr
+          )
+        ]
+      ),
+      Hive::Workflow.new(
+        id: :demo,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "fix", index: 1, state_file: "fix-report.md", kind: :agent,
+            workspace: :worktree, handoff: :draft_pr
+          )
+        ]
+      ),
+      Hive::Workflow.new(
+        id: :demo,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "fix", index: 1, state_file: "fix-report.md", kind: :agent,
+            deliverable: "fix-report.md", workspace: :worktree
+          )
+        ]
+      ),
+      Hive::Workflow.new(
+        id: :demo,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "fix", index: 1, state_file: "report.md", kind: :agent,
+            deliverable: "report.md", workspace: :worktree, handoff: :draft_pr
+          )
+        ]
+      )
+    ]
+    validator = Hive::WorkflowPackage::Validator.new(
+      Dir.pwd, expected_name: nil, expected_manifest_digest: nil, managed: true
+    )
+
+    rules = workflows.flat_map do |workflow|
+      diagnostics = []
+      validator.send(:validate_managed_workflow, workflow, diagnostics, registry: true)
+      diagnostics.map(&:rule_id)
+    end
+
+    assert_includes rules, "workspace.invalid_contract"
+    assert_operator rules.count("workspace.invalid_contract"), :>=, 2
+    assert_operator rules.count("handoff.invalid_contract"), :>=, 3
+  end
+
+  def test_managed_worktree_handoff_still_rejects_embedded_execution_identity
+    workflow = Hive::Workflow.new(
+      id: :demo,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "fix", index: 1, state_file: "fix-report.md", kind: :agent,
+          instruction: "instructions/fix.md", permissions: "yolo",
+          mapping_role: "development", mapping_contract: "demo-fix-v1",
+          agent: "codex", model: "gpt", effort: "medium",
+          deliverable: "fix-report.md", workspace: :worktree, handoff: :draft_pr
+        )
+      ]
+    )
+    diagnostics = []
+    validator = Hive::WorkflowPackage::Validator.new(
+      Dir.pwd, expected_name: nil, expected_manifest_digest: nil, managed: true
+    )
+
+    validator.send(:validate_managed_workflow, workflow, diagnostics, registry: true)
+
+    assert_includes diagnostics.map(&:rule_id), "mapping.embedded_identity"
+    refute_includes diagnostics.map(&:rule_id), "workspace.invalid_contract"
+    refute_includes diagnostics.map(&:rule_id), "handoff.invalid_contract"
+  end
+
   def test_registry_extension_rejects_invalid_shapes_paths_and_inventory
     manifest_type = Struct.new(:data, :file_entries)
     workflow = Struct.new(:stages).new([])
@@ -239,6 +348,71 @@ class WorkflowPackageValidatorTest < Minitest::Test
     assert_includes rules, "x-hive.invalid_input_slots"
   end
 
+  def test_registry_mapping_recommendations_accept_only_sorted_executable_effort_entries
+    validator = Hive::WorkflowPackage::Validator.new(
+      Dir.pwd, expected_name: nil, expected_manifest_digest: nil, managed: true
+    )
+    workflow = recommendation_workflow
+    manifest_type = Struct.new(:data, :file_entries)
+    extension = lambda do |recommendations|
+      manifest_type.new({
+        "x-hive" => {
+          "mapping_recommendations" => recommendations,
+          "optional_inputs" => [],
+          "tools" => []
+        }
+      }, [])
+    end
+
+    diagnostics = []
+    validator.send(
+      :validate_hive_extension,
+      extension.call([
+        { "slot" => "stages.draft", "effort" => "medium" },
+        { "slot" => "stages.review", "effort" => "high" }
+      ]),
+      workflow,
+      diagnostics
+    )
+    assert_empty diagnostics
+
+    diagnostics = []
+    validator.send(
+      :validate_hive_extension,
+      extension.call([ { "slot" => "stages.draft" } ]),
+      workflow,
+      diagnostics
+    )
+    assert_empty diagnostics
+
+    malformed = [
+      [ { "slot" => "stages.draft", "effort" => "turbo" } ],
+      [ { "slot" => "stages.draft", "agent" => "codex" } ],
+      [ { "slot" => "stages.draft", "model" => "gpt" } ],
+      [ { "slot" => "stages.draft", "unknown" => true } ]
+    ]
+    malformed.each do |recommendations|
+      diagnostics = []
+      validator.send(:validate_hive_extension, extension.call(recommendations), workflow, diagnostics)
+      assert_includes diagnostics.map(&:rule_id), "x-hive.invalid_mapping_recommendations"
+    end
+
+    [
+      [ { "slot" => "stages.review" }, { "slot" => "stages.draft" } ],
+      [ { "slot" => "stages.draft" }, { "slot" => "stages.draft", "effort" => "medium" } ]
+    ].each do |recommendations|
+      diagnostics = []
+      validator.send(:validate_hive_extension, extension.call(recommendations), workflow, diagnostics)
+      assert_includes diagnostics.map(&:rule_id), "x-hive.invalid_mapping_recommendation_order"
+    end
+
+    %w[stages.missing stages.done].each do |slot|
+      diagnostics = []
+      validator.send(:validate_hive_extension, extension.call([ { "slot" => slot } ]), workflow, diagnostics)
+      assert_includes diagnostics.map(&:rule_id), "x-hive.invalid_mapping_recommendation_slots"
+    end
+  end
+
   private
 
   def metadata
@@ -286,5 +460,26 @@ class WorkflowPackageValidatorTest < Minitest::Test
       YAML
       yield root
     end
+  end
+
+  def recommendation_workflow
+    Hive::Workflow.new(
+      id: :demo,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "draft", index: 1, state_file: "draft.md", kind: :agent,
+          instruction: "/tmp/draft.md", permissions: "yolo",
+          mapping_role: "development", mapping_contract: "draft-v1"
+        ),
+        Hive::Workflow::Stage.new(
+          name: "review", index: 2, state_file: "review.md", kind: :agent,
+          instruction: "/tmp/review.md", permissions: "yolo",
+          mapping_role: "reviewer", mapping_contract: "review-v1"
+        ),
+        Hive::Workflow::Stage.new(
+          name: "done", index: 3, state_file: "done.md", kind: :inert
+        )
+      ]
+    )
   end
 end

@@ -94,7 +94,7 @@ module Hive
         manifest_path = File.join(path, "manifest.yml")
         stat = secure_file!(manifest_path)
         raise PublishRecoveryError, "retained manifest is oversized" if stat.size > MAX_RECEIPT_BYTES
-        package_digest = Digest::SHA256.file(manifest_path).hexdigest
+        package_digest = ::Digest::SHA256.file(manifest_path).hexdigest
         unless secure_equal?(package_digest, receipt.package_digest)
           raise PublishRecoveryError, "retained bundle manifest digest does not match its receipt"
         end
@@ -124,12 +124,12 @@ module Hive
       def bundles_root = File.join(root, "bundles")
 
       def identity_key(registry, name, version)
-        Digest::SHA256.hexdigest([ registry, name, version ].join("\0"))
+        ::Digest::SHA256.hexdigest([ registry, name, version ].join("\0"))
       end
 
       def persist_bundle(package)
         source_manifest = File.join(package.root, "manifest.yml")
-        source_digest = Digest::SHA256.file(source_manifest).hexdigest
+        source_digest = ::Digest::SHA256.file(source_manifest).hexdigest
         unless secure_equal?(source_digest, package.package_digest)
           raise PublishRecoveryError, "validated package manifest changed before retention"
         end

@@ -108,7 +108,7 @@ module Hive
           RegistryManifest.load(file.path)
         end
         {
-          package_digest: Digest::SHA256.hexdigest(bytes),
+          package_digest: ::Digest::SHA256.hexdigest(bytes),
           release_digest: manifest.data.fetch("release_sha256")
         }
       rescue PackageError, KeyError
@@ -139,7 +139,7 @@ module Hive
       end
 
       def prepare_commit(package, repository:, base_branch:, base_oid:, head_repository:, branch:)
-        key = Digest::SHA256.hexdigest([ repository, package.name, package.version, package.release_digest ].join("\0"))
+        key = ::Digest::SHA256.hexdigest([ repository, package.name, package.version, package.release_digest ].join("\0"))
         checkout = File.join(@objects_root, key)
         FileUtils.mkdir_p(@objects_root, mode: 0o700)
         File.chmod(0o700, @objects_root)

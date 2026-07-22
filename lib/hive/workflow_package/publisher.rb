@@ -164,7 +164,7 @@ module Hive
       end
 
       def retained_receipt_path?(registry)
-        key = Digest::SHA256.hexdigest([ registry, @name, @version ].join("\0"))
+        key = ::Digest::SHA256.hexdigest([ registry, @name, @version ].join("\0"))
         path = File.join(Hive::Paths.workflow_publish_receipts_root, "#{key}.json")
         File.exist?(path) || File.symlink?(path)
       end

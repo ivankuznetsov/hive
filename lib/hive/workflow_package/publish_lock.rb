@@ -10,7 +10,7 @@ module Hive
         locks = File.join(root, "locks")
         ensure_private_directory!(root)
         ensure_private_directory!(locks)
-        path = File.join(locks, "#{Digest::SHA256.hexdigest(identity.to_s)}.lock")
+        path = File.join(locks, "#{::Digest::SHA256.hexdigest(identity.to_s)}.lock")
         flags = File::RDWR | File::CREAT
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
         file = File.open(path, flags, 0o600)

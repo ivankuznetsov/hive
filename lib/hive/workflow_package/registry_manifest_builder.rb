@@ -41,7 +41,7 @@ module Hive
           "files" => files,
           "x-hive" => hive_extension
         }
-        release_digest = Digest::SHA256.hexdigest(
+        release_digest = ::Digest::SHA256.hexdigest(
           CanonicalYAML.dump_manifest(document, include_release: false)
         )
         document["release_sha256"] = release_digest
@@ -52,7 +52,7 @@ module Hive
         manifest = RegistryManifest.load(path)
         Build.new(
           manifest: manifest, bytes: bytes.freeze,
-          package_digest: Digest::SHA256.hexdigest(bytes).freeze,
+          package_digest: ::Digest::SHA256.hexdigest(bytes).freeze,
           release_digest: release_digest.freeze
         ).freeze
       end
@@ -93,7 +93,7 @@ module Hive
       def payload_hashes
         prefix = "packages/#{@name}/#{@version}/"
         @snapshot.files.keys.sort.to_h do |relative|
-          [ "#{prefix}#{relative}", Digest::SHA256.file(File.join(@destination, relative)).hexdigest ]
+          [ "#{prefix}#{relative}", ::Digest::SHA256.file(File.join(@destination, relative)).hexdigest ]
         end
       end
 

@@ -28,7 +28,7 @@ module Hive
 
       def self.load(path: PATH, expected_sha256: CONTRACT_SHA256)
         bytes = File.binread(path)
-        digest = Digest::SHA256.hexdigest(bytes)
+        digest = ::Digest::SHA256.hexdigest(bytes)
         unless SHA256.match?(expected_sha256.to_s) && secure_equal?(digest, expected_sha256)
           raise Hive::ConfigError, "Honeycomb lint policy integrity check failed"
         end

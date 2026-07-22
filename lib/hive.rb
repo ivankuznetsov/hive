@@ -42,8 +42,8 @@ module Hive
       # (`hive daemon queue [list|show|prune]`). See AN-1/2/3 and
       # `Hive::Commands::Daemon#queue_command`.
       "hive-daemon-queue" => 1,
-      "hive-patrol" => 2,
-      "hive-patrol-finding" => 2,
+      "hive-patrol" => 3,
+      "hive-patrol-finding" => 3,
       "hive-refactor-patrol" => 3,
       "hive-refactor-patrol-jobs" => 1,
       "hive-refactor-patrol-thesis" => 3,
@@ -504,6 +504,14 @@ module Hive
   end
 
   class InvalidTaskPath < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
+  # Generic command-line usage failure. Unlike InvalidTaskPath, this does not
+  # imply that a task identifier or filesystem path was malformed.
+  class UsageError < Error
     def exit_code
       ExitCodes::USAGE
     end

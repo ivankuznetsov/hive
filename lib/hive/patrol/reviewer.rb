@@ -11,6 +11,7 @@ require "hive/patrol/review_error_details"
 require "hive/patrol/source_reader"
 require "hive/patrol/state_store"
 require "hive/patrol/token_budget"
+require "hive/patrol/validator"
 require "hive/stages/base"
 
 module Hive
@@ -34,6 +35,7 @@ module Hive
 
       TemplateBindings = Struct.new(
         :project_root, :feature, :output_path, :max_findings, :user_supplied_tag,
+        :validation_keys,
         keyword_init: true
       ) do
         def binding_for_erb = binding
@@ -116,6 +118,7 @@ module Hive
             feature: bounded_prompt_feature(feature),
             output_path: output_path,
             max_findings: max_findings,
+            validation_keys: configured_validation_keys,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
@@ -167,7 +170,6 @@ module Hive
 
           finding
         end
-        findings.each { |finding| @state.write_finding(finding) }
         findings
       end
 
@@ -206,6 +208,8 @@ module Hive
         return nil if PRODUCTION_CATEGORIES.include?(category) && evidence.none? { |item| production_evidence?(item) }
         return nil unless slice_anchored?(feature, evidence)
         evidence = prioritize_slice_evidence(feature, evidence)
+        validation_key = normalized_validation_key(raw["validation_key"])
+        return nil if configured_validation_keys.any? && validation_key.nil?
 
         finding = Finding.new(
           id: "#{feature.id}-#{run_id}-#{idx + 1}",
@@ -222,6 +226,7 @@ module Hive
           root_cause: raw["root_cause"],
           reproduction: raw["reproduction"],
           validation: raw["validation"],
+          validation_key: validation_key,
           evidence: evidence
         )
         # Stamp the fingerprint before persisting so the durable
@@ -236,6 +241,16 @@ module Hive
 
       def present_text?(value)
         value.is_a?(String) && !value.strip.empty?
+      end
+
+      def normalized_validation_key(value)
+        candidate = value.to_s.strip
+        candidate = configured_validation_keys.first if candidate.empty? && configured_validation_keys.one?
+        candidate if configured_validation_keys.include?(candidate)
+      end
+
+      def configured_validation_keys
+        Validator.configured_names(@cfg.dig("patrol", "commands"))
       end
 
       def normalized_evidence(value)

@@ -1,5 +1,6 @@
 require "fileutils"
 require "open3"
+require "hive/config"
 require "hive/worktree"
 
 module Hive
@@ -28,7 +29,8 @@ module Hive
       end
 
       def path
-        File.join(@project.fetch("hive_state_path"), "babysitter", "worktrees", @pr.fetch("number").to_s)
+        state_path = Hive::Config.project_hive_state_path(@project)
+        File.join(state_path, "babysitter", "worktrees", @pr.fetch("number").to_s)
       end
 
       def branch

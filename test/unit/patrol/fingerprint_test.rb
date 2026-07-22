@@ -101,6 +101,21 @@ class HivePatrolFingerprintTest < Minitest::Test
     end
   end
 
+  def test_complete_findings_can_be_compared_without_a_ledger
+    first = finding
+    first.fingerprint = ""
+    first.root_cause = "The scheduler lease remains claimed after launch rejection."
+    second = finding
+    second.fingerprint = ""
+    second.title = "Nil user crash in the request route"
+    second.root_cause = "Launch rejection leaves the scheduler lease claimed."
+
+    assert Hive::Patrol::Fingerprint.semantically_same?(first, second)
+
+    second.category = "security"
+    refute Hive::Patrol::Fingerprint.semantically_same?(first, second)
+  end
+
   # ── compatibility pins ─────────────────────────────────────────────────
   # These exact digests were computed once by running the current
   # implementation and are hard-coded on purpose: the fingerprint ledger
@@ -244,9 +259,11 @@ class HivePatrolFingerprintTest < Minitest::Test
     fps = {}
     finding = titled("Dry-run gh allows implicit POST mutations")
     finding.root_cause = "Payload flags silently change a read into a write"
+    finding.target_sha = "a" * 40
     Hive::Patrol::Fingerprint.record_seen(fps, "fp1", state: "open", finding: finding)
     assert_equal "security", fps["fp1"]["category"]
     assert_equal "f", fps["fp1"]["feature_id"]
+    assert_equal "a" * 40, fps["fp1"]["target_sha"]
     assert_includes fps["fp1"]["title_tokens"], "implicit"
     assert_includes fps["fp1"]["root_cause_tokens"], "payload"
   end

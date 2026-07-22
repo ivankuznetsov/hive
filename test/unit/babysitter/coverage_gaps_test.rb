@@ -527,10 +527,13 @@ class BabysitterCoverageGapsTest < Minitest::Test
         "baseRefName" => "main",
         "isCrossRepository" => true
       }
-      with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, ->(*_args, **_kwargs) {
-        Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
-      }) do
-        assert_equal :fork_pr, Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: true, logger: nil, inflight: Set.new)
+      non_green = { "mergeable" => "CONFLICTING", "statusCheckRollup" => [] }
+      with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(*_args, **_kwargs) { non_green }) do
+        with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, ->(*_args, **_kwargs) {
+          Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+        }) do
+          assert_equal :fork_pr, Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: true, logger: nil, inflight: Set.new)
+        end
       end
 
       fixer = Hive::Babysitter::PrFixer.new(pr.merge("isCrossRepository" => false), project, cfg, dry_run: true, logger: nil, inflight: Set.new)

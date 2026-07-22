@@ -792,6 +792,21 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_reports_when_bundler_cannot_be_spawned
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "report.json")
+      out, err, status = Open3.capture3(
+        { "PATH" => "" },
+        RbConfig.ruby, "bin/hive-eval", "--no-judge", "--report", report
+      )
+
+      assert_equal 127, status.exitstatus
+      assert_empty out
+      assert_match(/could not launch `bundle exec rake test:eval`/, err)
+      refute File.exist?(report)
+    end
+  end
+
   def test_cli_rejects_stray_positional_scenario_names
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "positional.json")

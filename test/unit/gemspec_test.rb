@@ -7,7 +7,6 @@ class GemspecTest < Minitest::Test
     spec = Gem::Specification.load(GEMSPEC_PATH)
 
     assert_includes spec.files, "bin/hive-babysitter-skip-log.rb"
-    assert_includes spec.files, "bin/hive-babysitter-stub-gh"
     assert_includes spec.files, "bin/hive-babysitter-stub-gh.rb"
     assert_includes spec.files, "bin/hive-babysitter-stub-git"
   end
@@ -65,6 +64,12 @@ class GemspecTest < Minitest::Test
 
     refute_nil dependency
     assert dependency.requirement.satisfied_by?(Gem::Version.new("2.5.0"))
+  end
+
+  def test_runtime_dependencies_include_base64_used_by_pkce
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+
+    refute_nil spec.runtime_dependencies.find { |candidate| candidate.name == "base64" }
   end
 
   # The web tier is a Rails app under web/, supported only in the Docker

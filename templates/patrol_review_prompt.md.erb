@@ -72,6 +72,9 @@ Before reporting a finding:
   complete root cause rather than one token or example.
 - Provide a deterministic reproduction (or precise static trace) and a
   targeted validation that would fail before the fix and pass afterward.
+- Select exactly one operator-configured validation key from:
+  <%= validation_keys.join(", ") %>. The key must name a command that can
+  validate this finding on the current checkout; never invent command text.
 - Choose scope from local, feature, cross_feature, or system.
 - For every evidence item, copy `snippet` as a non-empty exact substring of
   the single source line named by `file` and `line`. Never span multiple
@@ -97,6 +100,7 @@ Required shape:
       "root_cause": "feature-independent underlying cause",
       "reproduction": "current-checkout reproduction or precise static trace",
       "validation": "targeted before/after proof plus broader checks",
+      "validation_key": "<%= validation_keys.first || "configured-key" %>",
       "recommendation": "smallest coherent root-cause fix",
       "evidence": [
         {"file": "relative/path", "line": 12, "snippet": "exact single-line source substring", "role": "trigger|root_cause|impact"}

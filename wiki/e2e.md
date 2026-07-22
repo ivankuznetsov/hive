@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-07-16
+updated: 2026-07-22
 tags: [test, e2e, tui, incidents, artifacts]
 ---
 
@@ -32,10 +32,14 @@ bin/hive-e2e clean              # old run cleanup
 | `0` | all selected scenarios passed |
 | `1` | one or more scenarios failed, or an unclassified harness error occurred |
 | `64` | usage error: unknown command, missing required Thor arguments, unsafe replay path, invalid retention window, or no matching scenarios |
-| `78` | preflight/config failure: malformed scenario YAML/definitions, missing `tmux`, missing `asciinema` when required, missing replay repro artifact, or a replay `repro.sh` that is not a regular executable file |
+| `78` | preflight/config failure: malformed scenario YAML/definitions, missing `tmux`, missing replay repro artifact, or a replay `repro.sh` that is not a regular executable file |
 
-Thor is started exactly once with `debug: true` so `Thor::Error` re-raises into the executable's outer rescue instead of taking Thor's built-in human path; a second `Binary.start` call would rerun successful commands and emit duplicate JSON envelopes. That outer rescue maps both human and `--json` usage failures to `64`. With `--json`, usage and preflight failures emit a `hive-e2e-error` envelope on stdout with `ok: false`, `error_kind`, `message`, and `exit_code`; human mode prefixes prose errors with `hive-e2e:` on stderr and exits with the same code. Scenario parse/config failures from both `run` and `list` use `error_kind: "preflight"` and exit `78`, before any scenario executes. Replay artifact failures are split: a missing `repro.sh` emits `error_kind: "missing_repro"`, while an existing but non-executable `repro.sh` emits `error_kind: "unusable_repro"`; both exit `78`. Top-level `--version` / `-v` is intercepted before Thor dispatch so binary smoke tests get only `Hive::VERSION`.
-Successful `--json` commands emit exactly one top-level JSON document on stdout, including `list --json` and `clean --json`, so wrapper callers can parse stdout directly.
+`asciinema` is optional. When it is missing, too old, or cannot start, TUI
+scenarios continue without cast capture; that degraded artifact coverage is not
+an exit `78` preflight failure.
+
+Thor is started exactly once with `debug: true` so `Thor::Error` re-raises into the executable's outer rescue instead of taking Thor's built-in human path; a second `Binary.start` call would rerun successful commands and emit duplicate JSON envelopes. That outer rescue maps both human and `--json` usage failures to `64`. With `--json`, usage and preflight failures emit a `hive-e2e-error` envelope on stdout with `ok: false`, `error_kind`, `message`, and `exit_code`; human mode prefixes prose errors with `hive-e2e:` on stderr and exits with the same code. Scenario parse/config failures from both `run` and `list` use `error_kind: "preflight"` and exit `78`, before any scenario executes. Replay artifact failures are split: a missing `repro.sh` emits `error_kind: "missing_repro"`, while an existing but non-executable `repro.sh` emits `error_kind: "unusable_repro"`; both exit `78`. Top-level `--version` / `-v` is intercepted before Thor dispatch so prose callers get only `Hive::VERSION`; `version --json` emits the versioned `hive-e2e-version` envelope.
+Successful `--json` commands emit exactly one top-level JSON document on stdout, including `list --json`, `clean --json`, and `version --json`, so wrapper callers can parse stdout directly.
 
 `bin/hive-e2e replay RUN_ID SCENARIO` validates safe run/scenario basenames,
 resolves the stored `scenarios/<scenario>/repro.sh` under the selected run
@@ -76,7 +80,15 @@ normal `hive-e2e-error` envelope with `error_kind: "usage"`.
 `--retain-failed-days` values before Thor dispatch. A bare retention flag, or
 one followed by another option such as `--json` or `--dry-run`, is a usage
 error (`64`) and never reaches artifact cleanup; Thor cannot silently reuse the
-configured retention default for a malformed destructive invocation.
+configured retention default for a malformed destructive invocation. Default
+retention overrides are namespaced as `HIVE_E2E_RUNS_RETAIN_DAYS` and
+`HIVE_E2E_RUNS_RETAIN_FAILED_DAYS`. The legacy generic
+`RUNS_RETAIN_DAYS` / `RUNS_RETAIN_FAILED_DAYS` names remain a compatibility
+fallback only when the corresponding namespaced variable and CLI option are
+absent; using one prints a deprecation warning on stderr, including in JSON
+mode, so stdout remains exactly one parseable document. A namespaced value is
+authoritative when both forms are present, preventing a generic process
+variable from silently overriding the harness-specific cleanup policy.
 
 ## Layout
 
@@ -234,7 +246,12 @@ durations from `report.json`. Durations include sandbox bootstrap; each enabled
 incident must be below five seconds and the group below thirty seconds. This job does not fold e2e into the default
 `rake test` task.
 
-`tmux` is required for TUI scenarios. `asciinema` is test-time optional until a TUI failure needs a cast, but missing/corrupt casts are recorded in artifacts instead of crashing unrelated CLI scenarios. If `asciinema` is installed outside PATH, set `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema`.
+`tmux` is required for TUI scenarios. `asciinema` is test-time optional: when
+it is unavailable or too old, TUI scenarios run without cast capture while the
+other failure artifacts are still recorded. A corrupt produced cast is reported
+in the artifact bundle instead of crashing unrelated CLI scenarios. If
+`asciinema` is installed outside PATH, set
+`HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema`.
 
 ## Backlinks
 

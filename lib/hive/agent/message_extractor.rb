@@ -3,6 +3,75 @@ require "json"
 module Hive
   class Agent
     module MessageExtractor
+      class Accumulator
+        attr_reader :source
+
+        def initialize(max_bytes:)
+          @max_bytes = max_bytes.to_i
+          @structured = nil
+          @streaming = false
+          @plain_tail = +""
+          @source = nil
+        end
+
+        def truncated? = @source == :structured_truncated
+
+        def observe(data, raw_line: nil)
+          message = MessageExtractor.extract(data)
+          if message
+            if MessageExtractor.streaming_text_event?(data)
+              reset_structured_stream unless @streaming
+              append_structured(message)
+              @streaming = true
+            else
+              replace_structured(message)
+              @streaming = false
+            end
+          elsif data.nil? && raw_line
+            @plain_tail << raw_line
+            @plain_tail = @plain_tail.byteslice(-@max_bytes, @max_bytes) || @plain_tail
+          end
+          message
+        end
+
+        def value
+          return nil if truncated?
+          return @structured unless @structured.nil?
+
+          plain = @plain_tail.strip
+          @source = :plain unless plain.empty?
+          plain
+        end
+
+        private
+
+        def reset_structured_stream
+          @structured = +""
+          @source = :structured
+        end
+
+        def append_structured(message)
+          return if truncated?
+
+          remaining = @max_bytes - @structured.bytesize
+          return mark_structured_truncated if message.bytesize > remaining
+
+          @structured << message
+        end
+
+        def replace_structured(message)
+          return mark_structured_truncated if message.bytesize > @max_bytes
+
+          @structured = +message
+          @source = :structured
+        end
+
+        def mark_structured_truncated
+          @structured = nil
+          @source = :structured_truncated
+        end
+      end
+
       module_function
 
       def extract(data)

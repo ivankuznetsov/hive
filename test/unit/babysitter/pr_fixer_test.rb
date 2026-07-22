@@ -56,6 +56,29 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_already_green_fork_pr_noops_without_needs_human_label
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      status = {
+        "mergeable" => "MERGEABLE", "mergeStateStatus" => "CLEAN",
+        "statusCheckRollup" => [ { "name" => "ci", "conclusion" => "SUCCESS" } ]
+      }
+      labels = []
+
+      with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(*_args, **_kwargs) { status }) do
+        with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, ->(*args, **_kwargs) { labels << args }) do
+          outcome = Hive::Babysitter::PrFixer.run(
+            pr.merge("isCrossRepository" => true), project, cfg,
+            dry_run: false, logger: nil, inflight: Set.new
+          )
+          assert_equal :already_green, outcome
+        end
+      end
+
+      assert_empty labels
+    end
+  end
+
   def test_agent_success_emits_success_and_clears_inflight
     with_tmp_dir do |dir|
       project = project_entry(dir)

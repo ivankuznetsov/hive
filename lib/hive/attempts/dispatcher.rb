@@ -59,8 +59,11 @@ module Hive
           task_generation: predecessor.task_generation,
           attempt_store: @store
         )
-        inherited = inherited_outputs ||
-                    (predecessor["inherited_outputs"] + predecessor["current_outputs"]).uniq
+        inherited = if inherited_outputs.nil? || inherited_outputs.empty?
+          (predecessor["inherited_outputs"] + predecessor["current_outputs"]).uniq
+        else
+          inherited_outputs
+        end
         admit(
           task: task, generation: generation, argv: argv, request_id: request_id,
           provider: provider, interactive: interactive,
@@ -184,7 +187,9 @@ module Hive
         return result if result
 
         handoff = @launcher.launch(created, claim_capability: claim_capability)
-        return accepted_result(created, interactive: interactive) if handoff.is_a?(Hash) && handoff["claimed"] == true
+        if handoff.is_a?(Hash) && (handoff["claimed"] == true || handoff["state"] == "launching")
+          return accepted_result(created, interactive: interactive)
+        end
 
         resolve_failed_handoff(
           created, interactive: interactive, error: handoff.is_a?(Hash) ? handoff["error"] : nil

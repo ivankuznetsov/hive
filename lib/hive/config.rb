@@ -1130,12 +1130,14 @@ module Hive
         next unless valid_registry_entry?(entry)
 
         abs_path = File.expand_path(entry["path"])
-        out << {
+        project = {
           "name" => entry["name"],
           "path" => abs_path,
-          "hive_state_path" => entry["hive_state_path"] || File.join(abs_path, ".hive-state"),
+          "hive_state_path" => entry["hive_state_path"],
           "repository_identity" => entry["repository_identity"]
         }
+        project["hive_state_path"] = project_hive_state_path(project)
+        out << project
       end
     end
 

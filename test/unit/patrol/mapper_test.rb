@@ -38,6 +38,28 @@ class HivePatrolMapperTest < Minitest::Test
     end
   end
 
+  def test_babysitter_stub_features_include_their_behavioral_tests
+    with_tmp_git_repo do |repo|
+      %w[bin test/unit/babysitter test/babysitter/acceptance].each do |dir|
+        FileUtils.mkdir_p(File.join(repo, dir))
+      end
+      File.write(File.join(repo, "bin", "hive-babysitter-skip-log.rb"), "# helper\n")
+      File.write(File.join(repo, "test", "unit", "babysitter", "dry_run_env_test.rb"), "# unit\n")
+      File.write(File.join(repo, "test", "babysitter", "acceptance", "dry_run_test.rb"), "# acceptance\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "babysitter fixture", "--quiet")
+
+      feature = Hive::Patrol::Mapper.new(repo, cfg: cfg).call.find do |candidate|
+        candidate.entrypoints.include?("bin/hive-babysitter-skip-log.rb")
+      end
+
+      assert_equal %w[
+        test/unit/babysitter/dry_run_env_test.rb
+        test/babysitter/acceptance/dry_run_test.rb
+      ], feature.tests
+    end
+  end
+
   def test_ids_are_stable_across_runs
     with_tmp_git_repo do |repo|
       FileUtils.mkdir_p(File.join(repo, "pages"))

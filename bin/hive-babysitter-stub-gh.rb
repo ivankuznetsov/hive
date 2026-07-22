@@ -5,6 +5,8 @@ require "fileutils"
 
 require_relative "hive-babysitter-skip-log"
 
+scrub_dynamic_loader_env!
+
 argv = ARGV.map(&:b)
 
 # `gh --repo`/`-R` accept `[HOST/]OWNER/REPO`, a full URL, or an scp-style
@@ -231,7 +233,6 @@ def api_read_only?(rest)
   method = nil
   payload = false
   unsafe_payload = false
-  cache = false
   index = 1
   while index < rest.length
     arg = expose_api_value_shorthand(rest[index])
@@ -249,6 +250,8 @@ def api_read_only?(rest)
       payload = true
       index += 2
     when "--cache", /\A--cache=/
+      # Response caching writes state even for a GET, so it is not a dry-run
+      # read. Reject every spelling here; no later cache bookkeeping is needed.
       return false
     when "-F", "--field"
       payload = true
@@ -257,9 +260,6 @@ def api_read_only?(rest)
     when "--input"
       payload = true
       unsafe_payload = true
-      index += 2
-    when "--cache"
-      cache = true
       index += 2
     when /\A-f.+\z/, /\A--raw-field=.+\z/
       payload = true
@@ -276,9 +276,6 @@ def api_read_only?(rest)
       payload = true
       unsafe_payload = true
       index += 1
-    when /\A--cache=.*\z/
-      cache = true
-      index += 1
     else
       if arg.start_with?("--")
         name = arg.split("=", 2).first
@@ -291,9 +288,9 @@ def api_read_only?(rest)
     end
   end
 
-  return method.casecmp("GET").zero? && !unsafe_payload && !cache if method
+  return method.casecmp("GET").zero? && !unsafe_payload if method
 
-  !payload && !cache
+  !payload
 end
 
 # `gh auth status` exposes `-t`/`--show-token` (boolean) alongside the boolean
@@ -478,8 +475,7 @@ end
 rest = stripped_global_options(argv)
 
 unless read_only?(rest) && !external_launcher_option?(rest) && !host_override?(argv, rest) && !positional_host_override?(rest)
-  log_skip("gh", argv)
-  warn "[dry-run] gh #{escaped_argv(argv)} skipped"
+  warn log_skip("gh", argv)
   exit 0
 end
 
@@ -505,11 +501,8 @@ trusted_config_home = ENV["HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR"].to_s
 # Real gh can also invoke git for repo probes; scrub git's trace, config, and helper-command
 # env seams before those child git processes can inherit them. Pin PATH too, so those child
 # git probes cannot resolve an agent-controlled git binary from the caller's PATH.
+scrub_dynamic_loader_env!
 %w[
-  LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
-  DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH
-  DYLD_FALLBACK_LIBRARY_PATH DYLD_FALLBACK_FRAMEWORK_PATH
-  DYLD_VERSIONED_LIBRARY_PATH DYLD_VERSIONED_FRAMEWORK_PATH DYLD_PRINT_TO_FILE
   RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH GEM_HOME GEM_PATH
   BUNDLER_SETUP BUNDLER_VERSION
   GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY

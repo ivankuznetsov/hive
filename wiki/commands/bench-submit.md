@@ -3,7 +3,7 @@ title: hive bench submit
 type: command
 source: lib/hive/commands/bench_submit.rb
 created: 2026-06-14
-updated: 2026-06-14
+updated: 2026-07-22
 tags: [command, bench, corpus]
 ---
 
@@ -27,21 +27,35 @@ preflight, aborting before any PR if a secret is found.
    default `~/Dev/hive-bench`) to build the entry. The command derives the
    source repo from the project's `origin` remote and requires it to be a
    `github.com` remote.
-5. In the hive-bench checkout, creates `submit-<slug>`, stages the generated
-   entry, commits `corpus: add <slug>`, pushes to `origin`, and runs
-   `gh pr create -R ivankuznetsov/hive-bench`.
+5. Records the hive-bench checkout's original branch (or detached HEAD),
+   resolves the remote default through `Hive::GitOps` (`origin/HEAD` with
+   full-ref `origin/main` / `origin/master` fallbacks),
+   creates `submit-<slug>` from that remote default, stages the generated
+   entry, commits, pushes, and runs `gh pr create -R ivankuznetsov/hive-bench`.
+   An ensure path restores the original branch/HEAD even when commit, push, or
+   PR creation fails. Success records the exact submission ref and commit SHA;
+   the entry locator is repository-relative so it remains meaningful after the
+   original checkout has been restored and the entry is no longer present in
+   the working tree.
 
 ## Notes
 
 - hive depends on hive-bench only as a *producer* here; hive-bench never depends
   on hive. See [[commands]] for the full command list.
-- `--json` emits a simple success document `{schema, slug, entry, pr_url}` with
-  `schema: "hive-bench-submit"`. This schema is not currently registered in
+- `--json` emits a success document with `schema`, `slug`, `entry`, `pr_url`,
+  `submission_ref`, and `commit_sha`; `entry` is relative to the hive-bench
+  repository and the ref/SHA identify the checkout that contains it. The
+  `schema: "hive-bench-submit"` contract is not currently registered in
   `Hive::Schemas::SCHEMA_VERSIONS`, and failures still use the normal stderr +
-  exit-code path rather than a structured JSON error envelope.
+  exit-code path rather than a structured JSON error envelope. Injected legacy
+  PR-opener seams that return only a URL retain the original fields but cannot
+  supply ref/SHA metadata.
 - The extractor and PR-opening subprocesses use argv/array-form `Open3` calls.
   The extractor `-I` flag and harness path are separate argv entries; the
   remaining Brakeman ignore for `gh pr create` is documented in [[testing]].
 - Tests cover both injected seams and the default seam methods using a stub
-  extractor script plus stub `git`/`gh` binaries. Live hive-bench / GitHub
-  submission evidence is tracked in [[gaps]].
+  extractor script plus stub `git`/`gh` binaries. Real temporary repositories
+  prove success and GitHub failure restore the original branch/HEAD, including
+  exact detached-HEAD restoration, and that the reported locator resolves at
+  the recorded submission SHA. Live hive-bench / GitHub submission evidence is
+  tracked in [[gaps]].

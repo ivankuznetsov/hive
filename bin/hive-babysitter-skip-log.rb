@@ -1,9 +1,7 @@
 # frozen_string_literal: true
 
-BABYSITTER_DYNAMIC_LOADER_ENV = %w[
-  LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_DEBUG_OUTPUT
-  DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH DYLD_FALLBACK_LIBRARY_PATH
-].freeze
+require_relative "../lib/hive/babysitter/stub_environment"
+
 MAX_ESCAPED_ARGV_BYTES = 4 * 1024
 MAX_SKIP_LOG_BYTES = 64 * 1024
 SKIP_LOG_LOCK_TIMEOUT_SECONDS = 0.25
@@ -11,13 +9,14 @@ SKIP_LOG_LOCK_RETRY_SECONDS = 0.01
 TRUNCATED_ARGV_SUFFIX = "...[truncated]"
 
 def scrub_dynamic_loader_env!
-  BABYSITTER_DYNAMIC_LOADER_ENV.each { |key| ENV.delete(key) }
+  Hive::Babysitter::StubEnvironment.scrub_dynamic_loader_env!
 end
 
 def log_skip(command, argv)
   path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
-  message = "[dry-run] #{command} #{escaped_argv(argv)} skipped"
+  message = skip_message(command, argv)
   append_skip_log(path, message)
+  message
 rescue SystemCallError, IOError => e
   # The command is still skipped (stderr below preserves the human-visible signal), but the
   # persistent audit log just developed an invisible gap; surface the cause instead of
@@ -25,6 +24,11 @@ rescue SystemCallError, IOError => e
   # write/flush failure cannot escape, crash the stub, and drop the audit record. Name the
   # target path so the operator knows which log location (the override or the default) failed.
   warn "[dry-run] failed to write skip log #{path}: #{e.message}"
+  message
+end
+
+def skip_message(command, argv)
+  "[dry-run] #{command} #{escaped_argv(argv)} skipped"
 end
 
 def append_skip_log(path, message)

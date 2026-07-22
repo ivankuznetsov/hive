@@ -288,47 +288,6 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
-  def test_gh_stub_does_not_load_caller_rubylib
-    with_tmp_dir do |dir|
-      poison_dir = File.join(dir, "rubylib")
-      FileUtils.mkdir_p(poison_dir)
-      marker = File.join(dir, "rubylib-loaded")
-      File.write(
-        File.join(poison_dir, "pwn.rb"),
-        "File.write(ENV.fetch(\"HIVE_RUBYOPT_MARKER\"), \"loaded\")\n"
-      )
-      %w[tmpdir uri].each do |feature|
-        File.write(File.join(poison_dir, "#{feature}.rb"), "File.write(#{marker.dump}, #{feature.dump})\n")
-      end
-
-      env = {
-        "RUBYOPT" => "-rpwn",
-        "RUBYLIB" => poison_dir,
-        "HIVE_RUBYOPT_MARKER" => marker,
-        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
-      }
-
-      _out, err, status = Open3.capture3(env, stub_path("gh"), "pr", "comment", "42", "--body", "hi")
-
-      assert status.success?, err
-      assert_includes err, "[dry-run] gh pr comment 42 --body hi skipped"
-      refute_path_exists marker, "gh stub loaded caller-controlled Ruby before the skip gate"
-
-      real_gh = recording_binary(dir, "real-gh")
-      _out, err, status = Open3.capture3(
-        env.merge("HIVE_BABYSITTER_REAL_GH" => real_gh),
-        stub_path("gh"),
-        "repo",
-        "view",
-        "owner/repo"
-      )
-
-      assert status.success?, err
-      assert_includes File.read(File.join(dir, "real.log")), "real-gh repo view owner/repo"
-      refute_path_exists marker, "gh stub loaded caller-controlled Ruby before passthrough"
-    end
-  end
-
   def test_overlay_shims_scrub_ruby_startup_environment_before_stub_handoff
     with_tmp_dir do |dir|
       poison_dir = File.join(dir, "poison")
@@ -899,6 +858,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "repo", "view", "--web"
       assert_stubbed env, "gh", "pr", "view", "42", "--web"
       assert_stubbed env, "gh", "run", "view", "123", "-w"
+      assert_stubbed env, "gh", "run", "view", "123", "--web"
+      assert_stubbed env, "gh", "workflow", "view", "ci.yml", "-w"
       assert_stubbed env, "gh", "auth", "status", "--show-token"
       assert_stubbed env, "gh", "auth", "status", "-t"
       # gh (pflag) clusters boolean shorthands, so `-t` smuggled into a cluster
@@ -921,6 +882,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "--repo=https://evil.example.com/owner/repo", "pr", "view", "42"
       assert_stubbed env, "gh", "pr", "view", "42", "-R", "evil.example.com/owner/repo"
       assert_stubbed env, "gh", "pr", "view", "42", "--repo", "evil.example.com/owner/repo"
+      assert_stubbed env, "gh", "-R", "evil.example.com/owner/repo", "run", "list"
+      assert_stubbed env, "gh", "workflow", "list", "-R", "evil.example.com/owner/repo"
       # Glued short `-R<val>` / `-R=<val>` (pflag strips the `=`) carry a host the same way
       # the separate and long forms do, so a host-qualified glued form trailing the subcommand
       # — where stripped_global_options leaves it for host_override? to catch — must skip too.
@@ -982,6 +945,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "gh", "pr", "view", "42", "-cRocto/repo"
       assert_passes env, "gh", "pr", "view", "42", "-cR", "octo/repo"
       assert_passes env, "gh", "--repo=owner/repo", "pr", "view", "42"
+      assert_passes env, "gh", "pr", "status"
+      assert_passes env, "gh", "pr", "list"
+      assert_passes env, "gh", "run", "list", "-w", "ci.yml"
+      assert_passes env, "gh", "run", "watch", "123"
+      assert_passes env, "gh", "workflow", "list"
+      assert_passes env, "gh", "workflow", "view", "ci.yml"
       assert_passes env, "gh", "auth", "status"
       assert_passes env, "gh", "auth", "status", "-a"
       assert_passes env, "gh", "api", "repos/owner/repo"
@@ -1099,6 +1068,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # spelled-out flag must skip, and so must every prefix git accepts as the long option
       # (`--text`, `--textc`, ...), e.g. `git cat-file --text` / `git grep --textc`.
       assert_stubbed env, "git", "diff", "--textconv"
+      assert_stubbed env, "git", "rev-list", "--show-signature", "HEAD"
       assert_stubbed env, "git", "cat-file", "--text", "HEAD:README.md"
       assert_stubbed env, "git", "grep", "--textc", "needle"
       # `git cat-file --filters` is an allowlisted read, but `--filters` runs the repo-local
@@ -1165,6 +1135,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # Read-only subcommand `-p` must pass through; it is not the global `--paginate`.
       assert_passes env, "git", "log", "-p"
       assert_passes env, "git", "show", "-p"
+      assert_passes env, "git", "log", "--text", "-1", "HEAD"
+      assert_passes env, "git", "show", "--text", "HEAD"
       assert_stubbed env, "git", "diff", "-p"
       assert_stubbed env, "git", "status", "-v"
       assert_stubbed env, "git", "status", "-vv"
@@ -1279,6 +1251,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git grep -e -- --textconv skipped"
       assert_includes skipped, "git diff --submodule=diff skipped"
       assert_includes skipped, "git diff --submodule diff skipped"
+      assert_includes skipped, "git rev-list --show-signature HEAD skipped"
       assert_includes skipped, "git remote show origin skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))
@@ -1290,6 +1263,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "real-gh repo view owner/repo"
       assert_includes real_invocations, "real-gh pr view 42"
       assert_includes real_invocations, "real-gh pr view feature/topic/branch"
+      assert_includes real_invocations, "real-gh pr status"
+      assert_includes real_invocations, "real-gh run list -w ci.yml"
+      assert_includes real_invocations, "real-gh run watch 123"
+      assert_includes real_invocations, "real-gh workflow list"
+      assert_includes real_invocations, "real-gh workflow view ci.yml"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -F state=open"
       assert_includes real_invocations, expected_real_invocation("git", "-C", dir, "status", "--short")
@@ -1342,6 +1320,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
         HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
         SSL_CERT_FILE SSL_CERT_DIR ssl_cert_file ssl_cert_dir
       ]
+      loader_env_keys = (
+        Hive::Babysitter::StubEnvironment::DYNAMIC_LOADER_ENV +
+        %w[LD_FAKE_LOADER_SEAM DYLD_FAKE_LOADER_SEAM]
+      ).uniq
+      env_keys = (loader_env_keys + env_keys).uniq
       real_gh = recording_env_binary(dir, "real-gh", env_keys)
       env = {
         "HIVE_BABYSITTER_REAL_GH" => real_gh,
@@ -1406,8 +1389,14 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "ssl_cert_file" => File.join(dir, "agent-ca-lower.pem"),
         "ssl_cert_dir" => File.join(dir, "agent-ca-dir-lower")
       }
+      loader_env_keys.each { |key| env.delete(key) }
+      script = <<~RUBY
+        #{loader_env_keys.inspect}.each { |key| ENV[key] = "loader-pwned" }
+        ARGV.replace(["repo", "view", "owner/repo"])
+        load #{stub_path("gh").dump}
+      RUBY
 
-      _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")
+      _out, err, status = Open3.capture3(env, RbConfig.ruby, "-e", script)
 
       assert status.success?, err
       recorded = File.read(File.join(dir, "env.log")).lines.map(&:chomp).to_h do |line|
@@ -1752,10 +1741,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
   def test_git_stub_scrubs_dynamic_loader_environment_before_read_only_passthrough
     with_tmp_dir do |dir|
-      loader_env_keys = %w[
-        LD_PRELOAD LD_LIBRARY_PATH LD_FAKE_LOADER_SEAM
-        DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FAKE_LOADER_SEAM
-      ]
+      loader_env_keys = (
+        Hive::Babysitter::StubEnvironment::DYNAMIC_LOADER_ENV +
+        %w[LD_FAKE_LOADER_SEAM DYLD_FAKE_LOADER_SEAM]
+      ).uniq
       real_git = recording_env_binary(dir, "real-git", loader_env_keys)
       env = {
         "HIVE_BABYSITTER_REAL_GIT" => real_git,
@@ -2354,7 +2343,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
   end
 
   def stub_path(binary)
-    File.expand_path("../../../bin/hive-babysitter-stub-#{binary}", __dir__)
+    suffix = binary == "gh" ? "gh.rb" : binary
+    File.expand_path("../../../bin/hive-babysitter-stub-#{suffix}", __dir__)
   end
 
   def recording_env_binary(dir, name, keys)

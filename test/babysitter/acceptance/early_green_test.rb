@@ -15,7 +15,10 @@ class BabysitterAcceptanceEarlyGreenTest < Minitest::Test
       spawned = false
 
       with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(_path, _number, **_kwargs) { status }) do
-        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { spawned = true }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |*_args, **_kwargs|
+          spawned = true
+          { status: :ok }
+        }) do
           outcome = Hive::Babysitter::PrFixer.run(
             pr,
             project,

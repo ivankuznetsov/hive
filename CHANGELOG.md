@@ -2,6 +2,25 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.6.6
+
+- Fixed scheduled llm-wiki refreshes multiplying into thousands of host timers
+  from disposable repositories. Hive now installs one bounded timer per
+  primary repository, removes catch-up stampedes, reconciles old units, and
+  serializes refreshes behind a machine-wide lock and memory limit. Scheduled
+  updates publish through `llm-wiki/refresh` without dirtying protected
+  checkouts. (#828)
+- Added managed draft-PR handoff for agent work, with bounded branch publication
+  and recovery evidence when an agent reaches a review boundary. (#827)
+- Made native Hive web the default experience and added the workflow-derived
+  Kanban board, mobile status improvements, and clearer first-run launch paths.
+  (#796, #817, #822, #826)
+- Made Hive operations agent-native across Claude, Codex, Pi, and OpenClaw with
+  fresh status/action contracts and canonical managed skill projections. (#824)
+- Fixed generic approve binding to the task's actual stage and simplified the
+  workflow, Rails, and patrol architecture around value-bearing work. (#799,
+  #816, #825)
+
 ## 0.6.5
 
 Hive 0.6.5 makes autonomous maintenance quieter, sharper, and safer. Patrols

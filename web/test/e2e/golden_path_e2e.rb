@@ -40,7 +40,6 @@ class GoldenPathE2E < ApplicationSystemTestCase
     speed_up_daemon!
     @project = create_hive_project!("golden-app")
     force_headless_claude!(@project)
-    StatusBroadcaster.start!
     install_github_stub(login: "goldenpath")
     spawn_daemon!
   end

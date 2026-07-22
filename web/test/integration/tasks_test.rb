@@ -477,9 +477,9 @@ class TasksTest < ActionDispatch::IntegrationTest
         { "name" => @project, "error" => "project_load_failed", "tasks" => [] }
       ]
     }
-    replacement = proc { snapshot }
+    replacement = proc { StatusBroadcaster::PageSnapshot.new(payload: snapshot, version: 1) }
 
-    with_replaced_singleton_method(StatusBroadcaster, :snapshot, replacement) do
+    with_replaced_singleton_method(StatusBroadcaster, :snapshot_with_version, replacement) do
       post "/tasks/#{@project}/#{@slug}/run",
            params: { action_name: "ready_to_brainstorm", stage: "1-inbox" }
     end
@@ -631,8 +631,12 @@ class TasksTest < ActionDispatch::IntegrationTest
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\nDone\n\n<!-- WAITING -->\n")
 
     get "/tasks/#{@project}/#{@slug}"
-    assert_select "turbo-cable-stream-source", { minimum: 1 },
+    assert_select "hive-status-stream-source[channel='StatusChannel'][data-turbo-permanent]", { minimum: 1 },
                   "the task page must subscribe to the status channel for push refreshes"
+    assert_select "#status-stream-owner[data-controller~='status-refresh'][data-status-version]", 1,
+                  "task pages must version the render used by confirmed Cable catch-up"
+    assert_select "#status-stream-owner .advanced form", { minimum: 1 },
+                  "the refresh owner must wrap task mutations so a pushed refresh cannot beat their redirect"
     assert_select "meta[name='turbo-refresh-method'][content='morph']", 1,
                   "refreshes must morph so permanent forms survive"
     assert_select ".state-banner", text: /waiting for the daemon|agent is working/i,

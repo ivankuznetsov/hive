@@ -182,38 +182,96 @@ so the login gate can run.
   page change; choice mirrored to `?project=` via replaceState; explicit
   project clicks sync the composer project select so new ideas land in that
   context, while filtered deep-links preselect the composer only when it is
-  unset; a MutationObserver re-applies the filter after every broadcast
-  morph), composer (new idea with image attach: clipboard
+  unset; the filter is re-applied after server reconciliation without moving
+  or rebuilding the server-rendered project navigation), composer (new idea with image attach: clipboard
   paste AND upload button; images become `[imageN]` placeholders and land in
   the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
   Streams**: `StatusBroadcaster` subscribes to `StatusFeed#each_snapshot`;
+  a dedicated `StatusChannel` starts that shared subscription when the first
+  live page connects and stops it when the last page disconnects, so booting
+  or leaving the server idle performs no fleet scans. Pending, active, and
+  closed ownership is synchronized per channel: teardown during stream
+  verification prevents later acquisition, and repeated cleanup releases an
+  accepted channel at most once without blocking unrelated connections. Failed
+  first-poller startup rolls the shared subscriber count back, rejects that
+  channel, and lets the browser retry. Validation and lease acquisition happen
+  before `stream_from` queues adapter registration, preventing a rejected
+  startup from landing a late pub/sub handler. A request-time snapshot
+  primes the feed before Cable connects, avoiding an immediate duplicate scan.
+  Only the first idle request can claim that baseline; a later competing render
+  cannot replace the value the first page actually rendered. Each render
+  carries a SHA-256 token derived from its exact semantic snapshot (canonical
+  key order, with volatile timestamps removed), rather than a process-local
+  counter. After Action Cable confirms the subscription,
+  `StatusChannel#catch_up` compares that page token with the current feed:
+  a current fresh navigation performs no HTTP work, while a genuinely stale
+  or competing render receives one targeted Turbo refresh. The token remains
+  valid across Puma workers and process restarts, so a worker mismatch cannot
+  certify stale markup. The targeted stream echoes the page token; its
+  permanent source carries that token and URL only through the same-URL Turbo
+  move, then consumes the live-element handoff by URL into connection-local
+  state, even if the reconciliation GET renders a different token. A lagging
+  Cable worker can therefore cause at most one reconciliation GET on that
+  connection rather than a refresh loop. The handoff is a live-element
+  property rather than cloneable DOM state, so navigation—including history
+  restoration after a page without the status source—cannot revive an older
+  URL's attempt. A genuine socket disconnect releases it for later recovery.
+  Connected
+  pages share one five-second polling cadence regardless of their count. The
+  subscribing page already rendered the primed snapshot, so the broadcaster
+  does not send a duplicate first refresh.
   `StatusFeed` suppresses unchanged snapshots by comparing with only
   `generated_at` and `age_seconds` removed while keeping `mtime` /
-  `folder_mtime` as liveness signals. The broadcaster sends the status-channel
-  refresh first, then uses one server-sorted snapshot to replace the project
-  rail and morph the composer project selector over solid_cable. The refresh
+  `folder_mtime` as liveness signals. The poller publishes its comparable key
+  with the payload and reuses the existing semantic token when that key is
+  unchanged, so volatile-only ticks do not repeat canonical JSON hashing.
+  The broadcaster first renders one Turbo Stream
+  message containing the refresh plus the server-sorted project rail and
+  composer selector, then sends that complete message once over solid_cable.
+  A partial render failure therefore delivers nothing and can be retried
+  without creating a refresh-only request loop. The refresh
   re-renders the current URL (or `/`'s saved preference), so Board and Grid
   cannot be cross-patched with markup for the other view; task pages without
   the dashboard targets still receive the same morph signal. Stable digest IDs
   keep project/workflow bands, columns, and task cards attached to the same DOM
   identity across reorder morphs. A status-level submission guard marks the
-  mutation at the native submit-bubble boundary and defers one refresh while
+  mutation at Turbo's confirmed `submit-start` boundary and defers one refresh while
   the composer or a card action is in flight. It replays after a
   non-redirecting response; a successful redirect's fresh GET already
   reconciles without racing the operator back to the old URL. The final
   submission admission stays at document scope across Stimulus morph
   reconnects, the final redirect URL is guarded on the document root across
   Turbo's body replacement, and both late refresh streams and their old-URL
-  replace visits remain suppressed until that URL is active.
+  replace visits remain suppressed until that URL is active. Declining a
+  confirmation does not start submission admission.
   This prevents a
-  filesystem broadcast from aborting the mutation. The same guard keeps the
-  Action Cable source permanent across morphs, remembers its first connection
-  on a source-owned DOM attribute across Stimulus lifecycles and Turbo
-  history-cache clones, and requests one full catch-up refresh on a later
-  reconnect so an update broadcast during the disconnected window is not
-  stranded. The initial
-  connection does not duplicate the fresh page GET. The composer's stream hook keeps the
+  filesystem broadcast from aborting the mutation. The app-owned Action Cable
+  source stays permanent across morphs and performs the version comparison
+  only from its confirmed subscription callback; there is no reconnect DOM
+  observer, timer, or fresh-navigation refresh. Async Cable setup is
+  generation-guarded: a handle whose DOM owner disconnects before confirmation
+  waits for the current transport's confirmation, rejection, or disconnect
+  before release, so an abandoned page cannot keep the server poller alive or
+  race unsubscribe ahead of subscribe—even during reconnect. If no callback
+  arrives within five seconds, Hive closes the otherwise-unowned Cable transport
+  to force server cleanup before dropping the local handle. The server checks
+  teardown before deferred adapter registration and again when registration
+  completes, immediately removing any handler that landed after the first
+  cleanup. A deferred adapter exception releases the shared lease and closes
+  the socket with reconnect enabled. If turbo-rails' lazy
+  consumer promise rejects, Hive clears the
+  poisoned cached promise before retrying at a bounded five-second cadence;
+  if subscription creation throws after Action Cable registration, Hive removes
+  the partial registration, disconnects that failed consumer, and creates a
+  fresh one. A server-side poller startup failure rejects the subscription, and
+  the rejected callback schedules the same bounded retry. Detaching the source
+  cancels the retry. The task-page owner encloses every
+  mutation form, so those submissions cross the same refresh guard as Board
+  actions. A
+  failed Turbo broadcast also remains pending across last-subscriber shutdown
+  and is retried by the replacement broadcaster. The initial connection does
+  not duplicate the fresh page GET. The composer's stream hook keeps the
   browser's current project selection when that project still exists; ordering
   belongs to the server while unfinished form state remains local. A successful
   idea POST returns to the same-origin Board/Grid URL that submitted it, so an

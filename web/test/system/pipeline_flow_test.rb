@@ -9,7 +9,6 @@ class PipelineFlowTest < ApplicationSystemTestCase
   setup do
     @project = create_hive_project!
     configure_owner!
-    StatusBroadcaster.start!
   end
 
   teardown do

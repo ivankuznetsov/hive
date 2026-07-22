@@ -6,7 +6,9 @@ class StatusController < ApplicationController
     explicit_view = params[:view].to_s.presence_in(VIEWS)
     saved_view = cookies.signed[VIEW_COOKIE].to_s.presence_in(VIEWS)
     @status_view = explicit_view || saved_view || "board"
-    @payload = StatusBroadcaster.snapshot
+    page_snapshot = StatusBroadcaster.snapshot_with_version
+    @payload = page_snapshot.payload
+    @status_version = page_snapshot.version
     @projects = StatusBroadcaster.projects(@payload)
     @board = Board.new(@projects) if @status_view == "board"
     @daemon_status = daemon_status

@@ -3,10 +3,8 @@ require "hive/commands/workflow"
 require "hive/workflows/project"
 
 class TaskMutationsTest < ActiveSupport::TestCase
-  teardown do
-    FileUtils.rm_rf(File.join(Hive::Paths.state_home, "dispatch_requests"))
-    Hive::Workflows::Project.reset!
-  end
+  setup { reset_task_mutation_state }
+  teardown { reset_task_mutation_state }
 
   test "derives queueable actions from the canonical task action vocabulary" do
     expected = Hive::TaskAction::READY_COMMANDS.select do |_action, verb|
@@ -197,6 +195,11 @@ class TaskMutationsTest < ActiveSupport::TestCase
   end
 
   private
+
+  def reset_task_mutation_state
+    FileUtils.rm_rf(File.join(Hive::Paths.state_home, "dispatch_requests"))
+    Hive::Workflows::Project.reset!
+  end
 
   def task(attributes = {}, project: nil, slug: "demo-task", **extra_attributes)
     project ||= Project.new("name" => "demo")

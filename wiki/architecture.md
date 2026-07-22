@@ -332,23 +332,63 @@ Streams, with production Action Cable accepting same-origin-as-host and
 `StatusBroadcaster` (self-healing subscriber loop) bridges
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
 broadcast morph refresh plus targeted project-rail/composer updates over
-solid_cable. The current route renders either the Rails-native workflow Board
+solid_cable. Each accepted channel acquires one poller lease and releases it
+exactly once; a per-channel synchronized pending/active/closed transition
+prevents socket teardown from racing stream verification into a leak or double
+release without serializing unrelated browser connections. A failed first
+poller-thread start restores the shared lease count and rejects that channel;
+the browser then retries with a fresh subscription. Signed-stream verification
+and lease acquisition precede `stream_from`, so the rejected path cannot leave
+an asynchronously queued pub/sub handler behind.
+Rendered pages carry canonical content tokens instead of
+process-local counters, so HTTP and Cable may land on different Puma workers
+without stale-page acceptance or a refresh loop. Unchanged polls reuse the
+stored comparable key and token, avoiding duplicate normalization and hashing
+on the five-second hot path. It renders the complete
+multi-action Turbo Stream before one
+Cable send, so a partial render cannot produce a refresh-only retry loop. The
+current route renders either the Rails-native workflow Board
 or compact Grid, so live reconciliation does not maintain a second board patch
 protocol. Digest-based DOM identities preserve the owning band/card across
 reorder morphs, and the status-level refresh guard defers background refreshes
-from the native submit-bubble boundary while status forms submit, using a
+from Turbo's confirmed `submit-start` boundary while status forms submit, using a
 successful redirect's fresh GET as the reconciliation instead of racing a
 replay against the old URL. Document-level submission admission survives the
 Stimulus disconnect/reconnect gap during a morph, and the redirect destination
 is kept on the document root across the Turbo body swap, so late refresh
 signals and their same-URL replace visits remain suppressed until the browser
-reaches that destination. It also
-keeps first-connection history on the permanent status Action Cable source as
-a clone-stable DOM attribute, surviving both Stimulus disconnects and Turbo
-history restoration without leaking across fresh sources, and issues one
-catch-up refresh on later reconnects. That closes the window in
-which the only filesystem broadcast could be missed without duplicating the
-fresh initial page load. The
+reaches that destination; declining a confirmation never arms the guard. Each
+status/task render carries the feed's semantic
+version. The permanent app-owned Cable source compares that version only after
+the subscription is confirmed: current fresh navigation does nothing, while a
+stale reconnect or history restoration receives one targeted refresh. This
+closes the missed-broadcast window without a reconnect MutationObserver or a
+duplicate fresh-page request. The targeted stream names the rendered semantic
+token and URL. The permanent source carries that latch only through the
+same-URL Turbo move in a live-element property, then transfers it to the active
+connection by URL, even when the reconciliation response renders a different
+semantic token, and removes the handoff. Cached Turbo snapshots cannot clone that
+property, so restoring a page after a source-less route cannot revive it.
+Later confirmations on that connection are bounded to one
+reconciliation GET instead of a refresh loop, while navigation cannot revive
+an old URL's latch. A real socket disconnect releases the connection-local
+latch so a later missed update can recover. Rejected lazy Action
+Cable consumer promises are removed from turbo-rails' cache before a bounded
+retry. A synchronous create failure also removes any partially registered
+subscription and replaces its failed consumer; detaching the source cancels
+the retry. A pre-confirmation detach waits for the current transport's
+confirmation, rejection, or disconnect before releasing the handle, preserving
+server subscribe/unsubscribe order across reconnects. A five-second fallback
+closes an otherwise-unowned transport that produces none of those callbacks,
+giving the server a connection-cleanup edge before local release. The channel
+also fences Action Cable's deferred adapter subscribe both before registration
+and at its completion; if teardown wins either race, no handler remains. A
+raising deferred adapter releases the broadcaster lease and reconnects the
+transport, so it cannot strand an active, unconfirmed channel. On task pages
+the status-refresh owner
+wraps the mutation forms as well as the stream source, so every task action
+crosses the same native submission guard before a filesystem broadcast can
+arrive. The
 request-local Rails `Project` wrapper
 reuses one parsed config for Board defaults, daemon state, and workflow-overlay
 loading. `Hive::StageLabel` gives web and bot surfaces one acronym-aware stage

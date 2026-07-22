@@ -11,10 +11,12 @@
     not links — a navigation would discard the permanent composer's typed
     text). The controller wraps the rail and selected view; it re-applies the
     filter after every broadcast morph. %>
-<div class="status-layout" data-controller="project-filter status-refresh">
-  <%# Keep the source inside status-refresh so it can distinguish the first
-      Cable connection from a later reconnect and catch up after missed work. %>
-  <%= turbo_stream_from StatusBroadcaster::CHANNEL, id: "status-stream-source",
+<div class="status-layout" data-controller="project-filter status-refresh"
+     data-status-version="<%= @status_version %>">
+  <%# The permanent source reads its owning page's non-permanent version after
+      Cable confirms. Fresh navigation does no extra GET; stale history and
+      real reconnects receive one targeted catch-up refresh. %>
+  <%= status_stream_source id: "status-stream-source",
         hidden: true, data: { turbo_permanent: true } %>
   <%= render "status/project_nav", projects: @projects %>
   <div class="status-main">

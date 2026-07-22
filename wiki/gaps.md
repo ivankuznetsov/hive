@@ -93,6 +93,23 @@ tags: [gap, todo, release-proof, agent-skills]
   paths), not the listed repository-identity/config dependency commit. This
   refresh attributes behavior to `git show` results, not those stale path
   lists.
+- The later coalesced queue is also branch-heavy: none of its supplied SHAs is
+  an ancestor of this refresh branch, although the current default-branch
+  source and wiki contain equivalent or later contracts for durable attempts,
+  condition journals, implementation identity, operational snapshots, native
+  web, workflow packages, patrol budgets, digest v2, and the v0.6.6 release.
+  Several entries are duplicate/cherry-picked implementations (notably the U1,
+  U2, U3, U4, U5, and U7 durable-attempt commits, condition-journal U1, strict
+  config IU3/IU4, dependency-admission refresh, and digest U3/U4 pairs).
+  Therefore this refresh treats each SHA as immutable evidence but does not
+  infer merge provenance from commit ancestry.
+- The queued path manifest for `067171bf` names
+  `docs/notes/hivebox-agent-oauth-relay.md`, but that path does not exist in
+  the commit. The actual committed note is
+  `docs/notes/hive-web-agent-oauth-relay.md`; it documents the provider-owned
+  URL plus pasted-code PTY relay and explicitly says callback proxying is not
+  implemented. Web documentation is grounded in that blob and the committed
+  Rails/controller sources, not the stale path entry.
 
 ## Source-file coverage (representative map)
 

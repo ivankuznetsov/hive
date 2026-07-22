@@ -1,5 +1,13 @@
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
+# Tests create thousands of disposable projects. Keep scheduler and post-commit
+# side effects disabled for the entire process, including setup hooks and child
+# processes. The one scheduler integration test temporarily opts back in while
+# HOME points at a throwaway directory.
+ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"] = "1"
+ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"] = "1"
+ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"] = "1"
+
 if ENV["HIVE_COVERAGE"]
   require_relative "support/coverage"
   HiveTestCoverage.start!(root: File.expand_path("..", __dir__))
@@ -37,8 +45,10 @@ module HiveTestStdinIsolation
   def before_setup
     @hive_original_stdin = $stdin
     @hive_original_skip_llm_wiki_scheduler = ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"]
+    @hive_original_skip_llm_wiki_systemctl = ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"]
     @hive_original_skip_llm_wiki_post_commit = ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"]
     ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"] = "1"
+    ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"] = "1"
     ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"] = "1"
     $stdin = StringIO.new
     super
@@ -59,6 +69,13 @@ module HiveTestStdinIsolation
         ENV.delete("HIVE_SKIP_LLM_WIKI_POST_COMMIT")
       else
         ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"] = @hive_original_skip_llm_wiki_post_commit
+      end
+    end
+    if defined?(@hive_original_skip_llm_wiki_systemctl)
+      if @hive_original_skip_llm_wiki_systemctl.nil?
+        ENV.delete("HIVE_SKIP_LLM_WIKI_SYSTEMCTL")
+      else
+        ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"] = @hive_original_skip_llm_wiki_systemctl
       end
     end
     $stdin = @hive_original_stdin if defined?(@hive_original_stdin)

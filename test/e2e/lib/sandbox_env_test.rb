@@ -20,7 +20,11 @@ class E2ESandboxEnvTest < Minitest::Test
         Hive::E2E::SandboxEnv.with(sandbox, home) { |env| yielded = env }
 
         assert_equal File.join(sandbox, "Gemfile"), yielded["BUNDLE_GEMFILE"]
+        assert_equal home, yielded["HOME"]
         assert_equal home, yielded["HIVE_HOME"]
+        assert_equal "1", yielded["HIVE_SKIP_LLM_WIKI_SCHEDULER"]
+        assert_equal "1", yielded["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"]
+        assert_equal "1", yielded["HIVE_SKIP_LLM_WIKI_POST_COMMIT"]
         assert_equal yielded["HIVE_CLAUDE_BIN"], yielded["HIVE_CODEX_BIN"]
         assert_equal yielded["HIVE_CLAUDE_BIN"], yielded["HIVE_GROK_BIN"]
         assert_equal yielded["HIVE_CLAUDE_BIN"], yielded["HIVE_PI_BIN"]

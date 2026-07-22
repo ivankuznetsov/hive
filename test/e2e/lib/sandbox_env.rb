@@ -35,7 +35,11 @@ module Hive
 
       PROTECTED_ENV_KEYS = %w[
         BUNDLE_GEMFILE
+        HOME
         HIVE_HOME
+        HIVE_SKIP_LLM_WIKI_SCHEDULER
+        HIVE_SKIP_LLM_WIKI_SYSTEMCTL
+        HIVE_SKIP_LLM_WIKI_POST_COMMIT
         HIVE_CLAUDE_BIN
         HIVE_CODEX_BIN
         HIVE_GROK_BIN
@@ -89,7 +93,11 @@ module Hive
         ]
         {
           "BUNDLE_GEMFILE" => File.join(sandbox_dir, "Gemfile"),
+          "HOME" => run_home,
           "HIVE_HOME" => run_home,
+          "HIVE_SKIP_LLM_WIKI_SCHEDULER" => "1",
+          "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1",
+          "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => "1",
           "HIVE_CLAUDE_BIN" => File.expand_path(fake_claude_path),
           "HIVE_CODEX_BIN" => File.expand_path(fake_claude_path),
           "HIVE_GROK_BIN" => File.expand_path(fake_claude_path),

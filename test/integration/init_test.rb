@@ -1718,11 +1718,13 @@ class InitTest < Minitest::Test
           shared_post_commit = File.join(shared_dir, "post-commit-refresh.sh")
           shared_compile_log = File.join(shared_dir, "compile-log.sh")
           shared_config = File.join(shared_dir, "config.json")
+          shared_scheduler_service = File.join(shared_dir, "scheduler-service")
           assert_equal File.binread(post_commit_script), File.binread(shared_post_commit)
           assert_equal File.binread(compile_log_script), File.binread(shared_compile_log)
           assert_equal File.binread(File.join(dir, ".llm-wiki", "config.json")), File.binread(shared_config)
           assert File.executable?(shared_post_commit)
           assert File.executable?(shared_compile_log)
+          assert_match(/\Allm-wiki-.+\.service\n\z/, File.read(shared_scheduler_service))
 
           hook = File.read(File.join(common_dir, "hooks", "post-commit"))
           assert_includes hook, "# BEGIN LLM WIKI POST-COMMIT"
@@ -1845,13 +1847,23 @@ class InitTest < Minitest::Test
     assert File.exist?(timer)
     assert File.symlink?(wants)
     service_contents = File.read(service)
+    shared_runner = File.join(Hive::LlmWikiBootstrap.git_common_dir(project_dir), "llm-wiki", "post-commit-refresh.sh")
+    assert_includes service_contents, "ConditionFileIsExecutable=#{shared_runner}"
     assert_includes service_contents, "WorkingDirectory=#{project_dir}"
-    assert_includes service_contents, "ExecStart=#{File.join(project_dir, ".llm-wiki", "refresh-wiki.sh")}"
+    flock_path = Hive::LlmWikiBootstrap::Scheduler.executable_path("flock")
+    assert_includes service_contents,
+                    "ExecStart=#{flock_path} --nonblock --conflict-exit-code 0 " \
+                    "%t/hive-llm-wiki-refresh.lock #{shared_runner} --project #{project_dir} --drain"
     assert_includes service_contents, "TimeoutStartSec=45min"
+    assert_includes service_contents, "MemoryMax=4G"
+    assert_includes service_contents, "MemorySwapMax=0"
+    assert_includes service_contents, "Environment=LLM_WIKI_GLOBAL_LOCK_HELD=1"
     refute_includes service_contents, 'WorkingDirectory="'
     timer_contents = File.read(timer)
+    assert_includes timer_contents, "X-HiveManaged=yes"
     assert_includes timer_contents, "OnActiveSec=10min"
     assert_includes timer_contents, "OnUnitActiveSec=1d"
+    assert_includes timer_contents, "RandomizedDelaySec=6h"
     refute_includes timer_contents, "OnBootSec="
     refute_includes timer_contents, "Persistent=true"
   end

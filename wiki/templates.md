@@ -3,7 +3,7 @@ title: Templates
 type: reference
 source: templates/, lib/hive/llm_wiki_bootstrap/scripts.rb
 created: 2026-04-25
-updated: 2026-07-20
+updated: 2026-07-21
 tags: [template, erb, prompt, llm-wiki]
 ---
 
@@ -19,13 +19,51 @@ tags: [template, erb, prompt, llm-wiki]
 directory returned by `git rev-parse --path-format=absolute --git-common-dir`.
 Within its `llm-wiki/` directory, queued sources live in `pending/`,
 quarantined sources in `failed/`, the circuit breaker in `refresh-disabled`,
-and the audit log in `post-commit-refresh.log`. Automatic processing opens or
+publication merge conflicts in `publication-blocked`, and the audit log in
+`post-commit-refresh.log`. Automatic processing opens or
 keeps the circuit open before another provider launch when the backlog exceeds
 `LLM_WIKI_MAX_AUTO_PENDING` (25 by default), a source or batch cannot be pinned,
 the batch failure count reaches `LLM_WIKI_MAX_REFRESH_ATTEMPTS` (2 by default),
 quarantined sources remain, or sources arriving outside the completed bounded
 batch are deferred. A batch includes at most `LLM_WIKI_MAX_BATCH_SOURCES`
 sources (10 by default).
+
+Hive-installed runtimes record a `scheduler-service` in the shared state. A
+commit-triggered runner queues its source and dispatches that memory-bounded
+oneshot service. If the user systemd manager is unavailable, it removes the
+unusable marker and falls back to the machine-wide provider lock. Systems
+without the `flock` executable use Ruby's native OS file lock held by a small
+keeper process for the runner's lifetime, preserving the same crash-safe kernel
+release semantics without a stale directory protocol. Scheduled workers consume up
+to `LLM_WIKI_MAX_DRAIN_BATCHES` (3) with
+`LLM_WIKI_DRAIN_SETTLE_SECONDS` (1) between batches, catching sources queued
+while the oneshot is already active without turning ordinary overlap into a
+manual circuit.
+
+The managed branch is `llm-wiki/refresh` by default and is published to
+`origin`; override those independently with `LLM_WIKI_REFRESH_BRANCH` and
+`LLM_WIKI_REFRESH_REMOTE`. Before every batch the runner fetches the published
+branch plus the remote's resolved current default branch into private refs,
+merges both, and then uses an ordinary fast-forward push. It never rewrites
+published wiki history. A rejected push retains the generated local commit and
+the source queue without incrementing the provider-failure circuit. A later
+mixed batch first publishes and receipts retained sources, then launches the
+agent only for new sources. Even a no-diff generation gets an empty commit with
+source trailers when remote publication is required, so publication retries do
+not repeat the provider call.
+If merging the published refresh branch or current default branch conflicts,
+the runner aborts the merge and writes `publication-blocked`. Later automatic
+runs keep queuing sources but do not relaunch the agent. After resolving the
+refresh branch, an explicit `--retry-failed <sha|all>` clears the marker for one
+bounded recovery attempt; an unresolved conflict records the marker again.
+Queue entries are acknowledged only after their receipt is durable locally and,
+when publication is configured, the receipt or source-trailer commit remains
+reachable from the freshly fetched remote branch. This closes the crash window
+between commit, push, and receipt publication without trusting stale local
+receipts after a remote deletion or rewind. `LLM_WIKI_SKIP_PUSH=1` explicitly selects local-only mode;
+an absent configured remote also keeps the branch local. Git remote inspection,
+fetch, and push are bounded by `LLM_WIKI_GIT_FETCH_TIMEOUT` (120 seconds) and
+`LLM_WIKI_GIT_PUSH_TIMEOUT` (120 seconds).
 
 Recovery is an explicit operator action:
 
@@ -35,7 +73,8 @@ Recovery is an explicit operator action:
 
 A full source SHA retries that quarantined or still-pending source; `all` restores all
 quarantined sources and processes one bounded batch of the combined queued
-work. If the command reports that queued or quarantined sources remain, repeat
+work. A retained generated commit is pushed without another agent run. If the
+command reports that queued or quarantined sources remain, repeat
 `--retry-failed all` for the next batch. A retry can launch the configured
 logged-in agent and consumes that provider subscription's token capacity; it is
 not a free bookkeeping command. The runner also requires GNU `timeout` or
@@ -122,4 +161,4 @@ All templates use `trim_mode: "-"` so `<%- … -%>` lines don't add stray newlin
 - [[modules/digest]]
 - [[architecture]]
 
-<!-- updated: 2026-07-20 -->
+<!-- updated: 2026-07-21 -->

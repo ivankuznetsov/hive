@@ -1,6 +1,13 @@
 require "test_helper"
 
 class TestHelperTest < ActiveSupport::TestCase
+  test "test projects cannot install host llm wiki timers" do
+    assert_equal ENV.fetch("HIVE_TEST_HOME_ROOT"), File.dirname(ENV.fetch("HOME"))
+    assert_equal "1", ENV.fetch("HIVE_SKIP_LLM_WIKI_SCHEDULER")
+    assert_equal "1", ENV.fetch("HIVE_SKIP_LLM_WIKI_SYSTEMCTL")
+    assert_equal "1", ENV.fetch("HIVE_SKIP_LLM_WIKI_POST_COMMIT")
+  end
+
   test "create_task retries rare generated slug collisions" do
     project = create_hive_project!("collision-app")
     first_slug = create_task!(project, "collision probe")

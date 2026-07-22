@@ -3,6 +3,16 @@
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "hive"
+require "hive/llm_wiki_bootstrap"
+
+# Repair legacy path-keyed LLM-wiki timers as soon as an upgraded Hive binary
+# is invoked, including `hive --version`. The reconciliation is idempotent and
+# touches only Hive-managed units.
+begin
+  Hive::LlmWikiBootstrap::Scheduler.reconcile_existing!
+rescue StandardError => e
+  warn "hive: warning: could not reconcile LLM-wiki scheduler units: #{e.message}"
+end
 
 if ENV["HIVE_ATTEMPT_INTERNAL"] == "1"
   require "hive/attempts/context"

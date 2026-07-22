@@ -3,6 +3,7 @@
 require_relative "../test_helper"
 require "tmpdir"
 require "fileutils"
+require "open3"
 
 # Guards the transactional contract of .llm-wiki/post-commit-refresh.sh: a
 # commit in any checkout queues one refresh into a dedicated managed worktree.
@@ -70,6 +71,438 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     assert_includes git(@main, "show --stat --pretty=format: llm-wiki/refresh"),
                     "wiki/log.d/stub-entry.md"
     assert_match(/stub refresh/, git(@main, "show llm-wiki/refresh:wiki/log.d/stub-entry.md"))
+  end
+
+  def test_refresh_branch_is_pushed_without_touching_main
+    remote = File.join(@dir, "remote.git")
+    sh "git init -q --bare #{q(remote)}"
+    git(@main, "remote add origin #{q(remote)}")
+    git(@main, "push -q -u origin main")
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo pushed refresh\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: push wiki source'")
+    main_head_before = git(@main, "rev-parse HEAD")
+
+    result = run_refresh_from(@wt)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    local_refresh = git(@main, "rev-parse llm-wiki/refresh")
+    remote_refresh = `git --git-dir=#{q(remote)} rev-parse refs/heads/llm-wiki/refresh`.strip
+    assert_equal local_refresh, remote_refresh
+    assert_equal main_head_before, git(@main, "rev-parse HEAD")
+    assert_equal "", git(@main, "status --porcelain")
+  end
+
+  def test_rejected_refresh_push_keeps_commit_and_queue_without_opening_circuit_then_recovers
+    remote = File.join(@dir, "rejecting-remote.git")
+    sh "git init -q --bare #{q(remote)}"
+    git(@main, "remote add origin #{q(remote)}")
+    git(@main, "push -q -u origin main")
+    hook = File.join(remote, "hooks", "pre-receive")
+    File.write(hook, <<~HOOK)
+      #!/usr/bin/env bash
+      while read -r _old _new ref; do
+        [ "$ref" != "refs/heads/llm-wiki/refresh" ] || exit 1
+      done
+    HOOK
+    FileUtils.chmod("+x", hook)
+    calls = File.join(@dir, "rejecting-agent-calls")
+    counting_stub = File.join(@dir, "stub bin", "counting-refresh.sh")
+    File.write(counting_stub, <<~STUB)
+      #!/usr/bin/env bash
+      root="$1"
+      printf 'called\n' >>#{q(calls)}
+      mkdir -p "$root/wiki/log.d"
+      printf 'retained publication\n' >"$root/wiki/log.d/rejected.md"
+    STUB
+    FileUtils.chmod("+x", counting_stub)
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo rejected refresh\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: retain rejected wiki source'")
+    source_sha = git(@wt, "rev-parse HEAD")
+    main_head_before = git(@main, "rev-parse HEAD")
+
+    result = run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => counting_stub)
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo rejected refresh\necho newly queued source\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: queue source behind retained publication'")
+    second_sha = git(@wt, "rev-parse HEAD")
+    second_result = run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => counting_stub)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    assert_equal 0, second_result.fetch(:status), second_result.fetch(:out)
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    assert_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+    assert_path_exists File.join(common, "llm-wiki", "pending", second_sha)
+    refute_path_exists File.join(common, "llm-wiki", "refresh-disabled")
+    refute_path_exists File.join(common, "llm-wiki", "consecutive-failures")
+    assert_equal 1, File.readlines(calls).length, "publication retry must not rerun the agent"
+    assert_equal main_head_before, git(@main, "rev-parse HEAD")
+    assert_equal "", git(@main, "status --porcelain")
+    assert_match(/LLM-Wiki-Source: #{source_sha}/, git(@main, "log --format=%B llm-wiki/refresh"))
+
+    FileUtils.rm_f(hook)
+    recovery = run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => counting_stub)
+
+    assert_equal 0, recovery.fetch(:status), recovery.fetch(:out)
+    assert_equal 2, File.readlines(calls).length,
+                 "recovery should publish the retained source and run the agent only for new work"
+    refute_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+    refute_path_exists File.join(common, "llm-wiki", "pending", second_sha)
+    remote_refresh = `git --git-dir=#{q(remote)} rev-parse refs/heads/llm-wiki/refresh`.strip
+    assert_equal git(@main, "rev-parse llm-wiki/refresh"), remote_refresh
+    assert_match(/LLM-Wiki-Source: #{source_sha}/,
+                 `git --git-dir=#{q(remote)} log --format=%B refs/heads/llm-wiki/refresh`)
+    assert_match(/LLM-Wiki-Source: #{second_sha}/,
+                 `git --git-dir=#{q(remote)} log --format=%B refs/heads/llm-wiki/refresh`)
+  end
+
+  def test_noop_generation_creates_publishable_acknowledgement_and_does_not_rerun_agent
+    remote = File.join(@dir, "noop-rejecting-remote.git")
+    sh "git init -q --bare #{q(remote)}"
+    git(@main, "remote add origin #{q(remote)}")
+    git(@main, "push -q -u origin main")
+    hook = File.join(remote, "hooks", "pre-receive")
+    File.write(hook, "#!/bin/sh\nexit 1\n")
+    FileUtils.chmod("+x", hook)
+    calls = File.join(@dir, "noop-agent-calls")
+    noop_stub = File.join(@dir, "stub bin", "noop-refresh.sh")
+    File.write(noop_stub, "#!/bin/sh\nprintf 'called\\n' >>#{q(calls)}\n")
+    FileUtils.chmod("+x", noop_stub)
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo noop source\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: noop wiki source'")
+    source_sha = git(@wt, "rev-parse HEAD")
+
+    run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => noop_stub)
+    run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => noop_stub)
+
+    assert_equal 1, File.readlines(calls).length
+    assert_match(/LLM-Wiki-Source: #{source_sha}/, git(@main, "log -1 --format=%B llm-wiki/refresh"))
+  end
+
+  def test_local_receipt_is_revalidated_after_remote_refresh_branch_disappears
+    remote = File.join(@dir, "receipt-remote.git")
+    sh "git init -q --bare #{q(remote)}"
+    git(@main, "remote add origin #{q(remote)}")
+    git(@main, "push -q -u origin main")
+    calls = File.join(@dir, "receipt-agent-calls")
+    counting_stub = File.join(@dir, "stub bin", "receipt-refresh.sh")
+    File.write(counting_stub, <<~STUB)
+      #!/bin/sh
+      root="$1"
+      printf 'called\n' >>#{q(calls)}
+      mkdir -p "$root/wiki/log.d"
+      printf 'receipt publication\n' >"$root/wiki/log.d/receipt.md"
+    STUB
+    FileUtils.chmod("+x", counting_stub)
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo receipt source\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: receipt source'")
+    source_sha = git(@wt, "rev-parse HEAD")
+    run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => counting_stub)
+    git(@main, "push origin :refs/heads/llm-wiki/refresh")
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    pending = File.join(common, "llm-wiki", "pending", source_sha)
+    File.write(pending, "#{source_sha}\tfeat\nbin/tool.sh\n")
+    git(@main, "update-ref refs/llm-wiki/sources/#{source_sha} #{source_sha}")
+
+    result = run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => counting_stub)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    assert_equal 1, File.readlines(calls).length,
+                 "remote receipt recovery should republish without another agent run"
+    refute_path_exists pending
+    assert system("git", "--git-dir=#{remote}", "show-ref", "--verify", "refs/heads/llm-wiki/refresh")
+  end
+
+  def test_refresh_merge_conflict_opens_durable_publication_block_without_rerunning_agent
+    remote = File.join(@dir, "conflicting-remote.git")
+    other = File.join(@dir, "conflicting-clone")
+    sh "git init -q --bare #{q(remote)}"
+    git(@main, "remote add origin #{q(remote)}")
+    git(@main, "push -q -u origin main")
+
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo establish refresh branch\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: establish refresh branch'")
+    run_refresh_from(@wt)
+
+    hook = File.join(remote, "hooks", "pre-receive")
+    File.write(hook, <<~HOOK)
+      #!/usr/bin/env bash
+      while read -r _old _new ref; do
+        [ "$ref" != "refs/heads/llm-wiki/refresh" ] || exit 1
+      done
+    HOOK
+    FileUtils.chmod("+x", hook)
+    calls = File.join(@dir, "conflict-agent-calls")
+    conflict_stub = File.join(@dir, "stub bin", "conflict-refresh.sh")
+    File.write(conflict_stub, <<~STUB)
+      #!/usr/bin/env bash
+      root="$1"
+      printf 'called\n' >>#{q(calls)}
+      printf 'local publication\n' >"$root/wiki/conflict.md"
+    STUB
+    FileUtils.chmod("+x", conflict_stub)
+
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo local unpublished refresh\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: retain conflicting refresh'")
+    source_sha = git(@wt, "rev-parse HEAD")
+    run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => conflict_stub)
+    FileUtils.rm_f(hook)
+
+    sh "git clone -q #{q(remote)} #{q(other)}"
+    git(other, "config user.email other@t")
+    git(other, "config user.name other")
+    git(other, "checkout -q main")
+    git(other, "checkout -q llm-wiki/refresh")
+    File.write(File.join(other, "wiki", "conflict.md"), "remote publication\n")
+    git(other, "add wiki/conflict.md")
+    git(other, "commit -qm 'docs(wiki): conflicting remote publication'")
+    git(other, "push -q origin llm-wiki/refresh")
+
+    first_retry = run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => conflict_stub)
+    second_retry = run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => conflict_stub)
+
+    assert_equal 0, first_retry.fetch(:status), first_retry.fetch(:out)
+    assert_equal 0, second_retry.fetch(:status), second_retry.fetch(:out)
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    marker = File.join(common, "llm-wiki", "publication-blocked")
+    assert_path_exists marker
+    assert_includes File.read(marker), "description=origin/llm-wiki/refresh"
+    assert_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+    assert_equal 1, File.readlines(calls).length,
+                 "a durable publication conflict must suppress repeated agent runs"
+  end
+
+  def test_published_refresh_history_survives_later_default_branch_changes
+    remote = File.join(@dir, "history-remote.git")
+    other = File.join(@dir, "history-clone")
+    sh "git init -q --bare #{q(remote)}"
+    git(@main, "remote add origin #{q(remote)}")
+    git(@main, "push -q -u origin main")
+    source_stub = write_source_named_stub("history-refresh.sh")
+
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo first source\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: first published source'")
+    first_source = git(@wt, "rev-parse HEAD")
+    run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => source_stub)
+
+    sh "git clone -q #{q(remote)} #{q(other)}"
+    git(other, "config user.email other@t")
+    git(other, "config user.name other")
+    git(other, "checkout -q main")
+    File.write(File.join(other, "README.md"), "# remotely advanced main\n")
+    git(other, "add README.md")
+    git(other, "commit -qm 'docs: remotely advance main'")
+    git(other, "push -q origin main")
+    remote_main = git(other, "rev-parse HEAD")
+
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo source after remote main\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: source after remote main'")
+    second_source = git(@wt, "rev-parse HEAD")
+    result = run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => source_stub)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    remote_log = `git --git-dir=#{q(remote)} log --format=%B refs/heads/llm-wiki/refresh`
+    assert_match(/LLM-Wiki-Source: #{first_source}/, remote_log)
+    assert_match(/LLM-Wiki-Source: #{second_source}/, remote_log)
+    assert system("git", "--git-dir=#{remote}", "merge-base", "--is-ancestor",
+                  remote_main, "refs/heads/llm-wiki/refresh")
+  end
+
+  def test_commit_trigger_dispatches_to_memory_bounded_scheduler_when_available
+    common = git(@wt, "rev-parse --path-format=absolute --git-common-dir")
+    state_dir = File.join(common, "llm-wiki")
+    fake_bin = File.join(@dir, "systemctl-bin")
+    calls = File.join(@dir, "systemctl-calls")
+    FileUtils.mkdir_p(state_dir)
+    FileUtils.mkdir_p(fake_bin)
+    File.write(File.join(state_dir, "scheduler-service"), "llm-wiki-project-deadbeef.service\n")
+    File.write(File.join(fake_bin, "systemctl"), <<~SH)
+      #!/bin/sh
+      printf '%s\n' "$*" >>#{q(calls)}
+    SH
+    FileUtils.chmod("+x", File.join(fake_bin, "systemctl"))
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo scheduled source\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: dispatch scheduled wiki worker'")
+    source_sha = git(@wt, "rev-parse HEAD")
+
+    result = run_refresh_from(
+      @wt,
+      "PATH" => "#{fake_bin}:/usr/bin:/bin",
+      "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "0"
+    )
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    assert_equal "--user start --no-block llm-wiki-project-deadbeef.service\n", File.read(calls)
+    assert_path_exists File.join(state_dir, "pending", source_sha)
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet", "refs/heads/llm-wiki/refresh")
+  end
+
+  def test_failed_systemd_dispatch_removes_marker_and_uses_serialized_fallback
+    common = git(@wt, "rev-parse --path-format=absolute --git-common-dir")
+    state_dir = File.join(common, "llm-wiki")
+    fake_bin = File.join(@dir, "failing-systemctl-bin")
+    FileUtils.mkdir_p(state_dir)
+    FileUtils.mkdir_p(fake_bin)
+    marker = File.join(state_dir, "scheduler-service")
+    File.write(marker, "llm-wiki-project-deadbeef.service\n")
+    File.write(File.join(fake_bin, "systemctl"), "#!/bin/sh\nexit 1\n")
+    FileUtils.chmod("+x", File.join(fake_bin, "systemctl"))
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo fallback source\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: fall back from unavailable systemd'")
+
+    result = run_refresh_from(
+      @wt,
+      "PATH" => "#{fake_bin}:/usr/bin:/bin",
+      "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "0"
+    )
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    refute_path_exists marker
+    assert_match(/stub refresh/, git(@main, "show llm-wiki/refresh:wiki/log.d/stub-entry.md"))
+  end
+
+  def test_ruby_portable_global_lock_respects_an_existing_os_lock
+    runtime_dir = File.join(@dir, "runtime")
+    lock_file = File.join(runtime_dir, "hive-llm-wiki-refresh.lock")
+    ready = File.join(runtime_dir, "holder-ready")
+    FileUtils.mkdir_p(runtime_dir)
+    holder = Process.spawn(
+      "ruby", "-e",
+      "f=File.open(ARGV[0], File::RDWR|File::CREAT, 0600); f.flock(File::LOCK_EX); File.write(ARGV[1], 'ready'); sleep 60",
+      lock_file, ready,
+      out: File::NULL, err: File::NULL
+    )
+    sleep 0.01 until File.exist?(ready)
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo portable lock source\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: portable lock source'")
+    source_sha = git(@wt, "rev-parse HEAD")
+
+    result = run_refresh_from(
+      @wt,
+      "XDG_RUNTIME_DIR" => runtime_dir,
+      "LLM_WIKI_DISABLE_FLOCK" => "1"
+    )
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    assert_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet", "refs/heads/llm-wiki/refresh")
+
+    Process.kill("TERM", holder)
+    Process.wait(holder)
+    holder = nil
+    recovery = run_refresh_from(
+      @wt,
+      "XDG_RUNTIME_DIR" => runtime_dir,
+      "LLM_WIKI_DISABLE_FLOCK" => "1"
+    )
+    assert_equal 0, recovery.fetch(:status), recovery.fetch(:out)
+    refute_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+  ensure
+    Process.kill("KILL", holder) rescue nil if holder
+    Process.wait(holder) rescue nil if holder
+  end
+
+  def test_scheduled_worker_drains_source_queued_during_its_active_batch
+    common = git(@wt, "rev-parse --path-format=absolute --git-common-dir")
+    state_dir = File.join(common, "llm-wiki")
+    fake_bin = File.join(@dir, "redrain-systemctl-bin")
+    systemctl_calls = File.join(@dir, "redrain-systemctl-calls")
+    agent_calls = File.join(@dir, "redrain-agent-calls")
+    injected = File.join(@dir, "redrain-injected")
+    FileUtils.mkdir_p(state_dir)
+    FileUtils.mkdir_p(fake_bin)
+    File.write(File.join(state_dir, "scheduler-service"), "llm-wiki-project-deadbeef.service\n")
+    File.write(File.join(fake_bin, "systemctl"), <<~SH)
+      #!/bin/sh
+      printf '%s\n' "$*" >>#{q(systemctl_calls)}
+    SH
+    FileUtils.chmod("+x", File.join(fake_bin, "systemctl"))
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo first drain source\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: first drain source'")
+    run_refresh_from(
+      @wt,
+      "PATH" => "#{fake_bin}:/usr/bin:/bin",
+      "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "0"
+    )
+    redrain_stub = File.join(@dir, "stub bin", "redrain-refresh.sh")
+    File.write(redrain_stub, <<~STUB)
+      #!/usr/bin/env bash
+      root="$1"
+      printf 'called\n' >>#{q(agent_calls)}
+      if [ ! -e #{q(injected)} ]; then
+        touch #{q(injected)}
+        printf 'echo second drain source\n' >#{q(File.join(@wt, "bin", "tool.sh"))}
+        git -C #{q(@wt)} add bin/tool.sh
+        git -C #{q(@wt)} -c core.hooksPath=/dev/null commit -qm 'feat: second drain source'
+        PATH=#{q("#{fake_bin}:/usr/bin:/bin")} HIVE_SKIP_LLM_WIKI_SYSTEMCTL=0 \
+          bash #{q(SCRIPT)} --project #{q(@wt)}
+      fi
+      mkdir -p "$root/wiki/log.d"
+      count="$(wc -l <#{q(agent_calls)})"
+      printf 'drain batch %s\n' "$count" >"$root/wiki/log.d/drain-$count.md"
+    STUB
+    FileUtils.chmod("+x", redrain_stub)
+
+    env = {
+      "LLM_WIKI_REFRESH_CMD" => redrain_stub,
+      "PATH" => "#{fake_bin}:/usr/bin:/bin",
+      "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => "",
+      "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "0",
+      "LLM_WIKI_GLOBAL_LOCK_HELD" => "1",
+      "LLM_WIKI_DRAIN_SETTLE_SECONDS" => "0"
+    }
+    out, err, status = Open3.capture3(env, "bash", SCRIPT, "--project", @main, "--drain", chdir: @main)
+
+    assert status.success?, "#{out}\n#{err}"
+    assert_equal 2, File.readlines(agent_calls).length
+    assert_empty Dir.glob(File.join(state_dir, "pending", "*"))
+    refute_path_exists File.join(state_dir, "refresh-disabled")
+  end
+
+  def test_remote_refresh_advanced_by_another_clone_is_merged_not_overwritten
+    remote = File.join(@dir, "shared-remote.git")
+    other = File.join(@dir, "other-clone")
+    sh "git init -q --bare #{q(remote)}"
+    git(@main, "remote add origin #{q(remote)}")
+    git(@main, "push -q -u origin main")
+    source_stub = write_source_named_stub("shared-refresh.sh")
+
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo local source\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: local source'")
+    run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => source_stub)
+
+    sh "git clone -q #{q(remote)} #{q(other)}"
+    git(other, "config user.email other@t")
+    git(other, "config user.name other")
+    git(other, "checkout -q llm-wiki/refresh")
+    File.write(File.join(other, "wiki", "other.md"), "# other clone\n")
+    git(other, "add wiki/other.md")
+    git(other, "commit -qm 'docs(wiki): concurrent remote update'")
+    other_head = git(other, "rev-parse HEAD")
+    git(other, "push -q origin llm-wiki/refresh")
+
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo local source\necho next\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: source after remote update'")
+    result = run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => source_stub)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    remote_head = `git --git-dir=#{q(remote)} rev-parse refs/heads/llm-wiki/refresh`.strip
+    assert system("git", "--git-dir=#{remote}", "merge-base", "--is-ancestor", other_head, remote_head)
+    assert_equal "# other clone", `git --git-dir=#{q(remote)} show #{remote_head}:wiki/other.md`.strip
   end
 
   def test_concurrent_refresh_stays_queued_until_a_worker_can_acquire_the_lock
@@ -258,7 +691,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     script = File.read(SCRIPT)
     assert_match(/core\.hooksPath=\/dev\/null/, script)
     assert_match(/HIVE_SKIP_LLM_WIKI_POST_COMMIT=1 \\\n+\s*git -C "\$refresh_root"/, script)
-    refute_match(/git .*push/, script)
+    assert_match(/push "\$refresh_remote" "HEAD:refs\/heads\/\$refresh_branch"/, script)
     refute_match(/wiki_root="\$main_checkout"/, script)
   end
 
@@ -410,6 +843,20 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     File.write(owner_path, owner)
     oid = git(tree, "hash-object -w #{q(owner_path)}")
     git(tree, "update-ref refs/llm-wiki/refresh-lock #{oid}")
+  end
+
+  def write_source_named_stub(name)
+    path = File.join(@dir, "stub bin", name)
+    File.write(path, <<~STUB)
+      #!/usr/bin/env bash
+      root="$1"
+      prompt="$2"
+      source_sha="$(printf '%s' "$prompt" | sed -nE 's/^- commit ([0-9a-f]+).*/\\1/p' | tail -n 1)"
+      mkdir -p "$root/wiki/log.d"
+      printf 'stub refresh for %s\n' "$source_sha" >"$root/wiki/log.d/$source_sha.md"
+    STUB
+    FileUtils.chmod("+x", path)
+    path
   end
 
   def git(dir, args)

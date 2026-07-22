@@ -100,7 +100,9 @@
                   "validated", "validation_failed", "fix_agent_failed", "fix_agent_rejected",
                   "missing_fix_proof", "no_validation_commands", "invalid_validation_key",
                   "missing_regression", "regression_not_reproduced", "targeted_validation_failed",
-                  "fix_guardrail", "validation_mutated_worktree", "fix_error"
+                  "fix_guardrail", "validation_mutated_worktree", "stale_target_sha",
+                  "validation_preflight_failed", "validation_preflight_mutated_worktree",
+                  "fix_error"
                 ]
               },
               "detail": { "type": ["string", "null"] },
@@ -136,12 +138,15 @@
                   "low_confidence",
                   "low_severity",
                   "non_production",
+                  "invalid_validation",
                   "low_alpha",
                   "active_feature",
                   "duplicate_in_run",
-                  "feature_limit"
+                  "feature_limit",
+                  "semantic_duplicate"
                 ]
-              }
+              },
+              "canonical_finding_id": { "type": "string" }
             }
           }
         },

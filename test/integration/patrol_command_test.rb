@@ -118,6 +118,12 @@ class PatrolCommandTest < Minitest::Test
       assert_equal [ "https://example.com/pull/7" ], payload.fetch("pr_urls")
       assert_equal [], payload.fetch("review_handoff_errors")
       assert_equal "opened", payload.dig("fix_results", 0, "publication_status")
+      record_path = Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].first
+      record = JSON.parse(File.read(record_path))
+      assert_equal run!("git", "-C", repo, "rev-parse", "HEAD").strip,
+                   record.fetch("target_sha")
+      assert_equal "test", record.fetch("validation_key")
+      assert_equal "active", record.fetch("lifecycle_state")
 
       state = JSON.parse(File.read(File.join(repo, ".hive-state", "patrol", "state.json")))
       assert_equal payload.fetch("last_scanned_sha"), state.fetch("last_scanned_sha")
@@ -128,6 +134,34 @@ class PatrolCommandTest < Minitest::Test
       assert_equal "hive-patrol-selection", selection.fetch("schema")
       assert_equal [ finding.id ], selection.fetch("ranked_candidates").map { |item| item.fetch("finding_id") }
       assert_operator selection.dig("ranked_candidates", 0, "alpha_score"), :>=, 70
+    end
+  end
+
+  def test_semantic_duplicate_on_the_same_target_is_filtered_before_persistence
+    with_patrol_project do |repo|
+      first = sample_finding
+      second = sample_finding
+      second.id = "finding-2"
+      first_out, = with_captured_exit do
+        command_for(
+          dry_run: true, mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ first ])
+        ).call
+      end
+      second_out, = with_captured_exit do
+        command_for(
+          dry_run: true, mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ second ])
+        ).call
+      end
+
+      assert_equal 1, JSON.parse(first_out).fetch("findings")
+      second_payload = JSON.parse(second_out)
+      assert_equal 0, second_payload.fetch("findings")
+      duplicate = second_payload.fetch("skipped_findings").first
+      assert_equal "semantic_duplicate", duplicate.fetch("reason")
+      assert_equal "finding-1", duplicate.fetch("canonical_finding_id")
+      assert_equal 1, Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].size
     end
   end
 
@@ -1020,7 +1054,7 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_fixer_rejection_remains_an_attempt_outcome_without_durable_suppression
+  def test_fixer_rejection_remains_active_until_operator_or_pr_disposition
     with_patrol_project do |repo|
       finding = sample_finding
       finding.fingerprint = "resolved-fp"
@@ -1044,6 +1078,9 @@ class PatrolCommandTest < Minitest::Test
       fingerprint_path = File.join(repo, ".hive-state", "patrol", "fingerprints.json")
       fingerprints = File.exist?(fingerprint_path) ? JSON.parse(File.read(fingerprint_path)) : {}
       refute fingerprints.key?("resolved-fp"), "a fixer rejection must not permanently suppress the finding"
+      path = Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].first
+      record = JSON.parse(File.read(path))
+      assert_equal "active", record.fetch("lifecycle_state")
     end
   end
 

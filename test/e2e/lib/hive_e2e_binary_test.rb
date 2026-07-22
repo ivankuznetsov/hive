@@ -130,6 +130,34 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_clean_retention_environment_is_hive_e2e_namespaced
+    Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
+      run_dir = File.join(tmp_runs_dir, "2026-07-22T10-00-00Z-1234-abcd")
+      FileUtils.mkdir_p(run_dir)
+      File.write(
+        File.join(run_dir, "report.json"),
+        JSON.generate("status" => "complete", "summary" => { "failed" => 0 })
+      )
+      old = Time.now - 86_400
+      File.utime(old, old, run_dir)
+
+      out, err, status = Open3.capture3(
+        {
+          "HIVE_E2E_RUNS_DIR" => tmp_runs_dir,
+          "RUNS_RETAIN_DAYS" => "0",
+          "HIVE_E2E_RUNS_RETAIN_DAYS" => "2"
+        },
+        hive_e2e, "clean", "--json", "--dry-run"
+      )
+
+      assert status.success?, err
+      payload = JSON.parse(out)
+      assert_equal 0, payload.fetch("deleted")
+      assert_equal 1, payload.fetch("kept")
+      assert_equal 2, payload.dig("kept_runs", 0, "retain_days")
+    end
+  end
+
   def test_leading_json_clean_dispatches_to_clean
     Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
       out, err, status = Open3.capture3(

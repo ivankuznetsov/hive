@@ -63,7 +63,7 @@ class HivePatrolReviewerTest < Minitest::Test
     db&.close
   end
 
-  def test_persists_schema_valid_findings_from_agent_output
+  def test_returns_schema_valid_findings_without_persisting_before_selection
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, "app.rb"), "user.name\n")
@@ -79,11 +79,11 @@ class HivePatrolReviewerTest < Minitest::Test
       assert_match(/\Aroute-users-\d{8}T\d{6}Z-[0-9a-f]{8}-1\z/, findings.first.id)
       assert_equal "cross_feature", findings.first.scope
       assert_equal "The shared lookup path assumes every id resolves.", findings.first.root_cause
-      assert File.exist?(File.join(dir, ".hive-state", "patrol", "findings", "#{findings.first.id}.json"))
+      refute File.exist?(File.join(dir, ".hive-state", "patrol", "findings", "#{findings.first.id}.json"))
     end
   end
 
-  def test_repeated_reviews_preserve_immutable_finding_records
+  def test_repeated_reviews_return_unique_run_ids_without_persisting_records
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, "app.rb"), "user.name\n")
@@ -97,7 +97,7 @@ class HivePatrolReviewerTest < Minitest::Test
 
       refute_equal first.id, second.id
       records = Dir[File.join(dir, ".hive-state", "patrol", "findings", "route-users-*.json")]
-      assert_equal 2, records.size
+      assert_empty records
     end
   end
 
@@ -121,6 +121,48 @@ class HivePatrolReviewerTest < Minitest::Test
       findings = Hive::Patrol::Reviewer.new(dir, cfg: cfg, agent_runner: runner).call([ feature ])
 
       assert_empty findings, "ordinary patrol must reject quota-filling findings without contract, impact, root cause, reproduction, and validation"
+    end
+  end
+
+  def test_binds_finding_to_an_operator_configured_validation_key
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, "app.rb"), "user.name\n")
+      configured = cfg
+      configured["patrol"]["commands"]["test"] = "ruby test/app_test.rb"
+      payload = qualified_finding(file: "app.rb").merge("validation_key" => "test")
+      prompt = nil
+      runner = lambda do |output_path:, **args|
+        prompt = args.fetch(:prompt)
+        File.write(output_path, JSON.generate("findings" => [ payload ]))
+      end
+
+      finding = Hive::Patrol::Reviewer.new(
+        dir, cfg: configured, agent_runner: runner
+      ).call([ feature ]).first
+
+      assert_equal "test", finding.validation_key
+      assert_includes prompt, "Select exactly one operator-configured validation key from:"
+      assert_includes prompt, "test"
+    end
+  end
+
+  def test_rejects_a_finding_that_does_not_select_one_of_multiple_validation_keys
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, "app.rb"), "user.name\n")
+      configured = cfg
+      configured["patrol"]["commands"]["lint"] = "ruby -c app.rb"
+      configured["patrol"]["commands"]["test"] = "ruby test/app_test.rb"
+      runner = lambda do |output_path:, **|
+        File.write(output_path, JSON.generate(
+          "findings" => [ qualified_finding(file: "app.rb") ]
+        ))
+      end
+      reviewer = Hive::Patrol::Reviewer.new(dir, cfg: configured, agent_runner: runner)
+
+      assert_empty reviewer.call([ feature ])
+      assert_equal "schema_invalid", reviewer.review_errors.first.fetch("error")
     end
   end
 

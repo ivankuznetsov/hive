@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-07-18
+updated: 2026-07-22
 tags: [attempts, ownership, leases, daemon, recovery]
 ---
 
@@ -23,7 +23,7 @@ reconciles and applies policy; it does not own or reap task agents.
 | `Dispatcher` | Resolve receipt replay, live duplicate attachment, loss deferral, capacity, fresh admission, and explicit successors. |
 | `DetachedLauncher` | Reject unsupported platforms before handoff, create a POSIX session, and start the private supervisor route. |
 | `Supervisor` | Claim, first-heartbeat, spawn the existing Hive command, heartbeat, frame output, enforce timeout/cancellation, and terminalize. |
-| `Client` | Tail frames read-only and replay a terminal result. Interrupt means detach; it never signals the owner group. |
+| `Client` | Tail frames read-only and replay a terminal result. It performs one final drain after observing a terminal/lost record so frames published just before the receipt are not dropped. Interrupt means detach; it never signals the owner group. |
 | `CommandDispatch` | Give `hive run` and workflow stage commands one attach-result policy: shared durable dispatch, lost-attempt translation, receipt exit propagation, and single-document JSON fallback when a failed worker emitted no stdout. |
 | `Reconciler`, `ProcessIdentity` | Adopt without `wait2`, detect PID/start/session/group mismatch, preserve suspects, expire launches, and normalize loss. |
 | `DirtyStateCapture`, `LostOutcomeStore` | Inventory partial git/untracked/binary work without mutation and make cleanup/successor policy restart-idempotent. |
@@ -59,7 +59,9 @@ admission verdict. Duplicate live deliveries receive the same attempt and an
 unchanged completed generation replays its receipt, while a dependency wait
 that later becomes clear advances generation instead of replaying the stale
 exit-75 receipt. A loss successor has a new attempt ID but inherits generation,
-predecessor, outputs, worktree/branch, and an incremented retry charge.
+predecessor, outputs, worktree/branch, and an incremented retry charge. An
+omitted or empty successor-output override inherits the predecessor's complete
+output set; only a non-empty explicit override replaces it.
 
 Condition projection adds an explicit numeric `task_input_epoch` to attempt
 records/context while retaining the prerequisite's opaque ownership generation
@@ -95,7 +97,8 @@ session. The dispatcher gives the wrapper a one-time random capability through
 an inherited pipe; the private `__attempt-supervise` route accepts no worker
 command argv and can claim only by proving that capability against the
 immutable record digest. The supervisor then executes the record's exact argv.
-Admission is reported accepted only after the launcher confirms that claim. A
+Admission is reported accepted after the launcher confirms the claim or
+reports the authenticated wrapper in its durable `launching` state. A
 false/malformed handoff or launcher exception marks the unclaimed reservation
 `lost` and returns a retryable deferral; if the wrapper won the claim race, the
 dispatcher re-reads and adopts it instead of creating an overlapping owner.

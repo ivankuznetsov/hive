@@ -181,8 +181,12 @@ module Hive
       end
 
       desc "clean", "Remove old e2e run artifacts"
-      option :retain_days, type: :string, default: ENV.fetch("RUNS_RETAIN_DAYS", "7")
-      option :retain_failed_days, type: :string, default: ENV.fetch("RUNS_RETAIN_FAILED_DAYS", "14")
+      option :retain_days, type: :string,
+                           default: ENV.fetch("HIVE_E2E_RUNS_RETAIN_DAYS", "7"),
+                           desc: "days to retain passing runs (env: HIVE_E2E_RUNS_RETAIN_DAYS)"
+      option :retain_failed_days, type: :string,
+                                  default: ENV.fetch("HIVE_E2E_RUNS_RETAIN_FAILED_DAYS", "14"),
+                                  desc: "days to retain failed runs (env: HIVE_E2E_RUNS_RETAIN_FAILED_DAYS)"
       option :dry_run, type: :boolean, default: false, desc: "show which runs would be deleted without deleting them"
       def clean
         retain_days = parse_retention_window(options[:retain_days], "retain_days")

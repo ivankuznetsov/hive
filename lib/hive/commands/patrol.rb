@@ -8,6 +8,7 @@ require "hive/git_ops"
 require "hive/patrol/candidate_selector"
 require "hive/patrol/dismissals"
 require "hive/patrol/fingerprint"
+require "hive/patrol/finding_registry"
 require "hive/patrol/fixer"
 require "hive/patrol/feature_batch"
 require "hive/patrol/mapper"
@@ -73,21 +74,29 @@ module Hive
             mapped, target_sha: target_sha, limit: review_launch_limit(token_budget, cfg)
           )
           scan_reviewer = build_reviewer(scan_root, cfg, state, token_budget)
-          reviewed = stamp_fingerprints(scan_reviewer.call(batch.features), scan_root)
+          reviewed = stamp_findings(
+            scan_reviewer.call(batch.features), scan_root,
+            target_sha: target_sha, cfg: cfg
+          )
           [ mapped, batch, scan_reviewer, reviewed ]
         end
         review = review_outcome(feature_batch, reviewer)
 
         fingerprints = state.fingerprints
+        registry = Hive::Patrol::FindingRegistry.new(state: state, target_sha: target_sha)
+        registry.reconcile!(fingerprints: fingerprints, dismissed: dismissed)
+        admission = registry.admit(findings)
+        findings = admission.findings
         candidates, skipped = Hive::Patrol::CandidateSelector.new(
           cfg: cfg,
           fingerprints: fingerprints,
           dismissed: dismissed
         ).call(findings)
-        # Reviewer persists before portfolio scoring because it operates one
-        # feature at a time. Rewrite only scored records; base-gated findings
-        # retain their immutable first write and avoid a no-op second write.
-        findings.select { |finding| !finding.alpha_score.nil? }.each { |finding| state.write_finding(finding) }
+        skipped.concat(admission.skipped)
+        # Persist only after target binding, semantic deduplication, lifecycle
+        # admission, and portfolio scoring. The reviewer itself is a pure
+        # producer and cannot accumulate untriaged duplicates.
+        findings.each { |finding| state.write_finding(finding) }
         write_selection_audit(state, candidates, skipped)
 
         # `max_prs_per_cycle` caps PRs opened per scan, not fix candidates.
@@ -111,6 +120,7 @@ module Hive
             fixes << patch
             outcome = fix_outcome(finding, patch)
             fix_results << outcome
+            update_finding_lifecycle(registry, finding, outcome.fetch("reason"))
             break if terminal_patrol_exhaustion?(patch)
             next unless patch.passed
 
@@ -251,9 +261,22 @@ module Hive
               "patrol.commands must configure at least one of docs, format, lint, public_contract, typecheck, or test before fixes can run"
       end
 
-      def stamp_fingerprints(findings, project_root)
+      def stamp_findings(findings, project_root, target_sha:, cfg:)
+        configured_keys = Hive::Patrol::Validator::COMMAND_NAMES.select do |name|
+          command = cfg.dig("patrol", "commands", name)
+          command.is_a?(String) && !command.strip.empty?
+        end
         findings.each do |finding|
           finding.fingerprint ||= Hive::Patrol::Fingerprint.compute(finding, project_root: project_root)
+          finding.target_sha = target_sha
+          finding.validation_key ||= configured_keys.first if configured_keys.one?
+        end
+      end
+
+      def update_finding_lifecycle(registry, finding, reason)
+        case reason
+        when "stale_target_sha"
+          registry.transition_current!(finding, state: "superseded", reason: reason)
         end
       end
 
@@ -374,7 +397,9 @@ module Hive
               "feature_id" => finding.feature_id,
               "fingerprint" => finding.fingerprint,
               "category" => finding.category,
-              "alpha_score" => finding.alpha_score
+              "alpha_score" => finding.alpha_score,
+              "target_sha" => finding.target_sha,
+              "validation_key" => finding.validation_key
             }
           end,
           "skipped" => skipped

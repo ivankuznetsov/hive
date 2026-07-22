@@ -132,6 +132,74 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_stale_evidence_target_is_rejected_before_validation_or_agent_work
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = "a" * 40
+      candidate.validation_key = "test"
+      agent_ran = false
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo),
+        agent_runner: ->(**) { agent_ran = true }
+      ).attempt(candidate)
+
+      refute patch.passed
+      refute agent_ran
+      assert_equal "stale_target_sha", patch.validation.fetch("reason")
+    end
+  end
+
+  def test_failing_validation_preflight_blocks_the_fix_agent
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["test"] = "exit 9"
+      agent_ran = false
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: configured,
+        agent_runner: ->(**) { agent_ran = true }
+      ).attempt(candidate)
+
+      refute patch.passed
+      refute agent_ran
+      assert_equal "validation_preflight_failed", patch.validation.fetch("reason")
+      assert_equal 9, patch.validation.dig("commands", 0, "exit_code")
+    end
+  end
+
+  def test_mutating_validation_preflight_blocks_the_fix_agent
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["test"] = "printf changed > app.rb"
+      agent_ran = false
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: configured,
+        agent_runner: ->(**) { agent_ran = true }
+      ).attempt(candidate)
+
+      refute patch.passed
+      refute agent_ran
+      assert_equal "validation_preflight_mutated_worktree", patch.validation.fetch("reason")
+    end
+  end
+
   def test_validation_failure_removes_worktree_and_opens_no_pr_path
     with_tmp_git_repo do |repo|
       File.write(File.join(repo, "app.rb"), "if\n")
@@ -438,7 +506,7 @@ class HivePatrolFixerTest < Minitest::Test
       assert_includes prompt, '"regression_paths"'
       assert_includes prompt, '"validation_key"'
       assert_includes prompt, "Hive will run that operator-configured command"
-      assert_includes prompt, "Available operator-configured validation keys: test"
+      assert_includes prompt, "Required operator-configured validation key:"
       assert_includes prompt, "These are agent-reported paths"
       refute_includes prompt, '"before"'
       assert_includes prompt, '"status": "rejected"'

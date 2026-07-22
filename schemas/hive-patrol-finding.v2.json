@@ -32,6 +32,16 @@
     "validation": { "type": "string", "minLength": 1 },
     "alpha_score": { "type": "integer", "minimum": 0, "maximum": 100 },
     "fingerprint": { "type": "string" },
+    "validation_key": {
+      "enum": ["docs", "format", "lint", "public_contract", "typecheck", "test"]
+    },
+    "target_sha": { "type": "string", "pattern": "^[0-9a-fA-F]{40,64}$" },
+    "lifecycle_state": {
+      "enum": ["active", "resolved", "rejected", "superseded"]
+    },
+    "lifecycle_reason": { "type": "string" },
+    "lifecycle_updated_at": { "type": "string", "format": "date-time" },
+    "superseded_by": { "type": "string" },
     "evidence": {
       "type": "array",
       "items": {

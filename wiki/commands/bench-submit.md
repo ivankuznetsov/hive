@@ -3,7 +3,7 @@ title: hive bench submit
 type: command
 source: lib/hive/commands/bench_submit.rb
 created: 2026-06-14
-updated: 2026-06-14
+updated: 2026-07-22
 tags: [command, bench, corpus]
 ---
 
@@ -27,9 +27,12 @@ preflight, aborting before any PR if a secret is found.
    default `~/Dev/hive-bench`) to build the entry. The command derives the
    source repo from the project's `origin` remote and requires it to be a
    `github.com` remote.
-5. In the hive-bench checkout, creates `submit-<slug>`, stages the generated
-   entry, commits `corpus: add <slug>`, pushes to `origin`, and runs
-   `gh pr create -R ivankuznetsov/hive-bench`.
+5. Records the hive-bench checkout's original branch (or detached HEAD),
+   resolves `origin/HEAD` with `origin/main` / `origin/master` fallbacks,
+   creates `submit-<slug>` from that remote default, stages the generated
+   entry, commits, pushes, and runs `gh pr create -R ivankuznetsov/hive-bench`.
+   An ensure path restores the original branch/HEAD even when commit, push, or
+   PR creation fails.
 
 ## Notes
 

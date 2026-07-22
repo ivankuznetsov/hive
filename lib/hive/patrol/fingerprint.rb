@@ -145,6 +145,25 @@ module Hive
         end
       end
 
+      # Compare two complete finding records without requiring either one to
+      # have reached the PR/dismissal ledger. Discovery uses this before it
+      # persists a new record, so repeated model wording cannot accumulate as
+      # a second active finding merely because the first item has not shipped.
+      def semantically_same?(left, right)
+        return true if !left.fingerprint.to_s.empty? && left.fingerprint == right.fingerprint
+        return false unless left.category.to_s == right.category.to_s
+
+        left_title = title_tokens(left)
+        right_title = title_tokens(right)
+        title_match = !left_title.empty? && !right_title.empty? &&
+                      overlap_coefficient(left_title, right_title) >= SIMILARITY_THRESHOLD
+        left_root = semantic_tokens(left)
+        right_root = semantic_tokens(right)
+        root_match = !left_root.empty? && !right_root.empty? &&
+                     overlap_coefficient(left_root, right_root) >= SIMILARITY_THRESHOLD
+        title_match || root_match
+      end
+
       def semantic_tokens(finding)
         return [] unless finding.respond_to?(:root_cause)
 

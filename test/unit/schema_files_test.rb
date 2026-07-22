@@ -2186,6 +2186,11 @@ class SchemaFilesTest < Minitest::Test
       "validation" => "Run the focused request regression and full request suite.",
       "alpha_score" => 84,
       "fingerprint" => "fp1",
+      "validation_key" => "test",
+      "target_sha" => "a" * 40,
+      "lifecycle_state" => "active",
+      "lifecycle_reason" => "admitted",
+      "lifecycle_updated_at" => "2026-07-22T12:00:00Z",
       "evidence" => [
         { "file" => "app.rb", "line" => 12, "snippet" => "user.name" }
       ]
@@ -2194,7 +2199,10 @@ class SchemaFilesTest < Minitest::Test
     assert_empty errors, "durable patrol finding record must validate"
 
     legacy = payload.reject do |key, _value|
-      %w[scope contract impact root_cause reproduction validation alpha_score].include?(key)
+      %w[
+        scope contract impact root_cause reproduction validation alpha_score
+        validation_key target_sha lifecycle_state lifecycle_reason lifecycle_updated_at
+      ].include?(key)
     end
     legacy_errors = JSONSchemer.schema(doc).validate(legacy).map { |e| e["error"] }
     assert_empty legacy_errors, "v2 must continue accepting durable records written before alpha scoring"

@@ -1,5 +1,6 @@
 require "set"
 require "hive/patrol/fingerprint"
+require "hive/patrol/validator"
 
 module Hive
   module Patrol
@@ -10,7 +11,8 @@ module Hive
       DEFAULT_FEATURE_LIMIT = 1
       SKIP_REASONS = %w[
         dismissed existing_pr similar_to_existing low_confidence low_severity
-        non_production low_alpha active_feature duplicate_in_run feature_limit
+        non_production invalid_validation low_alpha active_feature
+        duplicate_in_run feature_limit semantic_duplicate
       ].freeze
       # The corpus showed model-authored severity/confidence labels did not
       # predict whether a finding delivered. Treat them as admission gates and
@@ -88,9 +90,21 @@ module Hive
         end
         return "low_confidence" unless Fingerprint.fixable_confidence?(finding, config_value("min_confidence_to_fix", "medium"))
         return "low_severity" unless FIXABLE_SEVERITIES.include?(finding.severity.to_s)
+        return "invalid_validation" unless valid_validation_key?(finding)
         return "active_feature" if active_feature?(finding)
 
         nil
+      end
+
+      def valid_validation_key?(finding)
+        commands = @cfg["commands"] || @cfg[:commands] || {}
+        configured = Validator::COMMAND_NAMES.select do |name|
+          value = commands[name] || commands[name.to_sym]
+          value.is_a?(String) && !value.strip.empty?
+        end
+        return true if configured.empty?
+
+        configured.include?(finding.validation_key.to_s)
       end
 
       def select_ranked(scored, skipped)

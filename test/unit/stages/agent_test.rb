@@ -134,6 +134,37 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_worktree_setup_resumes_advanced_handoff_phase_without_resetting_receipt
+    with_draft_pr_task do |task, worktree_root|
+      with_fake_github_controller do |auth_calls|
+        first = Hive::Stages::AgentWorktree.prepare!(task, {})
+        Hive::DraftPrReceipt.advance!(
+          task.folder, from: "worktree_created", to: "agent_validated",
+          attributes: {
+            "head_oid" => first.base_oid,
+            "report_sha256" => "b" * 64
+          },
+          worktree_root: worktree_root
+        )
+        Hive::DraftPrReceipt.advance!(
+          task.folder, from: "agent_validated", to: "push_intent",
+          attributes: {
+            "scan_sha256" => "c" * 64,
+            "push_intent_id" => "d" * 32
+          },
+          worktree_root: worktree_root
+        )
+
+        resumed = Hive::Stages::AgentWorktree.prepare!(task, {})
+        receipt = Hive::DraftPrReceipt.read(task.folder, worktree_root: worktree_root)
+
+        assert_equal first, resumed
+        assert_equal "push_intent", receipt.fetch("phase")
+        assert_equal 2, auth_calls.length, "every resume must re-check controller gh auth"
+      end
+    end
+  end
+
   def test_worktree_setup_auth_failure_creates_no_worktree
     with_draft_pr_task do |task, worktree_root|
       identity = ->(_path, cfg: nil) { { "host" => "github.com", "repository" => "acme/widgets" } }

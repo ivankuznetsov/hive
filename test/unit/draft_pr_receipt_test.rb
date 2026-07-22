@@ -132,6 +132,74 @@ class DraftPrReceiptTest < Minitest::Test
     end
   end
 
+  def test_identity_only_comparison_accepts_advanced_phase_and_rejects_each_mismatch
+    with_tmp_dir do |root|
+      task = File.join(root, "task")
+      worktree_root = File.join(root, "worktrees")
+      expected = attributes(File.join(worktree_root, "fix-ui"))
+      FileUtils.mkdir_p(task)
+      Hive::DraftPrReceipt.initialize!(
+        task, expected: expected, worktree_root: worktree_root
+      )
+      Hive::DraftPrReceipt.advance!(
+        task, from: "worktree_created", to: "agent_validated",
+        attributes: { "head_oid" => "b" * 40, "report_sha256" => "c" * 64 },
+        worktree_root: worktree_root
+      )
+
+      phase_error = assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.read(
+          task, expected: expected, worktree_root: worktree_root
+        )
+      end
+      assert_includes phase_error.message, "phase"
+      assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.initialize!(
+          task, expected: expected, worktree_root: worktree_root
+        )
+      end
+      resumed = Hive::DraftPrReceipt.read(
+        task, expected_identity: expected, worktree_root: worktree_root
+      )
+      assert_equal "agent_validated", resumed.fetch("phase")
+      assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.read(
+          task, expected: expected, expected_identity: expected,
+          worktree_root: worktree_root
+        )
+      end
+      assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.read(
+          task, expected: false, expected_identity: expected,
+          worktree_root: worktree_root
+        )
+      end
+      assert_raises(Hive::WorktreeError) do
+        Hive::DraftPrReceipt.read(
+          task, expected_identity: false, worktree_root: worktree_root
+        )
+      end
+
+      contradictions = {
+        "version" => 2,
+        "repository" => "github.com/acme/other",
+        "base_branch" => "develop",
+        "base_oid" => "d" * 40,
+        "task_branch" => "fix-other",
+        "worktree_path" => File.join(worktree_root, "fix-other")
+      }
+      contradictions.each do |key, value|
+        error = assert_raises(Hive::WorktreeError) do
+          Hive::DraftPrReceipt.read(
+            task, expected_identity: expected.merge(key => value),
+            worktree_root: worktree_root
+          )
+        end
+        assert_includes error.message, key
+      end
+    end
+  end
+
   def test_rejects_pr_url_that_contradicts_recorded_repository_or_number
     with_tmp_dir do |root|
       data = attributes(File.join(root, "worktrees", "fix-ui")).merge(

@@ -399,7 +399,7 @@ module Hive
           task.folder, expected_root: root, expected: expected
         )
         Hive::DraftPrReceipt.read(
-          task.folder, expected: receipt_from(pointer), worktree_root: root
+          task.folder, expected_identity: receipt_from(pointer), worktree_root: root
         )
         worktree.validate_strict_resume!(
           branch_name: task.slug, base_oid: pointer.fetch("base_oid")

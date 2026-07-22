@@ -20,7 +20,7 @@ STATE_FILE="judge.md"
 
 # Scratch outputs are folded into the state file below; never leave them behind
 # to be swept into hive-state commits.
-trap 'rm -f .judge-campaign.out .judge-campaign.err .judge-args.out .judge-args.err .judge-precheck.out .judge-precheck.err .judge-rejudge.out .judge-rejudge.err .judge-deliberate.out .judge-deliberate.err .judge-delibmerge.out .judge-delibmerge.err .judge-validate.out .judge-validate.err' EXIT
+trap 'rm -f .judge-campaign.out .judge-campaign.err .judge-args.out .judge-args.err .judge-precheck.out .judge-precheck.err .judge-rejudge.out .judge-rejudge.err .judge-delibskip.json .judge-delibskip.out .judge-delibskip.err .judge-deliberate.out .judge-deliberate.err .judge-delibmerge.out .judge-delibmerge.err .judge-validate.out .judge-validate.err' EXIT
 
 write_waiting() {
   {
@@ -100,6 +100,8 @@ ruby -ryaml -e '
 { read -r CAMPAIGN_ID; read -r SOURCE; read -r SEEDS; read -r NEEDS_OPENROUTER; } <.judge-campaign.out
 RESULTS="runs/$CAMPAIGN_ID/results.json"
 DELIB="runs/$CAMPAIGN_ID/deliberation.json"
+DELIB_SKIP=".judge-delibskip.json"
+TASK_DIR="$PWD"
 
 if [ ! -f "$REPO_ROOT/$RESULTS" ]; then
   write_waiting "Missing $RESULTS. Re-run generate before judge."
@@ -187,12 +189,35 @@ fi
 # OpenRouter call 403ing) can be reported next to the MISSING_JUDGES lines.
 REJUDGE_ERR_TAIL="$(tail -n 15 .judge-rejudge.err)" || REJUDGE_ERR_TAIL=""
 
+# Build the retry skip-set from COMPLETE transcripts only. Deliberation records
+# a round-two provider failure as final:null so the evidence survives, but mere
+# cell presence must not make that incomplete verdict permanently un-runnable.
+ruby -ryaml -rjson -e '
+  data = File.file?(ARGV.fetch(0)) ? JSON.parse(File.read(ARGV.fetch(0))) : { "cells" => [] }
+  judges = YAML.safe_load_file("campaign.yml").fetch("judges")
+               .reject { |_backend, config| config.nil? || config == false }
+  judge_slate = judges.map do |backend, config|
+    backend == "claude" ? config.fetch("model").sub(/\Aclaude-/, "") : config.fetch("model").split("/").last
+  end
+  complete = data.fetch("cells", []).to_a.select do |transcript|
+    records = transcript.fetch("judges", {})
+    (judge_slate - records.keys).empty? && judge_slate.all? do |judge|
+      final = records.fetch(judge)["final"]
+      final.is_a?(Numeric) && final.between?(0, 10)
+    end
+  end
+  File.write(ARGV.fetch(1), JSON.generate(data.merge("cells" => complete)))
+' "$REPO_ROOT/$DELIB" "$DELIB_SKIP" >.judge-delibskip.out 2>.judge-delibskip.err || {
+  write_waiting "Could not classify completed deliberations for retry: $(cat .judge-delibskip.err .judge-delibskip.out)"
+  exit 0
+}
+
 # Deliberate to a SCRATCH transcript and union below: deliberate.rb --out
 # writes ONLY the newly deliberated cells, so pointing it at the transcript
 # itself would destroy prior paid deliberations on a routine wall retry (and a
-# zero-new-cell retry would wipe the file to cells:[]). --skip-done keeps
-# retries from re-buying cells the transcript already covers.
-(cd "$REPO_ROOT" && ruby "$BENCH_ROOT/harness/deliberate.rb" --source "$SOURCE" --results "$RESULTS" --out "$DELIB.next" --min-disagreement 0 --plan-source candidate --skip-done "$DELIB" "${JUDGE_ARGS[@]}" runs/"$CAMPAIGN_ID"/*--*) \
+# zero-new-cell retry would wipe the file to cells:[]). The filtered skip file
+# keeps successful cells while retrying any missing round-two verdict.
+(cd "$REPO_ROOT" && ruby "$BENCH_ROOT/harness/deliberate.rb" --source "$SOURCE" --results "$RESULTS" --out "$DELIB.next" --min-disagreement 0 --plan-source candidate --skip-done "$TASK_DIR/$DELIB_SKIP" "${JUDGE_ARGS[@]}" runs/"$CAMPAIGN_ID"/*--*) \
   >.judge-deliberate.out 2>.judge-deliberate.err || {
   rm -f "$REPO_ROOT/$DELIB.next"
   write_waiting "$(cat .judge-deliberate.err .judge-deliberate.out)"
@@ -298,8 +323,13 @@ ruby -ryaml -rjson -e '
     judge_slate.each do |judge|
       next unless transcript.fetch("judges", {}).key?(judge)
 
-      effort = transcript.dig("judges", judge, "reasoning_effort") || "unspecified"
+      record = transcript.fetch("judges").fetch(judge)
+      effort = record["reasoning_effort"] || "unspecified"
       problems << "DELIBERATION_EFFORT_MISMATCH #{candidate} #{task} #{judge} (have #{effort}, need #{expected_efforts.fetch(judge)})" unless effort == expected_efforts.fetch(judge)
+      final = record["final"]
+      unless final.is_a?(Numeric) && final.between?(0, 10)
+        problems << "INCOMPLETE_DELIBERATION #{candidate} #{task} #{judge} (final must be a number from 0 to 10; got #{final.inspect})"
+      end
     end
   end
   # A results cell outside the pre-registered matrix means campaign.yml was

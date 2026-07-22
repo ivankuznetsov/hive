@@ -50,12 +50,13 @@ module Hive
         "created_by" => "hive"
       )
       configured_main_wiki_path = payload["main_wiki_path"]
-      main_wiki_path = if configured_main_wiki_path.is_a?(String) &&
-                          File.directory?(File.expand_path(configured_main_wiki_path, project_root))
-                         configured_main_wiki_path
-                       else
-                         detect_main_wiki_path(project_root)
-                       end
+      main_wiki_path =
+        if configured_main_wiki_path.is_a?(String) &&
+           File.directory?(File.expand_path(configured_main_wiki_path, project_root))
+          configured_main_wiki_path
+        else
+          detect_main_wiki_path(project_root)
+        end
       if main_wiki_path
         payload["main_wiki_path"] = main_wiki_path
       else

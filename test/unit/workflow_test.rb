@@ -28,10 +28,12 @@ class WorkflowTest < Minitest::Test
     assert_nil stage.reviewers
     assert_nil stage.council
     assert_nil stage.deliverable
+    assert_nil stage.outcomes
   end
 
   def test_known_kinds_include_coding_runtime_primitives
     assert_includes Hive::Workflow::KNOWN_KINDS, :council
+    assert_includes Hive::Workflow::KNOWN_KINDS, :human
     assert_includes Hive::Workflow::KNOWN_KINDS, :execute
     assert_includes Hive::Workflow::KNOWN_KINDS, :review_council
     assert_includes Hive::Workflow::KNOWN_KINDS, :finalize
@@ -39,6 +41,52 @@ class WorkflowTest < Minitest::Test
     # workflow_helpers.rb / resolver_test.rb edits exist precisely because the
     # kind no longer exists). Pin its absence so a re-introduction is caught.
     refute_includes Hive::Workflow::KNOWN_KINDS, :marker
+  end
+
+  def test_human_stage_exposes_immutable_named_outcomes
+    approve = Hive::Workflow::Outcome.new(
+      name: "approve", complete: true, artifact: "draft.md"
+    )
+    reject = Hive::Workflow::Outcome.new(name: "reject", to: "draft")
+    outcomes = { "approve" => approve, "reject" => reject }.freeze
+    workflow = Hive::Workflow.new(
+      id: :editorial,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "draft", index: 1, state_file: "draft.md", kind: :agent
+        ),
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          input: "draft.md", outcomes: outcomes
+        )
+      ]
+    )
+
+    approval = workflow.stage_named("approval")
+    assert_same outcomes, approval.outcomes
+    assert approval.outcomes.frozen?
+    assert approval.outcomes.fetch("approve").frozen?
+    assert approval.outcomes.fetch("approve").terminal?
+    refute approval.outcomes.fetch("reject").terminal?
+    assert_equal "draft", approval.outcomes.fetch("reject").to
+  end
+
+  def test_workflow_rejects_human_outcome_target_outside_descriptor
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(
+        id: :editorial,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "approval", index: 1, state_file: "approval.md", kind: :human,
+            outcomes: {
+              "reject" => Hive::Workflow::Outcome.new(name: "reject", to: "draft")
+            }.freeze
+          )
+        ]
+      )
+    end
+
+    assert_includes error.message, 'stage "approval" outcome "reject" targets unknown stage "draft"'
   end
 
   def test_stage_carries_user_descriptor_instruction_and_permissions

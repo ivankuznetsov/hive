@@ -20,7 +20,7 @@ module Hive
     # :execute/:review_council/:finalize drive coding status/action
     # classification (the coding runners are selected by name, not kind — see
     # Stages::Resolver), and nil is the unspecified default.
-    KNOWN_KINDS = [ nil, :agent, :council, :inert, :execute, :review_council, :finalize ].freeze
+    KNOWN_KINDS = [ nil, :agent, :council, :human, :inert, :execute, :review_council, :finalize ].freeze
 
     # Single source of truth for the council triage artifact default. Referenced
     # by the Council default below, the descriptor parser, and both council
@@ -100,7 +100,8 @@ module Hive
       :name, :index, :state_file, :advance_verb, :kind, :skill, :instruction,
       :permissions, :status_mode, :budget_usd, :timeout_sec, :capability,
       :agent, :model, :effort, :input, :reviewers, :council, :deliverable,
-      :workspace, :handoff, :condition_policy, :mapping_role, :mapping_contract
+      :workspace, :handoff, :condition_policy, :mapping_role, :mapping_contract,
+      :outcomes
     ) do
       def initialize(name:, index:, state_file:, advance_verb: nil, kind: nil,
                      skill: nil, instruction: nil, permissions: nil,
@@ -108,11 +109,19 @@ module Hive
                      capability: nil, agent: nil, model: nil, effort: nil,
                      input: nil, reviewers: nil, council: nil, deliverable: nil,
                      workspace: nil, handoff: nil,
-                     condition_policy: nil, mapping_role: nil, mapping_contract: nil)
+                     condition_policy: nil, mapping_role: nil, mapping_contract: nil,
+                     outcomes: nil)
+        outcomes = outcomes&.dup&.freeze unless outcomes&.frozen?
         super
       end
 
       def dir = "#{index}-#{name}"
+    end
+
+    Outcome = Data.define(:name, :complete, :artifact, :to) do
+      def initialize(name:, complete: false, artifact: nil, to: nil) = super
+
+      def terminal? = complete
     end
 
     Council = Data.define(:quorum, :max_rounds, :exit_rule, :on_max_rounds, :triage_output, :revise) do
@@ -173,12 +182,63 @@ module Hive
           raise ArgumentError,
                 "workflow #{id.inspect} stage #{stage.name.inspect} has unknown kind #{stage.kind.inspect} " \
                 "(known: #{KNOWN_KINDS.map(&:inspect).join(', ')})"
+
+        validate_human_stage!(stage)
       end
 
       stages.first.advance_verb.nil? or
         raise ArgumentError,
               "workflow #{id.inspect} first stage #{stages.first.name.inspect} must not declare an " \
               "advance_verb (no stage precedes it to advance from)"
+    end
+
+    def validate_human_stage!(stage)
+      if stage.kind != :human
+        return unless stage.respond_to?(:outcomes) && stage.outcomes
+
+        raise ArgumentError,
+              "workflow #{id.inspect} non-human stage #{stage.name.inspect} must not declare outcomes"
+      end
+
+      outcomes = stage.outcomes
+      unless outcomes.is_a?(Hash) && !outcomes.empty?
+        raise ArgumentError,
+              "workflow #{id.inspect} human stage #{stage.name.inspect} must declare at least one outcome"
+      end
+
+      outcomes.each do |name, outcome|
+        unless outcome.is_a?(Outcome) && name == outcome.name
+          raise ArgumentError,
+                "workflow #{id.inspect} stage #{stage.name.inspect} outcome #{name.inspect} is invalid"
+        end
+
+        actions = [ outcome.complete, !outcome.to.nil? ].count(true)
+        unless actions == 1
+          raise ArgumentError,
+                "workflow #{id.inspect} stage #{stage.name.inspect} outcome #{name.inspect} " \
+                "must declare exactly one of complete or to"
+        end
+
+        if outcome.complete
+          unless outcome.artifact
+            raise ArgumentError,
+                  "workflow #{id.inspect} stage #{stage.name.inspect} outcome #{name.inspect} " \
+                  "must declare an artifact when complete"
+          end
+          next
+        end
+
+        if outcome.artifact
+          raise ArgumentError,
+                "workflow #{id.inspect} stage #{stage.name.inspect} outcome #{name.inspect} " \
+                "artifact is only valid for a completing outcome"
+        end
+        next if stage_named(outcome.to)
+
+        raise ArgumentError,
+              "workflow #{id.inspect} stage #{stage.name.inspect} outcome #{name.inspect} " \
+              "targets unknown stage #{outcome.to.inspect}"
+      end
     end
 
     def reject_duplicates!(values, label)

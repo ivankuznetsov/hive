@@ -136,6 +136,124 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal "/ship", workflow.stage_named("work").skill
   end
 
+  def test_editorial_human_stage_parses_closed_outcomes
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "editorial",
+        "stages" => [
+          { "name" => "research", "kind" => "agent", "state_file" => "research.md", "skill" => "/research" },
+          { "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft" },
+          {
+            "name" => "approval",
+            "kind" => "human",
+            "state_file" => "approval.md",
+            "input" => "draft.md",
+            "outcomes" => {
+              "approve" => { "complete" => true, "artifact" => "draft.md" },
+              "reject" => { "to" => "draft" }
+            }
+          }
+        ]
+      },
+      path: "/tmp/editorial.yml"
+    )
+
+    assert_equal %w[research draft approval], workflow.stage_names
+    approval = workflow.stage_named("approval")
+    assert_equal :human, approval.kind
+    assert_equal "draft.md", approval.input
+    assert_equal %w[approve reject], approval.outcomes.keys
+    assert_equal true, approval.outcomes.fetch("approve").complete
+    assert_equal "draft.md", approval.outcomes.fetch("approve").artifact
+    assert_equal "draft", approval.outcomes.fetch("reject").to
+    assert approval.outcomes.frozen?
+  end
+
+  def test_human_outcomes_reject_invalid_shapes_and_targets
+    invalid = [
+      [ { "approve" => { "complete" => true, "to" => "draft", "artifact" => "draft.md" } }, "exactly one" ],
+      [ { "approve" => { "artifact" => "draft.md" } }, "exactly one" ],
+      [ { "approve" => { "complete" => false, "artifact" => "draft.md" } }, "complete must be true" ],
+      [ { "approve" => { "complete" => true } }, "artifact must be a non-empty string" ],
+      [ { "reject" => { "to" => "draft", "artifact" => "draft.md" } }, "artifact is only valid" ],
+      [ { "bad name" => { "to" => "draft" } }, "outcome name" ],
+      [ { "reject" => { "to" => "missing" } }, "targets unknown stage" ],
+      [ { "reject" => { "to" => "draft", "command" => "publish" } }, "unknown key" ]
+    ]
+
+    invalid.each do |outcomes, message|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            { "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft" },
+            {
+              "name" => "approval", "kind" => "human", "state_file" => "approval.md",
+              "input" => "draft.md", "outcomes" => outcomes
+            }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, message, "expected #{outcomes.inspect} to report #{message.inspect}"
+      assert_includes error.message, "approval"
+    end
+  end
+
+  def test_human_stage_rejects_agent_settings_and_non_human_outcomes
+    %w[agent model permissions instruction skill effort budget_usd timeout_sec reviewers council deliverable workspace handoff conditions mapping_role mapping_contract].each do |field|
+      value =
+        case field
+        when "budget_usd", "timeout_sec" then 1
+        when "reviewers" then []
+        when "council", "conditions" then {}
+        else "value"
+        end
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            {
+              "name" => "approval", "kind" => "human", "state_file" => "approval.md",
+              "outcomes" => { "approve" => { "complete" => true, "artifact" => "draft.md" } },
+              field => value
+            }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, field
+      assert_includes error.message, "human stage"
+    end
+
+    error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          {
+            "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft",
+            "outcomes" => { "approve" => { "complete" => true, "artifact" => "draft.md" } }
+          }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+    assert_includes error.message, "outcomes is only valid on a human stage"
+  end
+
+  def test_human_stage_requires_at_least_one_outcome
+    [ nil, {} ].each do |outcomes|
+      stage = { "name" => "approval", "kind" => "human", "state_file" => "approval.md" }
+      stage["outcomes"] = outcomes unless outcomes.nil?
+      error = assert_config_error(
+        { "id" => "bad", "stages" => [ stage ] },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, "human stage must declare at least one outcome"
+    end
+  end
+
   def test_stage_conditions_select_registered_semantics_only
     workflow = Hive::Workflows::DescriptorParser.parse_hash(
       {
@@ -773,7 +891,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       parser.send(:validate_terminal_last_stage!, [ stage ])
     end
 
-    assert_includes error.message, 'last stage "execute" must be terminal, agent, or council'
+    assert_includes error.message, 'last stage "execute" must be terminal, agent, council, or human'
   end
 
   def test_council_stage_requires_reviewers
@@ -944,7 +1062,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       path: "/tmp/bad.yml"
     )
 
-    assert_includes error.message, 'stage 1 kind "marker" must be agent, council, or terminal'
+    assert_includes error.message, 'stage 1 kind "marker" must be agent, council, human, or terminal'
 
     # The coding runtime kinds (execute/review_council/finalize) are Ruby-only:
     # only Workflows::Coding declares them via Stage.new, and parse_kind must keep
@@ -960,7 +1078,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
         path: "/tmp/bad.yml"
       )
 
-      assert_includes runtime_error.message, %(stage 1 kind "#{coding_runtime_kind}" must be agent, council, or terminal),
+      assert_includes runtime_error.message, %(stage 1 kind "#{coding_runtime_kind}" must be agent, council, human, or terminal),
                       "YAML descriptors must not be able to declare Ruby-only coding runtime kind " \
                       "#{coding_runtime_kind.inspect}"
     end

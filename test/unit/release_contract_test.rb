@@ -26,6 +26,27 @@ class ReleaseContractTest < Minitest::Test
     assert_equal 2, read("install.md").scan(%r{/v#{version}/install\.sh}).size
   end
 
+  def test_public_credibility_copy_matches_current_capabilities
+    readme = read("README.md")
+    gemspec = read("hive.gemspec")
+    faq = read("docs/faq.md")
+    workflows = read("docs/workflows.md")
+
+    assert_includes readme, "Hive is a durable, local-first workflow engine for AI agents."
+    assert_includes gemspec, "Durable, local-first workflow engine for AI agents"
+    assert_match(/coding,\s+content, benchmark, and owner-authored workflows/, gemspec)
+    assert_includes faq, "hive web"
+    refute_includes faq, "Why no built-in web UI?"
+    refute_includes readme, "why no built-in web UI"
+
+    assert_includes workflows, "built-in `coding`, `content`, and `bench` workflows"
+    assert_includes workflows, "hive workflow install honeycomb/architecture --yes"
+    assert_includes workflows, "The last stage may be `kind: terminal`, `kind: agent`, or `kind: council`."
+
+    %w[OpenClaw Grok hive-bench Honeycomb].each { |capability| assert_includes readme, capability }
+    assert_includes readme, "### Hive web (default native experience)"
+  end
+
   def test_discord_announcement_uses_supported_update_command
     workflow = YAML.safe_load_file(RELEASE_WORKFLOW, aliases: true)
     step = workflow.fetch("jobs").fetch("release-finalize").fetch("steps").find do |candidate|

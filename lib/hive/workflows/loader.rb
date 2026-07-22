@@ -13,9 +13,9 @@ module Hive
       # delegates here for scaffolding. `expand_path(..., project_root)` resolves
       # a relative hive_state_path against the project and honors an absolute
       # one, where a bare File.join would mis-concatenate.
-      def workflow_dir(project_root)
+      def workflow_dir(project_root, config: nil)
         project_root = File.expand_path(project_root)
-        cfg = Hive::Config.load(project_root)
+        cfg = config || Hive::Config.load(project_root)
         File.join(File.expand_path(cfg.fetch("hive_state_path"), project_root), "workflows")
       end
 

@@ -1,4 +1,5 @@
 require "monitor"
+require "hive/stage_label"
 
 module Hive
   module Bot
@@ -6,21 +7,11 @@ module Hive
       # coding-scoped (block): bespoke human labels for the coding stage dirs;
       # every other workflow titleizes its stage name instead of looking up
       # this coding-only map (see stage_label's fallback).
-      STAGE_LABELS = {
-        "1-inbox" => "Inbox",
-        "2-brainstorm" => "Brainstorm",
-        "3-plan" => "Plan",
-        "4-execute" => "Execute",
-        "5-open-pr" => "Open PR",
-        "6-review" => "Review",
-        "7-artifacts" => "Artifacts",
-        "8-finalize" => "Finalize",
-        "9-done" => "Done"
-      }.freeze
+      STAGE_LABELS = Hive::StageLabel::KNOWN
 
       SLUG_SUFFIX = /-\d{6}-[a-f0-9]{4,}\z/
       TITLE_LIMIT = 60
-      ACRONYMS = %w[PR CI CD DB UI UX API URL HTTP].freeze
+      ACRONYMS = Hive::StageLabel::ACRONYMS
       ACRONYM_REGEXPS = ACRONYMS.map { |a| [ /\b#{Regexp.escape(a)}\b/i, a ] }.freeze
       UNKNOWN_STAGE_LABELS_LOCK = Monitor.new
       # Eager-initialize the unknown-label cache so the lookup at log time
@@ -46,9 +37,7 @@ module Hive
         return label if label
 
         log_unknown_stage_once(key, logger)
-        fallback = key.sub(/\A\d+-/, "").tr("-", " ").strip
-        fallback = "stage" if fallback.empty?
-        fallback.split(/\s+/).map(&:capitalize).join(" ")
+        Hive::StageLabel.format(key)
       end
 
       def log_unknown_stage_once(key, logger)

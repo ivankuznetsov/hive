@@ -12,10 +12,10 @@ class TasksTest < ActionDispatch::IntegrationTest
   end
 
   test "status grid lists the task" do
-    get "/"
+    get "/grid"
     assert_response :success
     assert_match @slug, response.body
-    assert_select "#projects", 1
+    assert_select "#status-grid", 1
   end
 
   test "task state renders implementation ownership as pending without mutating legacy state" do

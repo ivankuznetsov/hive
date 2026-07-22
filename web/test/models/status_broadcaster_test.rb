@@ -60,13 +60,12 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
 
     StatusBroadcaster.send(:broadcast, payload)
 
-    assert_equal [ :refresh, :replace, :replace, :replace ], events.map(&:first)
-    assert_equal %w[project-nav composer-project projects],
+    assert_equal [ :refresh, :replace, :replace ], events.map(&:first)
+    assert_equal %w[project-nav composer-project],
                  events.drop(1).map { |event| event.last.fetch(:target) }
     assert_equal [
       "status/project_nav",
-      "status/composer_project",
-      "status/projects"
+      "status/composer_project"
     ], events.drop(1).map { |event| event.last.fetch(:partial) }
     events.drop(1).each do |event|
       assert_equal %w[busy idle],

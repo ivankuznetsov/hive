@@ -40,6 +40,16 @@ class Project
     InitSetup.workflows(path)
   end
 
+  def config
+    return @config if defined?(@config)
+    raise @config_error if defined?(@config_error)
+
+    @config = Hive::Config.load(path)
+  rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
+    @config_error = e
+    raise
+  end
+
   def active_tasks
     @active_tasks ||= attributes.fetch("tasks", []).map do |task_attributes|
       Task.new(project: self, attributes: task_attributes)
@@ -47,14 +57,14 @@ class Project
   end
 
   def default_workflow
-    Hive::Config.load(path)["default_workflow"].presence
+    config["default_workflow"].presence
   rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
     Rails.logger.warn("default_workflow unreadable for #{name}: #{e.class}: #{e.message}")
     nil
   end
 
   def daemon_enabled?
-    Hive::Config.load(path).dig("daemon", "enabled") != false
+    config.dig("daemon", "enabled") != false
   rescue StandardError => e
     Rails.logger.warn("project config unreadable for #{name}: #{e.class}: #{e.message}")
     true

@@ -17,6 +17,19 @@ class IdeasTest < ActionDispatch::IntegrationTest
     assert slug, "the idea must become a 1-inbox task folder"
   end
 
+  test "idea creation returns to the same-origin status view only" do
+    destination = grid_url(project: @project)
+    post ideas_path,
+         params: { project: @project, text: "Stay on the explicit grid" },
+         headers: { "HTTP_REFERER" => destination }
+    assert_redirected_to destination
+
+    post ideas_path,
+         params: { project: @project, text: "Reject an external return" },
+         headers: { "HTTP_REFERER" => "https://attacker.example/grid" }
+    assert_redirected_to root_path
+  end
+
   test "attached images land in the task's assets dir, TUI contract" do
     png = Rack::Test::UploadedFile.new(
       StringIO.new("\x89PNG\r\n\x1a\nfake".b), "image/png", original_filename: "image1.png"

@@ -5,7 +5,7 @@
 <section id="task-state" data-controller="answers">
   <div class="task-header">
     <%= stage_badge(@task["stage"]) %>
-    <span class="task-meta"><%= status_dot(@task) %> <%= @task["action_label"].presence || @task["marker"].presence || "idle" %></span>
+    <span class="task-meta"><%= status_dot(@task) %> <%= @task.status_label %></span>
   </div>
 
   <% if (ownership = @task["implementation_identity"]) %>
@@ -64,26 +64,9 @@
     </div>
   <% end %>
 
-  <div class="task-actions">
-    <% if @task.recovery_action? %>
-      <%# The bot's Autofix, web-shaped: clears the failure marker (guarded
-          by its attrs) and re-runs the stage verb as one queued sequence. %>
-      <%= button_to "Retry stage", task_recover_path(@project.name, @task["slug"]),
-            data: { turbo_submits_with: "Queueing…" } %>
-    <% end %>
-    <% if @task.passable? %>
-      <%= button_to "Approve", task_approve_path(@project.name, @task["slug"]),
-            params: { from: @task["stage"] }, data: { turbo_submits_with: "Approving…" } %>
-    <% end %>
-    <% if !@daemon_enabled && (dispatch_action = @task.dispatch_action) %>
-      <%= button_to "Run #{@task.run_verb}", task_run_path(@project.name, @task["slug"]),
-            params: { action_name: dispatch_action, stage: @task["stage"] }, class: "btn-secondary",
-            data: { turbo_submits_with: "Queueing…" } %>
-    <% end %>
-    <% if @task.worktree? %>
-      <%= link_to "Diff", task_diff_path(@project.name, @task["slug"]), class: "btn btn-secondary" %>
-    <% end %>
-  </div>
+  <%# The bot's Autofix, web-shaped, and every other primary task action are
+      shared with board cards so both surfaces submit the same native forms. %>
+  <%= render "tasks/primary_actions", task: @task, daemon_enabled: @daemon_enabled %>
 
   <% if @questions.any? %>
     <section class="qa">

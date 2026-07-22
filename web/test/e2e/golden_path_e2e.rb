@@ -100,10 +100,13 @@ class GoldenPathE2E < ApplicationSystemTestCase
 
     # The wait page meta-refreshes once per interval; the next render polls
     # the (stubbed) token endpoint and admits.
-    assert_selector "#projects", wait: 15
+    assert_selector "#status-board", wait: 15
     config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
     assert_equal "goldenpath", config.dig("web", "github", "owner"),
                  "the claim must be persisted as the Hive web owner"
+
+    visit grid_path
+    assert_selector "#status-grid"
 
     # --- Sample idea -------------------------------------------------------
     fill_in "New idea", with: "Golden path sample idea"
@@ -251,9 +254,9 @@ class GoldenPathE2E < ApplicationSystemTestCase
     device = http_ok(JSON.generate(
                        "device_code" => "dev-1", "user_code" => "ABCD-1234",
                        "verification_uri" => "https://github.com/login/device",
-                       # interval 1: the wait page must actually RENDER with the
-                       # code before the meta-refresh polls and admits.
-                       "expires_in" => 900, "interval" => 1
+                       # Keep the code visible long enough for Playwright to
+                       # observe the redirected page before meta-refresh admits.
+                       "expires_in" => 900, "interval" => 2
                      ))
     token = http_ok(JSON.generate("access_token" => "gho_e2e"))
     user = http_ok(JSON.generate("login" => login))

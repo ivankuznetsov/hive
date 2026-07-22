@@ -1760,6 +1760,47 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_llm_wiki_bootstrap_replaces_stale_main_wiki_path_when_fallback_exists
+    with_tmp_home do |global_home|
+      with_tmp_git_repo do |dir|
+        config_dir = File.join(dir, ".llm-wiki")
+        fallback = File.join(global_home, "wikis", "master", "wiki")
+        FileUtils.mkdir_p(config_dir)
+        FileUtils.mkdir_p(fallback)
+        File.write(
+          File.join(config_dir, "config.json"),
+          JSON.pretty_generate("main_wiki_path" => File.join(global_home, "missing", "wiki"))
+        )
+
+        Hive::LlmWikiBootstrap.ensure_config(dir)
+
+        cfg = JSON.parse(File.read(File.join(config_dir, "config.json")))
+        assert_equal fallback, cfg.fetch("main_wiki_path")
+      end
+    end
+  end
+
+  def test_llm_wiki_bootstrap_preserves_existing_custom_main_wiki_path
+    with_tmp_home do |global_home|
+      with_tmp_git_repo do |dir|
+        config_dir = File.join(dir, ".llm-wiki")
+        custom = File.join(global_home, "custom-wiki")
+        FileUtils.mkdir_p(config_dir)
+        FileUtils.mkdir_p(custom)
+        FileUtils.mkdir_p(File.join(global_home, "wikis", "master", "wiki"))
+        File.write(
+          File.join(config_dir, "config.json"),
+          JSON.pretty_generate("main_wiki_path" => custom)
+        )
+
+        Hive::LlmWikiBootstrap.ensure_config(dir)
+
+        cfg = JSON.parse(File.read(File.join(config_dir, "config.json")))
+        assert_equal custom, cfg.fetch("main_wiki_path")
+      end
+    end
+  end
+
   def test_llm_wiki_shared_runtime_copy_is_safe_with_utf8_default_internal_encoding
     with_tmp_git_repo do |dir|
       original_internal = Encoding.default_internal

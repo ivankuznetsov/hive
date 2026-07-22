@@ -145,6 +145,7 @@ positive_integer_or_default() {
 
 max_auto_pending="$(positive_integer_or_default "${LLM_WIKI_MAX_AUTO_PENDING:-25}" 25)"
 max_batch_sources="$(positive_integer_or_default "${LLM_WIKI_MAX_BATCH_SOURCES:-10}" 10)"
+max_source_pin_batch="$(positive_integer_or_default "${LLM_WIKI_MAX_SOURCE_PIN_BATCH:-64}" 64)"
 max_paths_per_source="$(positive_integer_or_default "${LLM_WIKI_MAX_PATHS_PER_SOURCE:-20}" 20)"
 max_path_bytes="$(positive_integer_or_default "${LLM_WIKI_MAX_PATH_BYTES:-200}" 200)"
 
@@ -335,17 +336,23 @@ pending_sources_present() {
   [ "$(pending_source_count)" -gt 0 ]
 }
 
+queue_temp_source_sha() {
+  local name
+  name="$(basename "$1")"
+  [[ "$name" =~ ^\.([0-9a-fA-F]{40,64})\.[0-9]+$ ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
 recover_queue_temps() {
-  local path name queued_sha queued_sha_in_file queued_branch target
+  local path name queued_sha queued_sha_in_file queued_branch target recovery_tmp
   shopt -s nullglob
   for path in "$pending_dir"/.[0-9a-fA-F]*.*; do
     [ -f "$path" ] || continue
     name="$(basename "$path")"
-    if [[ ! "$name" =~ ^\.([0-9a-fA-F]{40,64})\.[0-9]+$ ]]; then
+    queued_sha="$(queue_temp_source_sha "$path")" || {
       log_line "WARN: unrecognized queue temp retained: $name"
       continue
-    fi
-    queued_sha="${BASH_REMATCH[1]}"
+    }
     target="$pending_dir/$queued_sha"
     if [ -f "$target" ]; then
       rm -f -- "$path"
@@ -354,7 +361,21 @@ recover_queue_temps() {
     fi
     IFS=$'\t' read -r queued_sha_in_file queued_branch <"$path" || true
     if [ "$queued_sha_in_file" != "$queued_sha" ]; then
-      log_line "WARN: incomplete queue temp retained: $name"
+      if ! git cat-file -e "${queued_sha}^{commit}" 2>/dev/null; then
+        log_line "WARN: incomplete queue temp retained because its source commit is unavailable: $name"
+        continue
+      fi
+      recovery_tmp="$state_dir/.queue-recovery.${queued_sha}.$$"
+      printf '%s\tinterrupted-write\n' "$queued_sha" >"$recovery_tmp"
+      if ! git diff-tree --no-commit-id --name-only -r "$queued_sha" \
+           >>"$recovery_tmp" 2>/dev/null; then
+        rm -f -- "$recovery_tmp"
+        log_line "WARN: incomplete queue temp retained because its source paths could not be read: $name"
+        continue
+      fi
+      mv -f -- "$recovery_tmp" "$target"
+      rm -f -- "$path"
+      log_line "reconstructed interrupted queue write for source $queued_sha"
       continue
     fi
     mv -f -- "$path" "$target"
@@ -374,27 +395,50 @@ open_backlog_circuit_if_needed() {
   return 0
 }
 
-pin_queued_sources() {
-  local path queued_sha queued_branch
+run_update_ref_transaction() {
+  [ "$#" -gt 0 ] || return 0
   {
     printf 'start\n'
-    shopt -s nullglob
-    for path in "$pending_dir"/* "$failed_dir"/*; do
-      [ -f "$path" ] || continue
-      queued_sha=""
-      queued_branch=""
-      IFS=$'\t' read -r queued_sha queued_branch <"$path" || true
-      if [[ "$queued_sha" =~ ^[0-9a-fA-F]{40,64}$ ]] && \
-         git cat-file -e "${queued_sha}^{commit}" 2>/dev/null; then
-        printf 'update %s/%s %s\n' "$source_ref_prefix" "$queued_sha" "$queued_sha"
-      else
-        log_line "ERROR: queued source is not an available commit: $queued_sha"
-      fi
-    done
-    shopt -u nullglob
+    printf '%s\n' "$@"
     printf 'commit\n'
   } | run_with_timeout "${LLM_WIKI_GIT_REF_TIMEOUT:-5}" \
     git update-ref --stdin >>"$log_file" 2>&1
+}
+
+pin_source_ref_batch() {
+  local queued_sha
+  local commands=()
+  for queued_sha in "$@"; do
+    commands+=("update $source_ref_prefix/$queued_sha $queued_sha")
+  done
+  run_update_ref_transaction "${commands[@]}"
+}
+
+pin_queued_sources() {
+  local path queued_sha queued_branch
+  local source_shas=()
+  shopt -s nullglob
+  for path in "$pending_dir"/* "$failed_dir"/*; do
+    [ -f "$path" ] || continue
+    queued_sha=""
+    queued_branch=""
+    IFS=$'\t' read -r queued_sha queued_branch <"$path" || true
+    if [[ "$queued_sha" =~ ^[0-9a-fA-F]{40,64}$ ]] && \
+       git cat-file -e "${queued_sha}^{commit}" 2>/dev/null; then
+      source_shas+=("$queued_sha")
+      if [ "${#source_shas[@]}" -ge "$max_source_pin_batch" ]; then
+        pin_source_ref_batch "${source_shas[@]}" || {
+          shopt -u nullglob
+          return 1
+        }
+        source_shas=()
+      fi
+    else
+      log_line "ERROR: queued source is not an available commit: $queued_sha"
+    fi
+  done
+  shopt -u nullglob
+  pin_source_ref_batch "${source_shas[@]}"
 }
 
 open_source_pin_circuit() {
@@ -482,19 +526,17 @@ failed_source_count() {
 }
 
 recoverable_queue_temps_present() {
-  local path name queued_sha queued_sha_in_file
+  local path queued_sha queued_sha_in_file
   shopt -s nullglob
   for path in "$pending_dir"/.[0-9a-fA-F]*.*; do
     [ -f "$path" ] || continue
-    name="$(basename "$path")"
-    if [[ "$name" =~ ^\.([0-9a-fA-F]{40,64})\.[0-9]+$ ]]; then
-      queued_sha="${BASH_REMATCH[1]}"
-      queued_sha_in_file=""
-      IFS=$'\t' read -r queued_sha_in_file _ <"$path" || true
-      if [ "$queued_sha_in_file" = "$queued_sha" ]; then
-        shopt -u nullglob
-        return 0
-      fi
+    queued_sha="$(queue_temp_source_sha "$path")" || continue
+    queued_sha_in_file=""
+    IFS=$'\t' read -r queued_sha_in_file _ <"$path" || true
+    if [ "$queued_sha_in_file" = "$queued_sha" ] || \
+       git cat-file -e "${queued_sha}^{commit}" 2>/dev/null; then
+      shopt -u nullglob
+      return 0
     fi
   done
   shopt -u nullglob
@@ -842,17 +884,14 @@ publish_retained_sources() {
 
 write_source_receipts() {
   local refresh_head file queued_sha queued_branch
+  local commands=()
   refresh_head="$(git -C "$refresh_root" rev-parse HEAD)"
-  {
-    printf 'start\n'
-    for file in "${QUEUE_FILES[@]}"; do
-      IFS=$'\t' read -r queued_sha queued_branch <"$file"
-      printf 'update refs/llm-wiki/receipts/%s %s\n' "$queued_sha" "$refresh_head"
-      printf 'delete %s/%s\n' "$source_ref_prefix" "$queued_sha"
-    done
-    printf 'commit\n'
-  } | run_with_timeout "${LLM_WIKI_GIT_REF_TIMEOUT:-5}" \
-    git update-ref --stdin >>"$log_file" 2>&1
+  for file in "${QUEUE_FILES[@]}"; do
+    IFS=$'\t' read -r queued_sha queued_branch <"$file"
+    commands+=("update refs/llm-wiki/receipts/$queued_sha $refresh_head")
+    commands+=("delete $source_ref_prefix/$queued_sha")
+  done
+  run_update_ref_transaction "${commands[@]}"
 }
 
 prune_receipted_queue_files() {

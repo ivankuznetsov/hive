@@ -610,3 +610,15 @@ push, draft PR creation/reconciliation, and process death after each mutation
 intent followed by a separate-process resume. Keep this as an operational
 verification gap; the controller remains fail-closed when a result is not
 uniquely observable.
+
+## Large LLM-wiki backlog recovery needs live queue evidence (2026-07-22)
+
+Focused integration tests now prove bounded source-ref transactions, retry
+after a later transaction fails, reconstruction of an interrupted empty queue
+write when its commit is available, and retention when the commit is missing.
+They also prove stale `main_wiki_path` rediscovery without overriding a valid
+custom path. This closes the deterministic regression surface, but the real
+Hive backlog has not yet been drained with the repaired runner. Keep this gap
+open until a live recovery records the final queue and breaker counts, confirms
+the primary checkout stayed clean, and shows that scheduler unit count did not
+grow during the drain.

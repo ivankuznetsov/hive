@@ -136,7 +136,7 @@ task default: :test
 | `test/unit/web/{web_command,app_bundle,environment,host_authorization,service_status}_test.rb`, `test/integration/web_packaged_bootstrap_test.rb`, `web/test/integration/production_host_authorization_test.rb` | Hive web app-dir resolution (canonical input plus warned alias), exact six-variable precedence/warnings, launchd lifecycle/readiness polling including unsupported/disabled fallbacks, readiness-failing install and versioned status-error contracts, release-workflow-and-tag-pinned bundle authentication, authenticated lockfile preservation across Bundler/assets, bounded verifier output/termination cleanup, real packaged-root Bundler/Rails bootstrap without a parent checkout, root-level host-policy construction plus behavioral production Host authorization, `db:prepare` typed failure guidance, final Rails `Kernel.exec` env/argv, and loopback/public-bind policy. |
 | `web/test/models/{task,task_mutations,project,daemon}_test.rb`, `web/test/integration/daemon_repairs_test.rb` | Rails resource ownership — canonical stage-run verb mapping, fresh-row action/stage comparison, unknown-action and queue-grammar refusal before writes, guarded marker-clear plus stage-rerun recovery sequences with sidecar cleanup, manual-only/markerless refusal, Reject's prior-gate derivation, custom-workflow Approve/Drop, brainstorm answer/intervention writes, idea capture through `Project`, and global daemon repair through the REST-shaped repair resource. |
 | Queued `commands/module_*_test.rb`, `module_package/*_test.rb`, `modules/{status,doctor,dry_run,dispatcher,schedule_planner,decision_journal}_test.rb`, and module schema tests (`071d0d71` plus its branch ancestry) | Managed-module lifecycle and observability — preview/receipt binding, atomic generation/configuration activation, failure retention and tombstones, immutable decisions, event/schedule admission, shared redacted status, secret-value exclusion, bounded corrupt-state output, read-only doctor/inspection, production-evaluator dry-run parity, schema correspondence, and byte-stable no-write checks. These sources remain branch-only. |
-| `test/unit/web/status_feed_test.rb`, `web/test/{channels/status_channel,models/status_broadcaster,integration/status}_test.rb`, `web/test/e2e/golden_path_e2e.rb` | Hive web status delivery — canonical cross-process snapshot tokens, primed first-render ownership, one shared five-second poller only while confirmed subscribers exist, exact pending/active/closed lease release, deferred adapter and never-confirmed teardown, failed-start rollback/retry, volatile-only token reuse, one fully rendered Cable message, stale-token catch-up without refresh loops, cancellation/reconnect/consumer-cache failure handling, task-form submission guarding, and zero idle-browser HTTP/DOM update assertions. Queued `affc392f` additionally pins URL-addressed server filtering, invalid-project redirect, unrelated-project markup exclusion, server-rendered active navigation, view preservation, composer synchronization for raw JSON-looking project names, and refresh-plus-composer-only broadcasts. |
+| `test/unit/web/status_feed_test.rb`, `web/test/{channels/status_channel,models/status_broadcaster,integration/status}_test.rb`, `web/test/e2e/golden_path_e2e.rb` | Hive web status delivery — canonical cross-process snapshot tokens, primed first-render ownership, one shared five-second poller only while confirmed subscribers exist, exact pending/active/closed lease release, deferred adapter and never-confirmed teardown, failed-start rollback/retry, volatile-only token reuse, one fully rendered Cable message, stale-token catch-up without refresh loops, cancellation/reconnect/consumer-cache failure handling, task-form submission guarding, and zero idle-browser HTTP/DOM update assertions. Queued sibling snapshots `affc392f` and `22d80d1b` additionally pin URL-addressed server filtering, invalid-project redirect, unrelated-project markup exclusion, server-rendered active navigation, view preservation, composer synchronization for raw JSON-looking project names, and refresh-plus-composer-only broadcasts. `22d80d1b` adds isolated Playwright project state and confirmed-Cable synchronization before filesystem-triggered refresh assertions. |
 | `web/agents_auth_test.rb`, `web/agents_auth_login_test.rb`, `web/agents_routes_test.rb` | `Hive::Web::AgentsAuth` — Claude paste-back PTY login URL capture, Codex and Grok `--device-auth` poll-login behavior, `gh auth login --web` URL capture plus auto-Enter prompt handling, binary PTY output scrubbing, rejected-code errors, watchdog/process-group cleanup, concurrent-session cap, Pi token JSON rejection/persistence, and route wiring. |
 | `web/config_test.rb`, `web/supervisor_test.rb`, `web/app_coverage_test.rb` | Hivebox config/supervisor packaging support — global web defaults/validation, child restart/backoff/reload/shutdown decisions, and route coverage attribution guardrails. |
 | `patrol/pr_opener_test.rb`, `patrol/review_handoff_test.rb` | `Hive::Patrol::PrOpener` / `ReviewHandoff` — exact base/head and clean-worktree binding, leased/verified remote publication, created/existing PR reconciliation, final remote base/head recheck before task publication, stale-base failed-handoff retry refusal, durable `reconciliation_pending` URL/patch receipts across lookup/auth failures, fail-closed exact-diff/title/body secret scanning, closed results, proof handoff, and exact-patch handoff retry. |
@@ -322,16 +322,25 @@ many web tests intentionally reuse the same task title inside a persistent
 sandbox project, the helper retries rare `SlugCollisionError` cases and
 identifies the created folder by comparing inbox children before/after the
 command instead of relying on mtime ordering.
+Queued `22d80d1b` changes the Playwright layer from cumulative project state to
+per-example isolation: `ApplicationSystemTestCase` stops and clears the
+subscriber-owned feed, removes only the guarded `hive-web-test*` sandbox's
+`repos/` tree, empties the registered-project list through the locked global
+config updater, and resets workflow descriptor caches. Filesystem mutations
+that expect a pushed morph wait for both the connected stream element and the
+single accepted `StatusBroadcaster` lease first. These barriers prevent test
+order and an accumulated synthetic fleet from determining refresh timing; they
+remain branch-only until the Rails refactor is integrated into current main.
 Browser tests never retain a `.task-row` Capybara element across daemon-driven
 Turbo morphs, because reconciliation can detach the row while
 Playwright is preparing a click. The system test visits the route from the task
 folder it just created; the golden-path E2E resolves the slug from one
 current-DOM query and visits that stable route directly. The earlier
 project-rail test used the same current-DOM discipline for a
-broadcaster-replaced rail. Queued `affc392f` removes that client-side rail
-replacement: Rails renders ordinary GET links and the selected project subset,
-while system tests exercise navigation and composer synchronization rather
-than retaining a filter node across morphs.
+broadcaster-replaced rail. Queued siblings `affc392f` and `22d80d1b` remove
+that client-side rail replacement: Rails renders ordinary GET links and the
+selected project subset, while system tests exercise navigation and composer
+synchronization rather than retaining a filter node across morphs.
 Before submitting the
 brainstorm answer, it waits for the daemon to classify the
 `needs_input` row and for the current `brainstorm.md` mtime second to pass, so

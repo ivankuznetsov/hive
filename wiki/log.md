@@ -4,6 +4,65 @@ Append-only log of all wiki operations.
 
 <!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
 ---
+title: Audit queued Rails filter tests and integrated wiki worker fixes
+date: 2026-07-22T22:00:12Z
+tags: [wiki, web, testing, llm-wiki, scheduler, provenance]
+---
+
+Inspected all three queued commits and all 45 changed-path blobs with direct
+`git show`. None of the supplied SHAs is a graph ancestor of the refresh
+branch, but their integration states differ.
+
+Rails commit `22d80d1b` is a sibling of previously documented `affc392f` from
+the same parent. Their production web blobs are identical: Rails owns the
+URL-addressed project filter and broadcasts refresh plus composer
+reconciliation. The new sibling differs in focused test infrastructure. It
+resets the guarded Playwright project sandbox, registry, broadcaster, and
+workflow cache before each example, and it waits for a confirmed Cable lease
+before filesystem mutations expected to trigger a morph. [[testing]] and
+[[gaps]] now record that additional evidence without claiming current-main
+integration or deployed multi-client proof.
+
+Timeout commit `c93b29b` and provider-dispatch follow-up `f4f863fe` were
+squash-merged into current default as `5dc06203`. Their final runner,
+scheduler, integration-test, and affected wiki blobs match the squash result.
+Existing [[commands/init]], [[dependencies]], [[templates]], and [[testing]]
+already cover the four-hour outer service timeout, the canonical cross-package
+lock, and configured-provider-only production dispatch; [[gaps]] now closes
+the stale source-integration uncertainty while retaining the separate v0.6.9
+publication/install gap.
+
+Page coverage remains 95, so [[index]] did not change. Compiled [[log]] was
+not edited, and QMD was intentionally not run.
+
+**Refreshed pages:**
+
+- [[testing]]
+- [[gaps]]
+- [[log]]
+
+---
+title: Restrict wiki refreshes to configured providers
+date: 2026-07-22T21:23:00Z
+tags: [wiki, security, providers, scheduler]
+---
+
+Removed the undocumented `LLM_WIKI_REFRESH_CMD` arbitrary executable override
+from Hive's shipped llm-wiki worker. Production refreshes now dispatch only to
+the explicitly configured Codex, Claude Code, or Pi provider through their
+fixed command names, bounded argument shapes, and existing per-command
+timeouts. Integration tests inject their deterministic command seam only into
+a disposable worker copy and assert that the committed production template
+does not expose the override.
+
+This hardening accompanies the four-hour outer service timeout in v0.6.9 and
+moves Hive onto the canonical `%t/llm-wiki-refresh.lock` already used by
+standalone llm-wiki and the marketplace plugin. Mixed installations now share
+one machine-wide provider admission point instead of serializing only within
+each package. Queue retention, the 4 GiB/no-swap limit, and wiki-only
+publication to `llm-wiki/refresh` remain unchanged.
+
+---
 title: Refresh queued managed-module, Rails filtering, and focused-test contracts
 date: 2026-07-22T20:42:30Z
 tags: [wiki, modules, web, patrol, bot, testing, security]
@@ -55,6 +114,21 @@ not run.
 - [[gaps]]
 - [[index]]
 - [[log]]
+
+---
+title: Cover bounded multi-batch wiki drains in systemd
+date: 2026-07-22T20:20:00Z
+tags: [wiki, systemd, scheduler, reliability]
+---
+
+Raised the managed llm-wiki systemd service timeout from 45 minutes to four
+hours. A scheduled worker can consume three batches, and each batch may use a
+30-minute headless-agent budget followed by two separate 15-minute QMD phases;
+the old outer timeout could therefore terminate a healthy recovered queue
+between batches. The worker remains bounded by its batch cap, per-command
+timeouts, machine-wide provider lock, 4 GiB memory limit, and no-swap policy.
+
+Focused scheduler coverage now pins the four-hour service limit.
 
 ---
 title: Audit queued runtime, patrol, dependency, and focused-test commits

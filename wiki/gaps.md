@@ -129,21 +129,35 @@ tags: [gap, todo, release-proof, agent-skills]
   CI. Commit `e1c41ea0` changes only the Brakeman ignore fingerprint/note for an
   already-bounded registered-task lookup and supplies no new runtime behavior.
 - Commits `96b06792` and patch-equivalent queued `2fef1f47`, followed by
-  `4455fc06` and later `affc392f`, are snapshots on
+  `4455fc06` and later sibling heads `affc392f` and `22d80d1b`, are snapshots on
   `refactor/dhh-web-architecture-v2`, not ancestors of the refresh branch.
   They remove `Hive::Web::Dispatcher`, move mutations onto Rails
   `Task`/`Project`/`Daemon` resources, and make status scans
-  confirmed-subscriber-owned. The later head moves project filtering into the
-  Rails GET/URL boundary and limits broadcasts to refresh plus composer
-  reconciliation. Source/Rails/browser tests pin the contracts, but
+  confirmed-subscriber-owned. The sibling heads have identical production web
+  blobs and move project filtering into the Rails GET/URL boundary while
+  limiting broadcasts to refresh plus composer reconciliation. `22d80d1b`
+  additionally resets the guarded project sandbox, registry, broadcaster, and
+  workflow cache between Playwright examples and waits for a confirmed Cable
+  lease before filesystem-triggered refresh assertions. Those test changes do
+  not close the branch integration boundary. Source/Rails/browser tests pin the
+  contracts, but
   current-main integration and a long-running multi-worker/multi-client
   deployed smoke across differently filtered URLs remain open.
 - Commits `aae95f78` and `8944dfba` carry the same headless wiki signal fix
-  from different parents; the latter is the newer-base authority. All queued
-  source blobs match except pre-existing wiki testing context. The v0.6.8
-  metadata, user-bus recovery, marker retention, and compiled-log-only no-op
-  are branch-only here. No public v0.6.8 tag/release or installed headless
-  service exercise is inferred from release-prep metadata or focused tests.
+  from different parents; the latter is the newer-base authority. Their final
+  scheduler, runner, test, and wiki blobs match squash merge `33e3e02e`, now an
+  ancestor of current default and tagged `v0.6.8`. That closes the former
+  source-integration gap, but the commits and local tag alone do not supply an
+  installed headless-service exercise.
+- Timeout commit `c93b29b` and provider-dispatch follow-up `f4f863fe` are not
+  graph ancestors of this refresh branch because PR #842 landed as squash
+  commit `5dc06203`. Direct comparison shows the final runner, scheduler,
+  integration-test, and affected wiki blobs at `f4f863fe` match `5dc06203`:
+  current default therefore carries the four-hour three-batch service timeout,
+  canonical `%t/llm-wiki-refresh.lock`, and configured-provider-only production
+  dispatch with the command override confined to a disposable test-script copy.
+  The remaining v0.6.9 publication/install uncertainty stays in the release
+  section below; source integration itself is no longer open.
 - Commit `ae2c5d2d` is documentation-only. It proposes exact numerator equality
   for the 100% coverage gate before measuring CI optimizations; no coverage
   correction, fixture optimization, worker split, or hosted speedup is

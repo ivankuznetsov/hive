@@ -49,6 +49,13 @@ to `LLM_WIKI_MAX_DRAIN_BATCHES` (3) with
 while the oneshot is already active without turning ordinary overlap into a
 manual circuit.
 
+The shared runner, compiler, and config are reconciled from the primary Git
+worktree whenever it already contains the managed runtime. Starting an older
+Hive checkout from a linked feature worktree therefore cannot replace the
+repository-wide scheduler runtime with stale scripts. Only a repository's
+first linked-worktree bootstrap falls back to its newly generated local files
+while the primary worktree has no managed runtime.
+
 The managed branch is `llm-wiki/refresh` by default and is published to
 `origin`; override those independently with `LLM_WIKI_REFRESH_BRANCH` and
 `LLM_WIKI_REFRESH_REMOTE`. Before every batch the runner fetches the published

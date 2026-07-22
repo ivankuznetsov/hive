@@ -19,6 +19,20 @@ a later ref-transaction failure without losing queue entries, preserve or
 receipt every source, keep both user checkouts clean, rediscover a moved main
 wiki, and preserve an existing custom path. Updated [[templates]],
 [[commands/init]], [[testing]], and [[gaps]]; page coverage did not change, so
-[[index]] did not need a catalog update. The production queue is intentionally
-retained until this fix is committed and the operator-authorized bounded
-recovery runs.
+[[index]] did not need a catalog update.
+
+The operator-authorized live recovery reconstructed all five interrupted temp
+writes and drained 637 complete entries to zero pending, hidden, or failed
+entries. It left no breaker or publication block, published the same refresh
+head held locally, preserved a wiki-only branch diff, and kept the primary
+checkout clean. Scheduler inventory remained 13 repository-owned units before
+and after the drain, all with 4 GiB memory ceilings and none active or failed.
+Final QMD maintenance confirmed 688 indexed documents with no outstanding
+content-hash embeddings.
+
+Post-recovery verification found that startup reconciliation from an older
+linked checkout could still replace the shared runtime with that checkout's
+stale scripts. Shared-runtime copies now come from the primary worktree whenever
+its managed files exist; linked files are accepted only for a repository's
+first bootstrap. An integration test corrupts a linked copy deliberately and
+proves that the shared runner and config continue to match the primary.

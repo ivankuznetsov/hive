@@ -611,14 +611,22 @@ intent followed by a separate-process resume. Keep this as an operational
 verification gap; the controller remains fail-closed when a result is not
 uniquely observable.
 
-## Large LLM-wiki backlog recovery needs live queue evidence (2026-07-22)
+## Large LLM-wiki backlog recovery verified (2026-07-22)
 
-Focused integration tests now prove bounded source-ref transactions, retry
-after a later transaction fails, reconstruction of an interrupted empty queue
-write when its commit is available, and retention when the commit is missing.
-They also prove stale `main_wiki_path` rediscovery without overriding a valid
-custom path. This closes the deterministic regression surface, but the real
-Hive backlog has not yet been drained with the repaired runner. Keep this gap
-open until a live recovery records the final queue and breaker counts, confirms
-the primary checkout stayed clean, and shows that scheduler unit count did not
-grow during the drain.
+The repaired runner drained the live Hive backlog from 637 complete queue
+entries plus five interrupted temp writes to zero pending, hidden, or failed
+entries. All five temp writes were reconstructed; 658 receipt refs now cover
+the recovered history, and no source-pin, consecutive-failure, or publication
+breaker remains. The local and published `llm-wiki/refresh` heads match with a
+wiki-only diff from the current default branch. The primary checkout stayed
+clean, and the scheduler remained at 13 repository-owned timer/service pairs
+before and after recovery; every service retains its 4 GiB memory ceiling and
+none was left active or failed.
+
+Live closure also exposed one additional downgrade path: startup
+reconciliation invoked from an older linked checkout could overwrite the
+shared runner after recovery. Shared-runtime installation is now pinned to the
+primary worktree whenever its managed files exist, with regression coverage
+for a deliberately stale linked copy. The bootstrap-only fallback remains for
+repositories whose primary worktree does not yet contain managed wiki files.
+No unresolved recovery gap remains for this incident.

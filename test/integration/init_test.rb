@@ -1819,6 +1819,36 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_llm_wiki_shared_runtime_uses_primary_worktree_instead_of_stale_linked_copy
+    with_tmp_git_repo do |dir|
+      linked_dir = "#{dir}-linked-runtime"
+      Hive::LlmWikiBootstrap.ensure_config(dir)
+      Hive::LlmWikiBootstrap.ensure_refresh_scripts(dir)
+      run!("git", "-C", dir, "add", ".llm-wiki")
+      run!("git", "-C", dir, "commit", "-m", "add managed wiki runtime", "--quiet")
+      run!("git", "-C", dir, "worktree", "add", "-b", "linked-runtime-test", linked_dir, "HEAD", "--quiet")
+
+      linked_config = File.join(linked_dir, ".llm-wiki", "config.json")
+      linked_runner = File.join(linked_dir, ".llm-wiki", "post-commit-refresh.sh")
+      File.binwrite(linked_config, "{\"stale_linked_copy\":true}\n")
+      File.binwrite(linked_runner, "#!/usr/bin/env bash\n# stale linked runner\n")
+
+      Hive::LlmWikiBootstrap.ensure_shared_runtime(linked_dir)
+
+      shared_dir = File.join(Hive::LlmWikiBootstrap.git_common_dir(dir), "llm-wiki")
+      assert_equal File.binread(File.join(dir, ".llm-wiki", "config.json")),
+                   File.binread(File.join(shared_dir, "config.json"))
+      assert_equal File.binread(File.join(dir, ".llm-wiki", "post-commit-refresh.sh")),
+                   File.binread(File.join(shared_dir, "post-commit-refresh.sh"))
+      refute_includes File.binread(File.join(shared_dir, "config.json")), "stale_linked_copy"
+      refute_includes File.binread(File.join(shared_dir, "post-commit-refresh.sh")), "stale linked runner"
+    ensure
+      if linked_dir && File.directory?(linked_dir)
+        Open3.capture3("git", "-C", dir, "worktree", "remove", "--force", linked_dir)
+      end
+    end
+  end
+
   def test_llm_wiki_runtime_hook_install_restores_local_and_shared_runtime_first
     with_tmp_git_repo do |dir|
       Hive::LlmWikiBootstrap.install_runtime_hooks!(dir)

@@ -119,7 +119,8 @@ module Hive
     end
 
     def ensure_shared_runtime(project_root)
-      local_dir = File.join(project_root, ".llm-wiki")
+      runtime_root = shared_runtime_source_root(project_root)
+      local_dir = File.join(runtime_root, ".llm-wiki")
       shared_dir = File.join(git_common_dir(project_root), "llm-wiki")
       shared_scripts = {
         "post-commit-refresh.sh" => File.join(local_dir, "post-commit-refresh.sh"),
@@ -132,6 +133,30 @@ module Hive
         File.chmod(0o755, destination)
       end
       write_file(File.join(shared_dir, "config.json"), File.binread(File.join(local_dir, "config.json")))
+    end
+
+    def shared_runtime_source_root(project_root)
+      primary_root = primary_worktree_root(project_root)
+      required_files = %w[config.json post-commit-refresh.sh compile-log.sh]
+      return primary_root if required_files.all? { |name| File.file?(File.join(primary_root, ".llm-wiki", name)) }
+
+      # A repository can be initialized for the first time from a linked
+      # worktree. Until that bootstrap is merged, the primary worktree has no
+      # managed runtime to own, so use the newly generated local files.
+      File.expand_path(project_root)
+    end
+
+    def primary_worktree_root(project_root)
+      out, err, status = Open3.capture3(
+        "git", "-C", project_root, "worktree", "list", "--porcelain", "-z"
+      )
+      primary = out.split("\0").find { |field| field.start_with?("worktree ") }
+      primary = primary&.delete_prefix("worktree ")
+      unless status.success? && primary && File.directory?(primary)
+        raise ArgumentError, "cannot resolve primary Git worktree for #{project_root}: #{err.strip}"
+      end
+
+      File.expand_path(primary)
     end
 
     def ensure_post_commit_hook(project_root)

@@ -51,7 +51,10 @@ release semantics without a stale directory protocol. Scheduled workers consume 
 to `LLM_WIKI_MAX_DRAIN_BATCHES` (3) with
 `LLM_WIKI_DRAIN_SETTLE_SECONDS` (1) between batches, catching sources queued
 while the oneshot is already active without turning ordinary overlap into a
-manual circuit.
+manual circuit. The managed systemd service allows four hours for that bounded
+drain: each batch can spend up to 30 minutes in the wiki agent plus two
+independently bounded 15-minute QMD phases. The outer limit therefore covers
+the three-batch worst case without weakening the 4 GiB/no-swap cgroup limits.
 
 The shared runner, compiler, and config are reconciled from the primary Git
 worktree whenever it already contains the managed runtime. Starting an older

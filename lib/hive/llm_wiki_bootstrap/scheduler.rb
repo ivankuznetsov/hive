@@ -223,7 +223,10 @@ module Hive
           Environment=LLM_WIKI_GLOBAL_LOCK_HELD=1
           WorkingDirectory=#{encoded_project_root}
           ExecStart=#{systemd_path(flock_path)} --nonblock --conflict-exit-code 0 %t/hive-llm-wiki-refresh.lock #{encoded_refresh_script} --project #{encoded_project_root} --drain
-          TimeoutStartSec=45min
+          # A scheduled drain may run three batches. Each batch permits a
+          # 30-minute agent plus two independently bounded 15-minute QMD
+          # phases, so the outer service must outlive that bounded worst case.
+          TimeoutStartSec=4h
           MemoryMax=4G
           MemorySwapMax=0
         UNIT

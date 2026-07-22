@@ -2,6 +2,13 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.6.9
+
+- Fixed managed llm-wiki services timing out during a valid multi-batch drain.
+  The outer systemd limit now covers the worker's bounded worst case of three
+  agent and indexing batches, while retaining the 4 GiB memory limit, no-swap
+  policy, and machine-wide provider lock.
+
 ## 0.6.8
 
 - Fixed headless llm-wiki hooks losing their memory-bounded scheduler after a

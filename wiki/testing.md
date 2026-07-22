@@ -363,8 +363,10 @@ The protected `live-agent-skills.yml` workflow is the release-readiness owner:
    revision loaded from `refs/heads/main`;
 2. build one gem, one source archive, and one deterministic four-platform skill
    archive from that candidate;
-3. install each native CLI and exact candidate gem in a matrix job with its
-   protected environment credential exposed only to the proof step;
+3. install each native CLI and exact candidate gem in a matrix job, exposing
+   the private gem through a self-contained `GEM_HOME`/`GEM_PATH` wrapper that
+   clears inherited Ruby/Bundler startup injection while keeping its protected
+   environment credential scoped only to the proof step;
 4. place the exact platform projection into a disposable 0700 home and require
    structured native discovery/activation: OpenClaw resolves the exact
    `skills info` path, Codex's model-visible prompt inventory names the exact

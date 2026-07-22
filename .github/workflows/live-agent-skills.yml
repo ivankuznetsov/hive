@@ -162,11 +162,8 @@ jobs:
           set -euo pipefail
           gem_file="$(find candidate-artifacts -maxdepth 1 -type f -name 'hive-cli-*.gem' -print -quit)"
           [[ -n "$gem_file" && -s "$gem_file" ]]
-          mkdir -p "$RUNNER_TEMP/proven-gems"
-          gem install "$gem_file" \
-            --install-dir "$RUNNER_TEMP/proven-gems" \
-            --bindir "$RUNNER_TEMP/proven-gems/bin" \
-            --no-document
+          bash candidate-source/packaging/live_agent_skills/install_candidate_gem.sh \
+            "$gem_file" "$RUNNER_TEMP/proven-gems"
           "$RUNNER_TEMP/proven-gems/bin/hive" --version
           cd candidate-source
           bundle install --jobs 4 --retry 2

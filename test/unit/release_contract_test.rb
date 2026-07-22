@@ -111,6 +111,13 @@ class ReleaseContractTest < Minitest::Test
       step["name"] == "Install the native agent CLI in the ephemeral runner"
     end
     refute install_step.fetch("env").key?("CODEX_API_KEY")
+    candidate_install_step = jobs.fetch("live-agent").fetch("steps").find do |step|
+      step["name"] == "Install the exact candidate gem and test dependencies"
+    end
+    candidate_install_body = candidate_install_step.fetch("run")
+    assert_includes candidate_install_body, "install_candidate_gem.sh"
+    assert_includes candidate_install_body, '"$RUNNER_TEMP/proven-gems/bin/hive" --version'
+    refute_includes candidate_install_body, 'gem install "$gem_file"'
   end
 
   def test_tag_release_consumes_attested_artifacts_without_rebuilding

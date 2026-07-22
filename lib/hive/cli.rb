@@ -543,6 +543,11 @@ module Hive
       uses the project's default workflow; pass --workflow to pin a registered
       workflow for this task. (Options may also follow the text.)
 
+      --idempotency-key makes retries state-wide and machine-safe. Hive stores
+      the opaque key with a fingerprint of the input and resolved workflow,
+      returns the original task after it moves stages, and rejects reuse for
+      different input. Pair it with --json for the hive-new.v1 result.
+
       --depends-on stacks this task on a prerequisite: the daemon holds
       auto-advance until the prerequisite reaches the project's dependency
       gate stage (8-finalize by default, configurable via
@@ -563,6 +568,8 @@ module Hive
         hive new myproj --depends-on add-export-endpoint-260618-ab12 "wire up export API"
 
         hive new myproj --depends-on api:add-export-endpoint-260618-ab12 "wire up export UI"
+
+        hive new myproj --workflow content --idempotency-key creator:launch:v1 --json "write the launch post"
     DESC
     option :depends_on, type: :string,
                         desc: "depend on a same-project id/slug or explicit project:slug; hold daemon " \
@@ -571,6 +578,8 @@ module Hive
     option :base, type: :string,
                   desc: "base branch for a worktree/draft-PR workflow"
     option :workflow, type: :string, desc: workflow_option_desc
+    option :idempotency_key, type: :string,
+                             desc: "return the original task on a retry with identical input; reject conflicting reuse"
     def new_task(project, *text_parts)
       require "hive/commands/new"
       text = text_parts.join(" ")
@@ -581,7 +590,9 @@ module Hive
         text,
         base: options[:base],
         depends_on: options[:depends_on],
-        workflow: options[:workflow]
+        workflow: options[:workflow],
+        idempotency_key: options[:idempotency_key],
+        json: options[:json]
       ).call
     end
     map "new" => :new_task

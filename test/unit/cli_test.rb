@@ -257,13 +257,25 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::New) do |calls|
       Hive::CLI.start([ "new", "proj", "build", "thing" ])
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
-      assert_equal({ base: nil, depends_on: nil, workflow: nil }, calls.first.fetch(:kwargs))
+      assert_equal(
+        { base: nil, depends_on: nil, workflow: nil, idempotency_key: nil, json: false },
+        calls.first.fetch(:kwargs)
+      )
     end
 
     with_command_new_stub(Hive::Commands::New) do |calls|
-      Hive::CLI.start([ "new", "proj", "--depends-on", "base-task", "--workflow", "content_fixture", "build", "thing" ])
+      Hive::CLI.start([
+        "new", "proj", "--depends-on", "base-task", "--workflow", "content_fixture",
+        "--idempotency-key", "creator:v1", "--json", "build", "thing"
+      ])
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
-      assert_equal({ base: nil, depends_on: "base-task", workflow: "content_fixture" }, calls.first.fetch(:kwargs))
+      assert_equal(
+        {
+          base: nil, depends_on: "base-task", workflow: "content_fixture",
+          idempotency_key: "creator:v1", json: true
+        },
+        calls.first.fetch(:kwargs)
+      )
     end
 
     _out, err, status = with_captured_exit { Hive::CLI.start([ "new", "proj" ]) }

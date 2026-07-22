@@ -374,7 +374,9 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     runtime_dir = File.join(@dir, "runtime")
     lock_file = File.join(runtime_dir, "hive-llm-wiki-refresh.lock")
     ready = File.join(runtime_dir, "holder-ready")
+    forbidden_setup = File.join(runtime_dir, "forbidden-bundler-setup.rb")
     FileUtils.mkdir_p(runtime_dir)
+    File.write(forbidden_setup, "raise 'inherited Bundler setup reached portable lock keeper'\n")
     holder = Process.spawn(
       "ruby", "-e",
       "f=File.open(ARGV[0], File::RDWR|File::CREAT, 0600); f.flock(File::LOCK_EX); File.write(ARGV[1], 'ready'); sleep 60",
@@ -391,7 +393,8 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
       @wt,
       "XDG_RUNTIME_DIR" => runtime_dir,
       "LLM_WIKI_DISABLE_FLOCK" => "1",
-      "RUBYOPT" => "-rbundler/setup"
+      "RUBYOPT" => "-rbundler/setup",
+      "BUNDLER_SETUP" => forbidden_setup
     )
 
     assert_equal 0, result.fetch(:status), result.fetch(:out)
@@ -409,7 +412,8 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
         @wt,
         "XDG_RUNTIME_DIR" => runtime_dir,
         "LLM_WIKI_DISABLE_FLOCK" => "1",
-        "RUBYOPT" => "-rbundler/setup"
+        "RUBYOPT" => "-rbundler/setup",
+        "BUNDLER_SETUP" => forbidden_setup
       )
       break unless File.exist?(pending)
 

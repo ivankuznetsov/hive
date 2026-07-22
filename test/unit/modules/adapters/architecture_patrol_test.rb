@@ -1,0 +1,197 @@
+require "test_helper"
+require "hive/modules/adapters/architecture_patrol"
+require "hive/module_package/validator"
+
+class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
+  include HiveTestHelper
+
+  NOW = Time.utc(2026, 7, 22, 17, 0, 0)
+  DIGEST = "a" * 64
+  Configuration = Data.define(:settings, :grants, :digest)
+
+  class FakeCommand
+    def initialize(result = { "ok" => true }) = @result = result
+    def call = @result
+  end
+
+  class FakeScheduler
+    attr_reader :reserved, :completed, :cancelled
+
+    def initialize(candidates)
+      @candidates = candidates
+    end
+
+    def candidates(now:) = @candidates.map { |candidate| candidate.merge(now: now) }
+
+    def reserve(candidate, now:)
+      @reserved = [ candidate, now ]
+      candidate.merge(
+        manifest_path: candidate.fetch(:manifest_path, "/project/manifest.json"),
+        dispatch_token: {
+          kind: :architecture_patrol, phase: candidate.fetch(:action_phase, :discovery),
+          job_id: candidate.fetch(:job_id), registration: "demo"
+        }
+      )
+    end
+
+    def complete(**options)
+      @completed = options
+      { status: :classified }
+    end
+
+    def cancel(*args, **options) = @cancelled = [ args, options ]
+  end
+
+  def test_first_party_package_is_strictly_validated
+    result = Hive::ModulePackage::Validator.validate!(
+      File.expand_path("../../../../modules/architecture-patrol", __dir__),
+      catalog_commit: "f" * 40
+    )
+
+    assert_equal "architecture-patrol", result.descriptor.name
+    assert_equal "architecture-patrol", result.descriptor.type
+    assert_equal(
+      %w[setup scheduled-discovery merged-pr-discovery actions],
+      result.descriptor.hooks.map { |hook| hook.fetch("id") }
+    )
+    assert_equal [ "pull_request.merged" ], result.descriptor.hooks.fetch(2).fetch("events")
+    assert_equal %w[issues pull_requests], result.descriptor.permissions.fetch("github_mutations")
+  end
+
+  def test_shadow_merged_event_uses_exact_reconciler_job_without_claiming
+    with_project do |project|
+      scheduler = FakeScheduler.new([ candidate ])
+      commands = []
+      shadow = []
+      adapter = adapter_for(
+        scheduler, commands: commands, shadow: shadow
+      )
+
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "merged-pr-discovery",
+        event: merged_event, configuration: configuration(shadow: true)
+      )
+      assert_nil scheduler.reserved
+      assert_empty commands
+      assert_equal "due", shadow.fetch(0).fetch("rationale")
+      assert_equal "job-7", shadow.fetch(0).fetch("job_id")
+      refute File.exist?(File.join(project.fetch("path"), ".hive-state", "refactor_patrol"))
+    end
+  end
+
+  def test_scheduled_action_reserves_existing_lifecycle_and_invokes_internal_mode
+    with_project do |project|
+      scheduler = FakeScheduler.new([ candidate.merge(action_phase: :action) ])
+      commands = []
+      adapter = adapter_for(scheduler, commands: commands)
+
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "actions", event: schedule_event,
+        configuration: configuration(shadow: false)
+      )
+
+      name, options = commands.fetch(0)
+      assert_equal "demo", name
+      assert options.fetch(:actions)
+      assert_equal "/project/manifest.json", options.fetch(:job_manifest)
+      assert_equal project, options.fetch(:project_entry)
+      assert_equal true, options.fetch(:config_loader).call(project.fetch("path")).dig("refactor_patrol", "enabled")
+      assert_equal "job-7", scheduler.completed.fetch(:dispatch_token).fetch(:job_id)
+    end
+  end
+
+  def test_permission_denial_precedes_claim_and_engine
+    with_project do |project|
+      scheduler = FakeScheduler.new([ candidate ])
+      commands = []
+      denied = configuration(shadow: false)
+      denied.grants["github_mutations"] = [ "pull_requests" ]
+      adapter = adapter_for(scheduler, commands: commands)
+
+      assert_raises(Hive::Modules::CapabilityDenied) do
+        adapter.call(
+          project: project, hook_id: "scheduled-discovery", event: schedule_event,
+          configuration: denied
+        )
+      end
+      assert_nil scheduler.reserved
+      assert_empty commands
+    end
+  end
+
+  def test_merged_event_rejects_manifest_identity_drift
+    with_project do |project|
+      scheduler = FakeScheduler.new([ candidate ])
+      adapter = adapter_for(scheduler)
+      event = merged_event
+      event["payload"]["manifest_digest"] = "b" * 64
+
+      error = assert_raises(Hive::ConfigError) do
+        adapter.call(
+          project: project, hook_id: "merged-pr-discovery", event: event,
+          configuration: configuration(shadow: true)
+        )
+      end
+      assert_match(/manifest identity/, error.message)
+      assert_nil scheduler.reserved
+    end
+  end
+
+  private
+
+  def adapter_for(scheduler, commands: [], shadow: [])
+    Hive::Modules::Adapters::ArchitecturePatrol.new(
+      command_factory: lambda do |name, options|
+        commands << [ name, options ]
+        FakeCommand.new
+      end,
+      scheduler_factory: ->(**) { scheduler },
+      shadow_sink: ->(record) { shadow << record }
+    )
+  end
+
+  def with_project
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      FileUtils.mkdir_p(state)
+      File.write(File.join(state, "config.yml"), { "hive_state_path" => ".hive-state" }.to_yaml)
+      yield({ "name" => "demo", "path" => root, "hive_state_path" => state })
+    end
+  end
+
+  def candidate
+    {
+      job_id: "job-7", action_phase: :discovery,
+      manifest_path: "/project/manifest.json",
+      source: { "manifest_checksum" => DIGEST }
+    }
+  end
+
+  def configuration(shadow:)
+    Configuration.new(
+      settings: { "shadow_mode" => shadow, "dry_run" => false },
+      grants: {
+        "repository_write" => true, "github_mutations" => %w[issues pull_requests],
+        "external_commands" => %w[gh git], "network_hosts" => [ "api.github.com" ],
+        "filesystem_read" => [ "repository" ],
+        "filesystem_write" => [ ".hive-state/refactor_patrol/**" ], "secrets" => []
+      }, digest: "d" * 64
+    )
+  end
+
+  def schedule_event = event("schedule", "payload" => { "schedule" => "*/10 * * * *" })
+
+  def merged_event
+    event(
+      "pull_request.merged",
+      "payload" => { "job_id" => "job-7", "manifest_digest" => DIGEST }
+    )
+  end
+
+  def event(name, overrides = {})
+    {
+      "event_id" => "evt-#{'a' * 64}", "event_name" => name,
+      "occurred_at" => NOW.iso8601(6), "payload" => {}
+    }.merge(overrides)
+  end
+end

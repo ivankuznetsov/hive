@@ -68,7 +68,8 @@ module Hive
                      analysis_worktree_factory: nil,
                      heartbeat_interval_sec: CLAIM_HEARTBEAT_INTERVAL_SEC,
                      heartbeat_lease_sec: CLAIM_HEARTBEAT_LEASE_SEC,
-                     heartbeat_clock: -> { Time.now }, heartbeat_resolver: ClaimLivenessResolver.new)
+                     heartbeat_clock: -> { Time.now }, heartbeat_resolver: ClaimLivenessResolver.new,
+                     project_entry: nil, config_loader: ->(path) { Hive::Config.load(path) })
         @project = project
         @json = json
         @dry_run = dry_run
@@ -115,6 +116,8 @@ module Hive
         @heartbeat_lease_sec = heartbeat_lease_sec.to_i
         @heartbeat_clock = heartbeat_clock
         @heartbeat_resolver = heartbeat_resolver
+        @project_entry = project_entry
+        @config_loader = config_loader
       end
 
       def call
@@ -233,11 +236,11 @@ module Hive
       end
 
       def resolve_project!
-        entry = Hive::Config.find_project(@project)
+        entry = @project_entry || Hive::Config.find_project(@project)
         raise Hive::ConfigError, "hive refactor-patrol: unknown project #{@project.inspect}" unless entry
 
         project_root = entry.fetch("path")
-        cfg = Hive::Config.load(project_root)
+        cfg = @config_loader.call(project_root)
         unless query_mode? || @actions || (cfg["refactor_patrol"] || {})["enabled"]
           raise Hive::ConfigError, "hive refactor-patrol: project #{entry.fetch('name').inspect} must opt in with refactor_patrol.enabled: true"
         end

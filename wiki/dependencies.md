@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-07-20
+updated: 2026-07-22
 tags: [dependencies, gems, runtime]
 ---
 
@@ -11,9 +11,9 @@ tags: [dependencies, gems, runtime]
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
-tools. The v0.6.5 release-prep checkout is `0.6.5`: `lib/hive.rb`, root
+tools. The v0.6.6 release-prep checkout is `0.6.6`: `lib/hive.rb`, root
 `Gemfile.lock`, and `web/Gemfile.lock` all pin the local path gem as
-`hive-cli (0.6.5)`. The release-prep change keeps both lockfiles synchronized
+`hive-cli (0.6.6)`. The release-prep change keeps both lockfiles synchronized
 with public installer URLs and the changelog. Recent root bundle dependency
 commits also bumped RuboCop to 1.88.2, Brakeman from
 8.0.4 to 8.0.5, and `concurrent-ruby` from 1.3.6 to 1.3.7; the separate web
@@ -147,7 +147,7 @@ subscription-safety contract.
 `Gemfile` declares `ruby "~> 3.4"`. `hive.gemspec` requires Ruby
 `>= 3.4.0` for the packaged gem. `.rubocop.yml` pins
 `TargetRubyVersion: 3.4`. `Gemfile.lock` records Ruby 3.4.7, Bundler
-2.7.2, and the current local path gem as `hive-cli (0.6.5)`.
+2.7.2, and the current local path gem as `hive-cli (0.6.6)`.
 
 ## Backlinks
 

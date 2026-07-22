@@ -1,7 +1,7 @@
 PATH
   remote: ..
   specs:
-    hive-cli (0.6.5)
+    hive-cli (0.6.6)
       bubbletea (= 0.1.4)
       erb (>= 4.0)
       faraday (>= 2.14.2, < 3.0)

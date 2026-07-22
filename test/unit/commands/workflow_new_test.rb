@@ -238,7 +238,7 @@ class WorkflowNewTest < Minitest::Test
         Hive::Commands::Workflow.new(nil, nil, project_root: project_root, json: true).call
       end
       missing_payload = JSON.parse(missing_out)
-      assert_equal %w[new install list update remove publish], missing_payload.fetch("expected")
+      assert_equal %w[new validate install list update remove publish], missing_payload.fetch("expected")
       missing_errors = schemer.validate(missing_payload).map { |e| e["error"] }
       assert_empty missing_errors,
                    "hive-workflow-new usage ErrorPayload (with `expected`) must validate " \
@@ -249,7 +249,7 @@ class WorkflowNewTest < Minitest::Test
       end
       unknown_payload = JSON.parse(unknown_out)
       assert_equal "bogus", unknown_payload.fetch("value")
-      assert_equal %w[new install list update remove publish], unknown_payload.fetch("expected")
+      assert_equal %w[new validate install list update remove publish], unknown_payload.fetch("expected")
       unknown_errors = schemer.validate(unknown_payload).map { |e| e["error"] }
       assert_empty unknown_errors,
                    "hive-workflow-new usage ErrorPayload (with `value` AND `expected`) must " \
@@ -457,7 +457,7 @@ class WorkflowNewTest < Minitest::Test
 
       assert_equal Hive::ExitCodes::USAGE, status
       assert_empty out
-      assert_equal "hive workflow: unknown workflow subcommand \"save\" (expected: new, install, list, update, remove, publish)\n", err
+      assert_equal "hive workflow: unknown workflow subcommand \"save\" (expected: new, validate, install, list, update, remove, publish)\n", err
     end
   end
 
@@ -469,7 +469,7 @@ class WorkflowNewTest < Minitest::Test
 
       assert_equal Hive::ExitCodes::USAGE, status
       assert_empty out
-      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, install, list, update, remove, publish)\n", err
+      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, validate, install, list, update, remove, publish)\n", err
     end
   end
 
@@ -486,8 +486,8 @@ class WorkflowNewTest < Minitest::Test
       assert_equal "UsageError", payload.fetch("error_class")
       assert_equal "usage", payload.fetch("error_kind")
       assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
-      assert_equal "missing SUBCOMMAND (expected: new, install, list, update, remove, publish)", payload.fetch("message")
-      assert_equal %w[new install list update remove publish], payload.fetch("expected")
+      assert_equal "missing SUBCOMMAND (expected: new, validate, install, list, update, remove, publish)", payload.fetch("message")
+      assert_equal %w[new validate install list update remove publish], payload.fetch("expected")
       refute payload.key?("value")
     end
   end
@@ -505,9 +505,9 @@ class WorkflowNewTest < Minitest::Test
       assert_equal "UsageError", payload.fetch("error_class")
       assert_equal "usage", payload.fetch("error_kind")
       assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
-      assert_equal "unknown workflow subcommand \"bogus\" (expected: new, install, list, update, remove, publish)", payload.fetch("message")
+      assert_equal "unknown workflow subcommand \"bogus\" (expected: new, validate, install, list, update, remove, publish)", payload.fetch("message")
       assert_equal "bogus", payload.fetch("value")
-      assert_equal %w[new install list update remove publish], payload.fetch("expected")
+      assert_equal %w[new validate install list update remove publish], payload.fetch("expected")
     end
   end
 

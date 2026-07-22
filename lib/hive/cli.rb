@@ -453,6 +453,7 @@ module Hive
         new ID    Scaffold a per-project workflow descriptor under
                   <hive_state_path>/workflows/ID.yml plus its stage
                   instruction(s) under <hive_state_path>/workflows/ID/.
+        validate ID  Read and validate the normalized workflow graph without writes.
         install honeycomb/NAME[@VERSION]  Verify and install a reviewed package.
         list                              Inspect built-in, authored, and managed workflows.
         update NAME                       Diff and advance a managed package.

@@ -20,20 +20,21 @@ module Hive
       HONEYCOMB_TEMPLATES = %w[architecture writing].freeze
       WORKFLOW_ID_RE = Hive::Workflows::DescriptorParser::SAFE_SLUG
       SCHEMA = "hive-workflow-new".freeze
-      SUBCOMMANDS = %w[new install list update remove publish].freeze
+      SUBCOMMANDS = %w[new validate install list update remove publish].freeze
 
       class UsageError < Hive::Error
-        attr_reader :value, :expected
+        attr_reader :value, :expected, :suggested_id
 
         # Closed set of usage-error shapes (which structured field each carries):
         #   missing subcommand        -> expected only
         #   unknown subcommand        -> value (the rejected verb) + expected
         #   bad/missing/reserved id / -> value (the rejected/colliding token) only
         #   scaffold collision
-        def initialize(message, value: nil, expected: nil)
+        def initialize(message, value: nil, expected: nil, suggested_id: nil)
           super(message)
           @value = value
           @expected = expected
+          @suggested_id = suggested_id
         end
 
         def exit_code
@@ -45,17 +46,17 @@ module Hive
         new("new", id, project_root: project_root, json: json, stdout: stdout, template: template).call!
       end
 
-      def self.normalize_and_validate_id!(raw)
+      def self.normalize_and_validate_id!(raw, project_root: nil)
         id = normalize_id(raw)
-        validate_id!(id)
+        validate_id!(id, project_root: project_root)
         id
       end
 
       def self.scaffold_files!(id_raw, project_root:, template: DEFAULT_TEMPLATE)
-        id = normalize_and_validate_id!(id_raw)
+        id = normalize_and_validate_id!(id_raw, project_root: project_root)
         template_dir = template_dir!(template)
         paths = scaffold_paths(id, project_root: project_root, template_dir: template_dir)
-        refuse_overwrite!(paths)
+        refuse_overwrite!(paths, id: id, project_root: project_root)
         begin
           write_scaffold!(id, paths, template_dir)
           validate_descriptor!(paths.fetch(:descriptor))
@@ -84,6 +85,21 @@ module Hive
       def self.scaffold_collision?(id, project_root:)
         paths = scaffold_paths(id, project_root: project_root, template_dir: template_dir!(DEFAULT_TEMPLATE))
         scaffold_collisions(paths).any?
+      end
+
+      # Return the first create-safe id in a deterministic numeric sequence.
+      # This is intentionally read-only and shared by the CLI and canonical
+      # skill so collision recovery never depends on an agent guessing a name.
+      def self.available_id(raw, project_root:)
+        base = raw.to_s.strip
+        base = "workflow" unless WORKFLOW_ID_RE.match?(base)
+        suffix = 1
+        loop do
+          candidate = suffix == 1 ? base : "#{base}-#{suffix}"
+          return candidate unless unavailable_id?(candidate, project_root: project_root)
+
+          suffix += 1
+        end
       end
 
       # Sample templates ship as directories under `templates/workflows/` (the
@@ -178,15 +194,28 @@ module Hive
       end
       private_class_method :normalize_id
 
-      def self.validate_id!(id)
+      def self.validate_id!(id, project_root: nil)
         unless WORKFLOW_ID_RE.match?(id)
           raise UsageError.new("invalid workflow id #{id.inspect} (must match #{WORKFLOW_ID_RE.source})", value: id)
         end
         return unless Hive::Workflows::Registry::WORKFLOWS.key?(id.to_sym)
 
-        raise UsageError.new("workflow id #{id.inspect} is reserved by a built-in workflow", value: id)
+        suggested = available_id(id, project_root: project_root) if project_root
+        suffix = suggested ? "; try #{suggested.inspect}" : ""
+        raise UsageError.new(
+          "workflow id #{id.inspect} is reserved by a built-in workflow#{suffix}",
+          value: id, suggested_id: suggested
+        )
       end
       private_class_method :validate_id!
+
+      def self.unavailable_id?(id, project_root:)
+        return true if Hive::Workflows::Registry::WORKFLOWS.key?(id.to_sym)
+
+        dir = workflow_dir(project_root)
+        File.exist?(File.join(dir, "#{id}.yml")) || File.exist?(File.join(dir, id))
+      end
+      private_class_method :unavailable_id?
 
       def self.scaffold_paths(id, project_root:, template_dir:)
         workflows_dir = workflow_dir(project_root)
@@ -219,11 +248,15 @@ module Hive
       end
       private_class_method :workflow_dir
 
-      def self.refuse_overwrite!(paths)
+      def self.refuse_overwrite!(paths, id:, project_root:)
         collisions = scaffold_collisions(paths)
         return if collisions.empty?
 
-        raise UsageError.new("workflow scaffold already exists at #{collisions.join(', ')}", value: collisions.first)
+        suggested = available_id(id, project_root: project_root)
+        raise UsageError.new(
+          "workflow scaffold already exists at #{collisions.join(', ')}; try #{suggested.inspect}",
+          value: collisions.first, suggested_id: suggested
+        )
       end
       private_class_method :refuse_overwrite!
 
@@ -309,8 +342,7 @@ module Hive
 
       def call
         call!
-      rescue UsageError, Hive::ConfigError, Hive::GitError, Hive::ConcurrentRunError,
-             SystemCallError, IOError => e
+      rescue Hive::Error, SystemCallError, IOError => e
         # ConcurrentRunError (commit-lock contention, TEMPFAIL/75) is now caught
         # too: previously it escaped to bin/hive as plain stderr, hiding the
         # retryable-vs-terminal distinction from --json agent callers.
@@ -381,6 +413,11 @@ module Hive
 
       def lifecycle_command
         case @subcommand
+        when "validate"
+          require "hive/commands/workflow/validate"
+          Hive::Commands::Workflow::Validate.new(
+            @id, project_root: @project_root, json: @json, stdout: @stdout
+          )
         when "install"
           require "hive/commands/workflow/install"
           Hive::Commands::Workflow::Install.new(
@@ -449,7 +486,7 @@ module Hive
       # (agents branch on those uniformly).
       def error_payload(error)
         Hive::Schemas::ErrorEnvelope.build(
-          schema: SCHEMA,
+          schema: response_schema,
           error: error,
           error_kind: error_kind_for(error),
           extras: error_extras(error)
@@ -463,14 +500,27 @@ module Hive
         extras = {}
         extras["value"] = error.value if error.respond_to?(:value) && !error.value.nil?
         extras["expected"] = error.expected if error.respond_to?(:expected) && !error.expected.nil?
+        if error.respond_to?(:suggested_id) && !error.suggested_id.nil?
+          extras["suggested_id"] = error.suggested_id
+        end
+        if @subcommand == "validate"
+          extras["valid"] = false
+          extras["id"] = @id.to_s
+          extras["diagnostics"] = [ { "message" => error.message } ]
+        end
 
         extras
+      end
+
+      def response_schema
+        @subcommand == "validate" ? "hive-workflow-validate" : SCHEMA
       end
 
       def error_kind_for(error)
         kinds = Hive::Schemas::WorkflowNewErrorKind
         case error
         when UsageError                then kinds::USAGE
+        when Hive::Workflows::UnknownWorkflow then kinds::USAGE
         when Hive::ConcurrentRunError  then kinds::CONCURRENT_RUN
         when Hive::GitError            then kinds::GIT
         when Hive::ConfigError         then kinds::CONFIG

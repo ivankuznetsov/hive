@@ -54,6 +54,9 @@ module Hive
       # every other agent-callable command's error envelope; the success arm
       # builds its hash directly.
       "hive-workflow-new" => 1,
+      # Read-only production-resolution validation for owner-authored,
+      # managed, and built-in workflows (`hive workflow validate ID --json`).
+      "hive-workflow-validate" => 1,
       "hive-workflow-install" => 2,
       # v2 gives selected managed rows their active immutable configuration
       # digest plus redacted per-slot mapping and optional-input discovery.

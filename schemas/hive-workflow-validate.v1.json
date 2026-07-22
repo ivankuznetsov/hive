@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-validate.v1.json",
+  "title": "hive workflow validate output (v1)",
+  "description": "Read-only validation of a workflow through Hive's production project overlay and resolver.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "Diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message"],
+      "properties": {
+        "message": { "type": "string" }
+      }
+    },
+    "Stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "dir", "kind", "state_file", "instruction_path", "input"],
+      "properties": {
+        "name": { "type": "string" },
+        "dir": { "type": "string" },
+        "kind": { "type": ["string", "null"] },
+        "state_file": { "type": ["string", "null"] },
+        "instruction_path": { "type": ["string", "null"] },
+        "input": { "type": ["string", "null"] }
+      }
+    },
+    "AutomaticEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "type": "string" },
+        "to": { "type": "string" }
+      }
+    },
+    "HumanOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "name", "complete", "artifact", "to"],
+      "properties": {
+        "stage": { "type": "string" },
+        "name": { "type": "string" },
+        "complete": { "type": "boolean" },
+        "artifact": { "type": ["string", "null"] },
+        "to": { "type": ["string", "null"] }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "valid", "id", "origin",
+        "descriptor_path", "instruction_paths", "stages", "automatic_edges",
+        "human_outcomes", "diagnostics"
+      ],
+      "properties": {
+        "schema": { "const": "hive-workflow-validate" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "valid": { "const": true },
+        "id": { "type": "string" },
+        "origin": { "enum": ["built_in", "authored", "managed"] },
+        "descriptor_path": { "type": ["string", "null"] },
+        "instruction_paths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "stages": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Stage" } },
+        "automatic_edges": { "type": "array", "items": { "$ref": "#/$defs/AutomaticEdge" } },
+        "human_outcomes": { "type": "array", "items": { "$ref": "#/$defs/HumanOutcome" } },
+        "diagnostics": { "type": "array", "maxItems": 0 }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "valid", "id", "error_class",
+        "error_kind", "exit_code", "message", "diagnostics"
+      ],
+      "properties": {
+        "schema": { "const": "hive-workflow-validate" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "valid": { "const": false },
+        "id": { "type": "string" },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["usage", "config", "git", "concurrent_run", "error"] },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" },
+        "diagnostics": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Diagnostic" } },
+        "value": { "type": "string" },
+        "expected": { "type": "array", "items": { "type": "string" } },
+        "suggested_id": { "type": "string" },
+        "holder": { "type": "object", "additionalProperties": true },
+        "lock_path": { "type": "string" }
+      }
+    }
+  }
+}

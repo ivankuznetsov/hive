@@ -210,4 +210,21 @@ class HiveDigestSenderTest < Minitest::Test
     assert_raises(Hive::ConfigError) { sender.deliver("unsafe", dry_run: false) }
     assert_empty calls
   end
+
+  def test_delivery_redaction_runtime_errors_fail_before_telegram_send
+    broken = Object.new
+    broken.define_singleton_method(:redact) { |_text| raise EncodingError, "invalid" }
+    broken.define_singleton_method(:scan) { |_text| [] }
+    calls = []
+    sender = Hive::Digest::Sender.new(
+      cfg: { "bot" => { "chat_id_allowlist" => [ 123 ] } },
+      telegram_factory: ->(**) { calls << :client; Object.new },
+      logger: Object.new,
+      redactor: broken
+    )
+
+    error = assert_raises(Hive::ConfigError) { sender.deliver("unsafe", dry_run: false) }
+    assert_match(/delivery redaction failed/, error.message)
+    assert_empty calls
+  end
 end

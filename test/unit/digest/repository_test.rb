@@ -37,6 +37,24 @@ class HiveDigestRepositoryTest < Minitest::Test
     assert_match(/another target/, error.message)
   end
 
+  def test_evidence_file_rejects_a_non_sha256_checksum
+    error = assert_raises(ArgumentError) do
+      Hive::Digest::EvidenceFile.new(path: "/tmp/evidence", bytes: 0, sha256: "not-a-sha")
+    end
+
+    assert_match(/checksum must be SHA-256/, error.message)
+  end
+
+  def test_collection_report_rejects_non_collector_evidence_roots
+    error = assert_raises(ArgumentError) do
+      Hive::Digest::CollectionReport.new(
+        resolved_count: 0, repositories: [], failures: [], warnings: [], evidence_root: "/tmp"
+      )
+    end
+
+    assert_match(/collector-owned scratch directory/, error.message)
+  end
+
   private
 
   def repository_target(repository)

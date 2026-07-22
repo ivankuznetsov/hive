@@ -323,6 +323,149 @@ class HiveDigestCollectorTest < Minitest::Test
     assert_match(/redaction failed: EncodingError/, report.failures.first.message)
   end
 
+  def test_unexpected_exception_removes_the_collector_owned_run_directory
+    with_tmp_dir do |scratch|
+      collector = Hive::Digest::Collector.new(gh: fake_gh, logger: nil, scratch_root: scratch)
+      collector.define_singleton_method(:collect_repository) { |*| raise NoMemoryError, "boom" }
+
+      assert_raises(NoMemoryError) do
+        collector.for_date(Date.new(2026, 6, 13), targets: [ target ])
+      end
+      assert_empty Dir.children(scratch)
+    end
+  end
+
+  def test_legacy_diff_transport_is_written_to_private_scratch
+    source = fake_gh
+    legacy = Object.new
+    %i[
+      digest_repository_metadata digest_merged_pr_candidates digest_pr_detail
+      digest_pr_files digest_pr_diff
+    ].each do |name|
+      legacy.define_singleton_method(name) { |**kwargs| source.public_send(name, **kwargs) }
+    end
+
+    report = Hive::Digest::Collector.new(gh: legacy, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+
+    assert_equal 1, report.pull_requests.size
+    assert source.calls.any? { |call| call.fetch(:kind) == :diff }
+    report.cleanup!
+  end
+
+  def test_diff_path_decoder_rejects_malformed_headers_and_accepts_named_escapes
+    collector = Hive::Digest::Collector.new(gh: fake_gh, logger: nil)
+    parse = lambda do |payload|
+      collector.send(:parse_diff_header_paths, payload, expected_paths: [ "lib/change.rb" ])
+    end
+
+    assert_match(/invalid source path/, assert_raises(Hive::GhError) {
+      parse.call('"x/lib/change.rb" b/lib/change.rb')
+    }.message)
+    assert_match(/invalid source path/, assert_raises(Hive::GhError) {
+      parse.call("wrong b/lib/change.rb")
+    }.message)
+    assert_nil collector.send(:quoted_destination, 'a/lib/change.rb "unterminated')
+    assert_match(/invalid quoted file header/, assert_raises(Hive::GhError) {
+      collector.send(:decode_git_quoted_path, "not-quoted", 0)
+    }.message)
+
+    invalid_utf8 = ("\"".b + "\xFF".b + "\"".b)
+    assert_match(/invalid UTF-8/, assert_raises(Hive::GhError) {
+      collector.send(:decode_git_quoted_path, invalid_utf8, 0)
+    }.message)
+    assert_equal [ "a\n", 5 ], collector.send(:decode_git_quoted_path, '"a\n"', 0)
+    assert_match(/invalid file escape/, assert_raises(Hive::GhError) {
+      collector.send(:decode_git_quoted_path, '"a\z"', 0)
+    }.message)
+    assert_match(/unterminated/, assert_raises(Hive::GhError) {
+      collector.send(:decode_git_quoted_path, '"a', 0)
+    }.message)
+  end
+
+  def test_diff_path_guard_rejects_non_destination_paths
+    collector = Hive::Digest::Collector.new(gh: fake_gh, logger: nil)
+    collector.define_singleton_method(:parse_diff_header_paths) do |_payload, expected_paths:|
+      "x/#{expected_paths.first}"
+    end
+
+    error = assert_raises(Hive::GhError) do
+      collector.send(
+        :diff_file_paths, "diff --git a/lib/change.rb b/lib/change.rb\n",
+        expected_paths: [ "lib/change.rb" ]
+      )
+    end
+    assert_match(/invalid destination path/, error.message)
+  end
+
+  def test_multiline_private_keys_are_redacted_as_one_evidence_block
+    body = <<~BODY
+      before
+      -----BEGIN PRIVATE KEY-----
+      private material
+      -----END PRIVATE KEY-----
+      after
+    BODY
+    report = Hive::Digest::Collector.new(gh: fake_gh(body: body), logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+
+    text = File.binread(report.pull_requests.first.body.path)
+    assert_includes text, "[REDACTED:pem_private_key]"
+    refute_includes text, "private material"
+    assert_includes text, "after"
+    report.cleanup!
+  end
+
+  def test_file_redaction_checksum_and_io_failures_remove_partial_output
+    with_tmp_dir do |dir|
+      source = File.join(dir, "source")
+      destination = File.join(dir, "destination")
+      File.write(source, "safe\n")
+      collector = Hive::Digest::Collector.new(gh: fake_gh, logger: nil)
+      checksum = Struct.new(:hexdigest).new("0" * 64)
+
+      with_replaced_singleton_method(::Digest::SHA256, :file, ->(_path) { checksum }) do
+        assert_match(/checksum mismatch/, assert_raises(Hive::GhError) {
+          collector.send(
+            :redact_evidence_file, source, destination,
+            target: target, number: 7, warnings: []
+          )
+        }.message)
+      end
+
+      missing = File.join(dir, "missing")
+      assert_match(/redaction failed: Errno::ENOENT/, assert_raises(Hive::GhError) {
+        collector.send(
+          :redact_evidence_file, missing, destination,
+          target: target, number: 7, warnings: []
+        )
+      }.message)
+      refute File.exist?(destination)
+    end
+  end
+
+  def test_body_bytes_are_checked_before_requesting_a_diff
+    repository_limited = Hive::Digest::Collector.new(
+      gh: fake_gh, logger: nil,
+      limits: { per_pr: 100, per_repository: 3, per_digest: 100 }
+    )
+    repository_limited.instance_variable_set(:@digest_bytes, 0)
+    assert_match(/repository evidence exceeds/, assert_raises(Hive::GhError) {
+      repository_limited.send(:remaining_diff_bytes, 4, repository_bytes: 0)
+    }.message)
+
+    digest_limited = Hive::Digest::Collector.new(
+      gh: fake_gh, logger: nil,
+      limits: { per_pr: 100, per_repository: 100, per_digest: 3 }
+    )
+    digest_limited.instance_variable_set(:@digest_bytes, 0)
+    assert_match(/digest evidence exceeds/, assert_raises(Hive::GhError) {
+      digest_limited.send(:remaining_diff_bytes, 4, repository_bytes: 0)
+    }.message)
+  end
+
   private
 
   def target(repository: "owner/repo", project_name: "Project")

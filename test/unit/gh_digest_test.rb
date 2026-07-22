@@ -91,6 +91,23 @@ class HiveGhDigestTest < Minitest::Test
     end
   end
 
+  def test_merged_pr_candidates_fail_when_every_snapshot_changes
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    responses = [ 1, 2, 3 ].map do |number|
+      [ JSON.generate([ row(number, "2026-06-12T22:00:00Z") ]), "", ok ]
+    end
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { responses.shift }) do
+      error = assert_raises(Hive::GhError) do
+        Hive::Gh.digest_merged_pr_candidates(
+          repository: "owner/repo", host: "github.com",
+          window_start: Time.utc(2026, 6, 13)
+        )
+      end
+      assert_match(/pages changed during collection/, error.message)
+    end
+  end
+
   def test_detail_diff_and_files_use_explicit_host_and_validate_shapes
     ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
     calls = []
@@ -125,6 +142,76 @@ class HiveGhDigestTest < Minitest::Test
     assert calls.all? { |args| args.include?("--hostname") && args.include?("github.example.com") }
     assert calls[1].include?("Accept: application/vnd.github.diff")
     assert calls[2].include?("--paginate")
+  end
+
+  def test_diff_file_transport_uses_exact_host_private_mode_and_bounded_capture
+    with_tmp_dir do |dir|
+      path = File.join(dir, "diff.raw")
+      ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+      captured = nil
+      with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*args, **kwargs|
+        captured = [ args, kwargs ]
+        File.binwrite(kwargs.fetch(:stdout_path), "raw diff")
+        [ "", "", ok ]
+      }) do
+        bytes = Hive::Gh.digest_pr_diff_to_file(
+          repository: "owner/repo", host: "github.example.com", number: 7,
+          path: path, max_bytes: 123
+        )
+        assert_equal 8, bytes
+      end
+
+      assert_includes captured.first, "github.example.com"
+      assert_includes captured.first, "Accept: application/vnd.github.diff"
+      assert_equal 123, captured.last.fetch(:max_stdout_bytes)
+      assert_equal path, captured.last.fetch(:stdout_path)
+      assert_equal 0o600, File.stat(path).mode & 0o777
+    end
+  end
+
+  def test_diff_file_transport_removes_partial_files_on_command_and_io_failures
+    with_tmp_dir do |dir|
+      path = File.join(dir, "diff.raw")
+      failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+      with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*_, **kwargs|
+        File.binwrite(kwargs.fetch(:stdout_path), "partial")
+        [ "", "provider failed", failed ]
+      }) do
+        assert_match(/gh api.*failed/, assert_raises(Hive::GhError) {
+          Hive::Gh.digest_pr_diff_to_file(
+            repository: "owner/repo", host: "github.com", number: 7, path: path
+          )
+        }.message)
+      end
+      refute File.exist?(path)
+
+      File.write(path, "stale")
+      with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { raise Errno::EACCES, "blocked" }) do
+        assert_raises(Errno::EACCES) do
+          Hive::Gh.digest_pr_diff_to_file(
+            repository: "owner/repo", host: "github.com", number: 7, path: path
+          )
+        end
+      end
+      refute File.exist?(path)
+    end
+  end
+
+  def test_diff_file_transport_rejects_invalid_numbers
+    with_tmp_dir do |dir|
+      assert_match(/must be positive/, assert_raises(Hive::GhError) {
+        Hive::Gh.digest_pr_diff_to_file(
+          repository: "owner/repo", host: "github.com", number: 0,
+          path: File.join(dir, "zero")
+        )
+      }.message)
+      assert_match(/invalid pull-request diff input/, assert_raises(Hive::GhError) {
+        Hive::Gh.digest_pr_diff_to_file(
+          repository: "owner/repo", host: "github.com", number: Object.new,
+          path: File.join(dir, "invalid")
+        )
+      }.message)
+    end
   end
 
   def test_digest_text_preserves_valid_non_ascii_binary_output_and_rejects_invalid_utf8

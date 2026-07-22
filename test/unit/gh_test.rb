@@ -64,6 +64,28 @@ class GhUnitTest < Minitest::Test
     assert_match(/1024-byte safety ceiling/, error.message)
   end
 
+  def test_capture3_stdout_limit_handles_an_already_missing_process_group
+    with_replaced_singleton_method(Hive::Gh, :signal_process_group, lambda { |*|
+      raise Errno::ESRCH, "missing"
+    }) do
+      error = assert_raises(Hive::GhError) do
+        Hive::Gh.capture3(
+          RbConfig.ruby, "-e", "STDOUT.write('x' * 65536)",
+          timeout_sec: 5, max_stdout_bytes: 1024
+        )
+      end
+      assert_match(/1024-byte safety ceiling/, error.message)
+    end
+  end
+
+  def test_capture3_rejects_a_negative_stdout_limit_before_spawn
+    error = assert_raises(ArgumentError) do
+      Hive::Gh.capture3(RbConfig.ruby, "-e", "exit 0", max_stdout_bytes: -1)
+    end
+
+    assert_match(/max_stdout_bytes must be non-negative/, error.message)
+  end
+
   def test_capture3_can_stream_stdout_directly_to_private_file
     with_tmp_dir do |dir|
       path = File.join(dir, "stdout.txt")

@@ -765,6 +765,94 @@ class HiveDigestChangelogGeneratorTest < Minitest::Test
     end
   end
 
+  def test_empty_chunks_are_discarded_and_diff_preamble_fails_closed
+    with_tmp_dir do |dir|
+      path = File.join(dir, "empty.txt")
+      writer = Hive::Digest::ChangelogGenerator::EvidenceChunkWriter.new(
+        id: "empty", kind: "body_section", path: path, tag: "user_supplied_test"
+      )
+      writer.write(" \n\t")
+
+      assert_nil writer.finish
+      refute File.exist?(path)
+      assert_empty generator(dir).send(
+        :write_diff_chunks, " \n\t", prefix: "p", chunk_dir: dir, tag: "user_supplied_test"
+      )
+      assert_raises(Hive::Digest::GenerationError) do
+        generator(dir).send(
+          :write_diff_chunks, "orphan content\n", prefix: "p", chunk_dir: dir,
+          tag: "user_supplied_test"
+        )
+      end
+    end
+  end
+
+  def test_validation_rejects_a_bullet_fact_owned_by_another_pr
+    repositories = [
+      repository(repository: "a/repo", project_name: "A"),
+      repository(repository: "b/repo", project_name: "B")
+    ]
+    with_tmp_dir do |dir|
+      manifest, = generator(dir).send(
+        :materialize_manifest, repositories, dir: dir, tag: "user_supplied_test"
+      )
+      document = valid_document(manifest)
+      document.dig("projects", 0, "pull_requests", 0, "bullets", 0)["fact_ids"] =
+        [ document.fetch("facts").last.fetch("id") ]
+
+      assert_invalid_document(dir, document, repositories, manifest, /fact .* from the wrong PR/)
+    end
+  end
+
+  def test_validation_and_runtime_error_messages_fail_closed_when_redaction_breaks
+    unsafe = Object.new
+    unsafe.define_singleton_method(:redact) { |text| text }
+    unsafe.define_singleton_method(:scan) { |_text| [ { name: :secret } ] }
+    assert_equal "digest changelog output failed validation",
+                 Hive::Digest::ChangelogGenerator.send(
+                   :safe_validation_message, "private", redactor: unsafe
+                 )
+
+    broken = Object.new
+    broken.define_singleton_method(:redact) { |_text| raise EncodingError, "invalid" }
+    broken.define_singleton_method(:scan) { |_text| [] }
+    assert_equal "digest changelog output failed validation",
+                 Hive::Digest::ChangelogGenerator.send(
+                   :safe_validation_message, "private", redactor: broken
+                 )
+    assert_equal "unknown failure", generator("/tmp").send(:safe_agent_error, Object.new)
+    assert_equal "unknown failure",
+                 generator("/tmp", redactor: broken).send(:safe_agent_error, { status: :error })
+  end
+
+  def test_generated_identifier_and_cleanup_io_failures_are_typed
+    broken = Object.new
+    broken.define_singleton_method(:scan) { |_text| raise EncodingError, "invalid" }
+    broken.define_singleton_method(:redact) { |text| text }
+    fact = Hive::Digest::GeneratedFact.new(
+      id: "fact", repository: "github.com/owner/repo", pr_number: 7,
+      kind: "material", text: "text", evidence_ids: []
+    )
+    error = assert_raises(Hive::Digest::GenerationError) do
+      generator("/tmp", redactor: broken).send(
+        :sanitize_fact_ids, [ fact ], warnings: [],
+        display_repository: { "github.com/owner/repo" => "owner/repo" }
+      )
+    end
+    assert_match(/generated-identifier redaction failed: EncodingError/, error.message)
+
+    messages = []
+    logger = Object.new
+    logger.define_singleton_method(:warn) { |message| messages << message }
+    with_replaced_singleton_method(Dir, :children, ->(_dir) { raise Errno::EACCES, "blocked" }) do
+      error = assert_raises(Hive::Digest::GenerationError) do
+        generator("/tmp", logger: logger).send(:cleanup_run_dir, "/tmp/run", retain_ledger: false)
+      end
+      assert_match(/private-run cleanup failed: Errno::EACCES/, error.message)
+    end
+    assert_match(/run cleanup failed/, messages.first)
+  end
+
   private
 
   def generator(run_root, agent_factory: nil, redactor: Hive::SecretPatterns, logger: nil)

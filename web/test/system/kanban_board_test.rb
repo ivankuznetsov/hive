@@ -81,13 +81,13 @@ class KanbanBoardTest < ApplicationSystemTestCase
 
     click_project_filter(selected_project)
     assert_selector ".kanban-band[data-project-name='#{selected_project}']"
-    assert_selector ".kanban-band[data-project-name='#{hidden_project}']", visible: :hidden
+    assert_no_selector ".kanban-band[data-project-name='#{hidden_project}']", visible: :all
 
     click_status_view("Grid")
 
     assert_current_path grid_path(project: selected_project), wait: 10
     assert_selector "#status-grid .project-section[data-project-name='#{selected_project}']"
-    assert_selector "#status-grid .project-section[data-project-name='#{hidden_project}']", visible: :hidden
+    assert_no_selector "#status-grid .project-section[data-project-name='#{hidden_project}']", visible: :all
   end
 
   test "a refresh deferred during a failed idea submission is replayed" do
@@ -142,6 +142,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     JS
     assert_operator initial_scroll, :>, 0
 
+    wait_for_live_status
     create_task!(moving_project, "Move ahead one")
     create_task!(moving_project, "Move ahead two")
     assert_selector ".kanban-band[data-project-name='#{moving_project}'] .kanban-card", count: 2, wait: 10
@@ -162,6 +163,8 @@ class KanbanBoardTest < ApplicationSystemTestCase
     project = create_hive_project!("kanban-focused-move-app")
     slug = create_task!(project, "Follow this moving card")
     visit dev_login_path(as: "alice")
+    assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
+    wait_for_status_subscribers(1)
     expected_href = evaluate_script(<<~JS)
       (() => {
         const link = document.querySelector(".kanban-card[data-task-slug='#{slug}'] a")
@@ -934,7 +937,10 @@ class KanbanBoardTest < ApplicationSystemTestCase
 
     with_replaced_singleton_method(adapter, :subscribe, subscribe) do
       visit root_path
-      assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
+      # Action Cable's first reconnect poll is intentionally jittered between
+      # 6 and 12 seconds. Allow that production cadence to run instead of
+      # turning this integration test into a race against its default wait.
+      assert_selector "#status-stream-source[connected]", visible: :all, wait: 20
       assert_operator counter_mutex.synchronize { attempts }, :>=, 2
       wait_for_status_subscribers(1)
 
@@ -955,12 +961,21 @@ class KanbanBoardTest < ApplicationSystemTestCase
           const originalConsumer = await cable.getConsumer()
           const originalRetryDelay = sourceClass.retryDelay
           const owner = document.createElement("div")
-          owner.dataset.statusVersion = document.querySelector("[data-status-version]").dataset.statusVersion
+          owner.dataset.statusVersion = `retry-${crypto.randomUUID()}`
           const source = document.createElement("hive-status-stream-source")
           source.setAttribute("channel", liveSource.getAttribute("channel"))
           source.setAttribute("signed-stream-name", liveSource.getAttribute("signed-stream-name"))
+          source.catchUpRefresh = { token: owner.dataset.statusVersion, location: source.statusLocation }
           owner.appendChild(source)
           let recoveredConsumer
+
+          const cleanup = () => {
+            owner.remove()
+            recoveredConsumer?.disconnect()
+            sourceClass.retryDelay = originalRetryDelay
+            cable.setConsumer(originalConsumer)
+            delete window.hiveStatusRetryCleanup
+          }
 
           try {
             sourceClass.retryDelay = 0
@@ -979,22 +994,23 @@ class KanbanBoardTest < ApplicationSystemTestCase
             document.body.appendChild(owner)
             await connected
             recoveredConsumer = await cable.getConsumer()
+            window.hiveStatusRetryCleanup = cleanup
 
             return { connected: source.hasAttribute("connected"), pageToken: owner.dataset.statusVersion }
-          } finally {
-            owner.remove()
-            recoveredConsumer?.disconnect()
-            sourceClass.retryDelay = originalRetryDelay
-            cable.setConsumer(originalConsumer)
+          } catch (error) {
+            cleanup()
+            throw error
           }
         })()
       JS
 
       assert result.fetch("connected")
-      catch_up = Timeout.timeout(10) { catch_ups.pop }
+      catch_up = wait_for_status_catch_up(catch_ups, result.fetch("pageToken"))
       assert_equal result.fetch("pageToken"), catch_up.fetch("status_version"),
                    "application code must clear the poisoned cache and complete a real catch-up"
     end
+  ensure
+    cleanup_status_retry_fixture
   end
 
   test "a status source removes a partial Action Cable registration before retry" do
@@ -1010,10 +1026,11 @@ class KanbanBoardTest < ApplicationSystemTestCase
           const originalRetryDelay = sourceClass.retryDelay
           const failedConsumer = await cable.createConsumer()
           const owner = document.createElement("div")
-          owner.dataset.statusVersion = document.querySelector("[data-status-version]").dataset.statusVersion
+          owner.dataset.statusVersion = `retry-${crypto.randomUUID()}`
           const source = document.createElement("hive-status-stream-source")
           source.setAttribute("channel", liveSource.getAttribute("channel"))
           source.setAttribute("signed-stream-name", liveSource.getAttribute("signed-stream-name"))
+          source.catchUpRefresh = { token: owner.dataset.statusVersion, location: source.statusLocation }
           owner.appendChild(source)
           let disconnects = 0
           let recoveredConsumer
@@ -1024,6 +1041,14 @@ class KanbanBoardTest < ApplicationSystemTestCase
           }
           failedConsumer.connection.open = () => {
             throw new Error("WebSocket construction failed after registration")
+          }
+
+          const cleanup = () => {
+            owner.remove()
+            recoveredConsumer?.disconnect()
+            sourceClass.retryDelay = originalRetryDelay
+            cable.setConsumer(originalConsumer)
+            delete window.hiveStatusRetryCleanup
           }
 
           try {
@@ -1043,6 +1068,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
             document.body.appendChild(owner)
             await connected
             recoveredConsumer = await cable.getConsumer()
+            window.hiveStatusRetryCleanup = cleanup
 
             return {
               connected: source.hasAttribute("connected"),
@@ -1051,11 +1077,9 @@ class KanbanBoardTest < ApplicationSystemTestCase
               consumerReplaced: recoveredConsumer !== failedConsumer,
               pageToken: owner.dataset.statusVersion
             }
-          } finally {
-            owner.remove()
-            recoveredConsumer?.disconnect()
-            sourceClass.retryDelay = originalRetryDelay
-            cable.setConsumer(originalConsumer)
+          } catch (error) {
+            cleanup()
+            throw error
           }
         })()
       JS
@@ -1064,9 +1088,11 @@ class KanbanBoardTest < ApplicationSystemTestCase
       assert_equal 1, result.fetch("disconnects")
       assert result.fetch("consumerReplaced")
       assert result.fetch("connected")
-      catch_up = Timeout.timeout(10) { catch_ups.pop }
+      catch_up = wait_for_status_catch_up(catch_ups, result.fetch("pageToken"))
       assert_equal result.fetch("pageToken"), catch_up.fetch("status_version")
     end
+  ensure
+    cleanup_status_retry_fixture
   end
 
   test "disconnect cancels a rejected consumer retry before it creates a subscription" do
@@ -1152,13 +1178,30 @@ class KanbanBoardTest < ApplicationSystemTestCase
     original = StatusChannel.instance_method(:catch_up)
     completed = Queue.new
     StatusChannel.define_method(:catch_up) do |data|
-      original.bind_call(self, data)
-    ensure
+      result = original.bind_call(self, data)
       completed << data.to_h
+      result
     end
     yield completed
   ensure
     StatusChannel.define_method(:catch_up, original) if original
+  end
+
+  def wait_for_status_catch_up(catch_ups, token)
+    Timeout.timeout(10) do
+      loop do
+        catch_up = catch_ups.pop
+        return catch_up if catch_up.fetch("status_version") == token
+      end
+    end
+  end
+
+  def cleanup_status_retry_fixture
+    return unless page&.current_url
+
+    execute_script("window.hiveStatusRetryCleanup?.()")
+  rescue StandardError
+    # The browser can already be gone while unwinding a failed system test.
   end
 
   def with_replaced_instance_method(receiver, name, replacement)
@@ -1228,10 +1271,10 @@ class KanbanBoardTest < ApplicationSystemTestCase
   def click_project_filter(name)
     execute_script(<<~JS, name)
       const name = arguments[0]
-      const button = Array.from(document.querySelectorAll("[data-project-filter-name-param]"))
+      const link = Array.from(document.querySelectorAll("[data-project-filter-name-param]"))
         .find((candidate) => candidate.dataset.projectFilterNameParam === name)
-      if (!button) throw new Error(`project filter not found: ${name}`)
-      button.click()
+      if (!link) throw new Error(`project filter not found: ${name}`)
+      link.click()
     JS
   end
 

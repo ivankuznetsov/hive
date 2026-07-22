@@ -290,8 +290,10 @@ signal for artifact/log refreshes while agents write. The key is published
 beside the payload and an unchanged key reuses the existing SHA-256 token,
 avoiding a second normalization plus canonical serialization/hash each tick.
 `StatusBroadcaster`
-renders the refresh, project rail replacement, and composer-selector morph as
-one Turbo Stream message before one Action Cable send. A bad partial therefore
+renders the refresh and composer-selector morph as one Turbo Stream message
+before one Action Cable send. The refresh GET re-renders the project rail and
+the project subset selected by the current URL; there is no separate broadcast
+copy of filter state. A bad partial therefore
 delivers no refresh-only prefix; the self-healing retry cannot turn that
 failure into a periodic full-page request loop. Failed delivery remains
 pending across last-subscriber shutdown, and a

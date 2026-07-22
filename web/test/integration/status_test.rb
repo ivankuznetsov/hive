@@ -71,9 +71,9 @@ class StatusTest < ActionDispatch::IntegrationTest
                       "the page subscription, not server boot, must own status polling"
         assert_select "[data-controller~='status-refresh'][data-status-version='1']", 1,
                       "Cable catch-up must compare the confirmed subscription with this render"
-        assert_select ".project-nav button" do |buttons|
+        assert_select ".project-nav a:not(.project-nav-add)" do |links|
           assert_equal [ "All projects", "hive", "webmail.sh", "xbookmark" ],
-                       buttons.map { |button| button.text.strip }
+                       links.map { |link| link.text.strip }
         end
         assert_select ".project-section" do |sections|
           assert_equal [ "hive", "webmail.sh", "xbookmark" ],
@@ -83,6 +83,28 @@ class StatusTest < ActionDispatch::IntegrationTest
           assert_equal [ "hive", "webmail.sh", "xbookmark" ],
                        options.map { |option| option["value"] }
         end
+      end
+    end
+  end
+
+  test "project links render only the selected project and reject ghost filters" do
+    sign_in!
+    projects = [
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ]
+    with_daemon_status("running" => true, "service_installed" => true, "binary_drift" => "none") do
+      with_status_snapshot("projects" => projects) do
+        get grid_path(project: "beta")
+
+        assert_response :success
+        assert_select ".project-nav a.active[aria-current='page']", text: "beta"
+        assert_select ".project-section[data-project-name='beta']", 1
+        assert_select ".project-section[data-project-name='alpha']", 0
+        assert_select "#composer-project option[selected][value='beta']", 1
+
+        get grid_path(project: "ghost")
+        assert_redirected_to grid_path
       end
     end
   end

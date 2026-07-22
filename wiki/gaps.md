@@ -437,9 +437,12 @@ incident report contains six ordinary green results and zero pending entries.
 
 The Board model, route preference, shared task actions, workflow-derived
 columns, unknown-stage retention, mobile containment, and affected Turbo morph
-flows are covered by focused Rails and Playwright tests. This branch has not
+flows are covered by focused Rails and Playwright tests. The same coverage now
+pins URL-addressed server rendering for project filters, exclusion of
+unrelated project markup, canonical handling of stale project names, and
+selection preservation across view changes and live refreshes. This branch has not
 yet produced a long-running external-browser artifact with two simultaneous
-clients watching different Board/Grid preferences while a real daemon advances
+clients watching different Board/Grid/project URLs while a real daemon advances
 tasks across both built-in and project-authored workflows. The implementation
 deliberately relies on the existing URL-aware Turbo refresh instead of custom
 patch cursors, so that live smoke is confidence evidence rather than a missing

@@ -107,7 +107,7 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
                  events.first.last.dig(:locals, :projects).map { |project| project.fetch("name") }
   end
 
-  test "the atomic status broadcast contains refresh and both server-owned project surfaces" do
+  test "the atomic status broadcast contains refresh and the permanent project selector" do
     projects = [ Project.new("name" => "demo", "tasks" => []) ]
     content = ApplicationController.render(
       formats: [ :turbo_stream ],
@@ -116,9 +116,8 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     )
 
     streams = Nokogiri::HTML.fragment(content).css("turbo-stream")
-    assert_equal 3, streams.size
+    assert_equal 2, streams.size
     assert streams.any? { |stream| stream["action"] == "refresh" }
-    assert streams.any? { |stream| stream["target"] == "project-nav" }
     composer = streams.find { |stream| stream["target"] == "composer-project" }
     assert_equal "morph", composer["method"]
   end

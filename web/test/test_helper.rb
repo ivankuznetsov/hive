@@ -47,8 +47,8 @@ module ActiveSupport
       begin
         capture_io { Hive::Commands::Init.new(dir, force: true, json: false).call }
       rescue Hive::AlreadyInitialized
-        # The sandbox HIVE_HOME persists for the process; a later test
-        # re-using the same project name just reuses the registration.
+        # A helper invoked twice for the same project inside one example can
+        # reuse the already initialized repository and registration.
       end
       name
     end

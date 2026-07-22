@@ -172,18 +172,25 @@ so the login gate can run.
   drawer, cursor, transition, or audit subsystem: workflow mutation continues
   through the existing task controllers. Each band scrolls horizontally
   inside the page at narrow widths. `Grid` retains the compact per-project task
-  rows. A TUI-left-pane-parity project rail filters either view client-side
-  ("All projects" + one button per registered project;
+  rows. A TUI-left-pane-parity project rail filters either view through
+  ordinary GET links ("All projects" + one link per registered project;
   projects are ordered by descending in-flight task count, preserving registry
   order for ties, and the grid plus permanent composer selector stay in that
-  same order across live updates without losing the current selection;
-  buttons not links so the permanent composer's typed text survives; a
+  same order across live updates without losing the current selection). Rails
+  reads `?project=`, renders only that project's Board/Grid markup, and
+  redirects unknown project names to the same canonical route without the
+  stale filter. Unrelated project markup never enters a filtered document. A
+  small Stimulus click enhancement selects the explicit project in the
+  permanent composer before Turbo follows an unmodified in-tab link, so its
+  typed text and staged files survive while new ideas retain the selected
+  context. It reads the raw data attribute so JSON-looking project names stay
+  identifiers, and modified/new-tab clicks do not mutate the current tab.
+  Choosing
+  All projects deliberately keeps that composer choice. There is no filter
+  observer, animation-frame reconciliation, DOM hiding, or History API state
+  mirror. A
   `+ Add project` link navigates to Repos because adding a project is a real
-  page change; choice mirrored to `?project=` via replaceState; explicit
-  project clicks sync the composer project select so new ideas land in that
-  context, while filtered deep-links preselect the composer only when it is
-  unset; the filter is re-applied after server reconciliation without moving
-  or rebuilding the server-rendered project navigation), composer (new idea with image attach: clipboard
+  page change. The composer supports new ideas with image attach (clipboard
   paste AND upload button; images become `[imageN]` placeholders and land in
   the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
@@ -227,8 +234,10 @@ so the login gate can run.
   with the payload and reuses the existing semantic token when that key is
   unchanged, so volatile-only ticks do not repeat canonical JSON hashing.
   The broadcaster first renders one Turbo Stream
-  message containing the refresh plus the server-sorted project rail and
-  composer selector, then sends that complete message once over solid_cable.
+  message containing the refresh plus the server-sorted composer selector,
+  then sends that complete message once over solid_cable. The refresh GET
+  renders the project rail and the selected Board/Grid subset from the current
+  URL, keeping HTTP as the filter authority.
   A partial render failure therefore delivers nothing and can be retried
   without creating a refresh-only request loop. The refresh
   re-renders the current URL (or `/`'s saved preference), so Board and Grid

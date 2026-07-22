@@ -331,7 +331,7 @@ Streams, with production Action Cable accepting same-origin-as-host and
 `HIVE_WEB_ORIGIN` only as an extra allow for split-origin deployments:
 `StatusBroadcaster` (self-healing subscriber loop) bridges
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
-broadcast morph refresh plus targeted project-rail/composer updates over
+broadcast morph refresh plus a targeted composer-selector update over
 solid_cable. Each accepted channel acquires one poller lease and releases it
 exactly once; a per-channel synchronized pending/active/closed transition
 prevents socket teardown from racing stream verification into a leak or double
@@ -349,7 +349,12 @@ multi-action Turbo Stream before one
 Cable send, so a partial render cannot produce a refresh-only retry loop. The
 current route renders either the Rails-native workflow Board
 or compact Grid, so live reconciliation does not maintain a second board patch
-protocol. Digest-based DOM identities preserve the owning band/card across
+protocol. The project rail is URL-addressed Rails navigation: `?project=`
+selects the sole rendered project, an unknown value redirects to the same
+route without that parameter, and a tiny Stimulus click action only carries an
+explicit choice into the permanent composer before Turbo visits. Filtering
+has no MutationObserver, requestAnimationFrame loop, History API mutation, or
+client-side hide/show pass. Digest-based DOM identities preserve the owning band/card across
 reorder morphs, and the status-level refresh guard defers background refreshes
 from Turbo's confirmed `submit-start` boundary while status forms submit, using a
 successful redirect's fresh GET as the reconciliation instead of racing a

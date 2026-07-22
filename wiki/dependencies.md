@@ -18,8 +18,7 @@ artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
-tools. Queued release-prep commit `8944dfba` advances this line to `0.6.8`:
-`lib/hive.rb`, root
+tools. The v0.6.8 release-prep checkout is `0.6.8`: `lib/hive.rb`, root
 `Gemfile.lock`, and `web/Gemfile.lock` all pin the local path gem as
 `hive-cli (0.6.8)`. The release-prep change keeps both lockfiles synchronized
 with public installer URLs and the changelog. Recent root bundle dependency
@@ -164,8 +163,7 @@ subscription-safety contract.
 `Gemfile` declares `ruby "~> 3.4"`. `hive.gemspec` requires Ruby
 `>= 3.4.0` for the packaged gem. `.rubocop.yml` pins
 `TargetRubyVersion: 3.4`. `Gemfile.lock` records Ruby 3.4.7, Bundler
-2.7.2; queued release-prep commit `8944dfba` records the local path gem as
-`hive-cli (0.6.8)`.
+2.7.2, and the current local path gem as `hive-cli (0.6.8)`.
 
 ## Backlinks
 

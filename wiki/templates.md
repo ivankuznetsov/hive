@@ -39,14 +39,13 @@ source commit's changed paths also retains the original temp for a later retry.
 
 Hive-installed runtimes record a `scheduler-service` in the shared state. A
 commit-triggered runner queues its source and dispatches that memory-bounded
-oneshot service. Queued commit `8944dfba` makes headless hooks reconstruct a
-missing user-bus environment from the standard runtime socket. If signaling
-still fails, the runner retains the
+oneshot service. Headless hooks reconstruct a missing user-bus environment from
+the standard runtime socket. If signaling still fails, the runner retains the
 installer-owned marker and falls back to the machine-wide provider lock, so a
 transient headless failure cannot disable bounded dispatch for later commits.
 Commits whose only changed path is compiled `wiki/log.md` exit before queueing;
-source fragments under `wiki/log.d/` and other relevant changes still refresh.
-Systems without the `flock` executable use Ruby's native OS file lock held by a small
+source fragments under `wiki/log.d/` and other relevant changes still refresh. Systems
+without the `flock` executable use Ruby's native OS file lock held by a small
 keeper process for the runner's lifetime, preserving the same crash-safe kernel
 release semantics without a stale directory protocol. Scheduled workers consume up
 to `LLM_WIKI_MAX_DRAIN_BATCHES` (3) with

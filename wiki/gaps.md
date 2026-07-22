@@ -364,8 +364,7 @@ evidence closing the following June 16 gaps.
 ## Release install follow-ups
 
 Latest refresh (2026-07-22): the source version and installer references are
-prepared as v0.6.8 by queued commit `8944dfba`. This release-prep branch does
-not itself prove a public tag,
+prepared as v0.6.8. This release-prep branch does not itself prove a public tag,
 signed assets, Homebrew/AUR updates, ClawHub publication, or
 multi-architecture hivebox images. The release boundary uses an exact-tag
 offline candidate gate and does not require provider credentials. The live

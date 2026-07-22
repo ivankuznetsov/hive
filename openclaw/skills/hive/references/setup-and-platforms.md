@@ -35,7 +35,7 @@ installer into an owner-private temporary directory after approval:
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.7/install.sh \
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.8/install.sh \
   -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```

@@ -4,6 +4,7 @@ require_relative "../test_helper"
 require "tmpdir"
 require "fileutils"
 require "open3"
+require "socket"
 
 # Guards the transactional contract of .llm-wiki/post-commit-refresh.sh: a
 # commit in any checkout queues one refresh into a dedicated managed worktree.
@@ -71,6 +72,23 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     assert_includes git(@main, "show --stat --pretty=format: llm-wiki/refresh"),
                     "wiki/log.d/stub-entry.md"
     assert_match(/stub refresh/, git(@main, "show llm-wiki/refresh:wiki/log.d/stub-entry.md"))
+  end
+
+  def test_compiled_log_only_commit_does_not_queue_or_launch_refresh
+    File.write(File.join(@wt, "wiki", "log.md"), "# compiled projection\n")
+    git(@wt, "add wiki/log.md")
+    git(@wt, "commit -qm 'docs(wiki): compile log projection'")
+    source_sha = git(@wt, "rev-parse HEAD")
+
+    result = run_refresh_from(@wt)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    refute_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                  "refs/llm-wiki/sources/#{source_sha}")
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                  "refs/heads/llm-wiki/refresh")
   end
 
   def test_refresh_branch_is_pushed_without_touching_main
@@ -320,12 +338,16 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     state_dir = File.join(common, "llm-wiki")
     fake_bin = File.join(@dir, "systemctl-bin")
     calls = File.join(@dir, "systemctl-calls")
+    runtime_dir = File.join(@dir, "headless-runtime")
     FileUtils.mkdir_p(state_dir)
     FileUtils.mkdir_p(fake_bin)
+    FileUtils.mkdir_p(runtime_dir)
+    bus_path = File.join(runtime_dir, "bus")
+    bus = UNIXServer.new(bus_path)
     File.write(File.join(state_dir, "scheduler-service"), "llm-wiki-project-deadbeef.service\n")
     File.write(File.join(fake_bin, "systemctl"), <<~SH)
       #!/bin/sh
-      printf '%s\n' "$*" >>#{q(calls)}
+      printf '%s|%s|%s\n' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" "$*" >>#{q(calls)}
     SH
     FileUtils.chmod("+x", File.join(fake_bin, "systemctl"))
     File.write(File.join(@wt, "bin", "tool.sh"), "echo scheduled source\n")
@@ -336,16 +358,21 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     result = run_refresh_from(
       @wt,
       "PATH" => "#{fake_bin}:/usr/bin:/bin",
-      "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "0"
+      "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "0",
+      "XDG_RUNTIME_DIR" => runtime_dir,
+      "DBUS_SESSION_BUS_ADDRESS" => ""
     )
 
     assert_equal 0, result.fetch(:status), result.fetch(:out)
-    assert_equal "--user start --no-block llm-wiki-project-deadbeef.service\n", File.read(calls)
+    assert_equal "#{runtime_dir}|unix:path=#{bus_path}|--user start --no-block llm-wiki-project-deadbeef.service\n",
+                 File.read(calls)
     assert_path_exists File.join(state_dir, "pending", source_sha)
     refute system("git", "-C", @main, "show-ref", "--verify", "--quiet", "refs/heads/llm-wiki/refresh")
+  ensure
+    bus&.close
   end
 
-  def test_failed_systemd_dispatch_removes_marker_and_uses_serialized_fallback
+  def test_failed_systemd_dispatch_keeps_marker_and_uses_serialized_fallback
     common = git(@wt, "rev-parse --path-format=absolute --git-common-dir")
     state_dir = File.join(common, "llm-wiki")
     fake_bin = File.join(@dir, "failing-systemctl-bin")
@@ -366,7 +393,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     )
 
     assert_equal 0, result.fetch(:status), result.fetch(:out)
-    refute_path_exists marker
+    assert_equal "llm-wiki-project-deadbeef.service\n", File.read(marker)
     assert_match(/stub refresh/, git(@main, "show llm-wiki/refresh:wiki/log.d/stub-entry.md"))
   end
 

@@ -22,7 +22,6 @@ module Hive
       MAX_FIX_PROOF_BYTES = 64 * 1024
       MAX_AUDITED_PATHS = 24
       MAX_REGRESSION_PATHS = 12
-      VALIDATION_NAMES = %w[docs format lint public_contract typecheck test].freeze
       FixProofReadError = Class.new(StandardError)
       FAILURE_REASONS = %w[
         fix_agent_failed fix_agent_rejected missing_fix_proof no_validation_commands
@@ -532,12 +531,13 @@ module Hive
 
       def configured_validation_command(key, expected_key: nil)
         commands = @cfg.dig("patrol", "commands") || {}
-        if commands.values.none? { |command| present_proof_text?(command) }
+        validator = Validator.new(commands)
+        if validator.configured_names.empty?
           return [ nil, proof_validation_failure("no_validation_commands", "no patrol validation commands are configured") ]
         end
 
-        command = commands[key]
-        unless VALIDATION_NAMES.include?(key) && present_proof_text?(command)
+        command = validator.command_for(key)
+        unless command
           return [
             nil,
             proof_validation_failure(
@@ -771,8 +771,7 @@ module Hive
       end
 
       def configured_validation_keys
-        commands = @cfg.dig("patrol", "commands") || {}
-        VALIDATION_NAMES.select { |name| present_proof_text?(commands[name]) }
+        Validator.configured_names(@cfg.dig("patrol", "commands"))
       end
 
       def run_agent(prompt:, run_dir:, worktree_path:,

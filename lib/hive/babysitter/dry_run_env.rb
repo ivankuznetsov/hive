@@ -149,7 +149,7 @@ module Hive
       end
 
       def scrub_dynamic_loader_env!
-        ENV.keys.grep(DYNAMIC_LOADER_ENV_PATTERN).each { |key| ENV.delete(key) }
+        StubEnvironment.scrub_dynamic_loader_env!
       end
 
       def restore_dynamic_loader_env(values)

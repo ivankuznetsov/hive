@@ -250,10 +250,7 @@ module Hive
       end
 
       def configured_validation_keys
-        commands = @cfg.dig("patrol", "commands") || {}
-        Validator::COMMAND_NAMES.select do |name|
-          commands[name].is_a?(String) && !commands[name].strip.empty?
-        end
+        Validator.configured_names(@cfg.dig("patrol", "commands"))
       end
 
       def normalized_evidence(value)

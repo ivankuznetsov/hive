@@ -98,10 +98,7 @@ module Hive
 
       def valid_validation_key?(finding)
         commands = @cfg["commands"] || @cfg[:commands] || {}
-        configured = Validator::COMMAND_NAMES.select do |name|
-          value = commands[name] || commands[name.to_sym]
-          value.is_a?(String) && !value.strip.empty?
-        end
+        configured = Validator.configured_names(commands)
         return true if configured.empty?
 
         configured.include?(finding.validation_key.to_s)

@@ -5,7 +5,6 @@ require "open3"
 require "rbconfig"
 require "time"
 require "tmpdir"
-require_relative "artifact_paths"
 require_relative "gh_stub"
 require_relative "paths"
 require_relative "schemas"
@@ -308,7 +307,7 @@ module Hive
         {
           "path" => relative,
           "size" => File.size(path),
-          "sha256" => Digest::SHA256.file(path).hexdigest
+          "sha256" => ::Digest::SHA256.file(path).hexdigest
         }
       rescue StandardError => e
         @capture_errors << { "label" => "manifest:#{relative || path}", "error" => "#{e.class}: #{e.message}" }

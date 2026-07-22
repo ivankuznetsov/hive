@@ -47,8 +47,6 @@ if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   exit 0
 end
 
-JSON_TRUE_OPTIONS = Hive::CliJsonOptions::TRUE_OPTIONS
-JSON_FALSE_OPTIONS = Hive::CliJsonOptions::FALSE_OPTIONS
 JSON_BOOLEAN_OPTIONS = Hive::CliJsonOptions::BOOLEAN_OPTIONS
 STAGE_ACTION_USAGE_COMMANDS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
 NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow].freeze

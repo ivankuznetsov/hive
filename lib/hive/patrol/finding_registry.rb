@@ -8,12 +8,16 @@ module Hive
     # every prior finding, including records that never reached a PR ledger.
     class FindingRegistry
       Result = Struct.new(:findings, :skipped, keyword_init: true)
+      IndexedFinding = Struct.new(:finding, :signature, keyword_init: true)
 
       def initialize(state:, target_sha:, clock: -> { Time.now })
         @state = state
         @target_sha = target_sha.to_s.downcase
         @clock = clock
         @existing = state.findings
+        @exact_index = Hash.new { |hash, key| hash[key] = [] }
+        @category_index = Hash.new { |hash, key| hash[key] = [] }
+        @existing.each { |finding| index(finding) }
       end
 
       def admit(findings, persist: true)
@@ -22,9 +26,7 @@ module Hive
 
         Array(findings).each do |finding|
           finding.target_sha = @target_sha
-          matches = (@existing + admitted).select do |candidate|
-            Fingerprint.semantically_same?(candidate, finding)
-          end
+          matches = semantic_matches(finding)
           terminal = matches.find { |candidate| %w[resolved rejected].include?(lifecycle(candidate)) }
           same_target = matches.find { |candidate| candidate.target_sha.to_s.downcase == @target_sha }
 
@@ -37,6 +39,7 @@ module Hive
           supersede_active_matches(matches, finding, persist: persist)
           activate(finding)
           admitted << finding
+          index(finding)
         end
 
         Result.new(findings: admitted, skipped: skipped)
@@ -84,16 +87,43 @@ module Hive
       end
 
       def transition(finding, state, reason, superseded_by: nil, persist:)
-        finding.lifecycle_state = state
-        finding.lifecycle_reason = reason
-        finding.lifecycle_updated_at = @clock.call.utc.iso8601
-        finding.superseded_by = state == "superseded" ? superseded_by : nil
-        return finding unless persist
+        target_superseded_by = state == "superseded" ? superseded_by : nil
+        return finding if finding.lifecycle_state == state &&
+                          finding.lifecycle_reason == reason &&
+                          finding.superseded_by.to_s == target_superseded_by.to_s
+
+        now = @clock.call
+        unless persist
+          finding.lifecycle_state = state
+          finding.lifecycle_reason = reason
+          finding.lifecycle_updated_at = now.utc.iso8601
+          finding.superseded_by = target_superseded_by
+          return finding
+        end
 
         @state.transition_finding(
-          finding.id, state: state, reason: reason,
-          now: @clock.call, superseded_by: superseded_by
+          finding, state: state, reason: reason,
+          now: now, superseded_by: superseded_by
         )
+      end
+
+      def index(finding)
+        signature = Fingerprint.semantic_signature(finding)
+        indexed = IndexedFinding.new(finding: finding, signature: signature)
+        @category_index[signature.fetch(:category)] << indexed
+        fingerprint = signature.fetch(:fingerprint)
+        @exact_index[fingerprint] << indexed unless fingerprint.empty?
+      end
+
+      def semantic_matches(finding)
+        signature = Fingerprint.semantic_signature(finding)
+        candidates = @category_index.fetch(signature.fetch(:category), []).dup
+        fingerprint = signature.fetch(:fingerprint)
+        candidates.concat(@exact_index.fetch(fingerprint, [])) unless fingerprint.empty?
+        candidates.uniq! { |indexed| indexed.finding.object_id }
+        candidates.filter_map do |indexed|
+          indexed.finding if Fingerprint.semantically_same_signature?(indexed.signature, signature)
+        end
       end
 
       def lifecycle(finding)

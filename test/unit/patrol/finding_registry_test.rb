@@ -105,4 +105,34 @@ class HivePatrolFindingRegistryTest < Minitest::Test
       assert_equal "rejected", states.fetch("dismissed")
     end
   end
+
+  def test_reconciliation_reuses_loaded_records_and_one_timestamp_per_transition
+    with_tmp_dir do |dir|
+      store = Hive::Patrol::StateStore.new(dir)
+      store.ensure!
+      record = finding(id: "merged", state: "active")
+      store.write_finding(record)
+      reads = 0
+      original_findings = store.method(:findings)
+      store.define_singleton_method(:findings) do
+        reads += 1
+        original_findings.call
+      end
+      clock_calls = 0
+      now = Time.utc(2026, 7, 22, 12, 0, 0)
+      registry = Hive::Patrol::FindingRegistry.new(
+        state: store, target_sha: "c" * 40,
+        clock: -> { clock_calls += 1; now }
+      )
+
+      registry.reconcile!(
+        fingerprints: { record.fingerprint => { "state" => "merged" } },
+        dismissed: {}
+      )
+
+      assert_equal 1, reads
+      assert_equal 1, clock_calls
+      assert_equal now.iso8601, original_findings.call.first.lifecycle_updated_at
+    end
+  end
 end

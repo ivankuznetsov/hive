@@ -34,3 +34,8 @@ tags: [patrol, attempts, cli, babysitter, installer, e2e]
   agent starts; fixer proof must use the reviewer-selected validation key.
 - The sample systemd daemon unit no longer orders itself after the same
   `default.target` that wants it, avoiding an ordering cycle.
+- The quality pass centralized validation-key discovery and structured-message
+  accumulation, bounded streamed message memory, indexed semantic finding
+  history, eliminated repeated lifecycle reads/timestamps and Codex config
+  snapshots, reused GitOps default-branch discovery and shared dry-run env
+  scrubbing, and removed dead CLI/test aliases without weakening safety gates.

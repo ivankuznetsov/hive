@@ -262,10 +262,7 @@ module Hive
       end
 
       def stamp_findings(findings, project_root, target_sha:, cfg:)
-        configured_keys = Hive::Patrol::Validator::COMMAND_NAMES.select do |name|
-          command = cfg.dig("patrol", "commands", name)
-          command.is_a?(String) && !command.strip.empty?
-        end
+        configured_keys = Hive::Patrol::Validator.configured_names(cfg.dig("patrol", "commands"))
         findings.each do |finding|
           finding.fingerprint ||= Hive::Patrol::Fingerprint.compute(finding, project_root: project_root)
           finding.target_sha = target_sha

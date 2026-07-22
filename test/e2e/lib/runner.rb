@@ -31,16 +31,16 @@ module Hive
         raise "no scenarios match #{pattern || tag || 'all'}" if selected_scenarios.empty?
 
         @scenario_metadata = selected_scenarios.map { |scenario| scenario_metadata(scenario) }
-        scenarios = selected_scenarios.reject(&:pending)
+        runnable_scenarios = selected_scenarios.reject(&:pending)
 
         # Capture total once so signal handlers and the rescue branch can write
         # a coherent report regardless of how many scenarios actually ran.
-        @total = scenarios.size
+        @total = runnable_scenarios.size
         prev_int = Signal.trap("INT") { handle_signal!("INT") }
         prev_term = Signal.trap("TERM") { handle_signal!("TERM") }
         begin
           write_report(status: "partial", total: @total)
-          scenarios.each do |scenario|
+          runnable_scenarios.each do |scenario|
             run_one(scenario, keep_artifacts: keep_artifacts)
             write_report(status: "partial", total: @total)
           end

@@ -26,12 +26,16 @@ module Hive
         end
       end
 
-      def transition_finding(id, state:, reason:, now: Time.now, superseded_by: nil)
+      def transition_finding(finding_or_id, state:, reason:, now: Time.now, superseded_by: nil)
         unless Finding::LIFECYCLE_STATES.include?(state.to_s)
           raise ArgumentError, "unsupported patrol finding lifecycle state #{state.inspect}"
         end
 
-        finding = findings.find { |candidate| candidate.id.to_s == id.to_s }
+        finding = if finding_or_id.is_a?(Finding)
+          finding_or_id
+        else
+          findings.find { |candidate| candidate.id.to_s == finding_or_id.to_s }
+        end
         return unless finding
         return finding if finding.lifecycle_state == state.to_s &&
                           finding.lifecycle_reason == reason.to_s &&

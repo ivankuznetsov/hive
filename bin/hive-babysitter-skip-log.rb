@@ -9,8 +9,7 @@ SKIP_LOG_LOCK_RETRY_SECONDS = 0.01
 TRUNCATED_ARGV_SUFFIX = "...[truncated]"
 
 def scrub_dynamic_loader_env!
-  pattern = Hive::Babysitter::StubEnvironment::DYNAMIC_LOADER_ENV_PATTERN
-  ENV.keys.grep(pattern).each { |key| ENV.delete(key) }
+  Hive::Babysitter::StubEnvironment.scrub_dynamic_loader_env!
 end
 
 def log_skip(command, argv)

@@ -3,6 +3,57 @@ require "json"
 module Hive
   class Agent
     module MessageExtractor
+      class Accumulator
+        attr_reader :source
+
+        def initialize(max_bytes:)
+          @max_bytes = max_bytes.to_i
+          @structured = nil
+          @streaming = false
+          @plain_tail = +""
+          @source = nil
+        end
+
+        def observe(data, raw_line: nil)
+          message = MessageExtractor.extract(data)
+          if message
+            if MessageExtractor.streaming_text_event?(data)
+              @structured = +"" unless @streaming
+              append_structured(message)
+              @streaming = true
+            else
+              @structured = bounded_prefix(message)
+              @streaming = false
+            end
+            @source = :structured
+          elsif data.nil? && raw_line
+            @plain_tail << raw_line
+            @plain_tail = @plain_tail.byteslice(-@max_bytes, @max_bytes) || @plain_tail
+          end
+          message
+        end
+
+        def value
+          return @structured unless @structured.nil?
+
+          plain = @plain_tail.strip
+          @source = :plain unless plain.empty?
+          plain
+        end
+
+        private
+
+        def append_structured(message)
+          remaining = @max_bytes - @structured.bytesize
+          @structured << bounded_prefix(message, remaining) if remaining.positive?
+        end
+
+        def bounded_prefix(value, limit = @max_bytes)
+          prefix = value.to_s.byteslice(0, [ limit, 0 ].max).to_s
+          prefix.valid_encoding? ? prefix : prefix.scrub
+        end
+      end
+
       module_function
 
       def extract(data)

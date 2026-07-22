@@ -26,7 +26,7 @@ class InstallScriptTest < Minitest::Test
 
     refute_nil removal, "a managed wrapper must be removed before RubyGems writes its binstub"
     assert_operator removal, :<, install
-    assert_includes script, 'hive-managed: install-wrapper/v1'
+    assert_includes script, "hive-managed: install-wrapper/v1"
     assert_includes script, 'mv "$previous_wrapper" "$installed_bin"'
   end
 

@@ -4,6 +4,7 @@ require "open3"
 require "json"
 require "hive"
 require "hive/config"
+require "hive/git_ops"
 
 module Hive
   module Commands
@@ -24,9 +25,7 @@ module Hive
       DEFAULT_BENCH_PATH = File.expand_path("~/Dev/hive-bench")
       DEFAULT_REPO = "ivankuznetsov/hive-bench"
 
-      class UsageError < Hive::Error
-        def exit_code = Hive::ExitCodes::USAGE
-      end
+      class UsageError < Hive::UsageError; end
 
       # extractor: ->(task_dir:, repo:, repo_path:, out_dir:) => entry_dir
       # pr_opener: ->(bench_path:, entry_dir:, slug:) => pr_url
@@ -161,17 +160,8 @@ module Hive
       end
 
       def remote_default_ref(dir)
-        symbolic = optional_git_output(dir, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
-        return symbolic unless symbolic.empty?
-
-        %w[origin/main origin/master].find do |candidate|
-          git_success?(dir, "rev-parse", "--verify", candidate)
-        end || raise(UsageError, "cannot resolve hive-bench origin default branch")
-      end
-
-      def git_success?(dir, *args)
-        _out, _err, status = Open3.capture3("git", "-C", dir, *args)
-        status.success?
+        branch = Hive::GitOps.new(dir).origin_default_branch
+        branch ? "origin/#{branch}" : raise(UsageError, "cannot resolve hive-bench origin default branch")
       end
 
       # Run hive-bench's own SecretScan (one source of truth) in a child ruby —

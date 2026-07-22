@@ -125,9 +125,12 @@ module Hive
           if unrelated_digest(after.fetch("content"), native_spec) != unrelated_digest(before.fetch("content"), native_spec)
             return "Codex changed comments or unrelated config while applying #{operation.kind}"
           end
-          File.chmod(before["mode"], path) if before["mode"] && after["mode"] != before["mode"]
+          if before["mode"] && after["mode"] != before["mode"]
+            File.chmod(before["mode"], path)
+            after["mode"] = before["mode"]
+          end
           @successful_config_snapshots ||= {}
-          @successful_config_snapshots[operation.id] = file_snapshot(path)
+          @successful_config_snapshots[operation.id] = after
           nil
         end
 

@@ -247,9 +247,7 @@ module Hive
     def spawn_and_wait
       cmd = build_cmd
       log_file = log_path
-      final_message = nil
-      final_message_source = nil
-      streaming_text = false
+      messages = Hive::Agent::MessageExtractor::Accumulator.new(max_bytes: FINAL_MESSAGE_TAIL_BYTES)
       limit_text = nil
       last_usage = nil
       token_meter = StreamTokenMeter.new(@profile.name)
@@ -260,7 +258,6 @@ module Hive
       output_completed = false
       write_tool_in_current_turn = false
       write_turn_completed = false
-      plain_tail = +""
       stdin_file = prompt_stdin_file
       open_private_log(log_file) do |log|
         # Never serialize argv: for positional-prompt profiles it contains the
@@ -302,7 +299,7 @@ module Hive
             # logical message can span multiple newline-delimited JSON events,
             # so per-line regex redaction cannot safely retain their payloads.
             json = parse_json_line(line)
-            message = json && Hive::Agent::MessageExtractor.extract(json)
+            message = messages.observe(json, raw_line: line)
             safe_line = if message
               "[structured message omitted type=#{json.fetch('type', 'unknown')}]\n"
             else
@@ -311,20 +308,6 @@ module Hive
             log.write("[stream] #{Time.now.utc.iso8601} #{safe_line}")
             log.write("\n") unless safe_line.end_with?("\n")
             log.flush
-            if message
-              if Hive::Agent::MessageExtractor.streaming_text_event?(json)
-                final_message = +"" unless streaming_text
-                final_message << message
-                streaming_text = true
-              else
-                final_message = message
-                streaming_text = false
-              end
-              final_message_source = :structured
-            elsif json.nil?
-              plain_tail << line
-              plain_tail = plain_tail.byteslice(-FINAL_MESSAGE_TAIL_BYTES, FINAL_MESSAGE_TAIL_BYTES) || plain_tail
-            end
             # Capture a usage/credit-limit signal straight from the raw stream.
             # Some CLIs (notably codex) report "you've hit your usage limit" as a
             # structured {"type":"error",...} / turn.failed JSON event that
@@ -453,9 +436,7 @@ module Hive
                     -status.termsig
       end
 
-      plain_message = plain_tail.strip
-      message = final_message || plain_message
-      message_source = final_message ? final_message_source : (plain_message.empty? ? nil : :plain)
+      message = messages.value
 
       reported_usage = resource_exhaustion || output_completed ? token_meter.usage : last_usage
       {
@@ -465,7 +446,7 @@ module Hive
         timed_out: timed_out,
         log_file: log_file,
         final_message: message,
-        final_message_source: message_source,
+        final_message_source: messages.source,
         limit_text: limit_text,
         usage: reported_usage,
         model: reported_usage&.dig(:model),

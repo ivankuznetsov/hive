@@ -29,4 +29,19 @@ class AgentMessageExtractorTest < Minitest::Test
     assert_equal " a summary", Hive::Agent::MessageExtractor.extract(event)
     assert Hive::Agent::MessageExtractor.streaming_text_event?(event)
   end
+
+  def test_accumulator_bounds_streaming_messages_and_keeps_plain_tail
+    accumulator = Hive::Agent::MessageExtractor::Accumulator.new(max_bytes: 5)
+    accumulator.observe({ "type" => "text", "data" => "abc" })
+    accumulator.observe({ "type" => "text", "data" => "def" })
+
+    assert_equal "abcde", accumulator.value
+    assert_equal :structured, accumulator.source
+
+    plain = Hive::Agent::MessageExtractor::Accumulator.new(max_bytes: 5)
+    plain.observe(nil, raw_line: "abcdef")
+
+    assert_equal "bcdef", plain.value
+    assert_equal :plain, plain.source
+  end
 end

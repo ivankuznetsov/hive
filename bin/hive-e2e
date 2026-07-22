@@ -50,7 +50,6 @@ module Hive
       rescue Errno::ENOENT
         raise PreflightError, TMUX_INSTALL_HINT
       end
-
     end
 
     module JsonError
@@ -287,8 +286,6 @@ def rewrite_help_flag!(argv)
   argv.replace(argv[0...cmd_idx] + [ "help", help_target ])
 end
 
-JSON_TRUE_OPTIONS = Hive::CliJsonOptions::TRUE_OPTIONS
-JSON_FALSE_OPTIONS = Hive::CliJsonOptions::FALSE_OPTIONS
 JSON_BOOLEAN_OPTIONS = Hive::CliJsonOptions::BOOLEAN_OPTIONS
 TOP_LEVEL_FLAGS = %w[--help -h --version -v].freeze
 

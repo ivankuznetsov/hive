@@ -28,7 +28,8 @@ preflight, aborting before any PR if a secret is found.
    source repo from the project's `origin` remote and requires it to be a
    `github.com` remote.
 5. Records the hive-bench checkout's original branch (or detached HEAD),
-   resolves `origin/HEAD` with `origin/main` / `origin/master` fallbacks,
+   resolves the remote default through `Hive::GitOps` (`origin/HEAD` with
+   full-ref `origin/main` / `origin/master` fallbacks),
    creates `submit-<slug>` from that remote default, stages the generated
    entry, commits, pushes, and runs `gh pr create -R ivankuznetsov/hive-bench`.
    An ensure path restores the original branch/HEAD even when commit, push, or

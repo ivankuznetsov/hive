@@ -7,6 +7,8 @@ module Hive
     # all consume this one definition so newly discovered loader seams cannot
     # drift between handoff layers.
     module StubEnvironment
+      module_function
+
       RUBY_STARTUP_ENV = %w[
         RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH GEM_HOME GEM_PATH
         BUNDLER_SETUP BUNDLER_VERSION
@@ -26,6 +28,10 @@ module Hive
       ].freeze
       DYNAMIC_LOADER_ENV_PATTERN = /\A(?:LD|DYLD)_/.freeze
       STUB_STARTUP_ENV = (RUBY_STARTUP_ENV + DYNAMIC_LOADER_ENV).freeze
+
+      def scrub_dynamic_loader_env!
+        ENV.keys.grep(DYNAMIC_LOADER_ENV_PATTERN).each { |key| ENV.delete(key) }
+      end
     end
   end
 end

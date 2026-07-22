@@ -189,10 +189,25 @@ class WorkflowsLoaderTest < Minitest::Test
         original.call(candidate)
       end
       begin
-        assert_equal [ [ path, nil, nil ] ], Hive::Workflows::Loader.fingerprint(workflows_dir)
+        assert_equal [ [ path, nil, nil, nil ] ], Hive::Workflows::Loader.fingerprint(workflows_dir)
       ensure
         File.define_singleton_method(:stat, original)
       end
+    end
+  end
+
+  def test_fingerprint_detects_same_size_replacement_with_preserved_mtime
+    with_tmp_dir do |workflows_dir|
+      path = File.join(workflows_dir, "demo.yml")
+      File.write(path, "archive_visibility_retention_days: 3\n")
+      timestamp = Time.utc(2026, 7, 22, 10, 0, 0)
+      File.utime(timestamp, timestamp, path)
+      before = Hive::Workflows::Loader.fingerprint(workflows_dir)
+
+      File.write(path, "archive_visibility_retention_days: 7\n")
+      File.utime(timestamp, timestamp, path)
+
+      refute_equal before, Hive::Workflows::Loader.fingerprint(workflows_dir)
     end
   end
 end

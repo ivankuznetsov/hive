@@ -13,6 +13,7 @@ module Hive
 
       DESCRIPTOR = Hive::Workflow.new(
         id: :content,
+        archive_visibility_retention_days: 3,
         stages: [
           Hive::Workflow::Stage.new(
             name: "inbox",

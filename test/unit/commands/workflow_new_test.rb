@@ -37,6 +37,7 @@ class WorkflowNewTest < Minitest::Test
       assert_includes stdout.string, "hive new #{File.basename(project_root)} --workflow my-flow"
 
       assert File.file?(descriptor_path)
+      assert_includes File.read(descriptor_path), "archive_visibility_retention_days: 3"
       assert_equal "Edit this file to define what the `work` stage should do.\n", File.read(instruction_path)
       assert File.file?(File.join(File.dirname(instruction_path), "README.md"))
       assert File.file?(File.join(File.dirname(instruction_path), "honeycomb.yml"))
@@ -96,6 +97,7 @@ class WorkflowNewTest < Minitest::Test
 
       # The descriptor carries the SAMPLE's multi-stage shape, renamed to the id.
       workflow = Hive::Workflows::DescriptorParser.parse_file(File.join(workflows, "brief.yml"))
+      assert_includes File.read(File.join(workflows, "brief.yml")), "archive_visibility_retention_days: 3"
       assert_equal %w[inbox gather synthesize report done], workflow.stage_names
       assert_equal %i[inert agent agent agent inert], workflow.stages.map(&:kind)
 

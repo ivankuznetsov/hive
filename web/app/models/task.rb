@@ -2,6 +2,8 @@ require "tempfile"
 require "hive/web/environment"
 
 class Task
+  include TaskMutations
+
   ARTIFACT_ORDER = %w[idea.md brainstorm.md plan.md task.md pr.md summary.md artifact.md].freeze
   MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif)\z/i
   DIFF_TIMEOUT_SEC = Integer(Hive::Web::Environment.value("HIVE_WEB_DIFF_TIMEOUT_SEC"))
@@ -25,6 +27,11 @@ class Task
 
   def self.find!(project:, slug:, snapshot: StatusBroadcaster.snapshot)
     project_payload = snapshot.fetch("projects", []).find { |candidate| candidate["name"] == project.name }
+    if project_payload&.fetch("error", nil) == "project_load_failed"
+      raise Hive::Error,
+            "project #{project.name} status is unavailable — repair its configuration or workflow, then reload"
+    end
+
     attributes = project_payload&.fetch("tasks", [])&.find { |candidate| candidate["slug"] == slug }
     raise Hive::InvalidTaskPath, "unknown task #{slug}" unless attributes
 

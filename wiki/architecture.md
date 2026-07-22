@@ -1,9 +1,9 @@
 ---
 title: Architecture
 type: architecture
-source: lib/hive/, bin/hive, templates/
+source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-07-21
+updated: 2026-07-22
 tags: [architecture, overview]
 ---
 
@@ -401,17 +401,24 @@ pairings. `TelegramController` now exposes only the settings resource's
 rows before they reach ERB.
 
 A task page is a filesystem-backed `Task`, built from the matching status
-snapshot row and its `Project`. That model owns task
-reads and their invariants — workflow-aware artifact ordering, brainstorm
-questions, original-idea/title resolution, workflow-aware action/verb policy,
-terminal/passable/recovery predicates, bounded log tails and diffs, worktree
-presence, and media-manifest/path validation. Dashboard snapshots are wrapped
-as `Project`/`Task` models before rendering, so the grid and detail page use the
-same behavior rather than helper-owned filesystem reads or action tables.
-`TasksController` renders that resource. Namespaced task-resource
-controllers expose diff, log, media, approval, rejection, drop, run, recovery,
-answer, and intervention through standard `show`/`create` actions; each remains
-a thin HTTP boundary over `Task` or `Hive::Web::Dispatcher`.
+snapshot row and its `Project`. That model owns task reads and mutations:
+workflow-aware artifact ordering, brainstorm questions, original-idea/title
+resolution, workflow-aware action/verb policy, terminal/passable/recovery
+predicates, bounded log tails and diffs, worktree presence,
+media-manifest/path validation, approval/rejection/drop, guarded daemon runs
+and recovery, and brainstorm answers. `Project` owns idea capture; the
+`Daemon` resource owns liveness and queued repair. These models delegate
+pipeline mechanics to the canonical gem commands, queue writer, and bot
+recovery/answer primitives rather than duplicating a web orchestration layer.
+Dashboard snapshots are wrapped as `Project`/`Task` models before rendering,
+so the grid and detail page use the same behavior rather than helper-owned
+filesystem reads or action tables. `TasksController` renders that resource.
+Namespaced task-resource controllers expose diff, log, media, approval,
+rejection, drop, run, recovery, answer, and intervention through standard
+`show`/`create` actions; each loads a `Task`, invokes one domain method, and
+chooses the HTTP response. `DaemonRepairsController#create` follows the same
+resource shape. The former `Hive::Web::Dispatcher` indirection has been
+removed.
 
 ## Dispatch flow (durable generation ownership)
 

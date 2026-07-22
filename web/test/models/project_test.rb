@@ -37,4 +37,17 @@ class ProjectTest < ActiveSupport::TestCase
     assert_same project, task.project
     assert_equal "ship-it-260720-abcd", task.slug
   end
+
+  test "creates an idea through the project resource" do
+    name = create_hive_project!("project-idea-resource")
+    project = Project.find!(name)
+    inbox = stage_dir(name, "1-inbox")
+    before = inbox.children
+
+    capture_io { project.add_idea!("Model the operator's idea") }
+
+    created = inbox.children - before
+    assert_equal 1, created.size
+    assert_includes created.sole.join("idea.md").read, "Model the operator's idea"
+  end
 end

@@ -13,6 +13,7 @@ FileUtils.mkdir_p(ENV["HIVE_HOME"])
 
 require_relative "../config/environment"
 require "rails/test_help"
+require "hive/commands/new"
 
 Minitest.after_run do
   root = ENV["HIVE_TEST_HOME_ROOT"]

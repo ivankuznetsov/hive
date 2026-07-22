@@ -25,7 +25,8 @@ class ApplicationController < ActionController::Base
   # InvalidTaskPath (a Hive::Error subclass → 404) must come AFTER the
   # generic 422 handler or it would never fire.
   # NOT bare KeyError: that would reclassify programming errors anywhere in
-  # a request as 422 user errors. The dispatcher owns its verb-map KeyError;
+  # a request as 422 user errors. TaskMutations#run! turns unknown submitted
+  # actions into Hive::Error before looking up the canonical verb;
   # ParameterMissing (a KeyError subclass) is a genuine user error.
   rescue_from Hive::Error, ActionController::ParameterMissing do |e|
     render_typed_error(:unprocessable_entity, "Action failed", e.message)

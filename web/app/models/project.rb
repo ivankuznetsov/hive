@@ -1,4 +1,5 @@
 require "stringio"
+require "hive/commands/new"
 
 class Project
   attr_reader :attributes
@@ -82,5 +83,12 @@ class Project
       provisioning_error:
     ).call
     provisioning_error.string.strip.presence
+  end
+
+  def add_idea!(text, attachments: [])
+    text = text.to_s.strip
+    raise Hive::Error, "idea text is empty" if text.empty?
+
+    Hive::Commands::New.new(name, text, attachments:).call!
   end
 end

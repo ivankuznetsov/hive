@@ -1,5 +1,6 @@
 class Tasks::BaseController < ApplicationController
   before_action :load_project
+  before_action :load_task
 
   private
 
@@ -9,9 +10,5 @@ class Tasks::BaseController < ApplicationController
 
   def load_task
     @task = Task.find!(project: @project, slug: params[:slug])
-  end
-
-  def dispatcher
-    Hive::Web::Dispatcher.new
   end
 end

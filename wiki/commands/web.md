@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-21
+updated: 2026-07-22
 tags: [command, web, rails, turbo, hivebox-container]
 ---
 
@@ -16,7 +16,7 @@ of the same app at `/app/web`. The web tier adds no
 pipeline logic: status reads call `Hive::Commands::Status#json_payload` (via
 `Hive::Web::StatusFeed`), gate approval calls `Hive::Commands::Approve`
 in-process, task Drop calls `Hive::Commands::Drop` in-process, stage runs go
-through the daemon dispatch queue (`Hive::Web::Dispatcher`), daemon status
+through the daemon dispatch queue from the filesystem-backed Rails `Task`, daemon status
 renders the shared `Hive::Daemon::StatusReport.safe_payload` producer used by
 `hive daemon status --json`, and setup flows
 reuse `Hive::Web::GithubAuth`, `AgentsAuth`, `WorkflowLifecycle`, and the
@@ -433,17 +433,17 @@ so the login gate can run.
   on named resources.
 
 Task Drop is routed as `POST /tasks/:project/:slug/drop` →
-`Tasks::DropsController#create` → `Hive::Web::Dispatcher#drop` →
-`Hive::Commands::Drop`. It is intentionally in-process, not a daemon dispatch:
+`Tasks::DropsController#create` → `Task#drop!` → `Hive::Commands::Drop`. It is
+intentionally in-process, not a daemon dispatch:
 the task is gone after success, so the controller redirects to the grid. The
 form posts the row's rendered `stage` as `from`; if the task moved after the
 page rendered, `Commands::Drop` raises `Hive::WrongStage`, Rails renders the
 typed 422 error page, and the moved task folder is left intact.
 
 Task recovery is routed as `POST /tasks/:project/:slug/recover` →
-`Tasks::RecoveriesController#create` → `Hive::Web::Dispatcher#recover`. The controller
-re-reads the current status row rather than trusting form-posted stage/marker
-state. The dispatcher refuses manual-only states with
+`Tasks::RecoveriesController#create` → `Task#recover!`. The shared base
+controller re-reads the current status row rather than trusting form-posted
+stage/marker state. The task refuses manual-only states with
 `RecoverySequence.manual_only_text`, derives the most discriminating
 `--match-attr` through `NotificationBuilders.recovery_match_attr`, then writes
 the first command (`hive markers clear ... --json`) to the daemon dispatch
@@ -453,9 +453,12 @@ not promoted.
 
 Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
 404) — never a blank 500. Stage-run posts validate the action map before
-writing a daemon request, and `Hive::Web::Dispatcher#dispatch` wraps queue
-writer `ArgumentError`s (for example the queue's stricter slug grammar) as
-typed 422s instead of surfacing an opaque 500. CSRF is Rails-default (per-form
+writing a daemon request. `Task#run!` compares the submitted action and stage
+with the freshly loaded row, refuses stale forms, and wraps queue-writer
+`ArgumentError`s (for example the queue's stricter slug grammar) as typed 422s
+instead of surfacing an opaque 500. Idea creation likewise enters
+`Project#add_idea!`, and `POST /daemon/repair` is the conventional create action
+on `DaemonRepairsController`, backed by `Daemon#repair!`. CSRF is Rails-default (per-form
 tokens). In Hivebox mode every route except `/health`, `/up`, `/login`,
 `/logout`, `/auth/github*`, and the dev/test-only `/dev_login` is behind the
 owner gate; a verified local loopback request bypasses that gate for the

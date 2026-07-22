@@ -447,12 +447,46 @@ class TasksTest < ActionDispatch::IntegrationTest
 
   test "intervene writes the answer into the task" do
     post "/tasks/#{@project}/#{@slug}/approve", params: { from: "1-inbox", force: "1" }
+    folder = stage_dir(@project, "2-brainstorm").join(@slug)
+    brainstorm = folder.join("brainstorm.md")
+    brainstorm.write("### Q1. Which option?\n\n### A1.\n\n")
 
     post "/tasks/#{@project}/#{@slug}/intervene", params: { message: "Prefer option B" }
 
-    # Without an open brainstorm question the writer reports a typed error —
-    # still a readable page, never a blank 500.
-    assert_includes [ 302, 422 ], response.status
+    assert_redirected_to "/tasks/#{@project}/#{@slug}"
+    answer = Hive::Bot::BrainstormParser.parse(brainstorm).first.answer.to_s.strip
+    assert_equal "Prefer option B", answer
+  end
+
+  test "intervene rejects a blank answer without changing the task" do
+    post "/tasks/#{@project}/#{@slug}/approve", params: { from: "1-inbox", force: "1" }
+    brainstorm = stage_dir(@project, "2-brainstorm").join(@slug, "brainstorm.md")
+    brainstorm.write("### Q1. Which option?\n\n### A1.\n\n")
+    before = brainstorm.read
+
+    post "/tasks/#{@project}/#{@slug}/intervene", params: { message: "   " }
+
+    assert_response :unprocessable_entity
+    assert_match "intervene message is required", response.body
+    assert_equal before, brainstorm.read
+  end
+
+  test "task mutation reports a degraded project instead of a false 404" do
+    snapshot = {
+      "projects" => [
+        { "name" => @project, "error" => "project_load_failed", "tasks" => [] }
+      ]
+    }
+    replacement = proc { snapshot }
+
+    with_replaced_singleton_method(StatusBroadcaster, :snapshot, replacement) do
+      post "/tasks/#{@project}/#{@slug}/run",
+           params: { action_name: "ready_to_brainstorm", stage: "1-inbox" }
+    end
+
+    assert_response :unprocessable_entity
+    assert_match "project #{@project} status is unavailable", response.body
+    assert_match "repair", response.body
   end
 
   test "run stage dispatches the current stage's verb to the daemon queue" do

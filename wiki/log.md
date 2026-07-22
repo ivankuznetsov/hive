@@ -59,6 +59,32 @@ tags: [wiki, attempts, conditions, operations, web, digest, workflows, patrol]
   94.
 
 ---
+title: Audit queued 7x committed contracts against current wiki
+date: 2026-07-22T14:21:03Z
+tags: [wiki, attempts, conditions, web, workflows, digest, patrol, e2e]
+---
+
+- Inspected all 64 queued immutable commits with `git show`. Read all 1,002
+  available changed-path blobs with `git show <sha>:<path>` and the parent
+  blobs for all 13 deletions. None of the supplied SHAs is an ancestor of this
+  refresh branch. Also searched the configured master wiki for related
+  cross-project context; QMD was intentionally not run.
+- Confirmed that current pages already provide equal or later coverage for
+  durable-attempt admission, supervision, replay, generation tracking, and
+  loss healing; condition journals and projections; operational actions and
+  watches; native Hive web; managed worktrees and draft-PR handoff; immutable
+  workflow-package generations and publication recovery; repository-aware
+  dependency admission; canonical agent skills; patrol routing and budgets;
+  the London-scoped digest v2 contract; bounded wiki refresh scheduling; and
+  the queued incident, E2E, packaging, and release-proof changes.
+- The repeated cherry-pick-equivalent implementations, focused test fixes,
+  namespace hardening, and fixture-only commits establish no additional
+  public contract. Existing [[gaps]] entries already preserve the branch-only
+  provenance boundary and relevant live-proof uncertainties. No architecture,
+  command/API, dependency, data-model, planning, gap, or index page required
+  another edit; page coverage remains 94.
+
+---
 title: Audit queued completion retention and cross-cutting contracts
 date: 2026-07-22T14:15:51Z
 tags: [wiki, archive, completion-time, attempts, conditions, web, workflows]
@@ -201,6 +227,30 @@ tags: [rebase, finalize, git, pull-request, recovery]
 Branches that do not exist remotely remain local for the normal pre-PR workflow. Diverged remotes, preflight failures, and exact-lease rejection become structured non-fatal warnings; failed rebases never publish. Real bare-remote regressions cover the successful later-fast-forward path, pre-PR absence, and a concurrent actor moving the remote immediately before the leased push.
 
 This closes the recovery gap where Hive rebased an already-published PR locally, accumulated review-fix commits on the rewritten history, and then reached finalize with commits that an ordinary push could not publish. Finalize's patch-identity recovery remains a backstop rather than the first publication point.
+
+---
+title: Refactor Patrol identity, budget, and gate correction
+date: 2026-07-22
+tags: [refactor-patrol, identity, token-budget, architecture]
+---
+
+Architecture review and auto-fix now inherit the resolved execution provider,
+concrete model, and effort by default, with independent field-level overrides.
+New action policy snapshots preserve the full fix identity. Codex discovery has
+an enforced read-only sandbox, cached tokens remain telemetry but are excluded
+from input-plus-output budget ceilings, architecture reviews stop at eight per
+UTC day without consuming fix capacity, and the default proposal leverage floor
+is `0.10`.
+
+The correction addresses a legacy Claude review default, agent-only fix
+snapshots, cached-token charging, uncapped merge-driven discovery, and a `0.25`
+leverage floor that combined to spend heavily while suppressing legitimate
+small architectural costs.
+
+Existing explicit identity overrides still win. Legacy agent-only action
+snapshots retain provider-only matching. Missing provider accounting remains
+unmetered even when cached-only usage is present, and the separate unmetered
+architecture backstop remains `96`.
 
 ## 2026-07-22 — Resume advanced managed draft-PR receipts
 

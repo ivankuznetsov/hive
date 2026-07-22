@@ -1,9 +1,9 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/digest/, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-07-20
+updated: 2026-07-22
 tags: [commands, api, skills, agents, operational, provisioning]
 ---
 
@@ -218,7 +218,7 @@ device-flow auth can either use a pre-pinned `web.github.owner` or first-login
 claim on an ownerless box. Production Action Cable accepts same-origin-as-host,
 with `web.origin` / `HIVE_WEB_ORIGIN` only as an extra allow for split-origin
 deploys. Task Drop is deliberately not daemon-queued: the web handler calls
-`Hive::Web::Dispatcher#drop`, which runs `Commands::Drop` in-process with the
+`Task#drop!`, which runs `Commands::Drop` in-process with the
 rendered `from` stage as a stale-page guard. Repo setup clones through `gh`,
 normalizes GitHub SSH origins to https, and relies on the Docker image's
 `gh auth git-credential` helper for GitHub push auth; the Agents page now starts

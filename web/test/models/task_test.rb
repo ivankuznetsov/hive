@@ -29,6 +29,23 @@ class TaskTest < ActiveSupport::TestCase
     assert_equal "unknown task missing", error.message
   end
 
+  test "distinguishes an unavailable project from an unknown task" do
+    project = Project.new("name" => "alpha")
+    snapshot = {
+      "projects" => [
+        { "name" => "alpha", "error" => "project_load_failed", "tasks" => [] }
+      ]
+    }
+
+    error = assert_raises(Hive::Error) do
+      Task.find!(project:, slug: "still-on-disk", snapshot:)
+    end
+
+    refute_instance_of Hive::InvalidTaskPath, error
+    assert_match(/project alpha status is unavailable/, error.message)
+    assert_match(/repair.*reload/, error.message)
+  end
+
   test "prefers the action label when presenting task status" do
     project = Project.new("name" => "alpha")
 
@@ -109,6 +126,42 @@ class TaskTest < ActiveSupport::TestCase
 
       assert_equal(command == "run" ? "stage" : command, task.run_verb, action)
     end
+  end
+
+  test "queues a run through the task resource instead of a web dispatcher" do
+    task = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: {
+        "slug" => "ship-it-260720-abcd",
+        "stage" => "3-plan",
+        "workflow" => "coding"
+      }
+    )
+
+    result = task.run!(expected_action: "ready_to_plan", expected_stage: "3-plan")
+
+    assert_equal [ "hive", "plan", task.slug, "--project", "alpha", "--from", "3-plan" ], result[:argv]
+  ensure
+    FileUtils.rm_rf(File.join(Hive::Paths.state_home, "dispatch_requests"))
+  end
+
+  test "refuses a stale run form before writing to the daemon queue" do
+    task = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: {
+        "slug" => "ship-it-260720-abcd",
+        "stage" => "4-execute",
+        "workflow" => "coding"
+      }
+    )
+
+    queued_before = Dir[File.join(Hive::Paths.state_home, "dispatch_requests", "*")]
+    error = assert_raises(Hive::Error) do
+      task.run!(expected_action: "ready_to_plan", expected_stage: "3-plan")
+    end
+
+    assert_match(/state changed/, error.message)
+    assert_equal queued_before, Dir[File.join(Hive::Paths.state_home, "dispatch_requests", "*")]
   end
 
   test "refuses a diff when the task has no materialized worktree" do

@@ -1,6 +1,7 @@
-require "json"
 require "time"
 require "monitor"
+require "digest"
+require "json"
 require "hive/commands/status"
 require "hive/config"
 
@@ -10,10 +11,11 @@ module Hive
     # Rails web tier that is StatusBroadcaster, which bridges each changed
     # snapshot to a Turbo Streams broadcast.
     #
-    # A single shared background poller computes the snapshot ONCE per tick
-    # (one filesystem scan + YAML parse for the whole box) and publishes it to
-    # a mutex-protected latest-value. Every subscriber reads that shared value,
-    # so N subscribers cost one scan per tick — not N.
+    # While at least one live page is connected, a single shared background
+    # poller computes the snapshot ONCE per tick (one filesystem scan + YAML
+    # parse for the whole box) and publishes it to a mutex-protected
+    # latest-value. Every subscriber reads that shared value, so N subscribers
+    # cost one scan per tick — not N; an idle server performs no scans.
     #
     # Contract: a new subscriber gets the current snapshot immediately (emit
     # on connect); unchanged snapshots are suppressed (dedup, volatile fields
@@ -22,14 +24,18 @@ module Hive
     # `snapshot` returns a freshly-computed payload for the per-request read
     # path (the grid render, task_row lookups).
     class StatusFeed
-      def initialize(interval: 1.0, status_command: Hive::Commands::Status.new(json: true))
+      DEFAULT_INTERVAL = 5.0
+
+      def initialize(interval: DEFAULT_INTERVAL, status_command: Hive::Commands::Status.new(json: true))
         @interval = interval
         @status_command = status_command
         @monitor = Monitor.new
         @tick = @monitor.new_cond
         @generation = 0
-        @latest_json = nil
         @latest_payload = nil
+        @latest_key = nil
+        @latest_token = nil
+        @prime_claim = nil
         @poller = nil
       end
 
@@ -38,6 +44,38 @@ module Hive
       # shared poller instead so it never pays this cost per connection.
       def snapshot
         @status_command.json_payload(Hive::Config.registered_projects)
+      end
+
+      # Seed the shared poller from the snapshot Rails already computed to
+      # render the subscribing page. Without this handoff, the first Cable
+      # connection immediately repeats the same full-fleet filesystem scan.
+      # The first request owns the idle baseline until this poller lifecycle
+      # starts. Every page receives a stable token for the exact semantic
+      # payload it rendered; StatusChannel compares that token after Cable
+      # confirms, so an interleaving poll or another Puma worker cannot label
+      # stale content as current.
+      def prime(payload)
+        key = comparable_key(payload)
+        token = cached_token_for(key)
+        @monitor.synchronize do
+          unless @poller&.alive? || @prime_claim
+            @latest_payload = payload
+            @latest_key = key
+            @latest_token = token
+            @prime_claim = Object.new
+            @generation += 1
+          end
+
+          token
+        end
+      end
+
+      # The poll sequence wakes subscribers on every tick so `on_idle` keeps
+      # its contract. The public token changes only with semantic content,
+      # preventing an unchanged background tick from making a restored page
+      # look stale and trigger an unnecessary HTTP refresh.
+      def current_version?(candidate)
+        candidate.is_a?(String) && @monitor.synchronize { candidate == @latest_token }
       end
 
       # json_payload regenerates `generated_at` (and per-task `age_seconds`)
@@ -54,13 +92,11 @@ module Hive
       def each_snapshot(on_idle: nil)
         ensure_poller!
 
-        payload, _json, seen_generation = current_snapshot
-        last_key = comparable_key(payload)
+        payload, last_key, seen_generation = current_snapshot
         yield payload
 
         loop do
-          payload, _json, seen_generation = await_tick(seen_generation)
-          key = comparable_key(payload)
+          payload, key, seen_generation = await_tick(seen_generation)
           if key != last_key
             last_key = key
             yield payload
@@ -70,18 +106,29 @@ module Hive
         end
       end
 
-      # Stop the shared poller thread. Tests use this to reclaim the thread;
-      # the production process keeps a single poller alive for its lifetime.
+      # Stop the shared poller thread. StatusChannel calls this after the last
+      # live page disconnects; tests also use it to reclaim the thread.
       def stop
         thread = nil
+        detached_prime_claim = nil
         @monitor.synchronize do
           thread = @poller
           @poller = nil
+          detached_prime_claim = @prime_claim
+          @prime_claim = nil unless thread
         end
         return unless thread
 
         thread.kill
         thread.join
+        @monitor.synchronize do
+          # A request can claim a new idle baseline while the detached thread
+          # is joining. Release only the claim that belonged to the lifecycle
+          # being stopped, never a newer claim accepted in that join window.
+          if !@poller&.alive? && @prime_claim.equal?(detached_prime_claim)
+            @prime_claim = nil
+          end
+        end
       end
 
       private
@@ -95,11 +142,13 @@ module Hive
           # The connect-emit compute rides the same safety net as the loop:
           # a config error at exactly boot time must not kill the subscriber
           # thread before the poller ever starts.
-          begin
-            publish(compute_json)
-          rescue StandardError => e
-            warn "hive web: initial status snapshot failed (#{e.class}: #{e.message}); retrying on the next tick"
-            publish([ { "projects" => [] }, "{}" ])
+          unless @latest_payload
+            begin
+              publish(snapshot)
+            rescue StandardError => e
+              warn "hive web: initial status snapshot failed (#{e.class}: #{e.message}); retrying on the next tick"
+              publish({ "projects" => [] })
+            end
           end
           @poller = Thread.new { poll_loop }
         end
@@ -114,31 +163,29 @@ module Hive
           # stop, so even the on_idle keep-alive path never runs again. Log
           # and try again next tick.
           begin
-            publish(compute_json)
+            publish(snapshot)
           rescue StandardError => e
             warn "hive web: status poll failed (#{e.class}: #{e.message}); retrying"
           end
         end
       end
 
-      def compute_json
-        payload = snapshot
-        [ payload, JSON.generate(payload) ]
-      end
-
       # Store the newest snapshot and wake every waiting subscriber. The
       # generation counter lets a subscriber detect it slept through a tick.
-      def publish((payload, json))
+      def publish(payload)
+        key = comparable_key(payload)
+        token = cached_token_for(key)
         @monitor.synchronize do
           @latest_payload = payload
-          @latest_json = json
+          @latest_key = key
+          @latest_token = token
           @generation += 1
           @tick.broadcast
         end
       end
 
       def current_snapshot
-        @monitor.synchronize { [ @latest_payload, @latest_json, @generation ] }
+        @monitor.synchronize { [ @latest_payload, @latest_key, @generation ] }
       end
 
       # Block until the poller publishes a generation newer than the one this
@@ -146,8 +193,13 @@ module Hive
       def await_tick(seen_generation)
         @monitor.synchronize do
           @tick.wait while @generation == seen_generation
-          [ @latest_payload, @latest_json, @generation ]
+          [ @latest_payload, @latest_key, @generation ]
         end
+      end
+
+      def cached_token_for(key)
+        cached = @monitor.synchronize { @latest_token if key == @latest_key }
+        cached || token_for(key)
       end
 
       def comparable_key(node)
@@ -155,6 +207,26 @@ module Hive
         when Hash then node.except(*VOLATILE_KEYS).transform_values { |v| comparable_key(v) }
         when Array then node.map { |v| comparable_key(v) }
         else node
+        end
+      end
+
+      # A content identity, not a process-local event counter: HTTP and Cable
+      # may land on different Puma workers, and an open page may reconnect
+      # after a process restart. Canonical key ordering makes equal semantic
+      # payloads produce the same token in every process.
+      def token_for(key)
+        canonical = canonicalize(key)
+        "sha256:#{::Digest::SHA256.hexdigest(JSON.generate(canonical))}"
+      end
+
+      def canonicalize(node)
+        case node
+        when Hash
+          node.keys.sort_by(&:to_s).to_h { |key| [ key.to_s, canonicalize(node.fetch(key)) ] }
+        when Array
+          node.map { |value| canonicalize(value) }
+        else
+          node
         end
       end
     end

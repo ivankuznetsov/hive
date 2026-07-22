@@ -9,7 +9,7 @@
   </div>
   <%#
     The Repair button only ENQUEUES a daemon-consumed dispatch request
-    (web/dispatcher.rb#repair_daemon); the web tier never shells out to start
+    (Daemon#repair!); the web tier never shells out to start
     a daemon itself (KTD-4/U5). So the affordance can only work when the daemon
     is already running to drain the queue — gate on running==true. When the
     daemon is down or not installed (drift can't even be measured, or no unit

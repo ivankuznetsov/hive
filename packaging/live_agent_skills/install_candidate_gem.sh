@@ -33,7 +33,7 @@ printf -v quoted_rubygems_hive '%q' "$rubygems_bin/hive"
   printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
   printf '%s\n' 'unset RUBYOPT RUBYLIB BUNDLER_SETUP BUNDLE_GEMFILE BUNDLE_BIN_PATH RUBYGEMS_GEMDEPS'
   printf 'export GEM_HOME=%s\n' "$quoted_install_root"
-  printf '%s\n' 'export GEM_PATH="$GEM_HOME"'
+  printf '%s\n' "export GEM_PATH=\"\$GEM_HOME\""
   printf 'exec %s "$@"\n' "$quoted_rubygems_hive"
 } > "$public_bin/hive"
 chmod 0755 "$public_bin/hive"

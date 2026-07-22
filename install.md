@@ -4,7 +4,16 @@ You are installing the `hive` CLI for the user. Treat this prompt as the source 
 
 ## Goal
 
-Install the latest stable Hive release, install or repair the QMD wiki indexer, verify `hive --version`, set up daemon autostart, offer to run `hive init` in the current project, and report any missing runtime dependencies. Do not auto-install runtime dependencies such as `git`, `gh`, agent CLIs, or Node.js/npm; QMD is the exception once npm is already available because Hive's managed wiki refresh scripts use it. The bash installer reports its own installer prerequisites (Ruby 3.4, `curl`, `jq`, checksum tool) when that channel is used. Hive ships as a rubygem (`hive-cli`) attached to the GitHub Release; all three channels (Homebrew, AUR, install.sh) download the same signed `.gem` and run `gem install` against it. Daemon autostart is global install-time setup; project setup only decides whether that project is enrolled for daemon dispatch.
+Install the latest stable Hive release, install or repair the QMD wiki indexer,
+verify `hive --version`, run the normal native `hive setup`, offer project
+initialization, and report the truthful daemon and Hive web service state. Do
+not auto-install runtime dependencies such as `git`, `gh`, agent CLIs, or
+Node.js/npm; QMD is the exception once npm is already available because Hive's
+managed wiki refresh scripts use it. The bash installer requires Ruby 3.4,
+`curl`, `jq`, `cosign`, and a checksum tool. Hive ships as a rubygem
+(`hive-cli`) plus an authenticated managed web bundle; all three native
+channels use the same release artifacts. Default setup is loopback-only and
+never creates LAN/public or Tailscale exposure.
 
 ## Detect
 
@@ -29,6 +38,7 @@ Use this decision tree:
 - macOS arm64: prefer Homebrew.
 - Arch Linux: prefer AUR through `yay` or `paru`.
 - Ubuntu 22.04+ or other glibc Linux on x86_64/aarch64: use the bash installer.
+- Windows: use WSL with systemd enabled for the native path, or offer Hivebox.
 - Alpine, NixOS, BSD, and musl Linux: stop and report unsupported tier-3 platform.
 
 ## Install Commands
@@ -59,8 +69,8 @@ Ubuntu 22.04+ / glibc Linux fallback (pin to the current release tag, not `main`
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-# Release maintainers: bump v0.4.2 in both installer URLs when cutting a new stable release.
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.4.2/install.sh -o "$tmpdir/hive-install.sh"
+# Release maintainers: bump v0.6.6 in both installer URLs when cutting a new stable release.
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.6/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -69,8 +79,8 @@ To inspect the installer first, run a dry-run before the real invocation. State 
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-# Release maintainers: bump v0.4.2 in both installer URLs when cutting a new stable release.
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.4.2/install.sh -o "$tmpdir/hive-install.sh"
+# Release maintainers: bump v0.6.6 in both installer URLs when cutting a new stable release.
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.6/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh" --dry-run
 bash "$tmpdir/hive-install.sh"
 ```
@@ -115,30 +125,48 @@ fi
 
 If `hive` is shadowed by Apache Hive, try `hv --version` and tell the user to use `hv` or adjust PATH.
 
-## Daemon Autostart
+## Native Setup
 
-Do not ask the user whether to initialize the daemon. Hive install includes the per-user daemon service by default. After version verification, run this once for every channel and report the outcome:
+After version verification, run the shared setup command and parse its
+versioned envelope:
 
 ```bash
-"$hive_cmd" daemon install --json
+"$hive_cmd" setup --no-init --yes --json
 ```
 
-The bash installer already runs the same command after installing the gem; rerunning it is idempotent when the unit matches. If the command reports a drifted/customized unit, leave it untouched and report the `"$hive_cmd" daemon install --force` recovery command instead of forcing an overwrite. If systemd-user or launchd is unavailable, keep Hive installed and report that daemon autostart could not be enabled on this host.
+On supported Linux/macOS this bootstraps the authenticated managed Rails
+bundle, installs/enables/starts the daemon and Hive web services, optionally
+enrolls the current project only after separate explicit consent, probes bounded readiness, and reports the effective
+URL. Report `service_installed`, `service_enabled`, `service_running`, `ready`,
+and `readiness` separately; never describe the URL as available when `ready` is
+false. If a customized web unit is drifted, leave it byte-identical and report
+`"$hive_cmd" web install --force` as the explicit repair. If the user opts out,
+run `"$hive_cmd" setup --no-service --yes --json`; that performs no web-service
+mutation and does not stop or disable an existing unit. Use `--no-bootstrap`
+only for a diagnose-only run with no provisioning.
 
 ## Local Web Setup
 
-When the user wants the browser UI, prefer the first-class local setup command:
+Bare Hive web remains the foreground path:
 
 ```bash
-"$hive_cmd" setup
+"$hive_cmd" web
 ```
 
-It runs diagnostics, installs Hive-owned QMD/web pieces, ensures the daemon
-service, enrolls the current project, and leaves the web UI runnable with
-`"$hive_cmd" web` at `http://127.0.0.1:4567`. Bare `hive web` on a loopback
-bind runs no-auth by default; set `web.local_loopback: false` to require
-GitHub login even on loopback. Use `"$hive_cmd" setup --service` when the user
-also wants a managed `hive-web` service.
+It bootstraps as needed and blocks in the foreground. The untouched setup URL
+is `http://127.0.0.1:4567`. On a loopback bind it runs no-auth against the
+existing local Hive registry and workflow state; GitHub connection is optional
+and does not claim Hivebox ownership. A loopback reverse proxy such as
+Tailscale Serve retains that local behavior, so the proxy must authenticate
+and restrict its clients; an unrestricted forwarder would expose the local UI.
+Set `web.local_loopback: false` to require GitHub login even on loopback. Never
+run bare `hive web` as a read-only status check. Use
+`"$hive_cmd" web status --json` instead. The normal approved `hive setup`
+already installs the managed service unless `--no-service` is passed.
+
+Choose [Hivebox](packaging/docker/README.md) only for container isolation,
+multiple local instances, containment of untrusted agents, or reproducible
+server/NAS deployment.
 
 ## Initialize Project
 
@@ -151,17 +179,30 @@ If the current directory is a git project and the user wants Hive enabled here, 
 
 During `hive init`, keep the user's prompt choices. The daemon prompt is per-project enrollment (`daemon.enabled`) only; the service autostart has already been installed globally. If init is non-interactive, Hive uses recommended defaults and enrolls the project. `hive doctor` runs AFTER `hive init` because it requires an initialized project root.
 
-## Optional Skills
+## Provision Agent Skills
 
-The Hive skills package is deferred to a v0.1.x follow-up (tracked in `wiki/gaps.md`). DO NOT RUN these commands until that package is published; treat the slugs below as the intended marketplace identifiers. If/when the package is published, offer the matching command:
+`hive doctor` is read-only and reports the enabled built-in capabilities for
+Claude, Codex, and Pi. If it finds unresolved managed rows, offer Hive's
+aggregate, consent-safe setup command instead of hand-installing packages:
 
 ```bash
-claude plugin install ivankuznetsov/hive-skills
-codex plugin install ivankuznetsov/hive-skills
-pi install ivankuznetsov/hive-skills
+"$hive_cmd" setup-agents
 ```
 
-If the package is unavailable, report: "Hive core installed; skills package coming soon at ivankuznetsov/hive-skills."
+The command prints the exact native package commands and Hive-owned files,
+prompts once, revalidates, executes independent operations, and verifies the
+result. Never answer the consent prompt on the user's behalf. In an explicitly
+unattended flow where the user already authorized mutation, use:
+
+```bash
+"$hive_cmd" setup-agents --yes --json
+```
+
+Hive manages the declared Compound Engineering, llm-wiki, and Claude PR Review
+Toolkit packages. It does not install agent CLIs, authenticate providers,
+replace custom skills, overwrite a user-owned Codex source, or replace a
+user-authored Claude `/plan` command. Report conflicts with the remediation
+printed by doctor/setup.
 
 ## Final Report
 
@@ -170,8 +211,8 @@ Report:
 - channel used
 - command run
 - Hive CLI version output (`"$hive_cmd" --version`)
-- daemon autostart setup result from `"$hive_cmd" daemon install --json`
+- setup mode, effective URL, and distinct daemon/Hive web service state from `"$hive_cmd" setup --no-init --yes --json`
 - whether `hive init` was run
 - missing runtime dependencies from `hive doctor`
 - `qmd --version` output, or the reason QMD install/repair was skipped
-- whether the optional skills package was installed or skipped
+- whether managed agent skills were healthy, provisioned with consent, unavailable, or left conflicted

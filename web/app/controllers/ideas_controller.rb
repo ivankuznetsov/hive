@@ -11,8 +11,8 @@ class IdeasController < ApplicationController
     text = params.require(:text).to_s.strip
     raise Hive::Error, "idea text is empty" if text.empty?
 
-    dispatcher.new_idea(project: project["name"], text: text, attachments: staged_attachments)
-    redirect_to root_path, notice: "Idea added to #{project["name"]}"
+    dispatcher.new_idea(project: project.name, text: text, attachments: staged_attachments)
+    redirect_back_or_to root_path, allow_other_host: false, notice: "Idea added to #{project.name}"
   end
 
   private

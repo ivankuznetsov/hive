@@ -8,6 +8,7 @@ module Hive
     # (authoritative list: the `@return` tag on `decide` below):
     #
     #   :dispatch              — run `row.suggested_command` as a child
+    #   :admission_error       — hold: dependency admission is invalid
     #   :blocked_on_dependency — hold: an unmet/unresolved task dependency
     #                            (the `blocked` gate; takes precedence over
     #                            the Q&A hold)
@@ -85,6 +86,29 @@ module Hive
       # the edit-resume brake.
       RUN_ACTION = "ready_to_run".freeze
 
+      OPERATIONAL_DISPOSITIONS = {
+        admission_error: [ "operator", "dependency admission failed" ],
+        dispatch: [ "scheduler", "eligible for dispatch" ],
+        wait_for_debounce: [ "scheduler", "waiting for the edit debounce window" ],
+        record_baseline: [ "scheduler", "recorded the first edit baseline" ],
+        wait_for_answers: [ "operator", "waiting for unanswered brainstorm questions" ],
+        blocked_on_dependency: [ "scheduler", "waiting for a workflow dependency" ],
+        poll_for_merge: [ "scheduler", "waiting for pull request merge observation" ],
+        markerless_stalled: [ "hive", "agent exited without a terminal marker" ],
+        skip: [ "none", "no scheduler action is required" ]
+      }.freeze
+
+      # Closed explanation for a pure policy result. The dispatcher augments
+      # `dispatch` with the actual concurrency gate it observed, but separate
+      # status processes never need to reimplement Policy.decide.
+      def operational_disposition(decision)
+        owner, reason = OPERATIONAL_DISPOSITIONS.fetch(
+          decision.to_sym,
+          [ "unknown", "scheduler decision is not recognized" ]
+        )
+        { decision: decision.to_s, owner: owner, reason: reason }
+      end
+
       # Action that means "task is at the finalize stage, waiting for the human
       # to merge the PR on GitHub". Daemon hands off to PrMergeWatcher (U10)
       # which polls `gh pr view --json state` and dispatches `hive archive`
@@ -126,7 +150,9 @@ module Hive
       #   `:blocked_on_dependency`, taking precedence over `answers_pending`
       #   (applied to both advance/plan-approval and edit-resume rows).
       #
-      # @return [Symbol] one of :dispatch, :blocked_on_dependency,
+      # @param admission_error [Boolean] true when the row carries a
+      #   structured fail-closed dependency admission error.
+      # @return [Symbol] one of :dispatch, :admission_error, :blocked_on_dependency,
       #   :poll_for_merge, :wait_for_debounce, :wait_for_answers,
       #   :record_baseline, :skip
       #
@@ -135,7 +161,9 @@ module Hive
       # ConcurrencyController#observe_state_file_mtime so the next tick
       # has a baseline to compare against.
       def decide(action:, stage: nil, workflow: nil, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
-                 now:, edit_debounce_sec: 30, answers_pending: false, blocked: false)
+                 now:, edit_debounce_sec: 30, answers_pending: false, blocked: false,
+                 admission_error: false)
+        return :admission_error if admission_error || action == "admission_error"
         return :skip if action.nil?
         # Three branches dispatch the row's command verbatim (advance,
         # plan_approval) or via the edit-resume path (edit_resume).
@@ -154,7 +182,7 @@ module Hive
         if advance?(action) || plan_approval?(action, stage, workflow)
           blocked ? :blocked_on_dependency : :dispatch
         elsif action == MERGE_WAIT_ACTION
-          :poll_for_merge
+          blocked ? :blocked_on_dependency : :poll_for_merge
         elsif run?(action)
           # Debounced generic-run dispatch (see RUN_ACTION). First sight
           # dispatches; a markerless re-classification (mtime unchanged

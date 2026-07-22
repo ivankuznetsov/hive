@@ -10,10 +10,17 @@ require "hive/stages/resolver"
 require "hive/execute_waiting_action"
 require "hive/task_action"
 require "hive/task_resolver"
+require "hive/dependency_snapshot"
+require "hive/attempts/context"
+require "hive/conditions/transition_guard"
+require "hive/attempts/command_dispatch"
 
 module Hive
   module Commands
     class Run
+      include Hive::Schemas::EnvelopeEmitter
+      include Hive::Attempts::CommandDispatch
+
       # Single source of truth for the hive-run JSON envelope's required keys.
       # `report_json` builds the payload from this list so the schema-drift
       # test (test/unit/schema_files_test.rb) and the producer share one
@@ -29,36 +36,46 @@ module Hive
       # schemas/hive-run.v1.json $defs.SuccessPayload.properties.
       OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
 
-      def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false)
+      def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false,
+                     durable: false, attempt_entrypoint: nil, observation_guard: nil)
         @target = target
         @project_filter = project
         @stage_filter = stage
         @json = json
         @quiet = quiet
         @no_rebase = no_rebase
+        @durable = durable
+        @attempt_entrypoint = attempt_entrypoint
+        @observation_guard = observation_guard
       end
 
       def call
-        @stdout_written = false
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json && !@stdout_written
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json && !@stdout_written
-        raise wrapped
+        call_with_envelope do
+          @durable && !Hive::Attempts::Context.active? ? dispatch_durable : do_call
+        end
       end
 
-      def do_call
-        task = Hive::TaskResolver.new(
-          @target,
-          project_filter: @project_filter,
-          stage_filter: @stage_filter
-        ).resolve
-        cfg = Hive::Config.load(task.project_root)
+      def envelope_schema
+        "hive-run"
+      end
 
+      def envelope_extras
+        { "slug" => @target, "stage_filter" => @stage_filter }.compact
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
+      end
+
+      def envelope_serialization_failure_policy = :suppress
+
+      def do_call
+        task = resolve_task
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
+          Hive::DependencySnapshot.enforce_admission!(task)
+          Hive::Attempts::Context.current&.validate_generation!(task)
+          @observation_guard&.call(task)
+          cfg = Hive::Config.load(task.project_root)
           marker = Hive::Markers.current(task.state_file)
           if marker.name == :manual_steering
             @rebase_result = manual_steering_rebase_result
@@ -74,6 +91,25 @@ module Hive
         end
       end
 
+      def resolve_task
+        Hive::TaskResolver.new(
+          @target,
+          project_filter: @project_filter,
+          stage_filter: @stage_filter
+        ).resolve
+      end
+
+      def durable_intended_stage(task)
+        "#{task.stage_index}-#{task.stage_name}"
+      end
+
+      def durable_worker_argv(task)
+        argv = [ "hive", "run", task.folder ]
+        argv << "--json" if @json
+        argv << "--no-rebase" if @no_rebase
+        argv
+      end
+
       # Auto-rebase pre-step. Fail-soft: any failure aborts the rebase
       # and we proceed to the stage runner against the (stale) base.
       # See lib/hive/rebase.rb and
@@ -83,7 +119,13 @@ module Hive
         # `--no-rebase` flag: one-off override of `cfg.rebase.enabled`.
         # Use the same shape as the cfg-disabled path so JSON consumers
         # see the disabled result; distinguish by reason for ops debugging.
-        if @no_rebase
+        if task.workflow.draft_pr_handoff?
+          # Managed handoff receipts pin an exact base/head pair. Rewriting the
+          # task worktree before receipt reconciliation would invalidate the
+          # controller's already-scanned identity and could invoke a second
+          # conflict-resolution agent on a one-agent workflow.
+          result = Hive::Rebase::Result.skipped(:managed_draft_pr_handoff)
+        elsif @no_rebase
           result = Hive::Rebase::Result.skipped(:cli_override)
         else
           result = Hive::Rebase.perform(task, cfg)
@@ -151,6 +193,11 @@ module Hive
 
       def report(task, result)
         marker = Hive::Markers.current(task.state_file)
+        if marker.name == :execute_complete
+          Hive::Conditions::TransitionGuard.validate!(
+            task, config: Hive::Config.load(task.project_root)
+          )
+        end
         if @quiet
           # Quiet mode: skip stdout/stderr but preserve the dual-signal
           # raise on :error AND :review_error markers so composing callers
@@ -482,37 +529,6 @@ module Hive
         project ? project["name"] : task.project_name
       end
 
-      # Emit a hive-run ErrorPayload to stdout. Gated on @json + the
-      # @stdout_written flag in #call so we don't double-emit when
-      # report_json already wrote the dual-signal SuccessPayload before
-      # raising TaskInErrorState (see lib/hive/commands/run.rb#report_json
-      # and the contract documented at the top of report_json).
-      def emit_error_envelope(error)
-        # `stage_filter` carries the user-supplied `--stage` value (input);
-        # the structured `current_stage`/`target_stage` fields populated by
-        # ErrorEnvelope.build for WrongStage describe the resolved stage
-        # context (output). They live in different keys so an agent can read
-        # `payload.stage_filter` without ambiguity.
-        extras = { "slug" => @target, "stage_filter" => @stage_filter }.compact
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: "hive-run",
-          error: error,
-          error_kind: error_kind_for(error),
-          extras: extras
-        )
-        puts JSON.generate(payload)
-        @stdout_written = true
-      rescue Errno::EPIPE, JSON::GeneratorError
-        # Consumer closed the pipe (`hive run --json | jq -e ...` exiting
-        # early) or the error message contained non-encodable bytes (a
-        # subprocess stderr proxy with binary garbage). Swallow the emit
-        # failure so the original Hive::Error still propagates with its
-        # documented exit_code via bin/hive's outer rescue. The agent loses
-        # the structured envelope on this path but still receives the exit
-        # code, which is the load-bearing failure signal.
-        @stdout_written = true
-      end
-
       # Map a Hive::Error subclass to a RunErrorKind value. Ordering matters:
       # `case/when` uses `===` (is_a?), so subclasses MUST precede their
       # ancestors. Notably:
@@ -527,13 +543,16 @@ module Hive
         when Hive::ConcurrentRunError then Hive::Schemas::RunErrorKind::CONCURRENT_RUN
         when Hive::TaskInErrorState   then Hive::Schemas::RunErrorKind::TASK_IN_ERROR
         when Hive::StageError         then Hive::Schemas::RunErrorKind::STAGE
+        when Hive::DependencyWaitError then Hive::Schemas::RunErrorKind::DEPENDENCY_WAIT
+        when Hive::DependencyAdmissionError then Hive::Schemas::RunErrorKind::ADMISSION_ERROR
         when Hive::ConfigError        then Hive::Schemas::RunErrorKind::CONFIG
         when Hive::AgentError         then Hive::Schemas::RunErrorKind::AGENT
         when Hive::GitError           then Hive::Schemas::RunErrorKind::GIT
         when Hive::WorktreeError      then Hive::Schemas::RunErrorKind::WORKTREE
         when Hive::AmbiguousSlug      then Hive::Schemas::RunErrorKind::AMBIGUOUS_SLUG
         when Hive::InvalidTaskPath    then Hive::Schemas::RunErrorKind::INVALID_TASK_PATH
-        when Hive::InternalError      then Hive::Schemas::RunErrorKind::INTERNAL
+        when Hive::InternalError, Hive::AttemptExecutionError
+          Hive::Schemas::RunErrorKind::INTERNAL
         else                               Hive::Schemas::RunErrorKind::ERROR
         end
       end

@@ -89,6 +89,22 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  def test_build_result_preserves_raw_limit_text
+    with_tmp_dir do |dir|
+      reviewer = Hive::Reviewers::Agent.new(make_spec, make_ctx(dir))
+      limit_text = "You've hit your usage limit. Try again at Jul 18th, 2026 7:50 AM."
+      spawn_result = {
+        status: :error,
+        error_message: "limits reached for codex: provider wall",
+        limit_text: limit_text
+      }
+
+      result = reviewer.send(:build_result, spawn_result, 1, 1)
+
+      assert_equal limit_text, result.limit_text
+    end
+  end
+
   # A8 fail-closed, REAL adapter path: a non-yolo permissions scope on a
   # reviewer whose runner can't enforce tool scoping (codex) must raise
   # Hive::ConfigError from the ACTUAL Reviewers::Agent#run! →
@@ -348,7 +364,7 @@ class ReviewersAgentTest < Minitest::Test
       end
 
       refute_nil captured, "spawn_agent must have been called"
-      assert_equal "default", captured[:permission_mode]
+      assert_equal "dontAsk", captured[:permission_mode]
       assert_equal %w[Read Grep], captured[:allowed_tools]
       # Read/Grep are not in the read-only deny set, so the deny list is
       # unchanged — and it never overlaps the granted tools.

@@ -30,8 +30,8 @@ module Hive
       # inventory. Malformed or partial responses must not look like an empty
       # inventory because publication callers would create duplicates.
       def issues_for_repository(repository:, host:, cfg: nil)
-        repo = validated_repository_slug(repository)
-        github_host = validated_github_host(host)
+        repo = Hive::Gh::RepositoryIdentity.validated_repository_slug(repository)
+        github_host = Hive::Gh::RepositoryIdentity.validated_github_host(host)
 
         endpoint = "repos/#{repo}/issues?state=all&per_page=100"
         out, err, status = @transport.capture3(
@@ -77,8 +77,8 @@ module Hive
       # by a shell. The caller owns content bounds; this gateway owns transport
       # and fail-closed command/result handling.
       def create_issue(repository:, title:, body:, host:, cfg: nil)
-        repo = validated_repository_slug(repository)
-        github_host = validated_github_host(host)
+        repo = Hive::Gh::RepositoryIdentity.validated_repository_slug(repository)
+        github_host = Hive::Gh::RepositoryIdentity.validated_github_host(host)
         unless title.is_a?(String) && !title.strip.empty?
           raise Hive::GhError, "issue title must be a non-empty string"
         end
@@ -109,7 +109,7 @@ module Hive
 
       def verify_pr_identity!(pr_url, repository:, host:, branch:, head_oid:,
                               base_branch:, base_oid:, cfg: nil)
-        target = github_repository_target(repository, host)
+        target = Hive::Gh::RepositoryIdentity.github_repository_target(repository, host)
         fields = "url,number,state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid,headRepository"
         out, err, status = @transport.capture3(
           "gh", "pr", "view", pr_url.to_s, "--repo", target, "--json", fields,
@@ -229,8 +229,8 @@ module Hive
                           per_page:, worktree_path:, merged_until: nil, cfg: nil,
                           timeout_sec: nil)
         deadline = operation_deadline(timeout_sec)
-        repository = validated_repository_slug(repository)
-        host = validated_github_host(host)
+        repository = Hive::Gh::RepositoryIdentity.validated_repository_slug(repository)
+        host = Hive::Gh::RepositoryIdentity.validated_github_host(host)
         branch = default_branch.to_s
         unless repository.match?(%r{\A[^/\s]+/[^/\s]+\z}) && !branch.empty? && !branch.match?(/\s/)
           raise Hive::GhError, "merged-PR pagination requires a repository and default branch"
@@ -244,18 +244,19 @@ module Hive
         end
 
         search = "repo:#{repository} is:pr is:merged base:#{branch} sort:created-asc"
-        since = nil
-        if merged_since
-          since = merged_since.is_a?(Time) ? merged_since : Time.iso8601(merged_since.to_s)
-          search = "#{search} merged:>=#{since.utc.iso8601}"
+        since = merged_since && (merged_since.is_a?(Time) ? merged_since : Time.iso8601(merged_since.to_s))
+        upper = merged_until && (merged_until.is_a?(Time) ? merged_until : Time.iso8601(merged_until.to_s))
+        if since && upper && upper < since
+          raise Hive::GhError, "merged-PR pagination upper bound cannot precede its lower bound"
         end
-        if merged_until
-          upper = merged_until.is_a?(Time) ? merged_until : Time.iso8601(merged_until.to_s)
-          if since && upper < since
-            raise Hive::GhError, "merged-PR pagination upper bound cannot precede its lower bound"
-          end
-          search = "#{search} merged:<=#{upper.utc.iso8601}"
+        merged_range = if since && upper
+          "#{since.utc.iso8601}..#{upper.utc.iso8601}"
+        elsif since
+          ">=#{since.utc.iso8601}"
+        elsif upper
+          "<=#{upper.utc.iso8601}"
         end
+        search = "#{search} merged:#{merged_range}" if merged_range
         query = <<~GRAPHQL
           query($searchQuery: String!, $pageSize: Int!, $cursor: String) {
             search(query: $searchQuery, type: ISSUE, first: $pageSize, after: $cursor) {
@@ -392,33 +393,6 @@ module Hive
         true
       rescue URI::InvalidURIError
         raise Hive::GhError, "resolved PR URL #{url.inspect} is invalid"
-      end
-
-      def validated_repository_slug(repository)
-        value = repository.to_s.strip
-        segments = value.split("/", -1)
-        valid = segments.size == 2 && segments.all? do |segment|
-          segment.match?(/\A[a-zA-Z0-9_.-]+\z/) && !%w[. ..].include?(segment)
-        end
-        raise Hive::GhError, "repository must be an owner/name slug" unless valid
-
-        value
-      end
-
-      def validated_github_host(host)
-        value = host.to_s.strip
-        uri = URI.parse("https://#{value}")
-        valid = !value.empty? && uri.host == value && uri.path.empty? &&
-                uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
-        raise Hive::GhError, "GitHub host must be a hostname without a scheme or path" unless valid
-
-        value
-      rescue URI::InvalidURIError
-        raise Hive::GhError, "GitHub host must be a hostname without a scheme or path"
-      end
-
-      def github_repository_target(repository, host)
-        "#{validated_github_host(host)}/#{validated_repository_slug(repository)}"
       end
 
       def validate_issue_api_record!(issue, repository, host:)

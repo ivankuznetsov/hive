@@ -1,4 +1,4 @@
-<% content_for(:title, "hivebox — repos") %>
+<% content_for(:title, "#{web_product_name} — repos") %>
 <h1>Repos</h1>
 
 <h2>Registered</h2>
@@ -12,11 +12,11 @@
     <% @projects.each do |project| %>
       <article class="repo-row">
         <div>
-          <span class="repo-name"><%= project["name"] %></span>
-          <span class="repo-desc"><%= project["path"] %></span>
+          <span class="repo-name"><%= project.name %></span>
+          <span class="repo-desc"><%= project.path %></span>
         </div>
         <span class="repo-actions">
-          <%= link_to "Settings", new_repo_path(project: project["name"]), class: "btn btn-ghost btn-sm" %>
+          <%= link_to "Settings", new_repo_path(project: project.name), class: "btn btn-ghost btn-sm" %>
           <span class="tag tag-registered">registered</span>
         </span>
       </article>
@@ -37,7 +37,12 @@
 <% if @github_error %>
   <div class="flash flash-alert"><%= @github_error %></div>
 <% elsif @github_repos.nil? %>
-  <p class="muted">Sign in again to grant repository access.</p>
+  <% reconnecting = current_login.present? %>
+  <p class="muted">
+    <%= reconnecting ? "Reconnect GitHub to browse your repositories." : "Connect GitHub to browse your repositories." %>
+    Clone by URL remains available without a GitHub connection.
+  </p>
+  <%= link_to reconnecting ? "Reconnect GitHub" : "Connect GitHub", login_path, class: "btn btn-secondary btn-sm" %>
 <% elsif @github_repos.empty? %>
   <div class="empty-state"><p>No repositories on this GitHub account.</p></div>
 <% else %>

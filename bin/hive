@@ -3,9 +3,43 @@
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "hive"
+require "hive/llm_wiki_bootstrap"
+
+# Repair legacy path-keyed LLM-wiki timers as soon as an upgraded Hive binary
+# is invoked, including `hive --version`. The reconciliation is idempotent and
+# touches only Hive-managed units.
+begin
+  Hive::LlmWikiBootstrap::Scheduler.reconcile_existing!
+rescue StandardError => e
+  warn "hive: warning: could not reconcile LLM-wiki scheduler units: #{e.message}"
+end
+
+if ENV["HIVE_ATTEMPT_INTERNAL"] == "1"
+  require "hive/attempts/context"
+  begin
+    Hive::Attempts::Context.install_from_env!(argv: [ "hive", *ARGV ])
+  rescue Hive::Error => e
+    warn "hive: #{e.message}"
+    exit e.exit_code
+  end
+end
+
 require "hive/cli"
 require "hive/refactor_patrol/reporter"
 require "json"
+
+# Private detached-wrapper route. It is deliberately handled before Thor so
+# it never appears as a public workflow verb and cannot recurse through normal
+# admission. DetachedLauncher is the only producer.
+if ARGV.first == "__attempt-supervise"
+  require "hive/commands/attempt_supervise"
+  begin
+    exit Hive::Commands::AttemptSupervise.from_argv(ARGV.drop(1)).call
+  rescue Hive::Error => e
+    warn "hive: #{e.message}"
+    exit e.exit_code
+  end
+end
 
 if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   puts Hive::VERSION
@@ -16,7 +50,7 @@ JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
 JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
 JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
 STAGE_ACTION_USAGE_COMMANDS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
-NEW_VALUE_OPTIONS = %w[--depends-on --workflow].freeze
+NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow].freeze
 JSON_USAGE_ERROR_CONTRACTS = {
   "run" => { schema: "hive-run", error_kind: "invalid_task_path" },
   "rebase-status" => { schema: "hive-rebase-status", schema_version: 1, error_kind: "invalid_task_path" },
@@ -25,7 +59,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
   "findings" => { schema: "hive-findings", error_kind: "invalid_task_path" },
   "patrol" => { schema: "hive-patrol", error_kind: "error" },
   "refactor-patrol" => { reporter: :refactor_patrol, error_kind: "error" },
-  "setup" => { schema: "hive-setup", schema_version: false, error_kind: "usage" },
+  "setup" => { schema: "hive-setup", error_kind: "usage" },
   "connect" => { error_kind: "usage", extras: { "service" => "screenote" } },
   "disconnect" => { error_kind: "usage", extras: { "service" => "screenote" } },
   "accept-finding" => {
@@ -40,6 +74,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
   "status" => { schema: "hive-status", error_kind: "error" },
+  "act" => { schema: "hive-act", error_kind: "usage" },
   "prune" => { schema: "hive-prune", error_kind: "usage" },
   "forget" => { schema: "hive-forget", error_kind: "usage" },
   "metrics" => {
@@ -279,6 +314,32 @@ def json_usage_subcommand(argv, command_index, value_options: [])
   nil
 end
 
+def json_usage_positionals(argv, command_index, value_options: [])
+  positionals = []
+  skip_value = false
+  options = true
+  argv.drop(command_index + 1).each do |arg|
+    if skip_value
+      skip_value = false
+      next
+    end
+    next unless arg.valid_encoding?
+
+    if options && arg == "--"
+      options = false
+    elsif options && value_options.include?(arg)
+      skip_value = true
+    elsif options && value_options.any? { |option| arg.start_with?("#{option}=") }
+      next
+    elsif options && arg.start_with?("-")
+      next
+    else
+      positionals << arg
+    end
+  end
+  positionals
+end
+
 def json_usage_error_contract(argv)
   command_index = argv.index { |arg| !arg.b.start_with?("-") }
   return unless command_index
@@ -288,19 +349,31 @@ def json_usage_error_contract(argv)
   option_argv = json_usage_option_region(argv, command_index)
 
   case command
+  when "act"
+    action_id, target = json_usage_positionals(
+      argv, command_index, value_options: %w[--observation]
+    ).first(2)
+    return {
+      schema: "hive-act",
+      error_kind: "usage",
+      extras: { "action_id" => action_id.to_s, "target" => target.to_s }
+    }
   when "status"
     diagnose = option_argv.any? do |arg|
       arg.valid_encoding? && (arg == "--diagnose" || arg.start_with?("--diagnose="))
     end
     return { schema: "hive-status-diagnose", error_kind: "error" } if diagnose
+    operational = option_argv.any? do |arg|
+      arg.valid_encoding? && (arg == "--operational" || arg.start_with?("--operational="))
+    end
+    return { schema: "hive-operational-status", error_kind: "error" } if operational
   when "web"
     subcommand = json_usage_subcommand(argv, command_index, value_options: %w[--bind --port])
     return unless %w[install status].include?(subcommand)
 
     return {
       schema: "hive-web-#{subcommand}",
-      error_kind: "invalid_task_path",
-      schema_version: false
+      error_kind: "invalid_task_path"
     }
   when "bot"
     # hive-bot-status is deliberately the usage-error contract for the whole
@@ -320,6 +393,17 @@ def json_usage_error_contract(argv)
         extras: { "action" => jobs.fetch(:action) }
       }
     end
+  when "workflow"
+    subcommand = json_usage_subcommand(argv, command_index)
+    schema = case subcommand
+    when "install" then "hive-workflow-install"
+    when "list" then "hive-workflow-list"
+    when "remove" then "hive-workflow-remove"
+    when "update" then "hive-workflow-update"
+    when "publish" then "hive-workflow-publish"
+    else "hive-workflow-new"
+    end
+    return { schema: schema, error_kind: "usage" } if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
   end
 
   JSON_USAGE_ERROR_CONTRACTS[command]
@@ -362,7 +446,7 @@ def refactor_patrol_jobs_argv(argv)
   { action: action }
 end
 
-def refactor_patrol_v2_argv?(argv)
+def refactor_patrol_pr_scoped_argv?(argv)
   return true if argv.any? do |arg|
     arg == "--pr" || arg.start_with?("--pr=") ||
       arg == "--job-manifest" || arg.start_with?("--job-manifest=")
@@ -382,10 +466,33 @@ def refactor_patrol_v2_argv?(argv)
   actions == true
 end
 
+def native_web_error_context(schema, argv)
+  require "hive/commands/web"
+  context = Hive::Commands::Web.error_context(environment: ENV)
+  return context unless schema == "hive-setup"
+
+  mode = if argv.any? { |arg| %w[--no-bootstrap --skip-bootstrap --bootstrap=false].include?(arg) }
+    "diagnose_only"
+  elsif argv.any? { |arg| %w[--no-service --skip-service --service=false].include?(arg) }
+    "service_opt_out"
+  else
+    "managed_service"
+  end
+  {
+    "mode" => mode,
+    "url" => context.fetch("url"),
+    "service" => context.slice(
+      "platform", "unit_path", "service_installed", "service_enabled",
+      "service_running", "service_manager_available", "url", "ready", "readiness"
+    ),
+    "warnings" => context.fetch("warnings")
+  }
+end
+
 def json_usage_error_payload(contract, error, argv: [])
   if contract[:reporter] == :refactor_patrol
-    version = if refactor_patrol_v2_argv?(argv)
-      Hive::RefactorPatrol::Reporter::V2_SCHEMA_VERSION
+    version = if refactor_patrol_pr_scoped_argv?(argv)
+      Hive::RefactorPatrol::Reporter::V3_SCHEMA_VERSION
     else
       Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION
     end
@@ -400,6 +507,9 @@ def json_usage_error_payload(contract, error, argv: [])
   error_kind = contract.fetch(:error_kind)
   extras = contract.fetch(:extras, {})
   if schema && Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+    if %w[hive-setup hive-web-status hive-web-install].include?(schema)
+      extras = extras.merge(native_web_error_context(schema, argv))
+    end
     payload = Hive::Schemas::ErrorEnvelope.build(
       schema: schema,
       error: error,

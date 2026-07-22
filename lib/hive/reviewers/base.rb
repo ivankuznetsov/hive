@@ -77,6 +77,38 @@ module Hive
       def ensure_reviews_dir!
         FileUtils.mkdir_p(File.dirname(output_path))
       end
+
+      private
+
+      # Reviewer specs are validated before adapter construction, but custom
+      # integrations can still instantiate an adapter directly. Keep their
+      # defensive fallback and warning consistent across every adapter.
+      def max_attempts_from_spec
+        value = spec["max_attempts"]
+        return Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS if value.nil?
+
+        Integer(value)
+      rescue ArgumentError
+        warn "[hive.reviewers] reviewer #{spec['name'].inspect}: invalid max_attempts " \
+             "#{value.inspect}; using default #{Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS}"
+        Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS
+      end
+
+      # `deadline` is a monotonic timestamp. Nil preserves the adapter's
+      # configured timeout; otherwise no spawn may outlive the caller's
+      # remaining review-stage budget.
+      def deadline_remaining(deadline)
+        deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      def effective_timeout(configured_timeout, deadline)
+        return configured_timeout unless deadline
+
+        remaining = deadline_remaining(deadline)
+        return remaining.floor if remaining <= 0
+
+        [ configured_timeout, remaining.floor ].min
+      end
     end
   end
 end

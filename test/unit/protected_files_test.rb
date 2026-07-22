@@ -9,8 +9,8 @@ require "hive/protected_files"
 class ProtectedFilesTest < Minitest::Test
   include HiveTestHelper
 
-  def test_orchestrator_owned_lists_the_three_canonical_files
-    assert_equal %w[plan.md worktree.yml task.md],
+  def test_orchestrator_owned_lists_canonical_state_and_identity_files
+    assert_equal %w[plan.md worktree.yml task.md task-journal.jsonl task-projection.json],
                  Hive::ProtectedFiles::ORCHESTRATOR_OWNED,
                  "ORCHESTRATOR_OWNED is the single source of truth for the protected set"
   end
@@ -20,6 +20,8 @@ class ProtectedFilesTest < Minitest::Test
       File.write(File.join(dir, "plan.md"), "plan body\n")
       File.write(File.join(dir, "worktree.yml"), "path: /x\n")
       File.write(File.join(dir, "task.md"), "## task\n")
+      File.write(File.join(dir, "task-journal.jsonl"), "{}\n")
+      File.write(File.join(dir, "task-projection.json"), "{}\n")
 
       snap = Hive::ProtectedFiles.snapshot(dir)
       assert_kind_of Hash, snap
@@ -47,6 +49,8 @@ class ProtectedFilesTest < Minitest::Test
                  "missing file records nil so a later add yields a diff"
       assert_nil snap["worktree.yml"],
                  "missing file records nil so a later add yields a diff"
+      assert_nil snap["task-journal.jsonl"]
+      assert_nil snap["task-projection.json"]
     end
   end
 
@@ -89,6 +93,33 @@ class ProtectedFilesTest < Minitest::Test
       assert_equal %w[a.md b.md].sort, snap.keys.sort
       assert_equal Digest::SHA256.hexdigest("a\n"), snap["a.md"]
       assert_equal Digest::SHA256.hexdigest("b\n"), snap["b.md"]
+    end
+  end
+
+  def test_diff_detects_regular_file_replaced_by_same_content_symlink
+    with_tmp_dir do |dir|
+      plan = File.join(dir, "plan.md")
+      target = File.join(dir, "outside.md")
+      File.write(plan, "same\n")
+      File.write(target, "same\n")
+      before = Hive::ProtectedFiles.snapshot(dir, [ "plan.md" ])
+      FileUtils.rm_f(plan)
+      File.symlink(target, plan)
+      after = Hive::ProtectedFiles.snapshot(dir, [ "plan.md" ])
+
+      assert_equal [ "plan.md" ], Hive::ProtectedFiles.diff(before, after)
+    end
+  end
+
+  def test_snapshot_paths_detects_labeled_absolute_control_file_changes
+    with_tmp_dir do |dir|
+      config = File.join(dir, "config")
+      File.write(config, "safe\n")
+      before = Hive::ProtectedFiles.snapshot_paths("repository config" => config)
+      File.write(config, "unsafe\n")
+      after = Hive::ProtectedFiles.snapshot_paths("repository config" => config)
+
+      assert_equal [ "repository config" ], Hive::ProtectedFiles.diff(before, after)
     end
   end
 end

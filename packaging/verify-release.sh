@@ -28,7 +28,7 @@
 #   0   all verifications passed
 #   1   a verification step failed (script preserves the tmp prefix)
 #   2   bad arguments
-#   3   prerequisite missing (curl, ruby, jq, git)
+#   3   prerequisite missing (curl, ruby, jq, git, cosign)
 
 set -euo pipefail
 
@@ -57,7 +57,7 @@ EXIT CODES:
   0   all verifications passed
   1   a verification step failed (script preserves the tmp prefix)
   2   bad arguments
-  3   prerequisite missing (curl, ruby, jq, git)
+  3   prerequisite missing (curl, ruby, jq, git, cosign)
 HELP
 }
 
@@ -100,7 +100,7 @@ INSTALL_SH="$REPO_ROOT/install.sh"
 
 # ─── prerequisites ───────────────────────────────────────────────────
 
-for cmd in curl ruby jq git; do
+for cmd in curl ruby jq git cosign; do
   command -v "$cmd" >/dev/null 2>&1 || {
     echo "verify-release: missing prerequisite: $cmd" >&2
     exit 3
@@ -145,6 +145,28 @@ export HOME="$PREFIX/home"
 mkdir -p "$XDG_BIN_HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" \
          "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$HIVE_HOME" "$HOME"
 
+# HOME confines unit/plist files, but `systemctl --user` and `launchctl`
+# still talk to the operator's live per-user service manager. Put a harmless
+# platform stub ahead of PATH before install.sh, init, daemon install, or
+# uninstall can reach those managers. The verifier still exercises unit
+# rendering, backup rotation, JSON envelopes, and removal while guaranteeing
+# it cannot start, restart, stop, enable, or disable a real Hive service.
+SERVICE_MANAGER_BIN="$PREFIX/service-manager-bin"
+mkdir -p "$SERVICE_MANAGER_BIN"
+case "$(uname -s)" in
+  Linux)
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$SERVICE_MANAGER_BIN/systemctl"
+    chmod 0755 "$SERVICE_MANAGER_BIN/systemctl"
+    SERVICE_MANAGER_COMMAND="systemctl"
+    ;;
+  Darwin)
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$SERVICE_MANAGER_BIN/launchctl"
+    chmod 0755 "$SERVICE_MANAGER_BIN/launchctl"
+    SERVICE_MANAGER_COMMAND="launchctl"
+    ;;
+  *) SERVICE_MANAGER_COMMAND="" ;;
+esac
+
 # Sentinel file for leak detection: anchor `find -newer` on a file
 # whose mtime never moves, not on $PREFIX (whose mtime updates every
 # time a child file is added — which would mask early leaks because
@@ -154,7 +176,14 @@ START_MARKER="$PREFIX/.start-marker"
 
 # Put the installed binary first on PATH so subsequent `hive` calls
 # resolve to the just-installed artifact, not a host install.
-export PATH="$XDG_BIN_HOME:$PATH"
+export PATH="$SERVICE_MANAGER_BIN:$XDG_BIN_HOME:$PATH"
+if [[ -n "$SERVICE_MANAGER_COMMAND" ]]; then
+  RESOLVED_SERVICE_MANAGER="$(command -v "$SERVICE_MANAGER_COMMAND" || true)"
+  if [[ "$RESOLVED_SERVICE_MANAGER" != "$SERVICE_MANAGER_BIN/$SERVICE_MANAGER_COMMAND" ]]; then
+    echo "verify-release: failed to isolate $SERVICE_MANAGER_COMMAND (resolved: $RESOLVED_SERVICE_MANAGER)" >&2
+    exit 3
+  fi
+fi
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -281,6 +310,51 @@ case "$INSTALL_RC" in
        fail "install.sh failed (rc=$INSTALL_RC)"
        exit 1 ;;
 esac
+
+# Authenticate and checksum the managed web archive independently of the gem
+# installer. This catches release-manifest drift before the installed setup
+# command downloads or extracts persistent user-level code.
+step "authenticate managed web bundle"
+WEB_BUNDLE="hive-web-${HIVE_VERSION#v}.tar.gz"
+WEB_TRUST_DIR="$PREFIX/web-trust"
+RELEASE_BASE="https://github.com/ivankuznetsov/hive/releases/download/${HIVE_VERSION}"
+mkdir -p "$WEB_TRUST_DIR"
+curl -fsSL "$RELEASE_BASE/$WEB_BUNDLE" -o "$WEB_TRUST_DIR/$WEB_BUNDLE"
+curl -fsSL "$RELEASE_BASE/SHA256SUMS" -o "$WEB_TRUST_DIR/SHA256SUMS"
+curl -fsSL "$RELEASE_BASE/SHA256SUMS.sig" -o "$WEB_TRUST_DIR/SHA256SUMS.sig"
+curl -fsSL "$RELEASE_BASE/SHA256SUMS.pem" -o "$WEB_TRUST_DIR/SHA256SUMS.pem"
+cosign verify-blob \
+  --certificate "$WEB_TRUST_DIR/SHA256SUMS.pem" \
+  --signature "$WEB_TRUST_DIR/SHA256SUMS.sig" \
+  --certificate-identity-regexp "^https://github\.com/ivankuznetsov/hive/\.github/workflows/release\.yml@refs/tags/${HIVE_VERSION}$" \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  "$WEB_TRUST_DIR/SHA256SUMS"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  (
+    cd "$WEB_TRUST_DIR"
+    grep -E "^[a-f0-9]{64}  (\\./)?${WEB_BUNDLE}$" SHA256SUMS | sha256sum -c -
+  )
+else
+  EXPECTED_WEB_SHA="$(grep -E "^[a-f0-9]{64}  (\\./)?${WEB_BUNDLE}$" "$WEB_TRUST_DIR/SHA256SUMS" | awk '{print $1}')"
+  ACTUAL_WEB_SHA="$(shasum -a 256 "$WEB_TRUST_DIR/$WEB_BUNDLE" | awk '{print $1}')"
+  [[ -n "$EXPECTED_WEB_SHA" && "$ACTUAL_WEB_SHA" == "$EXPECTED_WEB_SHA" ]]
+fi
+ok "managed web bundle signature, identity, and checksum verified"
+
+step "managed hive setup from authenticated web bundle"
+EXPECTED_WEB_SHA="$(grep -E "^[a-f0-9]{64}  (\\./)?${WEB_BUNDLE}$" "$WEB_TRUST_DIR/SHA256SUMS" | awk '{print $1}')"
+if "$REPO_ROOT/packaging/verify-managed-web-setup.sh" \
+     --hive-bin="$XDG_BIN_HOME/hive" \
+     --archive="$WEB_TRUST_DIR/$WEB_BUNDLE" \
+     --sha256="$EXPECTED_WEB_SHA" \
+     --prefix="$PREFIX/managed-web-proof" \
+     >"$PREFIX/managed-web-setup.log" 2>"$PREFIX/managed-web-setup.err"; then
+  ok "consent-approved managed setup installed the authenticated web bundle"
+else
+  cat "$PREFIX/managed-web-setup.log" "$PREFIX/managed-web-setup.err" >&2 2>/dev/null || true
+  fail "managed hive setup failed against the authenticated web bundle"
+fi
 
 if [[ -x "$XDG_BIN_HOME/hive" ]]; then
   ok "binary at \$XDG_BIN_HOME/hive is executable"

@@ -1,6 +1,6 @@
 require "test_helper"
 
-# The box's primary authz gate: the REAL GithubAuth logic runs unstubbed —
+# Hive web's primary authz gate: the REAL GithubAuth logic runs unstubbed —
 # only Net::HTTP is replaced via the `http:` DI seam (the same seam the
 # gem's unit suite uses): start → wait-page poll → grant/denial.
 class SessionsFlowTest < ActionDispatch::IntegrationTest
@@ -33,10 +33,38 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
 
   setup do
     configure_owner!(owner: "alice")
+    @prior_web_local_loopback = ENV["HIVE_WEB_LOCAL_LOOPBACK"]
+    @prior_hivebox_local_loopback = ENV["HIVEBOX_LOCAL_LOOPBACK"]
+    @prior_hivebox_precompiled_assets = ENV["HIVEBOX_PRECOMPILED_ASSETS"]
+    @prior_web_origin = ENV["HIVE_WEB_ORIGIN"]
+    ENV.delete("HIVE_WEB_LOCAL_LOOPBACK")
+    ENV.delete("HIVEBOX_LOCAL_LOOPBACK")
+    ENV.delete("HIVEBOX_PRECOMPILED_ASSETS")
+    ENV.delete("HIVE_WEB_ORIGIN")
   end
 
   teardown do
     SessionsController.http_client = Net::HTTP
+    if @prior_web_local_loopback.nil?
+      ENV.delete("HIVE_WEB_LOCAL_LOOPBACK")
+    else
+      ENV["HIVE_WEB_LOCAL_LOOPBACK"] = @prior_web_local_loopback
+    end
+    if @prior_hivebox_local_loopback.nil?
+      ENV.delete("HIVEBOX_LOCAL_LOOPBACK")
+    else
+      ENV["HIVEBOX_LOCAL_LOOPBACK"] = @prior_hivebox_local_loopback
+    end
+    if @prior_hivebox_precompiled_assets.nil?
+      ENV.delete("HIVEBOX_PRECOMPILED_ASSETS")
+    else
+      ENV["HIVEBOX_PRECOMPILED_ASSETS"] = @prior_hivebox_precompiled_assets
+    end
+    if @prior_web_origin.nil?
+      ENV.delete("HIVE_WEB_ORIGIN")
+    else
+      ENV["HIVE_WEB_ORIGIN"] = @prior_web_origin
+    end
   end
 
   def http_ok(body)
@@ -112,7 +140,7 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     get "/"
     assert_response :success
 
-    # The box changes hands (config edit / re-claim): alice's session must
+    # The Hive web instance changes hands (config edit / re-claim): alice's session must
     # die with her ownership — it holds a repo-scoped token.
     configure_owner!(owner: "bob")
     get "/"
@@ -120,23 +148,39 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     assert_nil session[:github_token], "the evicted session must not keep the grant"
   end
 
-  test "a fresh box is claimed by its first successful login" do
+  test "a fresh Hive web instance is claimed by its first successful login" do
     configure_owner!(owner: "")
     install_auth(login: "firstcomer")
     begin_device_flow
 
     get "/auth/github/wait"
 
-    assert_redirected_to "/", "the first login claims an ownerless box"
+    assert_redirected_to "/", "the first login claims an ownerless Hive web instance"
     config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
     assert_equal "firstcomer", config.dig("web", "github", "owner"),
-                 "the claim must be persisted — it IS the box's auth gate from now on"
+                 "the claim must be persisted — it IS Hive web's auth gate from now on"
 
     get "/"
     assert_response :success, "the claimer is the owner; their session must work"
   end
 
-  test "a claimed box refuses every later non-owner login" do
+  test "optional GitHub connection from local mode does not claim ownership" do
+    ENV["HIVE_WEB_LOCAL_LOOPBACK"] = "1"
+    ENV["HIVE_WEB_ORIGIN"] = "http://www.example.com"
+    configure_owner!(owner: "")
+    install_auth(login: "local-user")
+    begin_device_flow
+
+    get "/auth/github/wait"
+
+    assert_redirected_to "/"
+    config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
+    assert_nil config.dig("web", "github", "owner"),
+               "connecting GitHub locally must not change future access policy"
+    assert_equal "gho_test", session[:github_token]
+  end
+
+  test "a claimed Hive web instance refuses every later non-owner login" do
     configure_owner!(owner: "")
     install_auth(login: "firstcomer")
     begin_device_flow
@@ -150,16 +194,64 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
 
     assert_response :forbidden
     assert_match "not the configured owner", response.body,
-                 "claiming is once — a claimed box is gated exactly like a configured one"
+                 "claiming is once — a claimed Hive web instance is gated exactly like a configured one"
   end
 
-  test "the login page explains claiming on a fresh box" do
+  test "the login page explains claiming on a fresh Hive web instance" do
     configure_owner!(owner: "")
     get "/login"
     assert_response :success
+    assert_select "title", text: "Hive web — sign in"
+    assert_select "meta[name='application-name'][content='Hive web']", 1
+    assert_select "a.brand", text: "Hive web"
+    assert_select "h1", text: "Hive web"
     assert_match "first GitHub sign-in becomes its owner", response.body
+    refute_match(/hivebox/i, response.body)
     assert_select "form[action='/auth/github']", 1,
                   "the claim path must be one button, not a config-editing instruction"
+  end
+
+  test "the container marker preserves the Hivebox product identity" do
+    ENV["HIVEBOX_PRECOMPILED_ASSETS"] = "1"
+    configure_owner!(owner: "")
+
+    get "/login"
+
+    assert_response :success
+    assert_select "title", text: "hivebox — sign in"
+    assert_select "meta[name='application-name'][content='hivebox']", 1
+    assert_select "a.brand", text: "hivebox"
+  end
+
+  test "local Hive Web presents GitHub as an optional connection, not box ownership" do
+    ENV["HIVEBOX_LOCAL_LOOPBACK"] = "1"
+    host! "localhost"
+    configure_owner!(owner: "")
+
+    get "/login"
+
+    assert_response :success
+    assert_select "h1", text: "Connect GitHub"
+    assert_match(/optional/i, response.body)
+    refute_match(/Fresh box|becomes its owner/, response.body)
+    refute_includes response.body, "hivebox"
+  end
+
+  test "local GitHub connection retains the token without claiming box ownership" do
+    ENV["HIVEBOX_LOCAL_LOOPBACK"] = "1"
+    host! "localhost"
+    configure_owner!(owner: "")
+    install_auth(login: "local-operator")
+    begin_device_flow
+
+    get "/auth/github/wait"
+
+    assert_redirected_to "/"
+    assert_equal "local-operator", session[:github_login]
+    assert_equal "gho_test", session[:github_token]
+    config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
+    assert_nil config.dig("web", "github", "owner"),
+               "connecting GitHub in local mode must not turn Hive Web into a claimed hivebox"
   end
 
   test "non-owner login is denied (U2)" do
@@ -193,5 +285,19 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     assert_redirected_to "/login"
     get "/"
     assert_redirected_to "/login", "the session must be gone after logout"
+  end
+
+  test "disconnecting GitHub in local mode returns to Hive instead of the login gate" do
+    ENV["HIVEBOX_LOCAL_LOOPBACK"] = "1"
+    host! "localhost"
+    sign_in!(token: "gho_test")
+
+    post "/logout"
+
+    assert_redirected_to "/"
+    follow_redirect!
+    assert_response :success
+    assert_nil session[:github_token]
+    assert_select ".session-login", text: "Local"
   end
 end

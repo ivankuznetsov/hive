@@ -35,7 +35,7 @@ class TmuxRunnerTest < Minitest::Test
       runner = runner(name: unique_name("env"), cwd: dir, env: { "HIVE_TMUX_TEST_VALUE" => "ok" })
       runner.start_detached(command: [ "ruby", "-e", "File.write(ARGV[0], ENV.fetch('HIVE_TMUX_TEST_VALUE'))", out_path ])
 
-      wait_for_file(out_path)
+      wait_for_file(out_path, expected: "ok")
 
       assert_equal "ok", File.read(out_path)
     ensure
@@ -58,7 +58,7 @@ class TmuxRunnerTest < Minitest::Test
       runner.start_detached(command: [ "ruby", "-e", reader, out_path, payload.bytesize.to_s ])
       runner.send_prompt(payload)
 
-      wait_for_file(out_path)
+      wait_for_file(out_path, expected: payload)
 
       assert_equal payload, File.binread(out_path)
     ensure
@@ -356,6 +356,19 @@ class TmuxRunnerTest < Minitest::Test
     end
   end
 
+  def test_kill_session_tolerates_a_target_that_exited_during_cleanup
+    with_tmp_dir do |dir|
+      fake = write_fake_tmux(dir, <<~SH)
+        #!/bin/sh
+        echo "no current target" >&2
+        exit 1
+      SH
+      runner = Hive::TmuxRunner.new(name: unique_name("exited"), cwd: dir, tmux_bin: fake)
+
+      assert runner.kill_session
+    end
+  end
+
   def test_missing_tmux_raises_typed_error
     with_tmp_dir do |dir|
       runner = Hive::TmuxRunner.new(name: unique_name("missing"), cwd: dir, tmux_bin: "missing-tmux-for-hive")
@@ -422,13 +435,13 @@ class TmuxRunnerTest < Minitest::Test
     system("tmux", "-V", out: File::NULL, err: File::NULL)
   end
 
-  def wait_for_file(path)
+  def wait_for_file(path, expected:)
     50.times do
-      return if File.exist?(path)
+      return if File.file?(path) && File.binread(path) == expected.b
 
       sleep 0.1
     end
-    flunk "timed out waiting for #{path}"
+    flunk "timed out waiting for #{path} to contain the expected bytes"
   end
 
   def write_fake_tmux(dir, body)

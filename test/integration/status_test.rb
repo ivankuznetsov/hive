@@ -11,7 +11,7 @@ class StatusTest < Minitest::Test
   def test_no_projects_message
     with_tmp_global_config do
       out, _err = capture_io { Hive::Commands::Status.new.call }
-      assert_includes out, "no projects registered"
+      assert_includes out, "NO REGISTERED PROJECTS"
     end
   end
 
@@ -33,7 +33,7 @@ class StatusTest < Minitest::Test
         FileUtils.mv(inboxes.first, moved)
         File.write(File.join(moved, "brainstorm.md"), "## Round 1\n<!-- WAITING -->\n")
 
-        out, _err = capture_io { Hive::Commands::Status.new.call }
+        out, _err = capture_io { Hive::Commands::Status.new(full: true).call }
         assert_includes out, project
         assert_includes out, "Ready to brainstorm"
         assert_includes out, "Answer questions"
@@ -60,7 +60,7 @@ class StatusTest < Minitest::Test
         FileUtils.mkdir_p(folder)
         File.write(File.join(folder, "task.md"), "<!-- REVIEW_WAITING escalations=2 pass=1 -->\n")
 
-        out, _err = capture_io { Hive::Commands::Status.new.call }
+        out, _err = capture_io { Hive::Commands::Status.new(full: true).call }
 
         assert_includes out, project
         assert_includes out, "Needs review decision",
@@ -86,7 +86,7 @@ class StatusTest < Minitest::Test
         FileUtils.mkdir_p(folder)
         File.write(File.join(folder, "plan.md"), "## Plan\n<!-- WAITING -->\n")
 
-        out, _err = capture_io { Hive::Commands::Status.new.call }
+        out, _err = capture_io { Hive::Commands::Status.new(full: true).call }
 
         assert_includes out, project
         assert_includes out, "Review plan draft",
@@ -112,7 +112,7 @@ class StatusTest < Minitest::Test
         FileUtils.mkdir_p(folder)
         File.write(File.join(folder, "pr.md"), "## PR\n<!-- WAITING -->\n")
 
-        out, _err = capture_io { Hive::Commands::Status.new.call }
+        out, _err = capture_io { Hive::Commands::Status.new(full: true).call }
 
         assert_includes out, project
         assert_includes out, "Confirm finalize",
@@ -139,6 +139,25 @@ class StatusTest < Minitest::Test
         assert_equal File.basename(folder), row["slug"]
         assert_equal 1, row["id"]
         assert_equal "Named Status Row", row["display_name"]
+      end
+    end
+  end
+
+  def test_status_read_does_not_create_condition_journal_or_snapshot_for_legacy_task
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        capture_io { Hive::Commands::New.new(project, "legacy status row").call }
+        folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "legacy-status-row-*")].first
+
+        out, = capture_io { Hive::Commands::Status.new(json: true).call }
+
+        refute File.exist?(File.join(folder, "events.jsonl"))
+        refute File.exist?(File.join(folder, "task-projection.json"))
+        identity = JSON.parse(out).dig("projects", 0, "tasks", 0, "implementation_identity")
+        assert_equal true, identity["pending"]
+        assert_equal({}, identity["stages"])
       end
     end
   end
@@ -228,7 +247,7 @@ class StatusTest < Minitest::Test
         fallback = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "fallback-row-*")].first
         Hive::TaskMeta.update_display_name(pretty, "Pretty Row")
 
-        out, = capture_io { Hive::Commands::Status.new.call }
+        out, = capture_io { Hive::Commands::Status.new(full: true).call }
 
         assert_match(/#1\s+—\s+Pretty Row/, out)
         assert_match(/#2\s+—\s+#{Regexp.escape(File.basename(fallback))}/, out)
@@ -240,7 +259,7 @@ class StatusTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
-        out, _err = capture_io { Hive::Commands::Status.new.call }
+        out, _err = capture_io { Hive::Commands::Status.new(full: true).call }
         assert_includes out, File.basename(dir)
         assert_includes out, "no active tasks"
       end
@@ -255,7 +274,7 @@ class StatusTest < Minitest::Test
         folder = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         FileUtils.mkdir_p(folder)
         File.write(File.join(folder, "task.md"), "<!-- AGENT_WORKING pid=99999999 claude_pid=99999998 -->\n")
-        out, _err = capture_io { Hive::Commands::Status.new.call }
+        out, _err = capture_io { Hive::Commands::Status.new(full: true).call }
         assert_includes out, "⚠"
         assert_includes out, "stale lock"
       end
@@ -277,7 +296,7 @@ class StatusTest < Minitest::Test
           File.write(File.join(folder, "task.md"), marker)
         end
 
-        out, _err = capture_io { Hive::Commands::Status.new.call }
+        out, _err = capture_io { Hive::Commands::Status.new(full: true).call }
         assert_includes out, "review-waiting"
         assert_includes out, "review-ci-stale"
         assert_includes out, "review-complete"

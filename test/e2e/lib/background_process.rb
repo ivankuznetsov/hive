@@ -36,7 +36,7 @@ module Hive
         # SandboxEnv.with strips leaky bundler/version-manager vars and yields
         # the sandbox env; the child inherits that cleaned env at spawn time.
         SandboxEnv.with(@sandbox_dir, @run_home, @fake_claude_path) do |env|
-          @pid = Process.spawn(env.merge(SandboxEnv.stringify_env(@env_overrides)), *command, **spawn_opts)
+          @pid = Process.spawn(SandboxEnv.merge(env, @env_overrides), *command, **spawn_opts)
         end
         @pgid = @pid
         @reaped = false

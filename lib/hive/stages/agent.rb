@@ -18,6 +18,10 @@ module Hive
         cfg ||= {}
         stage = task.workflow.stage_named(task.stage_name)
         stage or raise Hive::StageError, "no agent stage #{task.stage_name}"
+        if stage.workspace == :worktree
+          require "hive/stages/agent_worktree"
+          return Hive::Stages::AgentWorktree.run!(task, cfg)
+        end
         output_path = File.join(task.folder, stage.state_file)
         profile = Hive::Stages::Base.stage_profile(cfg, task.stage_name, explicit_agent: stage.agent)
 
@@ -35,11 +39,13 @@ module Hive
         end
         prompt = render_prompt(task, cfg, stage, profile: profile, instruction_body: instruction_body)
         permission_kwargs = stage.permissions.nil? ? {} : { explicit_permission_spec: stage.permissions }
-        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
-          cfg, task.stage_name, task, profile, **permission_kwargs
+        prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
+          cfg, task.stage_name, task, profile,
+          prompt: prompt, managed_slot: "stages.#{stage.name}", **permission_kwargs
         )
         resource_limits = Hive::Stages::Base.stage_resource_limits(cfg, stage)
 
+        marker_before_spawn = Hive::Markers.current(output_path)
         result = Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -58,26 +64,31 @@ module Hive
         )
 
         marker = Hive::Markers.current(output_path)
+        marker_unchanged = marker.name == marker_before_spawn.name && marker.raw == marker_before_spawn.raw
         # `spawn_agent` returns `{status: :error}` for both preflight failures
-        # and provider quota walls. In state-file mode Hive::Agent may already
-        # have written the retryable limit marker; other status modes only
-        # carry the wall in the result envelope. Preserve/classify those quota
-        # failures before the generic preflight fallback so the daemon can
-        # honor `retry_after` instead of parking the task permanently.
+        # and spawned failures. A changed marker is authoritative agent output;
+        # preserve it rather than relabeling it as a preflight failure. If the
+        # marker is unchanged, classify a provider quota envelope before the
+        # generic preflight fallback so the daemon can honor `retry_after`.
         if result.is_a?(Hash) && result[:status] == :error
           if Hive::AgentLimit.held?(marker.name, marker.attrs)
             # The agent already wrote the authoritative quota marker.
+          elsif !marker_unchanged
+            # The agent wrote another specific terminal marker (for example a
+            # timeout or exit-code error); its recovery metadata wins.
           elsif limit_error_envelope?(result)
             Hive::Markers.set(
               output_path, :error,
               reason: "limits_reached",
               provider: profile.name,
               message: result[:error_message].to_s[0, 200],
-              retry_after: Hive::AgentLimit.retry_after
+              retry_after: Hive::AgentLimit.retry_after(
+                text: result[:limit_text] || result[:error_message]
+              )
             )
           else
-            # A preflight/version failure writes no marker. Overwrite any
-            # stale marker from a prior run so the failure stays observable.
+            # A preflight/version failure writes no marker. Replace any stale
+            # marker from a prior run so the new failure stays observable.
             Hive::Markers.set(
               output_path, :error,
               reason: "agent_preflight_failed",
@@ -147,17 +158,7 @@ module Hive
       end
 
       def action_for(marker_name)
-        case marker_name
-        when :waiting then "round_waiting"
-        when :complete then "complete"
-        when :error then "error"
-        # A markerless (:none) run has nothing to commit; return nil so
-        # commit_after's `return unless result[:commit]` guard skips the commit
-        # outright, instead of relying on hive_commit's empty-diff no-op to
-        # swallow a bogus "none" action.
-        when :none then nil
-        else marker_name.to_s
-        end
+        Hive::Stages::Base.marker_commit_action(marker_name)
       end
     end
   end

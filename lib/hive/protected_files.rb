@@ -9,13 +9,14 @@ module Hive
   # that differ so a tampering attempt lands a structured error marker
   # (ADR-013 / ADR-019 / ADR-021).
   #
-  # The fix-agent gets a copy of plan.md, worktree.yml, and task.md but
-  # writes only to the worktree itself. This module is the single
-  # source of truth for "what counts as orchestrator-owned" so a future
-  # addition to that set lands in one place instead of four.
+  # The fix-agent gets task-folder context but writes only to the worktree
+  # itself. Plans, pointers, markers, and durable identity state therefore
+  # share this single protected-file source of truth.
   module ProtectedFiles
     # Files the orchestrator owns; sub-spawns must not modify them.
-    ORCHESTRATOR_OWNED = %w[plan.md worktree.yml task.md].freeze
+    ORCHESTRATOR_OWNED = %w[
+      plan.md worktree.yml task.md task-journal.jsonl task-projection.json
+    ].freeze
 
     module_function
 
@@ -25,14 +26,36 @@ module Hive
     # missing file across the snapshot pair).
     def snapshot(root, names = ORCHESTRATOR_OWNED)
       names.each_with_object({}) do |name, h|
-        path = File.join(root, name)
-        h[name] = File.exist?(path) ? ::Digest::SHA256.hexdigest(File.read(path)) : nil
+        h[name] = fingerprint(File.join(root, name))
       end
+    end
+
+    # Snapshot a small labeled set of absolute controller paths. Managed
+    # worktree agents can legitimately mutate refs and indexes through Git,
+    # but the .git pointer and repository configuration remain controller
+    # trust anchors and must not change across the spawn.
+    def snapshot_paths(paths)
+      paths.to_h { |label, path| [ label, fingerprint(path) ] }
     end
 
     # Names that differ between two snapshots produced by #snapshot.
     def diff(before, after)
       before.keys.reject { |k| before[k] == after[k] }
     end
+
+    def fingerprint(path)
+      stat = File.lstat(path)
+      if stat.file?
+        content = File.open(path, File::RDONLY | File::NOFOLLOW, &:read)
+        ::Digest::SHA256.hexdigest(content)
+      else
+        # File type is part of the integrity snapshot. A symlink to a file
+        # with identical contents must still count as tampering.
+        "#{stat.ftype}:#{stat.symlink? ? File.readlink(path) : stat.mode}"
+      end
+    rescue Errno::ENOENT
+      nil
+    end
+    private_class_method :fingerprint
   end
 end

@@ -218,6 +218,17 @@ class TaskActionGenericTest < Minitest::Test
                  "generic run command must carry --stage when status.rb flags a slug collision"
   end
 
+  def test_draft_pr_handoff_recovery_is_manual_run_and_never_daemon_dispatched
+    action = action_for(
+      "gather", :error,
+      { "reason" => "draft_pr_handoff_failed" }
+    )
+
+    assert_equal "recover_draft_pr", action.key
+    assert_equal "hive run #{SLUG}", action.command
+    assert_equal :skip, policy_decision(action)
+  end
+
   def test_generic_markerless_non_entry_row_surfaces_dispatchable_run_command
     action = action_for("gather", :none)
 

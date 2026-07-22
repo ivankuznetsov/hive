@@ -32,9 +32,11 @@ class TuiSchemaCorrespondenceTest < Minitest::Test
       "retry_after" => "2026-06-24T23:20:00Z"
     },
     mtime: Time.now,
+    observation_mtime: Time.now,
     folder_mtime: Time.now,
     claude_pid: nil,
     claude_pid_alive: nil,
+    implementation_identity: { "generation" => 0, "pending" => true, "stages" => {} },
     action_key: "ready_to_brainstorm",
     action_label: "Ready to brainstorm",
     suggested_command: "hive brainstorm probe --from 1-inbox"

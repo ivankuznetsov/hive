@@ -52,6 +52,7 @@ module Hive
           gh_config_dir: gh_auth_config_dir,
           skip_log: skip_log
         )
+        prepare_skip_log(skip_log)
         old = {
           "PATH" => ENV["PATH"],
           "HIVE_BABYSITTER_DRY_RUN_LOG" => ENV["HIVE_BABYSITTER_DRY_RUN_LOG"],
@@ -109,6 +110,33 @@ module Hive
           FileUtils.chmod("+x", link)
         end
         overlay
+      end
+
+      # Establish the audit sink before any agent-owned subprocess can race to
+      # become its first writer. Existing targets are deliberately untouched:
+      # each stub still performs the full regular-file, owner, mode, link, and
+      # descriptor-identity verification immediately before an append.
+      def prepare_skip_log(path)
+        raise IOError, "File::NOFOLLOW unavailable" unless File.const_defined?(:NOFOLLOW)
+
+        flags = File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW
+        File.open(path, flags, 0o600) do |file|
+          stat = file.stat
+          raise IOError, "dry-run skip log is not a regular file" unless stat.file?
+          raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
+          raise IOError, "dry-run skip log link count is not 1" unless stat.nlink == 1
+          raise IOError, "dry-run skip log permissions are not private" unless (stat.mode & 0o077).zero?
+
+          path_stat = File.lstat(path)
+          if path_stat.dev != stat.dev || path_stat.ino != stat.ino
+            raise IOError, "dry-run skip log changed during preparation"
+          end
+        end
+      rescue Errno::EEXIST
+        # A prior run (or a concurrent setup) already owns the pathname. Do
+        # not trust or modify it here; the subprocess stub validates it before
+        # every append and warns without executing a denied command if unsafe.
+        nil
       end
 
       def prepare_overlay_dir(overlay)

@@ -29,7 +29,12 @@ module Hive
         reviewers
         council
         deliverable
+        workspace
+        handoff
+        conditions
         permissions
+        mapping_role
+        mapping_contract
       ].freeze
       REVIEWER_KEYS = %w[
         name
@@ -43,17 +48,35 @@ module Hive
         output_basename
         permissions
         max_attempts
+        mapping_role
+        mapping_contract
       ].freeze
-      COUNCIL_KEYS = %w[quorum max_rounds exit_rule triage_output revise].freeze
-      REVISE_KEYS = %w[agent model effort skill instruction prompt command permissions].freeze
+      COUNCIL_KEYS = %w[quorum max_rounds exit_rule on_max_rounds triage_output revise].freeze
+      MAX_ROUND_POLICIES = %w[wait complete].freeze
+      REVISE_KEYS = %w[
+        agent model effort skill instruction prompt command permissions
+        mapping_role mapping_contract
+      ].freeze
+      MAPPING_ROLES = Hive::Workflow::MAPPING_ROLES
       REVIEWER_INSTRUCTION_KEYS = %w[skill instruction prompt command].freeze
       EXIT_RULES = %w[consensus human].freeze
+      WORKSPACES = { "worktree" => :worktree }.freeze
+      HANDOFFS = { "draft_pr" => :draft_pr }.freeze
 
       def self.parse_file(path) = new(path).parse_file
       def self.parse_hash(data, path:) = new(path).parse_hash(data)
 
-      def initialize(path)
+      # Registry packages use the stable `workflow.yml` filename, so bind the
+      # descriptor id to the trusted manifest/package name instead of weakening
+      # the legacy `<id>.yml` filename rule used by project-authored workflows.
+      def self.parse_package_file(path, package_name:)
+        new(path, package_name: package_name, package_root: File.dirname(path)).parse_file
+      end
+
+      def initialize(path, package_name: nil, package_root: nil)
         @path = path
+        @package_name = package_name&.to_s
+        @package_root = package_root && File.expand_path(package_root)
       end
 
       def parse_file
@@ -72,6 +95,7 @@ module Hive
         validate_filename_id!(id)
         stages = parse_stages(descriptor["stages"], id: id)
         validate_terminal_last_stage!(stages)
+        validate_workspace_handoff!(stages)
         validate_deliverable_position!(stages)
 
         build_workflow(id, stages)
@@ -108,6 +132,57 @@ module Hive
         end
       end
 
+      # Worktree execution and draft-PR delivery are two closed, controller-owned
+      # runtime capabilities. Keep them on the producing terminal agent so an
+      # opt-in cannot silently change the working directory or publish from an
+      # intermediate/council stage. A draft PR additionally needs an explicit
+      # report artifact for the controller to validate and summarize.
+      def validate_workspace_handoff!(stages)
+        last_index = stages.length - 1
+        stages.each_with_index do |stage, index|
+          if stage.handoff
+            unless stage.kind == :agent
+              raise descriptor_error(
+                "stage #{stage.name.inspect} handoff is only valid on an agent stage"
+              )
+            end
+            unless index == last_index
+              raise descriptor_error(
+                "stage #{stage.name.inspect} handoff is only valid on the last stage"
+              )
+            end
+            unless stage.workspace == :worktree
+              raise descriptor_error(
+                "stage #{stage.name.inspect} handoff: draft_pr requires workspace: worktree"
+              )
+            end
+            unless stage.deliverable == "fix-report.md" && stage.state_file == "fix-report.md"
+              raise descriptor_error(
+                "stage #{stage.name.inspect} handoff: draft_pr requires state_file and deliverable fix-report.md"
+              )
+            end
+          end
+
+          next unless stage.workspace
+
+          unless stage.kind == :agent
+            raise descriptor_error(
+              "stage #{stage.name.inspect} workspace is only valid on an agent stage"
+            )
+          end
+          unless index == last_index
+            raise descriptor_error(
+              "stage #{stage.name.inspect} workspace is only valid on the last stage"
+            )
+          end
+          next if stage.handoff == :draft_pr
+
+          raise descriptor_error(
+            "stage #{stage.name.inspect} workspace: worktree requires handoff: draft_pr"
+          )
+        end
+      end
+
       # Narrowed to JUST the Workflow.new construction. `validate_structure!`
       # raises ArgumentError for descriptor-level structural problems (gapped
       # indices, duplicate stage names/dirs, an unknown kind), which we relabel
@@ -131,6 +206,12 @@ module Hive
       end
 
       def validate_filename_id!(id)
+        if @package_name
+          return if id == @package_name
+
+          raise descriptor_error("id #{id.inspect} must match package name #{@package_name.inspect}")
+        end
+
         expected = File.basename(@path, File.extname(@path))
         return if id == expected
 
@@ -165,6 +246,9 @@ module Hive
         permissions = parse_permissions(stage, id: id, stage_name: name, label: label)
         input = optional_string(stage["input"], label: "#{label} input")
         deliverable = parse_deliverable(stage["deliverable"], label: label)
+        workspace = parse_closed_enum(stage["workspace"], WORKSPACES, label: "#{label} workspace")
+        handoff = parse_closed_enum(stage["handoff"], HANDOFFS, label: "#{label} handoff")
+        condition_policy = parse_condition_policy(stage["conditions"], label: label)
         reviewers = parse_reviewers(stage["reviewers"], id: id, label: label) if kind == :council
         council = parse_council(stage["council"], id: id, label: label, reviewer_count: reviewers&.length) if kind == :council
         validate_agent_instruction!(skill: skill, instruction: instruction, label: label) if kind == :agent
@@ -186,7 +270,12 @@ module Hive
           reviewers: reviewers,
           council: council,
           deliverable: deliverable,
-          permissions: permissions
+          workspace: workspace,
+          handoff: handoff,
+          condition_policy: condition_policy,
+          permissions: permissions,
+          mapping_role: parse_mapping_role(stage["mapping_role"], label: label),
+          mapping_contract: optional_string(stage["mapping_contract"], label: "#{label} mapping_contract")
         )
       end
 
@@ -236,9 +325,16 @@ module Hive
         return nil if raw.nil?
 
         resolved = File.expand_path(raw, File.dirname(@path))
+        if @package_root && !path_within?(resolved, @package_root)
+          raise descriptor_error("#{label} instruction must remain inside the package")
+        end
         return resolved if File.file?(resolved) && File.readable?(resolved)
 
         raise descriptor_error("#{label} instruction #{raw.inspect} must reference a readable file (#{resolved})")
+      end
+
+      def path_within?(candidate, root)
+        candidate == root || candidate.start_with?(root + File::SEPARATOR)
       end
 
       def parse_agent(value, label:)
@@ -256,6 +352,22 @@ module Hive
         return nil if value.nil?
 
         parse_state_file(value, label: "#{label} deliverable")
+      end
+
+      def parse_closed_enum(value, allowed, label:)
+        raw = optional_string(value, label: label)
+        return nil if raw.nil?
+        return allowed.fetch(raw) if allowed.key?(raw)
+
+        raise descriptor_error("#{label} #{raw.inspect} must be one of #{allowed.keys.inspect}")
+      end
+
+      def parse_condition_policy(value, label:)
+        return nil if value.nil?
+
+        Hive::Conditions::Policy.rule_from_descriptor(value)
+      rescue Hive::Conditions::InvalidPolicy => e
+        raise descriptor_error("#{label} #{e.message}")
       end
 
       def parse_permissions(stage, id:, stage_name:, label:)
@@ -321,7 +433,9 @@ module Hive
           command: optional_string(reviewer["command"], label: "#{label} command"),
           output_basename: optional_string(reviewer["output_basename"], label: "#{label} output_basename") || name,
           permissions: parse_permissions(reviewer, id: id, stage_name: name, label: label),
-          max_attempts: optional_positive_integer(reviewer["max_attempts"], label: "#{label} max_attempts")
+          max_attempts: optional_positive_integer(reviewer["max_attempts"], label: "#{label} max_attempts"),
+          mapping_role: parse_mapping_role(reviewer["mapping_role"], label: label),
+          mapping_contract: optional_string(reviewer["mapping_contract"], label: "#{label} mapping_contract")
         )
       end
 
@@ -336,6 +450,12 @@ module Hive
         exit_rule = optional_string(council["exit_rule"], label: "#{label} council exit_rule") || "human"
         unless EXIT_RULES.include?(exit_rule)
           raise descriptor_error("#{label} council exit_rule #{exit_rule.inspect} must be one of #{EXIT_RULES.inspect}")
+        end
+        on_max_rounds = optional_string(council["on_max_rounds"], label: "#{label} council on_max_rounds") || "wait"
+        unless MAX_ROUND_POLICIES.include?(on_max_rounds)
+          raise descriptor_error(
+            "#{label} council on_max_rounds #{on_max_rounds.inspect} must be one of #{MAX_ROUND_POLICIES.inspect}"
+          )
         end
 
         revise = parse_revise(council["revise"], id: id, label: "#{label} council revise")
@@ -360,6 +480,7 @@ module Hive
           quorum: quorum,
           max_rounds: max_rounds,
           exit_rule: exit_rule.to_sym,
+          on_max_rounds: on_max_rounds.to_sym,
           triage_output: parse_triage_output(council["triage_output"], label: "#{label} council triage_output"),
           revise: revise
         )
@@ -383,8 +504,18 @@ module Hive
           instruction: parse_instruction(revise["instruction"], label: label),
           prompt: optional_string(revise["prompt"], label: "#{label} prompt"),
           command: optional_string(revise["command"], label: "#{label} command"),
-          permissions: parse_permissions(revise, id: id, stage_name: "revise", label: label)
+          permissions: parse_permissions(revise, id: id, stage_name: "revise", label: label),
+          mapping_role: parse_mapping_role(revise["mapping_role"], label: label),
+          mapping_contract: optional_string(revise["mapping_contract"], label: "#{label} mapping_contract")
         )
+      end
+
+      def parse_mapping_role(value, label:)
+        role = optional_string(value, label: "#{label} mapping_role")
+        return nil unless role
+        return role if MAPPING_ROLES.include?(role)
+
+        raise descriptor_error("#{label} mapping_role #{role.inspect} must be one of #{MAPPING_ROLES.inspect}")
       end
 
       # `triage_output` is joined onto the task folder by the runner
@@ -428,7 +559,7 @@ module Hive
       def reject_agent_only_fields!(stage, kind:, label:)
         return if [ :agent, :council ].include?(kind)
 
-        present = %w[skill instruction agent model effort budget_usd timeout_sec input reviewers council deliverable permissions]
+        present = %w[skill instruction agent model effort budget_usd timeout_sec input reviewers council deliverable workspace handoff permissions mapping_role mapping_contract]
                   .select { |key| stage.key?(key) }
         return if present.empty?
 
@@ -451,7 +582,7 @@ module Hive
       # `permissions` are shared and stay valid on both. Reject the mismatches
       # here (fail-fast, same contract as reject_agent_only_fields!).
       COUNCIL_ONLY_FIELDS = %w[input reviewers council].freeze
-      AGENT_ONLY_FIELDS = %w[skill instruction].freeze
+      AGENT_ONLY_FIELDS = %w[skill instruction workspace handoff].freeze
 
       def reject_wrong_kind_fields!(stage, kind:, label:)
         case kind

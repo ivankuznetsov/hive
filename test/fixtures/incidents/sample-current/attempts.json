@@ -1,0 +1,16 @@
+{
+  "source": "synthetic durable-attempt replay metadata",
+  "attempts": [
+    {
+      "attempt_id": "sample-attempt",
+      "task_slug": "sample-current",
+      "task_id": "sample",
+      "intended_stage": "4-execute",
+      "ownership_generation": "sample-owner",
+      "task_input_epoch": 1,
+      "state": "running",
+      "outcome": null,
+      "starting_revision": "cccccccccccccccccccccccccccccccccccccccc"
+    }
+  ]
+}

@@ -10,9 +10,30 @@ require "hive/reviewers/agent"
 require "hive/task"
 require "hive/task_meta"
 require "hive/workflows/descriptor_parser"
+require "hive/workflows/project"
 
 class InitTest < Minitest::Test
   include HiveTestHelper
+
+  def teardown
+    Hive::Workflows::Project.reset!
+    super
+  end
+
+  def test_init_persists_canonical_origin_identity_in_registry
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        remote = File.join(File.dirname(dir), "origin.git")
+        run!("git", "init", "--bare", "--quiet", remote)
+        run!("git", "-C", dir, "remote", "add", "origin", remote)
+
+        capture_io { Hive::Commands::Init.new(dir).call }
+
+        entry = Hive::Config.registered_projects.find { |project| project["path"] == File.expand_path(dir) }
+        assert_equal Hive::RepositoryIdentity.normalize(remote), entry["repository_identity"]
+      end
+    end
+  end
 
   def with_tmp_home
     Dir.mktmpdir("hive-home") do |dir|
@@ -831,19 +852,20 @@ class InitTest < Minitest::Test
         # ...AND make the config.yml working-tree restore fail inside the
         # rollback. The rescue-within-rescue must warn without masking the
         # original GitError the caller re-raises.
-        original_binwrite = File.method(:binwrite)
         warnings = []
         begin
-          with_replaced_singleton_method(File, :binwrite, lambda { |path, *args|
-            raise Errno::EACCES, path.to_s if path == cfg_path
+          init = Hive::Commands::Init.new(dir, new_workflow: "writing")
+          original_atomic_write = init.method(:atomic_write)
+          config_writes = 0
+          init.define_singleton_method(:atomic_write) do |path, content|
+            config_writes += 1 if path == cfg_path
+            raise Errno::EACCES, path.to_s if path == cfg_path && config_writes > 1
 
-            original_binwrite.call(path, *args)
-          }) do
-            init = Hive::Commands::Init.new(dir, new_workflow: "writing")
-            init.define_singleton_method(:write_warn) { |line| warnings << line }
-            assert_raises(Hive::GitError) do
-              capture_io { init.call }
-            end
+            original_atomic_write.call(path, content)
+          end
+          init.define_singleton_method(:write_warn) { |line| warnings << line }
+          assert_raises(Hive::GitError) do
+            capture_io { init.call }
           end
         ensure
           FileUtils.rm_f(hook)
@@ -1663,9 +1685,13 @@ class InitTest < Minitest::Test
 
           refresh_script = File.join(dir, ".llm-wiki", "refresh-wiki.sh")
           post_commit_script = File.join(dir, ".llm-wiki", "post-commit-refresh.sh")
+          compile_log_script = File.join(dir, ".llm-wiki", "compile-log.sh")
           assert File.executable?(refresh_script)
           assert File.executable?(post_commit_script)
-          assert_includes File.read(refresh_script), 'codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root"'
+          refresh_contents = File.read(refresh_script)
+          assert_includes refresh_contents, "rev-parse --path-format=absolute --git-common-dir"
+          assert_includes refresh_contents, '--project "$project_root" --drain'
+          refute_match(/\b(?:codex exec|claude -p|pi )\b/, refresh_contents)
           # Post-commit refreshes run only in a disposable managed worktree on
           # llm-wiki/refresh. The source commit is queued before lock acquisition.
           assert_includes File.read(post_commit_script), 'add_dir_args=( --add-dir "$LLM_WIKI_QMD_CACHE_DIR" )'
@@ -1673,41 +1699,40 @@ class InitTest < Minitest::Test
           assert_includes File.read(post_commit_script), 'refresh_branch="${LLM_WIKI_REFRESH_BRANCH:-llm-wiki/refresh}"'
           assert_includes File.read(post_commit_script), 'mv -f "$queue_tmp" "$pending_dir/$sha"'
           refute_includes File.read(post_commit_script), 'wiki_root="$main_checkout"'
-          assert_includes File.read(refresh_script), "LLM_WIKI_QMD_CACHE_DIR"
           assert_includes File.read(post_commit_script), "LLM_WIKI_QMD_CACHE_DIR"
-          assert_includes File.read(refresh_script), ".llm-wiki/qmd-cache"
           assert_includes File.read(post_commit_script), 'export XDG_CACHE_HOME="$state_dir/cache"'
-          assert_includes File.read(refresh_script), "LLM_WIKI_CODEX_TIMEOUT"
-          assert_includes File.read(refresh_script), "LLM_WIKI_QMD_TIMEOUT"
-          assert_includes File.read(refresh_script), "qmd embed --max-docs-per-batch 64 --max-batch-mb 64"
-          assert_includes File.read(refresh_script), "Do not run qmd update or qmd embed yourself"
-          assert_includes File.read(refresh_script), "wiki/log.d/<timestamp>-<slug>.md"
-          assert_includes File.read(refresh_script), "without editing compiled wiki/log.md"
           assert_includes File.read(post_commit_script), "LLM_WIKI_CODEX_TIMEOUT"
           assert_includes File.read(post_commit_script), "LLM_WIKI_QMD_TIMEOUT"
-          assert_includes File.read(refresh_script), "git rev-parse --local-env-vars"
           assert_includes File.read(post_commit_script), "git rev-parse --local-env-vars"
-          assert_includes File.read(post_commit_script), "run_without_git_env timeout"
-          assert_includes File.read(refresh_script), "run_without_git_env timeout"
-          [ refresh_script, post_commit_script ].each do |script_path|
-            File.read(script_path).each_line.with_index(1) do |line, n|
-              next unless line.include?("codex exec")
-              assert_includes line, "run_without_git_env",
-                "#{script_path}:#{n}: `codex exec` must be wrapped with run_without_git_env: #{line.strip}"
-            end
-          end
+          assert_includes File.read(post_commit_script), 'run_without_git_env "$timeout_bin" -k "$kill_after"'
+          assert_includes File.read(post_commit_script), 'if [ "$drain_mode" -eq 1 ]; then'
+          assert_includes File.read(post_commit_script), "scheduled drain skipped; no queued sources"
           assert_includes File.read(post_commit_script), "qmd embed --max-docs-per-batch 64 --max-batch-mb 64"
           assert_includes File.read(post_commit_script), "Do not run\nqmd; the wrapper handles bounded index maintenance"
           assert_includes File.read(post_commit_script), "wiki/log.d/<timestamp>-<slug>.md"
           assert_includes File.read(post_commit_script), "without\nediting compiled wiki/log.md"
-          refute_includes File.read(refresh_script), "QMD_LLAMA_GPU"
           refute_includes File.read(post_commit_script), "QMD_LLAMA_GPU"
-          refute_includes File.read(refresh_script), "claude -p"
-          refute_includes File.read(post_commit_script), "claude -p"
 
-          hook = File.read(File.join(dir, ".git", "hooks", "post-commit"))
+          common_dir = Hive::LlmWikiBootstrap.git_common_dir(dir)
+          shared_dir = File.join(common_dir, "llm-wiki")
+          shared_post_commit = File.join(shared_dir, "post-commit-refresh.sh")
+          shared_compile_log = File.join(shared_dir, "compile-log.sh")
+          shared_config = File.join(shared_dir, "config.json")
+          shared_scheduler_service = File.join(shared_dir, "scheduler-service")
+          assert_equal File.binread(post_commit_script), File.binread(shared_post_commit)
+          assert_equal File.binread(compile_log_script), File.binread(shared_compile_log)
+          assert_equal File.binread(File.join(dir, ".llm-wiki", "config.json")), File.binread(shared_config)
+          assert File.executable?(shared_post_commit)
+          assert File.executable?(shared_compile_log)
+          assert_match(/\Allm-wiki-.+\.service\n\z/, File.read(shared_scheduler_service))
+
+          hook = File.read(File.join(common_dir, "hooks", "post-commit"))
           assert_includes hook, "# BEGIN LLM WIKI POST-COMMIT"
-          assert_includes hook, ".llm-wiki/post-commit-refresh.sh"
+          assert_includes hook, 'shared_runner="$common_dir/llm-wiki/post-commit-refresh.sh"'
+          assert_includes hook, 'local_runner="$project_root/.llm-wiki/post-commit-refresh.sh"'
+          assert_includes hook, '"$shared_runner" --project "$project_root"'
+          assert_operator hook.index('"$shared_runner" --project "$project_root"'), :<,
+                          hook.index('"$local_runner" --project "$project_root"')
 
           assert_llm_wiki_scheduler_files(global_home, dir)
         end
@@ -1728,6 +1753,84 @@ class InitTest < Minitest::Test
       assert_equal "codex", cfg.fetch("headless_agent")
       assert_equal %w[claude codex pi], cfg.fetch("context_agents")
       assert_equal "hive", cfg.fetch("created_by")
+      shared_cfg = JSON.parse(
+        File.read(File.join(Hive::LlmWikiBootstrap.git_common_dir(dir), "llm-wiki", "config.json"))
+      )
+      assert_equal cfg, shared_cfg
+    end
+  end
+
+  def test_llm_wiki_shared_runtime_copy_is_safe_with_utf8_default_internal_encoding
+    with_tmp_git_repo do |dir|
+      original_internal = Encoding.default_internal
+      Encoding.default_internal = Encoding::UTF_8
+
+      Hive::LlmWikiBootstrap.ensure_config(dir)
+      Hive::LlmWikiBootstrap.ensure_refresh_scripts(dir)
+      Hive::LlmWikiBootstrap.ensure_shared_runtime(dir)
+
+      common_dir = Hive::LlmWikiBootstrap.git_common_dir(dir)
+      local_compile_log = File.join(dir, ".llm-wiki", "compile-log.sh")
+      shared_compile_log = File.join(common_dir, "llm-wiki", "compile-log.sh")
+      assert_equal File.binread(local_compile_log), File.binread(shared_compile_log)
+    ensure
+      Encoding.default_internal = original_internal
+    end
+  end
+
+  def test_llm_wiki_runtime_hook_install_restores_local_and_shared_runtime_first
+    with_tmp_git_repo do |dir|
+      Hive::LlmWikiBootstrap.install_runtime_hooks!(dir)
+
+      local_dir = File.join(dir, ".llm-wiki")
+      shared_dir = File.join(Hive::LlmWikiBootstrap.git_common_dir(dir), "llm-wiki")
+      %w[post-commit-refresh.sh compile-log.sh].each do |name|
+        assert_equal File.binread(File.join(local_dir, name)), File.binread(File.join(shared_dir, name))
+        assert File.executable?(File.join(shared_dir, name))
+      end
+      assert_equal File.binread(File.join(local_dir, "config.json")),
+                   File.binread(File.join(shared_dir, "config.json"))
+      assert File.exist?(File.join(Hive::LlmWikiBootstrap.git_common_dir(dir), "hooks", "post-commit"))
+    end
+  end
+
+  def test_llm_wiki_common_hook_prefers_shared_runner_for_linked_worktree
+    with_tmp_git_repo do |dir|
+      linked_dir = nil
+      Hive::LlmWikiBootstrap.install!(dir, scheduler: false)
+      common_dir = Hive::LlmWikiBootstrap.git_common_dir(dir)
+      shared_runner = File.join(common_dir, "llm-wiki", "post-commit-refresh.sh")
+      linked_dir = "#{dir}-linked"
+      runner_log = File.join(dir, "runner.log")
+
+      File.write(shared_runner, <<~BASH)
+        #!/usr/bin/env bash
+        printf 'shared:%s\n' "$*" > "${HIVE_TEST_SHARED_RUNNER_LOG:?}"
+      BASH
+      File.chmod(0o755, shared_runner)
+      run!("git", "-C", dir, "worktree", "add", "-b", "linked-wiki-test", linked_dir, "HEAD", "--quiet")
+      local_runner = File.join(linked_dir, ".llm-wiki", "post-commit-refresh.sh")
+      FileUtils.mkdir_p(File.dirname(local_runner))
+      File.write(local_runner, <<~BASH)
+        #!/usr/bin/env bash
+        printf 'stale:%s\n' "$*" > "${HIVE_TEST_SHARED_RUNNER_LOG:?}"
+      BASH
+      File.chmod(0o755, local_runner)
+      File.write(File.join(linked_dir, "linked-change.md"), "linked worktree\n")
+      run!("git", "-C", linked_dir, "add", "linked-change.md")
+
+      with_env("HIVE_SKIP_LLM_WIKI_POST_COMMIT" => "0", "HIVE_TEST_SHARED_RUNNER_LOG" => runner_log) do
+        run!("git", "-C", linked_dir, "commit", "-m", "linked worktree change", "--quiet")
+      end
+
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      sleep 0.02 until File.exist?(runner_log) || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      assert File.exist?(runner_log), "the common hook should launch the shared runner"
+      assert_equal "shared:--project #{linked_dir}\n", File.read(runner_log)
+    ensure
+      if dir && linked_dir && File.directory?(linked_dir)
+        run!("git", "-C", dir, "worktree", "remove", "--force", linked_dir)
+      end
     end
   end
 
@@ -1744,11 +1847,25 @@ class InitTest < Minitest::Test
     assert File.exist?(timer)
     assert File.symlink?(wants)
     service_contents = File.read(service)
+    shared_runner = File.join(Hive::LlmWikiBootstrap.git_common_dir(project_dir), "llm-wiki", "post-commit-refresh.sh")
+    assert_includes service_contents, "ConditionFileIsExecutable=#{shared_runner}"
     assert_includes service_contents, "WorkingDirectory=#{project_dir}"
-    assert_includes service_contents, "ExecStart=#{File.join(project_dir, ".llm-wiki", "refresh-wiki.sh")}"
+    flock_path = Hive::LlmWikiBootstrap::Scheduler.executable_path("flock")
+    assert_includes service_contents,
+                    "ExecStart=#{flock_path} --nonblock --conflict-exit-code 0 " \
+                    "%t/hive-llm-wiki-refresh.lock #{shared_runner} --project #{project_dir} --drain"
     assert_includes service_contents, "TimeoutStartSec=45min"
+    assert_includes service_contents, "MemoryMax=4G"
+    assert_includes service_contents, "MemorySwapMax=0"
+    assert_includes service_contents, "Environment=LLM_WIKI_GLOBAL_LOCK_HELD=1"
     refute_includes service_contents, 'WorkingDirectory="'
-    assert_includes File.read(timer), "OnUnitActiveSec=1d"
+    timer_contents = File.read(timer)
+    assert_includes timer_contents, "X-HiveManaged=yes"
+    assert_includes timer_contents, "OnActiveSec=10min"
+    assert_includes timer_contents, "OnUnitActiveSec=1d"
+    assert_includes timer_contents, "RandomizedDelaySec=6h"
+    refute_includes timer_contents, "OnBootSec="
+    refute_includes timer_contents, "Persistent=true"
   end
 
   def test_init_preserves_existing_post_commit_hook_when_adding_managed_wiki_block
@@ -1910,6 +2027,13 @@ class InitTest < Minitest::Test
         assert_equal "courageous", cfg.dig("review", "triage", "bias")
         assert_equal 2,            cfg.dig("review", "max_passes")
         assert_equal 28_800,       cfg.dig("review", "max_wall_clock_sec")
+
+        raw = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+        refute raw.fetch("open_pr").key?("agent")
+        refute raw.dig("review", "ci").key?("agent")
+        refute raw.dig("review", "fix").key?("agent")
+        assert_equal "claude", raw.dig("review", "triage", "agent")
+        assert_equal "claude", raw.dig("review", "browser_test", "agent")
       end
     end
   end
@@ -1934,7 +2058,7 @@ class InitTest < Minitest::Test
     end
   end
 
-  def test_init_renders_recommended_refactor_patrol_discovery_with_side_effects_disabled
+  def test_init_renders_recommended_refactor_patrol_with_auto_fix_and_issue_output
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         out, _err = capture_io { Hive::Commands::Init.new(dir).call }
@@ -1942,9 +2066,9 @@ class InitTest < Minitest::Test
         resolved = Hive::Config.load(dir)
 
         assert_equal true, raw.dig("refactor_patrol", "enabled")
-        assert_equal false, raw.dig("refactor_patrol", "auto_fix", "enabled")
+        assert_equal true, raw.dig("refactor_patrol", "auto_fix", "enabled")
         assert_nil raw.dig("refactor_patrol", "commands", "public_contract")
-        assert_equal false, raw.dig("refactor_patrol", "issue_filing", "enabled")
+        assert_equal true, raw.dig("refactor_patrol", "issue_filing", "enabled")
         assert_equal true, resolved.dig("refactor_patrol", "enabled")
         assert_nil resolved.dig("refactor_patrol", "commands", "public_contract")
         assert_includes out, "architecture patrol"
@@ -2204,6 +2328,35 @@ class InitTest < Minitest::Test
     refute Hive::Config.find_project(File.basename(dir))
   end
 
+  def with_tmp_linked_git_worktree
+    with_tmp_git_repo do |main_dir|
+      linked_dir = File.join(File.dirname(main_dir), "#{File.basename(main_dir)}-linked")
+      run!("git", "-C", main_dir, "worktree", "add", "-b", "init-rollback-linked", linked_dir, "HEAD", "--quiet")
+      yield(main_dir, linked_dir)
+    ensure
+      if linked_dir && File.directory?(linked_dir)
+        _out, _err, status = Open3.capture3("git", "-C", main_dir, "worktree", "remove", "--force", linked_dir)
+        FileUtils.rm_rf(linked_dir) unless status.success?
+      end
+    end
+  end
+
+  def fail_linked_init_after_bootstrap(linked_dir)
+    command = Hive::Commands::Init.new(linked_dir)
+    ops = Hive::GitOps.new(linked_dir)
+    _out, err = capture_io do
+      error = assert_raises(RuntimeError) do
+        command.send(
+          :initialize_project_state,
+          ops,
+          content: "---\nhive_state_path: .hive-state\n"
+        ) { raise "boom after shared runtime install" }
+      end
+      assert_equal "boom after shared runtime install", error.message
+    end
+    assert_includes err, "partial init failed; rolled back"
+  end
+
   def test_init_with_piped_user_choices_writes_matching_config
     # Order matches Prompts#collect. Choose codex for planning, default
     # claude_mode, codex for development, safetyist triage, only first +
@@ -2456,6 +2609,75 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_init_late_failure_in_linked_worktree_restores_existing_common_llm_wiki_runtime
+    with_tmp_global_config do
+      with_tmp_linked_git_worktree do |_main_dir, linked_dir|
+        assert File.file?(File.join(linked_dir, ".git")), "linked worktree must exercise a .git file"
+
+        common_dir = Hive::LlmWikiBootstrap.git_common_dir(linked_dir)
+        hook_path = File.join(common_dir, "hooks", "post-commit")
+        shared_dir = File.join(common_dir, "llm-wiki")
+        shared_runner = File.join(shared_dir, "post-commit-refresh.sh")
+        shared_compile_log = File.join(shared_dir, "compile-log.sh")
+        shared_config = File.join(shared_dir, "config.json")
+        unrelated_state = File.join(shared_dir, "pending", "keep-me")
+
+        original_hook = "#!/usr/bin/env bash\n# existing project hook\n"
+        original_runner = "#!/usr/bin/env bash\n# existing shared runner\n"
+        original_compile_log = "#!/usr/bin/env bash\n# existing shared log compiler\n"
+        original_config = "{\"existing\":true}\n"
+        FileUtils.mkdir_p(File.dirname(hook_path))
+        File.binwrite(hook_path, original_hook)
+        File.chmod(0o751, hook_path)
+        FileUtils.mkdir_p(File.dirname(unrelated_state))
+        File.binwrite(shared_runner, original_runner)
+        File.chmod(0o701, shared_runner)
+        File.binwrite(shared_compile_log, original_compile_log)
+        File.chmod(0o705, shared_compile_log)
+        File.binwrite(shared_config, original_config)
+        File.chmod(0o604, shared_config)
+        File.binwrite(unrelated_state, "queued state that init does not own\n")
+        File.chmod(0o640, unrelated_state)
+        File.chmod(0o710, shared_dir)
+
+        fail_linked_init_after_bootstrap(linked_dir)
+
+        assert_equal original_hook, File.binread(hook_path)
+        assert_equal 0o751, File.stat(hook_path).mode & 0o7777
+        assert_equal original_runner, File.binread(shared_runner)
+        assert_equal 0o701, File.stat(shared_runner).mode & 0o7777
+        assert_equal original_compile_log, File.binread(shared_compile_log)
+        assert_equal 0o705, File.stat(shared_compile_log).mode & 0o7777
+        assert_equal original_config, File.binread(shared_config)
+        assert_equal 0o604, File.stat(shared_config).mode & 0o7777
+        assert_equal "queued state that init does not own\n", File.binread(unrelated_state)
+        assert_equal 0o640, File.stat(unrelated_state).mode & 0o7777
+        assert_equal 0o710, File.stat(shared_dir).mode & 0o7777
+        assert_equal "", run!("git", "-C", linked_dir, "status", "--porcelain").strip
+      end
+    end
+  end
+
+  def test_init_late_failure_in_linked_worktree_removes_new_common_llm_wiki_runtime
+    with_tmp_global_config do
+      with_tmp_linked_git_worktree do |_main_dir, linked_dir|
+        common_dir = Hive::LlmWikiBootstrap.git_common_dir(linked_dir)
+        hook_path = File.join(common_dir, "hooks", "post-commit")
+        shared_dir = File.join(common_dir, "llm-wiki")
+        refute File.exist?(hook_path)
+        refute File.exist?(shared_dir)
+
+        fail_linked_init_after_bootstrap(linked_dir)
+
+        refute File.exist?(hook_path), "rollback must remove the hook created by failed init"
+        refute File.exist?(shared_dir), "rollback must remove the entire newly created shared runtime directory"
+        refute File.exist?(File.join(linked_dir, ".llm-wiki", "post-commit-refresh.sh")),
+               "rollback must leave no checkout-local runner that a future commit could launch"
+        assert_equal "", run!("git", "-C", linked_dir, "status", "--porcelain").strip
+      end
+    end
+  end
+
   def test_init_already_initialized_short_circuits_before_any_prompt
     # On a re-run of `hive init` the AlreadyInitialized guard must fire
     # BEFORE the prompt module reads anything from stdin. We feed an
@@ -2489,8 +2711,10 @@ class InitTest < Minitest::Test
       FileUtils.chmod(0755, hive)
       old_program_name = $PROGRAM_NAME
       begin
-        $PROGRAM_NAME = hive
-        assert_equal hive, Hive::Commands::Init.new(dir).send(:current_binary_path)
+        with_env("HIVE_INVOKED_BIN" => nil) do
+          $PROGRAM_NAME = hive
+          assert_equal hive, Hive::Commands::Init.new(dir).send(:current_binary_path)
+        end
       ensure
         $PROGRAM_NAME = old_program_name
       end

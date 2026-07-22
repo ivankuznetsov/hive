@@ -1,8 +1,7 @@
 # Bridges the gem's StatusFeed poller to Turbo Streams: one background
-# subscriber per process watches for snapshot changes and broadcasts a
-# replace of the projects frame to every connected dashboard. Pages render
-# the same snapshot synchronously on first paint, so the stream only ever
-# *updates* what the server already rendered.
+# subscriber per process watches for snapshot changes and broadcasts a Turbo
+# morph refresh. Pages render their selected Board or Grid view synchronously,
+# so the current URL and saved preference remain the only view authority.
 class StatusBroadcaster
   CHANNEL = "status".freeze
 
@@ -19,6 +18,13 @@ class StatusBroadcaster
 
     def snapshot
       feed.snapshot
+    end
+
+    def projects(payload)
+      payload.fetch("projects", [])
+             .each_with_index
+             .sort_by { |(project, index)| [ -project.fetch("tasks", []).size, index ] }
+             .map { |project, _index| Project.new(project) }
     end
 
     # Self-healing by construction: a raising broadcast (a solid_cable
@@ -52,6 +58,7 @@ class StatusBroadcaster
     private
 
     def broadcast(payload)
+      sorted_projects = projects(payload)
       # Refresh signal FIRST: it carries no payload and cannot fail on
       # content, while the partial render below can (one bad row). Task
       # pages subscribe to the same channel and morph-refresh on this
@@ -61,9 +68,16 @@ class StatusBroadcaster
       Turbo::StreamsChannel.broadcast_refresh_to(CHANNEL)
       Turbo::StreamsChannel.broadcast_replace_to(
         CHANNEL,
-        target: "projects",
-        partial: "status/projects",
-        locals: { projects: payload.fetch("projects", []) }
+        target: "project-nav",
+        partial: "status/project_nav",
+        locals: { projects: sorted_projects }
+      )
+      Turbo::StreamsChannel.broadcast_replace_to(
+        CHANNEL,
+        target: "composer-project",
+        attributes: { method: :morph },
+        partial: "status/composer_project",
+        locals: { projects: sorted_projects }
       )
     end
   end

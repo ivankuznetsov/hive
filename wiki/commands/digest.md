@@ -196,13 +196,16 @@ Real-send JSON sets `message` to `null` and `chat_id` to the resolved
 recipient. Partial repo drops still return `ok: true`; only command-level
 errors use the ErrorPayload arm.
 
-Usage errors emit the shared `ErrorPayload` (same `hive-digest` schema):
+Usage/config errors emit the shared `ErrorPayload` with the active digest
+schema: shipped-task invocations use `hive-digest`, while merged-PR invocations
+selected by `--source merged-prs` or `--repo` use `hive-merged-pr-digest`.
 
 - a bad `--date` raises `Hive::ConfigError` and the command emits the
   envelope itself (`error_kind: "config"`, exit 78) before re-raising;
 - a malformed invocation caught before dispatch (unknown flag / malformed
-  `--json`) emits via `JSON_USAGE_ERROR_CONTRACTS` (`error_kind: "usage"`,
-  exit 64).
+  `--json`) emits via the wrapper's JSON usage-error contract
+  (`error_kind: "usage"`, exit 64); the wrapper mirrors digest source
+  selection so merged-PR usage errors keep the merged-PR schema.
 
 A Telegram send error that occurs mid-delivery still stays on the stderr +
 non-zero exit-code path without an envelope.

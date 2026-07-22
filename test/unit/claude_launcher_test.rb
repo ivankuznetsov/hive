@@ -986,6 +986,47 @@ class ClaudeLauncherTest < Minitest::Test
     assert_equal %w[--disallowedTools Write,Bash], command.each_cons(2).find { |a, _| a == "--disallowedTools" }
   end
 
+
+  def test_wrapper_command_carries_managed_settings_isolation
+    profile = Hive::AgentProfiles.lookup(:claude)
+    policy = Struct.new(
+      :permission_mode, :allowed_tools, :disallowed_tools, :directories,
+      :settings_path, :mcp_config_path, :cli_flags, keyword_init: true
+    ).new(
+      permission_mode: "dontAsk", allowed_tools: %w[Read Bash], disallowed_tools: %w[Write WebSearch],
+      directories: [ "/tmp/task" ], settings_path: "/tmp/policy/settings.json",
+      mcp_config_path: "/tmp/policy/mcp.json",
+      cli_flags: [ "--settings", "/tmp/policy/settings.json", "--setting-sources", "",
+                   "--mcp-config", "/tmp/policy/mcp.json", "--strict-mcp-config" ]
+    )
+    command = Hive::ClaudeLauncher.send(
+      :wrapper_command,
+      cwd: "/tmp/task", add_dirs: [], profile: profile,
+      permission_mode: nil, runtime_policy: policy
+    )
+
+    assert_equal "dontAsk", command[command.index("--permission-mode") + 1]
+    assert_equal "/tmp/policy/settings.json", command[command.index("--settings") + 1]
+    assert_equal "", command[command.index("--setting-sources") + 1]
+    assert_includes command, "--strict-mcp-config"
+    assert_equal policy.allowed_tools.join(","), command[command.index("--allowedTools") + 1]
+  end
+
+  def test_managed_tmux_command_starts_with_only_the_compiled_environment
+    policy = Struct.new(:environment, keyword_init: true).new(
+      environment: { "HOME" => "/safe/home", "PATH" => "/usr/bin", "HIVE_MANAGED_POLICY" => "1" }
+    )
+    task = Struct.new(:folder).new("/safe/task")
+    command = Hive::ClaudeLauncher.send(:isolated_managed_command, [ "/usr/bin/env" ], policy, task)
+
+    out, err, status = Open3.capture3({ "PARENT_SECRET" => "must-not-leak" }, *command)
+    assert status.success?, err
+    environment = out.lines.map(&:chomp)
+    assert_includes environment, "PATH=/usr/bin"
+    assert_includes environment, "HIVE_TASK_STAGE_DIR=/safe/task"
+    refute environment.any? { |line| line.start_with?("PARENT_SECRET=") }
+  end
+
   # Readiness-wins contract: the limit menu is only classified AFTER the
   # ready wait exhausts (no fail-fast inside the loop — banner/footer copy
   # in a still-booting pane must never kill a launch). The clock is stubbed
@@ -1141,7 +1182,7 @@ class ClaudeLauncherTest < Minitest::Test
       result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
 
       assert_equal :error, result.fetch(:status)
-      assert_equal "❯ 1. Stop and wait for limit to reset", result.fetch(:limit_text)
+      assert_equal limit_menu.lines.last(3).map(&:strip).join("\n"), result.fetch(:limit_text)
       assert_equal "limits reached for claude: ❯ 1. Stop and wait for limit to reset",
                    result.fetch(:error_message)
       refute_match(/tmux_session_terminated/, result.fetch(:error_message))
@@ -1375,7 +1416,7 @@ class ClaudeLauncherTest < Minitest::Test
       result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "ci")
 
       assert_equal :error, result.fetch(:status)
-      assert_equal "❯ 1. Stop and wait for limit to reset", result.fetch(:limit_text)
+      assert_equal limit_menu.lines.last(3).map(&:strip).join("\n"), result.fetch(:limit_text)
       assert_equal "limits reached for claude: ❯ 1. Stop and wait for limit to reset",
                    result.fetch(:error_message)
       refute_match(/stop hook did not signal/, result.fetch(:error_message))
@@ -1475,27 +1516,25 @@ class ClaudeLauncherTest < Minitest::Test
       Hive::Markers.set(task.state_file, :agent_working,
                         pid: Process.pid,
                         started: Time.now.utc.iso8601)
-      limit_menu = pane_fixture("limit_menu_live.txt")
+      limit_menu = "#{pane_fixture('limit_menu_live.txt')}\nTry again at Jul 18th, 2026 7:50 AM.\n"
       runner = Struct.new(:name, :tail) do
         def session_exists? = true
         def capture_pane_tail(bytes:) = tail
       end.new("limited-stage", limit_menu)
 
-      # Floor: retry_after is a second-precision iso8601 stamp.
-      before = Time.now.utc.floor
-      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(_seconds) { }) do
-        marker = Hive::ClaudeLauncher.wait_for_terminal_marker(task, runner, 10)
-        after = Time.now.utc
+      now = Time.utc(2026, 7, 12, 20, 0, 0)
+      with_env("TZ" => "Europe/London") do
+        with_replaced_singleton_method(Time, :now, -> { now }) do
+          with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(_seconds) { }) do
+            marker = Hive::ClaudeLauncher.wait_for_terminal_marker(task, runner, 10)
 
-        assert_equal :error, marker.name
-        assert_equal "limits_reached", marker.attrs.fetch("reason")
-        assert_match(/\Alimits reached for claude:/, marker.attrs.fetch("message"))
+            assert_equal :error, marker.name
+            assert_equal "limits_reached", marker.attrs.fetch("reason")
+            assert_match(/\Alimits reached for claude:/, marker.attrs.fetch("message"))
 
-        retry_after = Time.parse(marker.attrs.fetch("retry_after"))
-        cooldown = Hive::AgentLimit::RETRY_COOLDOWN_SEC
-        assert retry_after >= before + cooldown,
-               "limits_reached marker must stamp a cooldown retry_after"
-        assert retry_after <= after + cooldown
+            assert_equal "2026-07-18T06:51:00Z", marker.attrs.fetch("retry_after")
+          end
+        end
       end
     end
   end

@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.dev/schemas/hive-setup-agents.v1.json",
+  "title": "hive-setup-agents.v1",
+  "oneOf": [
+    { "$ref": "#/$defs/Result" },
+    { "$ref": "#/$defs/Error" }
+  ],
+  "$defs": {
+    "Result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "preview", "consent", "operation_results", "final_health", "skips", "exit_code", "classification"],
+      "properties": {
+        "schema": { "const": "hive-setup-agents" },
+        "schema_version": { "const": 1 },
+        "ok": { "type": "boolean" },
+        "preview": { "$ref": "#/$defs/Plan" },
+        "consent": { "$ref": "#/$defs/Consent" },
+        "operation_results": { "type": "array", "items": { "$ref": "#/$defs/Outcome" } },
+        "final_health": { "type": "array", "items": { "$ref": "#/$defs/Health" } },
+        "skips": { "type": "array", "items": { "type": "object" } },
+        "exit_code": { "enum": [0, 1, 64] },
+        "classification": { "enum": ["success", "no_op", "residual_failure", "refused"] }
+      }
+    },
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "exit_code", "classification", "error_class", "message"],
+      "properties": {
+        "schema": { "const": "hive-setup-agents" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "exit_code": { "const": 78 },
+        "classification": { "const": "invalid_config" },
+        "error_class": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    },
+    "Plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["health", "operations", "conflicts", "filters", "fingerprint"],
+      "properties": {
+        "health": { "type": "array", "items": { "$ref": "#/$defs/Health" } },
+        "operations": { "type": "array", "items": { "$ref": "#/$defs/Operation" } },
+        "conflicts": { "type": "array", "items": { "type": "string" } },
+        "filters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agents", "skills"],
+          "properties": {
+            "agents": { "type": "array", "items": { "type": "string" } },
+            "skills": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "Operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "agent", "package", "capabilities", "kind", "argv", "files", "depends_on", "preconditions"],
+      "properties": {
+        "id": { "type": "string" },
+        "agent": { "enum": ["claude", "codex", "pi"] },
+        "package": { "type": "string" },
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "kind": { "type": "string" },
+        "argv": { "type": "array", "items": { "type": "string" } },
+        "files": { "type": "array", "items": { "type": "string" } },
+        "depends_on": { "type": "array", "items": { "type": "string" } },
+        "preconditions": { "type": "object" }
+      }
+    },
+    "Outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_id", "agent", "package", "status", "message", "exit_status", "changed_files"],
+      "properties": {
+        "operation_id": { "type": "string" },
+        "agent": { "enum": ["claude", "codex", "pi"] },
+        "package": { "type": "string" },
+        "status": { "enum": ["succeeded", "failed", "skipped"] },
+        "message": { "type": "string" },
+        "exit_status": { "type": ["integer", "null"] },
+        "changed_files": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "Consent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["granted", "provenance"],
+      "properties": {
+        "granted": { "type": "boolean" },
+        "provenance": { "type": "string" }
+      }
+    },
+    "Health": {
+      "type": "object",
+      "required": ["agent", "managed", "health", "severity", "explanation"],
+      "properties": {
+        "agent": { "type": "string" },
+        "managed": { "type": "boolean" },
+        "health": { "enum": ["healthy", "missing", "stale", "incompatible", "conflicting", "unavailable"] },
+        "severity": { "enum": ["info", "warning", "error"] },
+        "explanation": { "type": "string" }
+      }
+    }
+  }
+}

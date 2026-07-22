@@ -1,13 +1,13 @@
 ---
 title: Hive::Worktree
 type: module
-source: lib/hive/worktree.rb
+source: lib/hive/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/managed_git.rb, lib/hive/stages/agent_worktree.rb
 created: 2026-04-25
-updated: 2026-06-29
-tags: [worktree, git, pointer, dependencies]
+updated: 2026-07-21
+tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
 ---
 
-**TLDR**: Wrapper around `git worktree add/remove/list` with a YAML pointer file (`worktree.yml`) inside the task folder, plus path-prefix validation that rejects pointers outside the configured `worktree_root`.
+**TLDR**: Wrapper around `git worktree add/remove/list` with a YAML pointer file (`worktree.yml`) inside the task folder, path-prefix validation, and an origin-only exact-base path for controller-owned draft-PR workflows.
 
 ## Class shape
 
@@ -16,6 +16,9 @@ Hive::Worktree.new(project_root, slug, worktree_root: nil)
 #path   → "<worktree_root>/<slug>"
 #exists? → bool (sees both filesystem dir and `git worktree list`)
 #create!(branch_name, default_branch:, base_override: nil) → :created
+#fetch_strict_origin_base!(base_branch) → exact origin OID or raises
+#create_strict_origin!(branch_name, base_branch:, base_oid:) → :created
+#validate_strict_resume!(branch_name:, base_oid:) → current HEAD or raises
 #remove! → :removed
 #write_pointer!(task_folder, branch_name, execute_base_head: nil) → writes worktree.yml
 ```
@@ -24,6 +27,7 @@ Class methods:
 
 ```ruby
 Hive::Worktree.read_pointer(task_folder) → Hash | nil
+Hive::Worktree.read_strict_pointer(task_folder, expected_root:, expected: nil) → Hash or raises
 Hive::Worktree.validate_pointer_path(path, expected_root) → expanded_path | raises
 Hive::Worktree.materialize_pr(repo_root:, pr_number:, path:, branch:) → {path:, branch:, head_sha:}
 ```
@@ -52,13 +56,54 @@ If passed explicitly, that's used. Otherwise:
 
 This handles re-attaching to a previously-created branch (e.g. after manually deleting a worktree) without losing history, while allowing dependency-stacked empty placeholders to be recreated on the intended prerequisite base.
 
+### Strict draft-PR creation and resume
+
+Managed stages that opt into `workspace: worktree` plus `handoff: draft_pr` do
+not use `create!`'s offline/local fallback. `fetch_strict_origin_base!` fetches
+an explicit `refs/heads/<base>` and returns the exact `origin/<base>` commit;
+missing origin, fetch failure, or a missing branch blocks before creating a
+task branch or worktree.
+
+`create_strict_origin!` refuses unfamiliar same-named branches, registered
+worktrees, and filesystem paths. It never deletes, resets, or attaches them.
+`validate_strict_resume!` is read-only and requires the saved path to remain
+registered, the slug-named branch to remain checked out, the local ref to equal
+worktree HEAD, and the recorded base OID to remain an ancestor. Any mismatch
+preserves the unfamiliar state and blocks.
+
+`Hive::Stages::AgentWorktree` preflights one GitHub.com origin fetch URL whose
+identity matches the single push URL, controller `gh` authentication, no
+dependency stacking, and a structured base branch. It atomically initializes
+the pointer and versioned `handoff.yml`, then requires their immutable
+repository, branch, base OID, and worktree identities to agree on every
+resume. The receipt's phase is independent monotonic recovery state, so an
+advanced handoff resumes without being compared to the pointer's initial
+`worktree_created` shape; `DraftPrReceipt.read(expected_identity:)` makes that
+narrow comparison explicit while ordinary `expected:` reads remain
+phase-sensitive. It then launches exactly one configured stage profile in the saved
+worktree, protects controller-owned task state across the spawn, parses
+task-root `fix-report.md`, and validates the reported decision against the
+actual branch, base ancestry, cleanliness, and descendant commit count. Remote
+push/PR reconciliation is a later controller phase; the agent report alone has
+no publication or terminal-marker authority.
+
+The prompt includes the controller-recorded repository, task branch, base
+branch, and base OID as trusted identity context. Across the spawn Hive hashes
+the task-owned control files plus the worktree `.git` pointer and repository,
+worktree, global, XDG, and configured Git config paths. Any change replaces
+untrusted report output with a private controller `ERROR
+reason=managed_agent_failed` marker. Every subsequent Git read, scan, cleanup,
+remote observation, and exact push uses `Hive::ManagedGit`, which ignores
+global/system config and disables hooks, fsmonitor, external diff/textconv,
+custom transports, and arbitrary credential/SSH helpers.
+
 ### `freshest_base(default_branch)` — origin-first base resolution
 
 New branches always start at `origin/<default>` (after a quick fetch) rather than local `<default>`. The reason is concrete: a contributor who hasn't pulled in a while has a stale local default — `git worktree add -b <slug> <local_default>` would silently produce a worktree missing every upstream commit, and reviewers in 5-review would surface those missing commits as phantom deletions (this was the agent-plugins-was-7-commits-behind incident). Auto-rebase (PR #69) handles drift in long-running worktrees; this handles drift at *creation* time.
 
 The helper:
 1. Checks `git config remote.origin.url` — if no `origin` is configured (early-stage repos, internal forks without upstream), return `default_branch` (local fallback). No fetch attempted.
-2. Runs `git fetch origin <default_branch>` with non-interactive env (`GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10"` — same shape as `GitOps#fetch_default_branch`) so credential prompts cannot hang worktree creation.
+2. Runs an explicit `+refs/heads/<default_branch>:refs/remotes/origin/<default_branch>` fetch. Fully qualifying the source prevents a same-named tag from shadowing the branch. The fetch uses non-interactive env (`GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10"`, plus HTTPS low-speed limits), a 60-second absolute deadline, a bounded 64 KiB capture per stream, and process-group TERM/KILL cleanup so a connected-but-stalled transport cannot hang worktree creation or patrol.
 3. On fetch failure (network down, auth missing, dead remote), warn to stderr (`[hive] worktree base: fetch origin <default> failed (<err>); branching from local <default>`) and return `default_branch` (fall back). The worktree is still created so the operator can keep working offline.
 4. On fetch success, return `"origin/#{default_branch}"`.
 
@@ -103,9 +148,20 @@ path: /home/asterio/Dev/<project>.worktrees/<slug>
 branch: <slug>
 created_at: 2026-04-25T10:23:45Z
 execute_base_head: <sha>   # optional; set by 4-execute for commit-baseline checks
+base_branch: main          # strict draft-PR path only
+base_oid: <sha>            # strict draft-PR path only
+repository: github.com/owner/name # strict draft-PR path only
 ```
 
-`read_pointer` parses with `YAML.safe_load` and validates the result is a Hash; raises `WorktreeError` otherwise.
+`read_pointer` parses with `YAML.safe_load` and validates the result is a Hash; raises `WorktreeError` otherwise. `Hive::Stages::Base.worktree_pointer_or_exit` owns the stricter stage-entry policy shared by open-PR and finalize: the pointer must contain `path`, that directory must still exist, and either failure preserves the established warning and exit status 1.
+
+The strict reader uses a bounded owner-side no-follow read and additionally
+rejects symlinks, oversized input, malformed or duplicate fields, out-of-root
+paths, invalid branch/OID/repository values, and
+contradictions with controller-expected state. The companion `handoff.yml`
+starts at schema `version: 1`, phase `worktree_created`; it contains only the
+canonical repository, base branch/OID, task branch, and worktree path—never
+credentials or agent output.
 
 `execute_base_head` records the worktree HEAD immediately after 4-execute creates the task branch. Execute completion compares later HEADs against this baseline, not just against the current spawn's starting HEAD, so a dirty-worktree pause can be recovered by cleaning the worktree without requiring a second empty commit.
 
@@ -123,15 +179,28 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 
 - `Stages::Execute#run_init_pass` — creates the worktree, writes the pointer, validates the prefix.
 - `Stages::Execute#run_iteration_pass` — re-reads the pointer, re-validates.
-- `Stages::OpenPr#run!` — reads pointer for the worktree path; `git push` runs there.
-- `Stages::Finalize#run!` — reads pointer to verify the final branch state before wrapping up the PR.
+- `Stages::OpenPr#run!` — uses the shared stage-entry pointer validator before `git push` runs in the worktree.
+- `Stages::Finalize#run!` — uses the same validator before verifying the final branch state.
 - `Stages::Done#run!` — reads pointer to print cleanup instructions.
 - `Hive::Commands::AdhocReview` — materializes a PR head at the normal worktree root before creating a synthetic `6-review` task.
 - `Hive::Babysitter::Worktree` — delegates PR-head materialization here while keeping babysitter-specific cleanup and fork policy around it.
 
 ## Tests
 
-- `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.
+- `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), explicit remote-head fetching despite a same-named tag, stalled-transport process-group timeout, empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.
+- `test/unit/draft_pr_receipt_test.rb` — versioned initialization, exact and
+  identity-only advanced-phase resume, duplicate/malformed/symlink rejection,
+  root containment, and per-field contradictory-state rejection.
+- `test/unit/stages/agent_test.rb` — draft-PR setup delegation, auth-first
+  failure, exact pointer/receipt creation, initial and advanced-phase resume,
+  incomplete-state preservation, exact-cwd one-agent execution,
+  protected-state enforcement, and runtime/report outcome separation.
+- `test/unit/managed_git_test.rb` — proves agent-selected fsmonitor and
+  `.gitattributes` external-diff helpers execute under ordinary Git but never
+  at the managed controller boundary; also pins environment and command
+  allowlists.
+- `test/unit/stages/agent_report_test.rb` — strict evidence grammar plus actual
+  branch, ancestry, cleanliness, and commit-count validation.
 
 ## Backlinks
 

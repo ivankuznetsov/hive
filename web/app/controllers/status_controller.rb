@@ -1,7 +1,14 @@
 class StatusController < ApplicationController
+  VIEWS = %w[board grid].freeze
+  VIEW_COOKIE = :hive_status_view
+
   def index
+    explicit_view = params[:view].to_s.presence_in(VIEWS)
+    saved_view = cookies.signed[VIEW_COOKIE].to_s.presence_in(VIEWS)
+    @status_view = explicit_view || saved_view || "board"
     @payload = StatusBroadcaster.snapshot
-    @projects = @payload.fetch("projects", [])
+    @projects = StatusBroadcaster.projects(@payload)
+    @board = Board.new(@projects) if @status_view == "board"
     @daemon_status = daemon_status
   end
 

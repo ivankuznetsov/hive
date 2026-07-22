@@ -1,5 +1,6 @@
 require "monitor"
 require "set"
+require "shellwords"
 require "hive/workflows/descriptor_parser"
 require "hive/workflows/loader"
 require "hive/workflows/registry"
@@ -38,10 +39,12 @@ module Hive
       # call `reset!` afterwards — `reset!` is why Commands::Workflow#call!
       # clears the overlay so a LATER (separate) invocation discovers the new
       # descriptor; `call!` does not re-resolve in-process.
-      def load!(project_root)
+      def load!(project_root, config: nil)
         LOCK.synchronize do
           project_root = File.expand_path(project_root)
-          return if @active_root == project_root
+          workflow_dir = config ? workflow_dir_for(project_root, config:) : workflow_dir_for(project_root)
+          fingerprint = Hive::Workflows::Loader.fingerprint(workflow_dir)
+          return if @active_root == project_root && @active_fingerprint == fingerprint
 
           # Clear the prior project's overlay BEFORE loading, and drop
           # @active_root to nil first. @active_root is re-set to the new root only
@@ -52,21 +55,31 @@ module Hive
           Hive::Workflows::Registry.reset_project_registrations!
           @active_root = nil
 
-          workflow_dir = workflow_dir_for(project_root)
-          workflows = loaded_workflows.fetch(project_root) do
-            loaded_workflows[project_root] = Hive::Workflows::Loader.load_dir(workflow_dir)
+          cached = loaded_workflows[project_root]
+          workflows = if cached && cached.fetch(:fingerprint) == fingerprint
+                        cached.fetch(:workflows)
+          else
+                        Hive::Workflows::Loader.load_dir(workflow_dir).tap do |loaded|
+                          loaded_workflows[project_root] = { fingerprint: fingerprint, workflows: loaded }
+                        end
           end
-          workflows.each_value { |workflow| register_descriptor(workflow, workflow_dir) }
+          workflows.each_value { |workflow| register_descriptor(workflow, workflow_dir, project_root) }
           # No trailing reset_union_cache! here: both register! and
           # reset_project_registrations! already invalidate the union cache, so an
           # explicit call would be dead in every path (and re-spell the
           # respond_to? guard the registry already encapsulates).
           @active_root = project_root
+          @active_fingerprint = fingerprint
         end
       end
 
-      def register_descriptor(workflow, workflow_dir)
+      def register_descriptor(workflow, workflow_dir, project_root)
         source_path = File.join(workflow_dir, "#{workflow.id}.yml")
+        if Hive::Workflows::Bench.legacy_project_descriptor?(workflow, source_path: source_path) &&
+           warned_skips.add?(source_path)
+          warn "hive: legacy bench workflow at #{source_path} remains active; " \
+               "run `hive init #{Shellwords.escape(project_root)} --workflow bench` to migrate to the built-in"
+        end
         Hive::Workflows::Registry.register!(workflow, project: true, source_path: source_path)
       rescue Hive::ConfigError => e
         # A descriptor whose id collides with a built-in (or another already-
@@ -112,6 +125,7 @@ module Hive
       def reset!
         LOCK.synchronize do
           @active_root = nil
+          @active_fingerprint = nil
           loaded_workflows.clear
           warned_skips.clear
           Hive::Workflows::Registry.reset_project_registrations!
@@ -135,8 +149,10 @@ module Hive
         @warned_skips ||= Set.new
       end
 
-      def workflow_dir_for(project_root)
-        Hive::Workflows::Loader.workflow_dir(project_root)
+      def workflow_dir_for(project_root, config: nil)
+        return Hive::Workflows::Loader.workflow_dir(project_root) unless config
+
+        Hive::Workflows::Loader.workflow_dir(project_root, config:)
       rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
         fallback = File.join(project_root, Hive::Config::DEFAULTS.fetch("hive_state_path"), "workflows")
         # Surface the fallback so a project with a CUSTOM hive_state_path whose

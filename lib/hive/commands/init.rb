@@ -16,7 +16,7 @@ require "hive/workflows/loader"
 require "hive/llm_wiki_bootstrap"
 require "hive/commands/workflow"
 require "hive/commands/init/prompts"
-require "hive/commands/doctor"
+require "hive/commands/setup_agents"
 require "hive/commands/daemon/service_installer"
 require "hive/invoked_binary"
 
@@ -50,6 +50,12 @@ module Hive
         raw/notes
       ].freeze
 
+      LLM_WIKI_SHARED_RUNTIME_FILES = %w[
+        post-commit-refresh.sh
+        compile-log.sh
+        config.json
+      ].freeze
+
       # Immutable value object (Data.define, matching the Workflow/Stage/
       # AdvanceVerb convention) carrying the resolved descriptor and the
       # provenance of the choice (:flag | :prompt | :implicit). The initialize
@@ -76,7 +82,10 @@ module Hive
 
       def initialize(project_path, force: false, json: false, prompts: nil,
                      workflow: nil, new_workflow: nil, refactor_patrol: nil,
-                     workflow_input: $stdin, workflow_output: $stderr)
+                     workflow_input: $stdin, workflow_output: $stderr,
+                     provisioning_input: $stdin, provisioning_output: $stdout,
+                     provisioning_error: $stderr, preflight_inspector: nil,
+                     setup_agents_factory: nil, agent_skill_preflight: true)
         @project_path = File.expand_path(project_path)
         @force = force
         @json = json
@@ -88,6 +97,17 @@ module Hive
         @refactor_patrol = refactor_patrol
         @workflow_input = workflow_input
         @workflow_output = workflow_output
+        @provisioning_input = provisioning_input
+        @provisioning_output = provisioning_output
+        @provisioning_error = provisioning_error
+        @preflight_inspector = preflight_inspector
+        unless [ true, false ].include?(agent_skill_preflight)
+          raise ArgumentError, "agent_skill_preflight must be true or false"
+        end
+        @agent_skill_preflight = agent_skill_preflight
+        @setup_agents_factory = setup_agents_factory || lambda do |**kwargs|
+          Hive::Commands::SetupAgents.new(**kwargs)
+        end
         # Optional Prompts instance for testability. Tests inject a
         # pre-fed StringIO-backed instance to drive the interactive flow
         # without touching $stdin. Production keeps this nil so the
@@ -154,7 +174,7 @@ module Hive
           print_summary(entry: entry, ops: ops, answers: answers, workflow: workflow_choice.descriptor.id)
         end
         register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
-        run_init_preflight!
+        run_init_preflight! if @agent_skill_preflight
       rescue Hive::Commands::Init::Prompts::Aborted => e
         # The interactive WORKFLOW prompt (resolve_workflow_choice, which runs
         # before collect_prompt_answers) aborts on closed stdin. Mirror
@@ -203,7 +223,7 @@ module Hive
           print_summary(entry: entry, ops: ops, answers: answers, workflow: id, scaffold_paths: paths)
         end
         register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
-        run_init_preflight!
+        run_init_preflight! if @agent_skill_preflight
       end
 
       def scaffold_descriptor_commit!(ops, id)
@@ -288,8 +308,11 @@ module Hive
         # `:implicit` re-init already raised AlreadyInitialized in `call` before
         # reaching here, so this path only sees :flag / :prompt — both express a
         # default-workflow intent and run the (idempotent) rebind.
-        install_builtin_workflow_runtime!(ops, workflow_choice.descriptor.id)
-        update_existing_default_workflow!(ops, workflow_choice.descriptor.id)
+        if workflow_choice.descriptor.id.to_s == "bench"
+          install_and_rebind_existing_bench!(ops, workflow_choice.descriptor.id)
+        else
+          update_existing_default_workflow!(ops, workflow_choice.descriptor.id)
+        end
         Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
         if @json
           emit_existing_json_summary(ops, workflow_choice: workflow_choice)
@@ -374,17 +397,54 @@ module Hive
         end
       end
 
-      def restore_config_snapshot(cfg_path, before)
-        if before == :absent
-          FileUtils.rm_f(cfg_path)
-        else
-          File.binwrite(cfg_path, before)
+      # Legacy bench migration changes three pieces of durable state: the
+      # project-authored descriptor archive, the packaged runtime, and the
+      # default_workflow binding. Keep them under Bench's single commit lock and
+      # single scoped commit so a rejected commit or Ctrl-C restores all three.
+      def install_and_rebind_existing_bench!(ops, workflow_id)
+        cfg_path = File.join(ops.hive_state_path, "config.yml")
+        config_before = nil
+        config_mutated = false
+        next_value = workflow_id.to_s
+        before_commit = lambda do
+          current, corrupt = current_default_workflow_with_status(ops)
+          next if current == next_value && !corrupt
+
+          warn_on_fieldless_tasks_rebinding(ops, from: current, to: next_value)
+          Thread.handle_interrupt(Interrupt => :never) do
+            config_before = File.exist?(cfg_path) ? File.binread(cfg_path) : :absent
+            config_mutated = true
+            write_default_workflow!(cfg_path, next_value)
+          end
         end
+        rollback = lambda do
+          restore_config_snapshot!(cfg_path, config_before) if config_mutated
+        end
+
+        install_builtin_workflow_runtime!(
+          ops,
+          workflow_id,
+          additional_pathspecs: -> { config_mutated ? [ "config.yml" ] : [] },
+          before_commit: before_commit,
+          rollback: rollback
+        )
+      end
+
+      def restore_config_snapshot(cfg_path, before)
+        restore_config_snapshot!(cfg_path, before)
       rescue StandardError => e
         # A failed restore must not mask the original commit error; surface it
         # and let the original (re-raised by the caller) propagate.
         write_warn("hive: could not restore config.yml after a failed default_workflow commit " \
                    "(#{e.class}: #{e.message}); re-run `hive init --workflow` to retry")
+      end
+
+      def restore_config_snapshot!(cfg_path, before)
+        if before == :absent
+          FileUtils.rm_f(cfg_path)
+        else
+          atomic_write(cfg_path, before)
+        end
       end
 
       def current_default_workflow(ops)
@@ -520,10 +580,14 @@ module Hive
         end
       end
 
-      def install_builtin_workflow_runtime!(ops, workflow_id)
+      def install_builtin_workflow_runtime!(ops, workflow_id, **options)
         return unless workflow_id.to_s == "bench"
 
-        Hive::Workflows::Bench.install_runtime!(ops)
+        Hive::Workflows::Bench.install_runtime!(ops, **options)
+        # A legacy project descriptor may have been archived by install_runtime!.
+        # Drop the process-local overlay/cache so later same-process task reads
+        # resolve the newly installed built-in instead of the now-absent file.
+        Hive::Workflows::Project.reset!
       end
 
       def rollback_partial_init(ops, side_effect_snapshot: nil)
@@ -584,11 +648,18 @@ module Hive
         project_paths = (INIT_MAIN_CHECKOUT_PATHS + INIT_MAIN_CHECKOUT_DIRS).map do |path|
           File.join(@project_path, path)
         end
-        project_paths + [
-          File.join(@project_path, ".git", "hooks", "post-commit"),
+        common_dir = Hive::LlmWikiBootstrap.git_common_dir(@project_path)
+        shared_dir = File.join(common_dir, "llm-wiki")
+        shared_paths = [
+          File.join(common_dir, "hooks", "post-commit"),
+          *LLM_WIKI_SHARED_RUNTIME_FILES.map { |name| File.join(shared_dir, name) },
+          shared_dir
+        ]
+
+        (project_paths + shared_paths + [
           *llm_wiki_scheduler_paths,
           Hive::Config.global_config_path
-        ]
+        ]).uniq
       end
 
       def llm_wiki_scheduler_paths
@@ -710,10 +781,10 @@ module Hive
         "#{worktree} && #{branch}"
       end
 
-      # Non-fatal skill preflight: after init succeeds, run the doctor
-      # against the freshly-written config and emit stderr warnings for
-      # any `:missing` rows. Init's exit code is unaffected — install
-      # gaps surface but never block bootstrap.
+      # Non-transactional post-init aid. The shared inspector diagnoses the
+      # freshly written effective config. A TTY may delegate accepted repair
+      # to SetupAgents with recorded consent; JSON/non-TTY flows only report
+      # remediation, and setup failures never roll back project creation.
       #
       # Rescue scope: `StandardError` for verifier bugs (with a
       # bug-report hint in the warning so silent swallow is mitigated).
@@ -722,33 +793,66 @@ module Hive
       # `SystemExit` propagate (Ctrl-C honored as user intent).
       def run_init_preflight!
         cfg = Hive::Config.load(@project_path)
-        doctor = Hive::Commands::Doctor.new(
+        inspector = @preflight_inspector || Hive::AgentSkills::Inspector.new(
           config: cfg,
-          project_root: @project_path,
-          output: StringIO.new
+          project_root: @project_path
         )
-        exit_code = doctor.call
-        if exit_code == Hive::Commands::Doctor::EXIT_CONFIG_ERROR
-          # Doctor caught a config issue internally; @rows is nil. Surface a
-          # pointer rather than going silent.
-          write_warn("hive: doctor pre-flight — config issue detected; run `hive doctor` for details")
+        rows = inspector.inspect
+        actionable = rows.select do |row|
+          row.managed && %w[missing stale incompatible conflicting].include?(row.health)
+        end
+        return if actionable.empty?
+
+        unless interactive_provisioning?
+          emit_preflight_warnings(actionable)
           return
         end
 
-        missing = Array(doctor.rows).select { |r| r[:status] == "missing" }
-        return if missing.empty?
+        @provisioning_error.print "Provision unresolved agent skills now? [y/N]: "
+        @provisioning_error.flush
+        answer = @provisioning_input.gets.to_s.strip.downcase
+        unless %w[y yes].include?(answer)
+          emit_preflight_warnings(actionable)
+          return
+        end
 
-        emit_preflight_warnings(missing)
+        setup = @setup_agents_factory.call(
+          config: cfg,
+          project_root: @project_path,
+          consent_provenance: "init_interactive",
+          input: @provisioning_input,
+          output: @provisioning_output,
+          error: @provisioning_error
+        )
+        exit_code = setup.call
+        return if exit_code.zero?
+
+        @provisioning_error.puts "hive: optional agent skill setup finished with exit #{exit_code}; " \
+                                 "the project remains initialized. Re-run `hive setup-agents`."
+      rescue Hive::ConfigError => e
+        @provisioning_error.puts "hive: doctor pre-flight — config issue detected (#{e.message}); " \
+                                 "run `hive doctor` for details"
       rescue StandardError => e
         emit_preflight_bug(e)
       end
 
-      def emit_preflight_warnings(missing)
-        write_warn("hive: doctor pre-flight — found #{missing.size} issue(s):")
-        missing.each do |r|
-          write_warn("  [#{r[:label]}/#{r[:agent]}] #{r[:message]}")
+      def interactive_provisioning?
+        return false if @json
+        @provisioning_input.respond_to?(:tty?) && @provisioning_input.tty?
+      rescue IOError
+        false
+      end
+
+      def emit_preflight_warnings(rows)
+        @provisioning_error.puts "hive: doctor pre-flight — found #{rows.size} issue(s):"
+        rows.each do |row|
+          label = row.surfaces.join(",")
+          @provisioning_error.puts "  [#{label}/#{row.agent}] #{row.explanation}"
+          @provisioning_error.puts "    repair: #{row.remediation}" if row.remediation
         end
-        write_warn("  See `hive doctor` for details.")
+        @provisioning_error.puts "  See `hive doctor` for details or run `hive setup-agents`."
+      rescue Errno::EPIPE
+        nil
       end
 
       def emit_preflight_bug(error)

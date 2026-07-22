@@ -71,25 +71,28 @@ module Hive
         end
 
         def run_agent!
-          profile = Hive::Stages::Base.stage_profile(@cfg, @stage.name, explicit_agent: @reviewer.agent || @stage.agent)
-          scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
+          identity = launch_identity
+          profile = Hive::Stages::Base.stage_profile(@cfg, @stage.name, explicit_agent: identity.fetch(:agent))
+          actor_prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
             @cfg,
             @stage.name,
             @task,
             profile,
+            prompt: prompt(profile),
+            managed_slot: "stages.#{@stage.name}.reviewers.#{@reviewer.name}",
             **permission_kwargs
           )
           resource_limits = Hive::Stages::Base.stage_resource_limits(@cfg, @stage)
           result = Hive::Stages::Base.spawn_agent(
             @task,
-            prompt: prompt(profile),
+            prompt: actor_prompt,
             add_dirs: scope.fetch(:add_dirs),
             cwd: @task.folder,
             **resource_limits,
             log_label: "#{@stage.name}-#{@reviewer.name}",
             profile: profile,
-            model: @reviewer.model || @stage.model,
-            effort: @reviewer.effort || @stage.effort,
+            model: identity[:model],
+            effort: identity[:effort],
             expected_output: output_path,
             status_mode: :output_file_exists,
             cfg: @cfg,
@@ -99,6 +102,22 @@ module Hive
 
           raise Hive::StageError,
                 "council reviewer #{@reviewer.name} failed: #{result[:error_message].to_s[0, 200]}"
+        end
+
+        def launch_identity
+          unless @task.respond_to?(:managed_workflow?) && @task.managed_workflow?
+            return {
+              agent: @reviewer.agent || @stage.agent,
+              model: @reviewer.model || @stage.model,
+              effort: @reviewer.effort || @stage.effort
+            }
+          end
+
+          if @reviewer.agent.to_s.empty?
+            raise Hive::ConfigError,
+                  "managed council reviewer #{@reviewer.name} is missing its mapped agent"
+          end
+          { agent: @reviewer.agent, model: @reviewer.model, effort: @reviewer.effort }
         end
 
         def prompt(profile)

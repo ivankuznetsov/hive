@@ -16,7 +16,7 @@ class SessionsController < ApplicationController
   def new
     return redirect_to root_path if current_login
 
-    # Surface a misconfigured box on the page itself — a sign-in button that
+    # Surface a misconfigured instance on the page itself — a sign-in button that
     # errors only after the click is a broken first-run.
     @configured = github_auth.configured?
     @claimable = @configured && github_auth.claimable?
@@ -80,7 +80,7 @@ class SessionsController < ApplicationController
 
   def destroy
     reset_session
-    redirect_to login_path
+    redirect_to local_web_mode? ? root_path : login_path
   end
 
   # Dev/test auth seam — the route only exists in local envs, and the action
@@ -98,10 +98,12 @@ class SessionsController < ApplicationController
 
   def admit!(result)
     login = result[:login]
-    claim_ownership!(login) if github_auth.claimable?
-    unless github_auth.owner?(login)
-      return render "errors/show", status: :forbidden,
-                    locals: { heading: "Not allowed", message: "#{login} is not the configured owner." }
+    unless local_loopback_request?
+      claim_ownership!(login) if github_auth.claimable?
+      unless github_auth.owner?(login)
+        return render "errors/show", status: :forbidden,
+                      locals: { heading: "Not allowed", message: "#{login} is not the configured owner." }
+      end
     end
 
     # Rotate the session at the auth boundary; carry the grant into the
@@ -112,11 +114,11 @@ class SessionsController < ApplicationController
     redirect_to root_path
   end
 
-  # First successful login on an ownerless box claims it (the install path
+  # First successful login on an ownerless Hive web instance claims it (the install path
   # has no config-editing step). The re-check inside the config lock closes
   # the race where two browsers finish the device flow simultaneously —
   # exactly one login wins; the loser falls through to the owner? 403.
-  # Claiming is loud: it is the box's single most security-relevant event.
+  # Claiming is loud: it is Hive web's single most security-relevant event.
   def claim_ownership!(login)
     claimed = Hive::Config.update_global_config! do |data|
       web = (data["web"] ||= {})
@@ -128,7 +130,7 @@ class SessionsController < ApplicationController
         false
       end
     end
-    Rails.logger.warn("hivebox CLAIMED by GitHub user #{login.inspect} — web.github.owner written") if claimed
+    Rails.logger.warn("Hive web CLAIMED by GitHub user #{login.inspect} — web.github.owner written") if claimed
     @github_auth = nil # reload so owner? sees the claim
   end
 

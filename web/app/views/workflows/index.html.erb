@@ -1,0 +1,112 @@
+<% content_for(:title, "#{web_product_name} — workflows") %>
+<h1>Workflows</h1>
+<p class="muted">Choose how each project turns an idea into a deliverable. Built-ins, project-authored workflows, and reviewed Honeycomb packages all use Hive's real workflow registry.</p>
+
+<% if @projects.empty? %>
+  <div class="empty-state">
+    <p>Add a repository before managing its workflows.</p>
+    <p><%= link_to "Add a repository", repos_path %></p>
+  </div>
+<% else %>
+  <%= form_with url: workflows_path, method: :get, class: "repo-form workflow-project-form" do |f| %>
+    <%= select_tag :project,
+          options_for_select(@projects.map { |project| [project.name, project.name] },
+                             @selected_project&.name),
+          include_blank: @projects.many? ? "Choose a project…" : false,
+          required: true, aria: { label: "Project workflows" } %>
+    <%= f.submit "View workflows", data: { turbo_submits_with: "Loading…" } %>
+  <% end %>
+<% end %>
+
+<% if @selected_project %>
+  <% if @workflow_change %>
+    <%= render "workflows/preview",
+          change: @workflow_change, project: @selected_project %>
+  <% end %>
+
+  <section aria-labelledby="project-workflows-heading">
+    <h2 id="project-workflows-heading"><%= @selected_project.name %> workflows</h2>
+    <div class="workflow-list">
+      <% @workflows.each do |workflow| %>
+        <article class="workflow-row" data-workflow-origin="<%= workflow.origin %>"
+                 data-workflow-selection="<%= workflow.selection %>">
+          <div>
+            <div class="workflow-title">
+              <strong><%= workflow.name %></strong>
+              <span class="tag"><%= workflow.origin.humanize %></span>
+              <% if workflow.default? %><span class="tag tag-registered">default</span><% end %>
+              <% if workflow.selection %><span class="tag tag-registered"><%= workflow.selection %></span><% end %>
+              <% if workflow.integrity %>
+                <span class="tag <%= "tag-health-conflicting" unless workflow.verified? %>"><%= workflow.integrity %></span>
+              <% end %>
+            </div>
+            <p class="workflow-meta">
+              <% if workflow.version %>version <%= workflow.version %><% end %>
+              <% if workflow.source_commit %>
+                <span title="<%= workflow.source_commit %>">commit <%= workflow.source_commit.to_s[0, 10] %></span>
+              <% end %>
+              <% if workflow.catalog_visibility %><span><%= workflow.catalog_visibility.humanize %></span><% end %>
+            </p>
+          </div>
+          <% if workflow.managed? && workflow.selected? && workflow.verified? %>
+            <div class="workflow-actions">
+              <%= button_to "Check update", preview_workflow_update_path,
+                    params: { project: @selected_project.name, name: workflow.name },
+                    class: "btn-ghost btn-sm", data: { turbo_submits_with: "Checking…" },
+                    form: { data: { turbo: false } } %>
+              <%= button_to "Review removal", preview_workflow_remove_path,
+                    params: { project: @selected_project.name, name: workflow.name },
+                    class: "btn-ghost btn-sm", data: { turbo_submits_with: "Reviewing…" },
+                    form: { data: { turbo: false } } %>
+            </div>
+          <% elsif workflow.managed? && workflow.selected? %>
+            <span class="faint">Repair the malformed or tampered selection from the project checkout before changing it.</span>
+          <% end %>
+        </article>
+      <% end %>
+    </div>
+    <p><%= link_to "Choose the default workflow", new_repo_path(project: @selected_project.name), class: "btn btn-ghost btn-sm" %></p>
+  </section>
+
+  <div class="workflow-management-grid">
+    <section class="card workflow-management-card" aria-labelledby="install-workflow-heading">
+      <h2 id="install-workflow-heading">Install from Honeycomb</h2>
+      <p class="muted">Preview verifies the immutable package and shows its exact permissions before anything changes.</p>
+      <%# Preview returns a review PAGE (HTTP 200), not a mutation redirect.
+          Native navigation is intentional: Turbo requires successful form
+          submissions to redirect and would discard this rendered disclosure. %>
+      <%= form_with url: preview_workflow_install_path, class: "form-grid", data: { turbo: false } do |f| %>
+        <%= hidden_field_tag :project, @selected_project.name %>
+        <div class="form-row">
+          <%= f.label :source, "Reviewed package" %>
+          <%= f.text_field :source, required: true, placeholder: "honeycomb/workflow-name@1.0.0" %>
+        </div>
+        <p><%= f.submit "Preview install", data: { turbo_submits_with: "Verifying…" } %></p>
+      <% end %>
+    </section>
+
+    <section class="card workflow-management-card" aria-labelledby="author-workflow-heading">
+      <h2 id="author-workflow-heading">Create for this project</h2>
+      <p class="muted">Scaffold an owner-authored descriptor and editable stage instructions on <code>hive/state</code>.</p>
+      <%= form_with url: create_workflow_path, class: "form-grid" do |f| %>
+        <%= hidden_field_tag :project, @selected_project.name %>
+        <div class="form-row">
+          <%= f.label :id, "Workflow ID" %>
+          <%= f.text_field :id, required: true, pattern: "[a-z0-9][a-z0-9-]*", placeholder: "release-notes" %>
+        </div>
+        <div class="form-row">
+          <%= f.label :template, "Starting template" %>
+          <%= f.select :template,
+                options_for_select(@templates, Hive::Commands::Workflow::DEFAULT_TEMPLATE) %>
+        </div>
+        <p><%= f.submit "Create workflow", data: { turbo_submits_with: "Creating…" } %></p>
+      <% end %>
+      <p class="faint">After creation, edit the descriptor and stage instructions under the project's Hive state <code>workflows/</code> directory, then choose it as the project default or select it per idea.</p>
+    </section>
+  </div>
+
+  <details class="setup-guide workflow-publish-note">
+    <summary>Publishing to Honeycomb</summary>
+    <p>The current <code>hive workflow publish</code> command still produces the legacy submission layout, while the live Honeycomb catalog requires v2 packages. Hive web does not offer a button that would open an unusable registry PR; author and test the workflow here, then publish after the v2 publisher migration lands.</p>
+  </details>
+<% end %>

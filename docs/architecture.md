@@ -24,6 +24,15 @@ Hive is a Ruby CLI around filesystem state, agent subprocesses, and git worktree
 
 The project checkout holds code. `.hive-state/` holds durable Hive state on the separate `hive/state` branch. The feature worktree holds code changes for one task branch.
 
+Managed Honeycomb workflows add immutable package generations below
+`.hive-state/workflows/<name>/versions/<source-commit>/`. A canonical
+`honeycomb.lock.json` is the only activation pointer. Lifecycle changes share a
+workflow mutation lock and durable transaction journal; package placement is
+inert until the pointer is atomically replaced and the scoped state commit
+succeeds. Task metadata pins the source commit plus manifest digest, so a task
+resolves its exact generation without registering duplicate workflow ids in the
+process-wide Loader overlay.
+
 ## Storage Layout
 
 `hive init .` creates the per-project storage tree:
@@ -49,14 +58,49 @@ Each stage has one state file: `idea.md` (1-inbox), `brainstorm.md` (2-brainstor
 
 ## Local Web Runtime
 
-The local Rails web UI is a managed runtime dependency, not part of the CLI
-gem payload. `hive web` resolves `HIVEBOX_WEB_APP_DIR`, then
-`${XDG_DATA_HOME}/hive/web`, then a source checkout `web/`. `hive setup` and
-`hive web` can bootstrap the managed app from the versioned web release bundle
-and run its Rails bundle install. The web storage directory remains under
+Hive web is the shared Rails application and a managed runtime dependency. The
+CLI gem packages the gem metadata needed for an installed package root to be a
+valid Bundler path dependency; the Rails source itself remains in the managed
+web bundle. `hive web` resolves `HIVE_WEB_APP_DIR`, then
+`${XDG_DATA_HOME}/hive/web`, then a source checkout `web/`. Released bundles
+are authenticated through the release's cosign-signed checksum manifest before
+extraction or execution. A custom remote `HIVE_WEB_BUNDLE_URL` also requires
+an exact `HIVE_WEB_BUNDLE_SHA256`; local bundle directories remain a
+development-only input. `hive setup` and `hive web` prepare the managed app in
+a staging directory, install its Rails bundle, precompile production CSS and
+JavaScript, and verify the required entrypoints plus every manifest asset
+before activating it. A current bundle with missing assets is repaired on the
+next setup or launch. The deprecated `HIVEBOX_WEB_APP_DIR` alias remains
+accepted through the next major release with migration guidance. The web
+storage directory remains under
 `${XDG_STATE_HOME}/hive/web-storage`, so the TUI, daemon, and web UI operate
 on the same local registry, project `.hive-state/` directories, and task
-folders.
+folders. Local loopback requests use the `hive` identity and do not require
+GitHub; connecting GitHub only enables repository listing and cloning. Because
+the trust check uses the actual socket peer, a reverse proxy that connects over
+localhost (including Tailscale Serve) retains local mode even when it forwards
+the remote client's address. That proxy becomes part of the access boundary
+and must authenticate or restrict its clients; an unrestricted localhost
+forwarder exposes the no-auth UI. Hivebox is the separate owner-gated container
+deployment of the same Rails application.
+
+Normal `hive setup` installs, enables, starts, and probes the per-user service
+on supported Linux/macOS while preserving drifted units. Bare `hive web` is the
+blocking foreground path. The default URL is loopback-only and setup never
+creates exposure; Windows uses WSL with systemd or the Hivebox container path.
+
+The canonical shared-app environment settings are `HIVE_WEB_APP_DIR`,
+`HIVE_WEB_ORIGIN`, `HIVE_WEB_STORAGE_DIR`, `HIVE_WEB_LOCAL_LOOPBACK`,
+`HIVE_WEB_DIFF_TIMEOUT_SEC`, and `HIVE_WEB_CLONE_TIMEOUT_SEC`. Their named
+legacy aliases use the same suffix under `HIVEBOX_*` (with
+`HIVEBOX_WEB_APP_DIR` for the app directory) through the next major release.
+Blank values are unset; a canonical value wins over its alias, including when
+the canonical value is invalid, and a migration warning names the replacement.
+Warnings appear on stderr, in setup/web JSON, and as `kind: warning` doctor
+rows. Container-only variables such as `HIVEBOX_IMAGE`, `HIVEBOX_NAME`,
+`HIVEBOX_BIND`, `HIVEBOX_PORT`, `HIVEBOX_DATA`, `HIVEBOX_REPOS_DIR`,
+`HIVEBOX_SESSION_SECRET`, and `HIVEBOX_SUPERVISOR_PID` remain canonical and do
+not warn.
 
 ## Agents
 
@@ -64,27 +108,47 @@ Hive has built-in agent profiles for `claude`, `codex`, `pi`, and `grok`. A prof
 
 Default new-project setup uses `claude` for planning, `codex` for execute, a normal reviewer set that can include Claude, Codex, and PR review toolkit agents, and a narrower patrol PR reviewer set that defaults to Codex only. The profile details live in [wiki/modules/agent_profile.md](../wiki/modules/agent_profile.md).
 
-## Required Skills Per Stage
+## Managed Agent Skills
 
-Hive's prompts invoke skills inside the chosen agent. `hive doctor` checks the configured rows and reports missing installs.
+[`config/agent-skills.yml`](../config/agent-skills.yml) is the authoritative,
+packaged mapping from stable Hive capabilities to agent-specific package
+sources, compatible versions, invocations, probes, prerequisites, and aliases.
+The initial managed set is:
 
-| Stage | Default invocation | Install for claude | Install for codex |
-|---|---|---|---|
-| `2-brainstorm` | `/ce-brainstorm` | `claude plugin install <every-marketplace>` (or any marketplace shipping `compound-engineering`) | `codex plugin install <compound-engineering-marketplace>` |
-| `3-plan` | `/plan` | a user-level slash command at `~/.claude/commands/plan.md` (e.g. ship via the [llm-wiki plugin](https://github.com/ivankuznetsov/agent-plugins) or write one inline) | a skill at `~/.codex/skills/plan/SKILL.md` (codex has no user-level slash-command directory) |
+| Package | Capabilities | Agents |
+|---|---|---|
+| `compound-engineering@compound-engineering-plugin` | `ce-brainstorm`, `ce-code-review`, `ce-test-browser` | Claude, Codex, Pi |
+| `llm-wiki` | `wiki-plan` | Claude, Codex, Pi |
+| `pr-review-toolkit@claude-plugins-official` | `pr-review-toolkit:review-pr` | Claude |
 
-| Reviewer | Default skill | Agent | Install target |
-|---|---|---|---|
-| `claude-ce-code-review` | `/ce-code-review` | `claude` | `~/.claude/skills/ce-code-review/SKILL.md` or a Claude plugin that ships `ce-code-review`; legacy `skill: compound-engineering:ce-code-review` config is normalized to `/ce-code-review` |
-| `codex-ce-code-review` | `/ce-code-review` | `codex` | `~/.codex/skills/ce-code-review/SKILL.md` (or via `codex plugin install` for `compound-engineering`) |
-| `pr-review-toolkit` | `/pr-review-toolkit:review-pr` | `claude` | `claude plugin install <pr-review-toolkit-marketplace>` |
+`hive doctor` combines bounded native inventory with the same filesystem
+resolution rules stages use. It is read-only and reports `healthy`, `missing`,
+`stale`, `incompatible`, `conflicting`, or `unavailable`. `hive setup-agents`
+turns only missing/stale managed rows into one immutable operation plan,
+obtains consent once, revalidates ownership/state, uses supported native CLIs,
+and then runs the shared inspector again. Package work is deduplicated while
+capability health remains per row. Narrow filters recursively retain declared
+package prerequisites; an uninspectable or unhealthy prerequisite blocks its
+dependent operation. Native commands run in owned process groups that are
+terminated and reaped before a timeout is reported.
+
+Hive owns a Claude `/plan` alias only when absent or already Hive-owned. A
+user-authored alias, higher-precedence shadow skill, or mismatched Codex
+marketplace/plugin owner is a conflict: setup leaves it byte-identical and
+prints manual guidance. Custom workflow skills remain unmanaged.
 
 Run:
 
 ```bash
 hive doctor
-hive doctor --json
+hive setup-agents             # one aggregate preview and prompt
+hive setup-agents --yes --json
 ```
+
+To extend a built-in default, add its capability and per-agent contracts to
+the manifest, expose it through the runtime default constants/template, and
+update the manifest-coverage plus live-resolution tests. The coverage test
+fails when a built-in coding default drifts beyond the manifest.
 
 ## Config Schema
 
@@ -111,6 +175,9 @@ plan:
   agent: claude
 execute:
   agent: codex
+conditions:
+  authority: markers
+  stages: {}
 open_pr:
   agent: claude
 finalize:
@@ -195,6 +262,12 @@ rebase:
   enabled: true
   conflict_resolution_timeout_sec: 2700
 ```
+
+Generation-scoped condition authority is intentionally staged. Existing
+projects stay on `markers`; operators may set only `stages.4-execute` to
+`shadow`, then to `conditions` after the parity bar is met. See the
+[condition rollout runbook](condition-rollout.md). Other stages remain
+marker-authoritative in this increment.
 
 `hive init` writes the full per-project YAML from `templates/project_config.yml.erb`, including the recommended `review.reviewers` set and the narrower `patrol.review.reviewers` set. Workflow verbs `hive archive` and `hive migrate` do not take config blocks; they read project state and operate on stage folders.
 

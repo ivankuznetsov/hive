@@ -3,11 +3,11 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-07-13
+updated: 2026-07-21
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. The flagship `coding` workflow is the nine-stage idea-to-PR pipeline, while the built-in `content` and `bench` workflows and project-authored descriptors run through the same generic workflow/data layer. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks and can run language-neutral architecture patrol after merges, `hive tui` renders a terminal dashboard, `hive bot` turns human-input gates into Telegram interactions, and `hive web` provides the hivebox browser surface. Workflow state has no application database; durable task/project state is the filesystem plus global YAML config, while token-usage metrics use a small SQLite store.
+**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. Built-in and project-authored workflows share one workflow/data layer. Accepted task-stage agents run as durable attempts under detached supervisor wrappers; CLI, bot, web, and daemon surfaces attach or observe instead of owning agent lifetime. Workflow and attempt state are filesystem records plus global YAML config, while token-usage metrics use a small SQLite store.
 
 ## Layer cake
 
@@ -33,20 +33,24 @@ Master is never modified by Hive (apart from one initial `chore: ignore .hive-st
 
 ## Process model
 
-`hive run` is synchronous, single-process, single-task:
+Public task commands admit through `Hive::Attempts::Dispatcher`. Admission
+creates one `launching` lease for the task generation, then a short launcher
+creates a detached POSIX session. Its supervisor claims the lease, wins first
+heartbeat, and only then starts the existing Hive command in a worker group.
+That internal command still takes the task lock, runs auto-rebase/stage/provider
+logic, commits state under the project lock, and writes normal markers.
 
-1. Parent acquires per-task lock (`<task>/.lock`, EXCL with stale-PID detection).
-2. Marker-owned spawns write `AGENT_WORKING`; reviewer-style sub-spawns leave the orchestrator's marker in place.
-3. Parent spawns the resolved `AgentProfile` command via `Process.spawn(..., pgroup: true, out:/err: pipe)`.
-4. Parent traps SIGINT/SIGTERM to forward `kill -TERM -<pgid>` to the child group.
-5. Parent's reader thread streams stdout/stderr into `<.hive-state>/logs/<slug>/<label>-<ts>.log` and keeps a bounded `final_message` tail.
-6. Parent polls `Process.wait(pid, WNOHANG)` until completion or timeout. On timeout, sends TERM, waits 3s grace, escalates to KILL.
-7. Exit handling first checks `Hive::AgentLimit` for provider account/rate/quota exhaustion in failed or timed-out output; marker-owned spawns become `ERROR reason=limits_reached` before generic timeout/exit-code markers.
-8. The selected status-detection mode derives the result from the state-file marker, exit code, or expected-output file; runner returns `{commit:, status:}`.
-9. Parent acquires per-project commit lock (`<.hive-state>/.commit-lock` flock) and runs `git add . && git commit` in the hive-state worktree.
-10. Parent prints the marker + a `next:` hint and releases the task lock.
+The wrapper owns heartbeat, checkpoints, ordered output frames, timeout,
+worker identity, exit capture, and terminal receipt. The foreground CLI is a
+read-only client: Ctrl-C/caller death detaches without signalling the attempt.
+Bot, web, daemon auto-advance, and recovery share generation admission. The
+daemon adopts wrappers by PID/start fingerprint without `wait2`;
+`ChildSupervisor` remains for non-task ancillary work. See
+[[modules/attempts]].
 
-Concurrency: any number of `hive run` processes on **different** tasks can proceed in parallel; the per-project commit lock serialises only the brief `git commit` window.
+Concurrency is reconstructed from live/reserved leases after restart. The
+project commit lock still serialises brief state commits, and a generation
+lock prevents duplicate task-stage ownership.
 
 ## Scheduled architecture-patrol boundary
 
@@ -67,17 +71,27 @@ without treating tests, docs, assets, generated files, or chunk boundaries as
 architectural coupling. Fixture/test manifests never become review slices. A
 mapper failure is retained as an incomplete-measurement diagnostic, so fallback
 zero signals cannot be mistaken for evidence that a component has no leverage.
-The reviewer sees only affected feature slices from the
-merge manifest, runs under provider-specific read-only enforcement, and must
-leave the registered checkout byte-for-byte unchanged. A strict run-wide thesis
+The reviewer starts from affected feature slices from the merge manifest, but a
+refactoring thesis may span mapped features when it removes duplicated ownership
+or an unstable dependency direction. Cross-feature scope is recorded rather than
+treated as a risk by itself. The prompt retains a fixed-size list of mapped
+dependency, peer-entrypoint, and test paths so the agent can inspect the relevant
+neighboring boundary without broad repository search. The reviewer runs under provider-specific read-only
+enforcement and must leave the registered checkout byte-for-byte unchanged. A strict run-wide thesis
 budget leaves later slices resumable, and every cited file/line/snippet is
 verified against the pinned checkout's real bytes before a thesis is admissible.
 The mutation boundary is intentionally narrower. Each accepted thesis is
-processed in an isolated worktree only when a certified public-contract guard,
-feature-boundary checks, configured validation, secret scanning, dependency
-and patch caps, and the independently enabled `auto_fix` policy all pass.
-Otherwise an independently enabled issue policy may publish one deduplicated
-strategic issue, or the action is durably suppressed. Architecture patrol never
+processed in an isolated worktree only when certified public-contract guards,
+root confinement, `.hive-state` control-plane protection, secret scanning,
+dependency guards, applicable
+configured validation (or the built-in diff check for inert documentation
+formats), and the
+independently enabled `auto_fix` policy all pass. Cross-feature patches remain
+eligible regardless of file count or diff size, and every changed path
+participates in trunk-overlap reanalysis. Contract-changing,
+dependency-changing, or otherwise high-risk work may instead become one
+deduplicated strategic issue when issue filing is independently enabled.
+Architecture patrol never
 merges its own PRs; an OPEN or MERGED publication succeeds only after entering
 the normal `6-review` flow.
 
@@ -293,22 +307,52 @@ sends the next question. The earlier "Codex draft-assist" flow — where
 Path A spawned Codex to draft an answer with write-draft/edit/cancel
 buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
-## Hivebox web pipeline
+## Hive Web and Hivebox pipeline
 
-`hive web` serves a vanilla Rails 8 + Turbo app from `web/` (ADR-037; the
-original Sinatra/Puma + SSE tier is gone). Auth is the GitHub device flow
-(ADR-036): a configured `web.github.owner` gates entry, while an ownerless
-fresh box is claimable and the first successful login writes
+`hive web` serves the shared vanilla Rails 8 + Turbo app from `web/` (ADR-037;
+the original Sinatra/Puma + SSE tier is gone). Native Hive web is the default
+browser control plane over the same registry and workflow state as the CLI/TUI;
+loopback requests use the `hive` identity without mandatory sign-in, including
+through a local reverse proxy whose socket peer is loopback. GitHub is an
+optional connection for repository listing and cloning and does not claim
+ownership. Hivebox is the distinct owner-gated container distribution. Its
+auth is the GitHub device flow (ADR-036): a configured `web.github.owner` gates
+entry, while an ownerless fresh box is claimable and the first successful login
+writes
 `web.github.owner` under the global config lock. Owner-gated requests re-check
 the current owner on every request and evict old sessions when
 `web.github.owner` changes, so a repo-scoped session token cannot survive an
-ownership rotation. Reads render
+ownership rotation. Managed local installs stage `bundle install` plus a
+production asset precompile and verify the CSS/JavaScript manifest before the
+atomic bundle swap; same-version installs with missing assets are repaired.
+Reads render
 `Commands::Status#json_payload` snapshots; live updates flow over Turbo
 Streams, with production Action Cable accepting same-origin-as-host and
-`HIVEBOX_ORIGIN` only as an extra allow for split-origin deployments:
+`HIVE_WEB_ORIGIN` only as an extra allow for split-origin deployments:
 `StatusBroadcaster` (self-healing subscriber loop) bridges
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
-broadcast of the projects frame over solid_cable. Mutations reuse gem
+broadcast morph refresh plus targeted project-rail/composer updates over
+solid_cable. The current route renders either the Rails-native workflow Board
+or compact Grid, so live reconciliation does not maintain a second board patch
+protocol. Digest-based DOM identities preserve the owning band/card across
+reorder morphs, and the status-level refresh guard defers background refreshes
+from the native submit-bubble boundary while status forms submit, using a
+successful redirect's fresh GET as the reconciliation instead of racing a
+replay against the old URL. Document-level submission admission survives the
+Stimulus disconnect/reconnect gap during a morph, and the redirect destination
+is kept on the document root across the Turbo body swap, so late refresh
+signals and their same-URL replace visits remain suppressed until the browser
+reaches that destination. It also
+keeps first-connection history on the permanent status Action Cable source as
+a clone-stable DOM attribute, surviving both Stimulus disconnects and Turbo
+history restoration without leaking across fresh sources, and issues one
+catch-up refresh on later reconnects. That closes the window in
+which the only filesystem broadcast could be missed without duplicating the
+fresh initial page load. The
+request-local Rails `Project` wrapper
+reuses one parsed config for Board defaults, daemon state, and workflow-overlay
+loading. `Hive::StageLabel` gives web and bot surfaces one acronym-aware stage
+formatter. Mutations reuse gem
 primitives: `Commands::Approve` in-process, `Commands::Drop` in-process for
 Advanced hard deletes, daemon dispatch queue for stage runs, the bot's
 `RecoverySequence` for task-page Retry recovery (`markers clear` plus the
@@ -323,51 +367,79 @@ push credentials without docker-exec setup. The container supervisor (tini →
 signal-killed children with backoff, survives malformed config, and
 SIGHUP-reloads the bot set. Details: [[commands/web]].
 
-## Dispatch flow (single-dispatcher contract, plan 2026-05-28-002)
+The Rails layer wraps each registry entry in a `Project` model. Project lookup,
+config-backed workflow/default/daemon behavior, and the non-interactive
+`Hive::Commands::Init` setup seam live there; controllers and views use named
+project attributes instead of passing registry hashes around. Gem adapters can
+still call `fetch` at the explicit compatibility boundary.
 
-For state-mutating workflow verbs (`run`, `develop`, `brainstorm`,
-`plan`, `review`, `open-pr`, `artifacts`, `finalize`, `archive`,
-`markers clear`) there is exactly ONE subprocess dispatcher: the daemon.
-The Telegram bot and hivebox web write file-backed JSON requests; the daemon's
-own healer also uses the same queue for the `3-plan` terminal-error rerun.
-The daemon's tick loop is the only thing that calls `Process.spawn` on those
-verbs.
+Repository admission is a separate `Repository` model: it validates GitHub
+source/name input, owns the clone target, bounds and cleans up `gh repo clone`,
+and normalizes origins before handing the checkout to `Project#setup!`.
+`ReposController` only selects between new admission and existing-project
+setup, then renders or redirects.
 
+Workflow list rows are typed `Workflow` models rather than anonymous adapter
+hashes. The model owns the shared `Hive::Web::WorkflowLifecycle` boundary for
+listing and scaffolding. Reviewed install/update/remove state is represented by
+`WorkflowChange`: it creates the dry-run, signs the operation/project/identity
+receipt, verifies consent and expiry, preserves the separate escalation gate,
+and applies only the reviewed identity. Existing workflow URLs now enter
+`Workflows::PreviewsController#create` or
+`Workflows::ChangesController#create`; route defaults supply the operation from
+the matched route rather than accepting an operator-controlled action name.
+`WorkflowsController` is left with the collection page and authored-workflow
+creation.
+
+Telegram configuration is a `TelegramBot` model. It owns strict allowlist
+parsing, saved-token lookup/persistence, `getMe` validation, global bot config,
+supervisor reload signalling, round-trip delivery, and pending/approved
+pairings. `TelegramController` now exposes only the settings resource's
+`show`/`update`; test deliveries and pairing approvals enter
+`Telegram::TestMessagesController#create` and
+`Telegram::PairingApprovalsController#create`. The model wraps pending pairing
+rows before they reach ERB.
+
+A task page is a filesystem-backed `Task`, built from the matching status
+snapshot row and its `Project`. That model owns task
+reads and their invariants — workflow-aware artifact ordering, brainstorm
+questions, original-idea/title resolution, workflow-aware action/verb policy,
+terminal/passable/recovery predicates, bounded log tails and diffs, worktree
+presence, and media-manifest/path validation. Dashboard snapshots are wrapped
+as `Project`/`Task` models before rendering, so the grid and detail page use the
+same behavior rather than helper-owned filesystem reads or action tables.
+`TasksController` renders that resource. Namespaced task-resource
+controllers expose diff, log, media, approval, rejection, drop, run, recovery,
+answer, and intervention through standard `show`/`create` actions; each remains
+a thin HTTP boundary over `Task` or `Hive::Web::Dispatcher`.
+
+## Dispatch flow (durable generation ownership)
+
+Every task-stage producer resolves through one semantic admission protocol.
+CLI calls admit locally and attach. Bot/web requests remain file-backed
+deliveries, consumed by the daemon when present. Daemon auto-advance and loss
+healing call the same dispatcher. A daemon is optional after acceptance.
+
+```text
+CLI ───────────────────────────────┐
+bot/web → request queue → daemon ──┼→ Attempts::Dispatcher
+daemon auto-advance / recovery ────┘          │
+                                      generation lock + lease
+                                               │
+                                      detached supervisor
+                                               │
+                                      internal Hive worker
+                                               │
+                                      provider agent group
 ```
-operator → /done in Telegram
-   └─ Hive::Bot::Supervisor#execute_dispatch
-        └─ Hive::Bot::DispatchRequestWriter.write!
-             └─ <state_home>/dispatch_requests/<ts>-<id>.json
-                  ↑ atomic tmp + File.rename — partial reads impossible
-   ┄ wait for next daemon tick ┄
-   └─ Hive::Daemon::Dispatcher#tick
-        └─ Hive::Daemon::DispatchRequestQueue.pending
-             └─ allowlist + expiry + per-slug in-flight gate
-                  └─ Hive::Daemon::ChildSupervisor#spawn (with request_id)
-                       └─ hive run ... (the real subprocess)
-                            └─ reap_completed
-                                 ├─ controller.observe_state_file_mtime (refresh baseline)
-                                 ├─ DispatchRequestQueue.remove(request_id)
-                                 └─ :dispatch_request_completed event
-```
 
-Read-only verbs (`hive status`, `hive status --diagnose`,
-`hive doctor`, `gh pr view`) and verbs outside the allowlist
-(`hive new`, `hive approve`, `hive accept-finding`,
-`hive reject-finding`) still spawn directly from the bot via
-`Hive::Bot::ChildSupervisor`. They don't bump task state-file
-mtimes and don't cause the dual-writer race the queue exists to
-prevent.
-
-Why the file-backed queue beats an event bus or sockets: every
-hive-state-mutating operation already touches the filesystem
-under one well-known root (`Hive::Paths.state_home`), the
-atomic-rename idiom is already standard in this codebase
-(`Hive::Markers.write_atomic`, `DispatchBaselines#persist!`),
-and the daemon's tick was already a single-threaded sequential
-loop. The queue is the smallest possible addition that satisfies
-the single-dispatcher invariant. See [[modules/daemon]]
-§"Single-dispatcher" for the per-step gates and telemetry events.
+Queue claims are delivery metadata and store the resolved attempt reference.
+The daemon reconciles leases before healing or admission, reconstructs
+capacity, and completes a delivery from the wrapper receipt. It never reaps an
+adopted wrapper. Read-only/ancillary bot commands may still use the bot child
+supervisor, but task ownership never does. Filesystem locks, atomic rename,
+and fsync keep the protocol host-local without adding an event bus. See
+[[modules/attempts]] and [[modules/daemon]].
 
 ## Code conventions
 

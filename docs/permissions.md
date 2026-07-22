@@ -24,8 +24,46 @@ an agent, declare `permissions:` on a pipeline stage or a review reviewer.
 Permission scoping is tool/MCP-level, enforced by the agent's allowed tool set.
 It is not an OS sandbox. The agent runs as the same OS user; `read-only` limits
 accidental over-reach, but it does not contain a determined or mis-prompted
-agent. For real isolation, run hive under a sandboxed user or container, such as
-hivebox.
+agent. For real isolation, run Hive under a sandboxed user or choose the
+[Hivebox container distribution](../packaging/docker/README.md).
+
+## Managed Honeycomb Policy
+
+Reviewed Honeycomb packages do not inherit the owner-authored default above.
+The current `honeycomb-manifest/v1` declares a generated coarse disclosure:
+risk, capabilities, network hosts, filesystem read/write sets, and secrets.
+Hive validates that disclosure against the catalog and package fingerprint,
+but does not reinterpret it as the older exact tool/deny/command policy.
+
+Only `risk: low`, `capabilities: [filesystem-read]`, task-only read access, and
+empty network/write/secret sets have a lossless mapping today. That maps to
+Hive's read-only tool set. Every broader disclosure fails admission before
+project state changes. The current Bench and Docs Sync seeds therefore verify
+as registry content but are not installable until Hive can enforce v2 precisely
+or the registry adds an exact runtime policy contract.
+
+V2 managed actors compile their descriptor's exact `permissions:` preset in
+memory. Headless and tmux launches receive the resulting permission mode,
+allowed/denied tool lists, task/package directories, and a sanitized child
+environment/PATH. This actor path does not write `.managed-policies`, generate
+settings or MCP files, or install a pre-tool hook; it therefore does not claim
+to disable inherited Claude settings, hooks, plugins, or MCP configuration.
+Use hivebox or another OS/container boundary when those sources must be
+isolated as well as the actor's Hive-supplied tool scope.
+
+The legacy exact-policy compiler used by the separate publish/admission path
+can still materialize private settings, strict MCP configuration, and a
+pre-tool hook for its command/domain contract. Those generated artifacts are
+not the V2 actor-spawn contract described above.
+
+Admission runs before installation/update, then the policy is compiled again
+from the task-pinned manifest immediately before spawn. The still-legacy
+`workflow publish` path performs its existing exact-policy admission separately.
+Codex, Pi, Grok,
+custom profiles without the full `policy_capabilities` set, and explicit
+managed actors selecting them fail closed. These controls reduce agent/tool
+capability but do not change the process's OS user or claim universal network
+isolation beyond controls the runner can enforce.
 
 ## Presets
 
@@ -33,7 +71,7 @@ hivebox.
 |---|---|
 | `yolo` | Current default. Claude receives bypass permissions and no tool allowlist or denylist from Hive. |
 | `read-only` | Allows only `Read`, `LS`, `Grep`, and `Glob`. Explicitly denies `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash`. It does not include network tools or MCP tools. |
-| `scoped` | Custom scope. You provide `tools:` and optionally `dirs:`, or use `bash:` as sugar on the read-only base set. |
+| `scoped` | Custom non-interactive scope. You provide `tools:` and optionally `dirs:`, or use `bash:` as sugar on the read-only base set. Requests unmatched by any loaded permission rule are denied. |
 
 Non-yolo presets are supported for the Claude runner only. If a stage using
 Codex or Pi declares `read-only` or `scoped`, Hive fails closed with a config
@@ -52,10 +90,12 @@ Use a map when the preset takes options:
 ```yaml
 permissions:
   preset: scoped
-  tools: [Read, Write, Edit]
+  tools:
+    - Read
+    - Edit(./work.md)
+    - Edit(../../../../docs/**)
   dirs:
-    - ./drafts
-    - /tmp/shared-fixtures
+    - ../../../..
 ```
 
 A top-level `permissions:` value is the project default:
@@ -105,20 +145,47 @@ review:
 
 ## Scoped Options
 
-`tools:` is authoritative. Hive passes those tools as Claude's
-`--allowedTools` value, deduplicated. Entries are validated at config load:
-a blank, comma-bearing, whitespace-bearing, or null-byte entry is rejected
-with an error (not silently dropped), so each entry must be a single tool
-name. Hive also
-emits a `--disallowedTools` deny list —
-the `read-only` mutating/shell set (`Write`, `Edit`, `MultiEdit`,
-`NotebookEdit`, `Bash`) minus whatever you granted — so a tool you grant
-is never also denied. (Claude's deny rules win over allow rules, so an
-overlap would silently revoke the grant.)
+`tools:` is authoritative. Hive passes those rules as Claude's
+`--allowedTools` value, deduplicated. A rule is either a bare tool name or a
+single non-empty specifier, such as `Read(../../../../src/**)` or
+`Edit(../../../../docs/**)`. Entries are validated at config load: a blank,
+comma-bearing, whitespace-bearing, null-byte, or malformed rule is rejected
+with an error (not silently dropped).
+
+`Read(path)` and `Edit(path)` are portable, task-relative file rules. At spawn
+time Hive resolves their paths and emits Claude's absolute `//...` form.
+`Edit(path)` covers both built-in edits and new-file writes; use it instead of
+`Write(path)`, `MultiEdit(path)`, or `NotebookEdit(path)`, which Hive rejects
+because Claude does not enforce those rules as path matchers. Likewise, use
+`Read(path)` instead of path-qualified `LS`, `Grep`, or `Glob`. Bare tool names
+remain valid when unbounded access to that exact tool is intended.
+
+Scoped stages use Claude's `dontAsk` mode: a matching rule runs and an
+unmatched request is denied rather than prompting a headless process. Claude
+merges Hive's CLI rules with permission rules from loaded managed, user,
+project, and local settings. A broader allow there (for example bare `Write`)
+can widen the effective session beyond the descriptor's requested scope. Treat
+those setting sources as trusted operator policy; use an isolated Claude
+configuration plus an OS sandbox when the descriptor must be a hard security
+ceiling.
+
+Hive also emits a `--disallowedTools` deny list — the `read-only`
+mutating/shell set (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Bash`) minus
+whatever you granted — so a tool you grant is never also denied. A
+path-qualified `Edit` rule covers every built-in file-edit tool, so Hive removes
+all four file-edit denies for that rule. Claude's deny rules win over allow
+rules, so retaining any of them could silently revoke the qualified grant.
 
 `dirs:` extends the task folder add-dir list. Relative paths are resolved from
 the task folder; absolute paths are honored as written. Hive always keeps the
-task folder and appends these extra directories.
+task folder and appends these extra directories. A path rule does not itself
+make an external directory accessible, so declare the matching `dirs:` entry
+as well.
+
+For a standard workflow task at
+`<project>/.hive-state/stages/<stage>/<slug>`, `../../../..` is the project
+root. For example, bare `Read` plus `dirs: [../../../..]` grants project read,
+while `Edit(../../../../docs/**)` grants writes under project `docs/**` only.
 
 `bash:` is shorthand on the read-only base set:
 
@@ -135,7 +202,8 @@ directly in `tools:` when you provide a custom list.
 ## Validation
 
 Hive validates permission specs at config load and spawn time. Unknown presets,
-unknown keys, malformed maps, and `bash:` plus `tools:` are hard errors.
+unknown keys, malformed maps/rules, unresolvable file-rule paths,
+unsupported file-tool path rules, and `bash:` plus `tools:` are hard errors.
 Runner-support errors are checked inside `PermissionScope.resolve` (when a stage
 resolves its permission scope), so a non-yolo scope on Codex or Pi fails before
 the agent is spawned.

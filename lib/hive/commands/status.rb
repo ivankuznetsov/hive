@@ -10,19 +10,32 @@ require "hive/workflows"
 require "hive/workflows/project"
 require "hive/archive_filter"
 require "hive/dependencies"
+require "hive/dependency_admission"
+require "hive/dependency_snapshot"
 require "hive/diagnostic_evidence"
 require "hive/diagnostic_helpers"
 require "hive/secret_patterns"
 require "hive/task_action"
+require "hive/task_projection/store"
+require "hive/implementation_identity/resolver"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
 require "hive/gh"
 require "hive/pr"
+require "hive/process_kill"
+require "hive/operational_action"
+require "hive/operational_status"
+require "hive/daemon/operational_snapshot"
+require "hive/terminal_text"
 require "hive/tui/views/hyperlink"
 
 module Hive
   module Commands
     class Status
+      include Hive::Schemas::EnvelopeEmitter
+
+      AUTO_SCHEDULER_SNAPSHOT = Object.new.freeze
+
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: unanswered-question count only parses coding brainstorm.md
@@ -68,7 +81,19 @@ module Hive
         error: "⚠"
       }.freeze
 
-      def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false)
+      OPERATIONAL_BANDS = [
+        [ "running", "RUNNING" ],
+        [ "waiting_on_you", "WAITING ON YOU" ],
+        [ "needs_repair", "NEEDS REPAIR" ],
+        [ "waiting_on_provider_or_scheduler", "WAITING ON PROVIDER / SCHEDULER" ],
+        [ "completion_ready", "COMPLETION READY" ],
+        [ "unknown", "UNKNOWN" ],
+        [ "idle", "READY / IDLE" ]
+      ].freeze
+      OPERATIONAL_BAND_LIMIT = 5
+
+      def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false,
+                     operational: false, full: false)
         @json = json
         @diagnose = diagnose
         @project = project
@@ -76,27 +101,32 @@ module Hive
         @write = write
         @force = force
         @archive = archive
+        @operational = operational
+        @full = full
       end
 
       def call
-        @stdout_written = false
-        if @diagnose && @diagnose.to_s.strip.empty?
-          raise Hive::Error, "--diagnose requires a non-empty task slug"
+        call_with_envelope do
+          validate_mode_combinations!
+          if @diagnose && @diagnose.to_s.strip.empty?
+            raise Hive::Error, "--diagnose requires a non-empty task slug"
+          end
+          if @write && @diagnose.nil?
+            raise Hive::Error, "--write requires --diagnose <task>"
+          end
+          @diagnose ? diagnose_call : do_call
         end
-        if @write && @diagnose.nil?
-          raise Hive::Error, "--write requires --diagnose <task>"
-        end
-        return diagnose_call if @diagnose
-
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e, schema: status_schema_for_call) if @json && !@stdout_written
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped, schema: status_schema_for_call) if @json && !@stdout_written
-        raise wrapped
       end
+
+      def envelope_schema
+        status_schema_for_call
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
+      end
+
+      def envelope_serialization_failure_policy = :suppress
 
       # `--diagnose` routes through diagnose_call which emits the
       # `hive-status-diagnose` envelope on success; the top-level rescue
@@ -104,11 +134,23 @@ module Hive
       # branch against `urn:hive:schema:status-diagnose:v1`. Plain
       # `hive status --json` stays on `hive-status`.
       def status_schema_for_call
-        @diagnose ? "hive-status-diagnose" : "hive-status"
+        return "hive-status-diagnose" if @diagnose
+
+        @operational ? "hive-operational-status" : "hive-status"
       end
 
       def do_call
         projects = Hive::Config.registered_projects
+        if concise_operational_mode?
+          payload = operational_payload(projects)
+          if @json
+            puts JSON.generate(payload)
+            @stdout_written = true
+          else
+            render_operational(payload)
+          end
+          return
+        end
         if @json
           puts JSON.generate(json_payload(projects))
           @stdout_written = true
@@ -120,8 +162,9 @@ module Hive
           return
         end
 
+        admission_context = build_admission_context(projects)
         projects.each do |project|
-          render_project(project, project_count: projects.size)
+          render_project(project, project_count: projects.size, admission_context: admission_context)
         rescue StandardError => e
           # Symmetry with the JSON path's project_payload_or_degraded: isolate
           # per-project failures so one project (e.g. a malformed workflow
@@ -133,11 +176,125 @@ module Hive
         end
       end
 
+      def operational_payload(projects, scheduler_snapshot: AUTO_SCHEDULER_SNAPSHOT, status_payload: nil)
+        source = status_payload || json_payload(projects)
+        project_context = operational_project_context(projects)
+        if scheduler_snapshot.equal?(AUTO_SCHEDULER_SNAPSHOT)
+          scheduler_snapshot = if project_context.any? { |_name, context| context["daemon_enabled"] == true }
+            Hive::Daemon::OperationalSnapshot::Reader.new.read
+          end
+        end
+        Hive::OperationalStatus.new(
+          status_payload: source,
+          project_context: project_context,
+          scheduler_snapshot: scheduler_snapshot
+        ).to_h
+      end
+
+      def render_operational(payload)
+        summary = payload.fetch("summary")
+        completeness = %w[complete partial unknown].include?(payload["completeness"]) ?
+          payload.fetch("completeness") : "unknown"
+        puts "SNAPSHOT #{completeness.upcase} — " \
+             "#{summary.fetch('active')} active · #{summary.fetch('archived')} archived"
+        render_operational_issues(payload.fetch("issues"))
+
+        if completeness == "complete" && summary.fetch("active").zero?
+          render_operational_empty_state(payload)
+          return
+        end
+
+        grouped = payload.fetch("tasks").group_by { |row| row.fetch("state") }
+        OPERATIONAL_BANDS.each do |state, label|
+          rows = Array(grouped[state]).sort_by do |row|
+            [ row.dig("identity", "project").to_s, row.dig("identity", "slug").to_s ]
+          end
+          next if rows.empty?
+
+          puts label
+          rows.first(OPERATIONAL_BAND_LIMIT).each { |row| puts operational_row_line(row) }
+          overflow = rows.size - OPERATIONAL_BAND_LIMIT
+          puts "  +#{overflow} more — run `hive status --full`" if overflow.positive?
+        end
+      end
+
+      def validate_mode_combinations!
+        if @full && @json
+          raise Hive::InvalidTaskPath, "--full cannot be combined with --json; omit --full for hive-status.v6"
+        end
+        if @full && @operational
+          raise Hive::InvalidTaskPath, "--full cannot be combined with --operational"
+        end
+        if (@full || @operational) && (@diagnose || @write || @force)
+          mode = @full ? "--full" : "--operational"
+          raise Hive::InvalidTaskPath,
+                "#{mode} cannot be combined with --diagnose, --write, or --force"
+        end
+      end
+
+      def concise_operational_mode?
+        @operational || (!@full && !@json && !@archive)
+      end
+
+      def render_operational_issues(issues)
+        Array(issues).each do |entry|
+          puts "  ⚠ #{terminal_safe(entry.fetch('message', 'status source is incomplete'))}"
+          remediation = terminal_safe(entry["remediation"])
+          puts "    #{remediation}" unless remediation.empty?
+        end
+      end
+
+      def render_operational_empty_state(payload)
+        summary = payload.fetch("summary")
+        if summary.fetch("projects_total").zero?
+          puts "NO REGISTERED PROJECTS"
+          puts "  run `hive init <path>` to register and initialize a project"
+        elsif summary.fetch("archived").positive?
+          puts "ARCHIVE ONLY — #{summary.fetch('archived')} archived task" \
+               "#{summary.fetch('archived') == 1 ? '' : 's'}"
+          puts "  run `hive status --full` to inspect archived task details"
+        else
+          puts "IDLE — no active work"
+        end
+      end
+
+      def operational_row_line(row)
+        identity = row.fetch("identity")
+        project = terminal_safe(identity["project"])
+        slug = terminal_safe(identity["slug"])
+        display_name = terminal_safe(identity["display_name"])
+        target = "#{project}:#{slug}"
+        target = "#{target} (#{display_name})" unless display_name.empty? || display_name == slug
+        stage = terminal_safe(row.dig("position", "stage"))
+        marker = terminal_safe(row.dig("position", "marker"))
+        owner = terminal_safe(row["blocker_owner"] || "unknown")
+        reason = terminal_safe(row["reason"] || "status reason unavailable")
+        "  #{target} · #{stage}/#{marker} · #{owner} — #{reason}"
+      end
+
+      def terminal_safe(value)
+        Hive::TerminalText.escape(value)
+      end
+
+      def operational_project_context(projects)
+        projects.to_h do |project|
+          enabled = begin
+            Hive::Config.load(project.fetch("path")).dig("daemon", "enabled") == true
+          rescue Hive::Error, SystemCallError
+            false
+          end
+          [ project.fetch("name"), { "daemon_enabled" => enabled } ]
+        end
+      end
+
       # Stable schema for agent / wrapper consumption. Adding new keys is
       # non-breaking; removing or renaming keys must bump a documented
       # version. `tasks[].marker` is the lowercased symbol name as a string;
       # `tasks[].attrs` is the marker's attribute map.
-      def json_payload(projects, stages: nil, exclude_archived: false, extra_dependency_tasks: nil)
+      def json_payload(projects, stages: nil, exclude_archived: false, admission_context: nil)
+        admission_context ||= build_admission_context(
+          projects, exclude_archived: exclude_archived
+        )
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
@@ -149,7 +306,7 @@ module Hive
               project_count: projects.size,
               stages: stages,
               exclude_archived: exclude_archived,
-              extra_dependency_tasks: dependency_tasks_for(extra_dependency_tasks, p)
+              admission_context: admission_context
             )
           end
         }
@@ -163,13 +320,14 @@ module Hive
       # project to an empty task list (with a stderr breadcrumb in
       # daemon.log) so the rest of the fleet keeps advancing. The fallback
       # entry still validates against the published hive-status schema.
-      def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false, extra_dependency_tasks: nil)
+      def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false,
+                                      admission_context: nil)
         project_payload(
           project,
           project_count: project_count,
           stages: stages,
           exclude_archived: exclude_archived,
-          extra_dependency_tasks: extra_dependency_tasks
+          admission_context: admission_context
         )
       rescue StandardError => e
         warn "hive: status: project #{project['name'].inspect} payload failed " \
@@ -178,13 +336,15 @@ module Hive
           "name" => project["name"],
           "path" => project["path"],
           "hive_state_path" => project["hive_state_path"],
+          "error" => "project_load_failed",
           "tasks" => [],
           "legacy_stage_dirs" => [],
           "legacy_migrate_command" => nil
         }
       end
 
-      def project_payload(project, project_count:, stages: nil, exclude_archived: false, extra_dependency_tasks: nil)
+      def project_payload(project, project_count:, stages: nil, exclude_archived: false,
+                          admission_context: nil)
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {
@@ -208,8 +368,17 @@ module Hive
             # JSON path: pay the diagnostic-extraction cost because
             # external consumers (TUI, daemon, bots) read `diagnostic` off
             # every row. Schema mandates the field.
-            rows = annotate_actions(collect_rows(hive_state, stages: stages, exclude_archived: exclude_archived), project, project_count, with_diagnostic: true)
-            rows = annotate_dependencies(rows, project, extra_dependency_tasks: extra_dependency_tasks)
+            config = task_action_config(path)
+            rows = annotate_implementation_identities(
+              collect_rows(hive_state, stages: stages, exclude_archived: exclude_archived), config
+            )
+            rows = annotate_actions(
+              rows,
+              project, project_count, config: config, with_diagnostic: true
+            )
+            rows = annotate_dependencies(
+              rows, project, admission_context: admission_context
+            )
             rows = archive_rows(rows) if @archive
             out = base.merge("tasks" => rows.map { |r| task_payload(r) })
             # Always emit `legacy_stage_dirs` (default empty array) so
@@ -275,6 +444,7 @@ module Hive
           "blocked_by" => row[:blocked_by],
           "dependency_stage" => row[:dependency_stage],
           "blocked" => row[:blocked] == true,
+          "admission_error" => row[:admission_error]&.to_h,
           "folder" => row[:folder],
           "state_file" => row[:state_file],
           "worktree_path" => row[:worktree_path],
@@ -282,6 +452,7 @@ module Hive
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
           "mtime" => row[:mtime].utc.iso8601(6),
+          "observation_mtime" => (row[:observation_mtime] || row[:mtime]).utc.iso8601(6),
           "folder_mtime" => row[:folder_mtime].utc.iso8601(6),
           "age_seconds" => (Time.now - row[:mtime]).to_i,
           "claude_pid" => row[:claude_pid],
@@ -292,6 +463,24 @@ module Hive
           # and would have to handle JSON null otherwise. Additive field per
           # the SCHEMA_VERSIONS policy in lib/hive.rb — no version bump.
           "live_task_lock" => row[:live_task_lock] == true,
+          "attempt_id" => row[:attempt_id],
+          "task_generation" => row[:task_generation],
+          "task_lock_pid" => row[:task_lock_pid],
+          "task_lock_process_start_time" => row[:task_lock_process_start_time],
+          "task_lock_id" => row[:task_lock_id],
+          "condition_task_generation" => row.dig(:projection_data, "identity", "task_generation"),
+          "commit_generation" => row.dig(:projection_data, "identity", "commit_generation"),
+          "current_attempt" => row.dig(:projection_data, "identity", "attempt_id"),
+          "conditions" => row.dig(:projection_data, "conditions", "current") || [],
+          "condition_history" => row.dig(:projection_data, "conditions", "history") || [],
+          "evidence" => row.dig(:projection_data, "evidence") || [],
+          "condition_overrides" => row.dig(:projection_data, "condition_overrides") || [],
+          "condition_gate" => row[:condition_gate],
+          "condition_migration" => row[:condition_migration],
+          "condition_provenance" => row.dig(:projection_data, "provenance") || {},
+          "shadow_audit" => row.dig(:projection_data, "shadow_audit") || {},
+          "condition_warning" => row[:condition_warning],
+          "implementation_identity" => row[:implementation_identity],
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
           # 0 for every non-brainstorm / non-needs_input row. Lets an agent
           # or operator tell "the daemon is holding this brainstorm because
@@ -308,6 +497,7 @@ module Hive
           "diagnostic" => row[:diagnostic]
         }
         payload["workflow"] = row[:workflow].to_s if row.key?(:workflow) && !row[:workflow].nil?
+        payload.delete("implementation_identity") unless row[:implementation_identity]
         if Hive::AgentLimit.held?(row[:marker_name], row[:marker_attrs])
           payload["held"] = Hive::AgentLimit.held_field(row[:marker_attrs])
         end
@@ -347,7 +537,10 @@ module Hive
         # result of, so the shadowing doesn't obscure intent at the call sites.
         marker_summary_text = marker_summary(marker)
         liveness = liveness_kwargs_for(task)
-        action = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness)
+        config = Hive::Config.load(task.project_root)
+        action = Hive::TaskAction.for(
+          task, marker, config: config, project_name: project_name_for(task), **liveness
+        )
         diagnostic = action.diagnostic
 
         if @write
@@ -374,7 +567,9 @@ module Hive
 
           require "hive/diagnosis_agent"
           result = Hive::DiagnosisAgent.run!(task: task, local_diagnostic: diagnostic)
-          diagnostic = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness).diagnostic
+          diagnostic = Hive::TaskAction.for(
+            task, marker, config: config, project_name: project_name_for(task), **liveness
+          ).diagnostic
           emit_diagnose_result(task, diagnostic, result[:path], marker_summary: marker_summary_text)
         else
           if diagnostic.nil?
@@ -499,7 +694,7 @@ module Hive
         project ? project["name"] : File.basename(task.project_root)
       end
 
-      def render_project(project, project_count:)
+      def render_project(project, project_count:, admission_context: nil)
         path = project["path"]
         unless File.directory?(path)
           puts "#{project['name']}: missing project path #{path}"
@@ -516,8 +711,13 @@ module Hive
         # only — `diagnostic` is unused here, so skip the bounded file-
         # I/O that TaskAction#diagnostic performs per red row. JSON path
         # still pays the full cost via project_payload.
-        rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: false)
-        rows = annotate_dependencies(rows, project)
+        config = task_action_config(path)
+        rows = annotate_implementation_identities(collect_rows(hive_state), config)
+        rows = annotate_actions(
+          rows, project, project_count,
+          config: config, with_diagnostic: false
+        )
+        rows = annotate_dependencies(rows, project, admission_context: admission_context)
         if @archive
           render_archive_project(project, rows)
           return
@@ -539,7 +739,7 @@ module Hive
           puts "  #{label}"
           stage_rows.sort_by { |r| -r[:mtime].to_i }.each do |r|
             command = r[:suggested_command] || "-"
-            state = [ r[:state_label], dependency_indicator(r) ].compact.join(" ")
+            state = [ r[:state_label], dependency_indicator(r), implementation_owner_token(r) ].compact.join(" ")
             puts "    #{r[:icon]} #{display_identity_with_pr(r, TEXT_IDENTITY_WIDTH)} " \
                  "#{state.ljust(24)} #{command} #{r[:age]}"
           end
@@ -566,7 +766,7 @@ module Hive
         puts "  Archived"
         rows.sort_by { |row| -row[:mtime].to_i }.each do |row|
           command = row[:suggested_command] || "-"
-          state = [ row[:state_label], dependency_indicator(row) ].compact.join(" ")
+          state = [ row[:state_label], dependency_indicator(row), implementation_owner_token(row) ].compact.join(" ")
           puts "    #{row[:icon]} #{display_identity_with_pr(row, TEXT_IDENTITY_WIDTH)} " \
                "#{state.ljust(24)} #{command} #{row[:age]}"
         end
@@ -609,6 +809,10 @@ module Hive
 
       def dependency_indicator(row)
         return nil unless row[:blocked]
+        if row[:admission_error]
+          error = row[:admission_error]
+          return "⚠ admission #{error.reason_code}: #{error.safe_correction}"
+        end
 
         # Shared with the TUI's renderer so the unresolved-vs-resolved
         # discriminator (blocked_by presence) can never diverge between
@@ -618,6 +822,77 @@ module Hive
           blocked_by: row[:blocked_by],
           dependency_stage: row[:dependency_stage]
         )
+      end
+
+      # Build the public ownership view exclusively from the read-only task
+      # projection. Missing downstream launches are previews resolved from
+      # the immutable execute record plus raw configuration provenance; this
+      # method never reconstructs legacy state or appends journal events.
+      def annotate_implementation_identities(rows, config)
+        rows.each do |row|
+          next if row[:invalid]
+          next unless Hive::Workflows.coding_id?(row[:workflow])
+
+          row[:implementation_identity] = implementation_identity_status(
+            row.dig(:projection_data, "implementation_identity"), config
+          )
+        end
+      end
+
+      def implementation_identity_status(projected, config)
+        projected ||= {}
+        generation = projected["generation"] || 0
+        execute = projected["execute"]
+        return { "generation" => generation, "pending" => true, "stages" => {} } unless execute
+
+        stages = { "execute" => public_identity_stage(execute, status: "resolved") }
+        resolver = Hive::ImplementationIdentity::Resolver.new(cfg: config)
+        %w[open_pr review.fix review.ci].each do |stage|
+          actual = projected.dig("stages", stage)
+          identity = actual || resolver.resolve_stage(stage, execute_identity: execute)
+          stages[stage] = public_identity_stage(identity, status: actual ? "resolved" : "preview")
+        rescue Hive::ImplementationIdentity::Error, Hive::ConfigError => e
+          stages[stage] = {
+            "status" => "resolution_error",
+            "source" => implementation_preview_source(config, stage, execute),
+            "resolution_error" => e.message.to_s[0, 240]
+          }
+        end
+        { "generation" => generation, "pending" => false, "stages" => stages }
+      end
+
+      def public_identity_stage(identity, status:)
+        value = identity.respond_to?(:to_h) ? identity.to_h : identity
+        {
+          "provider" => value["provider"],
+          "model" => value["model"],
+          "requested_effort" => value["requested_effort"],
+          "effective_effort" => value["effective_effort"],
+          "effort_supported" => value["effort_supported"] == true,
+          "source" => value["source"],
+          "originating_attempt" => value["originating_attempt"],
+          "resolved_attempt" => value["resolved_attempt"],
+          "status" => status
+        }
+      end
+
+      def implementation_preview_source(config, stage, execute)
+        fields = config ? Hive::Config.implementation_identity_fields(config, stage) : {}
+        return "explicit_override" unless fields.empty?
+
+        execute["source"] == "legacy_backfill" ? "legacy_backfill" : "persisted_execute"
+      end
+
+      # Bounded token appended after the primary state/dependency signals, so
+      # a narrow text or TUI column truncates ownership before it hides the
+      # operational state that tells the operator what to do next.
+      def implementation_owner_token(row)
+        identity = row.dig(:implementation_identity, "stages", "execute")
+        return nil unless identity && identity["provider"] && identity["model"]
+
+        model = identity["model"].to_s
+        model = "#{model[0, 11]}…" if model.length > 12
+        "owner=#{identity['provider']}/#{model}"
       end
 
       def render_legacy_stage_warning(legacy)
@@ -669,8 +944,20 @@ module Hive
                 next
               end
               marker = Hive::Markers.current(task.state_file)
+              marker, projection = status_projection(task, marker)
               folder_mtime = File.mtime(entry)
               mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
+              # Generic markerless tasks still carry meta.yml. Use that stable
+              # task-owned file for the action observation before falling back
+              # to the directory mtime. Keep `mtime` on its long-standing
+              # state-file/directory meaning because the daemon's dispatch
+              # baseline relies on a stage move changing that value.
+              #
+              # acquiring `.lock` changes the directory mtime and would make a
+              # freshly emitted operational action invalidate itself inside
+              # the command's lock.
+              observation_source = Hive::OperationalAction.observation_mtime_source(task)
+              observation_mtime = observation_source == entry ? folder_mtime : File.mtime(observation_source)
               lock_holder = task_lock_holder(task)
               live_holder = live_task_lock_holder(lock_holder)
               icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: !live_holder.nil?)
@@ -699,14 +986,22 @@ module Hive
                 task: task,
                 marker_name: marker.name,
                 marker_attrs: marker.attrs,
+                projection: projection,
+                projection_data: projection.to_h,
                 icon: icon,
                 state_label: state_label,
                 mtime: mtime,
+                observation_mtime: observation_mtime,
                 folder_mtime: folder_mtime,
                 age: humanise_age(mtime),
                 claude_pid: claude_pid,
                 claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
-                live_task_lock: !live_holder.nil?
+                live_task_lock: !live_holder.nil?,
+                attempt_id: lock_holder && lock_holder["attempt_id"],
+                task_generation: lock_holder && lock_holder["task_generation"],
+                task_lock_pid: live_holder && live_holder["pid"],
+                task_lock_process_start_time: live_holder && live_holder["process_start_time"],
+                task_lock_id: live_holder && live_holder["lock_id"]
               }
             # A mid-scan stage-move (atomic rename of <stage>/<slug> out from
             # under us) makes an in-folder read raise ENOENT even though the
@@ -755,82 +1050,79 @@ module Hive
         drop_transient_stage_moves(rows)
       end
 
-      def annotate_dependencies(rows, project, extra_dependency_tasks: nil)
-        threshold_stage = dependency_gate_stage_for(project)
-        # filter_map + next: a future row source lacking :task must not
-        # KeyError on this never-fail surface (production rows always carry
-        # it). Rows without :task simply don't participate in the snapshot.
-        snapshot = rows.filter_map do |row|
-          task = row[:task]
-          next unless task
+      def status_projection(task, marker)
+        projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
+        [ marker, projection ]
+      rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
+             SystemCallError, IOError => e
+        warn "hive: status: #{task.folder} condition projection failed " \
+             "(#{e.class}: #{e.message}); surfaced as an Error row"
+        error_marker = Hive::Markers::State.new(
+          name: :error,
+          attrs: {
+            "reason" => "condition_projection_invalid",
+            "message" => e.message.to_s[0, 500]
+          },
+          raw: nil
+        )
+        [ error_marker, Hive::TaskProjection.project(records: [], marker: error_marker) ]
+      end
 
-          {
-            slug: row[:slug],
-            id: row[:id],
-            stage: row[:stage],
-            stage_index: task.stage_index
-          }
-        end
-        snapshot.concat(Array(extra_dependency_tasks))
-
-        rows.each { |row| apply_dependency_result(row, snapshot, threshold_stage) }
+      def annotate_dependencies(rows, project, admission_context: nil)
+        context = admission_context || build_admission_context([ project ])
+        rows.each { |row| apply_dependency_verdict(row, context, project) }
         rows
       end
 
-      def dependency_tasks_for(extra_dependency_tasks, project)
-        return nil unless extra_dependency_tasks
-
-        # `project["path"]` (not `fetch`): this never-fail status surface must
-        # degrade, not KeyError, if a future path-less project entry reaches
-        # here alongside non-nil extra_dependency_tasks.
-        extra_dependency_tasks[project["path"]]
-      end
-
-      # Threshold stage for the dependency gate. Config.load validates the
-      # key and raises ConfigError on a bad value (e.g. an operator typo
-      # `dependency_gate_stage: 5-open-pr`); degrade to the global default
-      # with a warn rather than let one project's bad config abort the
-      # whole `hive status --json` and freeze daemon auto-advance.
-      def dependency_gate_stage_for(project)
-        Hive::Config.load(project.fetch("path")).fetch("dependency_gate_stage")
-      rescue StandardError => e
-        # The degrade direction is security-relevant: the default
-        # (8-finalize) is MORE permissive than a deliberately-raised gate
-        # (e.g. 9-done), so this fallback can LOOSEN the gate and let a
-        # dependent dispatch one stage early. Erring toward dispatchable is
-        # the documented safe default (a transient/unrelated config error
-        # must not freeze fleet-wide auto-advance), but the warn names the
-        # direction so an operator can tell a genuine loosening apart from a
-        # no-op fallback.
-        default = Hive::Config::DEFAULTS["dependency_gate_stage"]
-        warn "hive: status: unusable dependency_gate_stage for project " \
-             "#{project['name'].inspect} (#{e.class}: #{e.message}); gate LOOSENED to " \
-             "default #{default} — a stricter configured gate is ignored, so a dependent " \
-             "may dispatch one stage early until the config loads cleanly"
-        default
-      end
-
-      # Resolve and stamp dependency state onto one row, failing OPEN on any
-      # resolver error (corrupt stage / malformed prereq shape): treat the
-      # row as unblocked with a breadcrumb. The gate erring toward
-      # "dispatchable" is the documented safe default, and a single bad task
-      # must not blank dependency state for the rest of the project.
-      def apply_dependency_result(row, snapshot, threshold_stage)
-        result = Hive::Dependencies.resolve(
-          depends_on: row[:depends_on],
-          tasks: snapshot,
-          threshold_stage: threshold_stage,
-          task: row
+      def build_admission_context(projects, exclude_archived: false)
+        Hive::DependencySnapshot.admission_context(
+          projects, exclude_archived: exclude_archived
         )
-        row[:blocked_by] = result.blocked_by
-        row[:dependency_stage] = result.dependency_stage
-        row[:blocked] = result.blocked
       rescue StandardError => e
-        warn "hive: status: dependency resolve failed for #{row[:slug].inspect} " \
-             "(#{e.class}: #{e.message}); treating as unblocked"
+        warn "hive: status: dependency admission snapshot failed " \
+             "(#{e.class}: #{e.message}); holding every affected row"
+        snapshots = projects.map do |project|
+          Hive::DependencyAdmission::ProjectSnapshot.new(
+            name: project["name"].to_s,
+            path: project["path"].to_s,
+            repository_identity: project["repository_identity"],
+            live_repository_identity: nil,
+            dependency_gate_stage: Hive::Config::DEFAULTS.fetch("dependency_gate_stage"),
+            tasks: [],
+            validation_error: "#{e.class}: #{e.message}"
+          )
+        end
+        Hive::DependencyAdmission::Context.new(projects: snapshots)
+      end
+
+      def apply_dependency_verdict(row, context, project)
+        verdict = context.verdict(project: project["name"], slug: row[:slug])
+        row[:blocked_by] = verdict.wait? ? verdict.blocked_by : nil
+        row[:dependency_stage] = verdict.wait? ? verdict.dependency_stage : nil
+        row[:blocked] = verdict.blocked?
+        row[:admission_error] = verdict.admission_error
+        return unless verdict.error?
+
+        row[:action_key] = Hive::Schemas::TaskActionKind::ADMISSION_ERROR
+        row[:action_label] = "Admission error"
+        row[:suggested_command] = nil
+        row[:next_action] = nil
+      rescue StandardError => e
+        warn "hive: status: dependency admission failed for #{row[:slug].inspect} " \
+             "(#{e.class}: #{e.message}); holding the row"
+        error = Hive::DependencyAdmission::AdmissionError.new(
+          reason_code: "dependency_validation_failed",
+          offending_ref: "#{project['name']}:#{row[:slug]}",
+          safe_correction: "Inspect project configuration and dependency metadata before retrying."
+        )
         row[:blocked_by] = nil
         row[:dependency_stage] = nil
-        row[:blocked] = false
+        row[:blocked] = true
+        row[:admission_error] = error
+        row[:action_key] = Hive::Schemas::TaskActionKind::ADMISSION_ERROR
+        row[:action_label] = "Admission error"
+        row[:suggested_command] = nil
+        row[:next_action] = nil
       end
 
       def pr_url_for(task)
@@ -839,8 +1131,11 @@ module Hive
         # task reusing a >= 5 stage index isn't probed for a pr.md it never
         # writes — inert today (generic tasks have no pr.md → nil) but keeps the
         # coding PR gate from leaking onto generic rows.
-        return nil unless Hive::Workflows.coding_id?(task.workflow.id) # coding-scoped: PR metadata exists only in the coding workflow
-        return nil if task.stage_index < OPEN_PR_STAGE_INDEX
+        managed_draft_pr = task.workflow.draft_pr_handoff?
+        unless managed_draft_pr
+          return nil unless Hive::Workflows.coding_id?(task.workflow.id) # coding-scoped: PR metadata exists only in the coding workflow
+          return nil if task.stage_index < OPEN_PR_STAGE_INDEX
+        end
 
         value = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"]
         value = value.to_s.strip
@@ -911,6 +1206,7 @@ module Hive
       end
 
       ACTION_LABEL_ORDER = [
+        "Admission error",
         "Ready to brainstorm",
         # Generic-workflow actions (non-coding descriptors). Sorted high with
         # the other actionable "ready"/"needs" rows so generic status rows
@@ -929,6 +1225,7 @@ module Hive
         "Ready to plan",
         "Ready to develop",
         "Needs recovery",
+        "Retry draft PR handoff manually",
         "Agent running",
         "Ready to open PR",
         "Ready for review",
@@ -972,6 +1269,7 @@ module Hive
           display_name: nil,
           workflow: nil,
           depends_on: nil,
+          admission_error: nil,
           folder: folder,
           # Schema requires a non-null string; the workflow never resolved, so
           # there's no real state file — point at the folder as a best-effort,
@@ -989,7 +1287,14 @@ module Hive
           age: humanise_age(folder_mtime),
           claude_pid: nil,
           claude_pid_alive: nil,
-          live_task_lock: false
+          live_task_lock: false,
+          attempt_id: nil,
+          task_generation: nil,
+          projection: Hive::TaskProjection.project(records: []),
+          projection_data: Hive::TaskProjection.project(records: []).to_h,
+          condition_gate: nil,
+          condition_migration: nil,
+          condition_warning: nil
         }
       end
 
@@ -1005,7 +1310,7 @@ module Hive
         )
       end
 
-      def annotate_actions(rows, project, project_count, with_diagnostic: true)
+      def annotate_actions(rows, project, project_count, config: nil, with_diagnostic: true)
         slug_counts = rows.each_with_object(Hash.new(0)) { |row, counts| counts[row[:slug]] += 1 }
         grace_sec = agent_marker_grace_sec_from_config
         rows.map do |row|
@@ -1014,6 +1319,8 @@ module Hive
           action = Hive::TaskAction.for(
             row[:task],
             marker_from_row(row),
+            projection: row[:projection],
+            config: config,
             project_name: project["name"],
             project_count: project_count,
             stage_collision: slug_counts[row[:slug]] > 1,
@@ -1027,9 +1334,33 @@ module Hive
             action_label: action.label,
             suggested_command: action.command,
             next_action: action.next_action,
-            diagnostic: with_diagnostic ? action.diagnostic : nil
+            diagnostic: with_diagnostic ? action.diagnostic : nil,
+            condition_gate: action.condition_gate&.to_h,
+            condition_migration: action.migration_selection.to_h,
+            condition_warning: action.condition_warning,
+            state_label: condition_state_label(row, action)
           )
         end
+      end
+
+      # Dependency admission reports invalid project configuration on each
+      # affected row. Keep those rows visible instead of letting TaskAction's
+      # condition-mode lookup degrade the whole project; nil safely selects
+      # marker authority until the configuration is repaired.
+      def task_action_config(project_root)
+        Hive::Config.load(project_root)
+      rescue Hive::ConfigError
+        nil
+      end
+
+      def condition_state_label(row, action)
+        return "#{row[:state_label]} [#{action.condition_warning}]" if action.condition_warning
+        return row[:state_label] unless action.migration_selection.effective == "conditions"
+
+        diagnostic = action.condition_gate&.diagnostics&.first
+        return row[:state_label] unless diagnostic
+
+        "#{diagnostic['condition']}=#{diagnostic['state']}"
       end
 
       # Memoize per status call. The daemon's StaleAgentHealer reads the
@@ -1075,12 +1406,7 @@ module Hive
       end
 
       def pid_alive?(pid)
-        Process.kill(0, pid)
-        true
-      rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        true
+        Hive::ProcessKill.pid_alive?(pid)
       end
 
       def task_lock_holder(task)
@@ -1141,27 +1467,6 @@ module Hive
         else
           "#{seconds / 86_400}d ago"
         end
-      end
-
-      # Emit an ErrorPayload to stdout. Gated on @json + @stdout_written
-      # so a successful payload write doesn't get double-emitted by the
-      # rescue. `schema:` selects between "hive-status" (plain status)
-      # and "hive-status-diagnose" (the --diagnose route) so consumers
-      # see one envelope shape per CLI invocation.
-      def emit_error_envelope(error, schema: "hive-status")
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: schema,
-          error: error,
-          error_kind: error_kind_for(error)
-        )
-        puts JSON.generate(payload)
-        @stdout_written = true
-      rescue Errno::EPIPE, JSON::GeneratorError
-        # See lib/hive/commands/run.rb#emit_error_envelope for the rationale:
-        # swallow emit-time failures so the original Hive::Error still
-        # propagates with its documented exit_code instead of becoming
-        # exit 1 via bin/hive's outermost rescue.
-        @stdout_written = true
       end
 
       # Map a Hive::Error subclass to a StatusErrorKind value. Status's

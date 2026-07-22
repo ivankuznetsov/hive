@@ -3,11 +3,11 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-21
 tags: [agent, claude, subprocess]
 ---
 
-**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for marker-owned spawns, streams stdout/stderr to the per-stage log, captures a bounded final-message summary, enforces native budget-equivalent, streamed token, and wall-clock limits, kills the process group on exhaustion, classifies provider account/rate/quota limits before generic failures, and translates the exit into a status/marker according to the selected `AgentProfile` status mode. The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
+**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for marker-owned spawns, streams stdout/stderr to the per-stage log, captures a bounded final-message summary, enforces native budget-equivalent, streamed token, optional completed-turn, and wall-clock limits, kills the process group on exhaustion or completed output, classifies provider account/rate/quota limits before generic failures, and translates the exit into a status/marker according to the selected `AgentProfile` status mode. The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
 
 ## Class shape
 
@@ -17,6 +17,7 @@ Hive::Agent.new(
   prompt:,              # rendered ERB string
   max_budget_usd:,      # required, no default
   max_tokens: nil,      # optional positive in-flight token ceiling
+  max_turns: nil,       # optional positive Claude completed-turn ceiling
   timeout_sec:,         # required, no default
   add_dirs: [],         # extra --add-dir paths
   cwd: nil,             # defaults to task.folder
@@ -34,11 +35,15 @@ Hive::Agent.new(
 ## Constants
 
 - `FINAL_MESSAGE_TAIL_BYTES = 64 * 1024` caps the plain stdout/stderr tail retained in `result[:final_message]` when no structured final agent message was parsed.
-- `TOKEN_LIMIT_TERM_GRACE_SECONDS = 3` bounds graceful shutdown after a streamed token ceiling before Hive escalates the process group to KILL.
+- `TERMINATION_GRACE_SECONDS = 3` bounds graceful shutdown after a streamed token ceiling, completed-turn ceiling, or completed expected output before Hive escalates the process group to KILL.
+- `COMPLETION_EVENT_GRACE_SECONDS = 3` lets an already-generated Claude `Write`
+  and its usage-bearing turn delta settle in either event order; expiry or a
+  next-turn start sends TERM, so the protocol allowance cannot become another
+  reasoning turn.
 
 ## Provider-limit classification
 
-`Hive::AgentLimit` is the shared classifier for provider account, rate, quota, billing, and usage-credit exhaustion. It normalizes ANSI/control-heavy terminal text before matching Claude's limit menu and common API error strings such as quota exhaustion, 429 too-many-requests responses, resource exhaustion, usage credits, and billing/limit language. The broad "limit reached/exceeded/reset" family is intentionally usage-qualified (`usage`, `rate`, `token`, `credit`, `quota`, account/subscription/time-window terms, etc.) so healthy agent output about UI limits such as scroll, window, viewport, page, buffer, or line limits does not trip a false `limits_reached` wall. `error_message(text, agent:)` prefixes the first useful normalized line with `limits reached` or `limits reached for <agent>`. `AgentLimit` also owns the limit-retry cooldown: `RETRY_COOLDOWN_SEC` (default 3600s = 1h, overridable per-process via `HIVE_LIMITS_RETRY_COOLDOWN_SEC`, validated to a positive integer) and `retry_after(now:)`, which returns `(now.utc + cooldown).iso8601`. Every `limits_reached` marker writer stamps that `retry_after` so the daemon healer can self-heal the parked task once the usage window has plausibly reset — see [[daemon]] and [[state-model]].
+`Hive::AgentLimit` is the shared classifier for provider account, rate, quota, billing, and usage-credit exhaustion. It normalizes ANSI/control-heavy terminal text before matching Claude's limit menu and common API error strings such as quota exhaustion, 429 too-many-requests responses, resource exhaustion, usage credits, and billing/limit language. The broad "limit reached/exceeded/reset" family is intentionally usage-qualified (`usage`, `rate`, `token`, `credit`, `quota`, account/subscription/time-window terms, etc.) so healthy agent output about UI limits such as scroll, window, viewport, page, buffer, or line limits does not trip a false `limits_reached` wall. `error_message(text, agent:)` prefixes the first useful normalized line with `limits reached` or `limits reached for <agent>`. `AgentLimit` also owns the periodic readiness interval: `RETRY_COOLDOWN_SEC` (default 3600s = 1h, overridable per-process via `HIVE_LIMITS_RETRY_COOLDOWN_SEC`, validated to a positive integer). `retry_after(text:, now:)` still preserves a complete provider reset estimate for status/TUI display, falling back to `now + cooldown`, but daemon scheduling deliberately ignores that estimate: `retry_due?` uses the latest quota marker's mtime so credits, usage resets, and account switches are noticed within one interval. See [[daemon]] and [[state-model]].
 
 Headless `Hive::Agent#spawn_and_wait` scans each raw stream line for limit text while still preserving the structured final message and bounded plain tail. That raw-stream path catches CLIs that emit usage walls as JSON error events which `MessageExtractor` does not surface as a final assistant message; `handle_exit` then prefers `result[:limit_text]` and falls back to scanning `final_message`. The classifier still only controls failure/timeout handling: a clean `exit_code == 0` result is not reclassified. For `:state_file_marker` spawns it stamps `ERROR reason=limits_reached`; for `:exit_code_only` and `:output_file_exists` spawns it returns the limit message without overwriting the orchestrator-owned marker. `Hive::ClaudeLauncher` uses the same classifier while waiting for tmux readiness, terminal markers, and expected-output files, so a visible provider-limit pane wins over readiness timeout, tmux-session-death, and missing-output fallbacks.
 
@@ -146,7 +151,7 @@ launches send the prompt through stdin with `-` in argv.
 
 ## `spawn_and_wait` (the long part)
 
-1. Open a logfile (`<task.log_dir>/<label>-<UTC-ts>.log`), append a `[hive] <ts> spawn cwd=… cmd=…` line.
+1. Open an owner-private (`0600`), no-follow logfile (`<task.log_dir>/<label>-<UTC-ts>.log`). Append only bounded launch metadata (`cwd`, profile, executable basename, argv count); never serialize argv because positional profiles carry the complete prompt there. Event messages pass through the same shared secret redactor before persistence.
 2. `IO.pipe` for child stdout/stderr.
 3. `Process.spawn(*cmd, chdir: cwd, pgroup: true, out: w, err: w)` — `pgroup: true` puts the child in its own process group so we can kill the entire group on signal/timeout.
 4. Capture `pgid` (with `Errno::ESRCH` fallback to pid).
@@ -155,12 +160,12 @@ launches send the prompt through stdin with `-` in argv.
    uses the PID for liveness, and drop cleanup uses the start time to reject a
    reused PID before signalling the recorded child.
 6. Trap `INT`/`TERM` to forward `kill -TERM -<pgid>`. Old handlers are restored in `ensure`.
-7. Reader thread: `r.each_line` writes timestamped lines to the log, captures the last structured agent final message it recognizes, and captures the first raw stream line whose text matches `Hive::AgentLimit`. Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`; non-JSON output is retained as a bounded plain tail with `:plain` source. When `max_tokens` is set, `StreamTokenMeter` also converts usage events into one monotonic count. Claude message-start/delta events sum completed turns while maxing cumulative current-turn fields; terminal run totals replace the aggregate only when they are not smaller than already observed usage.
-8. Polling loop: `Process.wait(pid, WNOHANG)` every `[remaining, 0.2].min` seconds until the deadline. Reaching `max_tokens` on a non-terminal event sends TERM immediately; a process group still alive after the token grace receives KILL independently of the longer wall-clock timeout.
+7. Reader thread: the shared stdout/stderr pipe is line-buffered before persistence, so credentials split across provider writes or the two streams are reassembled before `Hive::SecretPatterns.redact` runs. Structured message-bearing JSON events are stricter: their payload is omitted from the durable log and replaced with event-type metadata because one logical credential can span multiple newline-delimited events. Raw in-memory lines still feed structured final-message parsing, provider-limit detection, and usage metering. Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`; non-JSON output is retained as a bounded plain tail with `:plain` source. When `max_tokens` is set, `StreamTokenMeter` also converts usage events into one monotonic count. Claude message-start/delta events sum completed turns while maxing cumulative current-turn fields; terminal run totals replace the aggregate only when they are not smaller than already observed usage.
+8. Polling loop: `Process.wait(pid, WNOHANG)` every `[remaining, 0.2].min` seconds until the deadline. Reaching `max_tokens`, reaching the Claude `max_turns` ceiling, or observing a non-empty expected output begins termination. Claude can emit its local `Write` result before or after the same turn's usage-bearing `message_delta`, so Hive waits at most the completion-event grace for the missing half, captures the delta when available, and sends TERM before a next model turn. A process group still alive after the termination grace receives KILL independently of the longer wall-clock timeout.
 9. On timeout: `kill_group(pgid)` (TERM), then `sleep_grace_then_kill` (3s grace, then KILL).
 10. Reap with `Process.wait(pid)` (rescuing `Errno::ECHILD`).
 11. Join the reader thread (kill if still alive after 2s).
-12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, status: nil}`. Token exhaustion carries `reason: "token_limit"`, the configured limit, and observed usage.
+12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, output_completed, status: nil}`. Resource exhaustion carries `reason: "token_limit"` or `"turn_limit"`, the configured limit, and the observed count. A completed output is accepted only in `:output_file_exists` mode and remains subject to the caller's structured parser.
 
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
 
@@ -180,6 +185,7 @@ Claude/tmux teardown is deliberately narrower than a shell-pattern kill. `with_s
 | Condition | Marker set |
 |-----------|------------|
 | `result[:resource_exhaustion].reason == "token_limit"` | `<!-- ERROR reason=token_limit observed_tokens=N max_tokens=N marker_id=<hex16> -->` for `:state_file_marker`; other modes return the same error status without clobbering orchestrator-owned markers |
+| `result[:resource_exhaustion].reason == "turn_limit"` | `<!-- ERROR reason=turn_limit observed_turns=N max_turns=N marker_id=<hex16> -->` for `:state_file_marker`; a completed output-file artifact is retained for downstream parsing |
 | provider-limit text in a failed/timeout result's raw stream `limit_text` or `final_message` | `<!-- ERROR reason=limits_reached message="limits reached for <agent>: ..." marker_id=<hex16> -->` for `:state_file_marker`; other status modes return `result[:error_message] = "limits reached for <agent>: ..."` without clobbering orchestrator-owned markers |
 | `result[:timed_out]` | `<!-- ERROR reason=timeout timeout_sec=N marker_id=<hex16> -->` |
 | `exit_code` non-zero | `<!-- ERROR reason=exit_code exit_code=N marker_id=<hex16> -->` |
@@ -198,7 +204,7 @@ The default Claude permission path still uses `--dangerously-skip-permissions` (
 
 ## Tests
 
-- `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable permission argv, Claude model/effort and safe-mode `cli_flags`, and proof that the capability is absent from unrelated launches.
+- `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable permission argv, Claude model/effort and safe-mode `cli_flags`, proof that the capability is absent from unrelated launches, prompt omission from logs, credential redaction across stdout/stderr write boundaries and structured message-event boundaries, and `0600` log mode.
 - `test/unit/claude_launcher_test.rb` covers the tmux wrapper argv carrying model/effort pins and omitting them when no flags are configured.
 - `test/unit/spawn_agent_test.rb` covers `Stages::Base.spawn_agent` forwarding `claude.permission_mode` from config into headless Claude spawns and the stage permission-scope helper preserving yolo defaults.
 - `test/smoke/permission_scope_headless_smoke_test.rb` is a live Claude smoke proving a read-only headless write attempt completes without timeout and does not create the file, while yolo creates it.

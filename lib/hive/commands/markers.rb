@@ -12,9 +12,11 @@ module Hive
     # `hive markers SUBCOMMAND` — agent-callable surface for state-file
     # markers.
     #
-    # v1 ships one subcommand: `clear FOLDER --name <NAME>`. It removes
-    # the named marker line from the task's state file (atomic write)
-    # and records a `hive_commit` so the audit trail stays accurate.
+    # v1 ships one subcommand: `clear FOLDER --name <NAME>`. It validates
+    # the named current marker, removes all marker history from the task's
+    # state file (atomic write), and records a `hive_commit` so the audit
+    # trail stays accurate. Purging shadowed history prevents a completed
+    # run's older working/error marker from becoming current after recovery.
     #
     # Recovery from `REVIEW_STALE` / `REVIEW_CI_STALE` / `REVIEW_ERROR`
     # / `EXECUTE_STALE` / `EXECUTE_ERROR` previously required the user
@@ -28,6 +30,8 @@ module Hive
     # markers gate `hive approve`'s forward-advance check, and clearing
     # them silently would let an agent skip the approval gesture.
     class Markers
+      include Hive::Schemas::EnvelopeEmitter
+
       # Markers that map to a "user / agent stuck on a recoverable
       # error" runner pre-flight branch. Keep this list in sync with
       # the `case marker.name` in `lib/hive/stages/review.rb` and the
@@ -52,17 +56,30 @@ module Hive
       end
 
       def call
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json
-        raise wrapped
+        call_with_envelope { do_call }
       end
 
+      def envelope_schema
+        "hive-markers-clear"
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
+      end
+
+      def envelope_serialization_failure_policy = :raise
+
       private
+
+      # The published v1 error schema deliberately exposes only the marker
+      # command's original fields. Commit-lock diagnostics remain on stderr
+      # and in the typed exception instead of widening this closed payload.
+      def envelope_payload_for(error)
+        super.tap do |payload|
+          payload.delete("holder")
+          payload.delete("lock_path")
+        end
+      end
 
       def do_call
         unless VALID_SUBCOMMANDS.include?(@subcommand)
@@ -114,7 +131,7 @@ module Hive
           end
 
           match_attr_or_raise!(task, marker)
-          Hive::Markers.remove_marker(task.state_file, marker.raw)
+          Hive::Markers.remove_all_markers(task.state_file)
         end
 
         Hive::Lock.with_commit_lock(task.hive_state_path) do
@@ -253,20 +270,6 @@ module Hive
           puts "hive: cleared #{normalized} from #{task.slug}"
           warn "next: hive run #{task.folder}"
         end
-      end
-
-      def emit_error_envelope(error)
-        payload = {
-          "schema" => "hive-markers-clear",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-markers-clear"),
-          "ok" => false,
-          "error_class" => error.class.name.split("::").last,
-          "error_kind" => error_kind_for(error),
-          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
-          "message" => error.message
-        }
-        payload["candidates"] = error.candidates if error.is_a?(Hive::AmbiguousSlug)
-        puts JSON.generate(payload)
       end
 
       def error_kind_for(error)

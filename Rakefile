@@ -46,11 +46,11 @@ task :coverage do
   end
 end
 
-# Smoke suite — opt-in, runs against real `claude` and a tmp git repo. Costs
-# ~$0.25 per invocation (single brainstorm round). Excluded from the default
-# suite so CI without a claude binary doesn't try to run it.
+# Smoke suite — opt-in, runs against real agent CLIs and tmp homes/repos.
+# Some Claude cases cost roughly $0.25 per invocation. Excluded from the
+# default suite so CI without authenticated agent binaries does not run it.
 #
-#   rake smoke               # run the smoke suite (requires real claude on PATH)
+#   rake smoke               # run the smoke suite (requires explicitly prepared agents)
 #
 # Per project CLAUDE.md (Ivan's rule "use real APIs, make real requests"):
 # this is the test bed where claude actually gets called.
@@ -59,7 +59,7 @@ Rake::TestTask.new(:smoke) do |t|
   t.libs << "lib"
   t.test_files = FileList["test/smoke/**/*_test.rb"]
   t.warning = false
-  t.description = "Run live-claude smoke tests (real subprocess; ~$0.25/run)"
+  t.description = "Run authenticated live-agent smoke tests (real subprocesses; may incur API cost)"
 end
 
 namespace :e2e do

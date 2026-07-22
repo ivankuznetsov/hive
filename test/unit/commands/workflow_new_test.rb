@@ -38,6 +38,9 @@ class WorkflowNewTest < Minitest::Test
 
       assert File.file?(descriptor_path)
       assert_equal "Edit this file to define what the `work` stage should do.\n", File.read(instruction_path)
+      assert File.file?(File.join(File.dirname(instruction_path), "README.md"))
+      assert File.file?(File.join(File.dirname(instruction_path), "honeycomb.yml"))
+      assert_includes File.read(File.join(File.dirname(instruction_path), "README.md")), "# my-flow"
 
       workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
       assert_equal :"my-flow", workflow.id
@@ -85,54 +88,48 @@ class WorkflowNewTest < Minitest::Test
       stdout = StringIO.new
 
       payload = Hive::Commands::Workflow.new!(
-        "article", project_root: project_root, stdout: stdout, template: "writing"
+        "brief", project_root: project_root, stdout: stdout, template: "research"
       )
 
       workflows = File.join(project_root, ".hive-state", "workflows")
-      assert_equal "article", payload.fetch("id")
+      assert_equal "brief", payload.fetch("id")
 
       # The descriptor carries the SAMPLE's multi-stage shape, renamed to the id.
-      workflow = Hive::Workflows::DescriptorParser.parse_file(File.join(workflows, "article.yml"))
-      assert_equal %w[inbox research draft edit done], workflow.stage_names
+      workflow = Hive::Workflows::DescriptorParser.parse_file(File.join(workflows, "brief.yml"))
+      assert_equal %w[inbox gather synthesize report done], workflow.stage_names
       assert_equal %i[inert agent agent agent inert], workflow.stages.map(&:kind)
 
       # Every stage instruction is copied verbatim from the sample — real
       # content, not the blank placeholder — and named per stage.
-      %w[research draft edit].each do |stage|
-        path = File.join(workflows, "article", "#{stage}.md")
+      %w[gather synthesize report].each do |stage|
+        path = File.join(workflows, "brief", "#{stage}.md")
         assert File.file?(path), "#{stage}.md should be scaffolded"
         refute_includes File.read(path), "Edit this file",
                         "#{stage}.md must be the sample instruction, not the blank stub"
       end
-      assert_equal File.join(workflows, "article", "research.md"),
-                   workflow.stages.find { |s| s.name == "research" }.instruction
+      assert_equal File.join(workflows, "brief", "gather.md"),
+                   workflow.stages.find { |s| s.name == "gather" }.instruction
 
       # A multi-stage template points the operator at the directory of stage
       # instructions to fill in, not a single file.
-      assert_includes stdout.string, "edit: #{File.join(workflows, 'article')}/"
+      assert_includes stdout.string, "edit: #{File.join(workflows, 'brief')}/"
       assert_includes stdout.string, "3 stage instructions"
     end
   end
 
-  def test_scaffolds_architecture_template_with_council_and_agent_terminal
+  def test_retired_flagship_templates_point_to_honeycomb
     with_initialized_project do |project_root|
-      payload = Hive::Commands::Workflow.new!(
-        "arch-plan", project_root: project_root, stdout: StringIO.new, template: "architecture"
-      )
-      workflows = File.join(project_root, ".hive-state", "workflows")
-      descriptor_path = File.join(workflows, "arch-plan.yml")
+      %w[architecture writing].each do |template|
+        error = assert_raises(Hive::Commands::Workflow::UsageError) do
+          Hive::Commands::Workflow.new!(
+            "flagship", project_root: project_root, stdout: StringIO.new, template: template
+          )
+        end
 
-      assert_equal "arch-plan", payload.fetch("id")
-      workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
-      assert_equal %w[inbox draft review architecture], workflow.stage_names
-      assert_equal %i[inert agent council agent], workflow.stages.map(&:kind)
-      assert_equal "architecture.md", workflow.stage_named("architecture").deliverable
-      assert_equal 2, workflow.stage_named("review").reviewers.length
-      assert_match(/kind:\s+council/, File.read(descriptor_path))
-      refute_match(/name:\s+done/, File.read(descriptor_path))
-
-      %w[draft revise architecture].each do |name|
-        assert File.file?(File.join(workflows, "arch-plan", "#{name}.md")), "#{name}.md should be scaffolded"
+        assert_equal Hive::ExitCodes::USAGE, error.exit_code
+        assert_includes error.message, %(workflow template "#{template}" moved to Honeycomb)
+        assert_includes error.message, "hive workflow install honeycomb/#{template}"
+        assert_equal %w[blank research], error.expected
       end
     end
   end
@@ -145,9 +142,7 @@ class WorkflowNewTest < Minitest::Test
 
       assert_equal Hive::ExitCodes::USAGE, error.exit_code
       assert_includes error.message, %(unknown workflow template "bogus")
-      assert_includes error.expected, "blank"
-      assert_includes error.expected, "writing"
-      assert_includes error.expected, "architecture"
+      assert_equal %w[blank research], error.expected
       # An invalid template is rejected before any scaffold is written.
       refute File.exist?(File.join(project_root, ".hive-state", "workflows", "x.yml"))
     end
@@ -243,7 +238,7 @@ class WorkflowNewTest < Minitest::Test
         Hive::Commands::Workflow.new(nil, nil, project_root: project_root, json: true).call
       end
       missing_payload = JSON.parse(missing_out)
-      assert_equal [ "new" ], missing_payload.fetch("expected")
+      assert_equal %w[new install list update remove publish], missing_payload.fetch("expected")
       missing_errors = schemer.validate(missing_payload).map { |e| e["error"] }
       assert_empty missing_errors,
                    "hive-workflow-new usage ErrorPayload (with `expected`) must validate " \
@@ -254,7 +249,7 @@ class WorkflowNewTest < Minitest::Test
       end
       unknown_payload = JSON.parse(unknown_out)
       assert_equal "bogus", unknown_payload.fetch("value")
-      assert_equal [ "new" ], unknown_payload.fetch("expected")
+      assert_equal %w[new install list update remove publish], unknown_payload.fetch("expected")
       unknown_errors = schemer.validate(unknown_payload).map { |e| e["error"] }
       assert_empty unknown_errors,
                    "hive-workflow-new usage ErrorPayload (with `value` AND `expected`) must " \
@@ -462,7 +457,7 @@ class WorkflowNewTest < Minitest::Test
 
       assert_equal Hive::ExitCodes::USAGE, status
       assert_empty out
-      assert_equal "hive workflow: unknown workflow subcommand \"save\" (expected: new)\n", err
+      assert_equal "hive workflow: unknown workflow subcommand \"save\" (expected: new, install, list, update, remove, publish)\n", err
     end
   end
 
@@ -474,7 +469,7 @@ class WorkflowNewTest < Minitest::Test
 
       assert_equal Hive::ExitCodes::USAGE, status
       assert_empty out
-      assert_equal "hive workflow: missing SUBCOMMAND (expected: new)\n", err
+      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, install, list, update, remove, publish)\n", err
     end
   end
 
@@ -491,8 +486,8 @@ class WorkflowNewTest < Minitest::Test
       assert_equal "UsageError", payload.fetch("error_class")
       assert_equal "usage", payload.fetch("error_kind")
       assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
-      assert_equal "missing SUBCOMMAND (expected: new)", payload.fetch("message")
-      assert_equal [ "new" ], payload.fetch("expected")
+      assert_equal "missing SUBCOMMAND (expected: new, install, list, update, remove, publish)", payload.fetch("message")
+      assert_equal %w[new install list update remove publish], payload.fetch("expected")
       refute payload.key?("value")
     end
   end
@@ -510,9 +505,9 @@ class WorkflowNewTest < Minitest::Test
       assert_equal "UsageError", payload.fetch("error_class")
       assert_equal "usage", payload.fetch("error_kind")
       assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
-      assert_equal "unknown workflow subcommand \"bogus\" (expected: new)", payload.fetch("message")
+      assert_equal "unknown workflow subcommand \"bogus\" (expected: new, install, list, update, remove, publish)", payload.fetch("message")
       assert_equal "bogus", payload.fetch("value")
-      assert_equal [ "new" ], payload.fetch("expected")
+      assert_equal %w[new install list update remove publish], payload.fetch("expected")
     end
   end
 

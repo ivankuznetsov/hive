@@ -38,20 +38,54 @@ class PipelineFlowTest < ApplicationSystemTestCase
     click_button "Add idea"
   end
 
-  def task_row(text)
-    find(".task-row", text: text, wait: 5)
-  end
-
   # --- tests ---------------------------------------------------------------
+
+  test "mobile status keeps composer controls inside the viewport" do
+    create_hive_project!("topgreendeals.co.uk")
+    create_hive_project!("architecture")
+    sign_in!
+    page.current_window.resize_to(390, 844)
+    visit "/"
+
+    metrics = page.evaluate_script(<<~JS)
+      (() => {
+        const viewportWidth = document.documentElement.clientWidth
+        const selectors = [
+          ".composer",
+          ".composer select[name='project']",
+          ".composer-attach",
+          ".composer input[type='submit']",
+          ".daemon-panel"
+        ]
+        return {
+          pageWidth: document.documentElement.scrollWidth,
+          viewportWidth,
+          controls: selectors.map((selector) => {
+            const rect = document.querySelector(selector).getBoundingClientRect()
+            return { selector, left: rect.left, right: rect.right }
+          })
+        }
+      })()
+    JS
+
+    assert_equal metrics.fetch("viewportWidth"), metrics.fetch("pageWidth"),
+                 "the status page must not overflow the mobile viewport"
+    metrics.fetch("controls").each do |control|
+      assert_operator control.fetch("left"), :>=, 0, "#{control.fetch('selector')} starts off-screen"
+      assert_operator control.fetch("right"), :<=, metrics.fetch("viewportWidth"),
+                      "#{control.fetch('selector')} ends off-screen"
+    end
+  end
 
   test "login gate, composer with image, live stream update, approve" do
     # Unauthenticated → login page, nothing leaks.
     visit "/"
-    assert_selector "h1", text: "hivebox", wait: 5
+    assert_selector "h1", text: "Hive web", wait: 5
     assert_button "Continue with GitHub"
     assert_no_selector ".task-row", wait: 0
 
     sign_in!
+    visit grid_path
 
     # Composer: attach an image via the upload button; the placeholder must
     # appear in the text and a removable chip must render.
@@ -61,8 +95,25 @@ class PipelineFlowTest < ApplicationSystemTestCase
                  wait: 5
     assert_selector ".chip", text: "image1", count: 1
 
+    # Reproduce the filesystem broadcaster winning the race against the POST:
+    # a page-wide refresh at submit-start must not abort the originating form.
+    # Other clients remain eligible for the refresh.
+    page.execute_script <<~JS
+      document.addEventListener("turbo:submit-start", () => {
+        const stream = document.createElement("turbo-stream")
+        stream.setAttribute("action", "refresh")
+        document.documentElement.appendChild(stream)
+      }, { once: true })
+    JS
     submit_idea
     assert_selector ".flash-notice", text: "Idea added", wait: 5
+    assert page.has_field?("New idea", with: "", wait: 5),
+           "a submitted permanent composer must not retain a duplicate-ready draft"
+    assert_no_selector ".chip", wait: 0
+    assert_equal 0, page.evaluate_script("document.querySelector('[data-composer-target=\"files\"]').files.length"),
+                 "successful submission must release the staged upload transport"
+    assert_equal @project, find(".composer select[name='project']").value,
+                 "clearing the completed draft should retain the operator's project context"
 
     # The task folder + asset must exist on disk (real Commands::New ran).
     folder = stage_dir(@project, "1-inbox").children
@@ -80,7 +131,9 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
     # Approve through the task page (force-free path is gated; the grid is
     # the redirect target).
-    task_row("Browser test idea").find("a", match: :first).click
+    task_href = "/tasks/#{@project}/#{folder.basename}"
+    assert_selector ".task-row a[href='#{task_href}']", text: "Browser test idea", wait: 5
+    visit task_href
     assert_selector "h1", text: "Browser test idea", wait: 5
     # The state machine drives the buttons: an unmarked stage offers no
     # doomed Approve as a headline action — the Force override lives in the
@@ -93,9 +146,89 @@ class PipelineFlowTest < ApplicationSystemTestCase
            "approve must move the task into 2-brainstorm"
   end
 
-  test "an ownerless box offers the claim flow, not config-editing homework" do
-    # No web config at all: the shipped client_id default makes the box
-    # CLAIMABLE out of the box — the first sign-in becomes the owner.
+  test "a failed Turbo submission keeps the draft and staged attachment" do
+    sign_in!
+    compose_idea "Keep this failed draft"
+    attach_composer_image fixture_image
+    assert_selector ".chip", text: "image1", count: 1
+
+    execute_script(<<~JS)
+      document.querySelector("#composer").dispatchEvent(new CustomEvent("turbo:submit-end", {
+        bubbles: true,
+        detail: { success: false, fetchResponse: { statusCode: 422 } }
+      }))
+    JS
+
+    assert_equal "Keep this failed draft [image1]", find("textarea[aria-label='New idea']").value
+    assert_selector ".chip", text: "image1", count: 1
+    assert_equal 1, page.evaluate_script(
+      "document.querySelector('[data-composer-target=files]').files.length"
+    ), "a 422 must leave the upload transport retryable"
+  end
+
+  test "a successful response clears the permanent composer before Turbo renders" do
+    sign_in!
+    compose_idea "Clear this completed draft"
+    attach_composer_image fixture_image
+    assert_selector ".chip", text: "image1", count: 1
+
+    execute_script(<<~JS)
+      document.querySelector("#composer").dispatchEvent(new CustomEvent("turbo:before-fetch-response", {
+        bubbles: true,
+        detail: { fetchResponse: { succeeded: true } }
+      }))
+    JS
+
+    assert_equal "", find("textarea[aria-label='New idea']").value
+    assert_no_selector ".chip", wait: 0
+    assert_equal 0, page.evaluate_script(
+      "document.querySelector('[data-composer-target=files]').files.length"
+    ), "a successful response must release the upload before a permanent-node reconnect"
+    assert_equal @project, find(".composer select[name='project']").value
+  end
+
+  test "composer reconnect rebuilds staged attachments before adding another" do
+    sign_in!
+    compose_idea "Reconnect attachments"
+    attach_composer_image fixture_image
+    assert_selector ".chip", text: "image1", count: 1
+
+    # Move the exact permanent form out and back across animation frames. This
+    # drives a real Stimulus disconnect/connect while preserving the browser's
+    # FileList, matching Turbo moving a permanent node into a morphed document.
+    execute_script(<<~JS)
+      const form = document.querySelector("#composer")
+      const marker = document.createComment("composer reconnect marker")
+      form.before(marker)
+      form.remove()
+      requestAnimationFrame(() => {
+        marker.after(form)
+        requestAnimationFrame(() => { form.dataset.testReconnected = "true" })
+      })
+    JS
+    assert_selector "#composer[data-test-reconnected='true']", wait: 5
+
+    attach_composer_image fixture_image
+
+    assert_selector ".chip", text: "image1", count: 1
+    assert_selector ".chip", text: "image2", count: 1
+    names = page.evaluate_script(
+      "Array.from(document.querySelector('[data-composer-target=files]').files).map(file => file.name)"
+    )
+    assert_equal %w[image1.png image2.png], names,
+                 "reconnect must restore image1 before image2 rebuilds the transport"
+
+    submit_idea
+    assert_selector ".flash-notice", text: "Idea added", wait: 5
+    folder = stage_dir(@project, "1-inbox").children
+                                           .find { |child| child.basename.to_s.start_with?("reconnect-attachments") }
+    assert folder.join("assets", "image1.png").file?
+    assert folder.join("assets", "image2.png").file?
+  end
+
+  test "an ownerless Hive web instance offers the claim flow, not config-editing homework" do
+    # No web config at all: the shipped client_id default makes the instance
+    # immediately claimable — the first sign-in becomes the owner.
     path = File.join(ENV["HIVE_HOME"], "config.yml")
     data = YAML.safe_load_file(path) || {}
     data.delete("web")
@@ -108,35 +241,50 @@ class PipelineFlowTest < ApplicationSystemTestCase
   end
 
   test "the project rail filters the grid and survives live updates" do
-    second = create_hive_project!("second-app")
-    create_task!(@project, "Demo task one")
-    create_task!(second, "Second task one")
+    filtered = create_hive_project!("rail-filter-app")
+    active = create_hive_project!("rail-active-app")
+    create_task!(filtered, "Filter task one")
+    create_task!(active, "Active task one")
     sign_in!
-    visit "/"
-    assert_selector ".project-section[data-project-name='#{@project}']"
-    assert_selector ".project-section[data-project-name='second-app']"
+    visit grid_path
+    assert_selector ".project-section[data-project-name='#{filtered}']"
+    assert_selector ".project-section[data-project-name='#{active}']"
 
-    click_button @project
-    assert_selector ".project-section[data-project-name='#{@project}']"
-    assert_no_selector ".project-section[data-project-name='second-app']",
+    click_project_filter(filtered)
+    assert_selector ".project-section[data-project-name='#{filtered}']"
+    assert_no_selector ".project-section[data-project-name='#{active}']",
                        wait: 5
-    assert_includes page.current_url, "project=#{@project}",
+    assert_includes page.current_url, "project=#{filtered}",
                     "the choice must reach the URL so reloads land filtered"
-    assert_equal @project, find(".composer select[name='project']").value,
+    assert_equal filtered, composer_project,
                  "filtering is a context switch — new ideas should land in that project"
 
-    # The broadcast REPLACES the grid, discarding our hidden attributes —
-    # the filter must re-apply itself on the fresh DOM.
-    create_task!(second, "Second task two")
-    assert_selector ".project-section[data-project-name='second-app'][hidden]",
+    # The broadcast morphs the page, so the filter must re-apply itself to the
+    # refreshed project sections.
+    create_task!(active, "Active task two")
+    assert_selector ".project-section[data-project-name='#{active}'][hidden]",
                     visible: :hidden, wait: 10
-    assert_selector ".task-row", text: "Demo task one",
+    assert_selector ".task-row", text: "Active task two", visible: :hidden, wait: 10
+    assert_selector ".task-row", text: "Filter task one",
                     count: 1
+    rail_projects = page.evaluate_script(
+      "Array.from(document.querySelectorAll('.project-nav button'), node => node.textContent.trim())"
+    )
+    assert_operator rail_projects.index(active), :<, rail_projects.index(filtered),
+                    "the rail must adopt the live activity order"
+    composer_projects = page.evaluate_script(
+      "Array.from(document.querySelectorAll(\".composer select[name='project'] option:not([disabled])\"), " \
+      "node => node.value)"
+    )
+    assert_operator composer_projects.index(active), :<, composer_projects.index(filtered),
+                    "the permanent composer must adopt the live activity order"
+    assert_equal filtered, composer_project,
+                 "reordering projects must preserve the operator's selection"
 
-    click_button "All projects"
-    assert_selector ".project-section[data-project-name='second-app']"
-    assert_selector ".task-row", text: "Second task two"
-    assert_equal @project, find(".composer select[name='project']").value,
+    click_project_filter(nil)
+    assert_selector ".project-section[data-project-name='#{active}']"
+    assert_selector ".task-row", text: "Active task two"
+    assert_equal filtered, composer_project,
                  "widening the view must not discard the composer's project choice"
 
     click_link "+ Add project"
@@ -169,7 +317,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # Enough rows to overflow the viewport so window scroll is meaningful.
     30.times { |n| create_task!(@project, "Filler idea number #{n}") }
     sign_in!
-    visit "/"
+    visit grid_path
     assert_selector ".task-row", text: "Filler idea number 29", wait: 10
     fill_in "New idea", with: "half-typed thought"
 
@@ -369,6 +517,33 @@ class PipelineFlowTest < ApplicationSystemTestCase
   end
 
   private
+
+  # StatusBroadcaster replaces the project rail and composer select while this
+  # test is using them. Query and click/read in one JavaScript turn so Turbo
+  # cannot detach a Capybara node between lookup and Playwright's action.
+  def click_project_filter(name, timeout: 5)
+    target = name.to_s.to_json
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      clicked = page.evaluate_script(<<~JS)
+        (() => {
+          const button = Array.from(document.querySelectorAll(".project-nav button"))
+            .find((node) => node.dataset.projectFilterNameParam === #{target})
+          if (!button) return false
+          button.click()
+          return true
+        })()
+      JS
+      return if clicked
+      raise "project filter #{name.inspect} never appeared" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+
+      sleep 0.05
+    end
+  end
+
+  def composer_project
+    page.evaluate_script("document.querySelector(\".composer select[name='project']\")?.value")
+  end
 
   def fixture_image
     path = File.join(ENV["HIVE_TEST_HOME_ROOT"], "fixture.png")

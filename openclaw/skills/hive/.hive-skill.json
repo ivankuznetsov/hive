@@ -1,0 +1,18 @@
+{
+  "schema": "hive-managed-skill-projection",
+  "schema_version": 1,
+  "owner": "hive",
+  "platform": "openclaw",
+  "invocation": "/hive",
+  "skill_version": "0.1.3",
+  "canonical_digest": "94bcade45312ee0eebe246f2b99505e227f7fe1824f99f4bff9d0e58cac8701d",
+  "hive_version": "0.6.6",
+  "files": {
+    "SKILL.md": "40c3c1ef6fc9d6abfd945b77610c5b02f4fe74bfcae1bfe7fa37a5d50d9a57dd",
+    "references/recovery.md": "fb7ec513fb2f53183898259ddfc235b6303f2e157c426c8e9e4c991a8802cc27",
+    "references/safety.md": "4b420b964a5d729ccafe92bda01738517449f9779e1fe90d184463f461efacd3",
+    "references/setup-and-platforms.md": "c90950d16752e3f0f17e0f62d341965981cc3d37f94183dba673ba5954931ac3",
+    "references/status-and-watch.md": "5a9c878e347049bee9a7ed14fa98a52fa8428d7d83c21eb8db936696aea0b5aa",
+    "references/workflow-actions.md": "e94624d41b1093b2edf1c6e2105b9fd5a17549ef1be46e6260e2cf5178c5ce07"
+  }
+}

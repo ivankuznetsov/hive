@@ -2,13 +2,14 @@ require "test_helper"
 require "hive/config"
 require "hive/markers"
 require "hive/stages/agent"
+require "hive/stages/agent_worktree"
 
 class StagesAgentTest < Minitest::Test
   include HiveTestHelper
 
   TaskStub = Struct.new(
     :project_root, :folder, :state_file, :stage_name, :slug,
-    :stage_index, :log_dir, :project_name, :workflow,
+    :stage_index, :log_dir, :project_name, :workflow, :base_branch, :depends_on,
     keyword_init: true
   )
 
@@ -84,6 +85,450 @@ class StagesAgentTest < Minitest::Test
           refute_includes prompt, "old plan"
         end
       end
+    end
+  end
+
+  def test_worktree_stage_delegates_before_generic_agent_spawn
+    with_tmp_dir do |project|
+      descriptor = worktree_workflow
+      task = task_for(project, "fix", descriptor: descriptor)
+      delegated = []
+      replacement = lambda do |received_task, cfg|
+        delegated << [ received_task, cfg ]
+        { commit: "worktree_initialized", status: :worktree_ready }
+      end
+
+      with_replaced_singleton_method(Hive::Stages::AgentWorktree, :run!, replacement) do
+        with_stubbed_spawn do |captured|
+          result = Hive::Stages::Agent.run!(task, { "fix" => { "agent" => "codex" } })
+
+          assert_equal({ commit: "worktree_initialized", status: :worktree_ready }, result)
+          assert_equal 1, delegated.length
+          assert_empty captured
+        end
+      end
+    end
+  end
+
+  def test_worktree_setup_creates_exact_receipt_and_resumes_matching_state
+    with_draft_pr_task do |task, worktree_root|
+      with_fake_github_controller do |auth_calls|
+        first = Hive::Stages::AgentWorktree.prepare!(task, {})
+        second = Hive::Stages::AgentWorktree.prepare!(task, {})
+
+        assert_equal first, second
+        assert_equal File.join(worktree_root, task.slug), first.worktree_path
+        assert_equal task.slug, first.task_branch
+        assert_equal "master", first.base_branch
+        assert_equal "github.com/acme/widgets", first.repository
+        assert_equal first.base_oid, run!("git", "-C", first.worktree_path, "rev-parse", "HEAD").strip
+        assert_equal 2, auth_calls.length, "every run and resume must re-check controller gh auth"
+
+        pointer = Hive::Worktree.read_strict_pointer(task.folder, expected_root: worktree_root)
+        receipt = Hive::DraftPrReceipt.read(task.folder, worktree_root: worktree_root)
+        assert_equal pointer.fetch("base_oid"), receipt.fetch("base_oid")
+        assert_equal pointer.fetch("path"), receipt.fetch("worktree_path")
+        assert_equal 0o600, File.stat(File.join(task.folder, "worktree.yml")).mode & 0o777
+        assert_equal 0o600, File.stat(File.join(task.folder, "handoff.yml")).mode & 0o777
+      end
+    end
+  end
+
+  def test_worktree_setup_resumes_advanced_handoff_phase_without_resetting_receipt
+    with_draft_pr_task do |task, worktree_root|
+      with_fake_github_controller do |auth_calls|
+        first = Hive::Stages::AgentWorktree.prepare!(task, {})
+        Hive::DraftPrReceipt.advance!(
+          task.folder, from: "worktree_created", to: "agent_validated",
+          attributes: {
+            "head_oid" => first.base_oid,
+            "report_sha256" => "b" * 64
+          },
+          worktree_root: worktree_root
+        )
+        Hive::DraftPrReceipt.advance!(
+          task.folder, from: "agent_validated", to: "push_intent",
+          attributes: {
+            "scan_sha256" => "c" * 64,
+            "push_intent_id" => "d" * 32
+          },
+          worktree_root: worktree_root
+        )
+
+        resumed = Hive::Stages::AgentWorktree.prepare!(task, {})
+        receipt = Hive::DraftPrReceipt.read(task.folder, worktree_root: worktree_root)
+
+        assert_equal first, resumed
+        assert_equal "push_intent", receipt.fetch("phase")
+        assert_equal 2, auth_calls.length, "every resume must re-check controller gh auth"
+      end
+    end
+  end
+
+  def test_worktree_setup_auth_failure_creates_no_worktree
+    with_draft_pr_task do |task, worktree_root|
+      identity = ->(_path, cfg: nil) { { "host" => "github.com", "repository" => "acme/widgets" } }
+      fetch_identity = ->(_path, _cfg) { "github.com/acme/widgets" }
+      denied = ->(_cfg = nil, host: nil, timeout_sec: nil) { raise Hive::GhError, "auth denied" }
+
+      with_replaced_singleton_method(Hive::Gh, :repository_identity, identity) do
+        with_replaced_singleton_method(Hive::Stages::AgentWorktree, :controller_fetch_repository!, fetch_identity) do
+          with_replaced_singleton_method(Hive::Gh, :ensure_authenticated!, denied) do
+            assert_raises(Hive::GhError) { Hive::Stages::AgentWorktree.prepare!(task, {}) }
+          end
+        end
+      end
+
+      refute File.exist?(File.join(worktree_root, task.slug))
+      refute File.exist?(File.join(task.folder, "worktree.yml"))
+      refute File.exist?(File.join(task.folder, "handoff.yml"))
+    end
+  end
+
+  def test_worktree_instruction_reader_rejects_oversized_input
+    with_tmp_dir do |root|
+      path = File.join(root, "instruction.md")
+      File.binwrite(
+        path,
+        "x" * (Hive::Stages::AgentWorktree::MAX_INSTRUCTION_BYTES + 1)
+      )
+      stage = Struct.new(:instruction).new(path)
+
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::AgentWorktree.send(:read_instruction, stage)
+      end
+      assert_includes error.message, "exceeds"
+    end
+  end
+
+  def test_worktree_setup_preserves_incomplete_resume_state_and_blocks
+    with_draft_pr_task do |task, worktree_root|
+      with_fake_github_controller do
+        context = Hive::Stages::AgentWorktree.prepare!(task, {})
+        FileUtils.rm_f(File.join(task.folder, "handoff.yml"))
+
+        error = assert_raises(Hive::WorktreeError) do
+          Hive::Stages::AgentWorktree.prepare!(task, {})
+        end
+
+        assert_includes error.message, "state is incomplete"
+        assert File.exist?(File.join(task.folder, "worktree.yml"))
+        assert File.directory?(context.worktree_path)
+        assert_equal task.slug, run!("git", "-C", context.worktree_path, "branch", "--show-current").strip
+        assert_equal File.join(worktree_root, task.slug), context.worktree_path
+      end
+    end
+  end
+
+  def test_worktree_stage_runs_one_configured_agent_in_exact_worktree_and_validates_ready_report
+    with_draft_pr_task do |task, _worktree_root|
+      File.write(File.join(task.folder, "brief.md"), "Fix the nil response.\n")
+      captured = []
+      run_command = method(:run!)
+      report_source = valid_fix_report
+      spawn = lambda do |_task, prompt:, **kwargs|
+        captured << { prompt: prompt, kwargs: kwargs }
+        File.write(File.join(kwargs.fetch(:cwd), "fix.rb"), "fixed\n")
+        run_command.call("git", "-C", kwargs.fetch(:cwd), "add", "fix.rb")
+        run_command.call("git", "-C", kwargs.fetch(:cwd), "commit", "-m", "fix nil response", "--quiet")
+        File.write(File.join(task.folder, "fix-report.md"), report_source)
+        { status: :ok, exit_code: 0 }
+      end
+
+      with_fake_github_controller do
+        with_fixed_user_supplied_tag do |tag|
+          with_deferred_draft_handoff do
+            with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+              result = Hive::Stages::AgentWorktree.run!(
+                task, "fix" => { "agent" => "codex" }
+              )
+
+              assert_equal :ready, result.fetch(:status)
+              assert_equal "agent_validated", result.fetch(:commit)
+              assert_equal 1, result.fetch(:repository_state).commit_count
+              assert_equal 1, captured.length
+              call = captured.first
+              assert_equal result.fetch(:worktree_context).worktree_path, call.dig(:kwargs, :cwd)
+              assert_equal :exit_code_only, call.dig(:kwargs, :status_mode)
+              assert_equal :codex, call.dig(:kwargs, :profile).name
+              assert_includes call.fetch(:prompt), File.join(task.folder, "fix-report.md")
+              assert_includes call.fetch(:prompt), "<#{tag} content_type=\"prior_artifacts\">"
+              assert_includes call.fetch(:prompt), "Fix the nil response."
+              assert_includes call.fetch(:prompt), "Trusted repository identity: github.com/acme/widgets"
+              assert_includes call.fetch(:prompt), "Current task branch: #{task.slug}"
+              assert_includes call.fetch(:prompt), "Recorded base: master at #{result.fetch(:worktree_context).base_oid}"
+              assert_includes call.fetch(:prompt), "Do not run `gh`"
+              refute_includes call.fetch(:prompt), "<!-- COMPLETE -->"
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_worktree_stage_accepts_clean_no_fix_and_ignores_stale_report_on_runtime_error
+    with_draft_pr_task do |task, _worktree_root|
+      calls = 0
+      report_source = valid_fix_report
+      spawn = lambda do |_task, **_kwargs|
+        calls += 1
+        File.write(
+          File.join(task.folder, "fix-report.md"),
+          report_source.sub("Decision: ready", "Decision: no-fix")
+        )
+        { status: :ok, exit_code: 0 }
+      end
+      with_fake_github_controller do
+        with_deferred_draft_handoff do
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+            result = Hive::Stages::AgentWorktree.run!(task, {})
+            assert_equal :"no-fix", result.fetch(:status)
+            assert_equal 1, calls
+          end
+        end
+      end
+
+      File.write(File.join(task.folder, "fix-report.md"), "Decision: ready\n")
+      failed_spawn = ->(_task, **_kwargs) { { status: :error, error_message: "provider quota" } }
+      context = Hive::Stages::AgentWorktree::Context.new(
+        worktree_path: task.project_root, task_branch: "master", base_branch: "master",
+        base_oid: run!("git", "-C", task.project_root, "rev-parse", "HEAD").strip,
+        repository: "github.com/acme/widgets"
+      )
+      with_replaced_singleton_method(Hive::Stages::AgentWorktree, :prepare!, ->(_task, _cfg) { context }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, failed_spawn) do
+          result = Hive::Stages::AgentWorktree.run!(task, {})
+          assert_equal :error, result.fetch(:status)
+          assert_equal "provider quota", result.fetch(:error_message)
+          assert_equal "managed_agent_failed", result.fetch(:commit)
+          marker = Hive::Markers.current(File.join(task.folder, "fix-report.md"))
+          assert_equal :error, marker.name
+          assert_equal "managed_agent_failed", marker.attrs.fetch("reason")
+        end
+      end
+
+
+      with_replaced_singleton_method(Hive::Stages::AgentWorktree, :prepare!, ->(_task, _cfg) { context }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :spawn_agent,
+          ->(_task, **_kwargs) { { status: :timeout, timed_out: true } }
+        ) do
+          result = Hive::Stages::AgentWorktree.run!(task, {})
+          assert_equal :error, result.fetch(:status)
+          assert_equal "timeout", result.fetch(:commit)
+          refute result.key?(:report)
+        end
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(_task, **_kwargs) { nil }) do
+          result = Hive::Stages::AgentWorktree.run!(task, {})
+          assert_equal :error, result.fetch(:status)
+        end
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :spawn_agent,
+          ->(_task, **_kwargs) { raise IOError, "stream failed" }
+        ) do
+          error_result = Hive::Stages::AgentWorktree.run!(task, {})
+          assert_equal :error, error_result.fetch(:status)
+          assert_equal "managed_agent_failed", error_result.fetch(:commit)
+        end
+      end
+    end
+  end
+
+  def test_worktree_stage_rejects_protected_state_mutation_and_agent_marker_authorship
+    %w[meta.yml task.md].each do |protected_name|
+      with_draft_pr_task do |task, _worktree_root|
+        run_command = method(:run!)
+        report_source = valid_fix_report
+        spawn = lambda do |_task, **kwargs|
+          File.write(File.join(task.folder, protected_name), "agent-owned\n")
+          File.write(File.join(kwargs.fetch(:cwd), "fix.rb"), "fixed\n")
+          run_command.call("git", "-C", kwargs.fetch(:cwd), "add", "fix.rb")
+          run_command.call("git", "-C", kwargs.fetch(:cwd), "commit", "-m", "fix", "--quiet")
+          File.write(File.join(task.folder, "fix-report.md"), report_source)
+          { status: :ok, exit_code: 0 }
+        end
+
+        with_fake_github_controller do
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+            result = Hive::Stages::AgentWorktree.run!(task, {})
+            assert_equal :error, result.fetch(:status)
+            assert_equal "managed_agent_failed", result.fetch(:commit)
+            marker = Hive::Markers.current(File.join(task.folder, "fix-report.md"))
+            assert_equal "Hive::StageError", marker.attrs.fetch("exception_class")
+          end
+        end
+      end
+    end
+  end
+
+  def test_worktree_stage_rejects_git_configuration_tampering
+    with_draft_pr_task do |task, _worktree_root|
+      run_command = method(:run!)
+      spawn = lambda do |_task, **kwargs|
+        run_command.call(
+          "git", "-C", kwargs.fetch(:cwd), "config", "core.hooksPath", "/tmp/agent-hooks"
+        )
+        { status: :ok, exit_code: 0 }
+      end
+
+      with_fake_github_controller do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          result = Hive::Stages::AgentWorktree.run!(task, {})
+
+          assert_equal :error, result.fetch(:status)
+          assert_equal "managed_agent_failed", result.fetch(:commit)
+          assert_equal "Hive::StageError", result.fetch(:error)
+          marker = Hive::Markers.current(File.join(task.folder, "fix-report.md"))
+          assert_equal "managed_agent_failed", marker.attrs.fetch("reason")
+        end
+      end
+    end
+  end
+
+  def test_worktree_stage_rejects_global_git_configuration_tampering
+    with_draft_pr_task do |task, _worktree_root|
+      with_tmp_dir do |agent_home|
+        run_command = method(:run!)
+        spawn = lambda do |_task, **_kwargs|
+          run_command.call("git", "config", "--global", "credential.helper", "attacker")
+          { status: :ok, exit_code: 0 }
+        end
+
+        with_env("HOME" => agent_home) do
+          with_fake_github_controller do
+            with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+              result = Hive::Stages::AgentWorktree.run!(task, {})
+
+              assert_equal :error, result.fetch(:status)
+              assert_equal "managed_agent_failed", result.fetch(:commit)
+              assert_equal "Hive::StageError", result.fetch(:error)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_worktree_stage_protects_controller_handoff_files_without_changing_global_stage_ownership
+    expected = Hive::ProtectedFiles::ORCHESTRATOR_OWNED + %w[meta.yml handoff.yml pr.md]
+
+    assert_equal expected, Hive::Stages::AgentWorktree::PROTECTED_FILES
+    refute_includes Hive::ProtectedFiles::ORCHESTRATOR_OWNED, "pr.md"
+  end
+
+  def test_worktree_stage_rejects_symlinked_report
+    with_draft_pr_task do |task, _worktree_root|
+      report_source = valid_fix_report
+      spawn = lambda do |_task, **_kwargs|
+        target = File.join(task.folder, "outside-report.md")
+        File.write(target, report_source)
+        File.symlink(target, File.join(task.folder, "fix-report.md"))
+        { status: :ok, exit_code: 0 }
+      end
+
+      with_fake_github_controller do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          result = Hive::Stages::AgentWorktree.run!(task, {})
+          assert_equal :error, result.fetch(:status)
+          assert_equal "Hive::StageError", result.fetch(:error)
+          refute File.symlink?(File.join(task.folder, "fix-report.md"))
+        end
+      end
+    end
+  end
+
+  def test_worktree_stage_checks_protected_files_when_spawn_raises
+    with_draft_pr_task do |task, _worktree_root|
+      spawn = lambda do |_task, **_kwargs|
+        File.write(File.join(task.folder, "pr.md"), "forged\n")
+        raise IOError, "stream failed"
+      end
+
+      with_fake_github_controller do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          result = Hive::Stages::AgentWorktree.run!(task, {})
+          assert_equal :error, result.fetch(:status)
+          assert_equal "Hive::StageError", result.fetch(:error)
+        end
+      end
+    end
+  end
+
+  def test_worktree_stage_rejects_preexisting_symlinked_controller_file_before_spawn
+    with_tmp_dir do |project|
+      task = task_for(project, "fix", descriptor: worktree_workflow)
+      target = File.join(project, "outside-meta.yml")
+      File.write(target, "id: 1\n")
+      File.symlink(target, File.join(task.folder, "meta.yml"))
+      context = Hive::Stages::AgentWorktree::Context.new(
+        worktree_path: project, task_branch: task.slug, base_branch: "main",
+        base_oid: "a" * 40, repository: "github.com/acme/widgets"
+      )
+      calls = 0
+
+      with_replaced_singleton_method(Hive::Stages::AgentWorktree, :prepare!, ->(_task, _cfg) { context }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { calls += 1 }) do
+          result = Hive::Stages::AgentWorktree.run!(task, {})
+          assert_equal :error, result.fetch(:status)
+          assert_equal "Hive::StageError", result.fetch(:error)
+        end
+      end
+      assert_equal 0, calls
+      assert_equal "id: 1\n", File.read(target)
+    end
+  end
+
+  def test_worktree_prompt_includes_bounded_package_instruction
+    with_tmp_dir do |project|
+      instruction = File.join(project, "fix-instruction.md")
+      File.write(instruction, "Use the local reproducer before editing.\n")
+      descriptor = worktree_workflow(instruction: instruction)
+      task = task_for(project, "fix", descriptor: descriptor)
+      context = Hive::Stages::AgentWorktree::Context.new(
+        worktree_path: project, task_branch: task.slug, base_branch: "main",
+        base_oid: "a" * 40, repository: "github.com/acme/widgets"
+      )
+
+      prompt = Hive::Stages::AgentWorktree.render_prompt(
+        task, descriptor.stage_named("fix"), context,
+        File.join(task.folder, "fix-report.md")
+      )
+      assert_includes prompt, "Use the local reproducer before editing."
+
+      File.write(instruction, "x" * (Hive::Stages::AgentWorktree::MAX_INSTRUCTION_CHARS + 1))
+      assert_raises(Hive::StageError) do
+        Hive::Stages::AgentWorktree.render_prompt(
+          task, descriptor.stage_named("fix"), context,
+          File.join(task.folder, "fix-report.md")
+        )
+      end
+      FileUtils.rm_f(instruction)
+      assert_raises(Hive::StageError) do
+        Hive::Stages::AgentWorktree.render_prompt(
+          task, descriptor.stage_named("fix"), context,
+          File.join(task.folder, "fix-report.md")
+        )
+      end
+    end
+  end
+
+  def test_worktree_stage_rejects_noncanonical_report_path_before_spawn
+    with_tmp_dir do |project|
+      descriptor = worktree_workflow(deliverable: "report.md")
+      task = task_for(project, "fix", descriptor: descriptor)
+      context = Hive::Stages::AgentWorktree::Context.new(
+        worktree_path: project, task_branch: task.slug, base_branch: "main",
+        base_oid: "a" * 40, repository: "github.com/acme/widgets"
+      )
+      calls = 0
+      with_replaced_singleton_method(Hive::Stages::AgentWorktree, :prepare!, ->(_task, _cfg) { context }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { calls += 1 }) do
+          result = Hive::Stages::AgentWorktree.run!(task, {})
+          assert_equal :error, result.fetch(:status)
+          assert_equal "Hive::StageError", result.fetch(:error)
+        end
+      end
+      assert_equal 0, calls
     end
   end
 
@@ -236,6 +681,40 @@ class StagesAgentTest < Minitest::Test
         assert_equal "default", kwargs.fetch(:permission_mode)
         assert_equal %w[Read LS Grep Glob], kwargs.fetch(:allowed_tools)
         assert_equal %w[Write Edit MultiEdit NotebookEdit Bash], kwargs.fetch(:disallowed_tools)
+      end
+    end
+  end
+
+  def test_managed_actor_reuses_one_runtime_context_for_prompt_and_permissions
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      package_root = File.join(project, ".hive-state", "workflows", "demo", "versions", "#{'a' * 40}")
+      File.write(instruction_path, "Do managed work.\n")
+      FileUtils.mkdir_p(package_root)
+      descriptor = instruction_workflow(instruction_path, permissions: "read-only")
+      task = task_for(project, "work", descriptor: descriptor)
+      context = { package_root: package_root, environment: { "DEMO_INPUT" => "configured" } }
+      loads = 0
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:managed_runtime_context) do |slot_id|
+        loads += 1
+        raise "wrong managed slot" unless slot_id == "stages.work"
+
+        context
+      end
+      task.define_singleton_method(:managed_prompt) do |slot_id, body, supplied_context|
+        raise "wrong managed context" unless supplied_context.equal?(context)
+
+        "#{slot_id}:#{body}"
+      end
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, {})
+
+        assert_equal 1, loads
+        assert_match(/\Astages\.work:/, captured.first.fetch(:prompt))
+        policy = captured.first.fetch(:kwargs).fetch(:runtime_policy)
+        assert_equal "configured", policy.environment.fetch("DEMO_INPUT")
       end
     end
   end
@@ -509,6 +988,54 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_run_uses_provider_reset_date_from_limit_error_envelope
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      reset_at = Time.now.utc + (7 * 24 * 60 * 60)
+      limit_text = "You've hit your usage limit. Try again at #{reset_at.strftime('%b %-d, %Y %-I:%M %p')} UTC."
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
+        {
+          status: :error,
+          error_message: "limits reached for codex: usage limit",
+          limit_text: limit_text
+        }
+      }) do
+        Hive::Stages::Agent.run!(task, {})
+
+        retry_after = Time.parse(Hive::Markers.current(task.state_file).attrs.fetch("retry_after"))
+        assert_operator retry_after, :>, Time.now.utc + (6 * 24 * 60 * 60)
+        assert_operator retry_after, :<, Time.now.utc + (8 * 24 * 60 * 60)
+      end
+    end
+  end
+
+  def test_run_preserves_retryable_limit_marker_written_over_stale_marker
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      Hive::Markers.set(task.state_file, :error, reason: "agent_preflight_failed")
+      retry_after = (Time.now.utc + 3600).iso8601
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
+        Hive::Markers.set(
+          task.state_file,
+          :error,
+          reason: "limits_reached",
+          message: "limits reached for codex: usage limit",
+          retry_after: retry_after
+        )
+        { status: :error, error_message: "limits reached for codex: usage limit" }
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "limits_reached", status: :error }, result)
+        assert_equal "limits_reached", marker.attrs["reason"]
+        assert_equal retry_after, marker.attrs["retry_after"]
+      end
+    end
+  end
+
   def test_run_does_not_overwrite_quota_marker_written_by_agent
     with_tmp_dir do |project|
       task = task_for(project, "plan")
@@ -530,6 +1057,25 @@ class StagesAgentTest < Minitest::Test
         assert_equal "limits_reached", marker.attrs["reason"]
         assert_equal retry_after, marker.attrs["retry_after"]
         refute marker.attrs.key?("provider"), "preserving the marker must not synthesize or replace attrs"
+      end
+    end
+  end
+
+  def test_run_does_not_relabel_another_fresh_agent_error_as_preflight_failure
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      Hive::Markers.set(task.state_file, :complete)
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |spawned_task, **_kwargs|
+        Hive::Markers.set(spawned_task.state_file, :error, reason: "timeout", timeout_sec: 300)
+        { status: :error, error_message: "agent timed out" }
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result)
+        assert_equal "timeout", marker.attrs["reason"]
+        assert_equal "300", marker.attrs["timeout_sec"]
       end
     end
   end
@@ -637,7 +1183,204 @@ class StagesAgentTest < Minitest::Test
     assert_kind_of String, Hive::Stages::Base.render("agent_prompt.md.erb", bindings)
   end
 
+  def test_worktree_stage_resumes_terminal_receipts_before_and_after_prepare
+    with_tmp_dir do |project|
+      task = task_for(project, "fix", descriptor: worktree_workflow)
+      terminal = { "phase" => "terminal", "terminal_outcome" => "blocked" }
+      resumed = { commit: "handoff_recovered", status: :error }
+      context = Hive::Stages::AgentWorktree::Context.new(
+        worktree_path: project, task_branch: task.slug, base_branch: "main",
+        base_oid: "a" * 40, repository: "github.com/acme/widgets"
+      )
+
+      with_replaced_singleton_method(Hive::Stages::AgentWorktree, :terminal_receipt, ->(_task) { terminal }) do
+        with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :resume_terminal!, ->(*) { resumed }) do
+          assert_equal resumed, Hive::Stages::AgentWorktree.run!(task, {})
+        end
+      end
+
+      with_replaced_singleton_method(Hive::Stages::AgentWorktree, :terminal_receipt, ->(_task) { nil }) do
+        with_replaced_singleton_method(Hive::Stages::AgentWorktree, :prepare!, ->(*) { context }) do
+          with_replaced_singleton_method(Hive::DraftPrReceipt, :read, ->(*) { terminal }) do
+            with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :resume_terminal!, ->(*) { resumed }) do
+              assert_equal resumed, Hive::Stages::AgentWorktree.run!(task, {})
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_worktree_stage_resumes_noninitial_handoff_from_validated_report
+    with_tmp_dir do |project|
+      task = task_for(project, "fix", descriptor: worktree_workflow)
+      source = valid_fix_report
+      digest = Digest::SHA256.hexdigest(source)
+      receipt = { "phase" => "push_intent", "report_sha256" => digest }
+      context = Hive::Stages::AgentWorktree::Context.new(
+        worktree_path: project, task_branch: task.slug, base_branch: "main",
+        base_oid: "a" * 40, repository: "github.com/acme/widgets"
+      )
+      state = Hive::Stages::AgentReport::RepositoryState.new(
+        head_oid: "b" * 40, commit_count: 1, clean: true
+      )
+      captured = nil
+      captured_digest = nil
+
+      with_replaced_singleton_method(Hive::Stages::AgentWorktree, :terminal_receipt, ->(_task) { nil }) do
+        with_replaced_singleton_method(Hive::Stages::AgentWorktree, :prepare!, ->(*) { context }) do
+          with_replaced_singleton_method(Hive::DraftPrReceipt, :read, ->(*) { receipt }) do
+            with_replaced_singleton_method(
+              Hive::Stages::DraftPrHandoff, :report_source_for_resume,
+              ->(_path, expected_sha256:) { captured_digest = expected_sha256; source }
+            ) do
+              with_replaced_singleton_method(
+                Hive::Stages::AgentReport, :validate_repository!, ->(_report, _context) { state }
+              ) do
+                with_replaced_singleton_method(
+                  Hive::Stages::DraftPrHandoff, :run!,
+                  ->(*args, **kwargs) { captured = [ args, kwargs ]; { status: :complete } }
+                ) do
+                  assert_equal({ status: :complete }, Hive::Stages::AgentWorktree.run!(task, {}))
+                end
+              end
+            end
+          end
+        end
+      end
+      assert_equal digest, captured_digest
+      assert_equal state, captured.last.fetch(:repository_state)
+      assert_equal source, captured.last.fetch(:report_source)
+    end
+  end
+
+  def test_managed_failure_classifies_limits_and_resource_exhaustion
+    with_tmp_dir do |project|
+      task = task_for(project, "fix", descriptor: worktree_workflow)
+      cases = [
+        [ { limit_text: "budget exhausted" }, "limits_reached" ],
+        [ { resource_exhaustion: { reason: "quota_exhausted" } }, "quota_exhausted" ],
+        [ { resource_exhaustion: { reason: "" } }, "managed_agent_failed" ]
+      ]
+      cases.each do |result, reason|
+        actual = Hive::Stages::AgentWorktree.send(:managed_failure_result, task, result: result)
+        assert_equal reason, actual.fetch(:commit)
+        assert_equal reason, Hive::Markers.current(File.join(task.folder, "fix-report.md")).attrs.fetch("reason")
+      end
+    end
+  end
+
+  def test_agent_worktree_private_failures_are_typed_and_bounded
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    with_replaced_singleton_method(Open3, :capture3, ->(*) { [ "stdout detail", "", failed ] }) do
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::AgentWorktree.send(:git_path!, "/tmp/repo", "--absolute-git-dir")
+      end
+      assert_includes error.message, "stdout detail"
+    end
+
+    with_tmp_dir do |dir|
+      path = File.join(dir, "fix-report.md")
+      with_replaced_singleton_method(File, :lstat, ->(_path) { raise Errno::EACCES, path }) do
+        error = assert_raises(Hive::StageError) do
+          Hive::Stages::AgentWorktree.send(:prepare_report_output!, path)
+        end
+        assert_includes error.message, "could not prepare"
+      end
+    end
+
+    depends = Struct.new(:depends_on).new("parent-task")
+    error = assert_raises(Hive::WorktreeError) do
+      Hive::Stages::AgentWorktree.prepare!(depends, {})
+    end
+    assert_includes error.message, "do not support depends_on"
+  end
+
+  def test_agent_worktree_repository_identity_helpers_fail_closed
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+
+    with_replaced_singleton_method(
+      Hive::Gh, :repository_identity, ->(*, **) { { "host" => "github.com" } }
+    ) do
+      assert_raises(Hive::WorktreeError) do
+        Hive::Stages::AgentWorktree.send(:controller_repository!, "/repo", {})
+      end
+    end
+
+    failures = [
+      ->(*) { [ "", "cannot read", failed ] },
+      ->(*) { [ "one\ntwo\n", "", ok ] },
+      ->(*) { [ "https://gitlab.com/acme/widgets.git\n", "", ok ] },
+      ->(*) { [ "not a remote\n", "", ok ] }
+    ]
+    failures.each do |capture|
+      with_replaced_singleton_method(Hive::Gh, :capture3, capture) do
+        assert_raises(Hive::WorktreeError) do
+          Hive::Stages::AgentWorktree.send(:controller_fetch_repository!, "/repo", {})
+        end
+      end
+    end
+
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3,
+      ->(*_args, **_kwargs) { [ "git@github.com:acme/widgets.git\n", "", ok ] }
+    ) do
+      assert_equal "github.com/acme/widgets",
+                   Hive::Stages::AgentWorktree.send(:controller_fetch_repository!, "/repo", {})
+    end
+
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3,
+      ->(*_args, **_kwargs) { [ "stdout detail", "", failed ] }
+    ) do
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Stages::AgentWorktree.send(:controller_fetch_repository!, "/repo", {})
+      end
+      assert_includes error.message, "stdout detail"
+    end
+
+    with_replaced_singleton_method(
+      Hive::Stages::AgentWorktree, :controller_repository!, ->(*) { "github.com/acme/other" }
+    ) do
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Stages::AgentWorktree.send(
+          :validate_repository_match!, "/repo", "github.com/acme/widgets"
+        )
+      end
+      assert_includes error.message, "does not match recorded repository"
+    end
+  end
+
+  def test_agent_worktree_prepare_rejects_fetch_push_repository_mismatch
+    task = Struct.new(:depends_on, :base_branch, :project_root).new(nil, "main", "/repo")
+    with_replaced_singleton_method(
+      Hive::Stages::AgentWorktree, :controller_repository!, ->(*) { "github.com/acme/widgets" }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Stages::AgentWorktree, :controller_fetch_repository!, ->(*) { "github.com/acme/other" }
+      ) do
+        error = assert_raises(Hive::WorktreeError) do
+          Hive::Stages::AgentWorktree.prepare!(task, {})
+        end
+        assert_includes error.message, "does not match push repository"
+      end
+    end
+  end
+
   private
+
+    # U3-focused tests stop at the validated local boundary. U4 owns the
+    # controller publication state machine and has its own default-deny suite.
+    def with_deferred_draft_handoff
+      handoff = lambda do |_task, report:, repository_state:, **_kwargs|
+        {
+          commit: "agent_validated", status: report.decision,
+          repository_state: repository_state
+        }
+      end
+      with_replaced_singleton_method(Hive::Stages::DraftPrHandoff, :run!, handoff) { yield }
+    end
 
     def resource_workflow(name:, budget_usd:, timeout_sec:)
       Hive::Workflow.new(
@@ -655,6 +1398,83 @@ class StagesAgentTest < Minitest::Test
           )
         ]
       )
+    end
+
+    def worktree_workflow(instruction: nil, deliverable: "fix-report.md")
+      Hive::Workflow.new(
+        id: :worktree_agent,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "fix", index: 1, state_file: "fix-report.md", kind: :agent,
+            instruction: instruction,
+            workspace: :worktree, handoff: :draft_pr, deliverable: deliverable
+          )
+        ]
+      )
+    end
+
+    def valid_fix_report
+      <<~REPORT
+        Decision: ready
+
+        Reproduction:
+        Reproduced locally.
+
+        Cause:
+        The response mapper discarded nil values.
+
+        Changes:
+        Preserve the response key and add a regression test.
+
+        Tests:
+        Focused tests pass.
+
+        Risks:
+        Low and localized.
+
+        Suggested PR title: Preserve nil response values
+      REPORT
+    end
+
+    def with_draft_pr_task
+      with_tmp_git_repo do |project|
+        origin = "#{project}.agent-worktree-origin.git"
+        worktree_root = "#{project}.managed-worktrees"
+        begin
+          run!("git", "clone", "--bare", project, origin)
+          run!("git", "-C", project, "remote", "add", "origin", origin)
+          FileUtils.mkdir_p(File.join(project, ".hive-state"))
+          File.write(
+            File.join(project, ".hive-state", "config.yml"),
+            { "worktree_root" => worktree_root, "default_branch" => "master" }.to_yaml
+          )
+          descriptor = worktree_workflow
+          task = task_for(project, "fix", descriptor: descriptor)
+          task.base_branch = "master"
+          task.depends_on = nil
+          yield task, worktree_root
+        ensure
+          FileUtils.rm_rf(worktree_root)
+          FileUtils.rm_rf(origin)
+        end
+      end
+    end
+
+    def with_fake_github_controller
+      auth_calls = []
+      identity = ->(_path, cfg: nil) { { "host" => "github.com", "repository" => "acme/widgets" } }
+      authenticated = lambda do |_cfg = nil, host: nil, timeout_sec: nil|
+        auth_calls << host
+        nil
+      end
+      fetch_identity = ->(_path, _cfg) { "github.com/acme/widgets" }
+      with_replaced_singleton_method(Hive::Gh, :repository_identity, identity) do
+        with_replaced_singleton_method(Hive::Stages::AgentWorktree, :controller_fetch_repository!, fetch_identity) do
+          with_replaced_singleton_method(Hive::Gh, :ensure_authenticated!, authenticated) do
+            yield auth_calls
+          end
+        end
+      end
     end
 
     def instruction_workflow(instruction_path, permissions: nil)

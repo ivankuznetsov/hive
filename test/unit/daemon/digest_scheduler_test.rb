@@ -7,6 +7,15 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
 
   T0 = Time.utc(2026, 6, 14, 0, 0, 30)
 
+  def test_base_requires_an_explicit_scheduler_contract
+    scheduler = Hive::Daemon::DigestSchedulerBase.new(
+      state_path: "/tmp/unused", clock: -> { T0 }, enabled: true, logger: nil
+    )
+
+    error = assert_raises(NotImplementedError) { scheduler.send(:scheduler_contract) }
+    assert_match(/must define its digest scheduler contract/, error.message)
+  end
+
   # Validate event names against the REAL daemon Logger allowlist so a
   # scheduler emitting an unregistered event (which a production
   # Hive::Daemon::Logger would reject with ArgumentError, crashing the
@@ -25,6 +34,18 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
 
       @events << [ name, attrs ]
     end
+  end
+
+  def test_base_scheduler_requires_a_subclass_contract
+    base = Hive::Daemon::DigestSchedulerBase.new(
+      state_path: "/tmp/hive-digest-base-test.json",
+      clock: -> { T0 },
+      enabled: false,
+      logger: nil
+    )
+
+    error = assert_raises(NotImplementedError) { base.send(:scheduler_contract) }
+    assert_includes error.message, "must define its digest scheduler contract"
   end
 
   def test_first_run_initializes_cursor_without_dispatching_history
@@ -242,6 +263,28 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
 
       assert_equal "2026-06-13", state(dir).fetch("last_digested_date"),
                    "completion must never regress the cursor below its current value"
+    end
+  end
+
+  def test_complete_write_failure_keeps_day_owed_and_backs_off
+    with_tmp_dir do |dir|
+      write_state(dir, "last_digested_date" => "2026-06-12")
+      logger = StubLogger.new
+      scheduler = scheduler(dir, enabled: true, logger: logger)
+      assert_equal "2026-06-13", scheduler.tick(now: T0).first.fetch(:slug)
+
+      scheduler.define_singleton_method(:write_state) do |_data|
+        raise Errno::ENOSPC, "no space left on device"
+      end
+
+      assert_raises(Errno::ENOSPC) do
+        scheduler.complete(date: "2026-06-13", exit_code: 0, now: T0 + 1)
+      end
+
+      assert_equal "2026-06-12", state(dir).fetch("last_digested_date")
+      assert logger.events.any? { |name, _| name == :digest_failure_backoff }
+      assert_empty scheduler.tick(now: T0 + 30)
+      assert_equal "2026-06-13", scheduler.tick(now: T0 + 61).first.fetch(:slug)
     end
   end
 

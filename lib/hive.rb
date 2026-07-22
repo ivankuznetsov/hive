@@ -1,5 +1,5 @@
 module Hive
-  VERSION = "0.4.2".freeze
+  VERSION = "0.6.6".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
   # Canonical GitHub org + repo. Referenced by the release probe
   # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.
@@ -13,8 +13,16 @@ module Hive
     # removed; adding new keys is non-breaking and does NOT require a bump.
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
-      "hive-status" => 4,
+      "hive-status" => 6,
+      "hive-operational-status" => 1,
+      "hive-watch-event" => 1,
+      "hive-act" => 1,
       "hive-init" => 2,
+      "hive-setup-agents" => 1,
+      "hive-setup" => 1,
+      "hive-web-status" => 1,
+      "hive-web-install" => 1,
+      "hive-doctor" => 2,
       "hive-status-diagnose" => 2,
       "hive-run" => 2,
       "hive-approve" => 2,
@@ -36,15 +44,22 @@ module Hive
       "hive-daemon-queue" => 1,
       "hive-patrol" => 2,
       "hive-patrol-finding" => 2,
-      "hive-refactor-patrol" => 2,
+      "hive-refactor-patrol" => 3,
       "hive-refactor-patrol-jobs" => 1,
-      "hive-refactor-patrol-thesis" => 2,
+      "hive-refactor-patrol-thesis" => 3,
       # Scaffold a blank per-project workflow descriptor (`hive workflow new ID
       # --json`). The error arm routes through Hive::Schemas::ErrorEnvelope so
       # its output carries the same schema/schema_version/error_kind keys as
       # every other agent-callable command's error envelope; the success arm
       # builds its hash directly.
       "hive-workflow-new" => 1,
+      "hive-workflow-install" => 2,
+      # v2 gives selected managed rows their active immutable configuration
+      # digest plus redacted per-slot mapping and optional-input discovery.
+      "hive-workflow-list" => 2,
+      "hive-workflow-remove" => 1,
+      "hive-workflow-update" => 2,
+      "hive-workflow-publish" => 1,
       # Global daily shipped digest (`hive digest --json`). The success
       # envelope carries the delivery outcome (status/date/message); hard
       # failures use stderr + exit code, and the Thor-usage error path
@@ -70,11 +85,13 @@ module Hive
       # `dispatch_requests/` directory. See
       # `Hive::Daemon::DispatchRequestQueue` and
       # `Hive::Bot::DispatchRequestWriter`.
-      "hive-dispatch-request" => 2,
+      "hive-dispatch-request" => 3,
       # Reverse-direction notice the daemon writes for the bot to relay a
       # non-zero, bot-originated dispatch back to the originating Telegram
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
-      "hive-dispatch-result" => 1
+      "hive-dispatch-result" => 2,
+      # Internal source-of-truth record for durable task-stage ownership.
+      "hive-attempt" => 2
     }.freeze
 
     # Closed enum of Diagnostic.generated_by values accepted by the
@@ -124,9 +141,18 @@ module Hive
           payload["current_stage"] = error.current_stage if error.current_stage
           payload["target_stage"] = error.target_stage if error.target_stage
         end
+        if error.is_a?(Hive::ConditionGateBlocked)
+          payload["condition_gate"] = error.condition_gate
+          payload["next_action"] = error.next_action
+        end
         if error.is_a?(Hive::ConcurrentRunError)
           payload["holder"] = error.holder if error.holder
           payload["lock_path"] = error.lock_path if error.lock_path
+        end
+        if error.is_a?(Hive::DependencyWaitError) || error.is_a?(Hive::DependencyAdmissionError)
+          payload["reason_code"] = error.reason_code
+          payload["offending_ref"] = error.offending_ref
+          payload["safe_correction"] = error.safe_correction
         end
         payload
       end
@@ -171,6 +197,10 @@ module Hive
       READY_TO_ARCHIVE    = "ready_to_archive".freeze
       READY_TO_ADVANCE    = "ready_to_advance".freeze
       READY_TO_RUN        = "ready_to_run".freeze
+      # Explicit operator-only retry for a validated draft-PR handoff. The
+      # daemon's Policy does not dispatch this key; status still exposes the
+      # exact `hive run` command for a human-controlled retry.
+      RECOVER_DRAFT_PR    = "recover_draft_pr".freeze
       # A clean ad-hoc PR review that has completed: it stays PARKED at
       # 6-review rather than advancing to 7-artifacts. Deliberately NOT in
       # Daemon::Policy::ADVANCE_ACTIONS, so a daemon-enrolled project never
@@ -183,6 +213,7 @@ module Hive
       ARCHIVED            = "archived".freeze
       MANUAL_STEERING     = "manual_steering".freeze
       ERROR               = "error".freeze
+      ADMISSION_ERROR     = "admission_error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
@@ -204,6 +235,8 @@ module Hive
       WORKTREE          = "worktree".freeze
       AMBIGUOUS_SLUG    = "ambiguous_slug".freeze
       INVALID_TASK_PATH = "invalid_task_path".freeze
+      DEPENDENCY_WAIT    = "dependency_wait".freeze
+      ADMISSION_ERROR    = "admission_error".freeze
       INTERNAL          = "internal".freeze
       ERROR             = "error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
@@ -218,6 +251,19 @@ module Hive
       INTERNAL = "internal".freeze
       ERROR    = "error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
+    end
+
+    module OperationalActionErrorKind
+      USAGE             = "usage".freeze
+      STALE_OBSERVATION = "stale_observation".freeze
+      AMBIGUOUS_TARGET  = "ambiguous_target".freeze
+      CONCURRENT_RUN    = "concurrent_run".freeze
+      DEPENDENCY_WAIT   = "dependency_wait".freeze
+      ADMISSION_ERROR   = "admission_error".freeze
+      CONFIG            = "config".freeze
+      INTERNAL          = "internal".freeze
+      ERROR             = "error".freeze
+      ALL = constants(false).reject { |constant| constant == :ALL }.map { |constant| const_get(constant) }.freeze
     end
 
     # Closed enum of `error_kind` values emitted by `hive status --diagnose --json`.
@@ -246,36 +292,34 @@ module Hive
     #   * `envelope_error_kind(error)` — map an exception to a
     #     closed-enum `error_kind` value
     #
-    # Used by `Hive::Commands::Forget`, `Hive::Commands::Prune`,
-    # `Hive::Commands::Daemon` (enable/disable), and
-    # `Hive::Commands::AdhocReview`. The eight pre-existing emit sites
-    # (Approve, Markers, Metrics, FindingToggle, Status, Run, Findings,
-    # StageAction) have not yet been migrated — see Issue for the full
-    # sweep. This module exists so new emit sites do not add an 11th copy.
+    # Used by default-stdout command producers whose error schemas share
+    # ErrorEnvelope's common shape. Commands with injected output streams,
+    # variant schema routing, or schema-specific payloads keep specialised
+    # emitters. Metrics, for example, deliberately retains its narrower v1
+    # payload, which omits `error_class`; forcing it through this mixin would
+    # change a published contract rather than remove duplication.
     #
     # Consumers may also override `envelope_extras` to merge per-command
     # fields (e.g. `{"verb" => "review"}`) into the envelope; the default is
-    # no extras.
+    # no extras. `envelope_payload_for` preserves schema-specific field
+    # allowlists, while `envelope_serialization_failure_policy` preserves each
+    # producer's legacy warning, suppression, or re-raise behavior when an
+    # error payload itself cannot be encoded.
     module EnvelopeEmitter
       def call_with_envelope
         @stdout_written = false
         yield
       rescue Hive::Error => e
-        emit_envelope(e) if @json && !@stdout_written
+        emit_envelope(e) if envelope_enabled? && !@stdout_written
         raise
       rescue StandardError => e
         wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_envelope(wrapped) if @json && !@stdout_written
+        emit_envelope(wrapped) if envelope_enabled? && !@stdout_written
         raise wrapped
       end
 
       def emit_envelope(error)
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: envelope_schema,
-          error: error,
-          error_kind: envelope_error_kind(error),
-          extras: envelope_extras
-        )
+        payload = envelope_payload_for(error)
         puts JSON.generate(payload)
         @stdout_written = true
       rescue Errno::EPIPE
@@ -283,16 +327,49 @@ module Hive
         # for the exit code + stderr line. Nothing to surface.
         @stdout_written = true
       rescue JSON::GeneratorError => e
-        # A non-serialisable payload is a bug, not a closed pipe — don't hide
-        # it. The real error still re-raises through call_with_envelope.
-        warn "[hive] #{envelope_schema} error envelope was not serialisable: #{e.class}: #{e.message}"
+        case envelope_serialization_failure_policy
+        when :raise
+          raise
+        when :warn
+          warn "[hive] #{envelope_schema} error envelope was not serialisable: #{e.class}: #{e.message}"
+        when :suppress
+          nil
+        else
+          raise ArgumentError, "unknown envelope serialization failure policy: " \
+                               "#{envelope_serialization_failure_policy.inspect}"
+        end
         @stdout_written = true
+      end
+
+      def envelope_payload_for(error)
+        Hive::Schemas::ErrorEnvelope.build(
+          schema: envelope_schema,
+          error: error,
+          error_kind: envelope_error_kind(error),
+          extras: envelope_extras_for(error)
+        )
       end
 
       # Per-command fields merged into the error envelope. Override to add
       # e.g. `{"verb" => "review"}`; the default is no extras.
       def envelope_extras
         {}
+      end
+
+      # Composing commands may suppress their child-facing envelope while
+      # still preserving typed exceptions for the outer command.
+      def envelope_enabled?
+        @json
+      end
+
+      # Most extras are command-scoped. Commands with error-specific fields
+      # can override this hook without making the common emitter conditional.
+      def envelope_extras_for(_error)
+        envelope_extras
+      end
+
+      def envelope_serialization_failure_policy
+        :warn
       end
     end
 
@@ -432,6 +509,18 @@ module Hive
     end
   end
 
+  class OperationalActionUsageError < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
+  class StaleOperationalObservation < Error
+    def exit_code
+      ExitCodes::TEMPFAIL
+    end
+  end
+
   class ConcurrentRunError < Error
     attr_reader :holder, :lock_path
 
@@ -489,6 +578,36 @@ module Hive
     end
   end
 
+  # A dependency is valid but has not reached the depending project's gate.
+  # This is retryable operational state, not a configuration error.
+  class DependencyWaitError < Error
+    attr_reader :reason_code, :offending_ref, :safe_correction
+
+    def initialize(message, reason_code: "dependency_wait", offending_ref:, safe_correction:)
+      super(message)
+      @reason_code = reason_code
+      @offending_ref = offending_ref
+      @safe_correction = safe_correction
+    end
+
+    def exit_code
+      ExitCodes::TEMPFAIL
+    end
+  end
+
+  # A fail-closed dependency admission result. ConfigError ancestry gives
+  # manual callers the stable, non-retryable CONFIG exit code.
+  class DependencyAdmissionError < ConfigError
+    attr_reader :reason_code, :offending_ref, :safe_correction
+
+    def initialize(message, reason_code:, offending_ref:, safe_correction:)
+      super(message)
+      @reason_code = reason_code
+      @offending_ref = offending_ref
+      @safe_correction = safe_correction
+    end
+  end
+
   class UnavailableError < Error
     def exit_code
       ExitCodes::UNAVAILABLE
@@ -507,6 +626,24 @@ module Hive
   class InternalError < Error
     def exit_code
       ExitCodes::SOFTWARE
+    end
+  end
+
+  # A detached durable worker reached a non-zero terminal outcome without
+  # emitting the JSON document its caller requested. Carry the worker's exact
+  # exit status through the ordinary command envelope/rescue path.
+  class AttemptExecutionError < Error
+    attr_reader :attempt_id, :outcome
+
+    def initialize(message, exit_code:, attempt_id:, outcome:)
+      super(message)
+      @attempt_exit_code = Integer(exit_code)
+      @attempt_id = attempt_id.to_s
+      @outcome = outcome.to_s
+    end
+
+    def exit_code
+      @attempt_exit_code
     end
   end
 
@@ -570,6 +707,19 @@ module Hive
 
     def exit_code
       ExitCodes::WRONG_STAGE
+    end
+  end
+
+  # A forward transition rejected by condition authority. Carries the exact
+  # gate and recovery action so JSON callers never need to parse WrongStage
+  # prose or issue a second status request to decide what to do next.
+  class ConditionGateBlocked < WrongStage
+    attr_reader :condition_gate, :next_action
+
+    def initialize(message, condition_gate:, next_action:, **stage_context)
+      super(message, **stage_context)
+      @condition_gate = condition_gate
+      @next_action = next_action
     end
   end
 

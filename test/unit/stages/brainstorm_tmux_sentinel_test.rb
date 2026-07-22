@@ -305,7 +305,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
 
   def test_record_claude_pid_updates_task_lock
     with_tmp_task_folder do |task|
-      Hive::Lock.acquire_task_lock(task.folder, "stage" => "2-brainstorm")
+      lock_data = Hive::Lock.acquire_task_lock(task.folder, "stage" => "2-brainstorm")
 
       with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-time-#{pid}" }) do
         Hive::ClaudeLauncher.record_claude_pid(task, FakePidRunner.new(12_345))
@@ -315,13 +315,13 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       assert_equal 12_345, lock.fetch("claude_pid")
       assert_equal "start-time-12345", lock.fetch("claude_pid_start_time")
     ensure
-      Hive::Lock.release_task_lock(task.folder)
+      Hive::Lock.release_task_lock(task.folder, lock_id: lock_data && lock_data["lock_id"])
     end
   end
 
   def test_record_claude_pid_retries_until_pid_is_available
     with_tmp_task_folder do |task|
-      Hive::Lock.acquire_task_lock(task.folder, "stage" => "2-brainstorm")
+      lock_data = Hive::Lock.acquire_task_lock(task.folder, "stage" => "2-brainstorm")
       sleeps = []
       runner = FakeSequencePidRunner.new([ nil, 12_346 ])
 
@@ -333,7 +333,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       assert_equal 12_346, lock.fetch("claude_pid")
       assert_equal [ 0.05 ], sleeps
     ensure
-      Hive::Lock.release_task_lock(task.folder)
+      Hive::Lock.release_task_lock(task.folder, lock_id: lock_data && lock_data["lock_id"])
     end
   end
 

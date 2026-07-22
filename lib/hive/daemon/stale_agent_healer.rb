@@ -2,11 +2,14 @@ require "digest"
 require "open3"
 require "time"
 require "yaml"
+require "hive/agent_limit"
 require "hive/lock"
 require "hive/markers"
+require "hive/process_kill"
 require "hive/workflows"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/healer_support"
+require "hive/attempts/lost_outcome"
 
 module Hive
   module Daemon
@@ -95,6 +98,8 @@ module Hive
 
       REVIEW_ERROR_AUTO_RECOVERY_LIMIT = 3
       ERROR_AUTO_RECOVERY_LIMIT = 3
+      ATTEMPT_LOSS_RECOVERY_LIMIT = 3
+      CODING_REVIEW_STAGE = Hive::Workflows::Registry.default.stage_named("review").dir.freeze
       # `reason=timeout` recovers EXACTLY ONCE, and only on the two stages whose
       # re-entry is provably idempotent — far lower than the agent-loss budget
       # because a timeout means "I ran and didn't finish", not "I was interrupted".
@@ -118,7 +123,10 @@ module Hive
       def initialize(controller:, logger:, grace_sec: 300,
                      review_error_auto_recovery_limit: REVIEW_ERROR_AUTO_RECOVERY_LIMIT,
                      error_auto_recovery_limit: ERROR_AUTO_RECOVERY_LIMIT,
-                     request_queue: Hive::Daemon::DispatchRequestQueue)
+                     request_queue: Hive::Daemon::DispatchRequestQueue,
+                     attempt_store: nil, attempt_dispatcher: nil,
+                     lost_outcome_store: nil, lost_outcome_processor: nil,
+                     attempt_loss_recovery_limit: ATTEMPT_LOSS_RECOVERY_LIMIT)
         @controller = controller
         @logger = logger
         @request_queue = request_queue
@@ -129,6 +137,95 @@ module Hive
         @error_auto_recoveries = Hash.new(0)
         @review_error_recovery_exhausted = {}
         @error_recovery_exhausted = {}
+        @attempt_store = attempt_store
+        @attempt_dispatcher = attempt_dispatcher
+        @lost_outcome_store = lost_outcome_store
+        @lost_outcome_processor = lost_outcome_processor
+        @attempt_loss_recovery_limit = attempt_loss_recovery_limit
+      end
+
+      # Lease-backed loss is processed independently of legacy marker rows.
+      # The durable retry charge and predecessor link survive daemon restart,
+      # while the outcome sidecar makes repeated ticks idempotent.
+      def heal_attempt_losses(attempts, now: Time.now.utc)
+        return unless @attempt_store && @attempt_dispatcher &&
+                      @lost_outcome_store && @lost_outcome_processor
+
+        Array(attempts).each do |attempt|
+          next if attempt.compatibility?
+
+          outcome = @lost_outcome_processor.process(attempt, now: now)
+          next unless outcome["status"] == "ready"
+
+          existing = @attempt_store.scan.records.find do |candidate|
+            candidate["predecessor_attempt_id"] == attempt.attempt_id
+          end
+          if existing
+            @lost_outcome_store.update(
+              attempt, now: now, status: "successor_dispatched",
+              successor_attempt_id: existing.attempt_id
+            )
+            next
+          end
+
+          if attempt["retry_charge"] >= @attempt_loss_recovery_limit
+            @lost_outcome_store.update(
+              attempt, now: now, status: "exhausted",
+              diagnostic: "attempt loss retry budget exhausted"
+            )
+            @logger.event(
+              :marker_heal_exhausted,
+              project: attempt["project"], slug: attempt["task_slug"],
+              stage: attempt["intended_stage"], reason: "attempt_lost",
+              attempts: attempt["retry_charge"], max_attempts: @attempt_loss_recovery_limit
+            )
+            next
+          end
+
+          task = task_for_attempt(attempt, outcome)
+          unless task
+            @lost_outcome_store.update(
+              attempt, now: now, status: "manual",
+              diagnostic: "task could not be located for successor"
+            )
+            next
+          end
+
+          result = @attempt_dispatcher.dispatch_successor(
+            predecessor: attempt,
+            task: task,
+            project: attempt["project"],
+            argv: successor_argv(attempt, task),
+            request_id: "attempt-loss-#{outcome.fetch('idempotency_key')[0, 24]}",
+            provider: attempt["provider"],
+            inherited_outputs: (attempt["inherited_outputs"] + attempt["current_outputs"]).uniq,
+            retry_charge: attempt["retry_charge"] + 1,
+            interactive: false,
+            now: now
+          )
+          next if result.status == :deferred
+
+          @lost_outcome_store.update(
+            attempt, now: now, status: "successor_dispatched",
+            successor_attempt_id: result.attempt&.attempt_id
+          )
+          @logger.event(
+            :marker_healed,
+            project: attempt["project"], slug: attempt["task_slug"],
+            stage: attempt["intended_stage"], reason: "attempt_lost",
+            attempt_id: attempt.attempt_id,
+            successor_attempt_id: result.attempt&.attempt_id,
+            attempts: attempt["retry_charge"] + 1,
+            max_attempts: @attempt_loss_recovery_limit
+          )
+        rescue StandardError => e
+          @logger.event(
+            :marker_heal_failed,
+            project: attempt["project"], slug: attempt["task_slug"],
+            stage: attempt["intended_stage"], reason: "attempt_lost",
+            error: "#{e.class}: #{e.message}"
+          )
+        end
       end
 
       # Walk the row set, heal stale agent_working markers in place.
@@ -179,9 +276,83 @@ module Hive
         end
       end
 
+      # Read-only retry ownership for the dispatcher-owned observation. Keys
+      # are reduced to task identity and bounded counters; marker contents and
+      # executable commands never cross this interface.
+      def operational_snapshot
+        {
+          "error_retries" => retry_entries(@error_auto_recoveries, kind: "error"),
+          "review_retries" => retry_entries(@review_error_auto_recoveries, kind: "review"),
+          "error_exhausted" => exhausted_entries(@error_recovery_exhausted, kind: "error"),
+          "review_exhausted" => exhausted_entries(@review_error_recovery_exhausted, kind: "review"),
+          "limits" => {
+            "error" => @error_auto_recovery_limit,
+            "review" => @review_error_auto_recovery_limit,
+            "attempt_loss" => @attempt_loss_recovery_limit
+          }
+        }
+      end
+
       private
 
+      def retry_entries(source, kind:)
+        source.filter_map do |key, attempts|
+          next unless attempts.to_i.positive?
+
+          operational_recovery_entry(key, kind: kind).merge("attempts" => attempts.to_i)
+        end
+      end
+
+      def exhausted_entries(source, kind:)
+        source.filter_map do |key, exhausted|
+          next unless exhausted
+
+          operational_recovery_entry(key, kind: kind)
+        end
+      end
+
+      def operational_recovery_entry(key, kind:)
+        values = Array(key)
+        {
+          "project" => values[0].to_s,
+          "slug" => values[1].to_s,
+          "stage" => kind == "error" ? values[2].to_s : CODING_REVIEW_STAGE,
+          "reason" => (kind == "error" ? values[3] : values[2]).to_s,
+          "kind" => kind
+        }
+      end
+
+      def task_for_attempt(attempt, outcome)
+        folder = outcome["task_folder"]
+        return Hive::Task.new(folder) if folder && File.directory?(folder)
+
+        target = attempt["task_id"].to_s.empty? ? attempt["task_slug"] : attempt["task_id"]
+        Hive::TaskResolver.new(target, project_filter: attempt["project"]).resolve
+      rescue Hive::Error, SystemCallError
+        nil
+      end
+
+      def successor_argv(attempt, task)
+        argv = Array(attempt["worker_argv"]).dup
+        return argv unless argv.first == "hive" && argv.length >= 3
+
+        # The durable command is replayed byte-for-byte except for its task
+        # locator, which must follow an atomic stage move performed before the
+        # owner was lost. Once a workflow action has reached its admitted
+        # target, its source assertion is no longer valid and is removed; all
+        # other recovery/JSON flags remain intact.
+        argv[2] = task.folder
+        if "#{task.stage_index}-#{task.stage_name}" == attempt["intended_stage"]
+          while (index = argv.index("--from"))
+            argv.slice!(index, 2)
+          end
+          argv.reject! { |value| value.start_with?("--from=") }
+        end
+        argv
+      end
+
       def heal_error_if_auto_recoverable(row, now:)
+        return if marker_reason(row) == "attempt_lost"
         return if row.live_task_lock == true
         return unless auto_recoverable_error?(row, now: now)
         # The clear makes a markerless terminal-error row take the
@@ -195,7 +366,7 @@ module Hive
         recovery_key = error_recovery_key(row, marker_reason)
         recovery_limit = error_auto_recovery_limit_for(marker_reason)
         attempts = @error_auto_recoveries[recovery_key]
-        if attempts >= recovery_limit
+        if recovery_limit && attempts >= recovery_limit
           log_recovery_exhausted_once(
             @error_recovery_exhausted,
             recovery_key,
@@ -219,7 +390,8 @@ module Hive
         return unless Hive::Markers.clear_current(
           row.state_file,
           expected_name: :error,
-          match_attrs: marker_match_attrs(row, marker_reason)
+          match_attrs: marker_match_attrs(row, marker_reason),
+          purge_history: true
         )
 
         observe_pre_clear_mtime(row)
@@ -269,12 +441,10 @@ module Hive
         return true if Hive::Workflows.coding_row?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: unpushed commits are finalize/PR recovery
 
         # A usage/credit limit can hit any stage (brainstorm/plan/execute/…),
-        # so the cooldown retry is not stage-gated. Recoverable only once the
-        # stamped cooldown has elapsed; a missing/unparseable retry_after keeps
-        # the marker manual (legacy markers predate the stamp). Returning false
-        # here — before the budget increment in the caller — means waiting
-        # ticks do NOT consume the retry budget.
-        return cooldown_elapsed?(row, now: now) if reason == "limits_reached"
+        # so the periodic readiness attempt is not stage-gated. A provider's
+        # dated reset is display-only: the latest quota marker's mtime schedules
+        # the next attempt after one cooldown interval.
+        return limit_retry_due?(row, now: now) if reason == "limits_reached"
 
         # A `reason=timeout` on the two side-effect-safe stages recovers EXACTLY
         # ONCE (TIMEOUT_RECOVERY_LIMIT). The agent did the real work but returned
@@ -323,9 +493,13 @@ module Hive
         "terminal_agent_loss"
       end
 
-      # `reason=timeout` is capped at a single re-entry; every other auto-
-      # recoverable error reason shares the agent-loss budget (default 3).
+      # Provider-limit retries are periodic readiness attempts rather than
+      # task-failure recovery, so they remain available until the provider is
+      # usable. `reason=timeout` is capped at a single re-entry; every other
+      # auto-recoverable error reason shares the agent-loss budget (default 3).
       def error_auto_recovery_limit_for(reason)
+        return nil if reason == "limits_reached"
+
         reason == "timeout" ? TIMEOUT_RECOVERY_LIMIT : @error_auto_recovery_limit
       end
 
@@ -334,12 +508,6 @@ module Hive
 
         if Hive::Workflows.coding_row?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: finalize unpushed branch recovery
           return "rerun finalize (`#{command}`) or push the branch manually"
-        end
-
-        if reason == "limits_reached"
-          return "the usage/credit limit did not clear after #{@error_auto_recovery_limit} cooldown " \
-                 "retries — top up credits or wait for the window to reset, then rerun #{row.stage} " \
-                 "(`#{command}`) or run `hive markers clear`"
         end
 
         if reason == "timeout"
@@ -375,7 +543,8 @@ module Hive
         end
         recovery_key = review_error_auto_recovery_key(row, reason: reason)
         attempts = @review_error_auto_recoveries[recovery_key]
-        if attempts >= @review_error_auto_recovery_limit
+        recovery_limit = reason == "limits_reached" ? nil : @review_error_auto_recovery_limit
+        if recovery_limit && attempts >= recovery_limit
           log_recovery_exhausted_once(
             @review_error_recovery_exhausted,
             recovery_key,
@@ -383,7 +552,7 @@ module Hive
             reason: review_heal_label(reason),
             marker_reason: reason,
             attempts: attempts,
-            max_attempts: @review_error_auto_recovery_limit,
+            max_attempts: recovery_limit,
             phase: marker_attrs["phase"],
             pass: marker_attrs["pass"],
             errors_path: reviewer_errors_path(row),
@@ -395,7 +564,8 @@ module Hive
         return unless Hive::Markers.clear_current(
           row.state_file,
           expected_name: :review_error,
-          match_attrs: marker_attrs
+          match_attrs: marker_attrs,
+          purge_history: true
         )
 
         attempts += 1
@@ -411,7 +581,7 @@ module Hive
                       pass: marker_attrs["pass"],
                       errors_path: reviewer_errors_path(row),
                       attempts: attempts,
-                      max_attempts: @review_error_auto_recovery_limit)
+                      max_attempts: recovery_limit)
       rescue StandardError => e
         @logger.event(:marker_heal_failed,
                       project: row.project,
@@ -471,31 +641,19 @@ module Hive
       end
 
       def review_error_recovery_remediation(row, reason)
-        if reason == "limits_reached"
-          return "all reviewers' usage/credit limit did not clear after " \
-                 "#{@review_error_auto_recovery_limit} cooldown retries — top up credits or wait " \
-                 "for the window to reset, then rerun review (`hive run #{row.project} #{row.slug}`) " \
-                 "or run `hive markers clear`"
-        end
-
         "rerun review for this task " \
           "(`hive run #{row.project} #{row.slug}`) or inspect the reviewer errors file"
       end
 
-      # True only when the marker carries a `retry_after` ISO8601 stamp AND
-      # `now` is at or past it. A missing/unparseable stamp returns false so
-      # legacy `limits_reached` markers (written before the stamp existed)
-      # still require a manual `hive markers clear` rather than self-healing
-      # immediately. Parse defensively — a garbled stamp must never crash a
-      # tick or be treated as "elapsed".
-      def cooldown_elapsed?(row, now:)
-        raw = marker_attrs_for(row)["retry_after"].to_s
-        return false if raw.empty?
-
-        retry_after = Time.parse(raw)
-        now >= retry_after
-      rescue ArgumentError
-        false
+      # A provider reset hint is display-only: credits, usage, or the active
+      # account can change before it. `AgentLimit` schedules solely from the
+      # quota marker's observed mtime, so legacy/malformed hints cannot strand a
+      # task and each failed readiness attempt naturally starts a new interval.
+      def limit_retry_due?(row, now:)
+        Hive::AgentLimit.retry_due?(
+          limited_at: row.state_file_mtime,
+          now: now
+        )
       end
 
       def review_error_auto_recovery_key(row, reason:)
@@ -525,14 +683,12 @@ module Hive
         attrs = marker_attrs_for(row)
         return true if attrs["reason"].to_s == "review_agent_died"
 
-        # All reviewers hit a usage/credit limit: self-heal once the stamped
-        # cooldown has elapsed (a missing/unparseable retry_after stays
-        # manual). Gated before the caller's budget increment so cooldown-wait
-        # ticks do not burn the retry budget. This is the token/budget
-        # carve-out — every branch below it is a non-limit failure that retries
-        # immediately (bounded), since a credit limit set reason=limits_reached
-        # (the `all_failed_limit` arm in Stages::Review), never the reasons here.
-        return cooldown_elapsed?(row, now: now) if attrs["reason"].to_s == "limits_reached"
+        # All reviewers hit a usage/credit limit: self-heal after one cooldown
+        # interval, regardless of the provider's displayed reset estimate.
+        # These are unbounded readiness attempts, not task-failure retries; a
+        # fresh quota marker resets the hourly clock without consuming the
+        # bounded budget used by the non-limit branches below.
+        return limit_retry_due?(row, now: now) if attrs["reason"].to_s == "limits_reached"
 
         # All reviewers crashed for a non-limit reason (e.g. a native reviewer
         # exited non-zero, a tool/infra fault): bounded rerun. A persistent
@@ -596,22 +752,32 @@ module Hive
 
       # Case A (issue #320): the review parent still holds a verified-live
       # .lock but its Claude child died — terminate the wedged holder,
-      # drop the lock, and clear the marker so the daemon retries review.
+      # claim the lock, and clear the marker so the daemon retries review.
       def heal_wedged_review_row(row)
         return unless row.claude_pid_alive == false
 
         holder = task_lock_holder(row)
+        return unless task_lock_matches_status_snapshot?(holder, row)
         return unless wedged_review_lock_holder?(holder)
 
         marker_attrs = review_marker_attrs(row)
-        return unless Hive::Markers.clear_current(
-          row.state_file,
-          expected_name: :review_working,
-          match_attrs: marker_attrs
-        )
+        return unless review_marker_matches?(row, marker_attrs)
 
+        # Terminate only the exact holder identity captured by status, then
+        # acquire our own lock generation before clearing. A replacement run,
+        # undeletable lock, or still-live post-KILL holder makes the claim fail
+        # closed and leaves the marker untouched.
         terminate_lock_holder(holder)
-        release_task_lock(row)
+        cleared = with_review_heal_lock(row, reason: "review_agent_died") do
+          Hive::Markers.clear_current(
+            row.state_file,
+            expected_name: :review_working,
+            match_attrs: marker_attrs,
+            purge_history: true
+          )
+        end
+        return unless cleared
+
         @logger.event(:marker_healed,
                       project: row.project,
                       slug: row.slug,
@@ -641,20 +807,25 @@ module Hive
       # nothing else reconciles this. Past the grace window — so we don't
       # race a runner that just set REVIEW_WORKING but hasn't recorded its
       # lock yet (controller.running_task? already excludes in-process
-      # dispatches) — clear the marker and drop any stale .lock so the
-      # daemon re-dispatches review under normal concurrency control.
+      # dispatches) — claim the task lock, clear the marker, and release our
+      # claim so the daemon re-dispatches review under normal concurrency
+      # control. Claiming closes the stale-status race where an external run
+      # acquires a fresh .lock between the status snapshot and this heal.
       def heal_orphaned_review_row(row, now:)
         mtime = row.state_file_mtime
         return unless mtime && (now - mtime) > @grace_sec
 
         marker_attrs = review_marker_attrs(row)
-        return unless Hive::Markers.clear_current(
-          row.state_file,
-          expected_name: :review_working,
-          match_attrs: marker_attrs
-        )
+        cleared = with_review_heal_lock(row, reason: "review_orphaned") do
+          Hive::Markers.clear_current(
+            row.state_file,
+            expected_name: :review_working,
+            match_attrs: marker_attrs,
+            purge_history: true
+          )
+        end
+        return unless cleared
 
-        release_task_lock(row)
         @logger.event(:marker_healed,
                       project: row.project,
                       slug: row.slug,
@@ -681,6 +852,22 @@ module Hive
         nil
       end
 
+      def task_lock_matches_status_snapshot?(holder, row)
+        return false unless holder.is_a?(Hash)
+        return false unless row.task_lock_pid.is_a?(Integer)
+        return false unless holder["pid"] == row.task_lock_pid
+        return false unless holder["process_start_time"].to_s == row.task_lock_process_start_time.to_s
+
+        holder["lock_id"].to_s == row.task_lock_id.to_s
+      end
+
+      def review_marker_matches?(row, expected_attrs)
+        marker = Hive::Markers.current(row.state_file)
+        return false unless marker.name == :review_working
+
+        expected_attrs.all? { |key, value| marker.attrs[key.to_s].to_s == value.to_s }
+      end
+
       def wedged_review_lock_holder?(holder)
         return false unless holder.is_a?(Hash)
 
@@ -697,7 +884,8 @@ module Hive
 
       def review_marker_attrs(row)
         attrs = marker_attrs_for(row)
-        out = {}
+        marker_id = attrs["marker_id"].to_s
+        out = { "marker_id" => marker_id.empty? ? nil : marker_id }
         out["phase"] = attrs["phase"] if attrs["phase"]
         out["pass"] = attrs["pass"] if attrs["pass"]
         out
@@ -706,12 +894,7 @@ module Hive
       # marker_attrs_for is provided by HealerSupport.
 
       def pid_alive?(pid)
-        Process.kill(0, pid)
-        true
-      rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        true
+        Hive::ProcessKill.pid_alive?(pid)
       end
 
       def child_pids(pid)
@@ -727,32 +910,39 @@ module Hive
       def terminate_lock_holder(holder)
         pid = holder["pid"]
         return unless pid.is_a?(Integer)
+        return unless lock_holder_process_alive?(holder)
 
         Process.kill("TERM", pid)
         deadline = Time.now + 1
         while Time.now < deadline
-          return unless pid_alive?(pid)
+          return unless lock_holder_process_alive?(holder)
 
           sleep 0.05
         end
-        Process.kill("KILL", pid) if pid_alive?(pid)
+        Process.kill("KILL", pid) if lock_holder_process_alive?(holder)
       rescue Errno::ESRCH, Errno::EPERM
         nil
       end
 
-      def release_task_lock(row)
-        File.delete(File.join(row.folder.to_s, ".lock"))
-      rescue Errno::ENOENT
-        nil
-      rescue SystemCallError
-        # The marker heal has already succeeded by the time we drop the
-        # lock. A stale .lock we cannot delete (EACCES, EROFS, EISDIR, …)
-        # is non-fatal residue, not a failed heal — swallow it so it does
-        # not propagate to the caller's rescue and mislabel a succeeded
-        # heal as `marker_heal_failed` (which would also suppress the
-        # `marker_healed` success event). A later tick or the next
-        # dispatch reconciles the leaked lock.
-        nil
+      def lock_holder_process_alive?(holder)
+        pid = holder["pid"]
+        return false unless pid.is_a?(Integer) && pid_alive?(pid)
+
+        recorded = holder["process_start_time"]
+        recorded.nil? || Hive::Lock.process_start_time(pid) == recorded
+      end
+
+      def with_review_heal_lock(row, reason:)
+        Hive::Lock.with_task_lock(
+          row.folder.to_s,
+          "owner" => "stale_agent_healer",
+          "reason" => reason
+        ) { yield }
+      rescue Hive::ConcurrentRunError
+        # A runner acquired the task after this tick's status snapshot.
+        # Leave both its lock and the marker untouched; the next tick will
+        # reconcile the new generation.
+        false
       end
 
       def classify_stale(row, now:)

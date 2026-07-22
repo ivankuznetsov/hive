@@ -228,6 +228,8 @@
             "worktree",
             "ambiguous_slug",
             "invalid_task_path",
+            "dependency_wait",
+            "admission_error",
             "internal",
             "error"
           ]
@@ -239,6 +241,15 @@
         },
         "message": {
           "type": "string"
+        },
+        "condition_gate": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "next_action": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["kind"]
         },
         "slug": {
           "type": [
@@ -315,6 +326,33 @@
         "lock_path": {
           "type": "string",
           "description": "Filesystem path of the lock file that triggered ConcurrentRunError."
+        },
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "dependency_wait",
+            "dependency_metadata_unreadable",
+            "dependency_metadata_invalid",
+            "dependency_reference_invalid",
+            "dependency_task_missing",
+            "dependency_self_reference",
+            "dependency_cycle",
+            "dependency_gate_unknown",
+            "dependency_gate_unreachable",
+            "dependency_project_unknown",
+            "dependency_repository_identity_missing",
+            "dependency_repository_mismatch",
+            "plan_dependency_invalid",
+            "plan_dependency_missing",
+            "plan_dependency_mismatch",
+            "dependency_validation_failed"
+          ]
+        },
+        "offending_ref": {
+          "type": "string"
+        },
+        "safe_correction": {
+          "type": "string"
         }
       }
     }

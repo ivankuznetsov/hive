@@ -11,7 +11,9 @@ module Hive
       # and secret access key.
       aws_access_key:        /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
       aws_secret_access_key: %r{aws[_\- ]secret[_\- ]access[_\- ]key.{0,5}['"]?[A-Za-z0-9/+=]{40}['"]?}i,
-      # GitHub tokens: ghp (PAT), ghs (server-to-server), gho (OAuth), ghu (user).
+      # Current fine-grained GitHub PATs use the longer `github_pat_` prefix.
+      github_fine_grained_pat: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
+      # Legacy GitHub tokens: ghp (PAT), ghs (server-to-server), gho (OAuth), ghu (user).
       github_token:          /gh[psou]_[A-Za-z0-9]{36,}/,
       # Generic api_key / api-key / apiKey followed by an assignment to a
       # long string. Quotes are optional so unquoted shell/YAML/env-style
@@ -72,6 +74,12 @@ module Hive
         end
       end
       matches
+    end
+
+    def match?(text)
+      return false if text.nil? || text.empty?
+
+      PATTERNS.each_value.any? { |regex| regex.match?(text) }
     end
 
     # Replace every PATTERNS match in `text` with a `[REDACTED:<name>]`

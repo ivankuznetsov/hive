@@ -2,6 +2,7 @@ require "fileutils"
 require "json"
 require "securerandom"
 require "time"
+require "hive/task_journal/envelope"
 
 module Hive
   module Events
@@ -47,21 +48,22 @@ module Hive
     # an O_APPEND single-syscall append is atomic against concurrent
     # appenders via the inode lock; we cap message size (see
     # MAX_MESSAGE_BYTES) so the full line stays small and well-defined.
-    # status.md is derived state and is rewritten with atomic rename.
+    # Authoritative condition records use task-journal.jsonl instead, keeping
+    # this legacy telemetry contract homogeneous. status.md is derived state
+    # and is rewritten with atomic rename.
     def emit(task_folder:, slug:, stage:, event_type:, agent: nil, message: nil)
       event_type = event_type.to_sym
       unless EVENT_TYPES.include?(event_type)
         raise ArgumentError, "unknown event_type #{event_type.inspect}; valid: #{EVENT_TYPES.inspect}"
       end
 
-      record = {
-        "ts" => Time.now.utc.iso8601,
-        "slug" => slug.to_s,
-        "stage" => stage.to_s,
-        "agent" => agent.nil? ? nil : agent.to_s,
-        "event_type" => event_type.to_s,
-        "message" => message.nil? ? nil : truncate_message(message.to_s)
-      }
+      record = Hive::TaskJournal::Envelope.observational(
+        slug: slug,
+        stage: stage,
+        agent: agent,
+        event_type: event_type,
+        message: message.nil? ? nil : truncate_message(message.to_s)
+      )
 
       FileUtils.mkdir_p(task_folder)
       events_path = File.join(task_folder, "events.jsonl")

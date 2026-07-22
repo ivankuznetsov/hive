@@ -12,6 +12,12 @@ steps:
         content: "# Plan\n\n<!-- COMPLETE -->\n"
   - kind: ruby_block
     block: |
+      path = File.join(sandbox, ".hive-state", "config.yml")
+      config = YAML.safe_load(File.read(path))
+      config.fetch("claude")["mode"] = "headless"
+      File.write(path, config.to_yaml)
+  - kind: ruby_block
+    block: |
       lock_path = File.join(sandbox, ".hive-state/stages/4-execute/#{slug}/.lock")
       File.write(lock_path, {
         "pid" => Process.pid,

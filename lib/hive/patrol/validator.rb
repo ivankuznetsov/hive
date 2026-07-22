@@ -3,6 +3,7 @@ require "open3"
 module Hive
   module Patrol
     class Validator
+      COMMAND_NAMES = %w[docs format lint public_contract typecheck test].freeze
       DEFAULT_TIMEOUT_SEC = 600
       DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024
       TERM_GRACE_SEC = 0.5
@@ -46,14 +47,12 @@ module Hive
         @max_output_bytes = max_output_bytes.to_i
       end
 
-      def validate(worktree_path, names: nil)
-        selected = names && Array(names).map(&:to_s)
-        active = %w[docs format lint public_contract typecheck test].filter_map do |name|
-          next if selected && !selected.include?(name)
+      def configured?(names: nil)
+        active_commands(names: names).any?
+      end
 
-          command = @commands[name]
-          [ name, command ] if command.is_a?(String) && !command.strip.empty?
-        end
+      def validate(worktree_path, names: nil)
+        active = active_commands(names: names)
         return { "passed" => false, "reason" => "no_validation_commands", "commands" => [] } if active.empty?
 
         results = active.map { |name, command| run_command(name, command, worktree_path) }
@@ -64,6 +63,16 @@ module Hive
       end
 
       private
+
+      def active_commands(names: nil)
+        selected = names && Array(names).map(&:to_s)
+        COMMAND_NAMES.filter_map do |name|
+          next if selected && !selected.include?(name)
+
+          command = @commands[name]
+          [ name, command ] if command.is_a?(String) && !command.strip.empty?
+        end
+      end
 
       def run_command(name, command, worktree_path)
         stdin, stdout, stderr, waiter = Open3.popen3(

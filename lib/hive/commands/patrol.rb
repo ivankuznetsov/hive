@@ -15,6 +15,8 @@ require "hive/patrol/pr_opener"
 require "hive/patrol/reviewer"
 require "hive/patrol/state_store"
 require "hive/patrol/token_budget"
+require "hive/patrol/validator"
+require "hive/worktree"
 
 module Hive
   module Commands
@@ -59,6 +61,7 @@ module Hive
 
         project_root = entry.fetch("path")
         cfg = Hive::Config.load(project_root)
+        ensure_validation_configured!(cfg) unless @dry_run
         state = Hive::Patrol::StateStore.new(project_root)
         state.ensure!
         token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
@@ -67,7 +70,7 @@ module Hive
         features, feature_batch, reviewer, findings = with_scan_checkout(project_root, target_sha) do |scan_root|
           mapped = @mapper_factory.call(scan_root, cfg, state).call
           batch = Hive::Patrol::FeatureBatch.new(cfg: cfg, state: state).call(
-            mapped, target_sha: target_sha
+            mapped, target_sha: target_sha, limit: review_launch_limit(token_budget, cfg)
           )
           scan_reviewer = build_reviewer(scan_root, cfg, state, token_budget)
           reviewed = stamp_fingerprints(scan_reviewer.call(batch.features), scan_root)
@@ -108,6 +111,7 @@ module Hive
             fixes << patch
             outcome = fix_outcome(finding, patch)
             fix_results << outcome
+            break if terminal_patrol_exhaustion?(patch)
             next unless patch.passed
 
             result = pr_opener.open(finding, patch)
@@ -127,17 +131,13 @@ module Hive
         # partial scan as a clean pass and never looking again (U5).
         now_iso = Time.now.utc.iso8601
         if review.fetch("review_errors").any?
-          snapshot = state.state
-          retry_cursor = if snapshot["feature_review_sha"].to_s == target_sha.to_s
-            snapshot["feature_review_cursor"].to_i
-          else
-            0
-          end
           state.update_state(
             "last_run_at" => now_iso,
             "feature_review_active" => true,
             "feature_review_sha" => target_sha,
-            "feature_review_cursor" => retry_cursor
+            "feature_review_cursor" => retry_feature_cursor(
+              feature_batch, review.fetch("review_errors")
+            )
           )
           scanned_sha = state.state["last_scanned_sha"].to_s
         elsif feature_batch.complete
@@ -167,22 +167,68 @@ module Hive
       def review_outcome(feature_batch, reviewer)
         attempted = feature_batch.features.size
         errors = reviewer.respond_to?(:review_errors) ? Array(reviewer.review_errors) : []
-        attempted_ids = feature_batch.features.map { |feature| feature.id.to_s }
-        failed_ids = errors.filter_map do |error|
-          next unless error.is_a?(Hash)
-
-          id = (error["feature_id"] || error[:feature_id]).to_s
-          id if attempted_ids.include?(id)
-        end.uniq
+        failed_indices = review_failure_indices(feature_batch, errors)
         # An un-attributable error makes the successful count unknowable. Fail
         # closed instead of claiming that every attempted feature completed.
-        succeeded = errors.any? && failed_ids.size != errors.size ? 0 : attempted - failed_ids.size
+        succeeded = if errors.any? && failed_indices.nil?
+          0
+        else
+          attempted - Array(failed_indices).size
+        end
         {
           "features_review_attempted" => attempted,
           "features_reviewed" => succeeded,
           "review_complete" => errors.empty? && feature_batch.complete,
           "review_errors" => errors
         }
+      end
+
+      # Reviewer calls consume the same cycle and daily launch envelope as
+      # fixers. Bound the selected feature batch to launches that can actually
+      # happen and, for a shipping cycle, reserve as much configured fix-attempt
+      # capacity as the current envelope permits. A zero- or one-launch
+      # remainder still selects one feature so review can progress or report
+      # the exact budget exhaustion instead of presenting an empty batch as
+      # complete.
+      def review_launch_limit(token_budget, cfg)
+        available = token_budget.remaining_launches
+        return [ available, 1 ].max if @dry_run
+
+        desired_fix_launches = cfg.dig("patrol", "max_fix_attempts_per_cycle").to_i
+        fix_launches = [ desired_fix_launches, [ available - 1, 0 ].max ].min
+        [ available - fix_launches, 1 ].max
+      end
+
+      def terminal_patrol_exhaustion?(patch)
+        exhaustion = patch.validation["resource_exhaustion"] || patch.validation[:resource_exhaustion]
+        reason = exhaustion.is_a?(Hash) && (exhaustion["reason"] || exhaustion[:reason]).to_s
+        %w[
+          cycle_agent_spawn_limit daily_agent_spawn_limit
+          cycle_token_limit daily_token_limit usage_store_unavailable
+        ].include?(reason)
+      end
+
+      # A later feature failure must pin that feature, not replay already-clean
+      # leading features. Unattributable errors still fail closed at the batch
+      # start because Hive cannot prove which feature completed.
+      def retry_feature_cursor(feature_batch, errors)
+        failed_indices = review_failure_indices(feature_batch, Array(errors))
+        return feature_batch.start_cursor unless failed_indices
+
+        feature_batch.start_cursor + failed_indices.min.to_i
+      end
+
+      def review_failure_indices(feature_batch, errors)
+        attempted_ids = feature_batch.features.map { |feature| feature.id.to_s }
+        indices = errors.filter_map do |error|
+          next unless error.is_a?(Hash)
+
+          id = (error["feature_id"] || error[:feature_id]).to_s
+          attempted_ids.index(id)
+        end
+        return unless indices.size == errors.size && indices.uniq.size == errors.size
+
+        indices
       end
 
       def build_reviewer(root, cfg, state, token_budget)
@@ -197,6 +243,14 @@ module Hive
         Hive::Patrol::Fixer.new(root, cfg: cfg, state: state, token_budget: token_budget)
       end
 
+      def ensure_validation_configured!(cfg)
+        commands = cfg.dig("patrol", "commands")
+        return if Hive::Patrol::Validator.new(commands).configured?
+
+        raise Hive::ConfigError,
+              "patrol.commands must configure at least one of docs, format, lint, public_contract, typecheck, or test before fixes can run"
+      end
+
       def stamp_fingerprints(findings, project_root)
         findings.each do |finding|
           finding.fingerprint ||= Hive::Patrol::Fingerprint.compute(finding, project_root: project_root)
@@ -205,10 +259,31 @@ module Hive
 
       def current_default_sha(project_root, cfg)
         branch = cfg["default_branch"] || Hive::GitOps.new(project_root).detect_default_branch
-        out, err, status = Open3.capture3("git", "-C", project_root, "rev-parse", branch)
-        raise Hive::GitError, "git rev-parse #{branch} failed: #{err.strip.empty? ? out : err}" unless status.success?
+        ref = branch
+        if Hive::Worktree.origin_configured?(project_root)
+          out, err, status = Hive::Worktree.fetch_origin_branch(project_root, branch)
+          unless status.success?
+            detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
+            raise Hive::GitError,
+                  "cannot fetch fresh patrol scan base origin/#{branch}: #{detail}"
+          end
+          ref = "refs/remotes/origin/#{branch}"
+        end
 
-        out.strip
+        out, err, status = Open3.capture3(
+          "git", "-C", project_root, "rev-parse", "--verify", "#{ref}^{commit}"
+        )
+        unless status.success?
+          detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
+          raise Hive::GitError, "git rev-parse #{ref} failed: #{detail}"
+        end
+
+        sha = out.strip
+        unless sha.match?(/\A[0-9a-f]{40,64}\z/i)
+          raise Hive::GitError, "fresh patrol scan base resolved an invalid SHA"
+        end
+
+        sha.downcase
       end
 
       def sweep_target_sha(project_root, cfg, state)
@@ -217,9 +292,20 @@ module Hive
         active_sha = snapshot["feature_review_sha"].to_s
         active = snapshot["feature_review_active"] == true
         legacy_active = !snapshot.key?("feature_review_active") && cursor.positive?
-        return active_sha if (active || legacy_active) && !active_sha.empty?
+        if (active || legacy_active) && materializable_commit?(project_root, active_sha)
+          return active_sha.downcase
+        end
 
         current_default_sha(project_root, cfg)
+      end
+
+      def materializable_commit?(project_root, sha)
+        return false unless sha.match?(/\A[0-9a-f]{40,64}\z/i)
+
+        _out, _err, status = Open3.capture3(
+          "git", "-C", project_root, "rev-parse", "--verify", "#{sha}^{commit}"
+        )
+        status.success?
       end
 
       def with_scan_checkout(project_root, target_sha)

@@ -1,0 +1,315 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-refactor-patrol.v3.json",
+  "title": "hive refactor patrol output (v3)",
+  "description": "PR-scoped architecture patrol discovery and lifecycle output.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SourcePr": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "url", "number", "repository", "registration", "base_branch",
+        "base_sha", "merge_sha", "merged_at", "changed_paths",
+        "manifest_checksum"
+      ],
+      "properties": {
+        "url": { "type": "string" },
+        "number": { "type": "integer", "minimum": 1 },
+        "repository": { "type": "string" },
+        "registration": { "type": "string" },
+        "base_branch": { "type": "string" },
+        "base_sha": { "type": "string" },
+        "merge_sha": { "type": "string" },
+        "merged_at": { "type": "string" },
+        "changed_paths": { "type": "array", "items": { "type": "string" } },
+        "manifest_checksum": { "type": "string" }
+      }
+    },
+    "Disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "feature_id", "fingerprint", "score", "admissible", "reasons", "thesis"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "feature_id": { "type": "string", "minLength": 1 },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "score": { "type": "number" },
+        "admissible": { "type": "boolean" },
+        "reasons": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "reference": { "type": "string", "minLength": 1 },
+        "family_id": { "type": "string", "minLength": 1 },
+        "thesis": { "$ref": "#/$defs/ThesisSnapshot" }
+      }
+    },
+    "ThesisSnapshot": {
+      "type": "object",
+      "description": "Immutable normalized thesis consumed by later action workers.",
+      "additionalProperties": false,
+      "required": [
+        "id", "feature_id", "feature", "problem", "cost", "evidence",
+        "proposed_refactor", "feature_boundary", "feature_hotspot",
+        "expected_leverage", "confidence", "risk", "required_validation",
+        "admissible", "admissibility_reason", "follow_up_approval_state",
+        "fingerprint"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "feature_id": { "type": "string", "minLength": 1 },
+        "feature": { "type": "string", "minLength": 1 },
+        "problem": { "type": "string", "minLength": 1 },
+        "cost": { "type": "string", "minLength": 1 },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/ThesisEvidence" }
+        },
+        "proposed_refactor": { "type": "string", "minLength": 1 },
+        "feature_boundary": { "$ref": "#/$defs/ThesisFeatureBoundary" },
+        "feature_hotspot": { "$ref": "#/$defs/ThesisFeatureHotspot" },
+        "expected_leverage": { "$ref": "#/$defs/ThesisExpectedLeverage" },
+        "confidence": { "enum": ["low", "medium", "high"] },
+        "risk": { "$ref": "#/$defs/ThesisRisk" },
+        "required_validation": { "$ref": "#/$defs/ThesisRequiredValidation" },
+        "admissible": { "type": "boolean" },
+        "admissibility_reason": { "type": "string" },
+        "follow_up_approval_state": {
+          "enum": ["pending", "not_requested", "approved", "rejected"]
+        },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "collision": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reference"],
+          "properties": {
+            "kind": { "type": "string" },
+            "reference": { "type": "string" }
+          }
+        }
+      }
+    },
+    "ThesisEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "snippet": { "type": "string", "minLength": 1 },
+        "claim": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ThesisFeatureBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owned_files", "entrypoints"],
+      "properties": {
+        "owned_files": { "type": "array", "items": { "type": "string" } },
+        "entrypoints": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "ThesisSignalValues": {
+      "type": "object",
+      "additionalProperties": { "type": "number", "minimum": 0 }
+    },
+    "ThesisNormalizedSignalValues": {
+      "type": "object",
+      "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 }
+    },
+    "ThesisMeasurementDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "error_class", "message"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "error_class": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    },
+    "ThesisFeatureMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "diagnostics"],
+      "properties": {
+        "status": { "enum": ["complete", "incomplete"] },
+        "diagnostics": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/ThesisMeasurementDiagnostic" }
+        }
+      }
+    },
+    "ThesisFeatureHotspot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "score", "breakdown", "signals", "normalized"],
+      "properties": {
+        "scope": { "const": "feature" },
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "breakdown": { "$ref": "#/$defs/ThesisNormalizedSignalValues" },
+        "signals": { "$ref": "#/$defs/ThesisSignalValues" },
+        "normalized": { "$ref": "#/$defs/ThesisNormalizedSignalValues" },
+        "measurement": { "$ref": "#/$defs/ThesisFeatureMeasurement" }
+      }
+    },
+    "ThesisExpectedLeverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score", "breakdown", "drivers"],
+      "properties": {
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "breakdown": { "$ref": "#/$defs/ThesisNormalizedSignalValues" },
+        "drivers": { "type": "array", "items": { "$ref": "#/$defs/ThesisLeverageDriver" } }
+      }
+    },
+    "ThesisLeverageDriver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signal", "relief", "mechanism"],
+      "properties": {
+        "signal": {
+          "enum": ["churn", "fan_in", "complexity", "coupling", "bug_density", "coverage_gap"]
+        },
+        "relief": { "type": "number", "minimum": 0, "maximum": 1 },
+        "mechanism": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ThesisRisk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caps", "public_api_impact", "public_api_details",
+        "cross_feature_impact", "cross_feature_details", "flags"
+      ],
+      "properties": {
+        "caps": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["single_feature"],
+          "properties": {
+            "single_feature": { "type": "boolean" }
+          }
+        },
+        "public_api_impact": { "type": "boolean" },
+        "public_api_details": { "type": "array", "items": { "type": "string" } },
+        "cross_feature_impact": { "type": "boolean" },
+        "cross_feature_details": { "type": "array", "items": { "type": "string" } },
+        "flags": { "type": "array", "items": { "type": "string" } },
+        "advisories": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "ThesisRequiredValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commands", "characterization_first", "notes"],
+      "properties": {
+        "commands": { "type": "array", "items": { "type": "string" } },
+        "characterization_first": { "type": "boolean" },
+        "notes": { "type": "string" }
+      }
+    },
+    "ReviewError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feature_id", "error"],
+      "properties": {
+        "feature_id": { "type": "string" },
+        "error": { "type": "string", "minLength": 1 },
+        "message": { "type": "string" },
+        "details": { "type": "object" }
+      }
+    },
+    "FeatureResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feature_id", "complete", "thesis_ids", "errors"],
+      "properties": {
+        "feature_id": { "type": "string", "minLength": 1 },
+        "complete": { "type": "boolean" },
+        "thesis_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "errors": { "type": "array", "items": { "$ref": "#/$defs/ReviewError" } }
+      }
+    },
+    "Attempt": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "Action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_action_id", "thesis_id", "thesis_fingerprint", "kind", "owner_job_id",
+        "outcome", "terminal", "receipts"
+      ],
+      "properties": {
+        "canonical_action_id": { "type": "string", "minLength": 1 },
+        "thesis_id": { "type": "string", "minLength": 1 },
+        "thesis_fingerprint": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["fix", "issue"] },
+        "family_id": { "type": "string", "minLength": 1 },
+        "owner_job_id": { "type": "string", "minLength": 1 },
+        "outcome": { "type": "string", "minLength": 1 },
+        "terminal": { "type": "boolean" },
+        "receipts": { "type": "object" }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "job_id", "project", "project_root",
+        "dry_run", "source_pr", "analysis_sha", "complete", "features_mapped",
+        "accepted", "flagged", "suppressed", "review_errors", "feature_results", "zero_reason",
+        "attempts", "actions"
+      ],
+      "properties": {
+        "schema": { "const": "hive-refactor-patrol" },
+        "schema_version": { "const": 3 },
+        "ok": { "const": true },
+        "job_id": { "type": "string" },
+        "project": { "type": "string" },
+        "project_root": { "type": "string" },
+        "dry_run": { "type": "boolean" },
+        "source_pr": { "$ref": "#/$defs/SourcePr" },
+        "analysis_sha": { "type": "string" },
+        "complete": { "type": "boolean" },
+        "features_mapped": { "type": "integer", "minimum": 0 },
+        "accepted": { "type": "array", "items": { "$ref": "#/$defs/Disposition" } },
+        "flagged": { "type": "array", "items": { "$ref": "#/$defs/Disposition" } },
+        "suppressed": { "type": "array", "items": { "$ref": "#/$defs/Disposition" } },
+        "review_errors": { "type": "array", "items": { "$ref": "#/$defs/ReviewError" } },
+        "feature_results": { "type": "array", "items": { "$ref": "#/$defs/FeatureResult" } },
+        "zero_reason": { "type": ["string", "null"], "enum": ["no_mapped_slice", "no_theses", "all_suppressed", null] },
+        "attempts": { "type": "array", "items": { "$ref": "#/$defs/Attempt" } },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/Action" } },
+        "action_status": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "job_id", "source_pr", "complete",
+        "error_class", "error_kind", "exit_code", "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-refactor-patrol" },
+        "schema_version": { "const": 3 },
+        "ok": { "const": false },
+        "job_id": { "type": "string" },
+        "source_pr": { "$ref": "#/$defs/SourcePr" },
+        "complete": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["config", "error"] },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

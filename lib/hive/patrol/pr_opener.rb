@@ -70,7 +70,12 @@ module Hive
                 "created patrol PR #{pending['pr_url']} could not be reconciled"
         end
         if existing
-          assert_existing_pr_identity!(existing, patch, require_base_oid: !pending.nil?)
+          handoff_open_pr = review_prs_enabled? && existing["state"] == "OPEN"
+          assert_existing_pr_identity!(
+            existing,
+            patch,
+            require_base_oid: !pending.nil? || handoff_open_pr
+          )
           if review_prs_enabled? && existing["state"] == "OPEN"
             assert_local_patch_identity!(patch)
             assert_remote_patch_identity!(patch)
@@ -186,7 +191,16 @@ module Hive
       end
 
       def enqueue_review_task(finding, patch, pr_url, now)
+        # This is the last guard before the task folder is published. Hosted
+        # PR reconciliation alone is not enough: the default branch may move
+        # after that lookup, and a handoff retry must never enqueue an old-base
+        # patrol branch.
+        assert_local_patch_identity!(patch)
+        assert_remote_patch_identity!(patch)
+        assert_remote_base_identity!(patch)
         @review_handoff.enqueue(finding: finding, patch: patch, pr_url: pr_url, now: now)
+      rescue Hive::GhError
+        raise
       rescue StandardError => e
         warn "hive: patrol opened #{pr_url} but failed to enqueue 6-review task: #{e.class}: #{e.message}"
         nil

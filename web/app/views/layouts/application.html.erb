@@ -1,10 +1,10 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
-    <title><%= content_for(:title) || "hivebox" %></title>
+    <title><%= content_for(:title) || web_product_name %></title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="application-name" content="hivebox">
+    <meta name="application-name" content="<%= web_product_name %>">
     <meta name="mobile-web-app-capable" content="yes">
     <%= csrf_meta_tags %>
     <%= csp_meta_tag %>
@@ -23,17 +23,22 @@
   <body>
     <header class="topbar">
       <div class="topbar-inner">
-        <%= link_to "hivebox", root_path, class: "brand" %>
-        <% if current_login %>
+        <%= link_to web_product_name, root_path, class: "brand" %>
+        <% if operator_access? %>
           <nav aria-label="Primary">
             <%= link_to "Status", root_path, class: nav_class(:status) %>
             <%= link_to "Repos", repos_path, class: nav_class(:repos) %>
+            <%= link_to "Workflows", workflows_path, class: nav_class(:workflows) %>
             <%= link_to "Agents", agents_path, class: nav_class(:agents) %>
             <%= link_to "Telegram", telegram_path, class: nav_class(:telegram) %>
           </nav>
           <div class="topbar-session">
-            <span class="session-login"><%= current_login %></span>
-            <%= button_to "Log out", logout_path, class: "btn btn-ghost btn-sm", form_class: "inline-form" %>
+            <span class="session-login"><%= operator_label %></span>
+            <% if current_login %>
+              <%= button_to "Log out", logout_path, class: "btn btn-ghost btn-sm", form_class: "inline-form" %>
+            <% else %>
+              <%= link_to "Connect GitHub", login_path, class: "btn btn-ghost btn-sm" %>
+            <% end %>
           </div>
         <% end %>
       </div>

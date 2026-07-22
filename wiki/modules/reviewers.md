@@ -3,8 +3,7 @@ title: Hive::Reviewers
 type: module
 source: lib/hive/reviewers.rb, lib/hive/reviewers/{base,agent,codex_review,synthetic_task,plan_context}.rb
 created: 2026-04-26
-updated: 2026-06-18
-updated: 2026-06-19
+updated: 2026-07-18
 tags: [reviewer, dispatch, agent, codex, patrol, architecture]
 ---
 
@@ -31,6 +30,9 @@ Shared shell for adapter classes. Subclasses set:
 - `name` — derived from `spec["name"]`.
 - `output_path` — `<task_folder>/reviews/<output_basename>-<pass>.md`.
 - `ensure_reviews_dir!` — `FileUtils.mkdir_p(File.dirname(output_path))`.
+- monotonic deadline clamping — preserves an adapter's configured timeout when
+  no outer deadline exists and otherwise caps each spawn to the review stage's
+  remaining whole-second budget.
 
 `Result` (from Base) is a `Data.define(:name, :output_path, :status, :error_message)` with a `#error?` predicate.
 

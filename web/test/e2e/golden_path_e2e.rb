@@ -1,7 +1,7 @@
 require "application_system_test_case"
 require "open3"
 
-# The hivebox golden path, end to end, in a real browser — deliberately NOT
+# The Hive web golden path, end to end, in a real browser — deliberately NOT
 # named *_test.rb so the default suites skip it; run it explicitly:
 #
 #   cd web && bin/rails test test/e2e/golden_path_e2e.rb
@@ -36,7 +36,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
   end
 
   setup do
-    configure_owner!(owner: "") # claimable box
+    configure_owner!(owner: "") # claimable Hive web instance
     speed_up_daemon!
     @project = create_hive_project!("golden-app")
     force_headless_claude!(@project)
@@ -91,7 +91,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
     end
   end
 
-  test "claim the box, drop an idea, answer the brainstorm, reach the PR gate" do
+  test "claim Hive web, drop an idea, answer the brainstorm, reach the PR gate" do
     # --- Claim: the first device-flow login becomes the owner -------------
     visit "/login"
     assert_text "first GitHub sign-in becomes its owner"
@@ -100,10 +100,13 @@ class GoldenPathE2E < ApplicationSystemTestCase
 
     # The wait page meta-refreshes once per interval; the next render polls
     # the (stubbed) token endpoint and admits.
-    assert_selector "#projects", wait: 15
+    assert_selector "#status-board", wait: 15
     config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
     assert_equal "goldenpath", config.dig("web", "github", "owner"),
-                 "the claim must be persisted as the box's owner"
+                 "the claim must be persisted as the Hive web owner"
+
+    visit grid_path
+    assert_selector "#status-grid"
 
     # --- Sample idea -------------------------------------------------------
     fill_in "New idea", with: "Golden path sample idea"
@@ -123,9 +126,10 @@ class GoldenPathE2E < ApplicationSystemTestCase
     visit "/tasks/#{@project}/#{slug}"
     answer_field = find("textarea[name='answers[1]']", wait: 45)
     assert_text "Ship the sample feature?"
-    # Answer only AFTER the daemon has reaped the round-1 child: the edit
-    # baseline is seeded from the state file's mtime at child_exited, so an
-    # answer written before the reap is swallowed and the resume never
+    # Answer only AFTER the daemon has observed the round-1 owner complete:
+    # the edit baseline is seeded from the state file's mtime after legacy
+    # child exit or durable-attempt terminalization, so an answer written
+    # before that observation is swallowed and the resume never
     # fires (recorded in wiki/gaps.md as a real product edge — an operator
     # answering within one daemon tick of the agent finishing strands the
     # task). The daemon's event log and the state file's mtime are the
@@ -179,7 +183,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
 
   # The resume watcher only sees edits NEWER than its baseline, and the
   # baseline is seeded by the first classification tick AFTER the round-1
-  # child is reaped. Answering inside that window strands the task
+  # owner is observed complete. Answering inside that window strands the task
   # (wiki/gaps.md records this as a real product edge). Wait for both
   # events IN ORDER in the daemon's own log, then wait for a distinct
   # state-file mtime tick so coarse CI filesystems cannot collapse the
@@ -190,9 +194,11 @@ class GoldenPathE2E < ApplicationSystemTestCase
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
     loop do
       log = File.exist?(events) ? File.read(events) : ""
-      exited = log.match(/"child_exited".*#{slug_re}|#{slug_re}.*"child_exited"/)
-      if exited
-        rest = log[exited.end(0)..]
+      completed = log.match(
+        /"(?:child_exited|attempt_terminal)".*#{slug_re}|#{slug_re}.*"(?:child_exited|attempt_terminal)"/
+      )
+      if completed
+        rest = log[completed.end(0)..]
         break if rest.lines.any? do |line|
           line.include?(slug) && line.include?("2-brainstorm") &&
             line.match?(/"(skipped|debouncing|dispatched)"/)
@@ -248,9 +254,9 @@ class GoldenPathE2E < ApplicationSystemTestCase
     device = http_ok(JSON.generate(
                        "device_code" => "dev-1", "user_code" => "ABCD-1234",
                        "verification_uri" => "https://github.com/login/device",
-                       # interval 1: the wait page must actually RENDER with the
-                       # code before the meta-refresh polls and admits.
-                       "expires_in" => 900, "interval" => 1
+                       # Keep the code visible long enough for Playwright to
+                       # observe the redirected page before meta-refresh admits.
+                       "expires_in" => 900, "interval" => 2
                      ))
     token = http_ok(JSON.generate("access_token" => "gho_e2e"))
     user = http_ok(JSON.generate("login" => login))
@@ -277,10 +283,20 @@ class GoldenPathE2E < ApplicationSystemTestCase
   def force_headless_claude!(project)
     path = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", project, ".hive-state", "config.yml")
     data = YAML.safe_load_file(path)
-    data["claude"] = (data["claude"] || {}).merge("mode" => "headless")
+    data["claude"] = (data["claude"] || {}).merge(
+      "mode" => "headless",
+      # The fake CLI has no provider-owned settings file for identity
+      # discovery. Pin the model so implementation ownership can be captured
+      # before execute launches, just as a real explicit Claude selection is.
+      "model" => "claude-fable-5"
+    )
     # The default implementer is codex; this E2E fakes only claude, so every
     # stage must run through it.
     data["execute"] = (data["execute"] || {}).merge("agent" => "claude")
+    # This scenario verifies the interactive coding pipeline. Keep both patrol
+    # schedulers from taking the daemon's single child slot before brainstorm.
+    data["patrol"] = (data["patrol"] || {}).merge("mode" => "off")
+    data["refactor_patrol"] = (data["refactor_patrol"] || {}).merge("enabled" => false)
     # Keep worktrees inside the sandbox (the config default would put them
     # in the operator's real ~/Dev; config beats HIVE_WORKTREE_BASE).
     data["worktree_root"] = File.join(ENV["HIVE_TEST_HOME_ROOT"], "worktrees")

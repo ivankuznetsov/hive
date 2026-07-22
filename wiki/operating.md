@@ -1,10 +1,10 @@
 ---
 title: Operating Hive
 type: operating
-source: README.md, bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-07-14
-tags: [operating, daemon, bot, systemd, launchd, install]
+updated: 2026-07-20
+tags: [operating, daemon, bot, systemd, launchd, install, skills]
 ---
 
 **TLDR**: Day-2 guide for running the hive daemon, experimental PR babysitter, and Telegram bot.
@@ -31,14 +31,14 @@ codified in `CLAUDE.md`'s `## Workflow` section.
 
 ## Install
 
-Hive ships as the `hive-cli` rubygem attached to each GitHub Release,
-signed with cosign keyless attestation. All channels download the same `.gem`,
-verify the signature, run `gem install` against it, and write an
+Hive ships the `hive-cli` rubygem plus managed `hive-web-X.Y.Z.tar.gz` bundle
+in each GitHub Release. A cosign-signed checksum manifest authenticates both
+artifacts. All channels install the same `.gem` and write an
 `install-channel` marker so `hive update` delegates back to the same channel.
 Runtime gem constraints live in `hive.gemspec` and resolve from rubygems.org:
 the direct set is `thor`, `telegram-bot-ruby`, `faraday`,
-`faraday-multipart`, `bubbletea`, `lipgloss`, `sqlite3`, and
-`unicode-display_width`. The managed llm-wiki indexer, QMD, is installed
+`faraday-multipart`, `bubbletea`, `erb`, `json_schemer`, `lipgloss`, `rexml`,
+`sqlite3`, and `unicode-display_width`. The managed llm-wiki indexer, QMD, is installed
 separately through npm into Hive's data prefix when npm is available; Hive
 does not auto-install Node.js/npm itself.
 
@@ -60,7 +60,7 @@ yay -S hive-bin
 # glibc Linux fallback / Ubuntu 22.04+ (pin to the release tag, not main)
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.4.2/install.sh -o "$tmpdir/hive-install.sh"
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.5.3/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -80,8 +80,9 @@ bash "$tmpdir/hive-install.sh"
 For an agent-assisted install, paste the repository-root `install.md` into
 Claude Code, Codex, or Pi. It detects the host platform, chooses the channel,
 installs or repairs the QMD wiki indexer when npm is available, verifies
-`hive --version`, runs `hive daemon install --json` so the per-user daemon
-service is installed/enabled by default, offers `hive init`, and treats the
+`hive --version`, runs `hive setup --json` so the per-user daemon and default
+loopback Hive web service are installed and truthfully reported, offers
+`hive init`, and treats the
 skills package as optional marketplace content.
 
 Fresh installs use XDG locations:
@@ -114,15 +115,15 @@ wrapper/symlink themselves. The AUR package also uses an `hv -> hive` symlink;
 its `conflicts=('hive' 'apache-hive')` metadata blocks the parallel install
 before fallback aliasing is possible.
 
-Daemon autostart is part of install, not project enrollment. The bash installer
-runs `hive daemon install --json` after installing the gem. Agent-assisted
-Homebrew/AUR/manual installs run the same command after `hive --version`
-verification. If systemd-user or launchd cannot actually enable/start the unit,
-`hive daemon install --json` returns a failed envelope while leaving the written
-unit on disk for manual repair. Manual package users should run
-`hive daemon install` once after install if they did not use the agent prompt;
-package hooks cannot reliably start a per-user systemd/launchd service for every
-host setup.
+The daemon installer remains idempotent install-time infrastructure, while
+`hive setup` is the normal post-install first run. On supported Linux/macOS it
+installs/enables/starts both the daemon and Hive web services, optionally
+enrolls the current project, and returns distinct web installed, enabled,
+running, manager-available, and ready state. Package hooks cannot reliably
+start a per-user service on every host, so Homebrew/AUR caveats direct users to
+run setup. `hive setup --no-service` opts out of every web-service mutation;
+`hive setup --no-bootstrap` is diagnose-only. Windows uses WSL with systemd or
+the Hivebox container distribution rather than a separate native manager.
 
 Updates and uninstall:
 
@@ -138,36 +139,64 @@ hive uninstall --force-purge-state
                           # registered project .hive-state directories
 ```
 
-Skills package marketplace commands are documented for the optional companion
-package, but the package is still a separate external publishing follow-up.
-Do not run these commands until `ivankuznetsov/hive-skills` is published; Hive
-core install still succeeds without it:
+Normal `hive setup` provisions the bundled Hive operating skill before its
+other workstation mutations. The same inspector/provisioner is available
+separately:
 
-| Agent | Command shape |
-|-------|---------------|
-| Claude Code | `claude plugin install ivankuznetsov/hive-skills` |
-| Codex | `codex plugin install ivankuznetsov/hive-skills` |
-| Pi | `pi install ivankuznetsov/hive-skills` |
+```bash
+hive doctor                    # read-only inventory + real resolution evidence
+hive setup-agents              # aggregate preview, one TTY consent prompt
+hive setup-agents --yes --json # pre-authorized unattended provisioning
+```
 
-OpenClaw support now lives in-tree under `openclaw/skills/hive/`. It is one
+The packaged manifest includes Hive's canonical operating policy for Claude
+(`/hive`), Codex (`$hive`), and Pi (`/skill:hive`), plus native adapters for
+upstream Compound Engineering, llm-wiki, and Claude PR Review Toolkit packages. Hive
+does not depend on an unpublished companion `hive-skills` package. Setup does
+not install/authenticate agent CLIs or replace user-owned conflicts; rerun it
+after correcting the scoped remediation printed by doctor.
+
+OpenClaw support is rendered from the same canonical `skills/hive/` source into
+`openclaw/skills/hive/`. It is one
 skill, not a TypeScript plugin and not a multi-listing bundle: the ClawHub slug
-is `hive-cli`, the public listing is
-`https://clawhub.ai/ivankuznetsov/hive-cli`, and the installed slash command is
-`/hive`. The checked-in skill is version `0.1.1`. ClawHub uses the skill
-frontmatter `description` as the public page summary and search text, so listing
-copy belongs in that field and in the opening `SKILL.md` body for the single
-umbrella skill. `/hive setup` guides confirmed Hive install, strict `hive`/`hv`
-version verification, `hive daemon install`, and optional non-interactive
-`hive init`; after setup, users pass normal CLI verbs as
-`/hive status --json`, `/hive plan <slug>`, `/hive develop <slug>`, and so on.
+is `hive-cli`, the install reference is `@ivankuznetsov/hive-cli`, the public
+listing is `https://clawhub.ai/ivankuznetsov/skills/hive-cli`, and the installed
+slash command is `/hive`. Its version is derived from `skills/hive/skill.json`.
+ClawHub uses the skill frontmatter `description` as the public page summary and
+search text, so listing copy belongs in that field and in the opening `SKILL.md`
+body for the single umbrella skill. `/hive setup` guides confirmed Hive install,
+strict `hive`/`hv` version verification, and
+`hive setup --no-init --yes --json` after approval for web/daemon provisioning
+without enrollment. The result reports the effective loopback URL and
+distinct native web installed, enabled, running, and ready state alongside the
+daemon outcome. Initial enrollment is a separate interactive `hive init .` in
+the user's real terminal so subscription-consuming patrol, architecture
+discovery, daemon dispatch, and babysitter defaults are reviewed; after setup,
+users pass normal CLI verbs as
+`/hive status --operational --json`, `/hive watch <project>:<slug>
+--json-lines`, `/hive plan <slug>`, `/hive develop <slug>`, and so on.
+The current skill also covers `setup-agents`, Honeycomb workflow lifecycle,
+dependency/permission runtime guarantees, ordinary versus architecture patrol
+and subscription-backed token ceilings, digest/bench, TUI/web status, and
+bounded monitoring.
 The skill also documents `/hive wiki compile-log --check` as the read-only
 aggregate-changelog verification path and tells agents to reserve mutating
 `hive wiki compile-log` runs for merge/rebase cleanup or explicit user requests.
 Its marker-recovery guidance mirrors [[modules/daemon]]: inspect first with
-`hive status --json` and `hive daemon status --json`, wait for known
+`hive status --operational --json` and `hive daemon status --json`, wait for known
 healer-managed cooldown/retry signatures, start a stopped daemon with
 `hive daemon start --detach`, and treat manual `hive markers clear` as guarded
 mutation under the skill's Safety Boundaries.
+Host mutations remain reviewable: package-manager confirmation is never
+suppressed; direct installed-runtime patches and service-manager override
+writes are prohibited; Hive-native diagnosis, dry-run, preview, and repair
+commands are preferred. Agent-skill setup uses its structured consent-required
+preview before `--yes --json`; Honeycomb lifecycle changes use supported
+`--dry-run --json` previews and separately approved permission escalation.
+Patrol dry-runs still require consent because they launch agents, and exact
+token totals remain a human-only TUI view. Daemon auto-advance is allowed only
+within previously approved enrollment, and printed `next:` commands remain
+optional recovery actions rather than implicit execution requests.
 The naked `hive` ClawHub slug is already owned by another publisher, so it is
 intentionally not used.
 
@@ -182,16 +211,28 @@ URL is announced.
 The release ceremony exercises the published artifact end-to-end via
 [`packaging/verify-release.sh`](../packaging/verify-release.sh). The
 script installs a published release into an isolated XDG/HIVE_HOME/HOME
-tmp prefix, walks the command surface (`hive --version`, `hive doctor`,
+tmp prefix, authenticates the managed web bundle, and runs consent-approved
+managed `hive setup --no-init --yes --json` from that exact digest-pinned
+archive before walking the remaining command surface (`hive --version`, `hive doctor`,
 `hive init`, `hive new`, `hive status --json`, `hive daemon install
 [--force] --json`, `hive uninstall`), validates JSON envelopes against
-the published schemas, and asserts no state leaks outside the prefix.
+the published schemas, and asserts no state leaks outside the prefix. It also
+prepends inert `systemctl`/`launchctl` stubs inside that prefix: a rewritten
+`HOME` confines unit files but does not isolate the live per-user service
+manager, so verifier lifecycle calls must never reach the operator's actual
+Hive services. The tag workflow applies the same harness before publication:
+`web-bundle` creates one tracked-file archive and digest, `candidate-gate`
+builds and verifies the exact gem and four-platform skill archive without
+provider credentials, installs that gem against the web bytes, and
+`release-finalize` signs and publishes the same artifacts without rebuilding
+them. The credentialed live-agent workflow is optional diagnostic evidence,
+not a release prerequisite.
 
 Local usage:
 
 ```bash
-packaging/verify-release.sh --version=v0.4.2
-packaging/verify-release.sh --version=v0.4.2 --report=json | jq .ok
+packaging/verify-release.sh --version=v0.5.3
+packaging/verify-release.sh --version=v0.5.3 --report=json | jq .ok
 ```
 
 For unreleased packaging fixes, validate against the locally built gem rather
@@ -208,7 +249,7 @@ Exit codes:
 - `1` — a verification step failed; tmp prefix preserved at the
   path printed in the trailing `[verify] logs preserved at` line
 - `2` — bad arguments
-- `3` — prerequisite missing (`curl`, `ruby`, `jq`, `git`)
+- `3` — prerequisite missing (`curl`, `ruby`, `jq`, `git`, `cosign`)
 
 `--report=json` emits a single `hive-verify-release.v1` envelope on
 stdout (with human prose redirected to stderr) for programmatic
@@ -357,13 +398,13 @@ hive daemon start --detach
 
 ## Autostart
 
-`hive daemon install` writes and enables the platform daemon unit (see
-ADR-024). On Linux it lands at `~/.config/systemd/user/hive-daemon.service`;
-on macOS at `~/Library/LaunchAgents/local.hive-daemon.plist`. Installers and
-agent-assisted setup run this by default. `hive init` also idempotently ensures
+`hive setup` writes and enables the platform daemon and Hive web units by
+default (see ADR-024). On Linux they land under
+`~/.config/systemd/user/`; on macOS under `~/Library/LaunchAgents/`.
+`hive init` also idempotently ensures
 the service after project setup, but the init prompt only controls whether that
 project is enrolled for dispatch. The recipes below are the manual fallback for
-environments where the installer could not write or enable the unit (read-only
+environments where setup could not write or enable a unit (read-only
 home, restricted user, custom layout) or for migrating an existing install onto
 a newer template.
 
@@ -389,14 +430,21 @@ sudo loginctl enable-linger $USER
 The unit declares `Type=simple` and runs `hive daemon start` in the
 foreground — systemd is the supervisor. `Restart=on-failure` brings
 the daemon back after a crash; the daemon's own SIGTERM handler does
-the graceful drain (`daemon.shutdown_grace_sec`, default 600 s).
+the graceful drain (`daemon.shutdown_grace_sec`, default 600 s). The shipped
+unit uses `KillMode=process`, so a service stop or restart signals only the
+daemon process. Durable attempt wrapper/worker processes survive daemon
+replacement and remain lease-owned until the new daemon adopts or reconciles
+them. Existing installs whose unit still says `KillMode=mixed` should run
+`hive daemon install --force` once after upgrading; the installer backs up the
+old unit before loading this lifecycle policy.
 
 The shipped unit hardcodes `TimeoutStopSec=900` (15 min — drain budget
 plus headroom). If you raise `daemon.shutdown_grace_sec` above 900,
 **also** raise `TimeoutStopSec=` in your installed unit to match
 (`shutdown_grace_sec + 300` is a reasonable cushion). Otherwise
-systemd will SIGKILL still-running stage children mid-`hive run`,
-losing in-flight work.
+systemd can force-stop the old daemon before its graceful accounting finishes.
+Durable attempts are still preserved by `KillMode=process` and reconciled by
+the replacement daemon.
 
 If `hive` lives behind a version manager (rbenv / asdf / mise), edit
 the `ExecStart=` line to use the shim's absolute path — systemd-user

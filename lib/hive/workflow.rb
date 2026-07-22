@@ -1,3 +1,5 @@
+require "hive/conditions/policy"
+
 module Hive
   Workflow = Data.define(:id, :stages) do
     def initialize(id:, stages:)
@@ -25,6 +27,9 @@ module Hive
     # runners (council.rb round-tracking + triage.rb path building) so the value
     # can't drift across those copies.
     DEFAULT_TRIAGE_OUTPUT = "reviews/triage.md"
+    MAPPING_ROLES = %w[planning development reviewer].freeze
+
+    ExecutableSlot = Data.define(:id, :kind, :actor, :default_role)
 
     def each(&) = stages.each(&)
 
@@ -61,44 +66,82 @@ module Hive
     # built each call, so freezing it can't surprise a caller.
     def stage_names = map(&:name).freeze
     def stage_dirs = map(&:dir).freeze
+    def draft_pr_handoff? = any? { |stage| stage.handoff == :draft_pr }
+
+    # Canonical managed-runtime topology. Configuration snapshots, package
+    # validation, and admission all consume these same stable actor slots.
+    def executable_slots
+      stages.flat_map do |stage|
+        next [] unless [ :agent, :council ].include?(stage.kind)
+
+        slots = [
+          ExecutableSlot.new(
+            id: "stages.#{stage.name}", kind: :stage, actor: stage,
+            default_role: "development"
+          )
+        ]
+        Array(stage.reviewers).each do |reviewer|
+          slots << ExecutableSlot.new(
+            id: "stages.#{stage.name}.reviewers.#{reviewer.name}",
+            kind: :reviewer, actor: reviewer, default_role: "reviewer"
+          )
+        end
+        if stage.council&.revise
+          slots << ExecutableSlot.new(
+            id: "stages.#{stage.name}.revise", kind: :revise,
+            actor: stage.council.revise, default_role: "development"
+          )
+        end
+        slots
+      end
+    end
 
     Stage = Data.define(
       :name, :index, :state_file, :advance_verb, :kind, :skill, :instruction,
       :permissions, :status_mode, :budget_usd, :timeout_sec, :capability,
-      :agent, :model, :effort, :input, :reviewers, :council, :deliverable
+      :agent, :model, :effort, :input, :reviewers, :council, :deliverable,
+      :workspace, :handoff, :condition_policy, :mapping_role, :mapping_contract
     ) do
       def initialize(name:, index:, state_file:, advance_verb: nil, kind: nil,
                      skill: nil, instruction: nil, permissions: nil,
                      status_mode: nil, budget_usd: nil, timeout_sec: nil,
                      capability: nil, agent: nil, model: nil, effort: nil,
-                     input: nil, reviewers: nil, council: nil, deliverable: nil)
+                     input: nil, reviewers: nil, council: nil, deliverable: nil,
+                     workspace: nil, handoff: nil,
+                     condition_policy: nil, mapping_role: nil, mapping_contract: nil)
         super
       end
 
       def dir = "#{index}-#{name}"
     end
 
-    Council = Data.define(:quorum, :max_rounds, :exit_rule, :triage_output, :revise) do
+    Council = Data.define(:quorum, :max_rounds, :exit_rule, :on_max_rounds, :triage_output, :revise) do
       def initialize(quorum:, max_rounds: 1, exit_rule: :human,
-                     triage_output: DEFAULT_TRIAGE_OUTPUT, revise: nil)
+                     on_max_rounds: :wait, triage_output: DEFAULT_TRIAGE_OUTPUT, revise: nil)
         super
       end
     end
 
     Reviewer = Data.define(
       :name, :agent, :model, :effort, :skill, :instruction, :prompt,
-      :command, :output_basename, :permissions, :max_attempts
+      :command, :output_basename, :permissions, :max_attempts,
+      :mapping_role, :mapping_contract
     ) do
       def initialize(name:, agent: nil, model: nil, effort: nil, skill: nil,
                      instruction: nil, prompt: nil, command: nil,
-                     output_basename: nil, permissions: nil, max_attempts: nil)
+                     output_basename: nil, permissions: nil, max_attempts: nil,
+                     mapping_role: nil, mapping_contract: nil)
         super
       end
     end
 
-    Revise = Data.define(:agent, :model, :effort, :skill, :instruction, :prompt, :command, :permissions) do
+    Revise = Data.define(
+      :agent, :model, :effort, :skill, :instruction, :prompt, :command,
+      :permissions, :mapping_role, :mapping_contract
+    ) do
       def initialize(agent: nil, model: nil, effort: nil, skill: nil,
-                     instruction: nil, prompt: nil, command: nil, permissions: nil)
+                     instruction: nil, prompt: nil, command: nil, permissions: nil,
+                     mapping_role: nil, mapping_contract: nil)
         super
       end
     end

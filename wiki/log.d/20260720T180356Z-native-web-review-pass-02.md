@@ -1,0 +1,5 @@
+## [2026-07-20T18:03:56Z] web/setup — close native web review pass 02 gaps
+
+**Action:** Hardened the managed native web delivery contract after stage 6 review. Repeated macOS setup now leaves an unchanged already-loaded launchd job alone, mutating setup/install resamples asynchronous lifecycle state before readiness, explicit web install fails unless the observed app is installed/enabled/running/ready, and status configuration failures retain the versioned JSON envelope.
+
+**Coverage:** The packaged-layout integration fixture now drives real Bundler and Rails asset compilation from the installed gem root. Release certificates are pinned across the CLI, installers, verifier, and AUR workflow to `.github/workflows/release.yml` at the exact expected version tag. Production Host authorization is exercised through the real middleware, Hivebox smoke rejects missing baked assets, doctor alias coverage lives in a focused file below the 1,000-line rubric, and the legacy published-release CI fixture skips only when its release predates the managed web asset.

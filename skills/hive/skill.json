@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "hive-canonical-skill",
+  "schema_version": 1,
+  "name": "hive",
+  "version": "0.1.3",
+  "references": [
+    "references/status-and-watch.md",
+    "references/workflow-actions.md",
+    "references/recovery.md",
+    "references/setup-and-platforms.md",
+    "references/safety.md"
+  ]
+}

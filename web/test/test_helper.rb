@@ -6,10 +6,18 @@ require "tmpdir"
 ENV["RAILS_ENV"] ||= "test"
 ENV["HIVE_TEST_HOME_ROOT"] = Dir.mktmpdir("hive-web-test")
 ENV["HIVE_HOME"] = File.join(ENV["HIVE_TEST_HOME_ROOT"], "hive-home")
+ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"] = "1"
+ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"] = "1"
+ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"] = "1"
 FileUtils.mkdir_p(ENV["HIVE_HOME"])
 
 require_relative "../config/environment"
 require "rails/test_help"
+
+Minitest.after_run do
+  root = ENV["HIVE_TEST_HOME_ROOT"]
+  FileUtils.rm_rf(root) if root&.include?("hive-web-test")
+end
 
 module ActiveSupport
   class TestCase
@@ -76,6 +84,14 @@ module ActiveSupport
     ensure
       $stdout, $stderr = orig_out, orig_err
     end
+
+    def with_replaced_singleton_method(receiver, name, replacement)
+      original = receiver.method(name)
+      receiver.define_singleton_method(name, &replacement)
+      yield
+    ensure
+      receiver.define_singleton_method(name, original)
+    end
   end
 end
 
@@ -87,7 +103,7 @@ module AuthTestHelper
     follow_redirect! if response.redirect?
   end
 
-  # owner: "" writes a CLAIMABLE box (the key is omitted — the config
+  # owner: "" writes a CLAIMABLE instance (the key is omitted — the config
   # validator rejects empty strings; claimable means absent).
   def configure_owner!(owner: "alice")
     path = File.join(ENV["HIVE_HOME"], "config.yml")

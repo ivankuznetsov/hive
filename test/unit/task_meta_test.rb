@@ -2,6 +2,129 @@ require "test_helper"
 require "hive/task_meta"
 
 class TaskMetaTest < Minitest::Test
+  def test_read_for_admission_distinguishes_absent_metadata
+    Dir.mktmpdir do |dir|
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :absent, result.status
+      assert_nil result.error
+      assert_equal Hive::TaskMeta.empty, result.data
+    end
+  end
+
+  def test_read_for_admission_rejects_unreadable_yaml
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "meta.yml"), "depends_on: [unterminated\n")
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :unreadable, result.status
+      assert_match(/could not parse/, result.error)
+    end
+  end
+
+  def test_read_for_admission_rejects_non_mapping_yaml
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "meta.yml"), "- depends_on: base-task\n")
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :invalid, result.status
+      assert_match(/must contain a mapping/, result.error)
+    end
+  end
+
+  def test_read_for_admission_rejects_invalid_dependency_shape
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "meta.yml"), { "depends_on" => [ "base-task" ] }.to_yaml)
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :invalid, result.status
+      assert_match(/depends_on/, result.error)
+    end
+  end
+
+  def test_read_for_admission_rejects_duplicate_dependency_keys
+    Dir.mktmpdir do |dir|
+      File.write(
+        File.join(dir, "meta.yml"),
+        "depends_on: blocked-task\ndepends_on: completed-task\n"
+      )
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :invalid, result.status
+      assert_match(/duplicate depends_on/, result.error)
+      assert_equal :metadata_invalid, result.reason
+    end
+  end
+
+  def test_read_for_admission_rejects_duplicate_base_branch_keys
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "meta.yml"), "base_branch: main\nbase_branch: release/next\n")
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :invalid, result.status
+      assert_match(/duplicate base_branch/, result.error)
+      assert_equal :metadata_invalid, result.reason
+    end
+  end
+
+  def test_read_for_admission_reports_non_yaml_read_errors
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "meta.yml"))
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :unreadable, result.status
+      assert_match(/could not read/, result.error)
+      assert_equal :metadata_unreadable, result.reason
+    end
+  end
+
+  def test_managed_workflow_provenance_round_trips_and_survives_updates
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(
+        dir, id: 7, slug: "managed-260715-aaaa", display_name: nil, workflow: "demo",
+        workflow_commit: "a" * 40, workflow_manifest_digest: "b" * 64,
+        workflow_configuration_digest: "c" * 64
+      )
+
+      assert_equal "a" * 40, Hive::TaskMeta.read(dir)[:workflow_commit]
+      assert_equal "b" * 64, Hive::TaskMeta.read(dir)[:workflow_manifest_digest]
+      assert_equal "c" * 64, Hive::TaskMeta.read(dir)[:workflow_configuration_digest]
+      Hive::TaskMeta.update_display_name(dir, "Managed")
+      Hive::TaskMeta.update_id(dir, 8)
+      assert_equal "a" * 40, Hive::TaskMeta.read(dir)[:workflow_commit]
+      assert_equal "b" * 64, Hive::TaskMeta.read(dir)[:workflow_manifest_digest]
+      assert_equal "c" * 64, Hive::TaskMeta.read(dir)[:workflow_configuration_digest]
+    end
+  end
+
+
+  def test_configuration_digest_requires_package_provenance
+    with_tmp_dir do |dir|
+      assert_raises(ArgumentError) do
+        Hive::TaskMeta.write(
+          dir, id: 7, slug: "managed-260715-aaaa", display_name: nil,
+          workflow_configuration_digest: "c" * 64
+        )
+      end
+    end
+  end
+
+  def test_managed_workflow_provenance_must_be_written_as_a_pair
+    with_tmp_dir do |dir|
+      assert_raises(ArgumentError) do
+        Hive::TaskMeta.write(
+          dir, id: 7, slug: "managed-260715-aaaa", display_name: nil,
+          workflow_commit: "a" * 40
+        )
+      end
+    end
+  end
   include HiveTestHelper
 
   def test_write_and_read_round_trip
@@ -39,6 +162,25 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_base_branch_round_trips_and_survives_metadata_updates
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(
+        dir, id: 42, slug: "fix-ui", display_name: nil,
+        workflow: "async-fix", base_branch: "release/next"
+      )
+
+      assert_equal "release/next", Hive::TaskMeta.read(dir)[:base_branch]
+
+      Hive::TaskMeta.update_display_name(dir, "Fix UI")
+      Hive::TaskMeta.update_id(dir, 43)
+
+      meta = Hive::TaskMeta.read(dir)
+      assert_equal "release/next", meta[:base_branch]
+      assert_equal "Fix UI", meta[:display_name]
+      assert_equal 43, meta[:id]
+    end
+  end
+
   def test_read_surfaces_workflow_selector
     with_tmp_dir do |dir|
       File.write(File.join(dir, "meta.yml"), "workflow: research\n")
@@ -59,7 +201,7 @@ class TaskMetaTest < Minitest::Test
 
   def test_missing_or_malformed_file_returns_nil_fields
     with_tmp_dir do |dir|
-      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, Hive::TaskMeta.read(dir))
+      assert_equal Hive::TaskMeta.empty, Hive::TaskMeta.read(dir)
 
       File.write(File.join(dir, "meta.yml"), ":\n:not yaml")
       # Malformed YAML hits the warn arm of read; capture so it isn't leaked to
@@ -67,10 +209,10 @@ class TaskMetaTest < Minitest::Test
       # test_malformed_yaml_warns_that_depends_on_and_workflow_were_dropped).
       result = nil
       capture_io { result = Hive::TaskMeta.read(dir) }
-      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, result)
+      assert_equal Hive::TaskMeta.empty, result
 
       File.write(File.join(dir, "meta.yml"), "- not\n- a hash\n")
-      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, Hive::TaskMeta.read(dir))
+      assert_equal Hive::TaskMeta.empty, Hive::TaskMeta.read(dir)
     end
   end
 
@@ -102,7 +244,7 @@ class TaskMetaTest < Minitest::Test
       result = nil
       _out, err = capture_io { result = Hive::TaskMeta.read(dir) }
       assert_equal Hive::TaskMeta.empty, result
-      assert_match(/depends_on, workflow dropped/, err,
+      assert_match(/depends_on, workflow, base_branch dropped; managed provenance dropped/, err,
                    "a YAML parse failure must warn that depends_on (and the " \
                    "workflow selector) were dropped")
     end
@@ -193,6 +335,22 @@ class TaskMetaTest < Minitest::Test
       assert_equal 5, meta[:id]
       assert_equal "derived-slug-folder", meta[:slug],
                    "a missing slug must fall back to the folder basename"
+    end
+  end
+
+  def test_update_helpers_refuse_to_rewrite_corrupt_metadata
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "meta.yml")
+      original = "depends_on: [unterminated\n"
+      File.write(path, original)
+
+      assert_raises(Hive::TaskMeta::InvalidMetadata) do
+        Hive::TaskMeta.update_display_name(dir, "Do Not Rewrite")
+      end
+      assert_raises(Hive::TaskMeta::InvalidMetadata) do
+        Hive::TaskMeta.update_id(dir, 42)
+      end
+      assert_equal original, File.binread(path)
     end
   end
 end

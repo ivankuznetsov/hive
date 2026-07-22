@@ -11,6 +11,10 @@ require "hive/git_ops"
 require "hive/stages"
 require "hive/workflows"
 require "hive/commit_or_rollback"
+require "hive/dependency_snapshot"
+require "hive/attempts/context"
+require "hive/conditions/transition_guard"
+require "hive/workflow_package/mutation_lock"
 
 module Hive
   module Commands
@@ -35,9 +39,26 @@ module Hive
     # by a prior call, the assertion fails with WRONG_STAGE (4) so retry
     # loops can branch deterministically.
     class Approve
+      include Hive::Schemas::EnvelopeEmitter
+
       VALID_TERMINAL_MARKERS = %i[complete execute_complete review_complete].freeze
 
-      def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false)
+      def self.error_kind_for(error)
+        case error
+        when Hive::AmbiguousSlug then "ambiguous_slug"
+        when Hive::DestinationCollision then "destination_collision"
+        when Hive::FinalStageReached then "final_stage"
+        when Hive::WrongStage then "wrong_stage"
+        when Hive::RollbackFailed then "rollback_failed"
+        when Hive::InvalidTaskPath then "invalid_task_path"
+        when Hive::DependencyWaitError then "dependency_wait"
+        when Hive::DependencyAdmissionError then "admission_error"
+        else "error"
+        end
+      end
+
+      def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
+                     observation_guard: nil)
         @target = target
         @to = to
         @from = from
@@ -48,23 +69,29 @@ module Hive
         # (e.g. StageAction) that emit their own unified envelope.
         # State changes and typed exceptions still propagate normally.
         @quiet = quiet
+        @observation_guard = observation_guard
       end
 
       def call
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json && !@quiet
-        raise
-      rescue StandardError => e
-        # Anything that isn't a typed Hive::Error is an internal bug or an
-        # I/O fault we didn't anticipate (Errno::ENOSPC from mkdir_p, an
-        # Open3 failure, a SystemCallError from the cross-device fallback).
-        # Translate to InternalError so --json callers still get a parseable
-        # envelope on stdout instead of a Ruby trace on stderr, and the
-        # exit code is the documented SOFTWARE (70) rather than nothing.
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json && !@quiet
-        raise wrapped
+        call_with_envelope { do_call }
+      end
+
+      def envelope_schema
+        "hive-approve"
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
+      end
+
+      def envelope_serialization_failure_policy = :raise
+
+      def envelope_enabled?
+        @json && !@quiet
+      end
+
+      def envelope_extras_for(error)
+        error.is_a?(Hive::FinalStageReached) ? { "stage" => error.stage } : {}
       end
 
       private
@@ -83,7 +110,11 @@ module Hive
         validate_move!(task, next_stage_dir, marker)
         direction = direction_of(task, next_stage_dir)
 
-        new_folder, commit_action = perform_move_and_commit(task, next_stage_dir)
+        new_folder, commit_action = perform_move_and_commit(
+          task,
+          next_stage_dir,
+          enforce_admission: direction == "forward"
+        )
         emit_success(task, next_stage_dir, new_folder, marker, commit_action, direction)
       end
 
@@ -174,7 +205,9 @@ module Hive
 
       def validate_move!(task, dest_stage, marker)
         dest = stage_for_dest!(task, dest_stage)
-        return if dest.index <= task.stage_index || @force
+        return if dest.index <= task.stage_index
+        Hive::Conditions::TransitionGuard.validate!(task, force: @force, source: "approve")
+        return if @force
         return if VALID_TERMINAL_MARKERS.include?(marker.name)
 
         valid = VALID_TERMINAL_MARKERS.map { |m| ":#{m}" }.join(", ")
@@ -225,11 +258,20 @@ module Hive
       #     release no-ops on the gone source path. We delete the orphan at
       #     the new path before committing so the per-process lock metadata
       #     isn't tracked in hive/state.
-      def perform_move_and_commit(task, dest_stage)
+      def perform_move_and_commit(task, dest_stage, enforce_admission: false)
         new_folder = nil
         commit_action = nil
         Hive::Lock.with_commit_lock(task.hive_state_path) do
           Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "approve") do
+            # Preserve the command's typed collision contract before building
+            # a multi-project snapshot: a pre-existing destination necessarily
+            # duplicates the slug, but it is first and foremost an unsafe move
+            # destination and requires no dependency inference to reject.
+            raise_destination_collision(destination_folder(task, dest_stage)) if
+              destination_exists?(destination_folder(task, dest_stage))
+            Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
+            Hive::Attempts::Context.current&.validate_generation!(task)
+            @observation_guard&.call(task)
             new_folder = move_task!(task, dest_stage)
           end
           cleanup_orphan_task_lock(new_folder)
@@ -240,9 +282,16 @@ module Hive
       end
 
       def move_task!(task, dest_stage)
+        workflows_dir = File.join(task.hive_state_path, "workflows")
+        Hive::WorkflowPackage::MutationLock.with_lock(workflows_dir, shared: true) do
+          move_task_under_workflow_lock!(task, dest_stage)
+        end
+      end
+
+      def move_task_under_workflow_lock!(task, dest_stage)
         new_parent = File.join(task.hive_state_path, "stages", dest_stage)
         FileUtils.mkdir_p(new_parent)
-        new_folder = File.join(new_parent, task.slug)
+        new_folder = destination_folder(task, dest_stage)
 
         # Pre-check is the early-exit fast path; the rescue below is the
         # real safety net. POSIX rename(2) on a non-empty destination
@@ -250,7 +299,7 @@ module Hive
         # implementations vary (Linux glibc replaces; some libcs surface
         # as EEXIST/EISDIR). The rescue covers all three so the outcome
         # is uniform regardless of platform.
-        raise_destination_collision(new_folder) if File.exist?(new_folder)
+        raise_destination_collision(new_folder) if destination_exists?(new_folder)
 
         begin
           File.rename(task.folder, new_folder)
@@ -260,6 +309,14 @@ module Hive
           cross_device_move!(task.folder, new_folder)
         end
         new_folder
+      end
+
+      def destination_folder(task, dest_stage)
+        File.join(task.hive_state_path, "stages", dest_stage, task.slug)
+      end
+
+      def destination_exists?(path)
+        File.exist?(path) || File.directory?(path)
       end
 
       # Cross-device fallback: copy then remove. If the copy fails partway
@@ -465,32 +522,8 @@ module Hive
         verb ? "hive #{verb} #{task.slug} --from #{stage.dir}" : "hive run #{task.slug}"
       end
 
-      def emit_error_envelope(error)
-        payload = {
-          "schema" => "hive-approve",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-approve"),
-          "ok" => false,
-          "error_class" => error.class.name.split("::").last,
-          "error_kind" => error_kind_for(error),
-          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
-          "message" => error.message
-        }
-        payload["candidates"] = error.candidates if error.is_a?(Hive::AmbiguousSlug)
-        payload["path"] = error.path if error.is_a?(Hive::DestinationCollision)
-        payload["stage"] = error.stage if error.is_a?(Hive::FinalStageReached)
-        puts JSON.generate(payload)
-      end
-
       def error_kind_for(error)
-        case error
-        when Hive::AmbiguousSlug then "ambiguous_slug"
-        when Hive::DestinationCollision then "destination_collision"
-        when Hive::FinalStageReached then "final_stage"
-        when Hive::WrongStage then "wrong_stage"
-        when Hive::RollbackFailed then "rollback_failed"
-        when Hive::InvalidTaskPath then "invalid_task_path"
-        else "error"
-        end
+        self.class.error_kind_for(error)
       end
     end
   end

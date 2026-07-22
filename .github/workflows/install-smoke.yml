@@ -14,6 +14,8 @@ jobs:
       - uses: actions/checkout@v7
       - run: bash -n install.sh
       - run: bash -n packaging/verify-release.sh
+      - run: sh -n packaging/docker/install-box.sh
+      - run: bash -n packaging/docker/test-install-box.sh
       - name: Shellcheck
         uses: ludeeus/action-shellcheck@00b27aa7cb85167568cb48a3838b75f4265f2bca
         with:
@@ -21,7 +23,10 @@ jobs:
           additional_files: |
             install.sh
             packaging/verify-release.sh
+            packaging/docker/install-box.sh
+            packaging/docker/test-install-box.sh
       - run: bash install.sh --dry-run --version=v0.1.0
+      - run: bash packaging/docker/test-install-box.sh
 
   macos-dry-run:
     name: macOS dry run
@@ -74,7 +79,8 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
-      - name: Check pinned release exists
+      - uses: sigstore/cosign-installer@v3
+      - name: Check pinned release supports managed web verification
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -113,20 +119,27 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
+      - uses: sigstore/cosign-installer@v3
       - name: Check pinned release exists
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
           HIVE_VERSION: v0.1.0
         run: |
-          if gh release view "$HIVE_VERSION" --repo ivankuznetsov/hive >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+          if assets="$(gh release view "$HIVE_VERSION" --repo ivankuznetsov/hive --json assets --jq '.assets[].name' 2>/dev/null)"; then
+            web_asset="hive-web-${HIVE_VERSION#v}.tar.gz"
+            if grep -Fxq "$web_asset" <<<"$assets"; then
+              echo "capable=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "verify-release skipped: ${HIVE_VERSION} predates managed web asset ${web_asset}" >&2
+              echo "capable=false" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "verify-release skipped: ${HIVE_VERSION} is not published yet" >&2
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "capable=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Ensure jq is available
-        if: ${{ steps.release.outputs.exists == 'true' }}
+        if: ${{ steps.release.outputs.capable == 'true' }}
         run: |
           if command -v jq >/dev/null 2>&1; then
             jq --version
@@ -148,7 +161,7 @@ jobs:
           sudo apt-get install -y -qq jq
           jq --version
       - name: Run verify-release.sh
-        if: ${{ steps.release.outputs.exists == 'true' }}
+        if: ${{ steps.release.outputs.capable == 'true' }}
         env:
           HIVE_VERSION: v0.1.0
         run: |

@@ -3,6 +3,8 @@ require "time"
 require "hive/agent_limit"
 
 class AgentLimitTest < Minitest::Test
+  include HiveTestHelper
+
   def test_detects_claude_usage_limit_menu
     text = <<~TEXT
       What do you want to do?
@@ -116,11 +118,116 @@ class AgentLimitTest < Minitest::Test
     assert_match(/Z\z/, stamp, "stamp must be serialized in UTC")
   end
 
+  def test_retry_after_prefers_explicit_codex_reset_date
+    now = Time.utc(2026, 7, 12, 20, 0, 0)
+    message = "You've hit your usage limit. Try again at Jul 18th, 2026 7:50 AM."
+
+    with_env("TZ" => "Europe/London") do
+      assert_equal "2026-07-18T06:51:00Z", Hive::AgentLimit.retry_after(text: message, now: now)
+    end
+  end
+
+  def test_retry_after_ignores_expired_explicit_reset_date
+    now = Time.utc(2026, 7, 18, 7, 0, 0)
+    message = "You've hit your usage limit. Try again at Jul 18th, 2026 7:50 AM."
+
+    with_env("TZ" => "Europe/London") do
+      assert_equal (now + Hive::AgentLimit::RETRY_COOLDOWN_SEC).iso8601,
+                   Hive::AgentLimit.retry_after(text: message, now: now)
+    end
+  end
+
+  def test_retry_after_parses_explicit_utc_reset_date
+    now = Time.utc(2026, 7, 12, 20, 0, 0)
+    message = "You've hit your usage limit. Try again at Jul 18th, 2026 7:50 AM (UTC)."
+
+    assert_equal "2026-07-18T07:51:00Z", Hive::AgentLimit.retry_after(text: message, now: now)
+    assert_equal "2026-07-18T07:51:00Z",
+                 Hive::AgentLimit.retry_after(
+                   text: "You've hit your usage limit. Try again at Jul 18th, 2026 7:50 AM UTC.",
+                   now: now
+                 )
+  end
+
+  def test_retry_after_keeps_fixed_cooldown_for_ambiguous_hints
+    now = Time.utc(2026, 7, 12, 20, 0, 0)
+    fallback = (now + Hive::AgentLimit::RETRY_COOLDOWN_SEC).iso8601
+
+    assert_equal fallback, Hive::AgentLimit.retry_after(text: "Try again at 7:50 AM.", now: now)
+    assert_equal fallback,
+                 Hive::AgentLimit.retry_after(
+                   text: "Try again at Jul 18th, 2026 7:50 AM (America/New_York).",
+                   now: now
+                 )
+    assert_equal fallback,
+                 Hive::AgentLimit.retry_after(text: "Try again at Jul 18th, 2026 7:50 AM EDT.", now: now)
+  end
+
+  def test_retry_after_rejects_invalid_or_implausibly_distant_dates
+    now = Time.utc(2026, 7, 12, 20, 0, 0)
+    fallback = (now + Hive::AgentLimit::RETRY_COOLDOWN_SEC).iso8601
+
+    assert_equal fallback,
+                 Hive::AgentLimit.retry_after(text: "Try again at Feb 31st, 2027 7:50 AM.", now: now)
+    assert_equal fallback,
+                 Hive::AgentLimit.retry_after(text: "Try again at Jul 18th, 2028 7:50 AM.", now: now)
+    assert_equal fallback,
+                 Hive::AgentLimit.retry_after(text: "Try again at Jul 18th, 2026 0:50 AM.", now: now)
+    assert_equal fallback,
+                 Hive::AgentLimit.retry_after(text: "Try again at Jul 18th, 2026 13:50 AM.", now: now)
+  end
+
+  def test_retry_after_falls_back_when_local_time_conversion_rejects_the_hint
+    now = Time.utc(2026, 7, 12, 20, 0, 0)
+    message = "You've hit your usage limit. Try again at Jul 18th, 2026 7:50 AM."
+
+    with_replaced_singleton_method(Time, :local, ->(*) { raise ArgumentError, "invalid local time" }) do
+      assert_equal (now + Hive::AgentLimit::RETRY_COOLDOWN_SEC).iso8601,
+                   Hive::AgentLimit.retry_after(text: message, now: now)
+    end
+  end
+
+  def test_retry_after_for_uses_latest_boundary_regardless_of_order
+    now = Time.utc(2026, 7, 12, 20, 0, 0)
+    ambiguous = "You've hit your usage limit. Try again later."
+    dated = "You've hit your usage limit. Try again at Jul 18th, 2026 7:50 AM UTC."
+    expected = "2026-07-18T07:51:00Z"
+
+    assert_equal expected, Hive::AgentLimit.retry_after_for([ ambiguous, dated ], now: now)
+    assert_equal expected, Hive::AgentLimit.retry_after_for([ dated, ambiguous ], now: now)
+  end
+
+  def test_retry_due_allows_hourly_probe_before_explicit_provider_reset
+    now = Time.utc(2026, 7, 20, 12, 0, 0)
+
+    assert Hive::AgentLimit.retry_due?(
+      limited_at: now - Hive::AgentLimit::RETRY_COOLDOWN_SEC,
+      now: now
+    )
+  end
+
+  def test_retry_due_waits_until_hourly_probe
+    now = Time.utc(2026, 7, 20, 12, 0, 0)
+
+    refute Hive::AgentLimit.retry_due?(
+      limited_at: now - Hive::AgentLimit::RETRY_COOLDOWN_SEC + 1,
+      now: now
+    )
+  end
+
+  def test_retry_due_requires_marker_time
+    now = Time.utc(2026, 7, 20, 12, 0, 0)
+
+    refute Hive::AgentLimit.retry_due?(limited_at: nil, now: now)
+  end
+
   def test_retry_cooldown_sec_honors_a_positive_env_override
     with_env("HIVE_LIMITS_RETRY_COOLDOWN_SEC" => "120") do
       assert_equal 120, Hive::AgentLimit.retry_cooldown_sec
       now = Time.utc(2026, 6, 8, 12, 0, 0)
       assert_equal (now + 120).iso8601, Hive::AgentLimit.retry_after(now: now)
+      assert Hive::AgentLimit.retry_due?(limited_at: now - 120, now: now)
+      refute Hive::AgentLimit.retry_due?(limited_at: now - 119, now: now)
     end
   end
 
@@ -169,14 +276,27 @@ class AgentLimitTest < Minitest::Test
       "retry_after" => "2026-06-24T23:20:00Z"
     }
 
-    assert_equal "held: agent quota (codex) — retry after 2026-06-24 23:20 UTC; " \
+    assert_equal "held: agent quota (codex) — reset estimate 2026-06-24 23:20 UTC; " \
+                 "Hive retries hourly; " \
                  "top up or switch execute agent",
                  Hive::AgentLimit.held_label(attrs)
   end
 
   def test_held_label_omits_unknown_provider_and_missing_retry
-    assert_equal "held: agent quota; top up or switch execute agent",
+    assert_equal "held: agent quota; Hive retries hourly; top up or switch execute agent",
                  Hive::AgentLimit.held_label({})
+  end
+
+  def test_held_label_describes_configured_retry_interval
+    {
+      "7200" => "every 2 hours",
+      "120" => "every 2 minutes",
+      "7" => "every 7 seconds"
+    }.each do |seconds, label|
+      with_env("HIVE_LIMITS_RETRY_COOLDOWN_SEC" => seconds) do
+        assert_includes Hive::AgentLimit.held_label({}), "Hive retries #{label}"
+      end
+    end
   end
 
   def test_held_field_serializes_quota_shape
@@ -217,6 +337,20 @@ class AgentLimitTest < Minitest::Test
     assert Hive::AgentLimit.live_limit_menu?(pane)
     assert_equal "❯ 1. Stop and wait for limit to reset",
                  Hive::AgentLimit.live_limit_line(pane)
+  end
+
+  def test_live_limit_context_is_bounded_to_the_detected_wall
+    pane = <<~TEXT
+      Historical note: try again at Dec 31st, 2026 11:59 PM.
+      #{pane_fixture("limit_menu_live.txt")}
+      Try again at Jul 18th, 2026 7:50 AM.
+    TEXT
+
+    context = Hive::AgentLimit.live_limit_context(pane)
+
+    refute_includes context, "Historical note"
+    assert_equal "❯ 1. Stop and wait for limit to reset", context.lines.first.strip
+    assert_includes context, "Try again at Jul 18th, 2026 7:50 AM."
   end
 
   def test_live_limit_menu_rejects_quoted_menu_after_agent_moved_on

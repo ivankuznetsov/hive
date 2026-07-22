@@ -1,5 +1,6 @@
 require "set"
 require "date"
+require "time"
 
 module Hive
   module Daemon
@@ -57,6 +58,7 @@ module Hive
         @running = {}
         @external_running_by_project = Hash.new(0)
         @external_running_global = 0
+        @durable_daily_counts = {}
         # [project, Date] → Integer
         @daily_counts = Hash.new(0)
         # [project, slug] → Time (cooldown expiry)
@@ -168,6 +170,18 @@ module Hive
         @external_running_global = @external_running_by_project.values.sum
       end
 
+      # Publish the reconciled durable view before admission. Legacy status
+      # counts passed here must already be deduplicated against lease-backed
+      # tasks; they are a compatibility fallback only.
+      def set_capacity_snapshot(snapshot, legacy_per_project: {})
+        combined = Hash.new(0)
+        snapshot.per_project.each { |project, count| combined[project] += count.to_i }
+        legacy_per_project.each { |project, count| combined[project] += count.to_i }
+        @external_running_by_project = combined
+        @external_running_global = snapshot.global_count.to_i + legacy_per_project.values.sum(&:to_i)
+        @durable_daily_counts = snapshot.daily_counts
+      end
+
       # Returns the mtime LAST observed on (project, slug)'s state file —
       # captured at dispatch time AND refreshed post-completion (so the
       # agent's own marker write doesn't look like a user edit on the
@@ -211,12 +225,13 @@ module Hive
           state_file_mtime_at_dispatch: state_file_mtime,
           kind: kind
         }
-        # The digest runs on its own gate (can_dispatch_digest?), which reads
-        # NO daily counts, and record_completion early-returns for :digest
-        # before the TEMPFAIL refund (dec_daily). A counted digest dispatch
-        # would therefore leak one never-read [project, date] entry per
-        # calendar day, so skip the increment for symmetry with that refund.
-        @daily_counts[[ project, started_at.to_date ]] += 1 unless kind == :digest
+        # Digest and patrol scans run on their own gates, which read NO daily
+        # task counts, and record_completion returns before the TEMPFAIL refund
+        # for both kinds. Counting either dispatch would therefore consume an
+        # ordinary task slot that can never be refunded, so exempt both.
+        unless %i[digest patrol_scan].include?(kind)
+          @daily_counts[[ project, started_at.to_date ]] += 1
+        end
         if state_file_mtime
           @last_dispatched_mtime[[ project, slug ]] = state_file_mtime
           persist_dispatch_baselines!
@@ -265,14 +280,12 @@ module Hive
         entry = @running.delete(pid)
         return unless entry
 
-        # The global digest runs on its own scheduler-level backoff and is
-        # gated by `can_dispatch_digest?`, which consults NONE of the
-        # per-(project, slug) maps below. Recording cooldown/transient/
-        # quarantine/dropped state for it would leak one never-read entry per
-        # unique ISO-date slug (unbounded, failure-only growth) and falsely
-        # tag a phantom "digest" project as dropped. Freeing the slot above
-        # is the only bookkeeping the digest needs here.
-        return if entry[:kind] == :digest
+        # Global digests and patrol scans run on scheduler-level backoff and
+        # their gates consult none of the per-task maps below. Recording
+        # cooldown/quarantine/dropped state here would either leak never-read
+        # entries or, for a patrol-only CONFIG error, strand unrelated project
+        # tasks. Freeing the matching capacity slot above is all they need.
+        return if %i[digest patrol_scan].include?(entry[:kind])
 
         key = [ entry[:project], entry[:slug] ]
 
@@ -341,7 +354,65 @@ module Hive
       end
 
       def daily_count_for(project, now = Time.now)
-        @daily_counts[[ project, now.to_date ]]
+        [ @daily_counts[[ project, now.to_date ]],
+          @durable_daily_counts.fetch([ project, now.to_date ], 0) ].max
+      end
+
+      # Minimal read-only scheduler facts for the dispatcher-owned operational
+      # snapshot. Commands and raw argv are deliberately excluded: this is an
+      # explanation surface, not another execution channel.
+      def operational_snapshot(now: Time.now)
+        projects = (
+          @running.values.filter_map do |entry|
+            entry[:project] unless entry[:kind] == :patrol_scan || entry[:kind] == :digest
+          end +
+          @external_running_by_project.keys +
+          @daily_counts.keys.map(&:first) +
+          @durable_daily_counts.keys.map(&:first)
+        ).compact.uniq.sort
+        used = task_running_count + @external_running_global
+        {
+          "limits" => {
+            "global" => @max_concurrent_runs,
+            "per_project" => @max_concurrent_per_project,
+            "daily_per_project" => @max_runs_per_day_per_project,
+            "patrol_scans_per_project" => @max_concurrent_patrol_scans
+          },
+          "global" => {
+            "used" => used,
+            "available" => [ @max_concurrent_runs - used, 0 ].max
+          },
+          "projects" => projects.to_h do |project|
+            project_used = running_count_for(project)
+            [
+              project,
+              {
+                "used" => project_used,
+                "available" => [ @max_concurrent_per_project - project_used, 0 ].max,
+                "daily_used" => daily_count_for(project, now)
+              }
+            ]
+          end,
+          "running" => @running.sort_by { |pid, _entry| pid }.map do |pid, entry|
+            {
+              "pid" => pid,
+              "project" => entry[:project],
+              "slug" => entry[:slug],
+              "stage" => entry[:stage],
+              "kind" => (entry[:kind] || :task).to_s,
+              "started_at" => entry[:started_at]&.utc&.iso8601
+            }
+          end,
+          "cooldowns" => @cooldown_until.filter_map do |(project, slug), expires_at|
+            next unless expires_at && expires_at > now
+
+            { "project" => project, "slug" => slug, "until" => expires_at.utc.iso8601 }
+          end.sort_by { |entry| [ entry.fetch("project"), entry.fetch("slug") ] },
+          "quarantined" => @quarantine.to_a.sort.map do |project, slug|
+            { "project" => project, "slug" => slug }
+          end,
+          "dropped_projects" => @dropped_projects.to_a.sort
+        }
       end
 
       private
@@ -356,7 +427,9 @@ module Hive
       end
 
       def running_count_for(project)
-        @running.count { |_pid, entry| entry[:project] == project } +
+        @running.count do |_pid, entry|
+          entry[:project] == project && entry[:kind] != :patrol_scan && entry[:kind] != :digest
+        end +
           @external_running_by_project[project].to_i
       end
 

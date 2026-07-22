@@ -1,6 +1,6 @@
-<% content_for(:title, "hivebox — agents") %>
+<% content_for(:title, "#{web_product_name} — agents") %>
 <h1>Agents</h1>
-<p class="muted">Authenticate the coding agents the pipeline runs. Credentials persist on the box's <code>/data</code> mount.</p>
+<p class="muted">Authenticate the agents the pipeline runs. Credentials persist in Hive's data home on this machine.</p>
 
 <div class="agent-cards">
   <% @statuses.each do |agent, status| %>
@@ -11,7 +11,7 @@
         <span class="status-dot <%= logged_in ? "status-dot-running" : "status-dot-idle" %>"></span>
         <%= logged_in ? "Logged in" : "Not logged in" %>
       </p>
-      <% if %w[claude codex gh].include?(agent.to_s) %>
+      <% if %w[claude codex grok gh].include?(agent.to_s) %>
         <%= button_to logged_in ? "Log in again" : "Start login",
               agent_login_path(agent), class: logged_in ? "btn-ghost btn-sm" : "btn-secondary btn-sm",
               data: { turbo_submits_with: "Starting…" } %>
@@ -69,6 +69,69 @@
     </div>
   <% end %>
 <% end %>
+
+<section class="managed-skills" aria-labelledby="managed-skills-heading">
+  <h2 id="managed-skills-heading">Managed skills</h2>
+  <p class="muted">Check that each configured pipeline skill resolves through the agent that will run it. Hive checks one project at a time because native CLI inventory can take a few seconds.</p>
+
+  <% if @projects.empty? %>
+    <div class="empty-state">
+      <p>Add a repository before checking its agent skills.</p>
+      <p><%= link_to "Add a repository", repos_path %></p>
+    </div>
+  <% else %>
+    <%= form_with url: agents_path, method: :get, class: "repo-form skill-check-form" do |f| %>
+      <%= select_tag :project,
+            options_for_select(@projects.map { |project| [project.name, project.name] },
+                               @selected_project&.name),
+            aria: { label: "Project to check" } %>
+      <%= f.submit "Check skill health", data: { turbo_submits_with: "Checking…" } %>
+    <% end %>
+  <% end %>
+
+  <% if @selected_project && @skill_health %>
+    <% healthy_count = @skill_health.count { |row| row["health"] == "healthy" } %>
+    <% attention_count = @skill_health.count { |row| %w[missing stale incompatible conflicting].include?(row["health"]) } %>
+    <% unavailable_count = @skill_health.count { |row| row["health"] == "unavailable" } %>
+    <% repairable = @skill_health.any? { |row| %w[missing stale].include?(row["health"]) && row["managed"] } %>
+
+    <div class="skill-health-summary" role="status">
+      <strong><%= @selected_project.name %></strong>
+      <span><%= healthy_count %> ready</span>
+      <span><%= attention_count %> need attention</span>
+      <% if unavailable_count.positive? %><span><%= unavailable_count %> unavailable</span><% end %>
+    </div>
+
+    <div class="skill-health-list">
+      <% @skill_health.each do |row| %>
+        <article class="skill-health-row" data-skill-health="<%= row["health"] %>">
+          <div class="skill-health-title">
+            <strong><%= row["capability"].presence || "custom skill" %></strong>
+            <span class="tag tag-health-<%= row["health"] %>"><%= row["health"].to_s.humanize %></span>
+          </div>
+          <p class="skill-health-meta"><%= row["agent"] %> · <%= Array(row["surfaces"]).join(", ") %></p>
+          <p><%= row["explanation"] %></p>
+          <% unless row["health"] == "healthy" %>
+            <p class="faint"><code><%= row["remediation"] %></code></p>
+          <% end %>
+        </article>
+      <% end %>
+    </div>
+
+    <% if repairable %>
+      <div class="skill-repair">
+        <%= button_to "Repair safe changes", agent_skills_repair_path,
+              params: { project: @selected_project.name, consent: "repair_managed_skills" },
+              class: "btn-secondary",
+              data: {
+                turbo_confirm: "Install or update Hive-managed skills for #{@selected_project.fetch('name')}?",
+                turbo_submits_with: "Repairing…"
+              } %>
+        <p class="muted">Hive installs missing or stale managed packages and rechecks the result. Conflicting and custom skills stay untouched.</p>
+      </div>
+    <% end %>
+  <% end %>
+</section>
 
 <h2>Pi token</h2>
 <%= form_with url: agent_pi_token_path, class: "form-grid" do |f| %>

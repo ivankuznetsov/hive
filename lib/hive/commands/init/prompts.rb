@@ -62,11 +62,18 @@ module Hive
         # contract documented in wiki/commands/init.md (see "Stable-iteration-
         # order contract") — reordering is a breaking change for scripted
         # automation that uses index answers.
-        DEFAULT_REVIEWER_NAMES = %w[
-          claude-ce-code-review
-          codex-ce-code-review
-          pr-review-toolkit
-        ].freeze
+        REVIEWER_CAPABILITIES = {
+          "claude-ce-code-review" => {
+            "kind" => "agent", "agent" => "claude", "capability" => "ce-code-review"
+          }.freeze,
+          "codex-ce-code-review" => {
+            "kind" => "agent", "agent" => "codex", "capability" => "ce-code-review"
+          }.freeze,
+          "pr-review-toolkit" => {
+            "kind" => "agent", "agent" => "claude", "capability" => "pr-review-toolkit:review-pr"
+          }.freeze
+        }.freeze
+        DEFAULT_REVIEWER_NAMES = REVIEWER_CAPABILITIES.keys.freeze
         PATROL_REVIEWER_NAMES = %w[
           codex-native-review
           codex-ce-code-review
@@ -142,7 +149,7 @@ module Hive
         #     "patrol_mode"       => String,           # ultrapatrol | high | medium | low | off
         #     "triage_bias"       => String,           # courageous | safetyist
         #     "adhoc_auto_fix"    => Boolean           # auto-fix ad-hoc PR reviews
-        #     "refactor_patrol_enabled" => Boolean     # architecture discovery only
+        #     "refactor_patrol_enabled" => Boolean     # discovery, auto-fix, and review issues
         #     "budgets"  => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "timeouts" => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "daemon_enabled"    => Boolean           # auto-advance pipeline (ADR-024)
@@ -564,9 +571,9 @@ module Hive
         def prompt_refactor_patrol_enabled
           @output.puts ""
           @output.puts "Architecture patrol — review each future merged PR for refactor opportunities."
-          @output.puts "  Discovery is read-only. Auto-fixing and GitHub issue filing remain"
-          @output.puts "  independently disabled unless you enable their config gates later."
-          prompt_yes_no("Enable architecture patrol discovery for this project?", default: true)
+          @output.puts "  Accepted findings attempt confined fixes and pull requests by default."
+          @output.puts "  GitHub issues remain the fallback review surface when no safe fix ships."
+          prompt_yes_no("Enable architecture patrol for this project?", default: true)
         end
 
         def prompt_yes_no(question, default:)

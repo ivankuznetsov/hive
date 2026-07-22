@@ -6,6 +6,8 @@ require "hive"
 require "hive/refactor_patrol/review_agent_runner"
 require "hive/refactor_patrol/state_store"
 require "hive/refactor_patrol/thesis_normalizer"
+require "hive/patrol/review_error_details"
+require "hive/patrol/source_reader"
 require "hive/stages/base"
 
 module Hive
@@ -15,6 +17,9 @@ module Hive
     # thesis is ThesisNormalizer's job; how the agent is spawned is
     # ReviewAgentRunner's.
     class Reviewer
+      MAX_PROMPT_OWNED_FILES = 4
+      MAX_PROMPT_CONTEXT_FILES = 4
+      MAX_PROMPT_SOURCE_BYTES = 32 * 1024
       TemplateBindings = Struct.new(
         :project_root, :feature, :leverage, :commands, :output_path,
         :max_theses, :source_pr, :output_mode, :user_supplied_tag,
@@ -28,13 +33,14 @@ module Hive
 
       def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil, dry_run: false,
                      source_pr: nil, read_only: false, monotonic_clock: nil,
-                     token_budget: nil)
+                     token_budget: nil, audit_context: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @dry_run = dry_run
         @source_pr = source_pr
         @read_only = read_only
+        @audit_context = audit_context
         @monotonic_clock = monotonic_clock || -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
         @agent_runner = agent_runner ||
                         ReviewAgentRunner.new(
@@ -44,6 +50,7 @@ module Hive
                         )
         @review_errors = []
         @feature_results = []
+        @prompt_source_reader = Hive::Patrol::SourceReader.new(@project_root)
         @normalizer = ThesisNormalizer.new(
           project_root: @project_root,
           commands: configured_commands,
@@ -93,6 +100,7 @@ module Hive
           @feature_results << result
           yield feature, feature_theses, result if block_given?
           theses.concat(feature_theses)
+          break if errors.any?
         end
         theses
       end
@@ -103,6 +111,7 @@ module Hive
         # In dry-run mode we must not create durable artifacts under
         # .hive-state/refactor_patrol/; scratch the agent output in a temp dir.
         run_dir = @dry_run ? Dir.mktmpdir("refactor-patrol-review") : @state.run_dir("review")
+        write_audit_context(run_dir, feature)
         output_path = File.join(run_dir, "theses.json")
         prompt = render_prompt(feature, leverage, output_path, max_theses: max_theses)
         result = @agent_runner.call(
@@ -111,7 +120,8 @@ module Hive
         )
         if agent_failed?(result)
           return record_feature_error(
-            feature, "agent_failed", agent_error_message(result), agent_error_details(result)
+            feature, "agent_failed", agent_error_message(result),
+            Hive::Patrol::ReviewErrorDetails.from_agent_result(result)
           )
         end
 
@@ -124,12 +134,21 @@ module Hive
         FileUtils.remove_entry(run_dir) if @dry_run && run_dir && File.directory?(run_dir)
       end
 
+      def write_audit_context(run_dir, feature)
+        return if @dry_run || !@audit_context
+
+        @state.write_json(
+          File.join(run_dir, "review-context.json"),
+          @audit_context.merge("feature_id" => feature.id.to_s, "feature_kind" => feature.kind.to_s)
+        )
+      end
+
       def render_prompt(feature, leverage, output_path, max_theses:)
         Hive::Stages::Base.render(
           "refactor_patrol_review_prompt.md.erb",
           TemplateBindings.new(
             project_root: @project_root,
-            feature: feature,
+            feature: bounded_prompt_feature(feature),
             leverage: leverage,
             commands: configured_commands,
             output_path: output_path,
@@ -171,27 +190,44 @@ module Hive
         end
       end
 
+      # Hotspot measurement and evidence validation use the complete mapped
+      # component. The model gets a smaller initial view so a high-leverage
+      # component does not spend its architecture allowance reading every file
+      # before it can form a hypothesis; its bounded follow-up can request a
+      # direct dependency when the initial evidence warrants one.
+      def bounded_prompt_feature(feature)
+        feature.dup.tap do |bounded|
+          bounded.owned_files = bounded_owned_files(feature.owned_files)
+          bounded.context_files = bounded_context_paths(feature.context_files)
+          bounded.tests = bounded_context_paths(feature.tests)
+        end
+      end
+
+      def bounded_context_paths(paths)
+        Array(paths).map(&:to_s).reject(&:empty?).uniq.first(MAX_PROMPT_CONTEXT_FILES)
+      end
+
+      def bounded_owned_files(paths)
+        remaining = MAX_PROMPT_SOURCE_BYTES
+        selected = []
+        Array(paths).each do |path|
+          break if selected.size >= MAX_PROMPT_OWNED_FILES
+
+          bytes = @prompt_source_reader.read_bytes(path, limit: remaining + 1).bytesize
+          if selected.empty? || bytes <= remaining
+            selected << path
+            remaining = [ remaining - bytes, 0 ].max
+          end
+        end
+        selected
+      end
+
       def agent_failed?(result)
         result.is_a?(Hash) && result[:status] == :error
       end
 
       def agent_error_message(result)
         result.is_a?(Hash) ? result[:error_message].to_s : ""
-      end
-
-      def agent_error_details(result)
-        exhaustion = result.is_a?(Hash) ? result[:resource_exhaustion] : nil
-        return {} unless exhaustion.is_a?(Hash)
-
-        {
-          "details" => {
-            "resource_exhaustion" => {
-              "reason" => exhaustion[:reason].to_s,
-              "limit" => exhaustion[:limit].to_i,
-              "observed" => exhaustion[:observed].to_i
-            }
-          }
-        }
       end
 
       def record_feature_error(feature, kind, message, details = {})

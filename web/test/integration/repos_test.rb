@@ -11,7 +11,8 @@ class ReposTest < ActionDispatch::IntegrationTest
     get "/repos"
     assert_response :success
     assert_match @project, response.body
-    assert_match "Sign in again to grant repository access", response.body
+    assert_match "Reconnect GitHub to browse your repositories", response.body
+    assert_select "a[href='/login']", text: "Reconnect GitHub"
   end
 
   test "github listing degrades to an inline error on a bad token" do
@@ -57,11 +58,13 @@ class ReposTest < ActionDispatch::IntegrationTest
     assert_select "input[name='settings[adhoc_auto_fix]'][type='checkbox']", 1,
                   "the web setup must expose the same ad-hoc auto-fix choice as hive init"
     assert_select "input[name='settings[refactor_patrol_enabled]'][type='checkbox'][checked]", 1,
-                  "fresh web setup must recommend architecture patrol discovery"
+                  "fresh web setup must recommend architecture patrol"
+    assert_match(/Architecture patrol \(recommended\)/, response.body)
     assert_select "input[name='settings[refactor_patrol_auto_fix]']", 0,
-                  "discovery consent must not imply an auto-fix control"
+                  "the architecture patrol choice must govern its auto-fix policy"
     assert_select "input[name='settings[refactor_patrol_issue_filing]']", 0,
-                  "discovery consent must not imply an issue-filing control"
+                  "the architecture patrol choice must govern its issue fallback"
+    assert_match(/Accepted findings attempt confined fixes and pull requests/, response.body)
     assert_select "input[name='settings[budgets][brainstorm]']", 1
   end
 
@@ -74,9 +77,13 @@ class ReposTest < ActionDispatch::IntegrationTest
     # default_workflow assertion below can't by itself tell a flag bind from a
     # prompt bind; the system test covers the prompt-skip only implicitly.
     captured_workflow = :unset
+    captured_provisioning_input = nil
+    captured_provisioning_error = nil
     original_init_new = Hive::Commands::Init.method(:new)
     Hive::Commands::Init.define_singleton_method(:new) do |*args, **kwargs|
       captured_workflow = kwargs[:workflow]
+      captured_provisioning_input = kwargs[:provisioning_input]
+      captured_provisioning_error = kwargs[:provisioning_error]
       original_init_new.call(*args, **kwargs)
     end
 
@@ -98,6 +105,12 @@ class ReposTest < ActionDispatch::IntegrationTest
     assert_redirected_to "/repos"
     assert_equal "content", captured_workflow,
                  "the web path must supply the workflow as an Init flag, bypassing the interactive prompt"
+    refute_nil captured_provisioning_input,
+               "web init must supply its own non-interactive provisioning input instead of inheriting Puma's stdin"
+    assert_equal false, captured_provisioning_input.tty?,
+                 "a foreground `hive web` TTY must never leak an invisible setup-agents prompt into an HTTP request"
+    assert_instance_of StringIO, captured_provisioning_error,
+                       "web init must capture preflight findings instead of writing them only to Puma stderr"
     config = File.read(File.join(dir, ".hive-state", "config.yml"))
     assert_match(/headless/, config, "the chosen claude mode must land in the project config")
     assert_match(/safetyist/, config, "the chosen triage bias must land in the project config")
@@ -110,10 +123,34 @@ class ReposTest < ActionDispatch::IntegrationTest
                  "GitHub publishing must stay enabled by default for PR review comments"
     assert_equal true, parsed_config.dig("refactor_patrol", "enabled"),
                  "an omitted web checkbox value must use the fresh-init discovery recommendation"
-    assert_equal false, parsed_config.dig("refactor_patrol", "auto_fix", "enabled"),
-                 "recommended discovery must not imply auto-fix consent"
-    assert_equal false, parsed_config.dig("refactor_patrol", "issue_filing", "enabled"),
-                 "recommended discovery must not imply issue-filing consent"
+    assert_equal true, parsed_config.dig("refactor_patrol", "auto_fix", "enabled"),
+                 "recommended architecture patrol must attempt confined fixes"
+    assert_equal true, parsed_config.dig("refactor_patrol", "issue_filing", "enabled"),
+                 "recommended discovery must produce reviewable GitHub issues"
+  ensure
+    Hive::Commands::Init.define_singleton_method(:new, original_init_new) if original_init_new
+  end
+
+  test "web init surfaces noninteractive provisioning findings after success" do
+    project = create_hive_project!("repos-preflight-warning-app")
+    sign_in!
+    original_init_new = Hive::Commands::Init.method(:new)
+    Hive::Commands::Init.define_singleton_method(:new) do |*_args, **kwargs|
+      Object.new.tap do |command|
+        command.define_singleton_method(:call) do
+          kwargs.fetch(:provisioning_error).puts(
+            "hive: doctor pre-flight — found 1 issue: registry package is unavailable"
+          )
+        end
+      end
+    end
+
+    post repos_path,
+         params: { project: project, settings: { workflow: "coding" } }
+
+    assert_redirected_to repos_path
+    assert_match(/settings applied/, flash[:notice])
+    assert_match(/setup completed.*registry package is unavailable/, flash[:alert])
   ensure
     Hive::Commands::Init.define_singleton_method(:new, original_init_new) if original_init_new
   end
@@ -170,7 +207,10 @@ class ReposTest < ActionDispatch::IntegrationTest
     state_dir = File.join(dir, ".hive-state")
     config_path = File.join(state_dir, "config.yml")
     config = YAML.safe_load_file(config_path)
-    config.fetch("refactor_patrol")["enabled"] = false
+    refactor_patrol = config.fetch("refactor_patrol")
+    refactor_patrol["enabled"] = false
+    refactor_patrol.fetch("auto_fix")["enabled"] = false
+    refactor_patrol.fetch("issue_filing")["enabled"] = false
     File.write(config_path, config.to_yaml)
     system("git", "-C", state_dir, "add", "config.yml", exception: true)
     system("git", "-C", state_dir, "commit", "-qm", "disable architecture patrol", exception: true)
@@ -240,7 +280,7 @@ class ReposTest < ActionDispatch::IntegrationTest
 
   test "a path-traversal workflow id is rejected before it reaches path resolution" do
     # The web workflow value flows into File.join(workflow_dir, "#{id}.yml"); a
-    # crafted `../…` must be refused at the controller (SAFE_SLUG) rather than
+    # crafted `../…` must be refused by InitSetup (SAFE_SLUG) rather than
     # walking that join in WorkflowSelection.
     name = create_hive_project!("rerun-traversal-app")
     sign_in!

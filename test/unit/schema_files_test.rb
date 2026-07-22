@@ -6,6 +6,7 @@ require "hive/commands/approve"
 require "hive/commands/bot"
 require "hive/commands/daemon"
 require "hive/commands/drop"
+require "hive/commands/doctor"
 require "hive/commands/forget"
 require "hive/commands/init"
 require "hive/commands/patrol"
@@ -15,6 +16,7 @@ require "hive/commands/stage_action"
 require "hive/commands/status"
 require "hive/patrol/candidate_selector"
 require "hive/patrol/reviewer"
+require "hive/commands/setup_agents"
 require "hive/tui/snapshot"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
@@ -27,6 +29,151 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_native_web_schema_files_accept_versioned_success_and_error_shapes
+    service = {
+      "platform" => "linux", "unit_path" => "/tmp/hive-web.service",
+      "service_installed" => true, "service_enabled" => true,
+      "service_running" => true, "service_manager_available" => true,
+      "url" => "http://127.0.0.1:4567", "ready" => true, "readiness" => "ready"
+    }
+    samples = {
+      "hive-setup" => {
+        "schema" => "hive-setup", "schema_version" => 1, "ok" => true,
+        "mode" => "managed_service", "url" => service.fetch("url"),
+        "service" => service, "warnings" => [],
+        "phases" => [ { "name" => "web", "ok" => true, "available" => true } ]
+      },
+      "hive-web-status" => {
+        "schema" => "hive-web-status", "schema_version" => 1,
+        "ok" => true, "mode" => "managed_service", "warnings" => []
+      }.merge(service),
+      "hive-web-install" => {
+        "schema" => "hive-web-install", "schema_version" => 1, "ok" => true,
+        "mode" => "managed_service",
+        "outcome" => "written", "platform" => "linux",
+        "target_path" => "/tmp/hive-web.service", "backup_path" => nil,
+        "restarted" => false, "messages" => [], "warnings" => []
+      }.merge(service)
+    }
+
+    samples.each do |name, payload|
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(name))))
+      assert_empty schemer.validate(payload).to_a, "#{name} success payload must validate"
+
+      extras = if name == "hive-setup"
+        {
+          "mode" => "managed_service", "url" => service.fetch("url"),
+          "service" => service, "warnings" => []
+        }
+      else
+        { "mode" => "managed_service", "warnings" => [] }.merge(service)
+      end
+      error_kind = name == "hive-setup" ? "usage" : "invalid_task_path"
+      error = Hive::Schemas::ErrorEnvelope.build(
+        schema: name,
+        error: Hive::InvalidTaskPath.new("usage"),
+        error_kind: error_kind,
+        extras: extras
+      )
+      assert_empty schemer.validate(error).to_a, "#{name} usage payload must validate"
+    end
+
+    status_error = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-web-status",
+      error: Hive::ConfigError.new("invalid web config"),
+      error_kind: "config_error",
+      extras: { "mode" => "managed_service", "warnings" => [] }.merge(service)
+    )
+    status_schema = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-status")))
+    )
+    assert_empty status_schema.validate(status_error).to_a,
+                 "hive web status configuration errors must retain the v1 envelope"
+  end
+
+  def test_native_web_schemas_reject_incomplete_success_unknown_readiness_and_bad_warning
+    %w[hive-web-status hive-web-install].each do |name|
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(name))))
+      incomplete = { "schema" => name, "schema_version" => 1, "ok" => true }
+      refute_empty schemer.validate(incomplete).to_a
+    end
+
+    status = {
+      "schema" => "hive-web-status", "schema_version" => 1, "ok" => true,
+      "mode" => "managed_service", "platform" => "linux", "unit_path" => nil,
+      "service_installed" => true, "service_enabled" => true, "service_running" => true,
+      "service_manager_available" => true, "url" => "http://127.0.0.1:4567",
+      "ready" => false, "readiness" => "mystery", "warnings" => [ { "alias" => "old" } ]
+    }
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-status"))))
+    errors = schemer.validate(status).to_a
+    refute_empty errors
+    assert errors.any? { |error| error["data_pointer"] == "/readiness" }
+    assert errors.any? { |error| error["data_pointer"].start_with?("/warnings/0") }
+  end
+
+  def test_doctor_v1_schema_remains_available_and_v2_payload_validates
+    assert File.exist?(Hive::Schemas.schema_path("hive-doctor", version: 1))
+    target = Hive::AgentSkills::Target.new(
+      surfaces: [ "brainstorm" ], kind: "stage", agent: "claude",
+      configured_skill: "/ce-brainstorm", invocation: "/ce-brainstorm",
+      capability_id: "ce-brainstorm", package_id: "compound-engineering", managed: true
+    )
+    health = Hive::AgentSkills::Inspection.new(
+      target: target, expected: {}, native: { "available" => false }, resolution: {},
+      health: "unavailable", severity: "warning", explanation: "not installed",
+      remediation: "hive setup-agents --agent claude --skill ce-brainstorm"
+    )
+    inspector = Struct.new(:rows) { def inspect = rows }.new([ health ])
+    output = StringIO.new
+    Hive::Commands::Doctor.new(
+      config: { "claude" => { "mode" => "headless" } },
+      project_root: nil,
+      json: true,
+      output: output,
+      inspector: inspector,
+      environment: { "HIVEBOX_ORIGIN" => "https://legacy.example" }
+    ).call
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-doctor"))))
+
+    payload = JSON.parse(output.string)
+    assert_empty schemer.validate(payload).to_a
+    alias_row = payload.fetch("checks").find { |row| row["alias"] == "HIVEBOX_ORIGIN" }
+    refute_nil alias_row
+    assert_equal "HIVE_WEB_ORIGIN", alias_row["replacement"]
+    assert_equal false, alias_row["ignored"]
+  end
+
+  def test_setup_agents_schema_file_accepts_command_payload
+    path = Hive::Schemas.schema_path("hive-setup-agents")
+    assert File.exist?(path), "schema file missing: #{path}"
+    schemer = JSONSchemer.schema(JSON.parse(File.read(path)))
+    plan = Hive::AgentSkills::ProvisioningPlan.new(
+      inspections: [], operations: [], conflicts: [],
+      filters: { "agents" => [], "skills" => [] }, fingerprint: "a" * 64
+    )
+    result = Hive::AgentSkills::ProvisioningResult.new(
+      preview: plan,
+      consent: { "granted" => true, "provenance" => "not_required" },
+      operation_results: [], final_health: [], exit_code: 0, classification: "no_op"
+    )
+    payload = Hive::Commands::SetupAgents.new(
+      config: Hive::Config::DEFAULTS, project_root: Dir.pwd
+    ).send(:payload, result)
+
+    assert_empty schemer.validate(payload).to_a
+  end
+
+  def test_honeycomb_contract_schema_files_are_valid_and_versioned
+    %w[honeycomb-manifest.v1.json honeycomb-catalog.v1.json].each do |name|
+      path = File.join(Hive::Schemas.schema_dir, name)
+      assert File.file?(path), "schema file missing: #{path}"
+      document = JSON.parse(File.read(path))
+      assert_equal "https://json-schema.org/draft/2020-12/schema", document["$schema"]
+      assert_equal 1, document.dig("properties", "schema_version", "const")
+    end
+  end
+
   def test_hive_approve_v2_schema_file_exists_and_is_valid_json
     path = Hive::Schemas.schema_path("hive-approve")
     assert File.exist?(path), "schema file missing: #{path}"
@@ -121,7 +268,8 @@ class SchemaFilesTest < Minitest::Test
 
     producer_kinds = %w[
       ambiguous_slug destination_collision final_stage
-      wrong_stage rollback_failed invalid_task_path error
+      wrong_stage rollback_failed invalid_task_path dependency_wait
+      admission_error error
     ].sort
 
     assert_equal producer_kinds, schema_kinds,
@@ -146,8 +294,20 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-status",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 4,
+    assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_status_v5_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 5)))
+    assert_equal 5, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    refute_includes doc.dig("$defs", "Task", "properties").keys, "conditions"
+  end
+
+  def test_hive_status_v4_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 4)))
+    assert_equal 4, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    refute_includes doc.dig("$defs", "Task", "properties").keys, "admission_error"
   end
 
   def test_hive_status_v1_schema_remains_for_back_compat
@@ -190,6 +350,7 @@ class SchemaFilesTest < Minitest::Test
       blocked_by: nil,
       dependency_stage: nil,
       blocked: false,
+      admission_error: nil,
       folder: "/tmp/probe",
       state_file: "/tmp/probe/idea.md",
       pr_url: nil,
@@ -228,6 +389,23 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "Task", "properties", "marker", "enum").sort
     assert_equal Hive::Schemas::TaskActionKind::ALL.sort,
                  doc.dig("$defs", "Task", "properties", "action", "enum").sort
+  end
+
+  def test_hive_status_admission_error_is_closed_and_matches_reason_codes
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    definition = doc.dig("$defs", "AdmissionError")
+    assert_equal Hive::DependencyAdmission::REASON_CODES.sort,
+                 definition.dig("properties", "reason_code", "enum").sort
+
+    schemer = JSONSchemer.schema(definition)
+    valid = {
+      "reason_code" => "dependency_cycle",
+      "offending_ref" => "app:a -> app:b -> app:a",
+      "safe_correction" => "Break the cycle."
+    }
+    assert schemer.valid?(valid)
+    refute schemer.valid?(valid.merge("reason_code" => "unknown_reason"))
+    refute schemer.valid?(valid.merge("extra" => true))
   end
 
   def test_hive_status_schema_matches_tui_snapshot_row_keys
@@ -343,6 +521,7 @@ class SchemaFilesTest < Minitest::Test
       blocked_by: "base-task",
       dependency_stage: "7-artifacts",
       blocked: true,
+      admission_error: nil,
       folder: "/tmp/review-task",
       state_file: "/tmp/review-task/task.md",
       marker_name: :review_waiting,
@@ -803,6 +982,13 @@ class SchemaFilesTest < Minitest::Test
         candidates: [ { project: "alpha", stage: "2-brainstorm", folder: "/tmp/probe" } ]
       ),
       Hive::Schemas::RunErrorKind::INVALID_TASK_PATH => Hive::InvalidTaskPath.new("no such slug"),
+      Hive::Schemas::RunErrorKind::DEPENDENCY_WAIT => Hive::DependencyWaitError.new(
+        "waiting", offending_ref: "base", safe_correction: "Wait for base."
+      ),
+      Hive::Schemas::RunErrorKind::ADMISSION_ERROR => Hive::DependencyAdmissionError.new(
+        "invalid", reason_code: "dependency_cycle", offending_ref: "p:a -> p:a",
+        safe_correction: "Break the cycle."
+      ),
       Hive::Schemas::RunErrorKind::INTERNAL          => Hive::InternalError.new("internal bug"),
       Hive::Schemas::RunErrorKind::ERROR             => Hive::Error.new("plain")
     }
@@ -2182,17 +2368,46 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
-  def test_refactor_patrol_retains_v1_while_v2_is_current
-    assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
+  def test_internal_attempt_schema_pins_state_and_receipt_contract
+    path = Hive::Schemas.schema_path("hive-attempt")
+    doc = JSON.parse(File.read(path))
+
+    assert_equal Hive::Attempts::Record::SCHEMA_VERSION,
+                 doc.fetch("properties").dig("schema_version", "const")
+    assert_equal %w[launching running terminal lost], doc.fetch("properties").dig("state", "enum")
+    assert_includes doc.fetch("required"), "worker_argv"
+    assert_includes doc.fetch("required"), "claim_capability_digest"
+    assert_includes doc.fetch("required"), "ownership_generation"
+    assert_includes doc.fetch("required"), "task_input_epoch"
+    assert_equal "^[0-9a-f]{64}$", doc.fetch("properties").dig("claim_capability_digest", "pattern")
+    receipt_required = doc.dig("$defs", "Receipt", "required")
+    %w[attempt_id task_generation ownership_generation task_input_epoch outcome exit_status started_at ended_at final_checkpoint output_references log_reference].each do |key|
+      assert_includes receipt_required, key
+    end
+  end
+
+
+  def test_internal_attempt_v1_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-attempt", version: 1)))
+
+    assert_equal 1, doc.fetch("properties").dig("schema_version", "const")
+    refute_includes doc.fetch("properties").keys, "task_input_epoch"
+    refute_includes doc.fetch("properties").keys, "ownership_generation"
+  end
+
+  def test_refactor_patrol_retains_v1_and_v2_while_v3_is_current
+    assert_equal 3, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
 
     v1 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 1)))
     v2 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+    v3 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3)))
     assert_equal 1, v1.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
     assert_equal 2, v2.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    assert_equal 3, v3.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
-  def test_refactor_patrol_v2_requires_a_complete_immutable_thesis_snapshot
-    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+  def test_refactor_patrol_v3_requires_a_complete_immutable_thesis_snapshot
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3)))
     snapshot_schema = JSONSchemer.schema(
       { "$ref" => "#/$defs/ThesisSnapshot", "$defs" => document.fetch("$defs") }
     )
@@ -2214,8 +2429,8 @@ class SchemaFilesTest < Minitest::Test
   # contracts must stay in lockstep or an agent thesis with an empty `problem`
   # would pass the normalizer and then poison the whole discovery envelope.
   def test_refactor_patrol_thesis_narrative_min_lengths_match_the_envelope_snapshot
-    thesis = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 2)))
-    envelope = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+    thesis = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 3)))
+    envelope = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3)))
 
     %w[problem cost proposed_refactor].each do |field|
       assert_equal 1, thesis.dig("properties", field, "minLength"),
@@ -2226,8 +2441,8 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
-  def test_refactor_patrol_v2_pins_complete_source_and_action_identity
-    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+  def test_refactor_patrol_v3_pins_complete_source_and_action_identity
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3)))
 
     source_required = document.dig("$defs", "SourcePr", "required")
     assert_includes source_required, "registration"
@@ -2238,6 +2453,23 @@ class SchemaFilesTest < Minitest::Test
     assert_includes action_required, "canonical_action_id"
     assert_includes action_required, "thesis_fingerprint"
     assert_includes action_required, "owner_job_id"
+  end
+
+  def test_refactor_patrol_thesis_v1_and_v2_keep_published_size_estimates_while_v3_removes_them
+    assert_equal 3, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol-thesis")
+
+    v1 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 1)))
+    v2 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 2)))
+    v3 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 3)))
+
+    [ v1, v2 ].each do |document|
+      required = document.dig("$defs", "Risk", "properties", "caps", "required")
+      assert_includes required, "est_files"
+      assert_includes required, "est_diff_lines"
+    end
+    assert_equal [ "single_feature" ], v3.dig("$defs", "Risk", "properties", "caps", "required")
+    refute v3.dig("$defs", "Risk", "properties", "caps", "properties").key?("est_files")
+    refute v3.dig("$defs", "Risk", "properties", "caps", "properties").key?("est_diff_lines")
   end
 
   # ── hive-dispatch-request: claimed-file contract (#247) ─────────────────
@@ -2272,7 +2504,7 @@ class SchemaFilesTest < Minitest::Test
     doc = JSON.parse(File.read(path))
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-dispatch-result", doc.dig("properties", "schema", "const")
-    assert_equal 1, doc.dig("properties", "schema_version", "const")
+    assert_equal 2, doc.dig("properties", "schema_version", "const")
   end
 
   def test_hive_dispatch_result_required_keys_match_producer
@@ -2282,7 +2514,7 @@ class SchemaFilesTest < Minitest::Test
     # except the optional/nullable update_id is required.
     producer_required = %w[
       schema schema_version result_id created_at chat_id project slug
-      request_id exit_code command
+      request_id exit_code command attempt_id attempt_state receipt
     ].sort
     assert_equal producer_required, schema_required,
                  "schema/producer required-key drift in hive-dispatch-result.v1.json"
@@ -2310,10 +2542,11 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_dispatch_result_chat_id_must_be_non_zero
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-result"))))
     base = {
-      "schema" => "hive-dispatch-result", "schema_version" => 1,
+      "schema" => "hive-dispatch-result", "schema_version" => 2,
       "result_id" => "abc12345", "created_at" => "2026-06-03T12:00:00Z",
       "project" => "hive", "slug" => "my-task", "request_id" => "req00001",
-      "exit_code" => 1, "command" => "hive review my-task"
+      "exit_code" => 1, "command" => "hive review my-task",
+      "attempt_id" => nil, "attempt_state" => nil, "receipt" => nil
     }
     assert schemer.valid?(base.merge("chat_id" => 12_345)), "positive private chat id validates"
     assert schemer.valid?(base.merge("chat_id" => -1_001_234_567_890)), "negative group chat id validates"
@@ -2347,5 +2580,36 @@ class SchemaFilesTest < Minitest::Test
     prune = queue_cmd.send(:queue_envelope, action: "prune", pruned_count: 1,
                                             requests: [ request_hash ], malformed: [])
     assert_empty schemer.validate(prune).to_a, "prune envelope must validate"
+  end
+
+
+  # ── agent-first operational contracts ─────────────────────────────────
+
+  def test_operational_status_watch_and_act_schemas_are_published_at_v1
+    %w[hive-operational-status hive-watch-event hive-act].each do |name|
+      path = Hive::Schemas.schema_path(name)
+      assert File.file?(path), "schema file missing: #{path}"
+      document = JSON.parse(File.read(path))
+      assert_equal "https://json-schema.org/draft/2020-12/schema", document.fetch("$schema")
+      assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS.fetch(name)
+    end
+  end
+
+  def test_hive_act_error_enum_matches_producer_and_common_envelope_validates
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-act")))
+    kinds = document.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum")
+    assert_equal Hive::Schemas::OperationalActionErrorKind::ALL.sort, kinds.sort
+    schemer = JSONSchemer.schema(document)
+
+    Hive::Schemas::OperationalActionErrorKind::ALL.each do |kind|
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: "hive-act",
+        error: Hive::OperationalActionUsageError.new("invalid recommendation"),
+        error_kind: kind,
+        extras: { "action_id" => "workflow.advance", "target" => "demo:task" }
+      )
+      assert schemer.valid?(payload),
+             "hive-act ErrorPayload must accept #{kind}: #{schemer.validate(payload).to_a.inspect}"
+    end
   end
 end

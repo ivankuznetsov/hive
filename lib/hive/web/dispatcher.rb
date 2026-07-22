@@ -6,30 +6,24 @@ require "hive/bot/notification_builders"
 require "hive/commands/approve"
 require "hive/commands/drop"
 require "hive/commands/new"
+require "hive/daemon/dispatch_request_queue"
 require "hive/stages"
+require "hive/task_action"
 
 module Hive
   module Web
     class Dispatcher
-      STAGE_VERB_BY_ACTION = {
-        "ready_to_brainstorm" => "brainstorm",
-        "ready_to_plan" => "plan",
-        "ready_to_develop" => "develop",
-        "ready_to_open_pr" => "open-pr",
-        "ready_for_review" => "review",
-        "ready_to_artifacts" => "artifacts",
-        "ready_to_finalize" => "finalize",
-        "ready_to_archive" => "archive",
-        # Generic-workflow first-run rows dispatch the generic stage agent
-        # via `hive run`; without this the web dispatcher rejected the new
-        # `ready_to_run` action as unknown (422). `ready_to_advance` is
-        # deliberately NOT mapped here: its verb is `hive approve`, which the
-        # daemon dispatch-request queue's allowlist excludes (approve is
-        # spawned in-process, not queued — see DispatchRequestQueue and the
-        # bot supervisor). Generic advance is driven by the in-process
-        # `#approve` method (the "Approve" button), not this queue path.
-        "ready_to_run" => "run"
-      }.freeze
+      # Web stage dispatch rides the daemon queue, so project the classifier's
+      # canonical ready-command table through that queue's verb allowlist.
+      # This deliberately excludes ready_to_advance => approve: generic
+      # advance is driven by the in-process #approve endpoint instead.
+      STAGE_VERB_BY_ACTION = Hive::TaskAction::READY_COMMANDS.select do |_action, verb|
+        Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS.include?(verb)
+      end.freeze
+
+      def initialize(dispatch_writer: Hive::Bot::DispatchRequestWriter)
+        @dispatch_writer = dispatch_writer
+      end
 
       def approve(slug:, project:, from: nil, to: nil, force: false)
         Hive::Commands::Approve.new(
@@ -154,7 +148,7 @@ module Hive
         # advance/approve verb asserts the source stage with --from.
         argv += [ verb == "run" ? "--stage" : "--from", stage ] if stage
         begin
-          request_id = Hive::Bot::DispatchRequestWriter.write!(
+          reference = @dispatch_writer.dispatch!(
             project: project,
             slug: slug,
             argv: argv,
@@ -166,7 +160,14 @@ module Hive
           # unqueueable. A typed error beats a 500 from the writer.
           raise Hive::Error, "cannot queue this dispatch: #{e.message}"
         end
-        { ok: true, request_id: request_id, argv: argv }
+        {
+          ok: true,
+          request_id: reference.request_id,
+          attempt_id: reference.attempt_id,
+          state: reference.state,
+          dispatch_status: reference.status,
+          argv: argv
+        }
       end
 
       def repair_daemon

@@ -1,19 +1,51 @@
 require "fileutils"
 require "json"
+require "tmpdir"
 require "hive/config"
 require "hive/paths"
 require "hive/web/session_secret"
 require "hive/web/app_bundle"
+require "hive/web/environment"
 require "hive/web/loopback"
+require "hive/web/service_status"
 require "hive/invoked_binary"
 
 module Hive
   module Commands
     class Web
+      def self.error_context(environment: ENV)
+        require "hive/commands/web/service_installer"
+        config = Hive::Config.load_global_web
+        installer = ServiceInstaller.new(environment: environment, config: config)
+        state = Hive::Web::ServiceStatus.snapshot(
+          installer: installer, config: config, environment: environment
+        )
+        {
+          "mode" => "managed_service",
+          "warnings" => Hive::Web::Environment.warnings(environment: environment)
+        }.merge(state)
+      rescue StandardError
+        config = Hive::Config::DEFAULTS.fetch("web")
+        {
+          "mode" => "managed_service",
+          "warnings" => Hive::Web::Environment.warnings(environment: environment),
+          "platform" => "unsupported",
+          "unit_path" => nil,
+          "service_installed" => false,
+          "service_enabled" => false,
+          "service_running" => false,
+          "service_manager_available" => false,
+          "url" => Hive::Web::ServiceStatus.effective_url(config, environment: environment),
+          "ready" => false,
+          "readiness" => "manager_unavailable"
+        }
+      end
+
       VALID_SUBCOMMANDS = %w[install start stop status].freeze
 
       def initialize(subcommand = nil, bind: nil, port: nil, no_bootstrap: false,
-                     unsafe: false, force: false, json: false, detach: false)
+                     unsafe: false, force: false, json: false, detach: false,
+                     environment: ENV, error: nil)
         @subcommand = subcommand
         @bind = bind
         @port = port
@@ -22,12 +54,19 @@ module Hive
         @force = force
         @json = json
         @detach = detach
+        @environment = environment
+        @error = error
       end
 
       # Bare `hive web` (and `start` without --detach) runs the Rails server
       # in the foreground; install/start/stop/status manage the per-user
       # systemd/launchd service.
       def call
+        Hive::Web::Environment.emit_warnings(
+          environment: @environment,
+          output: @error || $stderr,
+          prefix: "hive web"
+        )
         case @subcommand
         when nil then run_foreground
         when "install" then install_command
@@ -49,42 +88,78 @@ module Hive
         enforce_bind_policy!(bind, cfg)
         app_dir = rails_app_dir(bootstrap: !@no_bootstrap)
         unless app_dir
-          warn "hive web: the hivebox web app (web/) was not found. " \
-               "Run `hive web install`, or point HIVEBOX_WEB_APP_DIR at the Rails app."
+          warn "hive web: the Hive web app (web/) was not found. " \
+               "Run `hive web install`, or point HIVE_WEB_APP_DIR at the Rails app."
           exit 1
         end
 
         env = {
-          "RAILS_ENV" => ENV.fetch("RAILS_ENV", "production"),
+          "RAILS_ENV" => @environment.fetch("RAILS_ENV", "production"),
           # Rails' secret_key_base derives from the same persisted secret the
           # session cookies used pre-Rails, so restarting the web service keeps
           # sessions signed in (the secret file is persisted under state_home).
-          "SECRET_KEY_BASE" => ENV["SECRET_KEY_BASE"] ||
+          "SECRET_KEY_BASE" => @environment["SECRET_KEY_BASE"] ||
             Hive::Web::SessionSecret.load_or_create(cfg.fetch("session_secret_file")),
-          "HIVEBOX_ORIGIN" => cfg.fetch("origin"),
+          "HIVE_WEB_ORIGIN" => Hive::Web::Environment.value(
+            "HIVE_WEB_ORIGIN", environment: @environment, default: cfg.fetch("origin")
+          ),
           # The solid_cable/cache/queue sqlite files must survive upgrades —
           # keep them under state_home, not in the app dir (the managed web
           # bundle is replaced wholesale on a version upgrade).
-          "HIVEBOX_STORAGE_DIR" => ENV["HIVEBOX_STORAGE_DIR"] ||
-            File.join(Hive::Paths.state_home, "web-storage"),
+          "HIVE_WEB_STORAGE_DIR" => Hive::Web::Environment.value(
+            "HIVE_WEB_STORAGE_DIR", environment: @environment
+          ),
+          "HIVE_WEB_DIFF_TIMEOUT_SEC" => Hive::Web::Environment.value(
+            "HIVE_WEB_DIFF_TIMEOUT_SEC", environment: @environment
+          ).to_s,
+          "HIVE_WEB_CLONE_TIMEOUT_SEC" => Hive::Web::Environment.value(
+            "HIVE_WEB_CLONE_TIMEOUT_SEC", environment: @environment
+          ).to_s,
           "BUNDLE_GEMFILE" => File.join(app_dir, "Gemfile")
         }
         # Only the MANAGED bundle resolves the hive-cli path gem via
         # HIVE_CLI_ROOT — its ".." holds no gem, and its bundle was installed
-        # with this same export. A source checkout or a HIVEBOX_WEB_APP_DIR
-        # override (e.g. the hivebox image's baked /app/web) was
+        # with this same export. A source checkout or a HIVE_WEB_APP_DIR
+        # override (e.g. the Hivebox image's baked /app/web) was
         # bundle-installed against its own ".."; re-pointing the path source
         # at runtime invalidates that prebuilt bundle (the v0.3.4/v0.3.5
         # image-smoke db:prepare failure).
-        env["HIVE_CLI_ROOT"] = Hive::Web::AppBundle.hive_cli_root if app_dir == Hive::Web::AppBundle.app_dir
+        managed_bundle = app_dir == Hive::Web::AppBundle.app_dir
+        if managed_bundle
+          env["HIVE_CLI_ROOT"] = Hive::Web::AppBundle.hive_cli_root
+          env["BUNDLE_PATH"] = Hive::Web::AppBundle.dependency_dir
+        end
         # The loopback no-auth bypass is opt-out: an operator can set
         # web.local_loopback: false to force GitHub login even on a loopback
         # bind. Only signal the bypass when both the bind is loopback AND the
         # config still allows it.
-        env["HIVEBOX_LOCAL_LOOPBACK"] = "1" if loopback_bind?(bind) && cfg.fetch("local_loopback", true)
-        FileUtils.mkdir_p(env.fetch("HIVEBOX_STORAGE_DIR"))
+        local_loopback = Hive::Web::Environment.local_loopback_mode?(
+          bind: bind,
+          environment: @environment,
+          default: cfg.fetch("local_loopback", true)
+        )
+        env["HIVE_WEB_LOCAL_LOOPBACK"] = local_loopback ? "1" : nil
+        # The child Rails process receives canonical names only. Removing a
+        # supplied legacy alias prevents a second warning after the CLI has
+        # already reported and translated it.
+        Hive::Web::Environment.legacy_names.each do |legacy|
+          env[legacy] = nil if @environment.key?(legacy)
+        end
+        FileUtils.mkdir_p(env.fetch("HIVE_WEB_STORAGE_DIR"))
 
         Dir.chdir(app_dir) do
+          precompiled_assets = managed_bundle || ENV["HIVEBOX_PRECOMPILED_ASSETS"] == "1"
+          if env.fetch("RAILS_ENV") == "production" && !precompiled_assets
+            compiled = Dir.mktmpdir("hive-web-assets") do |asset_storage|
+              asset_env = env.merge("HIVE_WEB_STORAGE_DIR" => asset_storage)
+              system(asset_env, "bin/rails", "assets:precompile")
+            end
+            unless compiled && Hive::Web::AppBundle.assets_ready?(app_dir)
+              raise Hive::Error,
+                    "hive web: asset precompile failed — check that #{app_dir} is writable " \
+                    "and that the web bundle is installed (cd #{app_dir} && bundle install)"
+            end
+          end
           # Idempotent: creates/migrates the solid-stack sqlite databases on
           # first boot, no-ops afterwards. Array form — no shell involved.
           # Typed error so a persistent failure surfaces as guidance, not a
@@ -92,7 +167,7 @@ module Hive
           unless system(env, "bin/rails", "db:prepare")
             raise Hive::Error,
                   "hive web: db:prepare failed — check that " \
-                  "#{env.fetch("HIVEBOX_STORAGE_DIR")} is writable " \
+                  "#{env.fetch("HIVE_WEB_STORAGE_DIR")} is writable " \
                   "and that the web bundle is installed (cd #{app_dir} && bundle install)"
           end
           puts "hive web: listening on http://#{bind}:#{port}"
@@ -103,16 +178,30 @@ module Hive
       end
 
       def install_command
-        Hive::Web::AppBundle.ensure! unless @no_bootstrap
+        @install_json_emitted = false
+        phase = :bootstrap
+        unless @no_bootstrap
+          Hive::Web::AppBundle.ensure!
+        end
+        phase = :service_install
         install_service
+      rescue StandardError => e
+        error = normalize_install_error(e, phase: phase)
+        emit_install_error(error, error_kind: install_error_kind(phase)) if @json && !@install_json_emitted
+        raise error
       end
 
       def rails_app_dir(bootstrap: true)
         # An explicit override is operator-managed, not the version-stamped
         # managed bundle — use it verbatim when it points at a real app.
-        if (override = ENV["HIVEBOX_WEB_APP_DIR"]) &&
-           File.file?(File.join(override, "config", "application.rb"))
-          return File.expand_path(override)
+        if (override = Hive::Web::Environment.value("HIVE_WEB_APP_DIR", environment: @environment))
+          expanded = File.expand_path(override)
+          unless File.file?(File.join(expanded, "config", "application.rb"))
+            raise Hive::Error,
+                  "HIVE_WEB_APP_DIR #{override.inspect} is not a Hive web Rails app " \
+                  "(missing config/application.rb)"
+          end
+          return expanded
         end
 
         # The managed bundle takes precedence over a source checkout (matching
@@ -173,16 +262,27 @@ module Hive
 
       def install_service
         require "hive/commands/web/service_installer"
-        installer = Hive::Commands::Web::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
+        config = Hive::Config.load_global_web
+        installer = Hive::Commands::Web::ServiceInstaller.new(
+          binary_path: Hive::InvokedBinary.path,
+          environment: @environment,
+          config: config
+        )
         outcome = installer.install!(autostart: true, force: @force)
+        envelope = service_envelope(installer, outcome, config: config)
         if @json
-          puts JSON.generate(service_envelope(installer, outcome))
+          emit_install_json(envelope)
         else
           installer.messages.each { |line| warn "hive: #{line}" }
           puts "hive web: #{outcome.wire_outcome} #{installer.target_path}"
+          render_service_state(envelope)
         end
         raise Hive::Error, "web service install failed" if outcome.failed?
         raise Hive::InvalidTaskPath, "web service differs; retry with --force" if outcome.drifted?
+        unless envelope["ok"]
+          raise Hive::Error,
+                "web service install did not become ready (readiness=#{envelope['readiness']})"
+        end
       end
 
       def start_service
@@ -214,26 +314,99 @@ module Hive
 
       def status_service
         require "hive/commands/web/service_installer"
-        installer = Hive::Commands::Web::ServiceInstaller.new
-        state = installer.service_state
+        begin
+          config = Hive::Config.load_global_web
+          installer = Hive::Commands::Web::ServiceInstaller.new(environment: @environment, config: config)
+          state = Hive::Web::ServiceStatus.snapshot(
+            installer: installer, config: config, environment: @environment
+          )
+        rescue StandardError => e
+          emit_status_error(e) if @json
+          raise
+        end
         if @json
-          puts JSON.generate({ "schema" => "hive-web-status", "ok" => true }.merge(state))
+          puts JSON.generate({
+            "schema" => "hive-web-status",
+            "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-web-status"),
+            "ok" => true,
+            "mode" => "managed_service",
+            "warnings" => environment_warnings
+          }.merge(state))
         else
-          puts "hive web: service #{state["service_installed"] ? "installed" : "not installed"}"
+          render_service_state(state)
         end
       end
 
-      def service_envelope(installer, outcome)
+      def service_envelope(installer, outcome, config: Hive::Config.load_global_web)
+        state = Hive::Web::ServiceStatus.snapshot(
+          installer: installer, config: config, environment: @environment,
+          wait_for_running: true
+        )
         {
           "schema" => "hive-web-install",
-          "ok" => outcome.success?,
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-web-install"),
+          "ok" => outcome.success? && state["ready"],
+          "mode" => "managed_service",
           "outcome" => outcome.wire_outcome,
-          "platform" => installer.envelope_platform,
           "target_path" => installer.target_path,
           "backup_path" => outcome.backup_path,
           "restarted" => outcome.restarted,
-          "messages" => installer.messages.dup
-        }
+          "messages" => installer.messages.dup,
+          "warnings" => environment_warnings
+        }.merge(state)
+      end
+
+      def emit_install_error(error, error_kind:)
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: "hive-web-install",
+          error: error,
+          error_kind: error_kind,
+          extras: self.class.error_context(environment: @environment)
+        )
+        emit_install_json(payload)
+      end
+
+      def emit_install_json(payload)
+        document = JSON.generate(payload)
+        @install_json_emitted = true
+        puts document
+      end
+
+      def install_error_kind(phase)
+        phase == :bootstrap ? "bootstrap_failed" : "service_install_failed"
+      end
+
+      def normalize_install_error(error, phase:)
+        return error if error.is_a?(Hive::Error)
+        return error if phase == :service_install && !@json
+
+        Hive::Error.new("#{error.class}: #{error.message}")
+      end
+
+      def emit_status_error(error)
+        error_kind = error.is_a?(Hive::ConfigError) ? "config_error" : "status_failed"
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: "hive-web-status",
+          error: error,
+          error_kind: error_kind,
+          extras: self.class.error_context(environment: @environment)
+        )
+        puts JSON.generate(payload)
+      end
+
+      def render_service_state(state)
+        puts "hive web: service " \
+             "manager_available=#{state["service_manager_available"]} " \
+             "installed=#{state["service_installed"]} " \
+             "enabled=#{state["service_enabled"]} " \
+             "running=#{state["service_running"]} " \
+             "ready=#{state["ready"]} " \
+             "readiness=#{state["readiness"]}"
+        puts "hive web: #{state["ready"] ? "ready at" : "configured at"} #{state["url"]}"
+      end
+
+      def environment_warnings
+        @environment_warnings ||= Hive::Web::Environment.warnings(environment: @environment)
       end
     end
   end

@@ -54,7 +54,12 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "claude_pid_alive" => nil,
       "action" => action,
       "action_label" => "Ready to brainstorm",
-      "suggested_command" => command
+      "suggested_command" => command,
+      "depends_on" => nil,
+      "blocked_by" => nil,
+      "dependency_stage" => nil,
+      "blocked" => false,
+      "admission_error" => nil
     }
   end
 
@@ -86,7 +91,12 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
   # (Hive::Commands::Status) or the Row struct surfaces as a structured
   # test failure rather than a silent classification change downstream.
   def test_parses_live_task_lock_field_and_coerces_to_strict_boolean
-    task_true = task_row(slug: "live-runner").merge("live_task_lock" => true)
+    task_true = task_row(slug: "live-runner").merge(
+      "live_task_lock" => true,
+      "task_lock_pid" => 12_345,
+      "task_lock_process_start_time" => "observed-start",
+      "task_lock_id" => "observed-generation"
+    )
     task_false = task_row(slug: "no-runner").merge("live_task_lock" => false)
     task_missing = task_row(slug: "legacy-payload")
     payload = make_envelope(projects: [ {
@@ -100,10 +110,48 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       rows = result.rows.each_with_object({}) { |r, h| h[r.slug] = r }
       assert_equal true, rows.fetch("live-runner").live_task_lock,
                    "explicit true must propagate"
+      assert_equal 12_345, rows.fetch("live-runner").task_lock_pid
+      assert_equal "observed-start", rows.fetch("live-runner").task_lock_process_start_time
+      assert_equal "observed-generation", rows.fetch("live-runner").task_lock_id
       assert_equal false, rows.fetch("no-runner").live_task_lock,
                    "explicit false must propagate"
       assert_equal false, rows.fetch("legacy-payload").live_task_lock,
                    "missing key must coerce to false, not nil — downstream callers compare with ==true"
+    end
+  end
+
+  def test_passes_through_canonical_condition_projection_fields
+    condition = { "condition" => "ChangesPresent", "state" => "satisfied" }
+    task = task_row(slug: "conditioned").merge(
+      "condition_task_generation" => 3,
+      "commit_generation" => 2,
+      "current_attempt" => "attempt-b",
+      "conditions" => [ condition ],
+      "condition_history" => [ condition.merge("state" => "superseded") ],
+      "evidence" => [ { "type" => "commit", "sha" => "b" * 40 } ],
+      "condition_overrides" => [ {
+        "reason" => "forced_condition_transition", "source_command" => "approve"
+      } ],
+      "condition_gate" => { "status" => "eligible" },
+      "condition_migration" => { "effective" => "conditions" },
+      "condition_provenance" => { "projector" => "TaskProjection/v1" },
+      "shadow_audit" => { "ready" => false },
+      "condition_warning" => nil
+    )
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [ task ]
+    } ])
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      row = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch.rows.fetch(0)
+      assert_equal 3, row.condition_task_generation
+      assert_equal 2, row.commit_generation
+      assert_equal "attempt-b", row.current_attempt
+      assert_equal [ condition ], row.conditions
+      assert_equal "approve", row.condition_overrides.fetch(0).fetch("source_command")
+      assert_equal "eligible", row.condition_gate.fetch("status")
+      assert_equal "conditions", row.condition_migration.fetch("effective")
     end
   end
 
@@ -131,6 +179,81 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_equal "7-artifacts", dependent.dependency_stage
       assert_equal true, dependent.blocked
       assert_equal false, rows.fetch("legacy-payload").blocked
+    end
+  end
+
+  def test_parses_admission_error_and_forces_inert_row_shape
+    admission = {
+      "reason_code" => "dependency_cycle",
+      "offending_ref" => "p:a -> p:b -> p:a",
+      "safe_correction" => "Break the cycle."
+    }
+    task = task_row(slug: "held", action: "ready_to_archive", command: "hive archive held").merge(
+      "blocked" => false,
+      "admission_error" => admission
+    )
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [ task ]
+    } ])
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      row = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch.rows.first
+
+      assert_equal true, row.blocked
+      assert_equal "admission_error", row.action
+      assert_nil row.suggested_command
+      assert_equal "dependency_cycle", row.admission_error.reason_code
+      assert_equal "Break the cycle.", row.admission_error.safe_correction
+    end
+  end
+
+  def test_missing_admission_field_fails_closed_even_on_known_action
+    task = task_row(slug: "schema-drift")
+    task.delete("admission_error")
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [ task ]
+    } ])
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      row = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch.rows.first
+
+      assert_equal true, row.blocked
+      assert_equal "admission_error", row.action
+      assert_equal "dependency_validation_failed", row.admission_error.reason_code
+    end
+  end
+
+  def test_malformed_admission_objects_fail_closed_per_row
+    malformed = [
+      "not-an-object",
+      { "reason_code" => "dependency_cycle", "offending_ref" => "p:a" },
+      { "reason_code" => "unknown", "offending_ref" => "p:a", "safe_correction" => "Fix it." },
+      { "reason_code" => "dependency_cycle", "offending_ref" => "", "safe_correction" => "Fix it." },
+      {
+        "reason_code" => "dependency_cycle", "offending_ref" => "p:a",
+        "safe_correction" => "Fix it.", "extra" => true
+      }
+    ]
+    tasks = malformed.each_with_index.map do |value, index|
+      task_row(slug: "malformed-#{index}").merge("admission_error" => value)
+    end
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => tasks
+    } ])
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      rows = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch.rows
+
+      assert_equal malformed.size, rows.size
+      rows.each do |row|
+        assert_equal true, row.blocked
+        assert_equal "admission_error", row.action
+        assert_nil row.suggested_command
+        assert_equal "dependency_validation_failed", row.admission_error.reason_code
+      end
     end
   end
 

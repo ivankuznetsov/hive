@@ -12,10 +12,23 @@ class TasksTest < ActionDispatch::IntegrationTest
   end
 
   test "status grid lists the task" do
-    get "/"
+    get "/grid"
     assert_response :success
     assert_match @slug, response.body
-    assert_select "#projects", 1
+    assert_select "#status-grid", 1
+  end
+
+  test "task state renders implementation ownership as pending without mutating legacy state" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_response :success
+    assert_select "details.implementation-identity", 1
+    assert_select "details.implementation-identity summary", text: /generation 0/
+    assert_select "details.implementation-identity", text: /Pending execute capture/
+    refute folder.join("events.jsonl").exist?
+    refute folder.join("task-projection.json").exist?
   end
 
   test "an unpassable stage offers Force approve, never a doomed Approve" do
@@ -238,7 +251,7 @@ class TasksTest < ActionDispatch::IntegrationTest
 
   test "media route 404s a valid-shape slug that names no task" do
     # A slug that satisfies the route constraint but matches no task row hits
-    # the shared task_row! -> InvalidTaskPath -> 404 path, the same handling
+    # the shared Task.find! -> InvalidTaskPath -> 404 path, the same handling
     # every other action gets for an unknown task (plan U3/U5).
     get "/tasks/#{@project}/ghost-task-260101-zzzz/media/01-home.png"
     assert_response :not_found
@@ -424,6 +437,14 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_response :not_found
   end
 
+  test "log route rejects unknown registered state before reading a path" do
+    get "/tasks/nope/#{@slug}/log"
+    assert_response :not_found
+
+    get "/tasks/#{@project}/ghost-task-260101-zzzz/log"
+    assert_response :not_found
+  end
+
   test "intervene writes the answer into the task" do
     post "/tasks/#{@project}/#{@slug}/approve", params: { from: "1-inbox", force: "1" }
 
@@ -531,6 +552,46 @@ class TasksTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "daemon-enabled task gives a recovery command when auto-advance is down" do
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_response :success
+    assert_select ".daemon-blocker", text: /Auto-advance is paused/
+    assert_select ".daemon-blocker code", text: "hive daemon start --detach"
+    assert_select "form[action$='/run']", 0,
+                  "web must not offer a queue button that a stopped daemon cannot consume"
+  end
+
+  test "running daemon does not show an auto-advance blocker" do
+    report = Object.new
+    report.define_singleton_method(:running_state) { { running: true } }
+    original_new = Hive::Daemon::StatusReport.method(:new)
+    Hive::Daemon::StatusReport.define_singleton_method(:new) { report }
+
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_response :success
+    assert_select ".daemon-blocker", 0
+  ensure
+    Hive::Daemon::StatusReport.define_singleton_method(:new, original_new) if original_new
+  end
+
+  test "terminal stages from non-coding workflows do not show an auto-advance blocker" do
+    with_registered_workflow(content_workflow) do
+      project = create_hive_project!("completed-content-app")
+      slug = "completed-content-260719-aaaa"
+      folder = stage_dir(project, "4-done").join(slug)
+      folder.mkpath
+      folder.join("done.md").write("# Done\n")
+      Hive::TaskMeta.write(folder.to_s, id: 1, slug: slug, display_name: nil, workflow: "content_fixture")
+
+      get "/tasks/#{project}/#{slug}"
+
+      assert_response :success
+      assert_select ".daemon-blocker", 0
+    end
+  end
+
   test "all-answered brainstorm shows the waiting banner on a push-refreshed page" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\nDone\n\n<!-- WAITING -->\n")
@@ -579,6 +640,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     get "/tasks/#{@project}/#{@slug}/diff"
 
     assert_response :success
+    assert_select "nav a.nav-link-active", text: "Status"
     assert_match "Diff truncated to the first 512", response.body
     assert response.body.bytesize < 700 * 1024,
            "the rendered diff must be capped (got #{response.body.bytesize} bytes)"

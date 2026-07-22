@@ -5,6 +5,26 @@ require "hive/task"
 class TaskTest < Minitest::Test
   include HiveTestHelper
 
+  def test_managed_task_rejects_incomplete_and_unresolvable_provenance
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-inbox", "managed-260715-aaaa")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "meta.yml"), <<~YAML)
+        workflow: demo
+        workflow_commit: #{'a' * 40}
+      YAML
+      assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+
+      File.write(File.join(folder, "meta.yml"), <<~YAML)
+        workflow: demo
+        workflow_commit: #{'a' * 40}
+        workflow_manifest_digest: #{'b' * 64}
+      YAML
+      error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+      assert_includes error.message, "manifest"
+    end
+  end
+
   def test_parses_valid_path
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "add-foo")
@@ -435,7 +455,7 @@ class TaskTest < Minitest::Test
       assert_nil task.display_name
       assert_nil task.depends_on
       assert_equal "add-foo", task.display_label
-      assert_match(/depends_on, workflow dropped/, err)
+      assert_match(/depends_on, workflow, base_branch dropped/, err)
     end
   end
 
@@ -445,6 +465,21 @@ class TaskTest < Minitest::Test
       FileUtils.mkdir_p(folder)
       task = Hive::Task.new(folder)
       assert_nil task.worktree_path
+    end
+  end
+
+  def test_worktree_path_uses_explicit_pointer_for_low_generic_stages
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-inbox", "add-foo")
+      FileUtils.mkdir_p(folder)
+      File.write(
+        File.join(folder, "worktree.yml"),
+        { "path" => "/some/where/add-foo", "branch" => "add-foo" }.to_yaml
+      )
+
+      task = Hive::Task.new(folder)
+
+      assert_equal "/some/where/add-foo", task.worktree_path
     end
   end
 

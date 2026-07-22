@@ -6,6 +6,7 @@ require "hive/bot/format"
 require "hive/bot/row_actions"
 require "hive/bot/title_formatter"
 require "hive/markers"
+require "hive/task_action"
 require "hive/workflows"
 
 module Hive
@@ -13,18 +14,7 @@ module Hive
     module NotificationBuilders
       module_function
 
-      READY_ACTIONS = %w[
-        ready_to_brainstorm
-        ready_to_plan
-        ready_to_develop
-        ready_to_open_pr
-        ready_for_review
-        ready_to_artifacts
-        ready_to_finalize
-        ready_to_archive
-        ready_to_advance
-        ready_to_run
-      ].freeze
+      READY_ACTIONS = Hive::TaskAction::READY_COMMANDS.keys.freeze
 
       INPUT_ACTIONS = %w[
         needs_input
@@ -358,7 +348,9 @@ module Hive
       # `ensure_clean_on_exit_failed` automatically first (bounded, then
       # parks); only once those retries are spent does an operator see this
       # "inspect manually" routing — at which point human eyes are warranted.
-      ERROR_MANUAL_ONLY_REASONS = %w[dirty_worktree ensure_clean_on_exit_failed].freeze
+      ERROR_MANUAL_ONLY_REASONS = %w[
+        dirty_worktree ensure_clean_on_exit_failed
+      ].concat(Hive::DraftPrReceipt::ERROR_REASONS).freeze
 
       # Single source of truth for "this state has no auto-recovery".
       # Pass attrs: nil from callers that only have the marker name
@@ -386,6 +378,14 @@ module Hive
         attrs = attrs ? attrs.to_h.transform_keys(&:to_s) : {}
         if marker == "review_error" && attrs["reason"].to_s == "fix_status_check_failed"
           "Hive can't auto-recover a worktree whose Git status cannot be read. Open the worktree, repair Git state, then rerun review."
+        elsif marker == "error" && attrs["reason"].to_s == Hive::DraftPrReceipt::RECOVERABLE_REASON
+          "Hive preserved the validated branch. Run the task manually to reconcile the remote draft-PR handoff."
+        elsif marker == "error" && attrs["reason"].to_s == Hive::DraftPrReceipt::QUARANTINE_REASON
+          "Hive blocked publication after finding prohibited local content. Inspect and securely clean the preserved isolated worktree."
+        elsif marker == "error" && attrs["reason"].to_s == Hive::DraftPrReceipt::IDENTITY_REASON
+          "Hive blocked publication because repository, branch, or PR identity changed. Inspect the preserved local and remote state."
+        elsif marker == "error" && attrs["reason"].to_s == Hive::DraftPrReceipt::AGENT_BLOCKED_REASON
+          "The mapped repair agent reported a blocked outcome. Inspect its preserved report and isolated worktree."
         elsif marker == "error" && ERROR_MANUAL_ONLY_REASONS.include?(attrs["reason"].to_s)
           "Hive can't auto-recover a dirty worktree. Open the worktree and commit or discard the changes, then tap Autofix."
         else
@@ -638,22 +638,7 @@ module Hive
       end
 
       def verb_for_action(action)
-        {
-          "ready_to_brainstorm" => "brainstorm",
-          "ready_to_plan" => "plan",
-          "ready_to_develop" => "develop",
-          "ready_to_open_pr" => "open-pr",
-          "ready_for_review" => "review",
-          "ready_to_artifacts" => "artifacts",
-          "ready_to_finalize" => "finalize",
-          "ready_to_archive" => "archive",
-          # Generic-workflow ready rows: advance promotes the task to the
-          # next stage (`hive approve`), run dispatches the generic stage
-          # agent (`hive run`). Without these a generic row gets no Telegram
-          # button and a daemon-disabled project can't drive it from chat.
-          "ready_to_advance" => "approve",
-          "ready_to_run" => "run"
-        }[action]
+        Hive::TaskAction::READY_COMMANDS[action]
       end
 
       CALLBACK_DATA_MAX = 64

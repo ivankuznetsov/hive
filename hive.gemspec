@@ -4,15 +4,14 @@ Gem::Specification.new do |spec|
   spec.name        = "hive-cli"
   spec.version     = Hive::VERSION
   spec.authors     = [ "Ivan Kuznetsov" ]
-  spec.summary     = "Multi-agent orchestrator that ships software ideas from rough note to merge-ready PR"
+  spec.summary     = "Durable, local-first workflow engine for AI agents"
   spec.description = <<~DESC
-    Hive drives software work from a rough idea to a merged pull request through a
-    folder-as-agent pipeline: brainstorm pins down requirements, plan fixes the
-    approach, execute writes the code, review hardens it, and finalize ships the
-    PR. Every task is a directory of plain markdown artefacts you can edit, and
-    the dashboard (`hive tui`) drives stage agents on single keystrokes. The CLI
-    surface is `--json`-clean so coding agents (Claude Code, Codex, Grok, Pi)
-    can drive it programmatically.
+    Hive is a durable, local-first workflow engine for AI agents. It runs coding,
+    content, benchmark, and owner-authored workflows as folder-as-agent pipelines
+    with inspectable artifacts and recoverable stage state. Its flagship coding
+    workflow carries a rough idea through planning, implementation, pull request,
+    review, and finalization. Humans and agents can operate the same local state
+    through the TUI, native web UI, files, or structured CLI output.
   DESC
   spec.homepage    = "https://github.com/ivankuznetsov/hive"
   spec.license     = "MIT"
@@ -36,6 +35,8 @@ Gem::Specification.new do |spec|
     "bin/hive-babysitter-stub-gh.rb",
     "bin/hive-babysitter-stub-git",
     "bin/hv",
+    "config/agent-skills.yml",
+    "skills/**/*",
     "lib/**/*.rb",
     "lib/hive/scripts/**/*.sh",
     "templates/**/*",
@@ -47,6 +48,7 @@ Gem::Specification.new do |spec|
     "CHANGELOG.md",
     "LICENSE",
     "README.md",
+    "hive.gemspec",
   ]
 
   spec.bindir      = "bin"
@@ -67,6 +69,10 @@ Gem::Specification.new do |spec|
   spec.add_dependency "erb", ">= 4.0"
   spec.add_dependency "faraday", ">= 2.14.2", "< 3.0"
   spec.add_dependency "faraday-multipart", "~> 1.0"
+  # Architecture-patrol manifests are runtime JSON contracts. The scheduler
+  # loads their validator in daemon/web-supervisor processes, so keeping this
+  # dependency test-only makes installed gems and hivebox crash on daemon boot.
+  spec.add_dependency "json_schemer", "~> 2.5"
   spec.add_dependency "lipgloss", "~> 0.2.2"
   # rexml stopped being a default gem in Ruby 3.4, so it is not guaranteed
   # present. The launchd service-installer drift probe parses plists with

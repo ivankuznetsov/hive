@@ -11,6 +11,8 @@ require "hive/permission_scope"
 require "hive/stages/clean_exit"
 require "hive/usage_db"
 require "hive/worktree"
+require "hive/attempts/context"
+require "hive/implementation_identity/store"
 
 module Hive
   module Stages
@@ -120,10 +122,43 @@ module Hive
         Hive::AgentProfiles.lookup(name, cfg: cfg)
       end
 
+      # Production stage launches run inside a durable attempt. Direct unit
+      # calls predating attempt supervision receive nil and retain their
+      # explicit test profile seam; real launches always resolve and journal
+      # implementation ownership before Process.spawn/tmux starts.
+      def implementation_stage_identity(task, cfg, stage)
+        return nil unless Hive::Attempts::Context.current
+
+        Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).resolve_stage!(stage)
+      end
+
       def stage_permission_scope(cfg, stage_name, task, profile,
                                  base_add_dirs: [ task.folder ],
                                  default_allowed_tools: nil,
-                                 explicit_permission_spec: MISSING_EXPLICIT_PERMISSION_SPEC)
+                                 explicit_permission_spec: MISSING_EXPLICIT_PERMISSION_SPEC,
+                                 managed_slot: nil,
+                                 managed_context: nil)
+        if task.respond_to?(:managed_workflow?) && task.managed_workflow?
+          require "hive/workflow_package/runtime_policy"
+          if explicit_permission_spec.equal?(MISSING_EXPLICIT_PERMISSION_SPEC)
+            raise Hive::ConfigError, "managed executable actor #{managed_slot || stage_name} is missing exact permissions"
+          end
+          slot_id = managed_slot || "stages.#{stage_name}"
+          context = managed_context || task.managed_runtime_context(slot_id)
+          runtime_policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            explicit_permission_spec,
+            task_folder: task.folder, profile: profile,
+            package_root: context.fetch(:package_root), environment: context.fetch(:environment)
+          )
+          return {
+            add_dirs: runtime_policy.directories,
+            permission_mode: runtime_policy.permission_mode,
+            allowed_tools: runtime_policy.allowed_tools,
+            disallowed_tools: runtime_policy.disallowed_tools,
+            runtime_policy: runtime_policy
+          }
+        end
+
         spec = if explicit_permission_spec.equal?(MISSING_EXPLICIT_PERMISSION_SPEC)
           Hive::Config.permission_spec(cfg || {}, stage_name)
         else
@@ -154,6 +189,22 @@ module Hive
         }
       end
 
+      # Prepare one actor launch from one managed snapshot, so its prompt and
+      # permission scope cannot observe different configuration generations.
+      def actor_prompt_and_scope(cfg, stage_name, task, profile, prompt:,
+                                 managed_slot: "stages.#{stage_name}", **scope_kwargs)
+        with_permission_config_error_marker(task) do
+          context = task.managed_runtime_context(managed_slot) if
+            task.respond_to?(:managed_workflow?) && task.managed_workflow?
+          prompt = task.managed_prompt(managed_slot, prompt, context) if context
+          scope = stage_permission_scope(
+            cfg, stage_name, task, profile,
+            managed_slot: managed_slot, managed_context: context, **scope_kwargs
+          )
+          [ prompt, scope ]
+        end
+      end
+
       # The three tool-scoping kwargs every spawn site forwards from a
       # resolved-scope Hash to spawn_agent / spawn_claude! /
       # with_shared_session. Splat this (`**Base.tool_scope_kwargs(scope)`)
@@ -161,11 +212,25 @@ module Hive
       # across the spawn sites. `scope` is the Hash stage_permission_scope
       # returns, NOT the PermissionScope::Scope struct.
       def tool_scope_kwargs(scope)
-        {
+        kwargs = {
           permission_mode: scope.fetch(:permission_mode),
           allowed_tools: scope.fetch(:allowed_tools),
           disallowed_tools: scope.fetch(:disallowed_tools)
         }
+        kwargs[:runtime_policy] = scope[:runtime_policy] if scope[:runtime_policy]
+        kwargs
+      end
+
+      # Generic agent and council stages use the same state-file marker
+      # vocabulary when naming their durable hive-state commits.
+      def marker_commit_action(marker_name)
+        case marker_name
+        when :waiting then "round_waiting"
+        when :complete then "complete"
+        when :error then "error"
+        when :none then nil
+        else marker_name.to_s
+        end
       end
 
       # The per-spec explicit-permission passthrough every reviewer
@@ -199,7 +264,13 @@ module Hive
       # outer Review.run! rescue maps the same ConfigError to :review_error
       # against the real task (see review.rb).
       def stage_permission_scope_or_mark!(cfg, stage_name, task, profile, **kwargs)
-        stage_permission_scope(cfg, stage_name, task, profile, **kwargs)
+        with_permission_config_error_marker(task) do
+          stage_permission_scope(cfg, stage_name, task, profile, **kwargs)
+        end
+      end
+
+      def with_permission_config_error_marker(task)
+        yield
       rescue Hive::ConfigError => e
         Hive::Markers.set(task.state_file, :error,
                           reason: "permission_config_error",
@@ -380,6 +451,21 @@ module Hive
         nil
       end
 
+      # Open-PR and finalize share the same hard precondition: execute must
+      # have left a pointer to a worktree that still exists on disk.
+      def worktree_pointer_or_exit(task)
+        pointer = Hive::Worktree.read_pointer(task.folder)
+        unless pointer && pointer["path"]
+          warn "hive: no worktree pointer; this task did not pass through 4-execute"
+          exit 1
+        end
+        unless File.directory?(pointer["path"])
+          warn "hive: worktree pointer at #{pointer['path']} no longer exists; recreate or move task back to 4-execute"
+          exit 1
+        end
+        pointer
+      end
+
       def log_clean_exit_event(task, stage, result)
         return unless result[:status] == :auto_committed
 
@@ -506,7 +592,7 @@ module Hive
                       profile: nil, expected_output: nil, status_mode: nil,
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
                       disallowed_tools: nil, cli_flags: nil,
-                      model: nil, effort: nil)
+                      model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
@@ -535,21 +621,28 @@ module Hive
         # path, already assembled the flags and must win over cfg; commit
         # 01841e12). Keying derivation on nil-vs-[] keeps those two intents
         # distinct rather than collapsing both to "empty".
-        derive_flags_from_cfg = cli_flags.nil?
+        derive_flags_from_cfg = cli_flags.nil? && identity_arguments.nil?
         cli_flags ||= []
-        if derive_flags_from_cfg && cfg && profile.name == :claude
+        if identity_arguments.nil? && (model || effort)
+          if profile.model_argument_builder
+            concrete_model = model || profile.concrete_default_model(
+              cfg: cfg, project_root: cfg && cfg["project_root"]
+            )
+            identity_arguments = profile.identity_arguments(
+              model: concrete_model, effort: effort
+            ).native_arguments
+          else
+            # Old-shape custom profiles predate normalized identity
+            # capabilities. Preserve their historical launch behavior for
+            # this legacy call form; implementation-owning stages pass an
+            # already-resolved identity_arguments array and never use this
+            # compatibility path.
+            warn_model_effort_dropped(task, profile, model: model, effort: effort)
+            identity_arguments = []
+          end
+        elsif derive_flags_from_cfg && cfg && profile.name == :claude
           permission_mode ||= Hive::Config.claude_permission_mode(cfg)
           cli_flags = Hive::Config.claude_cli_flags(cfg, model: model, effort: effort)
-        elsif (model || effort) && profile.name != :claude
-          # model/effort are only translated to CLI flags on the :claude profile
-          # (above). A per-stage/per-reviewer `model:`/`effort:` on a codex/fable/
-          # pi stage is therefore a no-op — plan U2 requires it be a LOGGED no-op,
-          # not a silent drop, so an author who sets it on a non-claude profile
-          # gets a breadcrumb rather than surprising unchanged behavior. Gate on
-          # `profile.name != :claude` so a claude caller that supplied explicit
-          # `cli_flags:` (derive_flags_from_cfg == false) with model/effort does
-          # NOT get the misleading "does not honor per-stage model/effort" note.
-          warn_model_effort_dropped(task, profile, model: model, effort: effort)
         end
 
         started_at = Time.now.utc.iso8601
@@ -567,7 +660,9 @@ module Hive
           permission_mode: permission_mode,
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
-          cli_flags: cli_flags
+          cli_flags: cli_flags,
+          identity_arguments: identity_arguments || [],
+          runtime_policy: runtime_policy
         ).run!
         record_usage(task, profile, result, started_at)
         result
@@ -591,7 +686,7 @@ module Hive
                          profile: nil, expected_output: nil, status_mode: nil,
                          permission_mode: nil, allowed_tools: nil,
                          disallowed_tools: nil, mcp_config_path: nil,
-                         strict_mcp_config: false)
+                         strict_mcp_config: false, identity_arguments: nil, runtime_policy: nil)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -617,7 +712,9 @@ module Hive
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
           mcp_config_path: mcp_config_path,
-          strict_mcp_config: strict_mcp_config
+          strict_mcp_config: strict_mcp_config,
+          identity_arguments: identity_arguments,
+          runtime_policy: runtime_policy
         )
       end
 
@@ -701,7 +798,7 @@ module Hive
         fields = { "model" => model, "effort" => effort }.compact
         message = "[hive] agent profile #{profile.name.inspect} does not honor per-stage " \
                   "#{fields.map { |key, value| "#{key}=#{value.inspect}" }.join(', ')}; " \
-                  "these are only applied on the :claude profile and are ignored for this spawn."
+                  "the profile has no normalized model capability, so they are ignored for this spawn."
         write_spawn_warning(task, "config-warnings.log", message)
       end
 

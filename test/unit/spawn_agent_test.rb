@@ -1,4 +1,5 @@
 require "test_helper"
+require "json"
 require "hive/markers"
 require "hive/lock"
 require "hive/config"
@@ -7,6 +8,7 @@ require "hive/agent"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/stages/base"
+require "hive/scripts/workflow_policy_hook"
 
 # Direct coverage for Hive::Stages::Base.spawn_agent: profile check_version! /
 # preflight! ordering, the warn_isolation_reduced trigger when the configured
@@ -245,6 +247,44 @@ class SpawnAgentTest < Minitest::Test
       refute_includes argv, "arg=medium"
     ensure
       FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
+  def test_normalized_codex_model_and_effort_reach_spawn_argv
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      argv_log = File.join(dir, "argv.log")
+      binary = File.join(dir, "fake-codex")
+      File.write(binary, <<~SH)
+        #!/usr/bin/env bash
+        if [ "$1" = "--version" ]; then echo "codex-cli 0.144.3"; exit 0; fi
+        printf '%s\n' "$@" > "#{argv_log}"
+      SH
+      File.chmod(0o755, binary)
+      profile = Hive::AgentProfile.new(
+        name: :codex,
+        bin_default: binary,
+        headless_flag: "exec",
+        prompt_style: :stdin,
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}",
+        status_detection_mode: :exit_code_only,
+        model_argument_builder: ->(model) { [ "--model", model ] },
+        effort_argument_builder: ->(effort) { [ "-c", "model_reasoning_effort=#{effort}" ] }
+      )
+
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x", max_budget_usd: nil, timeout_sec: 5,
+        profile: profile, status_mode: :exit_code_only,
+        model: "gpt-5.6-terra", effort: "medium"
+      )
+
+      argv = File.readlines(argv_log, chomp: true)
+      model_index = argv.index("--model")
+      effort_index = argv.index("-c")
+      assert_equal "gpt-5.6-terra", argv.fetch(model_index + 1)
+      assert_equal "model_reasoning_effort=medium", argv.fetch(effort_index + 1)
     end
   end
 
@@ -544,9 +584,11 @@ class SpawnAgentTest < Minitest::Test
       "execute" => { "agent" => "codex" },
       "agents"  => { "codex" => { "bin" => "/custom/codex/path" } }
     }
-    profile = Hive::Stages::Base.stage_profile(cfg, "execute")
-    assert_equal :codex, profile.name
-    assert_equal "/custom/codex/path", profile.bin
+    with_env("HIVE_CODEX_BIN" => nil) do
+      profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+      assert_equal :codex, profile.name
+      assert_equal "/custom/codex/path", profile.bin
+    end
   end
 
   def test_stage_profile_raises_on_unknown_agent_name
@@ -575,6 +617,55 @@ class SpawnAgentTest < Minitest::Test
       assert_nil scope.fetch(:allowed_tools)
       assert_nil scope.fetch(:disallowed_tools)
     end
+  end
+
+  def test_stage_permission_scope_compiles_task_pinned_managed_policy
+    with_tmp_dir do |dir|
+      task_folder = File.join(dir, "task")
+      package_root = File.join(dir, ".hive-state", "workflows", "demo", "versions", "a" * 40)
+      FileUtils.mkdir_p([ task_folder, package_root ])
+      workflow = Struct.new(:id).new(:demo)
+      task = Object.new
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:hive_state_path) { File.join(dir, ".hive-state") }
+      task.define_singleton_method(:workflow) { workflow }
+      task.define_singleton_method(:workflow_commit) { "a" * 40 }
+      task.define_singleton_method(:workflow_manifest_digest) { "b" * 64 }
+      task.define_singleton_method(:folder) { task_folder }
+      requested_slots = []
+      task.define_singleton_method(:managed_runtime_context) do |slot_id|
+        requested_slots << slot_id
+        { package_root: package_root, environment: { "DEMO_INPUT" => "configured" } }
+      end
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        {}, "work", task, Hive::AgentProfiles.lookup(:claude),
+        explicit_permission_spec: "read-only"
+      )
+      assert_equal [ "stages.work" ], requested_slots
+      assert_equal "default", scope.fetch(:permission_mode)
+      assert_equal %w[Read LS Grep Glob], scope.fetch(:allowed_tools)
+      assert_equal [ task_folder, package_root ], scope.fetch(:add_dirs)
+      policy = scope.fetch(:runtime_policy)
+      assert_instance_of Hive::WorkflowPackage::RuntimePolicy::Policy, policy
+      assert_nil policy.policy_path
+      assert_includes policy.disallowed_tools, "Write"
+      assert_equal "configured", policy.environment.fetch("DEMO_INPUT")
+      refute Dir.exist?(File.join(dir, ".hive-state", ".managed-policies"))
+    end
+  end
+
+  def test_managed_permission_scope_requires_an_exact_actor_policy
+    task = Object.new
+    task.define_singleton_method(:managed_workflow?) { true }
+    task.define_singleton_method(:folder) { Dir.tmpdir }
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Stages::Base.stage_permission_scope(
+        {}, "work", task, Hive::AgentProfiles.lookup(:claude), managed_slot: "stages.work"
+      )
+    end
+    assert_match(/missing exact permissions/, error.message)
   end
 
   def test_stage_permission_scope_yolo_preserves_tmux_builtin_allowlist
@@ -637,6 +728,7 @@ class SpawnAgentTest < Minitest::Test
 
       assert_equal [ task.folder, File.join(task.folder, "drafts"), absolute ], scope.fetch(:add_dirs)
       assert_equal %w[Read Write Edit], scope.fetch(:allowed_tools)
+      assert_equal "dontAsk", scope.fetch(:permission_mode)
     end
   end
 

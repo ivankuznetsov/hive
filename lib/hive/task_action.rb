@@ -1,11 +1,16 @@
 require "shellwords"
 require "digest"
 require "time"
-require "yaml"
 require "hive/agent_profiles"
 require "hive/stages"
 require "hive/workflows"
 require "hive/task_action/diagnostic"
+require "hive/conditions/gate_evaluator"
+require "hive/conditions/migration"
+require "hive/plan_frontmatter"
+require "hive/task_projection/store"
+require "hive/markers"
+require "hive/draft_pr_receipt"
 
 module Hive
   # Classifier that turns a (Task, Marker) pair into a user-facing
@@ -155,6 +160,11 @@ module Hive
         label: "Needs your input",
         command: "run"
       },
+      recover_draft_pr: {
+        key: Hive::Schemas::TaskActionKind::RECOVER_DRAFT_PR,
+        label: "Retry draft PR handoff manually",
+        command: "run"
+      },
       done: {
         key: Hive::Schemas::TaskActionKind::ARCHIVED,
         label: "Archived",
@@ -181,7 +191,15 @@ module Hive
       }
     }.freeze
 
-    attr_reader :task, :marker, :project_name
+    # Ready actions are the shared dispatch vocabulary for status consumers.
+    # Derive the lookup from the classifier table so bot and web adapters
+    # cannot drift from the command Hive actually reports for an action.
+    READY_COMMANDS = ACTIONS.values.each_with_object({}) do |action, commands|
+      key = action.fetch(:key)
+      commands[key] = action.fetch(:command) if key.start_with?("ready_")
+    end.freeze
+
+    attr_reader :task, :marker, :project_name, :projection
 
     # Default grace window for placeholder AGENT_WORKING markers (no PID
     # attribute) before they classify as orphaned. Mirrors the daemon's
@@ -190,12 +208,16 @@ module Hive
     # synthetic classification done here. Configurable per-instance.
     DEFAULT_AGENT_MARKER_GRACE_SEC = 300
 
-    def initialize(task, marker, project_name: nil, project_count: 1, stage_collision: false,
+    def initialize(task, marker = nil, projection: nil, config: nil,
+                   project_name: nil, project_count: 1, stage_collision: false,
                    pid_alive: nil, state_file_mtime: nil,
                    agent_marker_grace_sec: DEFAULT_AGENT_MARKER_GRACE_SEC,
                    live_task_lock: false)
       @task = task
-      @marker = marker
+      @projection = projection || load_projection(marker)
+      @marker = projected_marker(@projection) || marker ||
+                Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+      @config = config || { "conditions" => { "authority" => "markers", "stages" => {} } }
       @project_name = project_name
       @project_count = project_count
       @stage_collision = stage_collision
@@ -205,7 +227,7 @@ module Hive
       @live_task_lock = live_task_lock
     end
 
-    def self.for(task, marker, **)
+    def self.for(task, marker = nil, **)
       new(task, marker, **)
     end
 
@@ -262,6 +284,29 @@ module Hive
       }
     end
 
+    def migration_selection
+      @migration_selection ||= Hive::Conditions::Migration.selection(
+        config: @config, stage: "#{task.stage_index}-#{task.stage_name}",
+        projection: projection,
+        rule: task.stage_name == "execute" ? execute_condition_rule : nil
+      )
+    end
+
+    def condition_gate
+      return nil unless task.stage_name == "execute"
+
+      @condition_gate ||= Hive::Conditions::GateEvaluator.new(
+        projection: projection, rule: execute_condition_rule
+      ).evaluate(research: research_execution?, research_evidence: research_evidence?)
+    end
+
+    def condition_warning
+      return nil unless migration_selection.effective == "shadow"
+      return nil unless projection.to_h.dig("shadow_audit", "unexplained_mismatches").to_i.positive?
+
+      "condition shadow mismatch"
+    end
+
     private
 
     def action
@@ -287,6 +332,9 @@ module Hive
       if marker.name == :agent_working
         return ACTIONS.fetch(:error) if stale_agent_reason
         return ACTIONS.fetch(:agent_running)
+      end
+      if marker.name == :error && marker.attrs["reason"].to_s == Hive::DraftPrReceipt::RECOVERABLE_REASON
+        return ACTIONS.fetch(:recover_draft_pr)
       end
       return ACTIONS.fetch(:error) if marker.name == :error
       return ACTIONS.fetch(:manual_steering) if marker.name == :manual_steering
@@ -433,6 +481,10 @@ module Hive
     end
 
     def execute_action
+      if migration_selection.effective == "conditions"
+        return condition_gate.eligible? ? ACTIONS.fetch(:execute_complete) : ACTIONS.fetch(:execute_waiting)
+      end
+
       case marker.name
       when :execute_complete, :complete
         ACTIONS.fetch(:execute_complete)
@@ -456,6 +508,48 @@ module Hive
         # Policy than presuming the stage is runnable.
         ACTIONS.fetch(:error)
       end
+    end
+
+    def execute_condition_rule
+      workflow_stage&.condition_policy ||
+        Hive::Conditions::Policy.default.rule_for("execute_to_open_pr")
+    end
+
+    def research_execution?
+      path = File.join(task.folder, "plan.md")
+      result = Hive::PlanFrontmatter.read(path)
+      result.valid? && result.data["execution_mode"].to_s == "research"
+    end
+
+    def research_evidence?
+      return false unless research_execution?
+
+      fact = projection.current_condition("ChangesPresent")
+      fact&.dig("payload", "research_output_evidence") == true &&
+        Array(fact["evidence"]).any? do |entry|
+          entry["type"] == "file" && entry["purpose"] == "research_output"
+        end
+    end
+
+    def load_projection(marker)
+      folder = task.respond_to?(:folder) && task.folder
+      if folder
+        Hive::TaskProjection::Store.new(task_folder: folder).read(marker: marker)
+      else
+        Hive::TaskProjection.project(records: [], marker: marker)
+      end
+    end
+
+    def projected_marker(value)
+      data = value.respond_to?(:to_h) ? value.to_h : value
+      compatibility = data&.dig("compatibility", "marker") ||
+                      data&.dig("compatibility", "marker_fallback")
+      return nil unless compatibility
+
+      Hive::Markers::State.new(
+        name: compatibility.fetch("name").to_sym,
+        attrs: compatibility.fetch("attrs", {}), raw: nil
+      )
     end
 
     def plan_action
@@ -559,6 +653,7 @@ module Hive
         finalize_pr_url_mismatch: finalize_pr_url_mismatch?,
         legacy_execute_findings: legacy_execute_findings?,
         stale_agent_reason: stale_agent_reason,
+        condition_gate: migration_selection.effective == "conditions" ? condition_gate : nil,
         state_file_mtime: @state_file_mtime,
         project_name: project_name,
         project_count: @project_count

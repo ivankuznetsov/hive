@@ -123,6 +123,14 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal "run", Hive::Bot::NotificationBuilders.verb_for_action("ready_to_run")
   end
 
+  def test_ready_actions_share_task_action_commands
+    assert_equal Hive::TaskAction::READY_COMMANDS.keys,
+                 Hive::Bot::NotificationBuilders::READY_ACTIONS
+    Hive::TaskAction::READY_COMMANDS.each do |action, command|
+      assert_equal command, Hive::Bot::NotificationBuilders.verb_for_action(action)
+    end
+  end
+
   def test_display_title_handles_name_without_id_and_slug_fallback
     named = row(action: "needs_input", marker: "waiting", display_name: "Named Only")
     legacy = row(action: "needs_input", marker: "waiting", slug: "task-260514-abcd")
@@ -928,6 +936,21 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     refute_includes labels, "🔧 Autofix"
     assert_equal [ "Show details" ], labels
+  end
+
+  def test_managed_handoff_manual_recovery_replies_name_the_preserved_state
+    expected = {
+      Hive::DraftPrReceipt::RECOVERABLE_REASON => "preserved the validated branch",
+      Hive::DraftPrReceipt::QUARANTINE_REASON => "prohibited local content",
+      Hive::DraftPrReceipt::IDENTITY_REASON => "repository, branch, or PR identity changed",
+      Hive::DraftPrReceipt::AGENT_BLOCKED_REASON => "repair agent reported a blocked outcome"
+    }
+    expected.each do |reason, text|
+      reply = Hive::Bot::NotificationBuilders.send(
+        :manual_only_reply, marker: "error", attrs: { "reason" => reason }
+      )
+      assert_includes reply, text
+    end
   end
 
   def test_cause_sentence_for_review_error_reviewer_partial_failure

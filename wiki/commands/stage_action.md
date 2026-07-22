@@ -42,7 +42,7 @@ No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.n
 3. **Archive idempotency check**: if the verb is `archive` AND the task is already at `9-done` with `:complete` marker, emit a `noop` payload and return.
 4. **At-target branch**: if the task is already at the verb's target stage, just run the stage's agent via `Hive::Commands::Run`. Phase: `ran`.
 5. **Wrong-stage guard**: if the task is at neither source nor target, raise `WrongStage` with the verb's expected source/target.
-6. **Marker validation**: forward advance requires a terminal marker — currently `:complete`, `:execute_complete`, or `:review_complete` (one per stage that writes a typed terminal marker; the closed set is `Hive::Markers::TERMINAL_MARKER_NAMES`). The `brainstorm` verb has `force_source: true` and skips this check. `archive` has one additional internal exception: a matching `--recover-merged-error-reason` accepts an `8-finalize` `ERROR` marker only when the current `reason=` equals the flag, `pr.md` contains a `pr_url`, and `Hive::Gh.pr_state(pr_url)` returns `MERGED`.
+6. **Marker/condition validation**: forward advance requires a terminal marker — currently `:complete`, `:execute_complete`, or `:review_complete` (one per stage that writes a typed terminal marker; the closed set is `Hive::Markers::TERMINAL_MARKER_NAMES`). Effective condition authority additionally gates `4-execute`; a blocked JSON error includes `condition_gate` and `next_action`. The `brainstorm` verb has `force_source: true` and skips this check. `archive` has one additional internal exception: a matching `--recover-merged-error-reason` accepts an `8-finalize` `ERROR` marker only when the current `reason=` equals the flag, `pr.md` contains a `pr_url`, and `Hive::Gh.pr_state(pr_url)` returns `MERGED`.
 7. **Promote**: call `Hive::Commands::Approve` with `to: target_stage`, `from: current_stage`, and `quiet: @json` so the inner Approve doesn't double-emit.
 8. **Run**: call `Hive::Commands::Run` on the new folder, also `quiet: @json`.
 9. **Emit**: in JSON mode, emit a single `hive-stage-action` envelope with `phase: "promoted_and_ran"` (or `ran` / `noop`).
@@ -89,7 +89,15 @@ No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.n
 }
 ```
 
-`error_kind` enum: `ambiguous_slug`, `destination_collision`, `final_stage`, `wrong_stage`, `rollback_failed`, `invalid_task_path`, `error`.
+`error_kind` enum: `ambiguous_slug`, `destination_collision`, `final_stage`, `wrong_stage`, `rollback_failed`, `invalid_task_path`, `dependency_wait`, `admission_error`, `error`.
+
+The enum is classified by the composed Approve command, so direct approve and
+workflow-stage envelopes cannot drift on the same transition exception.
+
+Dependency errors also carry `reason_code`, `offending_ref`, and
+`safe_correction`. `dependency_wait` is retryable after the prerequisite
+reaches its gate; `admission_error` requires repairing the named metadata,
+plan, workflow, enrollment, or repository-identity evidence.
 
 In JSON mode, the inner Approve and Run are quieted so the envelope is a single parseable document. In text mode, Approve and Run emit their normal prose since that output is intended for humans.
 
@@ -121,7 +129,9 @@ The archive command still refuses the advance when any guard differs from the ob
 | Wrong stage / `--from` mismatch / non-terminal marker | 4 (`WRONG_STAGE`) | `Hive::WrongStage` |
 | Slug ambiguous / unknown / `--project` mismatch | 64 (`USAGE`) | `Hive::InvalidTaskPath` / `AmbiguousSlug` |
 | Destination collision | 1 (`GENERIC`) | `Hive::DestinationCollision` |
+| Dependency below its gate | 75 (`TEMPFAIL`) | `Hive::DependencyWaitError` |
 | Lock contention | 75 (`TEMPFAIL`) | `Hive::ConcurrentRunError` |
+| Invalid dependency admission | 78 (`CONFIG`) | `Hive::DependencyAdmissionError` |
 | Internal error | 70 (`SOFTWARE`) | `Hive::InternalError` |
 
 ## Backlinks

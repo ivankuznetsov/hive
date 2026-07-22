@@ -181,6 +181,21 @@ class HiveDaemonDisplayNameBackfillerTest < Minitest::Test
     assert_empty spawn.calls, "rows without a folder must be skipped, not crash"
   end
 
+  def test_admission_error_row_is_skipped_without_reading_or_spawning
+    folder = make_task_folder(display_name: nil)
+    row = make_row(folder)
+    row.admission_error = Hive::DependencyAdmission::AdmissionError.new(
+      reason_code: "dependency_metadata_unreadable",
+      offending_ref: row.slug,
+      safe_correction: "Repair meta.yml."
+    )
+    spawn = FakeSpawn.new
+
+    backfiller(spawn: spawn).backfill([ row ], now: NOW)
+
+    assert_empty spawn.calls
+  end
+
   def test_backfill_never_raises_on_bad_row
     # A row whose folder accessor explodes must degrade to a no-op tick,
     # not propagate out of backfill.
@@ -315,7 +330,7 @@ class HiveDaemonDisplayNameBackfillerTest < Minitest::Test
   def test_unreadable_meta_is_not_treated_as_missing
     folder = make_task_folder(display_name: nil)
     spawn = FakeSpawn.new
-    with_replaced_singleton_method(Hive::TaskMeta, :read, ->(*) { raise "meta boom" }) do
+    with_replaced_singleton_method(Hive::TaskMeta, :read_for_admission, ->(*) { raise "meta boom" }) do
       backfiller(spawn: spawn).backfill([ make_row(folder) ], now: NOW)
     end
 

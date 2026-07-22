@@ -141,24 +141,6 @@ module Hive
         build_result(result, attempts, max_attempts)
       end
 
-      def max_attempts_from_spec
-        value = spec["max_attempts"]
-        return Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS if value.nil?
-
-        Integer(value)
-      rescue ArgumentError
-        # pr-review-toolkit round-5 H1 + M4: surface the defensive
-        # fallback to stderr so a programmatic / test-only path that
-        # bypassed Hive::Config.validate_reviewers! doesn't silently
-        # land on a default the caller didn't ask for. (TypeError is
-        # dead with the `value.nil?` short-circuit above — only
-        # ArgumentError is reachable here, from Integer("two") and
-        # friends.)
-        warn "[hive.reviewers] reviewer #{spec['name'].inspect}: invalid max_attempts " \
-             "#{value.inspect}; using default #{Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS}"
-        Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS
-      end
-
       # pr-review-toolkit round-5 M2: TOCTOU-safe wrapper for the two
       # `File.delete(output_path)` sites in the retry loop. Distinguishes
       # ENOENT (file may not exist on first attempt — normal) from
@@ -185,22 +167,6 @@ module Hive
         Hive::Reviewers.backoff_seconds_for(failed_attempt)
       end
 
-      # ce-review round-3 P1 #3 helpers. `deadline` is a monotonic
-      # timestamp; `nil` means "no caller-imposed deadline" and the
-      # adapter behaves identically to pre-deadline code.
-      def deadline_remaining(deadline)
-        deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      end
-
-      def effective_timeout(configured_timeout, deadline)
-        return configured_timeout unless deadline
-
-        remaining = deadline_remaining(deadline)
-        return remaining.floor if remaining <= 0
-
-        [ configured_timeout, remaining.floor ].min
-      end
-
       def backoff(seconds)
         sleep(seconds)
       end
@@ -225,7 +191,8 @@ module Hive
             name: name,
             output_path: output_path,
             status: :error,
-            error_message: msg
+            error_message: msg,
+            limit_text: spawn_result[:limit_text]
           )
         end
       end

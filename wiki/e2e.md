@@ -7,7 +7,7 @@ updated: 2026-07-16
 tags: [test, e2e, tui, incidents, artifacts]
 ---
 
-**TLDR**: `test/e2e/` is the outer test layer. It drives the checkout's real `bin/hive` in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, keeps GitHub-facing subprocesses behind a fail-closed scripted `gh` shim, and writes versioned run artifacts for later debugging. Pending incident fixtures preserve sibling-owned activation contracts without counting as passing regression proof. The `bin/hive-e2e` Thor executable is also a small public harness surface with pinned exit codes and JSON error envelopes for wrapper/CI callers.
+**TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, and writes versioned run artifacts for later debugging. The `bin/hive-e2e` Thor executable is also a small public harness surface with pinned exit codes and JSON error envelopes for wrapper/CI callers.
 
 ## Commands
 
@@ -17,6 +17,7 @@ bin/hive-e2e list               # scenario inventory
 bin/hive-e2e run                # all scenarios
 bin/hive-e2e run --filter tui   # tag filter
 bin/hive-e2e run --filter incident-regression --json
+test/e2e/check_incident_budget.rb test/e2e/runs
 bin/hive-e2e clean              # old run cleanup
 ```
 
@@ -82,10 +83,12 @@ configured retention default for a malformed destructive invocation.
 | Path | Purpose |
 |------|---------|
 | `test/e2e/lib/` | Harness library: sandbox bootstrap, CLI driver, tmux driver, parser, executor, artifact capture, report writer. |
-| `test/e2e/fixtures/gh` | Executable default-deny `gh` shim driven by run-local ordered interactions. |
 | `test/e2e/scenarios/*.yml` | Agent-authorable scenarios using the locked YAML vocabulary. |
+| `test/e2e/scenarios/README.md` | Incident metadata, activation lifecycle, sibling index, GitHub scripting, and process-isolation contract. |
+| `test/e2e/fixtures/gh` | Run-global, default-deny GitHub CLI shim with no host-binary fallback. |
 | `test/e2e/sample-project/` | Tiny Ruby fixture copied into each scenario sandbox. Vendored gems keep bootstrap offline. |
 | `test/e2e/runs/` | Gitignored run artifacts. Each run has `report.json` and per-scenario artifact directories. |
+| `test/e2e/check_incident_budget.rb` | Report-driven below-5s-per-incident and below-30s-aggregate CI gate. |
 | `bin/hive-e2e` | Thor shell for run/list/replay/clean. |
 
 ## Scenario DSL
@@ -96,60 +99,12 @@ Supported step kinds:
 - `json_assert`: run a CLI command, parse stdout, validate it against a `schemas/hive-*.json` file, then optionally assert a `pick` path.
 - `state_assert`: assert file existence, absence, marker state, substring, or regex match; supports a short timeout for async TUI updates.
 - `seed_state`, `write_file`, `register_project`, `ruby_block`: fixture setup escape hatches.
-- `script_gh`: install an ordered run-local script for exact `gh` interactions.
 - `tui_expect`, `tui_keys`, `wait_subprocess`: tmux-backed TUI interaction.
 - `editor_action`, `log_assert`: narrower fixture helpers for editor/log flows.
+- `script_gh`: install an ordered sequence of exact GitHub argv, optional cwd/repository expectations, response JSON/stdout, stderr, and exit status.
+- `start_releases_stub`, `spawn_background`, `stop_process`: start controlled release responses and attached, harness-owned process groups for daemon-style scenarios.
 
 Template variables include `{sandbox}`, `{run_home}`, `{project}`, `{slug}`, `{run_id}`, and `{task_dir:<stage>}`.
-
-### Scripted GitHub boundary
-
-`SandboxEnv` puts `test/e2e/fixtures/` first on `PATH` for CLI, background,
-and tmux-launched Hive processes, and sets `HIVE_E2E_GH_STUB_DIR` to the
-run-local `<run_home>/gh-stub` directory. Scenario `env:` overrides may replace
-the rest of `PATH`, but `SandboxEnv.merge` restores the shim as its first entry
-and restores the original stub directory, so a scenario cannot fall through to
-the operator's real `gh` or redirect the interaction ledger. Generated repros
-apply the same merge to `cli`, `json_assert`, and `spawn_background` commands.
-
-`script_gh.interactions` is an ordered array. Every item requires exact string
-`args` and may constrain `cwd` and `repository`; the latter is derived from
-`--repo`/`-R` forms or `GH_REPO`. A match can return either JSON from
-`response` or literal `stdout`, plus optional `stderr` and an `exit_status`
-from 0 through 255. Defining both `response` and `stdout`, using unknown keys,
-or supplying a malformed field is rejected before the script is installed.
-Installation atomically writes `script.json` with schema
-`hive-e2e-gh-script` version 1 plus `state.json` with `next_index: 0`, and
-clears the prior audit.
-
-The executable shim serializes concurrent calls with a run-local flock,
-consumes matched interactions in order, and appends every attempt to
-`audit.jsonl` with argv, cwd, repository, expected interaction, and rejection
-reason. A missing script, argv/cwd/repository mismatch, exhausted script, or
-non-regular, symlinked, or malformed script/state file fails closed with exit
-86; an empty or symlinked stub root is denied at startup, and there is no
-real-`gh` fallback. After all scenario steps, `StepExecutor` fails the scenario if any
-audited call was rejected or any scripted interaction remains unconsumed.
-`repro.sh` re-installs expanded `script_gh` interactions before replaying later
-steps.
-
-### Hermetic runtime boundary
-
-`SandboxEnv` pins both `HIVE_BIN` and `HIVE_INVOKED_BIN` to the checkout's
-`bin/hive`, after merging scenario overrides. Neither an operator's inherited
-environment nor scenario `env:` / `tui_env:` values can redirect nested
-daemon, display-name, blocking, background, or TUI-dispatched work to an
-installed Hive wrapper. The existing fail-closed `gh` shim directory and
-run-local script root remain protected by the same merge boundary.
-
-Sandbox bootstrap writes `claude.mode: headless` into each copied project's
-config. Claude and Codex still resolve to `test/fixtures/fake-claude`, so fake
-agent stages use the subprocess protocol rather than production Claude/tmux
-readiness detection. TUI scenarios remain real tmux sessions: their tmux
-server is created inside `Bundler.with_unbundled_env`, with inherited Bundler,
-Ruby-manager, and gem-path variables removed before the sample-project
-`Gemfile` is applied. This prevents a root `bundle exec` invocation from
-combining its `RUBYOPT` or `BUNDLE_PATH` with the sandbox bundle.
 
 ### Trust boundary
 
@@ -167,30 +122,61 @@ Each entry in `report.json#scenarios[]` carries a `status`:
 - `failed` — at least one step raised; failure artifacts are written under `scenarios/<name>/`.
 - `setup_failed` — `Sandbox.bootstrap` raised before any step ran. `failed_step_index` is `null`, `artifacts_dir` is `null`. The aggregate run-level status (`complete` / `partial` / `crashed`) is unaffected.
 
-### Pending incident fixtures
+### Incident metadata and pending fixtures
 
-Incident scenarios declare `tags: [incident-regression]`, a stable
-`incident_id`, a sibling task id, and `pending: true`. Pending fixtures are
-activation scaffolds: their final `state_assert` deliberately points at a
-nonexistent `pending-contracts/...` guard, and their comments prohibit
-inventing persistence fields or reason codes before the sibling implementation
-defines them. The source-branch scenario README states that pending scenarios
-remain visible as metadata but their steps do not execute or contribute a
-passing scenario row.
+Scenarios tagged `incident-regression` require a non-empty `description`, a
+lowercase-kebab `incident_id`, and a `sibling_task_id` shaped like `#9767`.
+`pending: true` is a temporary sibling gate, not a scenario result status. A
+selected pending fixture is parsed and included in the additive top-level
+`scenario_metadata` array, but its steps do not execute, it contributes no
+`scenarios[]` row, and it does not change existing summary counts. A
+pending-only run is therefore complete and green with `summary.total: 0`, but
+does not claim that any incident passed. Legacy v1 reports without
+`scenario_metadata` remain schema-valid.
 
-This queued batch actually adds five such fixtures:
+Activation consumes the sibling task's exact persisted state, terminal state,
+and reason code before removing `pending`. Harness fixtures must not infer
+those contracts. The scenario README is the canonical six-incident index and
+activation checklist.
 
-| Incident | Sibling | Activation contract |
-|----------|---------|---------------------|
-| `accepted-attempt-caller-loss` | `#9767` | Preserve accepted attempt → caller death → single daemon adoption ordering, then assert exact attempt ownership and no duplicate claim. |
-| `finalize-pr-lifecycle-gate` | `#9769` | Script the synthetic draft/open → ready/unmerged → merged GitHub reads, then assert finalize is held until the terminal PR state. |
-| `plan-only-dependency-gate` | `#9771` | Add the sibling-defined dependency metadata, prove repeated daemon ticks dispatch nothing below the threshold, then prove one eligible dispatch after release. |
-| `repository-routing` | `#9771` | Add repository identities and scripted head evidence, then prove route-or-reject behavior without touching the non-target project. |
-| `provider-limit-retry` | `#9770` | Hold an ineligible `limits_reached` row across repeated ticks, release it through the supported cooldown seam, and assert bounded retry ownership/counts. |
+`list --json` exposes `incident_id`, `sibling_task_id`, and `pending` on every
+inventory row (nullable IDs on ordinary scenarios); human list/run output marks
+pending fixtures and reports selected, executed, pending, passed, and failed
+counts. Incident metadata without the `incident-regression` tag is rejected so
+it cannot bypass runtime budgets.
 
-The branch tree also contains `generation-scoped-no-worktree-marker` for
-`#9768`, but none of the actual queued commit diffs adds that file; the queue
-provenance mismatch is tracked in [[gaps]].
+### Hermetic GitHub and agents
+
+`SandboxEnv` puts `test/e2e/fixtures/gh` first on `PATH`, pins the exact require
+paths from Bundler's resolved specs as `RUBYLIB` so subprocesses retain the
+locked dependency set without inheriting Bundler setup, and pins
+`HIVE_GH_BIN` to the same shim for blocking, background, tmux, and replay
+subprocesses. `script_gh` interactions are
+consumed atomically. An absent or exhausted script, unexpected argv, cwd
+mismatch, or repository mismatch exits non-zero and records the rejected call;
+the shim never resolves or executes the machine's real `gh`. Thus e2e GitHub
+reads and mutations are synthetic and no real network access is possible.
+Git commands without `--repo`/`GH_REPO` derive a normalized identity from the
+checkout origin and record that provenance. One ordered script is allowed per
+scenario, the audit is append-only, and background plus tmux/TUI producers
+(including detached TUI workflow process groups recorded in the run-scoped
+lifecycle log) stop before the locked final verification or failure evidence snapshot.
+Harness-owned `BUNDLE_GEMFILE`, `HIVE_HOME`, built-in agent fixture binaries,
+`HIVE_BIN`, and `HIVE_INVOKED_BIN` cannot be replaced by scenario or operator
+overrides.
+
+Claude, Codex, Pi, and Grok profiles resolve to `test/fixtures/fake-claude`.
+Its `HIVE_FAKE_CLAUDE_READY_FILE` /
+`HIVE_FAKE_CLAUDE_RELEASE_FILE` barrier publishes a real PID atomically and
+waits on a condition file, allowing cross-process races without fixed sleeps.
+`spawn_background` owns a process group, and both explicit `stop_process` and
+scenario teardown terminate and reap registered groups.
+The copied project pins `claude.mode: headless`; this keeps fake Claude on its
+subprocess contract instead of sending it through production interactive-tmux
+readiness detection. TUI scenarios still run the real long-lived `hive tui`
+inside tmux. The harness creates that tmux server inside
+`Bundler.with_unbundled_env`, preventing the parent root bundle's `RUBYOPT` or
+`BUNDLE_PATH` from being combined with the sample project's Gemfile.
 
 ## Artifacts
 
@@ -208,8 +194,8 @@ On failure, the harness writes a scenario bundle containing:
 - `sandbox-git-status.txt`
 - `sandbox-tree.txt`
 - copied `.hive-state/stages/` and per-`.log` copies under `logs/<slug>/<basename>.log` plus a sibling `<basename>.tail` (last 200 lines) for fast agent reads
-- copied GitHub shim evidence under `gh/` (`script.json`, `state.json`, and `audit.jsonl` when present)
 - `repro.sh`
+- `gh/script.json`, `gh/state.json`, and `gh/audit.jsonl` when GitHub scripting was installed or rejected
 - `manifest.json` with size and SHA-256 per artifact
 - TUI failures also include keystroke captures, run-scoped TUI subprocess marker/capture logs under `tui-subprocess/` (including the current shared marker log and its single `.log.1` rotation), plus `pane-before.txt` (snapshot taken just before the most recent `tui_keys`) and `pane-after.txt`. Cast recording is implemented by `AsciinemaDriver`, but depends on local `asciinema >= 2.4`.
 
@@ -217,23 +203,36 @@ On failure, the harness writes a scenario bundle containing:
 
 | Scenario | Coverage |
 |----------|----------|
-| `full_pipeline_happy_path` | Real subprocess choreography from new task to done, avoiding network PR creation; the artifacts stage now asks fake Claude to write the asserted `artifact.md` completion marker. |
+| `full_pipeline_happy_path` | Real subprocess choreography from new task to done, avoiding network PR creation. |
 | `review_with_findings_then_develop` | `findings --json`, `accept-finding`, schema validation, review file toggles. |
 | `run_error_envelope` | `hive run --json` against a stale-locked task emits a parseable `hive-run` error payload. |
 | `stale_lock_recovery` | TEMPFAIL lock path, marker clear, rerun recovery. |
 | `tui_status_navigate_dispatch_plan` | TUI verb-key dispatch end-to-end: `p` on a ready-to-plan row spawns `bin/hive plan`, waits for the subprocess to exit, and asserts plan.md/COMPLETE landed. |
 | `tui_new_idea_editing` | TUI new-idea prompt paste delivery plus cursor navigation/insertion before submit. |
-| `tui_two_pane_navigate` | TUI v2 navigation between task list and detail panes, including focus changes and row movement; scope assertions use the rendered `Tasks · <project>` heading. |
-| `two_projects_fuzzy_filter` | tmux TUI filter input and project scope across two registered projects, asserted through the rendered project heading. |
+| `tui_two_pane_navigate` | TUI v2 navigation between task list and detail panes, including focus changes and row movement. |
+| `two_projects_fuzzy_filter` | tmux TUI filter input and project scope across two registered projects. |
 | `update_flow_pipeline` | Daemon update-check pipeline against a releases stub. |
 | `update_flow_tui_footer` | TUI update footer rendering after the update check records a newer release. |
 | `update_flow_tui_no_nudge` | TUI no-update-nudge path when update state should not be shown. |
 | `update_flow_up_to_date` | Daemon update-check path when the installed version is already current. |
+| `incident_plan_only_dependency_gate` | Rejects a plan-only assertion, holds exact metadata below the gate, then proves one real dispatch after the prerequisite reaches `8-finalize`. |
+| `incident_repository_routing` | Rejects a cross-project dependency whose registered repository identity disagrees with its live origin and preserves the non-target task. |
+
+The six incident-regression fixtures and their current pending/green states
+are indexed in `test/e2e/scenarios/README.md`. The two #9771 fixtures are green;
+pending fixtures for #9767, #9768, #9769, and #9770 remain report-visible until
+their sibling-owned persistence and reason contracts are available.
 
 ## Operational Notes
 
-The harness puts its fixture directory first on the tmux environment `PATH` for the fail-closed `gh` shim, then includes the active Ruby bin directory and repo `bin/` so TUI rows dispatch the checkout's commands such as `hive plan ...`. `tui_keys` with `text:` sends literal text one character at a time by default for deterministic slow typing; `paste: true` sends the full `text:` value as one literal tmux chunk to exercise the TUI paste-aware runner.
+The harness prepends repo `bin/` to the tmux environment PATH because TUI rows dispatch commands like `hive plan ...`. `tui_keys` with `text:` sends literal text one character at a time by default for deterministic slow typing; `paste: true` sends the full `text:` value as one literal tmux chunk to exercise the TUI paste-aware runner.
 `CliDriver` starts CLI subprocesses in their own process group and applies the step timeout to both the direct child and stdout/stderr reader threads, so descendants that inherit the capture pipes cannot hold an e2e step open after their parent exits.
+
+Routine pull-request CI runs `e2e:lib_test` and `rake e2e` in a separate job,
+retains the run directory even after failure, and then reads enabled incident
+durations from `report.json`. Durations include sandbox bootstrap; each enabled
+incident must be below five seconds and the group below thirty seconds. This job does not fold e2e into the default
+`rake test` task.
 
 `tmux` is required for TUI scenarios. `asciinema` is test-time optional until a TUI failure needs a cast, but missing/corrupt casts are recorded in artifacts instead of crashing unrelated CLI scenarios. If `asciinema` is installed outside PATH, set `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema`.
 

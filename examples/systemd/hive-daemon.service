@@ -73,9 +73,10 @@ Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.local/bin/hive daemon start
 Restart=on-failure
 RestartSec=30s
-# Forward SIGTERM through the PGID so children get the graceful shutdown
-# the daemon's own TERM handler delivers (up to daemon.shutdown_grace_sec).
-KillMode=mixed
+# Stop or restart only the supervised daemon process. Accepted stage attempts
+# have durable lease owners in detached wrapper/worker processes; they must
+# survive daemon replacement so the new daemon can adopt them without replay.
+KillMode=process
 TimeoutStopSec=900
 
 [Install]

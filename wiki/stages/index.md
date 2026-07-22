@@ -29,6 +29,8 @@ future `kind: :agent` stages outside the coding runner names. See
 
 `Hive::Stages::Council` is a reusable descriptor-backed document review runner
 for `kind: :council` custom workflow stages. See [[stages/council]].
+Generic agent and council runners share `Base.marker_commit_action`, including
+the markerless `nil` commit result that prevents empty audit commits.
 
 ## 6-review phase order
 

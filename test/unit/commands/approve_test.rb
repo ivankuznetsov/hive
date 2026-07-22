@@ -3,10 +3,37 @@ require "hive/commands/approve"
 require "fileutils"
 
 class HiveCommandsApproveTest < Minitest::Test
+  include HiveTestHelper
+
   FakeTask = Struct.new(:slug, :stage_index, :stage_name, :folder, :hive_state_path, :project_root, :workflow)
 
   def command(**kwargs)
     Hive::Commands::Approve.new("slug", **kwargs)
+  end
+
+  def test_observation_guard_runs_under_commit_and_task_locks_before_move
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "2-brainstorm", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "brainstorm.md"), "# state\n<!-- COMPLETE -->\n")
+      current = task(folder: source, hive_state_path: state, project_root: root)
+      guarded = command(
+        observation_guard: lambda do |observed|
+          assert_same current, observed
+          assert File.exist?(File.join(state, ".commit-lock"))
+          assert File.exist?(File.join(source, ".lock"))
+          raise Hive::StaleOperationalObservation, "rotated"
+        end
+      )
+
+      assert_raises(Hive::StaleOperationalObservation) do
+        guarded.send(:perform_move_and_commit, current, "3-plan")
+      end
+      assert File.directory?(source), "guard failure must leave the source task in place"
+      refute File.exist?(File.join(source, ".lock")), "guard failure must release the task lock"
+      refute File.exist?(File.join(state, "stages", "3-plan", current.slug))
+    end
   end
 
   def task(folder: "/tmp/task", hive_state_path: "/tmp/state", project_root: "/tmp/project",
@@ -52,6 +79,22 @@ class HiveCommandsApproveTest < Minitest::Test
     end
 
     assert_equal "", out
+  end
+
+  def test_emit_envelope_preserves_json_generation_failure
+    cmd = command(json: true)
+
+    with_replaced_singleton_method(JSON, :generate, lambda { |_payload|
+      raise JSON::GeneratorError, "bad json"
+    }) do
+      out, err = capture_io do
+        assert_raises(JSON::GeneratorError) do
+          cmd.send(:emit_envelope, Hive::Error.new("boom"))
+        end
+      end
+      assert_empty out
+      assert_empty err
+    end
   end
 
   def test_direction_of_reports_same_stage
@@ -108,6 +151,27 @@ class HiveCommandsApproveTest < Minitest::Test
     assert_includes error.message, "1-intake, 2-gather, 3-report"
   end
 
+  def test_forward_approve_runs_execute_condition_guard_before_marker_acceptance
+    current = task(
+      stage_index: 4, stage_name: "execute",
+      workflow: Hive::Workflows::Coding::DESCRIPTOR
+    )
+    marker = Hive::Markers::State.new(name: :execute_complete, attrs: {}, raw: nil)
+    calls = []
+    guard = lambda do |observed, force:, source:|
+      calls << [ observed, force, source ]
+      raise Hive::WrongStage, "condition gate blocked"
+    end
+
+    with_replaced_singleton_method(Hive::Conditions::TransitionGuard, :validate!, guard) do
+      error = assert_raises(Hive::WrongStage) do
+        command.send(:validate_move!, current, "5-open-pr", marker)
+      end
+      assert_includes error.message, "condition gate blocked"
+    end
+    assert_equal [ [ current, false, "approve" ] ], calls
+  end
+
   def test_move_task_uses_cross_device_fallback_on_exdev
     Dir.mktmpdir("hive-approve-unit") do |root|
       state = File.join(root, ".hive-state")
@@ -129,6 +193,56 @@ class HiveCommandsApproveTest < Minitest::Test
       assert_equal File.join(state, "stages", "3-plan", "slug-260522-abcd"), new_folder
       assert File.exist?(File.join(new_folder, "task.md"))
       refute Dir.exist?(source)
+    ensure
+      File.singleton_class.define_method(:rename, original) if original
+    end
+  end
+
+  def test_condition_gate_error_envelope_preserves_gate_and_recovery_action
+    error = Hive::ConditionGateBlocked.new(
+      "blocked",
+      current_stage: "4-execute", target_stage: "5-open-pr",
+      condition_gate: {
+        "status" => "blocked", "transition" => "execute_to_open_pr",
+        "diagnostics" => [ { "condition" => "ChangesPresent", "state" => "unsatisfied" } ],
+        "waivers" => []
+      },
+      next_action: {
+        "kind" => Hive::Schemas::NextActionKind::EDIT,
+        "reason" => "no_worktree_changes"
+      }
+    )
+
+    out, = capture_io { command.send(:emit_envelope, error) }
+    payload = JSON.parse(out)
+    assert_equal "blocked", payload.dig("condition_gate", "status")
+    assert_equal "ChangesPresent",
+                 payload.dig("condition_gate", "diagnostics", 0, "condition")
+    assert_equal Hive::Schemas::NextActionKind::EDIT, payload.dig("next_action", "kind")
+    assert_equal "4-execute", payload.fetch("current_stage")
+    assert_equal "5-open-pr", payload.fetch("target_stage")
+  end
+
+  def test_move_task_reports_destination_collision_when_rename_loses_race
+    Dir.mktmpdir("hive-approve-unit") do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "2-brainstorm", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      approve_task = task(folder: source, hive_state_path: state, project_root: root)
+      cmd = command
+      cmd.define_singleton_method(:destination_exists?) { |_path| false }
+      original = File.singleton_class.instance_method(:rename)
+      File.define_singleton_method(:rename) do |from, _to|
+        raise Errno::ENOTEMPTY, "destination appeared" if from == source
+
+        original.bind_call(File, from, _to)
+      end
+
+      error = assert_raises(Hive::DestinationCollision) do
+        cmd.send(:move_task!, approve_task, "3-plan")
+      end
+
+      assert_equal File.join(state, "stages", "3-plan", "slug-260522-abcd"), error.path
     ensure
       File.singleton_class.define_method(:rename, original) if original
     end
@@ -321,7 +435,7 @@ class HiveCommandsApproveTest < Minitest::Test
     assert_equal "error", cmd.send(:error_kind_for, Hive::Error.new("generic"))
 
     out, _err = capture_io do
-      cmd.send(:emit_error_envelope, StandardError.new("plain"))
+      cmd.send(:emit_envelope, StandardError.new("plain"))
     end
     payload = JSON.parse(out)
     assert_equal "error", payload.fetch("error_kind")

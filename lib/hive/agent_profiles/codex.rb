@@ -38,7 +38,13 @@ module Hive
       min_version: "0.125.0",
       status_detection_mode: :output_file_exists,
       usage_extractor: Hive::AgentProfiles::UsageExtractors::CODEX,
-      skill_verifier: Hive::SkillCheck::Codex.method(:verify)
+      skill_verifier: Hive::SkillCheck::Codex.method(:verify),
+      default_model_resolver: ->(**kwargs) {
+        Hive::ImplementationIdentity::NativeDefaults.resolve(:codex, **kwargs)
+      },
+      model_argument_builder: ->(model) { [ "--model", model ] },
+      effort_argument_builder: ->(effort) { [ "-c", "model_reasoning_effort=#{effort}" ] },
+      launcher_identity: "codex-cli/v1"
     )
 
     register(:codex, CODEX)

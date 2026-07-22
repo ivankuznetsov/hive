@@ -33,8 +33,41 @@ jobs:
           HIVE_COVERAGE_MIN_LINE: "100"
         run: bundle exec rake coverage
 
+  e2e:
+    name: real CLI scenario harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Install tmux for TUI scenarios
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tmux
+      - name: Run harness library tests
+        run: bundle exec rake e2e:lib_test
+      - name: Run real-subprocess scenarios
+        env:
+          HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
+        run: bundle exec rake e2e
+      - name: Enforce incident duration budgets
+        env:
+          HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
+        run: bundle exec ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR"
+      - name: Retain e2e reports and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: hive-e2e-report
+          path: ${{ runner.temp }}/hive-e2e-runs
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+
   web:
-    name: hivebox web (Rails tests + system)
+    name: Hive web (Rails tests + system)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -62,7 +95,7 @@ jobs:
           BUNDLE_DEPLOYMENT: ""
           BUNDLE_FROZEN: ""
         run: bundle install --jobs 4
-      - name: hivebox golden-path E2E (claim → idea → Q&A → daemon → PR gate)
+      - name: Hive web golden-path E2E (claim → idea → Q&A → daemon → PR gate)
         env:
           GOLDEN_E2E_BUNDLE_PATH: ${{ github.workspace }}/vendor/root-bundle
         run: bin/rails test test/e2e/golden_path_e2e.rb
@@ -159,8 +192,35 @@ jobs:
           # --no-bootstrap: skip the managed-web-bundle fetch (its release asset
           # doesn't exist until a version is tagged, so a plain `install` 404s).
           # The plist's WorkingDirectory is rewritten to $HOME, not the app dir,
-          # so the install mechanics need no bundle.
-          bundle exec hive web install --no-bootstrap
+          # so the install mechanics need no bundle. The readiness contract
+          # deliberately exits non-zero when that unbootstrapped service cannot
+          # answer /health; validate the emitted install state before accepting
+          # that bounded not-ready outcome.
+          set +e
+          out="$(bundle exec hive web install --no-bootstrap --json)"
+          web_install_rc=$?
+          set -e
+          # Ruby expands its own $stdin and interpolation; Bash must preserve them.
+          # shellcheck disable=SC2016
+          printf '%s\n' "$out" \
+            | WEB_INSTALL_RC="$web_install_rc" WEB_PLIST="$plist" ruby -rjson -e '
+              d = JSON.parse($stdin.read)
+              mechanics = d["schema"] == "hive-web-install" &&
+                d["platform"] == "macos" &&
+                d["target_path"] == ENV.fetch("WEB_PLIST") &&
+                d["outcome"] == "written" &&
+                d["service_manager_available"] &&
+                d["service_installed"] &&
+                d["service_enabled"]
+              rc = Integer(ENV.fetch("WEB_INSTALL_RC"))
+              readiness = if rc.zero?
+                d["ok"] && d["ready"] && d["readiness"] == "ready"
+              else
+                rc == 1 && !d["ok"] && !d["ready"] &&
+                  %w[inactive active_not_ready].include?(d["readiness"])
+              end
+              abort("web install: invalid launchd mechanics/readiness envelope: #{d.inspect}") unless mechanics && readiness
+            '
           test -f "$plist" || { echo "web plist not written to $plist" >&2; exit 1; }
           if grep -q "/Users/YOU" "$plist"; then echo "web plist WorkingDirectory placeholder not rewritten to \$HOME" >&2; exit 1; fi
           if ! launchctl list | grep -q local.hive-web; then echo "web job not loaded into launchd" >&2; exit 1; fi

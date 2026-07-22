@@ -78,6 +78,8 @@ module Hive
           [ model.with(mode: :archive), nil ]
         when Messages::OpenRedStatusDetail
           [ apply_open_red_status_detail(model, message), nil ]
+        when Messages::OpenImplementationIdentityDetail
+          [ apply_open_implementation_identity_detail(model, message), nil ]
         when Messages::RedStatusDetailScroll
           [ apply_red_status_detail_scroll(model, message), nil ]
         when Messages::HelpScroll
@@ -177,6 +179,18 @@ module Hive
         new_model = model.with(snapshot: msg.snapshot, last_error: nil)
         if model.mode == :red_status_detail && model.red_status_detail_state
           return apply_red_status_detail_snapshot(new_model, model.red_status_detail_state)
+        end
+        if model.mode == :implementation_identity_detail && model.implementation_identity_detail_state
+          state = model.implementation_identity_detail_state
+          row = find_row_for_detail(new_model.snapshot, state.row)
+          return new_model.with(
+            mode: :grid,
+            implementation_identity_detail_state: nil,
+            flash: "#{state.row.slug} no longer in this project",
+            flash_set_at: Time.now
+          ) unless row
+
+          return new_model.with(implementation_identity_detail_state: state.with(row: row))
         end
 
         visible = visible_snapshot(new_model)
@@ -754,6 +768,14 @@ module Hive
         model.with(mode: :red_status_detail, red_status_detail_state: state)
       end
 
+      def apply_open_implementation_identity_detail(model, msg)
+        state = Model::ImplementationIdentityDetailState.new(row: msg.row)
+        model.with(
+          mode: :implementation_identity_detail,
+          implementation_identity_detail_state: state
+        )
+      end
+
       def apply_red_status_detail_scroll(model, msg)
         state = model.red_status_detail_state
         if model.mode != :red_status_detail || state.nil?
@@ -843,6 +865,8 @@ end
           closed = model.with(mode: :grid, red_status_detail_state: nil)
           visible = visible_snapshot(closed)
           visible.nil? ? closed : closed.with(cursor: reclamp_cursor(visible, closed.cursor))
+        when :implementation_identity_detail
+          model.with(mode: :grid, implementation_identity_detail_state: nil)
         when :idea_preview
           model.with(mode: :grid, info_panel_state: nil)
         when :help, :filter then model.with(mode: :grid)

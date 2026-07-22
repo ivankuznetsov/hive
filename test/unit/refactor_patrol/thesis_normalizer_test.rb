@@ -338,7 +338,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
 
   def test_schema_invalid_normalization_returns_error_details
     raw = valid_raw_thesis
-    raw["risk"]["caps"]["est_files"] = -1
+    raw["risk"]["public_api_details"] = [ 1 ]
     result = normalize(raw)
 
     assert_instance_of Hive::RefactorPatrol::ThesisNormalizer::Invalid, result
@@ -365,14 +365,36 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     end
   end
 
-  def test_v2_schema_strictly_rejects_signal_and_value_on_evidence
+  def test_v3_schema_strictly_rejects_signal_and_value_on_evidence
     thesis = normalize(valid_raw_thesis)
     payload = thesis.to_h
     payload.fetch("evidence").first["signal"] = "churn"
     payload.fetch("evidence").first["value"] = 10
 
     refute thesis_schemer.valid?(payload)
-    assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol-thesis")
+    assert_equal 3, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol-thesis")
+  end
+
+  def test_historical_v1_and_v2_thesis_fixtures_remain_valid_while_v3_omits_size_estimates
+    current = normalize(valid_raw_thesis).to_h
+    refute current.dig("risk", "caps").key?("est_files")
+    refute current.dig("risk", "caps").key?("est_diff_lines")
+    assert thesis_schemer.valid?(current), thesis_schemer.validate(current).map { |error| error["error"] }.inspect
+
+    legacy_v2 = JSON.parse(JSON.generate(current))
+    legacy_v2.fetch("risk").fetch("caps").merge!("est_files" => 8, "est_diff_lines" => 400)
+    v2_schemer = JSONSchemer.schema(
+      Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 2))
+    )
+    assert v2_schemer.valid?(legacy_v2), v2_schemer.validate(legacy_v2).map { |error| error["error"] }.inspect
+
+    legacy_v1 = JSON.parse(JSON.generate(legacy_v2))
+    legacy_v1.delete("feature_hotspot")
+    legacy_v1.fetch("expected_leverage").delete("drivers")
+    v1_schemer = JSONSchemer.schema(
+      Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 1))
+    )
+    assert v1_schemer.valid?(legacy_v1), v1_schemer.validate(legacy_v1).map { |error| error["error"] }.inspect
   end
 
   def test_slice_without_tests_prescribes_characterization_and_lowers_high_confidence
@@ -409,7 +431,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     assert_includes thesis.required_validation.fetch("notes"), "Name explicit validation commands"
   end
 
-  def test_documentation_thesis_without_docs_validation_is_flagged_report_only
+  def test_documentation_thesis_without_configured_command_uses_built_in_validation
     raw = valid_raw_thesis.merge(
       "evidence" => [
         { "file" => "docs/guide.md", "line" => 3, "snippet" => "Setup", "claim" => "setup guidance is duplicated" }
@@ -419,10 +441,10 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     thesis = normalize(raw, feature: documentation_feature, commands: { "test" => "rake test" })
 
     assert thesis.admissible
-    assert_includes thesis.risk.fetch("flags"), "missing_docs_validation"
+    refute_includes thesis.risk.fetch("flags"), "missing_docs_validation"
     assert_empty thesis.required_validation.fetch("commands")
     refute thesis.required_validation.fetch("characterization_first")
-    assert_includes thesis.required_validation.fetch("notes"), "documentation validation"
+    assert_includes thesis.required_validation.fetch("notes"), "built-in documentation safety checks"
   end
 
   def test_documentation_thesis_uses_configured_docs_validation
@@ -439,6 +461,25 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     refute thesis.required_validation.fetch("characterization_first")
   end
 
+  def test_executable_documentation_format_without_configured_command_is_report_only
+    raw = valid_raw_thesis.merge(
+      "evidence" => [
+        { "file" => "docs/guide.mdx", "line" => 3, "snippet" => "Setup", "claim" => "setup guidance is duplicated" }
+      ],
+      "required_validation" => { "commands" => [], "characterization_first" => false, "notes" => "" }
+    )
+    thesis = normalize(
+      raw,
+      feature: documentation_feature(path: "docs/guide.mdx"),
+      commands: { "test" => "rake test" }
+    )
+
+    assert thesis.admissible
+    assert_includes thesis.risk.fetch("flags"), "missing_docs_validation"
+    assert_empty thesis.required_validation.fetch("commands")
+    assert_includes thesis.required_validation.fetch("notes"), "Configure an executable docs validation command"
+  end
+
   private
 
   def normalize(raw, feature: self.feature(tests: [ "test/checkout_test.rb" ]), leverage: feature_leverage,
@@ -452,12 +493,12 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     end
   end
 
-  def documentation_feature
+  def documentation_feature(path: "docs/guide.md")
     Hive::Patrol::Feature.new(
       id: "documentation-docs-root",
       kind: "documentation",
-      entrypoints: [ "docs/guide.md" ],
-      owned_files: [ "docs/guide.md" ],
+      entrypoints: [ path ],
+      owned_files: [ path ],
       context_files: [ "README.md" ],
       tests: []
     )

@@ -1,4 +1,4 @@
-# hivebox Docker
+# Hivebox Docker
 
 ## Install (golden path)
 
@@ -52,7 +52,7 @@ overridable with your own device-flow-enabled app. To pre-pin ownership
 instead of first-login claiming, set `web.github.owner` in the bind-mounted
 `config.yml`.
 
-## Updating
+## Upgrade
 
 Each release publishes `ghcr.io/ivankuznetsov/hivebox:<version>` and moves
 `:latest`. A running box updates with:
@@ -78,6 +78,19 @@ The supported operator surface is the authenticated web UI — a Rails 8 +
 Turbo app served by `hive web` inside the container (live status over Turbo
 Streams, image-attaching idea composer, your GitHub repo list one click from
 registration).
+
+## Troubleshooting
+
+- `docker info` must succeed for the current user before running either
+  installer. Start Docker Desktop/the Docker daemon or repair group access when
+  it does not.
+- A refused existing container name is deliberate. Resume with
+  `docker start hivebox`, or pull the new image, remove only that named
+  container, and rerun the installer; the `/data` directory remains intact.
+- Inspect `docker logs hivebox` and `docker inspect hivebox` when the container
+  starts but the health check does not become ready. Keep the default
+  `127.0.0.1` publish address until ownership is claimed and an operator has
+  deliberately configured a trusted proxy or tunnel.
 
 ## Terminal access: hive tui and tmux
 

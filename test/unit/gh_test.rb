@@ -34,6 +34,16 @@ class GhUnitTest < Minitest::Test
 
   # --- with_network_timeout --------------------------------------------
 
+  def test_remote_branch_validation_matches_worktree_contract
+    %w[feature//nested feature/.hidden feature/locked.lock feature@{upstream}].each do |branch|
+      error = assert_raises(Hive::GhError) do
+        Hive::Gh.send(:validated_branch_name, branch)
+      end
+      assert_match(/branch name is invalid/, error.message)
+    end
+    assert_equal "feature/nested", Hive::Gh.send(:validated_branch_name, " feature/nested ")
+  end
+
   def test_with_network_timeout_raises_typed_error_on_timeout
     err = assert_raises(Hive::GhError) do
       Hive::Gh.with_network_timeout do
@@ -546,6 +556,82 @@ def test_push_branch_force_passes_force_with_lease
     refute_includes captured, "--force-with-lease",
                     "a default push must not force"
   end
+end
+
+def test_push_exact_oid_names_immutable_source_and_never_forces
+  captured = nil
+  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  oid = "a" * 40
+  with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |path, *args, **_kwargs|
+    captured = [ path, *args ]
+    [ "", "", ok ]
+  }) do
+    result = Hive::Gh.push_exact_oid("/tmp/wt", oid, "feature")
+    assert result.success?
+  end
+
+  assert_equal [ "/tmp/wt", "push", "origin", "#{oid}:refs/heads/feature" ], captured
+  refute captured.any? { |arg| arg.include?("force") }
+end
+
+def test_push_exact_oid_returns_bounded_failure_for_invalid_identity
+  invalid_oid = Hive::Gh.push_exact_oid("/tmp/wt", "not-an-oid", "feature")
+  refute invalid_oid.success?
+  assert_includes invalid_oid.stderr, "OID is invalid"
+
+  invalid_branch = Hive::Gh.push_exact_oid("/tmp/wt", "a" * 40, "feature//bad")
+  refute invalid_branch.success?
+  assert_includes invalid_branch.stderr, "branch name is invalid"
+end
+
+def test_managed_origin_push_url_uses_hardened_git_boundary
+  captured = nil
+  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |path, *args, **_kwargs|
+    captured = [ path, *args ]
+    [ "git@github.com:acme/widgets.git\n", "", ok ]
+  }) do
+    assert_equal "git@github.com:acme/widgets.git", Hive::Gh.origin_push_url("/tmp/wt", managed: true)
+  end
+  assert_equal [ "/tmp/wt", "remote", "get-url", "--push", "--all", "origin" ], captured
+end
+
+def test_managed_remote_branch_lookup_uses_hardened_git_boundary
+  captured = nil
+  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |path, *args, **_kwargs|
+    captured = [ path, *args ]
+    [ "#{'a' * 40}\trefs/heads/feature\n", "", ok ]
+  }) do
+    oid = Hive::Gh.remote_branch_oid("/tmp/wt", "feature", managed: true)
+    assert_equal "a" * 40, oid
+  end
+
+  assert_equal [ "/tmp/wt", "ls-remote", "--heads", "origin", "refs/heads/feature" ], captured
+end
+
+def test_create_draft_pr_uses_explicit_args_and_always_removes_body_tempfile
+  captured = nil
+  failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
+    captured = [ cmd, kwargs, File.stat(cmd.fetch(cmd.index("--body-file") + 1)).mode & 0o777 ]
+    [ "", "timed out", failed ]
+  }) do
+    _out, _err, status = Hive::Gh.create_draft_pr(
+      "/tmp/wt", repository: "acme/demo", host: "github.com",
+      head: "feature", base: "main", title: "Focused fix", body: "private body"
+    )
+    refute status.success?
+  end
+
+  argv, kwargs, mode = captured
+  assert_equal 0o600, mode
+  assert_equal "/tmp/wt", kwargs.fetch(:chdir)
+  assert_includes argv, "--draft"
+  assert_equal "feature", argv.fetch(argv.index("--head") + 1)
+  assert_equal "main", argv.fetch(argv.index("--base") + 1)
+  refute_includes argv, "private body"
+  refute File.exist?(argv.fetch(argv.index("--body-file") + 1))
 end
 
 def test_push_branch_uses_exact_expected_oid_lease
@@ -1062,11 +1148,47 @@ def test_merged_prs_page_exposes_graphql_cursor_and_complete_merge_identity
   assert captured.first.any? { |arg| arg.include?("base:main") }
   search_arg = captured.first.find { |arg| arg.start_with?("searchQuery=") }
   assert_includes search_arg, "sort:created-asc"
-  assert_includes search_arg, "merged:>=2026-07-10T09:00:00Z"
-  assert_includes search_arg, "merged:<=2026-07-10T11:00:00Z"
+  assert_includes search_arg, "merged:2026-07-10T09:00:00Z..2026-07-10T11:00:00Z"
+  refute_includes search_arg, "merged:>="
+  refute_includes search_arg, "merged:<="
+  assert_equal 1, search_arg.scan("merged:").length
   assert_equal "/tmp/demo", captured.last.fetch(:chdir)
   assert_operator captured.last.fetch(:timeout_sec), :>, 0
   assert_operator captured.last.fetch(:timeout_sec), :<=, 2.0
+end
+
+def test_merged_prs_page_preserves_one_sided_merge_bounds
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  response = {
+    "data" => {
+      "search" => {
+        "issueCount" => 0,
+        "nodes" => [],
+        "pageInfo" => { "hasNextPage" => false, "endCursor" => nil }
+      }
+    }
+  }
+  searches = []
+
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **|
+    searches << cmd.find { |arg| arg.start_with?("searchQuery=") }
+    [ JSON.generate(response), "", status ]
+  }) do
+    refactor_patrol_github.merged_prs_page(
+      repository: "acme/demo", host: "github.com", default_branch: "main",
+      cursor: nil, merged_since: Time.utc(2026, 7, 10, 9), per_page: 25,
+      worktree_path: "/tmp/demo"
+    )
+    refactor_patrol_github.merged_prs_page(
+      repository: "acme/demo", host: "github.com", default_branch: "main",
+      cursor: nil, merged_since: nil, merged_until: Time.utc(2026, 7, 10, 11),
+      per_page: 25, worktree_path: "/tmp/demo"
+    )
+  end
+
+  assert_includes searches.fetch(0), "merged:>=2026-07-10T09:00:00Z"
+  assert_includes searches.fetch(1), "merged:<=2026-07-10T11:00:00Z"
+  searches.each { |search| assert_equal 1, search.scan("merged:").length }
 end
 
 def test_merged_prs_page_rejects_graphql_errors_or_missing_page_info
@@ -1414,7 +1536,9 @@ def test_refactor_patrol_gateway_timeout_and_url_helpers_fail_closed
     transport: Hive::Gh, monotonic_clock: -> { 2.0 }
   )
   assert_raises(Hive::GhError) { expired.send(:remaining_timeout, 1.0) }
-  assert_raises(Hive::GhError) { refactor_patrol_github.send(:validated_github_host, "[") }
+  assert_raises(Hive::GhError) do
+    Hive::Gh::RepositoryIdentity.validated_github_host("[")
+  end
   refute refactor_patrol_github.send(
     :pull_request_url_matches_repository?, "http://[", "acme/demo",
     host: "github.com", number: 7
@@ -1423,7 +1547,7 @@ end
 
 def test_repository_url_helpers_reject_invalid_uris_and_ssh_passwords
   assert_raises(Hive::GhError) do
-    Hive::Gh.send(:validated_github_host, "[")
+    Hive::Gh::RepositoryIdentity.validated_github_host("[")
   end
   refute refactor_patrol_github.send(
     :issue_url_matches_repository?, "http://[", "acme/demo", host: "github.com", number: 7

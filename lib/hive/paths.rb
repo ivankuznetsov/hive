@@ -28,6 +28,35 @@ module Hive
       File.join(state_home, ".task-counter.lock")
     end
 
+    # Owner-private daemon-to-CLI operational observation. Callers running
+    # against an injected daemon home may pass that state root explicitly.
+    def operational_snapshot_path(root = state_home)
+      File.join(root, "operational", "daemon-snapshot.json")
+    end
+
+    # Owner-private, versioned durable task-attempt state. Keeping the
+    # version in the directory name lets a future on-disk migration inspect
+    # old records without teaching older binaries to rewrite them.
+    def attempts_root
+      File.join(state_home, "attempts", "v1")
+    end
+
+    def attempt_records_root
+      File.join(attempts_root, "records")
+    end
+
+    def attempt_logs_root
+      File.join(attempts_root, "logs")
+    end
+
+    def attempt_outputs_root
+      File.join(attempts_root, "outputs")
+    end
+
+    def attempt_generation_locks_root
+      File.join(attempts_root, "generation-locks")
+    end
+
     def bin_home
       # bin_home intentionally ignores HIVE_HOME — install.sh places
       # the `hive`/`hv` symlinks under XDG_BIN_HOME (or ~/.local/bin),

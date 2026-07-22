@@ -1,5 +1,6 @@
 require "open3"
 require "timeout"
+require "hive/implementation_identity"
 
 module Hive
   # Per-CLI invocation contract for a headless agent.
@@ -40,7 +41,10 @@ module Hive
                 :budget_flag, :output_format_flags, :version_flag,
                 :skill_syntax_format, :headless_supported, :min_version,
                 :status_detection_mode, :usage_extractor,
-                :workspace_write_flags, :cli_capabilities
+                :workspace_write_flags, :cli_capabilities,
+                :initial_context_tokens, :default_model_resolver,
+                :model_argument_builder, :effort_argument_builder,
+                :launcher_identity, :policy_capabilities
 
     # Public API — do not break.
     #
@@ -78,6 +82,9 @@ module Hive
     #                          users must call require_cli_capability!, which
     #                          verifies the installed binary advertises every
     #                          flag before returning them.
+    #   initial_context_tokens: default 0. Conservative admission reserve for
+    #                           provider-owned context sent before the first
+    #                           streamed usage event.
     #   prompt_style:          default :stdin for a profile named :codex,
     #                          otherwise :positional (backward compatible
     #                          with pre-profile-style custom registrations)
@@ -106,7 +113,13 @@ module Hive
                    skill_verifier: nil,
                    workspace_write_flags: nil,
                    cli_capabilities: {},
-                   prompt_style: nil)
+                   initial_context_tokens: 0,
+                   prompt_style: nil,
+                   default_model_resolver: nil,
+                   model_argument_builder: nil,
+                   effort_argument_builder: nil,
+                   launcher_identity: nil,
+                   policy_capabilities: [])
       prompt_style ||= name.to_sym == :codex ? :stdin : :positional
       unless PROMPT_STYLES.include?(prompt_style)
         raise ArgumentError,
@@ -117,6 +130,10 @@ module Hive
         raise ArgumentError,
               "unknown status_detection_mode: #{status_detection_mode.inspect}; " \
               "valid: #{STATUS_DETECTION_MODES.inspect}"
+      end
+
+      unless initial_context_tokens.is_a?(Integer) && initial_context_tokens >= 0
+        raise ArgumentError, "initial_context_tokens must be a non-negative Integer"
       end
 
       @name = name
@@ -137,7 +154,13 @@ module Hive
       @skill_verifier = skill_verifier
       @workspace_write_flags = Array(workspace_write_flags).freeze
       @cli_capabilities = normalize_cli_capabilities(cli_capabilities)
+      @initial_context_tokens = initial_context_tokens
       @prompt_style = prompt_style
+      @default_model_resolver = default_model_resolver
+      @model_argument_builder = model_argument_builder
+      @effort_argument_builder = effort_argument_builder
+      @launcher_identity = (launcher_identity || "AgentProfile/v1:#{name}").to_s.freeze
+      @policy_capabilities = Array(policy_capabilities).map(&:to_sym).uniq.freeze
 
       freeze
     end
@@ -217,6 +240,50 @@ module Hive
       !@workspace_write_flags.empty?
     end
 
+    def concrete_default_model(cfg: nil, project_root: nil, home: nil)
+      unless @default_model_resolver
+        raise Hive::ImplementationIdentity::ResolutionError,
+              "agent profile #{@name.inspect} cannot resolve a concrete default model"
+      end
+
+      value = @default_model_resolver.call(cfg: cfg, project_root: project_root, home: home)
+      Hive::ImplementationIdentity.normalize_model(value, concrete: true)
+    rescue Hive::ImplementationIdentity::Error
+      raise
+    rescue StandardError => e
+      raise Hive::ImplementationIdentity::ResolutionError,
+            "agent profile #{@name.inspect} default-model resolution failed: #{e.message}"
+    end
+
+    def identity_arguments(model:, effort:, pin_model: true)
+      normalized_model = Hive::ImplementationIdentity.normalize_model(model, concrete: true)
+      requested_effort = Hive::ImplementationIdentity.normalize_effort(effort)
+      native_arguments = []
+      if pin_model
+        unless @model_argument_builder
+          raise Hive::ImplementationIdentity::ResolutionError,
+                "agent profile #{@name.inspect} cannot pin model #{normalized_model.inspect}"
+        end
+        native_arguments.concat(@model_argument_builder.call(normalized_model))
+      end
+
+      effort_supported = !@effort_argument_builder.nil?
+      effective_effort = nil
+      if requested_effort && effort_supported
+        native_arguments.concat(@effort_argument_builder.call(requested_effort))
+        effective_effort = requested_effort
+      end
+
+      Hive::ImplementationIdentity::LaunchArguments.new(
+        model: normalized_model,
+        requested_effort: requested_effort,
+        effective_effort: effective_effort,
+        effort_supported: effort_supported,
+        model_pinned: pin_model,
+        native_arguments: Hive::ImplementationIdentity.validate_native_arguments(native_arguments)
+      )
+    end
+
     # Return the argv for an explicitly declared CLI capability, but only
     # after the installed binary proves it supports the flags. This keeps a
     # caller from silently weakening a security boundary when an operator
@@ -233,7 +300,8 @@ module Hive
       key = [ bin, version, name, flags ]
       unless self.class.send(:capability_cache)[key]
         help = capture_help!(flags)
-        missing = flags.reject { |flag| cli_flag_advertised?(help, flag) }
+        option_flags = flags.select { |argument| argument.start_with?("-") }
+        missing = option_flags.reject { |flag| cli_flag_advertised?(help, flag) }
         unless missing.empty?
           raise Hive::AgentError,
                 "#{@name} #{version} does not advertise required #{name} capability " \
@@ -493,7 +561,13 @@ module Hive
         skill_verifier: @skill_verifier,
         workspace_write_flags: @workspace_write_flags.dup,
         cli_capabilities: @cli_capabilities.transform_values(&:dup),
-        prompt_style: @prompt_style
+        initial_context_tokens: @initial_context_tokens,
+        prompt_style: @prompt_style,
+        default_model_resolver: @default_model_resolver,
+        model_argument_builder: @model_argument_builder,
+        effort_argument_builder: @effort_argument_builder,
+        launcher_identity: @launcher_identity,
+        policy_capabilities: @policy_capabilities.dup
       }
     end
 

@@ -86,6 +86,7 @@ module Hive
         when :grid then grid_message(key: key, row: row, pane_focus: pane_focus)
         when :log_tail then log_tail_message(key: key, row: row)
         when :red_status_detail then red_status_detail_message(key: key, row: row)
+        when :implementation_identity_detail then implementation_identity_detail_message(key: key, row: row)
         when :token_stats then token_stats_message(key: key, row: row)
         when :archive then archive_message(key: key, row: row)
         when :filter then filter_message(key: key, row: row)
@@ -138,6 +139,9 @@ module Hive
         # not visually tracking.
         return Messages::OpenTaskFolder.new(row: row) if key == "o" && pane_focus == :right
         return Messages::OpenIdeaPreview.new(row: row) if key == "i" && pane_focus == :right
+        if key == "I" && pane_focus == :right
+          return Messages::OpenImplementationIdentityDetail.new(row: row)
+        end
         return Messages::OpenInAgent.new(row: row) if key == "s" && pane_focus == :right
         return verb_message(row, key) if VERB_KEYS.key?(key)
         return enter_message(row) if ENTER_KEYS.include?(key)
@@ -400,6 +404,12 @@ module Hive
         return Messages::TokenStatsScopeChanged.new(direction: :in) if key == :key_right || key == "l"
         return Messages::TokenStatsSelectionMoved.new(direction: :previous) if key == :key_up || key == "k"
         return Messages::TokenStatsSelectionMoved.new(direction: :next) if key == :key_down || key == "j"
+
+        Messages::NOOP
+      end
+
+      def implementation_identity_detail_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
+        return Messages::BACK if ESCAPE_KEYS.include?(key) || key == "q" || key == "I"
 
         Messages::NOOP
       end

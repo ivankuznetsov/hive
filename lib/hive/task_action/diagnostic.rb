@@ -3,6 +3,7 @@ require "shellwords"
 require "time"
 require "yaml"
 require "hive/execute_waiting_action"
+require "hive/conditions/recovery_action"
 require "hive/markers"
 require "hive/secret_patterns"
 require "hive/diagnostic_helpers"
@@ -48,6 +49,7 @@ module Hive
                      incomplete_plan_artifact:, finalize_missing_pr_md:,
                      finalize_missing_pr_url:, finalize_pr_url_mismatch:,
                      legacy_execute_findings:, stale_agent_reason:,
+                     condition_gate: nil,
                      state_file_mtime: nil,
                      project_name: nil, project_count: 1)
         @task = task
@@ -60,6 +62,7 @@ module Hive
         @finalize_pr_url_mismatch = finalize_pr_url_mismatch
         @legacy_execute_findings = legacy_execute_findings
         @stale_agent_reason = stale_agent_reason
+        @condition_gate = condition_gate
         @state_file_mtime = state_file_mtime
         @project_name = project_name
         @project_count = project_count
@@ -89,6 +92,11 @@ module Hive
       end
 
       def next_action
+        if @condition_gate && !@condition_gate.eligible?
+          return Hive::Conditions::RecoveryAction.build(
+            task: task, gate: @condition_gate, rerun_with: rerun_command
+          )
+        end
         return nil unless execute_waiting_input?
 
         Hive::ExecuteWaitingAction.build(task, marker, rerun_with: rerun_command)

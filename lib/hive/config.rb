@@ -6,7 +6,9 @@ require "hive/agent_profiles"
 require "hive/babysitter/interval"
 require "hive/permission_scope"
 require "hive/paths"
+require "hive/repository_identity"
 require "hive/screenote/oauth_client"
+require "hive/conditions/migration"
 
 module Hive
   module Config
@@ -16,6 +18,12 @@ module Hive
       "default_branch" => nil,
       "default_workflow" => "coding",
       "dependency_gate_stage" => "8-finalize", # coding-scoped: default dependency gate is the coding finalize stage
+      # Durable task-attempt timers are top-level because a detached wrapper
+      # enforces them even when no daemon exists. Tests may shorten all four.
+      "attempt_heartbeat_sec" => 5,
+      "attempt_stale_sec" => 30,
+      "attempt_launch_timeout_sec" => 30,
+      "attempt_first_heartbeat_timeout_sec" => 30,
       "project_name" => nil,
       # Project-wide default for per-stage permission scoping. "yolo"
       # preserves today's launch behavior; narrower scopes are opt-in.
@@ -70,11 +78,10 @@ module Hive
         "patrol" => 3600,
         "digest" => 1800
       },
-      # Stage-level agent for single-agent stages. The review
-      # stage has its own per-role agent fields under "review.{ci,triage,
-      # fix,browser_test}.agent". Runtime fallback in stage code stays
-      # `cfg.dig("<stage>", "agent") || "claude"` so legacy configs without
-      # these keys keep behaving as today (ADR-023). The recommended-default
+      # Stage-level agents remain for independently owned stages. Execute is
+      # captured once per generation; open_pr plus review ci/fix intentionally
+      # omit identity defaults so the persisted owner applies. Triage,
+      # browser-test, and reviewer identities remain independent. The recommended-default
       # for execute is `codex` only at the rendered-template level, not in
       # DEFAULTS itself, to avoid silently flipping the implementer for old
       # projects on next load.
@@ -99,7 +106,11 @@ module Hive
         }
       },
       "execute" => { "agent" => "claude" },
-      "open_pr" => { "agent" => "claude" },
+      "conditions" => {
+        "authority" => "markers",
+        "stages" => {}
+      },
+      "open_pr" => {},
       "artifacts" => { "agent" => "claude" },
       "finalize" => { "agent" => "claude" },
       # Per-CLI agent profiles. Each project may override `bin`,
@@ -142,7 +153,6 @@ module Hive
         "ci" => {
           "command" => nil,
           "max_attempts" => 3,
-          "agent" => "claude",
           "prompt_template" => "ci_fix_prompt.md.erb"
         },
         "reviewers" => [],
@@ -164,7 +174,6 @@ module Hive
           "custom_prompt" => nil
         },
         "fix" => {
-          "agent" => "claude",
           "prompt_template" => "fix_prompt.md.erb",
           "auto_commit" => {
             "sign_policy" => "inherit",
@@ -438,10 +447,18 @@ module Hive
         "max_tokens_per_agent" => 50_000,
         "max_agent_spawns_per_cycle" => 3,
         "max_agent_spawns_per_day" => 8,
+        # Metered architecture launches follow merge demand and do not consume
+        # the ordinary daily count. Keep a separate durable backstop for a
+        # provider that repeatedly returns no usable token totals.
+        "max_architecture_unmetered_spawns_per_day" => 96,
         "max_budget_usd_per_agent" => 25,
         # Architecture discovery/fixing may use a wider per-cycle and
-        # per-agent envelope, but still shares the mode's daily ceilings.
+        # per-agent envelope, but still shares the mode's daily token ceiling.
         "architecture_budget_multiplier" => 2,
+        # Ordinary fix agents need edit/test/proof turns after inspection;
+        # widen only their per-agent stream cap while preserving cycle/day
+        # token and launch ceilings.
+        "fix_budget_multiplier" => 2,
         # Open ready (non-draft) PRs by default so the babysitter — which
         # skips draft PRs — picks them up. Set `draft_prs: true` per project
         # to revert to draft PRs that need a manual "ready" toggle first.
@@ -457,8 +474,10 @@ module Hive
           "test" => nil
         },
         "review" => {
-          "max_context_files" => 24,
-          "max_owned_files" => 12,
+          # Keep one ordinary review slice small enough for the low 40k tier.
+          # Architecture patrol has its own wider slice below.
+          "max_context_files" => 4,
+          "max_owned_files" => 4,
           # Patrol PRs flow into 6-review the same as human PRs, but patrol
           # opens many PRs per cycle — running the multi-persona
           # ce-code-review fan-out (6–18 subagents) on each is expensive.
@@ -480,13 +499,12 @@ module Hive
           ]
         }
       },
-      # Refactor patrol is opt-in and reporting-only in v1. Keep its config
-      # and state independent from patrol so the two commands can diverge.
+      # Refactor patrol remains effect-free for legacy/missing configuration.
+      # Fresh initialization writes the recommended full policy explicitly;
+      # defaults here must not grant mutation authority to an older partial
+      # config that enabled discovery before auto-fix existed.
       "refactor_patrol" => {
         "enabled" => false,
-        # Discovery consent never grants mutation authority. These two gates
-        # are intentionally independent and default off for fresh and legacy
-        # projects alike.
         "auto_fix" => {
           "enabled" => false,
           # Fix agents need a real root-confined write sandbox. Discovery may
@@ -525,12 +543,13 @@ module Hive
           "test" => nil
         },
         "caps" => {
-          "single_feature_only" => true,
+          # Refactoring often removes duplicated ownership across mapped
+          # feature boundaries. Guard contracts and dependencies instead of
+          # treating cross-feature scope or patch size as risky by itself.
+          "single_feature_only" => false,
           "allow_dependency_bumps" => false,
           "allow_public_api_changes" => false,
-          "max_files" => 8,
-          "max_diff_lines" => 400,
-          "allow_cross_feature" => false
+          "allow_cross_feature" => true
         },
         "leverage" => {
           "weights" => {
@@ -543,8 +562,8 @@ module Hive
           }
         },
         "review" => {
-          "max_context_files" => 24,
-          "max_owned_files" => 12
+          "max_context_files" => 6,
+          "max_owned_files" => 6
         }
       },
       # Daily shipped digest. The daemon schedules one global `hive digest`
@@ -688,6 +707,14 @@ module Hive
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
     EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
     EXPLICIT_RESOURCE_LIMITS_KEY = :__hive_explicit_resource_limits
+    IMPLEMENTATION_IDENTITY_PROVENANCE_KEY = :__hive_implementation_identity_provenance
+    IMPLEMENTATION_IDENTITY_PATHS = {
+      "execute" => %w[execute],
+      "open_pr" => %w[open_pr],
+      "review.fix" => %w[review fix],
+      "review.ci" => %w[review ci]
+    }.freeze
+    IMPLEMENTATION_IDENTITY_FIELDS = %w[agent model effort].freeze
     RESOURCE_LIMIT_FIELDS = %w[budget_usd timeout_sec].freeze
 
     module_function
@@ -743,8 +770,22 @@ module Hive
     def load(project_root)
       project_root = File.expand_path(project_root)
       candidate = File.join(project_root, ".hive-state", "config.yml")
-      data = if File.exist?(candidate)
-               parsed = YAML.safe_load(File.read(candidate)) || {}
+      config_present = begin
+        File.lstat(candidate)
+        true
+      rescue Errno::ENOENT
+        false
+      rescue SystemCallError, IOError => e
+        raise ConfigError, "config.yml at #{candidate} is not readable: #{e.message}"
+      end
+      data = if config_present
+               parsed = begin
+                 YAML.safe_load(File.read(candidate)) || {}
+               rescue Psych::Exception => e
+                 raise ConfigError, "config.yml at #{candidate} is not valid YAML: #{e.message}"
+               rescue SystemCallError, IOError => e
+                 raise ConfigError, "config.yml at #{candidate} is not readable: #{e.message}"
+               end
                raise ConfigError, "config.yml at #{candidate} must be a hash" unless parsed.is_a?(Hash)
 
                parsed
@@ -756,6 +797,7 @@ module Hive
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
       merged[EXPLICIT_BRAINSTORM_RUNTIME_KEY] = nested_key?(data, "brainstorm", "runtime")
       merged[EXPLICIT_RESOURCE_LIMITS_KEY] = explicit_resource_limits(data)
+      merged[IMPLEMENTATION_IDENTITY_PROVENANCE_KEY] = implementation_identity_provenance(data)
       inject_bot_runtime_path_defaults!(merged)
       validate!(merged, candidate)
       merged
@@ -821,6 +863,43 @@ module Hive
         cursor = cursor[key]
       end
       true
+    end
+
+    def implementation_identity_fields(cfg, stage)
+      stage = stage.to_s
+      path = IMPLEMENTATION_IDENTITY_PATHS[stage]
+      raise ConfigError, "unknown implementation identity stage #{stage.inspect}" unless path
+
+      if cfg.key?(IMPLEMENTATION_IDENTITY_PROVENANCE_KEY)
+        return cfg.fetch(IMPLEMENTATION_IDENTITY_PROVENANCE_KEY).fetch(stage, {})
+      end
+
+      block = path.reduce(cfg) { |memo, key| memo.is_a?(Hash) ? memo[key] : nil }
+      return {} unless block.is_a?(Hash)
+
+      IMPLEMENTATION_IDENTITY_FIELDS.each_with_object({}) do |field, fields|
+        fields[field] = block[field] if block.key?(field)
+      end.freeze
+    end
+
+    def implementation_identity_provenance(raw)
+      IMPLEMENTATION_IDENTITY_PATHS.to_h do |stage, path|
+        block = path.reduce(raw) { |memo, key| memo.is_a?(Hash) ? memo[key] : nil }
+        fields = IMPLEMENTATION_IDENTITY_FIELDS.each_with_object({}) do |field, selected|
+          selected[field] = deep_dup(block[field]) if block.is_a?(Hash) && block.key?(field)
+        end
+        [ stage.freeze, deep_freeze(fields) ]
+      end.freeze
+    end
+
+    def deep_freeze(value)
+      case value
+      when Hash
+        value.each { |key, child| key.freeze; deep_freeze(child) }
+      when Array
+        value.each { |child| deep_freeze(child) }
+      end
+      value.freeze
     end
 
     # Resolve a workflow descriptor's per-stage resource default without
@@ -969,7 +1048,8 @@ module Hive
         out << {
           "name" => entry["name"],
           "path" => abs_path,
-          "hive_state_path" => entry["hive_state_path"] || File.join(abs_path, ".hive-state")
+          "hive_state_path" => entry["hive_state_path"] || File.join(abs_path, ".hive-state"),
+          "repository_identity" => entry["repository_identity"]
         }
       end
     end
@@ -1489,13 +1569,15 @@ module Hive
       defaults
     end
 
-    def register_project(name:, path:)
+    def register_project(name:, path:, repository_identity: :detect)
       entry = nil
       update_global_config! do |data|
         data["registered_projects"] = Array(data["registered_projects"])
         abs_path = File.expand_path(path)
         hive_state_path = File.join(abs_path, ".hive-state")
         entry = { "name" => name, "path" => abs_path, "hive_state_path" => hive_state_path }
+        identity = repository_identity == :detect ? Hive::RepositoryIdentity.current(abs_path) : repository_identity
+        entry["repository_identity"] = identity if identity
         real_path = realpath_or_nil(abs_path)
         entry["real_path"] = real_path if real_path
         existing = data["registered_projects"].find { |p| p.is_a?(Hash) && p["name"] == name }
@@ -1689,6 +1771,8 @@ module Hive
       validate_dependency_gate_stage!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
+      validate_attempt_timers!(cfg, source_path)
+      validate_conditions!(cfg, source_path)
       validate_daemon!(cfg, source_path)
       validate_web_config!(cfg, source_path)
       validate_screenote!(cfg, source_path)
@@ -1713,6 +1797,7 @@ module Hive
       claude
       plan
       execute
+      conditions
       open_pr
       artifacts
       finalize
@@ -1743,6 +1828,35 @@ module Hive
               "#{key} in #{describe_source(source_path)} must be a Hash; " \
               "got #{value.inspect} (#{value.class}). Either remove the key " \
               "(defaults will apply) or supply `#{key}: { ... }` with the right shape."
+      end
+    end
+
+    def validate_conditions!(cfg, source_path)
+      settings = cfg.fetch("conditions", {})
+      allowed = %w[authority stages]
+      unknown = settings.keys - allowed
+      unless unknown.empty?
+        raise ConfigError,
+              "conditions in #{describe_source(source_path)} has unknown keys: #{unknown.join(', ')}"
+      end
+      authority = settings.fetch("authority", "markers").to_s
+      unless Hive::Conditions::Migration::MODES.include?(authority)
+        raise ConfigError,
+              "conditions.authority in #{describe_source(source_path)} must be markers, shadow, or conditions"
+      end
+      stages = settings.fetch("stages", {})
+      unless stages.is_a?(Hash)
+        raise ConfigError, "conditions.stages in #{describe_source(source_path)} must be a Hash"
+      end
+      stages.each do |stage, mode|
+        unless Hive::Stages::DIRS.include?(stage.to_s)
+          raise ConfigError, "conditions.stages has unknown stage #{stage.inspect}"
+        end
+        begin
+          Hive::Conditions::Migration.validate_mode!(mode.to_s, stage.to_s)
+        rescue Hive::Conditions::InvalidMigrationMode => e
+          raise ConfigError, "conditions.stages.#{stage} in #{describe_source(source_path)}: #{e.message}"
+        end
       end
     end
 
@@ -2335,6 +2449,30 @@ module Hive
       [ "log_max_files", 1 ]
     ].freeze
 
+    ATTEMPT_TIMER_KEYS = %w[
+      attempt_heartbeat_sec
+      attempt_stale_sec
+      attempt_launch_timeout_sec
+      attempt_first_heartbeat_timeout_sec
+    ].freeze
+
+    def validate_attempt_timers!(cfg, source_path)
+      ATTEMPT_TIMER_KEYS.each do |key|
+        value = cfg[key]
+        next if value.is_a?(Integer) && value.positive?
+
+        raise ConfigError,
+              "#{key} in #{describe_source(source_path)} must be a positive integer; " \
+              "got #{value.inspect} (#{value.class})"
+      end
+
+      return if cfg["attempt_stale_sec"] >= cfg["attempt_heartbeat_sec"]
+
+      raise ConfigError,
+            "attempt_stale_sec in #{describe_source(source_path)} must be greater than or equal to " \
+            "attempt_heartbeat_sec"
+    end
+
     def validate_daemon!(cfg, source_path)
       daemon = cfg["daemon"]
       return if daemon.nil?
@@ -2599,7 +2737,9 @@ module Hive
       [ "max_tokens_per_agent", 1 ],
       [ "max_agent_spawns_per_cycle", 1 ],
       [ "max_agent_spawns_per_day", 1 ],
-      [ "architecture_budget_multiplier", 1 ]
+      [ "max_architecture_unmetered_spawns_per_day", 1 ],
+      [ "architecture_budget_multiplier", 1 ],
+      [ "fix_budget_multiplier", 1 ]
     ].freeze
 
     def validate_patrol!(cfg, source_path)
@@ -2748,10 +2888,6 @@ module Hive
       "max_theses_per_run" => 1,
       "max_review_seconds_per_run" => 1
     }.freeze
-    REFACTOR_PATROL_CAP_BOUNDS = {
-      "max_files" => 1,
-      "max_diff_lines" => 1
-    }.freeze
     REFACTOR_PATROL_WEIGHT_KEYS = %w[
       churn
       fan_in
@@ -2855,9 +2991,6 @@ module Hive
 
       REFACTOR_PATROL_CAP_BOOLEAN_KEYS.each do |key|
         validate_boolean!(caps[key], "refactor_patrol.caps.#{key}", source_path)
-      end
-      REFACTOR_PATROL_CAP_BOUNDS.each do |key, min|
-        validate_integer_min!(caps[key], "refactor_patrol.caps.#{key}", min, source_path)
       end
     end
 

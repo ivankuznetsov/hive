@@ -29,6 +29,19 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_load_reuses_a_resolved_project_config
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "resolved-flow")
+      config = Hive::Config.load(project_root)
+
+      with_replaced_singleton_method(Hive::Config, :load, ->(*) { flunk "config should already be resolved" }) do
+        Hive::Workflows::Project.load!(project_root, config: config)
+      end
+
+      assert_equal :"resolved-flow", Hive::Workflows::Registry.fetch(:"resolved-flow").id
+    end
+  end
+
   def test_project_load_is_memoized_per_root
     with_tmp_dir do |project_root|
       workflows_dir = File.join(project_root, ".hive-state", "workflows")
@@ -89,6 +102,44 @@ class WorkflowsProjectTest < Minitest::Test
       # The built-in coding workflow is untouched and still resolvable, so
       # coding tasks in this project keep loading.
       assert_equal :coding, Hive::Workflows::Registry.fetch(:coding).id
+    end
+  end
+
+  def test_exact_legacy_bench_descriptor_remains_runnable_until_migrated
+    with_tmp_dir do |project_root|
+      paths = write_legacy_bench_workflow(project_root)
+
+      _out, err = capture_io { Hive::Workflows::Project.load!(project_root) }
+      descriptor = Hive::WorkflowSelection.fetch!("bench", project_root: project_root)
+
+      refute_equal Hive::Workflows::Bench::DESCRIPTOR, descriptor
+      assert_equal File.join(paths.fetch(:instruction_dir), "generate.md"),
+                   descriptor.stage_named("generate").instruction
+      assert_includes err, "hive init #{project_root} --workflow bench"
+
+      task_dir = File.join(project_root, ".hive-state", "stages", "3-generate", "legacy-bench-260714-abcd")
+      FileUtils.mkdir_p(task_dir)
+      Hive::TaskMeta.write(task_dir, id: 1, slug: File.basename(task_dir), display_name: nil, workflow: "bench")
+
+      assert_equal descriptor, Hive::Task.new(task_dir).workflow
+    end
+  end
+
+  def test_modified_legacy_bench_descriptor_still_surfaces_collision
+    with_tmp_dir do |project_root|
+      paths = write_legacy_bench_workflow(project_root)
+      body = File.read(paths.fetch(:descriptor)).sub(
+        "    instruction: ./bench/generate.md\n",
+        "    instruction: ./bench/generate.md\n    timeout_sec: 42\n"
+      )
+      File.write(paths.fetch(:descriptor), body)
+
+      error = assert_raises(Hive::ConfigError) do
+        capture_io { Hive::WorkflowSelection.fetch!("bench", project_root: project_root) }
+      end
+
+      assert_includes error.message, paths.fetch(:descriptor)
+      assert_includes error.message, "collides with registered workflow :bench"
     end
   end
 

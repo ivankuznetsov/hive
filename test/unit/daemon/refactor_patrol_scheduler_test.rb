@@ -12,10 +12,10 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       @sha = sha
     end
 
-    def validate_and_snapshot!(merge_sha:)
+    def validate_and_snapshot!(merge_sha:, analysis_sha: nil)
       raise "missing merge" if merge_sha.to_s.empty?
 
-      { "analysis_sha" => @sha }
+      { "analysis_sha" => analysis_sha || @sha }
     end
   end
 
@@ -480,7 +480,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_pinned_partial_job_blocks_visibly_when_registered_head_advances
+  def test_pinned_partial_job_reuses_exact_analysis_sha_when_default_branch_advances
     with_project do |_dir, entry, store|
       enqueue(store)
       first = scheduler(entry, store)
@@ -494,16 +494,12 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         owner: "daemon-b"
       )
 
-      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
-        advanced.reserve(advanced.candidates(now: T0 + 60).first, now: T0 + 60)
-      end
+      resumed = advanced.reserve(advanced.candidates(now: T0 + 60).first, now: T0 + 60)
 
-      assert_equal "analysis_checkout_changed_after_pin", error.reason
-      assert_equal "head", error.evidence.fetch("expected_analysis_sha")
-      assert_equal "advanced-head", error.evidence.fetch("current_analysis_sha")
+      assert_equal "head", resumed.dig(:dispatch_token, :analysis_sha)
       aggregate = store.read_job("job-7")
-      assert_equal "analysis_checkout_changed_after_pin", aggregate.fetch("attempts").last.fetch("reason")
       assert_equal "head", aggregate.fetch("analysis_sha")
+      assert_equal "claimed", aggregate.fetch("attempts").last.fetch("state")
     end
   end
 
@@ -536,6 +532,74 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       assert_equal [ error ], aggregate.fetch("review_errors")
       assert_empty scheduler.candidates(now: T0 + 61)
       assert_equal [ "job-7" ], scheduler.candidates(now: T0 + 62).map { |item| item.fetch(:job_id) }
+    end
+  end
+
+  def test_clean_bounded_progress_retries_without_a_review_error
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      scheduler = scheduler(entry, store)
+      dispatch = scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
+      scheduler.spawned(dispatch, pid: 1234, process_start_time: "boot", pgid: 1234, now: T0 + 1)
+      partial = complete_zero_envelope(entry).merge(
+        "complete" => false,
+        "review_errors" => [],
+        "feature_results" => [
+          { "feature_id" => "checkout", "complete" => true, "thesis_ids" => [], "errors" => [] }
+        ],
+        "zero_reason" => nil
+      )
+
+      result = scheduler.complete(
+        dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 0,
+        envelope: partial, now: T0 + 2
+      )
+
+      assert_equal :retry, result.fetch(:status)
+      aggregate = store.read_job("job-7")
+      assert_equal [ "checkout" ], aggregate.fetch("feature_results").map { |item| item.fetch("feature_id") }
+      assert_empty aggregate.fetch("review_errors")
+      assert_empty scheduler.candidates(now: T0 + 61)
+      assert_equal [ "job-7" ], scheduler.candidates(now: T0 + 62).map { |item| item.fetch(:job_id) }
+    end
+  end
+
+  def test_daily_patrol_quota_exhaustion_backs_off_until_next_utc_day
+    %w[
+      daily_agent_spawn_limit daily_architecture_unmetered_spawn_limit
+      daily_token_headroom
+    ].each do |reason|
+      with_project do |_dir, entry, store|
+        enqueue(store)
+        scheduler = scheduler(entry, store)
+        dispatch = scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
+        scheduler.spawned(dispatch, pid: 1234, process_start_time: "boot", pgid: 1234, now: T0 + 1)
+        error = {
+          "feature_id" => "checkout", "error" => "agent_failed", "message" => "daily quota exhausted",
+          "details" => {
+            "resource_exhaustion" => {
+              "reason" => reason, "limit" => 8, "observed" => 8
+            }
+          }
+        }
+        partial = complete_zero_envelope(entry).merge(
+          "complete" => false,
+          "review_errors" => [ error ],
+          "feature_results" => [
+            { "feature_id" => "checkout", "complete" => false, "thesis_ids" => [], "errors" => [ error ] }
+          ],
+          "zero_reason" => nil
+        )
+
+        result = scheduler.complete(
+          dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 0,
+          envelope: partial, now: T0 + 2
+        )
+
+        assert_equal :retry, result.fetch(:status), reason
+        assert_empty scheduler.candidates(now: Time.utc(2026, 7, 10, 23, 59, 59)), reason
+        assert_equal [ "job-7" ], scheduler.candidates(now: Time.utc(2026, 7, 11)).map { |item| item.fetch(:job_id) }, reason
+      end
     end
   end
 
@@ -1037,7 +1101,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   def complete_zero_envelope(entry)
     aggregate = Hive::RefactorPatrol::JobStore.new(entry.fetch("path")).read_job("job-7")
     {
-      "schema" => "hive-refactor-patrol", "schema_version" => 2, "ok" => true,
+      "schema" => "hive-refactor-patrol", "schema_version" => 3, "ok" => true,
       "job_id" => "job-7", "project" => entry.fetch("name"), "project_root" => entry.fetch("path"),
       "dry_run" => false, "source_pr" => aggregate.fetch("source"), "analysis_sha" => "head",
       "complete" => true, "features_mapped" => 1,
@@ -1051,6 +1115,8 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
 
   def action_envelope(entry, aggregate)
     {
+      # A child launched before an upgrade may still return the frozen v2
+      # contract. The scheduler must accept that in-flight result.
       "schema" => "hive-refactor-patrol", "schema_version" => 2, "ok" => true,
       "job_id" => aggregate.fetch("job_id"), "project" => entry.fetch("name"),
       "project_root" => entry.fetch("path"), "dry_run" => false,

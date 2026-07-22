@@ -1,0 +1,18 @@
+{
+  "current_conditions": {
+    "AgentHealthy": { "attempt_id": "attempt-b", "commit_generation": 2, "event_id": "1849-b-agent", "reason": "attempt_terminal_succeeded", "state": "satisfied", "task_generation": 1 },
+    "ArtifactCurrent": { "attempt_id": null, "commit_generation": 2, "event_id": null, "reason": "no_current_observation", "state": "pending", "task_generation": 1 },
+    "AwaitingHuman": { "attempt_id": "attempt-b", "commit_generation": 2, "event_id": "1849-b-wait", "reason": "not_waiting", "state": "unsatisfied", "task_generation": 1 },
+    "BabysitterActive": { "attempt_id": null, "commit_generation": null, "event_id": null, "reason": "no_current_observation", "state": "pending", "task_generation": 1 },
+    "BranchPushed": { "attempt_id": null, "commit_generation": 2, "event_id": null, "reason": "no_current_observation", "state": "pending", "task_generation": 1 },
+    "ChangesPresent": { "attempt_id": "attempt-b", "commit_generation": 2, "event_id": "1849-b-changes", "reason": "commit_present", "state": "satisfied", "task_generation": 1 },
+    "Merged": { "attempt_id": null, "commit_generation": null, "event_id": null, "reason": "no_current_observation", "state": "pending", "task_generation": 1 }
+  },
+  "gate": { "diagnostics": [], "status": "eligible", "transition": "execute_to_open_pr", "waivers": [] },
+  "history": [
+    { "attempt_id": "attempt-a", "commit_generation": 1, "condition": "AgentHealthy", "event_id": "1849-a-agent", "original_state": "satisfied", "state": "superseded", "superseded_by_event_id": "1849-b-agent", "superseded_reason": "newer_incompatible_attempt", "task_generation": 1 },
+    { "attempt_id": "attempt-a", "commit_generation": 1, "condition": "ChangesPresent", "event_id": "1849-a-changes", "original_state": "unsatisfied", "state": "superseded", "superseded_by_event_id": "1849-b-changes", "superseded_reason": "older_commit_generation", "task_generation": 1 },
+    { "attempt_id": "attempt-a", "commit_generation": 1, "condition": "AwaitingHuman", "event_id": "1849-a-wait", "original_state": "satisfied", "state": "superseded", "superseded_by_event_id": "1849-b-wait", "superseded_reason": "newer_incompatible_attempt", "task_generation": 1 }
+  ],
+  "identity": { "attempt_id": "attempt-b", "commit_generation": 2, "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "task_generation": 1 }
+}

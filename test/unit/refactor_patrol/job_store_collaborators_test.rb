@@ -280,8 +280,7 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
         },
         "caps" => {
           "single_feature_only" => true, "allow_dependency_bumps" => false,
-          "allow_public_api_changes" => false, "max_files" => 10,
-          "max_diff_lines" => 500, "allow_cross_feature" => false
+          "allow_public_api_changes" => false, "allow_cross_feature" => false
         },
         "issue_min_leverage_score" => 0.5
       }

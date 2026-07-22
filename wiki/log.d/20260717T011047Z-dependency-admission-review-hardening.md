@@ -1,0 +1,7 @@
+**Action:** Hardened fail-closed dependency admission after the #764 review. Strict metadata and plan reads now reject duplicate top-level `depends_on` keys; plan frontmatter reads are bounded; explicit cross-project repository lookups are selective and process-group timed; and task-folder snapshots detect concurrent stage moves.
+
+**Behavior:** Admission contexts index projects, slugs, ids, and cycle positions, then memoize verdicts across shared dependency tails. The TUI reuses lossless immutable archived TaskSnapshots as an indexed fallback, preserving custom workflows, transitive edges, exact errors, and enrolled repository identity without scanning the archive on each hot refresh. Active tasks shadow cached terminal snapshots, while transient per-project archive degradation retains the last good context.
+
+**Daemon:** File-backed run/advance/archive requests now honor the same tick's dependency/admission holds before spawn; marker repair remains available. A task-local admission CONFIG/78 envelope no longer drops unrelated tasks in the project.
+
+**Coverage:** Added regressions for duplicate declarations, long/nested fallback resolution, stale-folder races, degraded archive retention, selective and TERM-resistant repository lookup, queued-request gating, marker-repair exemption, and task-local admission child exits. Updated [[modules/task_dependencies]], [[commands/status]], [[modules/daemon]], [[commands/stage_action]], and [[testing]].

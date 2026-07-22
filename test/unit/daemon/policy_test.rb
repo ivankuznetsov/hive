@@ -217,11 +217,20 @@ class HiveDaemonPolicyTest < Minitest::Test
                         blocked: true)
   end
 
-  def test_blocked_does_not_suppress_merge_polling
-    assert_equal :poll_for_merge,
+  def test_blocked_suppresses_merge_polling
+    assert_equal :blocked_on_dependency,
                  decide(action: "ready_to_archive",
                         command: "hive archive slug-a --from 8-finalize",
                         blocked: true)
+  end
+
+  def test_admission_error_precedes_every_action_branch
+    actions = Hive::Schemas::TaskActionKind::ALL + [ "unknown_future_action", nil ]
+    actions.each do |action|
+      assert_equal :admission_error,
+                   decide(action: action, command: "hive run unsafe", admission_error: true),
+                   "admission must suppress #{action.inspect}"
+    end
   end
 
   # ── edit-resume: mtime-debounced re-runs ───────────────────────────────
@@ -573,11 +582,20 @@ class HiveDaemonPolicyTest < Minitest::Test
                         answers_pending: true)
   end
 
+  def test_operational_disposition_is_closed_and_explains_policy_owner
+    assert_equal(
+      { decision: "wait_for_answers", owner: "operator",
+        reason: "waiting for unanswered brainstorm questions" },
+      Hive::Daemon::Policy.operational_disposition(:wait_for_answers)
+    )
+    assert_equal "unknown", Hive::Daemon::Policy.operational_disposition(:new_result).fetch(:owner)
+  end
+
   private
 
   def decide(action:, command:, stage: nil, workflow: nil, state_file_mtime: nil,
              last_dispatched_state_file_mtime: nil, now: T0, edit_debounce_sec: 30,
-             answers_pending: false, blocked: false)
+             answers_pending: false, blocked: false, admission_error: false)
     Hive::Daemon::Policy.decide(
       action: action,
       stage: stage,
@@ -588,7 +606,8 @@ class HiveDaemonPolicyTest < Minitest::Test
       now: now,
       edit_debounce_sec: edit_debounce_sec,
       answers_pending: answers_pending,
-      blocked: blocked
+      blocked: blocked,
+      admission_error: admission_error
     )
   end
 end

@@ -3,6 +3,71 @@ require "securerandom"
 require "hive/workflows/descriptor_parser"
 
 class WorkflowsDescriptorParserTest < Minitest::Test
+  def test_package_descriptor_binds_workflow_yml_to_expected_package_name
+    with_tmp_dir do |dir|
+      path = File.join(dir, "workflow.yml")
+      File.write(path, <<~YAML)
+        id: packaged
+        stages:
+          - name: done
+            kind: terminal
+            state_file: done.md
+      YAML
+
+      workflow = Hive::Workflows::DescriptorParser.parse_package_file(path, package_name: "packaged")
+      assert_equal :packaged, workflow.id
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.parse_package_file(path, package_name: "other")
+      end
+      assert_includes error.message, "package name"
+    end
+  end
+
+  def test_package_descriptor_rejects_instruction_escape
+    with_tmp_dir do |dir|
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p(package)
+      File.write(File.join(dir, "outside.md"), "outside")
+      path = File.join(package, "workflow.yml")
+      File.write(path, <<~YAML)
+        id: packaged
+        stages:
+          - name: work
+            kind: agent
+            state_file: work.md
+            instruction: ../outside.md
+      YAML
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.parse_package_file(path, package_name: "packaged")
+      end
+    end
+  end
+
+  def test_council_rejects_unknown_max_round_policy_and_mapping_role
+    base = {
+      "id" => "invalid-managed-contract",
+      "stages" => [
+        {
+          "name" => "review", "kind" => "council", "state_file" => "review.md",
+          "reviewers" => [ { "name" => "one", "prompt" => "Review." } ],
+          "council" => { "max_rounds" => 2, "on_max_rounds" => "explode" }
+        }
+      ]
+    }
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Workflows::DescriptorParser.parse_hash(base, path: "/tmp/invalid-managed-contract.yml")
+    end
+    assert_includes error.message, "on_max_rounds"
+
+    base["stages"].first["council"].delete("on_max_rounds")
+    base["stages"].first["mapping_role"] = "operator"
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Workflows::DescriptorParser.parse_hash(base, path: "/tmp/invalid-managed-contract.yml")
+    end
+    assert_includes error.message, "mapping_role"
+  end
   include HiveTestHelper
 
   def test_valid_descriptor_maps_user_vocabulary_and_resolves_instruction
@@ -69,6 +134,45 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     )
 
     assert_equal "/ship", workflow.stage_named("work").skill
+  end
+
+  def test_stage_conditions_select_registered_semantics_only
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "condition-flow",
+        "stages" => [
+          {
+            "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship",
+            "conditions" => {
+              "version" => 1,
+              "transition" => "work_complete",
+              "required" => [ "ChangesPresent" ],
+              "inhibitors" => [ "AwaitingHuman" ],
+              "options" => { "no_commit_success" => true }
+            }
+          },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/condition-flow.yml"
+    )
+    rule = workflow.stage_named("work").condition_policy
+    assert_equal "work_complete", rule.transition
+    assert rule.options.fetch("no_commit_success")
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Workflows::DescriptorParser.parse_hash(
+        {
+          "id" => "bad-conditions",
+          "stages" => [
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md",
+              "conditions" => { "transition" => "done", "required" => [ "MadeUp" ] } }
+          ]
+        },
+        path: "/tmp/bad-conditions.yml"
+      )
+    end
+    assert_includes error.message, "unknown condition"
   end
 
   def test_agent_stage_accepts_per_stage_agent_model_and_effort
@@ -224,6 +328,194 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_nil work.agent
     assert_nil work.model
     assert_nil work.effort
+    assert_nil work.workspace
+    assert_nil work.handoff
+  end
+
+  def test_terminal_agent_parses_worktree_draft_pr_handoff
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "managed-fix",
+        "stages" => [
+          { "name" => "inbox", "kind" => "terminal", "state_file" => "idea.md" },
+          {
+            "name" => "fix",
+            "kind" => "agent",
+            "state_file" => "fix-report.md",
+            "skill" => "/fix",
+            "deliverable" => "fix-report.md",
+            "workspace" => "worktree",
+            "handoff" => "draft_pr"
+          }
+        ]
+      },
+      path: "/tmp/managed-fix.yml"
+    )
+
+    fix = workflow.stage_named("fix")
+    assert_equal :worktree, fix.workspace
+    assert_equal :draft_pr, fix.handoff
+    assert fix.frozen?
+  end
+
+  def test_workspace_and_handoff_reject_unknown_enum_values
+    {
+      "workspace" => "checkout",
+      "handoff" => "pull_request"
+    }.each do |field, value|
+      stage = {
+        "name" => "fix", "kind" => "agent", "state_file" => "fix-report.md",
+        "skill" => "/fix", "deliverable" => "fix-report.md",
+        "workspace" => "worktree", "handoff" => "draft_pr"
+      }
+      stage[field] = value
+
+      error = assert_config_error(
+        { "id" => "bad", "stages" => [ stage ] },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, "/tmp/bad.yml"
+      assert_includes error.message, "stage 1 #{field}"
+    end
+  end
+
+  def test_workspace_and_handoff_are_agent_only
+    %w[workspace handoff].each do |field|
+      [
+        { "name" => "done", "kind" => "terminal", "state_file" => "done.md" },
+        {
+          "name" => "review", "kind" => "council", "state_file" => "review.md",
+          "reviewers" => [ { "name" => "one", "prompt" => "Review." } ]
+        }
+      ].each do |stage|
+        stage[field] = field == "workspace" ? "worktree" : "draft_pr"
+        error = assert_config_error(
+          { "id" => "bad", "stages" => [ stage ] },
+          path: "/tmp/bad.yml"
+        )
+
+        assert_includes error.message, "/tmp/bad.yml"
+        assert_includes error.message, field
+        assert_includes error.message, "agent stage"
+      end
+    end
+  end
+
+  def test_workspace_handoff_validation_fails_closed_for_non_agent_stage_objects
+    stage_class = Struct.new(
+      :name, :kind, :state_file, :deliverable, :workspace, :handoff,
+      keyword_init: true
+    )
+    handoff = stage_class.new(
+      name: "done", kind: :inert, state_file: "fix-report.md",
+      deliverable: "fix-report.md", workspace: :worktree, handoff: :draft_pr
+    )
+    workspace = stage_class.new(
+      name: "done", kind: :inert, state_file: "done.md",
+      deliverable: nil, workspace: :worktree, handoff: nil
+    )
+
+    [ handoff, workspace ].each do |stage|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.new("/tmp/bad.yml")
+                                         .send(:validate_workspace_handoff!, [ stage ])
+      end
+      assert_includes error.message, "agent stage"
+    end
+  end
+
+  def test_workspace_and_handoff_are_terminal_stage_only
+    %w[workspace handoff].each do |field|
+      work = {
+        "name" => "work", "kind" => "agent", "state_file" => "work.md",
+        "skill" => "/fix",
+        "workspace" => "worktree"
+      }
+      if field == "handoff"
+        work["deliverable"] = "work.md"
+        work["handoff"] = "draft_pr"
+      end
+
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            work,
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, "/tmp/bad.yml"
+      assert_includes error.message, field
+      assert_includes error.message, "last stage"
+    end
+  end
+
+  def test_draft_pr_requires_worktree_and_explicit_deliverable
+    [
+      [ {}, "workspace: worktree" ],
+      [ { "workspace" => "worktree" }, "deliverable" ]
+    ].each do |extra, message|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            {
+              "name" => "fix", "kind" => "agent", "state_file" => "fix-report.md",
+              "skill" => "/fix", "handoff" => "draft_pr"
+            }.merge(extra)
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, "/tmp/bad.yml"
+      assert_includes error.message, message
+    end
+  end
+
+  def test_worktree_requires_draft_pr_handoff
+    error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          {
+            "name" => "fix", "kind" => "agent", "state_file" => "fix-report.md",
+            "skill" => "/fix", "deliverable" => "fix-report.md",
+            "workspace" => "worktree"
+          }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+
+    assert_includes error.message, "workspace: worktree requires handoff: draft_pr"
+  end
+
+  def test_draft_pr_requires_canonical_report_contract
+    [
+      [ "report.md", "fix-report.md" ],
+      [ "fix-report.md", "report.md" ]
+    ].each do |state_file, deliverable|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            {
+              "name" => "fix", "kind" => "agent", "state_file" => state_file,
+              "skill" => "/fix", "deliverable" => deliverable,
+              "workspace" => "worktree", "handoff" => "draft_pr"
+            }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, "state_file and deliverable fix-report.md"
+    end
   end
 
   def test_parse_file_wraps_yaml_errors_with_path
@@ -396,6 +688,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
               "quorum" => 2,
               "max_rounds" => 3,
               "exit_rule" => "consensus",
+              "on_max_rounds" => "complete",
               "triage_output" => "reviews/triage.md",
               "revise" => { "agent" => "claude", "skill" => "/revise" }
             }
@@ -421,6 +714,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal 2, review.council.quorum
     assert_equal 3, review.council.max_rounds
     assert_equal :consensus, review.council.exit_rule
+    assert_equal :complete, review.council.on_max_rounds
     assert_equal "reviews/triage.md", review.council.triage_output
     assert_equal "/revise", review.council.revise.skill
   end
@@ -450,6 +744,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal 1, review.council.quorum
     assert_equal 1, review.council.max_rounds
     assert_equal :human, review.council.exit_rule
+    assert_equal :wait, review.council.on_max_rounds
     assert_equal "reviews/triage.md", review.council.triage_output
     assert_nil review.council.revise
   end

@@ -145,6 +145,74 @@ class HiveCommandsDaemonTest < Minitest::Test
     refute File.exist?(command.pid_file), "clean shutdown must remove the YAML PID file it wrote"
   end
 
+  def test_manual_daemon_start_pins_children_to_the_invoked_hive_binary
+    command = daemon("start")
+    invoked = File.join(@home, "checkout", "bin", "hive")
+    command.define_singleton_method(:current_binary_path) { invoked }
+
+    with_env("HIVE_BIN" => nil) do
+      assert_equal invoked, command.send(:pin_runtime_hive_bin!)
+      assert_equal invoked, ENV.fetch("HIVE_BIN")
+    end
+  end
+
+  def test_manual_daemon_start_preserves_explicit_hive_bin_override
+    command = daemon("start")
+    command.define_singleton_method(:current_binary_path) do
+      flunk "explicit HIVE_BIN should avoid invoked-binary resolution"
+    end
+
+    with_env("HIVE_BIN" => "/opt/hive/bin/hive") do
+      assert_equal "/opt/hive/bin/hive", command.send(:pin_runtime_hive_bin!)
+      assert_equal "/opt/hive/bin/hive", ENV.fetch("HIVE_BIN")
+    end
+  end
+
+  def test_start_wires_the_invoked_binary_into_runtime_collaborators_without_leaking_env
+    command = daemon("start", dry_run: true)
+    invoked = File.join(@home, "checkout", "bin", "hive")
+    command.define_singleton_method(:current_binary_path) { invoked }
+    dispatcher = FakeDispatcher.new([])
+    captured_bins = nil
+
+    with_env("HIVE_BIN" => nil) do
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
+        with_global_start_config(daemon_config) do
+          with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
+            captured_bins = [
+              kwargs.fetch(:supervisor).instance_variable_get(:@hive_bin),
+              kwargs.fetch(:status_consumer).instance_variable_get(:@hive_bin)
+            ]
+            dispatcher
+          }) do
+            command.call
+          end
+        end
+      end
+
+      refute ENV.key?("HIVE_BIN"), "a completed foreground run must restore its caller environment"
+    end
+
+    assert_equal [ invoked, invoked ], captured_bins
+  end
+
+  def test_start_restores_explicit_hive_bin_after_foreground_run
+    command = daemon("start", dry_run: true)
+    dispatcher = FakeDispatcher.new([])
+
+    with_env("HIVE_BIN" => "/opt/hive/bin/hive") do
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
+        with_global_start_config(daemon_config) do
+          with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, ->(**_kwargs) { dispatcher }) do
+            command.call
+          end
+        end
+      end
+
+      assert_equal "/opt/hive/bin/hive", ENV.fetch("HIVE_BIN")
+    end
+  end
+
   def test_start_daemon_forwards_answer_digest_enabled_and_hour_to_scheduler
     command = daemon("start", dry_run: true)
     dispatcher = FakeDispatcher.new([])

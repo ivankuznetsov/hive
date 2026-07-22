@@ -32,6 +32,146 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_strict_origin_creation_uses_fetched_oid_and_preserves_primary_checkout
+    with_initialized_project do |dir, root|
+      origin = "#{dir}.strict-origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin)
+        run!("git", "-C", dir, "remote", "add", "origin", origin)
+        primary_head = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+        primary_status = run!("git", "-C", dir, "status", "--porcelain=v1", "-z")
+        wt = Hive::Worktree.new(dir, "async-fix-task", worktree_root: root)
+
+        base_oid = wt.fetch_strict_origin_base!("master")
+        assert_equal :created,
+                     wt.create_strict_origin!("async-fix-task", base_branch: "master", base_oid: base_oid)
+
+        assert_equal base_oid, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+        assert_equal primary_head, run!("git", "-C", dir, "rev-parse", "HEAD").strip
+        assert_equal primary_status, run!("git", "-C", dir, "status", "--porcelain=v1", "-z")
+      ensure
+        FileUtils.rm_rf(origin)
+      end
+    end
+  end
+
+  def test_strict_origin_fetch_failure_creates_no_worktree_or_branch
+    with_initialized_project do |dir, root|
+      run!("git", "-C", dir, "remote", "add", "origin", File.join(dir, "missing.git"))
+      wt = Hive::Worktree.new(dir, "strict-failure", worktree_root: root)
+
+      assert_raises(Hive::WorktreeError) { wt.fetch_strict_origin_base!("master") }
+
+      refute File.exist?(wt.path)
+      _out, _err, status = Open3.capture3(
+        "git", "-C", dir, "show-ref", "--verify", "refs/heads/strict-failure"
+      )
+      refute status.success?
+    end
+  end
+
+  def test_strict_origin_fetch_rejects_missing_remote_ref_after_success
+    with_initialized_project do |dir, root|
+      run!("git", "-C", dir, "remote", "add", "origin", dir)
+      ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+      wt = Hive::Worktree.new(dir, "strict-missing", worktree_root: root)
+      with_replaced_singleton_method(Hive::Worktree, :fetch_origin_branch, ->(*) { [ "", "", ok ] }) do
+        with_replaced_singleton_method(Hive::Worktree, :origin_branch_ref_exists?, ->(*) { false }) do
+          error = assert_raises(Hive::WorktreeError) { wt.fetch_strict_origin_base!("master") }
+          assert_includes error.message, "was not found after fetch"
+        end
+      end
+    end
+  end
+
+  def test_strict_origin_creation_rejects_moved_base_and_existing_path
+    with_initialized_project do |dir, root|
+      origin = "#{dir}.strict-origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin)
+        run!("git", "-C", dir, "remote", "add", "origin", origin)
+        wt = Hive::Worktree.new(dir, "strict-path", worktree_root: root)
+        base_oid = wt.fetch_strict_origin_base!("master")
+        File.write(File.join(dir, "advanced.txt"), "advanced\n")
+        run!("git", "-C", dir, "add", "advanced.txt")
+        run!("git", "-C", dir, "commit", "-m", "advance locally", "--quiet")
+        advanced_oid = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+
+        moved = assert_raises(Hive::WorktreeError) do
+          wt.create_strict_origin!("strict-path", base_branch: "master", base_oid: advanced_oid)
+        end
+        assert_includes moved.message, "moved while preparing"
+
+        FileUtils.mkdir_p(wt.path)
+        exists = assert_raises(Hive::WorktreeError) do
+          wt.create_strict_origin!("strict-path", base_branch: "master", base_oid: base_oid)
+        end
+        assert_includes exists.message, "path already exists"
+      ensure
+        FileUtils.rm_rf(origin)
+      end
+    end
+  end
+
+  def test_strict_branch_validation_rejects_hidden_ref_components
+    assert_raises(Hive::WorktreeError) do
+      Hive::Worktree.validate_branch_name!("release/.hidden")
+    end
+  end
+
+  def test_strict_origin_creation_rejects_same_named_branch_without_deleting_it
+    with_initialized_project do |dir, root|
+      origin = "#{dir}.strict-origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin)
+        run!("git", "-C", dir, "remote", "add", "origin", origin)
+        run!("git", "-C", dir, "branch", "strict-collision")
+        branch_oid = run!("git", "-C", dir, "rev-parse", "strict-collision").strip
+        wt = Hive::Worktree.new(dir, "strict-collision", worktree_root: root)
+        base_oid = wt.fetch_strict_origin_base!("master")
+
+        error = assert_raises(Hive::WorktreeError) do
+          wt.create_strict_origin!("strict-collision", base_branch: "master", base_oid: base_oid)
+        end
+
+        assert_includes error.message, "already exists"
+        assert_equal branch_oid, run!("git", "-C", dir, "rev-parse", "strict-collision").strip
+        refute File.exist?(wt.path)
+      ensure
+        FileUtils.rm_rf(origin)
+      end
+    end
+  end
+
+  def test_strict_resume_requires_matching_branch_and_base_ancestry
+    with_initialized_project do |dir, root|
+      origin = "#{dir}.strict-origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin)
+        run!("git", "-C", dir, "remote", "add", "origin", origin)
+        wt = Hive::Worktree.new(dir, "strict-resume", worktree_root: root)
+        base_oid = wt.fetch_strict_origin_base!("master")
+        wt.create_strict_origin!("strict-resume", base_branch: "master", base_oid: base_oid)
+
+        assert_equal base_oid,
+                     wt.validate_strict_resume!(branch_name: "strict-resume", base_oid: base_oid)
+        assert_raises(Hive::WorktreeError) do
+          wt.validate_strict_resume!(branch_name: "wrong-branch", base_oid: base_oid)
+        end
+        tree = run!("git", "-C", dir, "rev-parse", "HEAD^{tree}").strip
+        unrelated = run!("git", "-C", dir, "commit-tree", tree, "-m", "unrelated").strip
+        run!("git", "-C", wt.path, "reset", "--hard", unrelated, "--quiet")
+        assert_raises(Hive::WorktreeError) do
+          wt.validate_strict_resume!(branch_name: "strict-resume", base_oid: base_oid)
+        end
+        assert_equal unrelated, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip,
+                     "a mismatched resume must preserve the unfamiliar branch state"
+      ensure
+        FileUtils.rm_rf(origin)
+      end
+    end
+  end
+
   def test_attaches_to_existing_branch
     with_initialized_project do |dir, root|
       wt1 = Hive::Worktree.new(dir, "feat-y", worktree_root: root)
@@ -75,6 +215,63 @@ class WorktreeTest < Minitest::Test
 
       assert_equal pinned, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
       assert_equal registered_head, run!("git", "-C", dir, "rev-parse", "HEAD").strip
+    end
+  end
+
+  def test_create_detached_exact_materializes_clean_commit_without_a_branch
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      File.write(File.join(dir, "README.md"), "dirty registered checkout\n")
+      wt = Hive::Worktree.new(dir, "analysis-pinned", worktree_root: root)
+
+      assert_equal :created, wt.create_detached_exact!(base_sha: pinned)
+
+      assert_equal pinned, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_empty run!("git", "-C", wt.path, "branch", "--show-current").strip
+      assert_empty run!("git", "-C", wt.path, "status", "--porcelain=v1", "-z")
+      assert_equal "dirty registered checkout\n", File.read(File.join(dir, "README.md"))
+    end
+  end
+
+  def test_create_detached_exact_reuses_an_existing_exact_worktree
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      wt = Hive::Worktree.new(dir, "analysis-existing", worktree_root: root)
+
+      assert_equal :created, wt.create_detached_exact!(base_sha: pinned)
+      assert_equal :existing, wt.create_detached_exact!(base_sha: pinned)
+    end
+  end
+
+  def test_create_detached_exact_prunes_orphaned_registration_before_retry
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      wt = Hive::Worktree.new(dir, "analysis-orphaned", worktree_root: root)
+      wt.create_detached_exact!(base_sha: pinned)
+      FileUtils.rm_rf(wt.path)
+      assert_includes wt.list_worktree_paths, wt.path
+
+      assert_equal :created, wt.create_detached_exact!(base_sha: pinned)
+      assert wt.exists?
+      assert_equal pinned, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+    end
+  end
+
+  def test_assert_detached_exact_rejects_a_different_pinned_commit
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      wt = Hive::Worktree.new(dir, "analysis-wrong-sha", worktree_root: root)
+      wt.create_detached_exact!(base_sha: pinned)
+      File.write(File.join(dir, "later.txt"), "later\n")
+      run!("git", "-C", dir, "add", "later.txt")
+      run!("git", "-C", dir, "commit", "-m", "later", "--quiet")
+      later = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+
+      error = assert_raises(Hive::WorktreeError) do
+        wt.assert_detached_exact!(base_sha: later)
+      end
+
+      assert_includes error.message, "expected pinned commit #{later}"
     end
   end
 
@@ -994,6 +1191,87 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_fetch_origin_branch_uses_the_explicit_remote_head_when_a_tag_has_the_same_name
+    origin = Dir.mktmpdir("hive-origin")
+    seed = Dir.mktmpdir("hive-origin-seed")
+    clone = Dir.mktmpdir("hive-origin-clone")
+    run!("git", "init", "--bare", origin)
+    run!("git", "-C", seed, "init", "-b", "master", "--quiet")
+    run!("git", "-C", seed, "config", "user.email", "test@example.com")
+    run!("git", "-C", seed, "config", "user.name", "Test")
+    File.write(File.join(seed, "version.txt"), "tag\n")
+    run!("git", "-C", seed, "add", "version.txt")
+    run!("git", "-C", seed, "commit", "-m", "tag target", "--quiet")
+    tag_sha = run!("git", "-C", seed, "rev-parse", "HEAD").strip
+    run!("git", "-C", seed, "remote", "add", "origin", origin)
+    run!("git", "-C", seed, "push", "origin", "refs/heads/master:refs/heads/master")
+    run!("git", "-C", seed, "update-ref", "refs/tags/master", tag_sha)
+    run!("git", "-C", seed, "push", "origin", "refs/tags/master:refs/tags/master")
+    File.write(File.join(seed, "version.txt"), "branch\n")
+    run!("git", "-C", seed, "add", "version.txt")
+    run!("git", "-C", seed, "commit", "-m", "advance branch", "--quiet")
+    branch_sha = run!("git", "-C", seed, "rev-parse", "HEAD").strip
+    run!("git", "-C", seed, "push", "origin", "refs/heads/master:refs/heads/master")
+    run!("git", "clone", origin, clone)
+    run!("git", "-C", clone, "update-ref", "-d", "refs/remotes/origin/master")
+
+    _out, err, status = Hive::Worktree.fetch_origin_branch(clone, "master")
+
+    assert status.success?, err
+    assert_equal branch_sha,
+                 run!("git", "-C", clone, "rev-parse", "refs/remotes/origin/master").strip
+    refute_equal tag_sha, branch_sha
+  ensure
+    FileUtils.rm_rf(origin) if origin
+    FileUtils.rm_rf(seed) if seed
+    FileUtils.rm_rf(clone) if clone
+  end
+
+  def test_fetch_origin_branch_times_out_and_reaps_the_transport_process_group
+    with_tmp_git_repo do |repo|
+      fake_bin = File.join(repo, "fake-bin")
+      pid_file = File.join(repo, "ssh-pids")
+      FileUtils.mkdir_p(fake_bin)
+      ssh = File.join(fake_bin, "ssh")
+      File.write(ssh, <<~SH)
+        #!/bin/sh
+        trap '' TERM
+        sleep 30 &
+        child=$!
+        printf '%s %s\n' "$$" "$child" > "$HIVE_TEST_FETCH_PID_FILE"
+        wait
+      SH
+      FileUtils.chmod(0o755, ssh)
+      run!("git", "-C", repo, "remote", "add", "origin", "ssh://example.invalid/repo.git")
+
+      _out, err, status = with_env(
+        "PATH" => "#{fake_bin}:#{ENV.fetch('PATH')}",
+        "HIVE_TEST_FETCH_PID_FILE" => pid_file
+      ) do
+        Hive::Worktree.fetch_origin_branch(repo, "master", timeout_sec: 0.1)
+      end
+
+      refute status.success?
+      assert_includes err, "timed out"
+      pids = File.read(pid_file).split.map { |value| Integer(value, 10) }
+      assert_equal 2, pids.size
+      pids.each do |pid|
+        process_state, _err, process_status = Open3.capture3(
+          "ps", "-o", "stat=", "-p", pid.to_s
+        )
+        running = process_status.success? && !process_state.lstrip.start_with?("Z")
+        refute running, "timed-out transport pid #{pid} must not remain running"
+      end
+    end
+  end
+
+  def test_fetch_origin_branch_returns_failure_for_invalid_timeout
+    _out, err, status = Hive::Worktree.fetch_origin_branch("/tmp/project", "main", timeout_sec: 0)
+
+    refute status.success?
+    assert_includes err, "fetch timeout must be positive"
+  end
+
   # Plan R12: drop must converge even when worktree.yml has been
   # truncated, hand-edited, or corrupted by a crashed prior writer.
   # read_pointer treats parse failure as "no pointer" (returns nil)
@@ -1009,6 +1287,68 @@ class WorktreeTest < Minitest::Test
   def test_read_pointer_returns_nil_when_file_missing
     Dir.mktmpdir do |folder|
       assert_nil Hive::Worktree.read_pointer(folder)
+    end
+  end
+
+  def test_strict_pointer_rejects_oversized_input_before_yaml_parsing
+    Dir.mktmpdir do |folder|
+      File.binwrite(
+        File.join(folder, "worktree.yml"),
+        "x" * (Hive::Worktree::STRICT_POINTER_MAX_BYTES + 1)
+      )
+
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_strict_pointer(folder, expected_root: folder)
+      end
+      assert_includes error.message, "exceeds"
+    end
+  end
+
+  def test_strict_pointer_rejects_missing_symlink_malformed_and_identity_mismatch
+    with_tmp_dir do |root|
+      folder = File.join(root, "task")
+      worktree_root = File.join(root, "worktrees")
+      FileUtils.mkdir_p(folder)
+      path = File.join(folder, "worktree.yml")
+
+      assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_strict_pointer(folder, expected_root: worktree_root)
+      end
+      File.write(path, "path: [unterminated\n")
+      assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_strict_pointer(folder, expected_root: worktree_root)
+      end
+      FileUtils.rm_f(path)
+      target = File.join(root, "target.yml")
+      File.write(target, "{}\n")
+      File.symlink(target, path)
+      assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_strict_pointer(folder, expected_root: worktree_root)
+      end
+      FileUtils.rm_f(path)
+
+      valid = {
+        "path" => File.join(worktree_root, "fix-ui"), "branch" => "fix-ui",
+        "base_branch" => "main", "base_oid" => "a" * 40,
+        "repository" => "github.com/acme/widgets"
+      }
+      [
+        valid.merge("base_oid" => "bad"),
+        valid.merge("repository" => "gitlab.com/acme/widgets")
+      ].each do |data|
+        File.write(path, data.to_yaml)
+        assert_raises(Hive::WorktreeError) do
+          Hive::Worktree.read_strict_pointer(folder, expected_root: worktree_root)
+        end
+      end
+      File.write(path, valid.to_yaml)
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_strict_pointer(
+          folder, expected_root: worktree_root,
+          expected: valid.merge("repository" => "github.com/acme/other")
+        )
+      end
+      assert_includes error.message, "contradicts saved task state"
     end
   end
 

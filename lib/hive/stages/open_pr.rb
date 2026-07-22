@@ -17,7 +17,7 @@ module Hive
       module_function
 
       def run!(task, cfg)
-        pointer = worktree_pointer_or_exit(task)
+        pointer = Hive::Stages::Base.worktree_pointer_or_exit(task)
         worktree_path = pointer.fetch("path")
         branch = pointer["branch"] || task.slug
 
@@ -101,9 +101,14 @@ module Hive
 
         prompt = render_prompt(task, worktree_path, branch,
                                base_branch: dependency_pr_base_branch(task, cfg))
-        profile = Hive::Stages::Base.stage_profile(cfg, "open_pr")
+        identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "open_pr")
+        profile = if identity
+          Hive::AgentProfiles.lookup(identity.provider, cfg: cfg)
+        else
+          Hive::Stages::Base.stage_profile(cfg, "open_pr")
+        end
         before_sha = Hive::ProtectedFiles.snapshot(task.folder)
-        spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path)
+        spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path, identity: identity)
         after_sha = Hive::ProtectedFiles.snapshot(task.folder)
         if (tampered = Hive::ProtectedFiles.diff(before_sha, after_sha)).any?
           Hive::Markers.set(task.state_file, :error,
@@ -133,7 +138,7 @@ module Hive
         { commit: "pr_opened_draft", status: :complete }
       end
 
-      def spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path)
+      def spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path, identity: nil)
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "open_pr", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
@@ -147,7 +152,8 @@ module Hive
           log_label: "open-pr",
           profile: profile,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
-          status_mode: :state_file_marker
+          status_mode: :state_file_marker,
+          identity_arguments: identity&.native_arguments
         }
         if profile.name == :claude
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(
@@ -159,19 +165,6 @@ module Hive
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)
         end
-      end
-
-      def worktree_pointer_or_exit(task)
-        pointer = Hive::Worktree.read_pointer(task.folder)
-        unless pointer && pointer["path"]
-          warn "hive: no worktree pointer; this task did not pass through 4-execute"
-          exit 1
-        end
-        unless File.directory?(pointer["path"])
-          warn "hive: worktree pointer at #{pointer['path']} no longer exists; recreate or move task back to 4-execute"
-          exit 1
-        end
-        pointer
       end
 
       def render_prompt(task, worktree_path, branch, base_branch: nil)

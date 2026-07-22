@@ -1,0 +1,16 @@
+## 2026-07-22 — Resume advanced managed draft-PR receipts
+
+- Fixed managed worktree resume so immutable pointer identity is checked
+  independently from the receipt's monotonic handoff phase.
+- Preserved advanced phases such as `push_intent` for reconcile-first recovery
+  instead of rejecting them as contradictions with the initial
+  `worktree_created` receipt shape.
+- Kept ordinary expected-state reads phase-sensitive and added an explicit
+  identity-only comparison for the worktree resume boundary; simultaneous or
+  malformed comparison inputs fail closed.
+- Added focused receipt and real-worktree regressions covering every immutable
+  identity mismatch plus authenticated resume from `push_intent` without
+  resetting the receipt.
+- Restored and validated UTF-8 on byte-exact report recovery after removing a
+  controller marker, so the recovered report can be reparsed before push or PR
+  reconciliation continues.

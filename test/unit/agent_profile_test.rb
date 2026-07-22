@@ -1,7 +1,17 @@
 require "test_helper"
 require "hive/agent_profile"
+require "hive/implementation_identity"
 
 class AgentProfileTest < Minitest::Test
+  def test_policy_capabilities_are_optional_and_frozen
+    profile = make_profile
+    assert_equal [], profile.policy_capabilities
+
+    capable = make_profile(policy_capabilities: %i[tools settings_isolation])
+    assert_equal %i[tools settings_isolation], capable.policy_capabilities
+    assert_predicate capable.policy_capabilities, :frozen?
+  end
+
   include HiveTestHelper
 
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)
@@ -42,6 +52,100 @@ class AgentProfileTest < Minitest::Test
     end
 
     assert_includes error.message, "unknown prompt_style"
+  end
+
+  def test_initial_context_reserve_defaults_to_zero_and_must_be_non_negative
+    assert_equal 0, make_profile.initial_context_tokens
+
+    error = assert_raises(ArgumentError) do
+      make_profile(initial_context_tokens: -1)
+    end
+    assert_includes error.message, "non-negative Integer"
+  end
+
+  def test_identity_arguments_translate_model_and_supported_effort_as_discrete_argv
+    profile = make_profile(
+      model_argument_builder: ->(model) { [ "--model", model ] },
+      effort_argument_builder: ->(effort) { [ "-c", "reasoning_effort=#{effort}" ] }
+    )
+
+    result = profile.identity_arguments(model: "gpt-5.6-terra", effort: "medium")
+
+    assert_equal [ "--model", "gpt-5.6-terra", "-c", "reasoning_effort=medium" ],
+                 result.native_arguments
+    assert_equal "medium", result.requested_effort
+    assert_equal "medium", result.effective_effort
+    assert result.effort_supported
+  end
+
+  def test_identity_arguments_report_unsupported_effort_without_native_argument
+    profile = make_profile(model_argument_builder: ->(model) { [ "--model", model ] })
+
+    result = profile.identity_arguments(model: "provider/model-v1", effort: "high")
+
+    assert_equal [ "--model", "provider/model-v1" ], result.native_arguments
+    assert_equal "high", result.requested_effort
+    assert_nil result.effective_effort
+    refute result.effort_supported
+  end
+
+  def test_identity_arguments_can_record_a_concrete_default_without_pinning_it
+    profile = make_profile(model_argument_builder: ->(model) { [ "--model", model ] })
+
+    result = profile.identity_arguments(model: "provider/default-v2", effort: nil, pin_model: false)
+
+    assert_equal [], result.native_arguments
+    assert_equal "provider/default-v2", result.model
+    refute result.model_pinned
+  end
+
+  def test_identity_arguments_reject_shell_shaped_model_and_invalid_effort
+    profile = make_profile(
+      model_argument_builder: ->(model) { [ "--model", model ] },
+      effort_argument_builder: ->(effort) { [ "--effort", effort ] }
+    )
+
+    assert_raises(Hive::ImplementationIdentity::InvalidIdentity) do
+      profile.identity_arguments(model: "safe\n--dangerous", effort: "high")
+    end
+    assert_raises(Hive::ImplementationIdentity::InvalidIdentity) do
+      profile.identity_arguments(model: "safe", effort: "high; touch /tmp/x")
+    end
+  end
+
+  def test_concrete_default_model_uses_profile_resolver_and_rejects_default_sentinel
+    resolved = make_profile(default_model_resolver: ->(**) { "vendor/model-1" })
+    assert_equal "vendor/model-1", resolved.concrete_default_model
+
+    unresolved = make_profile(default_model_resolver: ->(**) { "default" })
+    error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      unresolved.concrete_default_model
+    end
+    assert_match(/concrete default model/, error.message)
+  end
+
+  def test_concrete_default_model_requires_and_wraps_profile_resolver_failures
+    missing = make_profile
+    error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      missing.concrete_default_model
+    end
+    assert_match(/cannot resolve a concrete default model/, error.message)
+
+    broken = make_profile(default_model_resolver: ->(**) { raise IOError, "settings unavailable" })
+    error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      broken.concrete_default_model
+    end
+    assert_match(/default-model resolution failed: settings unavailable/, error.message)
+  end
+
+  def test_identity_arguments_requires_model_pin_support
+    profile = make_profile
+
+    error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      profile.identity_arguments(model: "provider/model-v1", effort: nil)
+    end
+
+    assert_match(/cannot pin model/, error.message)
   end
 
   def test_bin_uses_env_override_when_set
@@ -141,6 +245,14 @@ class AgentProfileTest < Minitest::Test
     assert_match(/unknown status_detection_mode/, err.message)
   end
 
+  def test_invalid_prompt_style_raises_at_construction
+    err = assert_raises(ArgumentError) do
+      make_profile(prompt_style: :unknown_style)
+    end
+
+    assert_match(/unknown prompt_style/, err.message)
+  end
+
   def test_preflight_default_is_noop
     profile = make_profile
     assert_nil profile.preflight!
@@ -201,6 +313,30 @@ class AgentProfileTest < Minitest::Test
       error = assert_raises(Hive::AgentError) { profile.require_cli_capability!(:safe_mode) }
 
       assert_includes error.message, "capability check failed"
+    end
+  end
+
+  def test_cli_capability_verifies_options_without_treating_values_as_flags
+    with_tmp_dir do |dir|
+      binary = File.join(dir, "valued-capability-cli")
+      File.write(binary, <<~SH)
+        #!/bin/sh
+        if [ "${1:-}" = "--version" ]; then
+          echo "2.1.179 (Claude Code)"
+          exit 0
+        fi
+        printf '%s\n' '--safe-mode --tools <tools...>'
+      SH
+      File.chmod(0o755, binary)
+      profile = make_profile(
+        bin_default: binary, env_bin_override_key: nil,
+        cli_capabilities: {
+          patrol: [ "--safe-mode", "--tools", "Read,Grep,Glob" ]
+        }
+      )
+
+      assert_equal [ "--safe-mode", "--tools", "Read,Grep,Glob" ],
+                   profile.require_cli_capability!(:patrol)
     end
   end
 
@@ -317,6 +453,33 @@ class AgentProfileTest < Minitest::Test
     assert_equal({ safe_mode: [ "--safe-mode" ] }, overridden.cli_capabilities)
   end
 
+  def test_with_overrides_preserves_initial_context_reserve
+    profile = make_profile(initial_context_tokens: 12_345)
+
+    overridden = profile.with_overrides("min_version" => "9.9.9")
+
+    assert_equal 12_345, overridden.initial_context_tokens
+  end
+
+  def test_with_overrides_preserves_identity_capabilities
+    resolver = ->(**) { "model-v1" }
+    model_builder = ->(model) { [ "--model", model ] }
+    effort_builder = ->(effort) { [ "--effort", effort ] }
+    profile = make_profile(
+      default_model_resolver: resolver,
+      model_argument_builder: model_builder,
+      effort_argument_builder: effort_builder,
+      launcher_identity: "custom-launcher/v2"
+    )
+
+    overridden = profile.with_overrides("min_version" => "9.9.9")
+
+    assert_same resolver, overridden.default_model_resolver
+    assert_same model_builder, overridden.model_argument_builder
+    assert_same effort_builder, overridden.effort_argument_builder
+    assert_equal "custom-launcher/v2", overridden.launcher_identity
+  end
+
   # --- with_overrides ---------------------------------------------------
 
   def test_with_overrides_returns_self_for_nil_or_empty
@@ -383,7 +546,6 @@ class AgentProfileTest < Minitest::Test
     assert_nil profile.extract_usage_event({ "type" => "result" })
   end
 
-
   def capability_binary(dir, help:, help_exit: 0)
     path = File.join(dir, "capable-cli")
     File.write(path, <<~SH)
@@ -410,5 +572,20 @@ class AgentProfileTest < Minitest::Test
   ensure
     Hive::AgentProfile.send(:remove_const, :VERSION_CHECK_TIMEOUT_SEC)
     Hive::AgentProfile.const_set(:VERSION_CHECK_TIMEOUT_SEC, original)
+  end
+
+  def test_verify_skill_reports_not_applicable_or_delegates
+    assert_equal [ :not_applicable, "no skill verifier configured for this profile" ],
+                 make_profile.verify_skill("/anything")
+
+    calls = []
+    verifier = lambda do |invocation, project_root:|
+      calls << [ invocation, project_root ]
+      [ :present, "/tmp/SKILL.md" ]
+    end
+    profile = make_profile(skill_verifier: verifier)
+
+    assert_equal [ :present, "/tmp/SKILL.md" ], profile.verify_skill("/demo", project_root: "/repo")
+    assert_equal [ [ "/demo", "/repo" ] ], calls
   end
 end

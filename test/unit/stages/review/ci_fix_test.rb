@@ -150,6 +150,34 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  def test_passes_pre_snapshot_identity_to_fix_agent
+    with_ci_dir do |dir, task_folder|
+      ci = write_ci_script(dir, %(echo "tests failed" >&2; exit 1))
+      resolved_identity = Object.new
+      identity_seen = nil
+
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :implementation_stage_identity,
+        ->(*_args) { resolved_identity }
+      ) do
+        replacement = lambda do |cfg:, ctx:, command:, attempt:, max_attempts:, captured_output:, identity: nil|
+          identity_seen = identity
+          { status: :error, error_message: "stop after identity handoff" }
+        end
+        with_replaced_singleton_method(Hive::Stages::Review::CiFix, :spawn_fix_agent, replacement) do
+          result = Hive::Stages::Review::CiFix.run!(
+            cfg: cfg_with(ci),
+            ctx: make_ctx(dir, task_folder)
+          )
+
+          assert_equal :error, result.status
+        end
+      end
+
+      assert_same resolved_identity, identity_seen
+    end
+  end
+
   def test_returns_error_when_fix_agent_leaves_uncommitted_changes
     with_tmp_dir do |task_root|
       with_tmp_git_repo do |worktree|

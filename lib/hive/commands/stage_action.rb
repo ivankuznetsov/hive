@@ -7,6 +7,9 @@ require "hive/stages"
 require "hive/task_resolver"
 require "hive/workflows"
 require "hive/task_action"
+require "hive/attempts/context"
+require "hive/attempts/command_dispatch"
+require "hive/conditions/transition_guard"
 
 module Hive
   module Commands
@@ -27,28 +30,59 @@ module Hive
     # In `--json` mode the inner Approve and Run are quieted and a single
     # `hive-stage-action` envelope is emitted at the end.
     class StageAction
+      include Hive::Schemas::EnvelopeEmitter
+      include Hive::Attempts::CommandDispatch
+
       def initialize(verb, target, project: nil, from: nil, json: false,
-                     recover_merged_error_reason: nil)
+                     recover_merged_error_reason: nil, durable: false,
+                     attempt_entrypoint: nil, quiet: false, observation_guard: nil)
         @verb = verb
         @target = target
         @project_filter = project
         @from = from
         @json = json
         @recover_merged_error_reason = recover_merged_error_reason
+        @durable = durable
+        @attempt_entrypoint = attempt_entrypoint
+        @quiet = quiet
+        @observation_guard = observation_guard
       end
 
       def call
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json
-        raise wrapped
+        call_with_envelope do
+          @durable && !Hive::Attempts::Context.active? ? dispatch_durable : do_call
+        end
       end
 
+      def envelope_schema
+        "hive-stage-action"
+      end
+
+      def envelope_extras
+        { "verb" => @verb }
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
+      end
+
+      def envelope_serialization_failure_policy = :raise
+
       private
+
+      def durable_intended_stage(_task)
+        Hive::Workflows.for_verb(@verb).fetch(:target)
+      end
+
+      def durable_worker_argv(task)
+        argv = [ "hive", @verb, task.folder ]
+        argv.concat([ "--from", @from ]) if @from
+        argv << "--json" if @json
+        if @recover_merged_error_reason
+          argv.concat([ "--recover-merged-error-reason", @recover_merged_error_reason ])
+        end
+        argv
+      end
 
       def do_call
         config = Hive::Workflows.for_verb(@verb)
@@ -60,7 +94,7 @@ module Hive
         return emit_archive_noop(task) if archive_noop?(task, current_stage)
 
         if current_stage == target_stage
-          run_at(task.folder)
+          run_at(task.folder, observation_guard: @observation_guard)
           return emit_phase(task, "ran")
         end
 
@@ -76,7 +110,7 @@ module Hive
         validate_marker!(task, config)
         new_folder = File.join(task.hive_state_path, "stages", target_stage, task.slug)
         promote(task, target_stage, current_stage, config)
-        run_at(new_folder)
+        run_at(new_folder, observation_guard: nil)
         emit_phase(Hive::Task.new(new_folder), "promoted_and_ran")
       end
 
@@ -116,6 +150,7 @@ module Hive
         return if config[:force_source]
 
         marker = Hive::Markers.current(task.state_file)
+        Hive::Conditions::TransitionGuard.validate!(task, force: config[:force_source])
         return if terminal_marker?(marker)
         return if archive_merged_error_recovery_marker?(task, marker, config)
 
@@ -168,35 +203,37 @@ module Hive
             config
           ),
           json: false,
-          quiet: @json
+          quiet: @json || @quiet,
+          observation_guard: @observation_guard
         ).call
       end
 
-      def run_at(folder)
+      def run_at(folder, observation_guard:)
         Hive::Commands::Run.new(
           folder,
           project: @project_filter,
           json: false,
-          quiet: @json
+          quiet: @json || @quiet,
+          observation_guard: observation_guard
         ).call
       end
 
       # ── Reporting ───────────────────────────────────────────────────────
 
       def emit_phase(task, phase)
-        return unless @json
+        return unless @json && !@quiet
 
         puts JSON.generate(success_payload(task, phase))
       end
 
       def emit_archive_noop(task)
         marker = Hive::Markers.current(task.state_file)
-        if @json
+        if @json && !@quiet
           puts JSON.generate(success_payload(task, "noop",
                                              noop: true,
                                              reason: "already_archived",
                                              marker: marker))
-        else
+        elsif !@quiet
           puts "hive: noop — #{task.slug} is already at #{Hive::Stages::DIRS.last}"
         end
       end
@@ -223,26 +260,8 @@ module Hive
         payload
       end
 
-      def emit_error_envelope(error)
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: "hive-stage-action",
-          error: error,
-          error_kind: error_kind_for(error),
-          extras: { "verb" => @verb }
-        )
-        puts JSON.generate(payload)
-      end
-
       def error_kind_for(error)
-        case error
-        when Hive::AmbiguousSlug then "ambiguous_slug"
-        when Hive::DestinationCollision then "destination_collision"
-        when Hive::FinalStageReached then "final_stage"
-        when Hive::WrongStage then "wrong_stage"
-        when Hive::RollbackFailed then "rollback_failed"
-        when Hive::InvalidTaskPath then "invalid_task_path"
-        else "error"
-        end
+        Hive::Commands::Approve.error_kind_for(error)
       end
 
       def stage_dir(task)

@@ -386,6 +386,69 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_accepted_thesis_remains_actionable_for_issue_when_auto_fix_is_disabled
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      policy = intake_policy.merge("issue_filing" => true)
+      store.enqueue_manifest!(manifest, policy: policy, now: T0)
+      token = store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
+        now: T0, lease_sec: 60
+      )
+      accepted = disposition("checkout-thesis", "fp-checkout").merge(
+        "thesis" => thesis_snapshot("checkout-thesis", "fp-checkout")
+      )
+      envelope = complete_zero_envelope(dir).merge(
+        "accepted" => [ accepted ],
+        "zero_reason" => nil,
+        "feature_results" => [
+          {
+            "feature_id" => "checkout", "complete" => true,
+            "thesis_ids" => [ "checkout-thesis" ], "errors" => []
+          }
+        ]
+      )
+
+      checkpoint = store.checkpoint_discovery!(token, envelope: envelope, now: T0 + 1)
+
+      refute checkpoint.fetch("complete")
+      assert_equal "classified", checkpoint.fetch("state")
+      assert_equal [ "pr-7-stable" ],
+                   store.actionable_jobs(now: T0 + 2).map { |job| job.fetch("job_id") }
+    end
+  end
+
+  def test_admissible_flagged_thesis_remains_actionable_for_issue
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      policy = intake_policy.merge("issue_filing" => true)
+      store.enqueue_manifest!(manifest, policy: policy, now: T0)
+      token = store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
+        now: T0, lease_sec: 60
+      )
+      flagged = disposition("checkout-thesis", "fp-checkout").merge(
+        "reasons" => [ "cross_feature_impact" ],
+        "thesis" => thesis_snapshot("checkout-thesis", "fp-checkout")
+      )
+      envelope = complete_zero_envelope(dir).merge(
+        "flagged" => [ flagged ],
+        "zero_reason" => nil,
+        "feature_results" => [
+          {
+            "feature_id" => "checkout", "complete" => true,
+            "thesis_ids" => [ "checkout-thesis" ], "errors" => []
+          }
+        ]
+      )
+
+      checkpoint = store.checkpoint_discovery!(token, envelope: envelope, now: T0 + 1)
+
+      refute checkpoint.fetch("complete")
+      assert_equal "classified", checkpoint.fetch("state")
+    end
+  end
+
   def test_expired_claim_reclaims_only_after_process_identity_is_resolved
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
@@ -1900,6 +1963,10 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       invalid_payloads << valid.merge("review_errors" => [ retry_error ], "feature_results" => [ incomplete ])
       invalid_payloads << valid.merge("review_errors" => [ retry_error ])
       invalid_payloads << valid.merge(
+        "complete" => false, "features_mapped" => 0, "zero_reason" => nil,
+        "review_errors" => [], "feature_results" => []
+      )
+      clean_partial = valid.merge(
         "complete" => false, "zero_reason" => nil, "review_errors" => [],
         "feature_results" => valid.fetch("feature_results")
       )
@@ -1908,6 +1975,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
           store.send(:assert_matching_discovery_payload!, aggregate, payload)
         end
       end
+      store.send(:assert_matching_discovery_payload!, aggregate, clean_partial)
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         store.send(:assert_matching_discovery_payload!, aggregate, valid, intermediate: true)
       end

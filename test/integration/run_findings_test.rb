@@ -466,7 +466,7 @@ class RunFindingsTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, execute, slug = seed_execute_task_with_reviews(dir)
-        Hive::Lock.acquire_task_lock(execute, slug: slug, op: "fake_run")
+        lock_data = Hive::Lock.acquire_task_lock(execute, slug: slug, op: "fake_run")
         begin
           _, err, status = with_captured_exit do
             Hive::Commands::FindingToggle.new(
@@ -477,7 +477,7 @@ class RunFindingsTest < Minitest::Test
                        "toggle must serialise via task lock"
           assert_includes err, "another hive run is active"
         ensure
-          Hive::Lock.release_task_lock(execute)
+          Hive::Lock.release_task_lock(execute, lock_id: lock_data.fetch("lock_id"))
         end
       end
     end

@@ -115,7 +115,7 @@ class HiveCommandsInitTest < Minitest::Test
     assert_match(/adhoc:\n    reviewers: null\n    fix: true/, enabled)
   end
 
-  def test_project_config_renders_independent_refactor_patrol_consent_gates
+  def test_project_config_renders_refactor_patrol_policy_from_choice
     enabled = render_fresh_config(
       :coding,
       answers: project_config_answers.merge("refactor_patrol_enabled" => true)
@@ -123,14 +123,17 @@ class HiveCommandsInitTest < Minitest::Test
     enabled_raw = YAML.safe_load(enabled).fetch("refactor_patrol")
 
     assert_equal true, enabled_raw.fetch("enabled")
-    assert_equal false, enabled_raw.dig("auto_fix", "enabled")
-    assert_equal false, enabled_raw.dig("issue_filing", "enabled")
+    assert_equal true, enabled_raw.dig("auto_fix", "enabled")
+    assert_equal true, enabled_raw.dig("issue_filing", "enabled")
 
     disabled = render_fresh_config(
       :coding,
       answers: project_config_answers.merge("refactor_patrol_enabled" => false)
     )
-    assert_equal false, YAML.safe_load(disabled).dig("refactor_patrol", "enabled")
+    disabled_raw = YAML.safe_load(disabled).fetch("refactor_patrol")
+    assert_equal false, disabled_raw.fetch("enabled")
+    assert_equal false, disabled_raw.dig("auto_fix", "enabled")
+    assert_equal false, disabled_raw.dig("issue_filing", "enabled")
   end
 
   def test_refactor_patrol_selector_requires_a_boolean_or_nil
@@ -139,23 +142,23 @@ class HiveCommandsInitTest < Minitest::Test
     end
   end
 
-  def test_run_init_preflight_warns_when_doctor_reports_config_error
-    cmd = command
-    warnings = []
-    fake_doctor = Object.new
-    fake_doctor.define_singleton_method(:call) { Hive::Commands::Doctor::EXIT_CONFIG_ERROR }
+  def test_run_init_preflight_warns_when_inspector_reports_config_error
+    error = StringIO.new
+    cmd = Hive::Commands::Init.new("/tmp/project", provisioning_error: error)
+    fake_inspector = Object.new
+    fake_inspector.define_singleton_method(:inspect) { raise Hive::ConfigError, "broken config" }
     original_load = Hive::Config.singleton_class.instance_method(:load)
-    original_doctor_new = Hive::Commands::Doctor.singleton_class.instance_method(:new)
+    original_inspector_new = Hive::AgentSkills::Inspector.singleton_class.instance_method(:new)
     Hive::Config.define_singleton_method(:load) { |_path| {} }
-    Hive::Commands::Doctor.define_singleton_method(:new) { |**_kwargs| fake_doctor }
-    cmd.define_singleton_method(:write_warn) { |line| warnings << line }
+    Hive::AgentSkills::Inspector.define_singleton_method(:new) { |**_kwargs| fake_inspector }
 
     cmd.send(:run_init_preflight!)
 
-    assert_equal [ "hive: doctor pre-flight — config issue detected; run `hive doctor` for details" ], warnings
+    assert_match(/doctor pre-flight — config issue detected \(broken config\)/, error.string)
+    assert_match(/run `hive doctor` for details/, error.string)
   ensure
     Hive::Config.singleton_class.define_method(:load, original_load) if original_load
-    Hive::Commands::Doctor.singleton_class.define_method(:new, original_doctor_new) if original_doctor_new
+    Hive::AgentSkills::Inspector.singleton_class.define_method(:new, original_inspector_new) if original_inspector_new
   end
 
   def test_write_warn_swallows_epipe
@@ -619,11 +622,13 @@ end
       FileUtils.chmod(0o755, hive)
       previous_program = $PROGRAM_NAME
       previous_path = ENV["PATH"]
-      $PROGRAM_NAME = "hive"
-      ENV["PATH"] = dir
+      with_env("HIVE_INVOKED_BIN" => nil) do
+        $PROGRAM_NAME = "hive"
+        ENV["PATH"] = dir
 
-      assert_equal hive, command.send(:current_binary_path)
-      assert_nil Hive::InvokedBinary.which("missing-hive")
+        assert_equal hive, command.send(:current_binary_path)
+        assert_nil Hive::InvokedBinary.which("missing-hive")
+      end
     ensure
       $PROGRAM_NAME = previous_program
       ENV["PATH"] = previous_path
@@ -643,10 +648,12 @@ end
       FileUtils.chmod(0o755, hv)
       previous_program = $PROGRAM_NAME
       previous_path = ENV["PATH"]
-      $PROGRAM_NAME = "hv"
-      ENV["PATH"] = [ File.dirname(apache), hv_dir ].join(File::PATH_SEPARATOR)
+      with_env("HIVE_INVOKED_BIN" => nil) do
+        $PROGRAM_NAME = "hv"
+        ENV["PATH"] = [ File.dirname(apache), hv_dir ].join(File::PATH_SEPARATOR)
 
-      assert_equal hv, command.send(:current_binary_path)
+        assert_equal hv, command.send(:current_binary_path)
+      end
     ensure
       $PROGRAM_NAME = previous_program
       ENV["PATH"] = previous_path

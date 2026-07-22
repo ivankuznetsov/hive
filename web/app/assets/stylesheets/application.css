@@ -1,4 +1,4 @@
-/* hivebox design system.
+/* Hive web design system.
  *
  * The bar: it should feel like claude.com — warm ivory surfaces, a
  * terracotta accent, a serif display voice, hairline borders, soft radii,
@@ -247,8 +247,30 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .composer-toolbar .spacer { flex: 1; }
 .composer select { max-width: 220px; }
 
+.daemon-panel {
+  display: flex;
+  align-items: center;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  margin: 0 0 28px;
+  font-size: 0.88rem;
+}
+.daemon-panel-running { background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 25%, transparent); }
+.daemon-panel-warning, .daemon-panel-stopped { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 25%, transparent); }
+.daemon-summary, .daemon-action { display: flex; align-items: center; gap: 8px; }
+.daemon-summary strong { font-family: var(--font-sans); font-size: 0.9rem; }
+.daemon-action { margin-left: auto; }
+.daemon-warning, .daemon-guidance { color: var(--ink-muted); }
+.daemon-guidance { flex: 1 0 100%; padding-left: 17px; }
+.daemon-guidance code { font-family: var(--font-mono); font-size: 0.84em; }
+.daemon-panel form { margin: 0; }
+
 /* Project filter rail (TUI left-pane parity). */
 .status-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 30px; align-items: start; }
+.status-main { min-width: 0; }
 .project-nav { position: sticky; top: 24px; display: flex; flex-direction: column; gap: 2px; }
 .project-nav-item {
   appearance: none; background: none; border: 0; cursor: pointer;
@@ -290,6 +312,112 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .chip button:hover { background: transparent; color: var(--danger); }
 
 /* ---- Status grid ---- */
+
+.status-view-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 26px 0 18px;
+}
+.status-view-toolbar h1 { margin: 0; font-size: 1.35rem; }
+.status-view-toolbar p { margin: 4px 0 0; }
+.status-view-switch {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-sunken);
+}
+.status-view-switch form { margin: 0; }
+.status-view-option {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  padding: 6px 11px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+.status-view-option:hover { color: var(--ink); background: transparent; }
+.status-view-option.active { color: var(--ink); background: var(--panel); box-shadow: var(--shadow); }
+
+.kanban-board { min-width: 0; }
+.kanban-band { margin-bottom: 38px; }
+.kanban-band-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.kanban-band-header > div { min-width: 0; }
+.kanban-band-header h2 { display: inline; margin: 0 8px 0 0; overflow-wrap: anywhere; }
+.kanban-workflow { color: var(--ink-faint); font-size: 0.82rem; overflow-wrap: anywhere; }
+.kanban-band-warning { margin: 0 0 12px; }
+.kanban-columns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(260px, 310px);
+  gap: 12px;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 2px 2px 12px;
+  scroll-snap-type: x proximity;
+  overscroll-behavior-inline: contain;
+}
+.kanban-column {
+  display: flex;
+  flex-direction: column;
+  min-height: 170px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-sunken);
+  scroll-snap-align: start;
+}
+.kanban-column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.kanban-column-header h3 { margin: 0; font-size: 0.9rem; }
+.kanban-count {
+  min-width: 1.6rem;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink-muted);
+  font-size: 0.76rem;
+  text-align: center;
+}
+.kanban-cards { display: grid; align-content: start; gap: 9px; }
+.kanban-empty { margin: 20px 0; color: var(--ink-faint); font-size: 0.82rem; text-align: center; }
+.kanban-card {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 1px 2px rgba(40, 35, 25, 0.03);
+}
+.kanban-card:focus-within { border-color: var(--accent); }
+.kanban-card-heading { display: flex; align-items: start; gap: 8px; font-weight: 600; }
+.kanban-card-heading .status-dot { flex: 0 0 auto; margin-top: 0.42rem; }
+.kanban-card-heading a { min-width: 0; color: var(--ink); overflow-wrap: anywhere; }
+.kanban-card .task-slug { margin: 6px 0 0 17px; overflow-wrap: anywhere; }
+.kanban-card-meta { display: flex; justify-content: space-between; gap: 8px; margin-top: 10px; font-size: 0.78rem; color: var(--ink-muted); }
+.kanban-owner { margin: 8px 0 0; font-size: 0.76rem; overflow-wrap: anywhere; }
+.task-actions-compact { gap: 6px; margin: 11px 0 0; }
+.task-actions-compact form { margin: 0; }
+.task-actions-compact button,
+.task-actions-compact .btn { padding: 5px 8px; font-size: 0.76rem; }
 
 .project-section { margin-bottom: 34px; }
 .project-title { display: flex; align-items: baseline; gap: 12px; }
@@ -473,6 +601,24 @@ pre {
 .setup-steps li { margin: 10px 0; line-height: 1.55; }
 .setup-steps code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-sunken); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
 
+.checkbox-row { grid-template-columns: auto 1fr; align-items: start; column-gap: 9px; }
+.checkbox-row input { margin-top: 4px; }
+.checkbox-row p { grid-column: 2; margin: 0; }
+.pairing-section { margin: 30px 0; }
+.pairing-list { display: grid; gap: 10px; margin-top: 14px; }
+.pairing-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 13px 18px;
+}
+.pairing-code { font-family: var(--font-mono); letter-spacing: 0.1em; display: block; }
+.pairing-row .faint { display: block; margin-top: 3px; }
+
 .intervene { margin: 26px 0; }
 .intervene textarea { width: 100%; min-height: 70px; }
 .intervene summary { cursor: pointer; font-size: 0.9rem; }
@@ -550,6 +696,72 @@ pre {
 
 .login-output pre { max-height: 260px; }
 
+.managed-skills { margin: 30px 0; }
+.skill-check-form select { min-width: 220px; }
+.skill-health-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  align-items: baseline;
+  margin: 18px 0 12px;
+  color: var(--ink-muted);
+  font-size: 0.88rem;
+}
+.skill-health-summary strong { color: var(--ink); font-size: 1rem; }
+.skill-health-list { display: grid; gap: 10px; }
+.skill-health-row {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 13px 16px;
+}
+.skill-health-row p { margin: 6px 0 0; }
+.skill-health-title { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.skill-health-meta { color: var(--ink-muted); font-family: var(--font-mono); font-size: 0.8rem; }
+.tag-health-healthy { border-color: color-mix(in srgb, var(--ok) 50%, transparent); color: var(--ok); }
+.tag-health-missing, .tag-health-stale { border-color: color-mix(in srgb, var(--warn) 50%, transparent); color: var(--warn); }
+.tag-health-conflicting, .tag-health-incompatible { border-color: color-mix(in srgb, var(--danger) 50%, transparent); color: var(--danger); }
+.tag-health-unavailable { color: var(--ink-faint); }
+.skill-repair { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 14px; }
+.skill-repair p { margin: 0; }
+
+/* ---- Workflows ---- */
+
+.workflow-project-form select { min-width: 220px; }
+.workflow-list { display: grid; gap: 10px; margin: 14px 0 30px; }
+.workflow-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 13px 18px;
+}
+.workflow-title { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.workflow-meta { display: flex; flex-wrap: wrap; gap: 10px; margin: 5px 0 0; color: var(--ink-muted); font-family: var(--font-mono); font-size: 0.79rem; }
+.workflow-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.workflow-management-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 16px; }
+.workflow-management-card h2 { margin-top: 0; }
+.workflow-management-card .form-grid { max-width: none; }
+.workflow-preview { margin: 22px 0 30px; border-color: var(--accent); }
+.workflow-preview h2 { margin-top: 0; }
+.workflow-preview code { overflow-wrap: anywhere; }
+.permission-grid { display: grid; grid-template-columns: minmax(130px, auto) minmax(0, 1fr); gap: 7px 18px; }
+.permission-grid dt { color: var(--ink-muted); }
+.permission-grid dd { margin: 0; overflow-wrap: anywhere; }
+.workflow-diff-summary { display: flex; flex-wrap: wrap; gap: 10px 20px; margin: 16px 0; color: var(--ink-muted); }
+.workflow-diff-summary strong { color: var(--ink); }
+.preview-confirm-form { display: grid; gap: 10px; margin-top: 18px; }
+.preview-confirm-form p { margin: 4px 0; }
+.workflow-escalation { margin-bottom: 18px; }
+.workflow-change-list { margin-bottom: 18px; }
+.workflow-file-changes { margin: 16px 0; }
+.workflow-file-changes summary { cursor: pointer; color: var(--ink-muted); }
+.workflow-file-changes p { overflow-wrap: anywhere; }
+.workflow-publish-note p { line-height: 1.55; }
+
 /* ---- Auth pages ---- */
 
 .auth-card {
@@ -601,12 +813,52 @@ pre {
 /* ---- Responsive ---- */
 
 @media (max-width: 720px) {
-  .topbar-inner { gap: 12px; }
-  .topbar nav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .topbar-inner { flex-wrap: wrap; gap: 6px 12px; padding: 8px 14px; }
+  .topbar-session { margin-left: auto; }
+  .topbar nav {
+    order: 3;
+    flex: 1 0 100%;
+    flex-wrap: nowrap;
+    justify-content: space-between;
+    gap: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .topbar .nav-link {
+    padding: 5px clamp(4px, 1.5vw, 6px);
+    font-size: clamp(0.75rem, 3.5vw, 0.86rem);
+  }
   .topbar nav::-webkit-scrollbar { display: none; }
   .session-login { display: none; }
+  .project-nav {
+    margin-inline: -14px;
+    padding-inline: 14px;
+    scroll-padding-inline: 14px;
+  }
+  .project-nav::-webkit-scrollbar { display: none; }
+  .composer-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
+  }
+  .composer select {
+    grid-column: 1 / -1;
+    width: 100%;
+    max-width: none;
+  }
+  .composer-toolbar .spacer { display: none; }
+  .composer-attach { justify-content: center; }
+  .composer input[type="submit"] { width: 100%; }
+  .daemon-action { margin-left: 0; }
   .task-row { grid-template-columns: 1fr; gap: 8px; }
+  .status-view-toolbar { align-items: start; }
+  .kanban-band-header { align-items: start; }
+  .kanban-columns { grid-auto-columns: minmax(78vw, 290px); }
   .task-meta { flex-wrap: wrap; white-space: normal; }
+  .workflow-row { grid-template-columns: 1fr; }
+  .workflow-actions { justify-content: flex-start; }
+  .permission-grid { grid-template-columns: 1fr; gap: 2px; }
+  .permission-grid dd { margin-bottom: 8px; }
   main { padding: 20px 14px 48px; }
 }
 

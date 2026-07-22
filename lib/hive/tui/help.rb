@@ -39,6 +39,7 @@ module Hive
         { mode: :grid, key: "Enter",     action: :open_contextual,    description: "left pane: focus right. right pane: open red-status detail on gated red rows; wall_clock REVIEW_STALE keeps direct retry, reason=exit_code signal-kill ERROR opens log tail, max_passes REVIEW_STALE opens focal escalations; non-red contextual behavior is unchanged" },
         { mode: :grid, key: "o",         action: :open_task_folder,   description: "open the focused task's folder in $EDITOR (read-only browse — no workflow dispatch, distinct from Enter and the verb keys)" },
         { mode: :grid, key: "i",         action: :open_idea_preview,  description: "open the info panel for the focused task (slug, stage, created_at, folder, latest log, original idea, and stage-specific brainstorm.md / plan.md / execute log tail)" },
+        { mode: :grid, key: "I",         action: :implementation_identity, description: "open implementation ownership details (execute, PR opening, review fix, and CI fix provenance)" },
         { mode: :grid, key: "s",         action: :open_in_agent,      description: "steer the focused task manually — opens the project's configured development agent in the feature worktree with every stage folder for this slug preloaded as context, marks the task MANUAL_STEERING so headless runs skip it, then archives the slug on agent exit" },
         { mode: :grid, key: "T",         action: :token_stats,        description: "open token usage statistics for the current selection" },
         { mode: :grid, key: "z",         action: :archive_pane,       description: "open Archive pane (all done tasks)" },
@@ -78,6 +79,10 @@ module Hive
         { mode: :idea_preview, key: "q",   action: :back, description: "close the info panel and return to grid" },
         { mode: :idea_preview, key: "Esc", action: :back, description: "close the info panel and return to grid" },
         { mode: :idea_preview, key: "i",   action: :back, description: "close the info panel (toggle off — same key that opens it)" },
+        # Implementation-identity detail mode.
+        { mode: :implementation_identity_detail, key: "I", action: :back, description: "close implementation ownership details (toggle off)" },
+        { mode: :implementation_identity_detail, key: "q", action: :back, description: "close implementation ownership details" },
+        { mode: :implementation_identity_detail, key: "Esc", action: :back, description: "close implementation ownership details" },
         # New-idea prompt mode (v2).
         { mode: :new_idea_project, key: "j/k",     action: :project_cursor,  description: "move through projects for the new idea" },
         { mode: :new_idea_project, key: "Up/Down", action: :project_cursor,  description: "move through projects (arrow keys)" },

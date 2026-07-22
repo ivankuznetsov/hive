@@ -679,3 +679,23 @@ push, draft PR creation/reconciliation, and process death after each mutation
 intent followed by a separate-process resume. Keep this as an operational
 verification gap; the controller remains fail-closed when a result is not
 uniquely observable.
+
+## Large LLM-wiki backlog recovery verified (2026-07-22)
+
+The repaired runner drained the live Hive backlog from 637 complete queue
+entries plus five interrupted temp writes to zero pending, hidden, or failed
+entries. All five temp writes were reconstructed; 658 receipt refs now cover
+the recovered history, and no source-pin, consecutive-failure, or publication
+breaker remains. The local and published `llm-wiki/refresh` heads match with a
+wiki-only diff from the current default branch. The primary checkout stayed
+clean, and the scheduler remained at 13 repository-owned timer/service pairs
+before and after recovery; every service retains its 4 GiB memory ceiling and
+none was left active or failed.
+
+Live closure also exposed one additional downgrade path: startup
+reconciliation invoked from an older linked checkout could overwrite the
+shared runner after recovery. Shared-runtime installation is now pinned to the
+primary worktree whenever its managed files exist, with regression coverage
+for a deliberately stale linked copy. The bootstrap-only fallback remains for
+repositories whose primary worktree does not yet contain managed wiki files.
+No unresolved recovery gap remains for this incident.

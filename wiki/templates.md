@@ -26,7 +26,16 @@ keeps the circuit open before another provider launch when the backlog exceeds
 the batch failure count reaches `LLM_WIKI_MAX_REFRESH_ATTEMPTS` (2 by default),
 quarantined sources remain, or sources arriving outside the completed bounded
 batch are deferred. A batch includes at most `LLM_WIKI_MAX_BATCH_SOURCES`
-sources (10 by default).
+sources (10 by default). Before provider batching, every queued commit is
+preserved under `refs/llm-wiki/sources/` using Git transactions capped by
+`LLM_WIKI_MAX_SOURCE_PIN_BATCH` (64 refs by default). Large durable backlogs
+therefore cannot turn one five-second ref transaction into a permanent
+`source-pin:batch` circuit. Successful chunks remain idempotently pinned if a
+later chunk fails and the operator retries. Crash-left queue temp files whose
+filename still identifies an available source commit are reconstructed from
+that commit and returned to the normal queue; unavailable or unrecognized temp
+files remain retained for inspection. A reconstruction that cannot read the
+source commit's changed paths also retains the original temp for a later retry.
 
 Hive-installed runtimes record a `scheduler-service` in the shared state. A
 commit-triggered runner queues its source and dispatches that memory-bounded
@@ -39,6 +48,13 @@ to `LLM_WIKI_MAX_DRAIN_BATCHES` (3) with
 `LLM_WIKI_DRAIN_SETTLE_SECONDS` (1) between batches, catching sources queued
 while the oneshot is already active without turning ordinary overlap into a
 manual circuit.
+
+The shared runner, compiler, and config are reconciled from the primary Git
+worktree whenever it already contains the managed runtime. Starting an older
+Hive checkout from a linked feature worktree therefore cannot replace the
+repository-wide scheduler runtime with stale scripts. Only a repository's
+first linked-worktree bootstrap falls back to its newly generated local files
+while the primary worktree has no managed runtime.
 
 The managed branch is `llm-wiki/refresh` by default and is published to
 `origin`; override those independently with `LLM_WIKI_REFRESH_BRANCH` and

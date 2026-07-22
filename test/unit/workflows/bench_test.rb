@@ -1,4 +1,6 @@
 require "test_helper"
+require "json"
+require "open3"
 require "hive/workflow_selection"
 require "hive/workflows/bench"
 require "hive/workflows/registry"
@@ -351,6 +353,105 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes instruction, 'if [ "$outcome_status" -eq 75 ]'
     assert_includes instruction, "<!-- ERROR reason=limits_reached"
     assert_includes instruction, 'retry_after="%s"'
+  end
+
+  def test_judge_validation_rejects_a_missing_round_two_verdict
+    instruction = File.read(stages_by_name.fetch("judge").instruction)
+    skip_filter = instruction.match(
+      /ruby -ryaml -rjson -e '\n(?<code>.*?)\n' "\$REPO_ROOT\/\$DELIB" "\$DELIB_SKIP"/m
+    )
+    refute_nil skip_filter, "judge instruction must classify retryable deliberations"
+    validator_start = instruction.rindex("ruby -ryaml -rjson -e '\n")
+    refute_nil validator_start, "judge instruction must expose its final artifact validator"
+    validator = instruction[validator_start..].match(
+      /ruby -ryaml -rjson -e '\n(?<code>.*?)\n' "\$REPO_ROOT\/\$RESULTS" "\$REPO_ROOT\/\$DELIB"/m
+    )
+    refute_nil validator, "judge instruction must expose its final artifact validator"
+
+    Dir.mktmpdir("hive-bench-judge-validator") do |root|
+      campaign = {
+        "campaign_id" => "validator-test",
+        "source" => "unused",
+        "seeds" => 1,
+        "tasks" => [ "task-one" ],
+        "candidates" => [ "candidate-one" ],
+        "exclusions" => [],
+        "judges" => {
+          "claude" => { "model" => "claude-fable-5" },
+          "codex" => { "model" => "gpt-5.6-sol", "reasoning_effort" => "ultra" }
+        }
+      }
+      results = {
+        "cells" => [ {
+          "task_id" => "task-one",
+          "agent_id" => "candidate-one",
+          "run_status" => "generated",
+          "judges" => {
+            "fable-5" => { "sample_count" => 1, "reasoning_effort" => "unspecified" },
+            "gpt-5.6-sol" => { "sample_count" => 1, "reasoning_effort" => "ultra" }
+          }
+        } ]
+      }
+      verdict = lambda do |effort|
+        {
+          "initial" => 7.0,
+          "initial_reason" => "initial reason",
+          "final" => 7.0,
+          "final_reason" => "final reason",
+          "discussion" => "checked the other referee's claims",
+          "reasoning_effort" => effort
+        }
+      end
+      deliberation = {
+        "cells" => [ {
+          "task_id" => "task-one",
+          "agent_id" => "candidate-one",
+          "judges" => {
+            "fable-5" => verdict.call("unspecified"),
+            "gpt-5.6-sol" => verdict.call("ultra")
+          }
+        } ]
+      }
+      campaign_path = File.join(root, "campaign.yml")
+      results_path = File.join(root, "results.json")
+      deliberation_path = File.join(root, "deliberation.json")
+      File.write(campaign_path, campaign.to_yaml)
+      File.write(results_path, JSON.generate(results))
+      File.write(deliberation_path, JSON.generate(deliberation))
+
+      skip_path = File.join(root, "skip.json")
+      _out, err, status = Open3.capture3(
+        RbConfig.ruby, "-ryaml", "-rjson", "-e", skip_filter[:code], deliberation_path, skip_path,
+        chdir: root
+      )
+      assert status.success?, err
+      assert_equal 1, JSON.parse(File.read(skip_path)).fetch("cells").size
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-ryaml", "-rjson", "-e", validator[:code], results_path, deliberation_path,
+        chdir: root
+      )
+      assert status.success?, "complete deliberation should validate: #{out}#{err}"
+
+      deliberation.dig("cells", 0, "judges", "gpt-5.6-sol")["final"] = nil
+      File.write(deliberation_path, JSON.generate(deliberation))
+      _out, err, status = Open3.capture3(
+        RbConfig.ruby, "-ryaml", "-rjson", "-e", skip_filter[:code], deliberation_path, skip_path,
+        chdir: root
+      )
+      assert status.success?, err
+      assert_empty JSON.parse(File.read(skip_path)).fetch("cells"),
+                   "the incomplete cell must remain eligible for a deliberation retry"
+
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-ryaml", "-rjson", "-e", validator[:code], results_path, deliberation_path,
+        chdir: root
+      )
+
+      refute status.success?, "a null final verdict must keep the judge stage incomplete"
+      assert_empty err
+      assert_includes out, "INCOMPLETE_DELIBERATION candidate-one task-one gpt-5.6-sol"
+      assert_includes out, "final"
+    end
   end
 
   def test_descriptor_carries_transition_verbs_after_inbox

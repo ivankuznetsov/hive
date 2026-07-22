@@ -108,11 +108,13 @@ tags: [gap, todo, release-proof, agent-skills]
   `c4068bf5`, `ae908e77`, `1d8c4637`, and `97259f74` documents and tests shared
   propagation through Doctor, review, init-generated config, task/workflow
   fallbacks, managed resolution, overlay isolation, and defensive key
-  rendering. Commits `e219f115`, `a4df6cd8`, and `f4379c5f` change only the
-  compiled-log artifact: the first carries accumulated generated entries, the
-  second removes that feature-branch residue and preserves fragment ownership,
-  and the third recompiles 2,486 generated lines from pre-existing fragments
-  without changing source, tests, schemas, or the fragments themselves.
+  rendering. Commits `e219f115`, `a4df6cd8`, `f4379c5f`, and `2c8c322e` change
+  only the compiled-log artifact: the first carries accumulated generated
+  entries, the second removes that feature-branch residue and preserves
+  fragment ownership, the third recompiles 2,486 generated lines from
+  pre-existing fragments, and the fourth removes 4,067 compiled lines from the
+  feature diff while leaving `wiki/log.d` unchanged. None changes source,
+  tests, schemas, or fragment-owned knowledge.
   None of these supplied SHAs is an ancestor of this refresh branch, and the
   current default-branch `lib/hive/config.rb` still has no
   `validate_project_top_level_keys!` or `UnsupportedProjectConfigError`.

@@ -9,7 +9,8 @@ require "socket"
 # Guards the transactional contract of .llm-wiki/post-commit-refresh.sh: a
 # commit in any checkout queues one refresh into a dedicated managed worktree.
 # Neither the committing checkout nor the user's main checkout may be mutated.
-# The headless agent is replaced via LLM_WIKI_REFRESH_CMD so no model runs.
+# Tests inject a command seam only into their disposable worker copy, so the
+# shipped worker remains limited to configured provider binaries.
 class LlmWikiPostCommitRefreshTest < Minitest::Test
   include HiveTestHelper
 
@@ -39,7 +40,9 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     FileUtils.mkdir_p(File.join(@main, ".llm-wiki"))
     FileUtils.mkdir_p(File.join(@main, "wiki", "log.d"))
     FileUtils.mkdir_p(File.join(@main, "bin"))
-    FileUtils.cp(SCRIPT, File.join(@main, ".llm-wiki", "post-commit-refresh.sh"))
+    test_runner = File.join(@main, ".llm-wiki", "post-commit-refresh.sh")
+    File.write(test_runner, refresh_test_script)
+    FileUtils.chmod("+x", test_runner)
     File.write(File.join(@main, "wiki", "index.md"), "# wiki\n")
     File.write(File.join(@main, "bin", "tool.sh"), "echo hi\n")
     git(@main, "add -A")
@@ -399,7 +402,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
 
   def test_ruby_portable_global_lock_respects_an_existing_os_lock
     runtime_dir = File.join(@dir, "runtime")
-    lock_file = File.join(runtime_dir, "hive-llm-wiki-refresh.lock")
+    lock_file = File.join(runtime_dir, "llm-wiki-refresh.lock")
     ready = File.join(runtime_dir, "holder-ready")
     forbidden_setup = File.join(runtime_dir, "forbidden-bundler-setup.rb")
     FileUtils.mkdir_p(runtime_dir)
@@ -504,7 +507,8 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
       "LLM_WIKI_GLOBAL_LOCK_HELD" => "1",
       "LLM_WIKI_DRAIN_SETTLE_SECONDS" => "0"
     }
-    out, err, status = Open3.capture3(env, "bash", SCRIPT, "--project", @main, "--drain", chdir: @main)
+    test_runner = File.join(@main, ".llm-wiki", "post-commit-refresh.sh")
+    out, err, status = Open3.capture3(env, "bash", test_runner, "--project", @main, "--drain", chdir: @main)
 
     assert status.success?, "#{out}\n#{err}"
     assert_equal 2, File.readlines(agent_calls).length
@@ -949,6 +953,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     assert_match(/HIVE_SKIP_LLM_WIKI_POST_COMMIT=1 \\\n+\s*git -C "\$refresh_root"/, script)
     assert_match(/push "\$refresh_remote" "HEAD:refs\/heads\/\$refresh_branch"/, script)
     refute_match(/wiki_root="\$main_checkout"/, script)
+    refute_includes script, "LLM_WIKI_REFRESH_CMD"
   end
 
   def test_scheduled_wrapper_delegates_to_shared_drain_runner_without_touching_dirty_checkout
@@ -1081,6 +1086,23 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
   end
 
   private
+
+  def refresh_test_script
+    source = File.read(SCRIPT)
+    needle = %(  local prompt="$1"\n)
+    unless source.scan(needle).one?
+      raise "could not inject the disposable refresh-command test seam"
+    end
+
+    override = <<~'SH'
+        if [ -n "${LLM_WIKI_REFRESH_CMD:-}" ]; then
+          run_with_timeout "${LLM_WIKI_REFRESH_TIMEOUT:-1800}" \
+            "$LLM_WIKI_REFRESH_CMD" "$refresh_root" "$prompt" >>"$log_file" 2>&1
+          return $?
+        fi
+    SH
+    source.sub(needle, needle + override)
+  end
 
   def run_refresh_from(tree, overrides = nil, arguments: [], **keyword_overrides)
     script = File.join(tree, ".llm-wiki", "post-commit-refresh.sh")

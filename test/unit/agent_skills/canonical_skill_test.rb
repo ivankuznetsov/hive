@@ -17,11 +17,31 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_match(/\A[0-9a-f]{64}\z/, skill.canonical_digest)
     assert_equal %w[description name], skill.frontmatter.keys.sort
     assert_operator skill.body.lines.size, :<, 120
-    assert_equal 5, skill.reference_paths.size
+    assert_equal 13, skill.reference_paths.size
     assert skill.reference_paths.all? { |path| path.start_with?("references/") }
     refute_includes skill.rendered_canonical_files.values.join("\n"), "{{HIVE_VERSION}}"
     assert_includes skill.rendered_canonical_files.fetch("references/setup-and-platforms.md"),
                     "/v#{Hive::VERSION}/install.sh"
+  end
+
+  def test_workflow_creator_contract_gates_mutation_and_reports_every_side_effect
+    files = Hive::AgentSkills::CanonicalSkill.new.rendered_canonical_files
+    route = files.fetch("SKILL.md")
+    creator = files.fetch("references/workflow-creator.md")
+
+    assert_includes route, "hive-workflow-creator"
+    assert_includes creator, "minimum Hive version: #{Hive::VERSION}"
+    assert_operator creator.index("hive version"), :<, creator.index("hive workflow list --json")
+    assert_operator creator.index("hive workflow list --json"), :<, creator.index("hive workflow new")
+    assert_operator creator.index("hive workflow validate"), :<, creator.index("hive new")
+    assert_includes creator, "No task by default"
+    assert_includes creator, "created files"
+    assert_includes creator, "applied defaults"
+    assert_includes creator, "validation result"
+    assert_includes creator, "hive update"
+    assert_includes creator, "idempotency-key"
+    assert_includes creator, "Never publish externally"
+    refute_match(/hive init[^\n]*--force/, creator)
   end
 
   def test_four_platform_projections_share_payload_but_keep_thin_wrappers

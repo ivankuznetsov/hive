@@ -228,7 +228,8 @@ CLI/bot/daemon stack; it does not introduce a separate workflow engine. GitHub
 device-flow auth can either use a pre-pinned `web.github.owner` or first-login
 claim on an ownerless box. Production Action Cable accepts same-origin-as-host,
 with `web.origin` / `HIVE_WEB_ORIGIN` only as an extra allow for split-origin
-deploys. On queued Rails resource commit `96b06792`, Task Drop is deliberately
+deploys. On queued Rails resource commit `153bed1d` (patch-equivalent to
+`96b06792` / `2fef1f47`), Task Drop is deliberately
 not daemon-queued: the web handler calls filesystem-backed `Task#drop!`, which
 runs `Commands::Drop` in-process with the rendered `from` stage as a stale-page
 guard. Repo setup clones through `gh`,

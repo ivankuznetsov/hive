@@ -123,14 +123,19 @@ tags: [gap, todo, release-proof, agent-skills]
   but do not close the current-main integration or installed/live gaps above.
   The queued path manifest for `176b5053` is stale: its immutable diff changes
   lifecycle/install/config files rather than the listed CLI/E2E/schema paths.
-  Commits `d28377b2`/`eb8f6181` and `c0c6c147`/`72b95280` are patch-equivalent
-  branch-only pairs covering the durable web PR-gate wait and bot admission
-  cleanup/task resolution; they do not by themselves prove current-main hosted
-  CI. Commit `e1c41ea0` changes only the Brakeman ignore fingerprint/note for an
-  already-bounded registered-task lookup and supplies no new runtime behavior.
-- Commits `96b06792` and patch-equivalent queued `2fef1f47`, followed by
-  `4455fc06` and later sibling heads `affc392f` and `22d80d1b`, are snapshots on
-  `refactor/dhh-web-architecture-v2`, not ancestors of the refresh branch.
+  Commits `d28377b2`/`eb8f6181`/`1941780d` and
+  `c0c6c147`/`72b95280`/`5c86ad25` are patch-equivalent branch-only groups
+  covering the durable web PR-gate wait and bot admission cleanup/task
+  resolution; they do not by themselves prove current-main hosted CI. Commits
+  `e1c41ea0` and patch-equivalent `a46cd592` change only the Brakeman ignore
+  fingerprint/note for an already-bounded registered-task lookup and supply no
+  new runtime behavior.
+- Commits `96b06792`, `2fef1f47`, and `153bed1d` are patch-equivalent Rails
+  resource snapshots. Their subscriber-owned descendants `4455fc06` and
+  `29d02c34` are also patch-equivalent; later `163ed51e` is patch-equivalent to
+  `22d80d1b`, and `ccfa7c03` is the current
+  `refactor/dhh-web-architecture-v2` head. None is an ancestor of the refresh
+  branch.
   They remove `Hive::Web::Dispatcher`, move mutations onto Rails
   `Task`/`Project`/`Daemon` resources, and make status scans
   confirmed-subscriber-owned. The sibling heads have identical production web
@@ -138,11 +143,16 @@ tags: [gap, todo, release-proof, agent-skills]
   limiting broadcasts to refresh plus composer reconciliation. `22d80d1b`
   additionally resets the guarded project sandbox, registry, broadcaster, and
   workflow cache between Playwright examples and waits for a confirmed Cable
-  lease before filesystem-triggered refresh assertions. Those test changes do
-  not close the branch integration boundary. Source/Rails/browser tests pin the
-  contracts, but
-  current-main integration and a long-running multi-worker/multi-client
-  deployed smoke across differently filtered URLs remain open.
+  lease before filesystem-triggered refresh assertions. `ccfa7c03` then bounds
+  idea attachment inspection, count, bytes, decode behavior, retained files,
+  and Turbo-frame request overlap; Puma rejects declared bodies above 81 MiB
+  and all chunked bodies before Rack. The queued path manifest for `163ed51e`
+  is stale: its immutable 19-path diff is the server-rendered-filter patch,
+  while the listed bounded-resource paths describe `ccfa7c03`'s 14-path diff.
+  These test changes do not close the branch integration boundary.
+  Source/Rails/browser tests pin the contracts, but current-default integration
+  and a long-running multi-worker/multi-client deployed smoke across differently
+  filtered URLs and real slow/upload traffic remain open.
 - Commits `aae95f78` and `8944dfba` carry the same headless wiki signal fix
   from different parents; the latter is the newer-base authority. Their final
   scheduler, runner, test, and wiki blobs match squash merge `33e3e02e`, now an
@@ -810,22 +820,29 @@ transaction. Those operational smokes remain open after branch integration.
 
 ## Queued Rails resource/status delivery needs deployed smoke (2026-07-22)
 
-Commits `96b06792` (patch-equivalent to queued `2fef1f47`), `4455fc06`, and
-`affc392f` replace the former
+Commits `153bed1d` (patch-equivalent to `96b06792` / `2fef1f47`), descendant
+`29d02c34` (patch-equivalent to `4455fc06`), `163ed51e` (patch-equivalent to
+`22d80d1b`), and head `ccfa7c03` replace the former
 `Hive::Web::Dispatcher` references retained in older historical gap entries:
 filesystem-backed `Task` now owns task mutations, `Project` owns idea capture,
 and `Daemon` owns repair. Status polling starts only for confirmed Cable
 subscribers and uses canonical semantic tokens for one-shot catch-up. The later
-head renders project filtering at the Rails GET boundary, rejects unknown
+filtering head renders project selection at the Rails GET boundary, rejects unknown
 project names, and lets the refresh request own the URL-selected subset instead
-of broadcasting another rail. Focused model/channel/integration/E2E tests cover
+of broadcasting another rail. The final head also limits composer batches to
+16 inspected entries and eight retained 10 MiB images, avoids client image
+decodes, releases truly detached file state, yields busy Turbo-frame polls, and
+adds real-socket tests for Puma's pre-Rack 81 MiB declared-body boundary and
+chunked-body rejection. Focused model/channel/integration/E2E tests cover
 ownership, deferred registration, reconnect, cancellation, idle-browser
-behavior, server-rendered selection, composer preservation, and differently
-filtered refreshes. No checked-in deployed artifact yet proves zero fleet scans
-for a long idle period followed by many simultaneous Board/Grid/task clients
-across multiple Puma workers and different project URLs, continued mutation
-safety during real daemon changes, and complete lease release after disconnect
-storms.
+behavior, server-rendered selection, composer preservation/bounds/cleanup,
+non-overlapping polls, Puma admission, and differently filtered refreshes. No
+checked-in deployed artifact yet proves zero fleet scans for a long idle period
+followed by many simultaneous Board/Grid/task clients across multiple Puma
+workers and different project URLs, continued mutation safety during real
+daemon changes, complete lease release after disconnect storms, slow-frame
+completion under real network latency, or oversized/chunked rejection through
+the supported reverse-proxy deployment shapes.
 
 ## Queued managed-module observability needs integration/live smoke (2026-07-22)
 

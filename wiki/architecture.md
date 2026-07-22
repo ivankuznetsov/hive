@@ -309,10 +309,12 @@ buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
 ## Hive Web and Hivebox pipeline
 
-Queued commit `2fef1f47` is patch-equivalent to the already documented
-`96b06792` Rails resource-mutation snapshot. `4455fc06` supplies the
-subscriber-owned status-delivery clauses, and later queued head `affc392f`
-makes project filtering server-rendered and URL-addressed. Current-default
+Queued commit `153bed1d` is patch-equivalent to the already documented
+`96b06792` / `2fef1f47` Rails resource-mutation snapshot. Its descendant
+`29d02c34` is patch-equivalent to `4455fc06`, and `163ed51e` is
+patch-equivalent to `22d80d1b`, which carries the later server-rendered,
+URL-addressed project filter and its isolated browser fixtures. Branch head
+`ccfa7c03` adds bounded browser/Puma request resources. Current-default
 integration remains open in [[gaps]].
 
 `hive web` serves the shared vanilla Rails 8 + Turbo app from `web/` (ADR-037;
@@ -372,8 +374,22 @@ subscription. A stale reconnect receives one targeted refresh; same-URL token
 handoff is connection-local and non-cloneable, so Turbo history cannot revive
 an old latch. Generation guards, bounded retry, and a five-second
 never-confirmed transport close keep abandoned or rejected subscriptions from
-leaking a server-side poller lease. The
-request-local Rails `Project` wrapper
+leaking a server-side poller lease.
+
+The queued `ccfa7c03` head extends that ownership model to client and request
+resources. A timed Turbo-frame poll yields while Turbo marks an earlier frame
+request busy. The permanent idea composer inspects at most 16 picker/clipboard
+entries, retains at most eight images of at most 10 MiB each, uses non-decoding
+glyph chips instead of image previews, and clears its browser-owned `FileList`
+after a cancellable true-disconnect window. Shared
+`Hive::Web::RequestLimits` constants drive both the Rails controller and
+rendered Stimulus values. Puma admits declared request bodies only through an
+81 MiB envelope before Rack parsing, while the Rails-only
+`PumaRequestLimits` hook rejects chunked bodies at the parsed-header boundary
+and closes the connection with unread chunks. The controller still enforces
+the authoritative per-image count and size inside that admitted envelope.
+
+The request-local Rails `Project` wrapper
 reuses one parsed config for Board defaults, daemon state, and workflow-overlay
 loading. `Hive::StageLabel` gives web and bot surfaces one acronym-aware stage
 formatter. Mutations reuse gem

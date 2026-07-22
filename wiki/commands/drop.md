@@ -116,8 +116,9 @@ Lowercase `x` is intentionally unbound. The archived-row and empty-grid cases fl
 
 ## Web Binding
 
-This binding reflects queued Rails resource commit `96b06792`; current-default
-integration is tracked in [[gaps]].
+This binding reflects queued Rails resource commit `153bed1d`
+(patch-equivalent to `96b06792` / `2fef1f47`); current-default integration is
+tracked in [[gaps]].
 
 In [[commands/web]], the task page's Advanced section posts its Drop card to:
 

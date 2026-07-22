@@ -26,10 +26,12 @@ Retry button and Telegram Autofix share the same guarded clear plus rerun
 contract; the TUI's Recover has its own subprocess-based clear + `hive run`
 path with separate gates.
 
-The Rails resource-ownership and subscriber-owned status lifecycle described
-below are queued on `refactor/dhh-web-architecture-v2` (`96b06792` →
-`4455fc06`), with server-rendered project filtering added at later head
-`affc392f`; they are not yet ancestors of this refresh branch's default.
+The Rails resource-ownership, subscriber-owned status lifecycle, server-side
+project filtering, and bounded client/request resources described below are
+queued on `refactor/dhh-web-architecture-v2` (production snapshots
+`153bed1d`, `29d02c34`, `163ed51e`, and head `ccfa7c03`). The first three are patch-equivalent to the
+previously documented `96b06792`, `4455fc06`, and `22d80d1b` snapshots. The
+branch is not yet an ancestor of this refresh branch's default.
 
 ## CLI
 
@@ -177,8 +179,9 @@ so the login gate can run.
   drawer, cursor, transition, or audit subsystem: workflow mutation continues
   through the existing task controllers. Each band scrolls horizontally
   inside the page at narrow widths. `Grid` retains the compact per-project task
-  rows. At queued head `affc392f`, a TUI-left-pane-parity project rail filters
-  either view through ordinary GET links ("All projects" + one link per
+  rows. At queued filtering snapshot `affc392f` and descendant
+  `163ed51e`/`ccfa7c03` heads, a TUI-left-pane-parity project rail filters either
+  view through ordinary GET links ("All projects" + one link per
   registered project). Projects are ordered by descending in-flight task
   count, preserving registry order for ties. `StatusController` resolves the
   optional `?project=` against that registered set and renders only the chosen
@@ -194,7 +197,20 @@ so the login gate can run.
   rewrite, mutation observer, or animation-frame reconciliation. The composer
   itself supports new ideas with image attach (clipboard
   paste AND upload button; images become `[imageN]` placeholders and land in
-  the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
+  the task's `assets/` dir — `Commands::New`'s TUI contract). At queued head
+  `ccfa7c03`, rendered Stimulus values share the server's eight-image and
+  10 MiB-per-image limits. A mixed batch accepts only its bounded valid prefix,
+  reports oversize/overflow/truncation through an accessible live-status
+  message, inspects at most 16 entries, and rebuilds the hidden multipart
+  `FileList` once per batch. Attachment chips use a constant-memory glyph
+  rather than decoding untrusted image dimensions. A true disconnect clears
+  retained `File` objects after a short cancellable window, while a
+  `data-turbo-permanent` move reconnects in time to preserve them. Puma's
+  81 MiB declared-body limit rejects oversized requests before Rack parses or
+  spools multipart parameters; a Rails-app-only Puma hook rejects chunked
+  bodies at the parsed-header boundary and closes the connection. Parsed
+  requests still pass through the controller's authoritative count/size
+  checks. The view then renders per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
   Streams**: `StatusBroadcaster` subscribes to `StatusFeed#each_snapshot`;
   `StatusChannel` starts that shared subscription when the first live page
@@ -251,8 +267,9 @@ so the login gate can run.
   back to the top; the composer form is `data-turbo-permanent` because
   typed-but-unsent idea text and staged image chips live in browser state. Its
   Stimulus controller rehydrates the staged-file index if Turbo reconnects the
-  permanent node, revokes removed preview URLs, and clears the submitted text,
-  chips, and upload transport on a successful `turbo:before-fetch-response`
+  permanent node, clears retained files after a cancellable true disconnect,
+  and clears submitted text, glyph chips, and the upload transport on a
+  successful `turbo:before-fetch-response`
   while the form is still connected (`turbo:submit-end` remains a fallback);
   `status_refresh_controller.js` owns submission-versus-refresh ordering for
   every form on the status surface, while refreshes on other clients continue
@@ -321,6 +338,9 @@ so the login gate can run.
   instead of replacing it on every poll. The poll controller gives the pane
   `tail -f` semantics: it pins to the bottom while following, pauses reloads
   while the operator scrolls up to read, and resumes when scrolled back down.
+  At queued head `ccfa7c03`, a timer tick also yields while Turbo marks the
+  frame `busy` / `aria-busy`, so a slow log or agent-login request owns its
+  render lifecycle instead of being repeatedly cancelled by the next tick.
   Server-side, the polled controller delegates to `Task#latest_log`, which
   reads only a 256 KiB byte
   window and returns the last 200 lines with a torn leading line dropped, so a
@@ -547,7 +567,11 @@ composer text/chip/file reset before Turbo renders with project-context
 retention, failed-submit
 draft/file retention on a 422-shaped Turbo event, and attachment-index rebuild
 after a real Stimulus disconnect/reconnect before adding and submitting another
-image, both approve
+image. Queued `ccfa7c03` additionally covers eight-image/10 MiB browser bounds,
+16-entry batch inspection, once-per-batch transport rebuild, non-decoding
+chips, true-disconnect file release without permanent-move loss, real-socket
+Puma 413 responses before Rack for oversized/chunked bodies, and non-overlapping
+busy-frame polling. Both approve
 paths (typed refusal page + confirmed force), Q&A round replacement without a
 lingering old form, typed Q&A preservation across a pushed morph, log-tail
 follow/pause/resume with node-preserving frame morph reloads, artifact

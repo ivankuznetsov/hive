@@ -7,6 +7,8 @@ require "hive/commands/bench_submit"
 # preflight are seams, so no real gh/extract/network is touched; the test
 # proves the orchestration: resolve the 9-done task, preflight, extract, PR.
 class BenchSubmitCommandTest < Minitest::Test
+  include HiveTestHelper
+
   def setup
     @root = Dir.mktmpdir("bench-submit")
     @bench = File.join(@root, "hive-bench")
@@ -217,6 +219,40 @@ class BenchSubmitCommandTest < Minitest::Test
       url = cmd.send(:open_pr_via_gh, bench_path: @bench, entry_dir: File.join(@bench, "corpus", "x"), slug: "fix-thing-260601-aa11")
       assert_equal "https://github.com/ivankuznetsov/hive-bench/pull/9", url
     end
+  end
+
+  def test_open_pr_branches_from_remote_default_and_restores_callers_branch
+    remote = File.join(@root, "hive-bench.git")
+    system("git", "init", "--bare", "-q", remote, exception: true)
+    system("git", "-C", @bench, "init", "-q", "-b", "main", exception: true)
+    system("git", "-C", @bench, "config", "user.email", "test@example.com", exception: true)
+    system("git", "-C", @bench, "config", "user.name", "Hive Test", exception: true)
+    File.write(File.join(@bench, "README.md"), "main\n")
+    system("git", "-C", @bench, "add", "README.md", exception: true)
+    system("git", "-C", @bench, "commit", "-qm", "main", exception: true)
+    system("git", "-C", @bench, "remote", "add", "origin", remote, exception: true)
+    system("git", "-C", @bench, "push", "-qu", "origin", "main", exception: true)
+    system("git", "-C", @bench, "checkout", "-qb", "operator-work", exception: true)
+    File.write(File.join(@bench, "operator.txt"), "not for submission\n")
+    system("git", "-C", @bench, "add", "operator.txt", exception: true)
+    system("git", "-C", @bench, "commit", "-qm", "operator work", exception: true)
+    entry = File.join(@bench, "corpus", "fix-thing-260601-aa11")
+    FileUtils.mkdir_p(entry)
+    File.write(File.join(entry, "spec.yml"), "slug: fix-thing\n")
+    gh_bin = File.join(@root, "gh-bin")
+    FileUtils.mkdir_p(gh_bin)
+    File.write(File.join(gh_bin, "gh"), "#!/bin/sh\necho https://example.test/pr/1\n")
+    FileUtils.chmod(0o755, File.join(gh_bin, "gh"))
+
+    with_env("PATH" => "#{gh_bin}:#{ENV.fetch('PATH')}") do
+      cmd.send(:open_pr_via_gh, bench_path: @bench, entry_dir: entry, slug: "fix-thing-260601-aa11")
+    end
+
+    branch_out, = Open3.capture2("git", "-C", @bench, "branch", "--show-current")
+    assert_equal "operator-work", branch_out.strip
+    refute system("git", "-C", @bench, "cat-file", "-e", "submit-fix-thing-260601-aa11:operator.txt",
+                  out: File::NULL, err: File::NULL),
+           "the submission branch must start at origin/main, not the caller's HEAD"
   end
 
   def test_open_pr_via_gh_raises_when_gh_fails

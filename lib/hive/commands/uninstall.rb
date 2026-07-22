@@ -21,6 +21,7 @@ module Hive
         projects = registered_projects
         deregister_daemon
         deregister_bot
+        deregister_web
         remove_user_config_and_cache
         remove_data_versions
         remove_user_symlinks
@@ -52,6 +53,11 @@ module Hive
         stop_foreground_bot
         require "hive/commands/bot/service_installer"
         deregister_unit(Hive::Commands::Bot::ServiceInstaller.new(host_os: @host_os))
+      end
+
+      def deregister_web
+        require "hive/commands/web/service_installer"
+        deregister_unit(Hive::Commands::Web::ServiceInstaller.new(host_os: @host_os))
       end
 
       # Deregister a per-user autostart unit using the installer's OWN

@@ -456,19 +456,41 @@ expected="$(printf '%s\n' "$expected_line" | awk '{print $1}')"
 
 mkdir -p "$bin_home" "$gem_home"
 
+# RubyGems refuses to overwrite the managed bash wrapper left by an earlier
+# installer run. Move only wrappers we can identify as ours out of the bindir;
+# if installation fails, restore the previous working entry point.
+previous_wrapper=""
+if [[ -f "$installed_bin" ]] && {
+  grep -Fq "hive-managed: install-wrapper/v1" "$installed_bin" ||
+    { grep -Fq 'export HIVE_INVOKED_BIN=' "$installed_bin" && grep -Fq '/shims/hive' "$installed_bin"; }
+}; then
+  previous_wrapper="${tmpdir}/hive-wrapper"
+  cp -p "$installed_bin" "$previous_wrapper"
+  rm -f "$installed_bin"
+fi
+
 # Install into a dedicated GEM_HOME under ${data_home}/gems. Runtime
 # deps (bubbletea, lipgloss, thor, telegram-bot-ruby) are pulled from
 # rubygems.org with platform-correct precompiled binaries. --no-document
 # skips rdoc/ri generation (saves ~30s on first install).
-GEM_HOME="$gem_home" gem install \
+if ! GEM_HOME="$gem_home" gem install \
   "${tmpdir}/${gem_file}" \
   --install-dir "$gem_home" \
   --bindir "${gem_home}/bin" \
   --no-document \
-  --source https://rubygems.org \
-  || die "gem install failed for ${gem_file}"
+  --source https://rubygems.org; then
+  if [[ -n "$previous_wrapper" && -f "$previous_wrapper" ]]; then
+    mv "$previous_wrapper" "$installed_bin"
+  fi
+  die "gem install failed for ${gem_file}"
+fi
 
-[[ -x "$installed_bin" ]] || die "gem install completed but no executable at ${installed_bin}"
+if [[ ! -x "$installed_bin" ]]; then
+  if [[ -n "$previous_wrapper" && -f "$previous_wrapper" ]]; then
+    mv "$previous_wrapper" "$installed_bin"
+  fi
+  die "gem install completed but no executable at ${installed_bin}"
+fi
 
 # Write a wrapper at ${gem_home}/bin/hive that sets GEM_HOME/GEM_PATH
 # before delegating to the real ruby script. The shim that
@@ -482,6 +504,7 @@ mkdir -p "${gem_home}/shims"
 mv "${gem_home}/bin/hive" "${gem_home}/shims/hive"
 cat > "${gem_home}/bin/hive" <<WRAPPER
 #!/usr/bin/env bash
+# hive-managed: install-wrapper/v1
 export GEM_HOME="${gem_home}"
 export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
 export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"

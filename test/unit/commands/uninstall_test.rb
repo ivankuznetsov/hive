@@ -186,6 +186,23 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
+  def test_linux_web_unit_disable_removes_unit
+    with_xdg_home do
+      unit = File.expand_path("~/.config/systemd/user/hive-web.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "unit\n")
+      calls = []
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: StringIO.new,
+        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+      ).call
+
+      assert_includes calls, %w[systemctl --user disable --now hive-web]
+      refute File.exist?(unit), "web unit must be removed after a successful disable"
+    end
+  end
+
   def test_linux_bot_disable_failure_leaves_unit_in_place
     with_xdg_home do
       unit = File.expand_path("~/.config/systemd/user/hive-bot.service")

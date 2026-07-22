@@ -122,22 +122,56 @@ module Hive
 
       def open_pr_via_gh(bench_path:, entry_dir:, slug:)
         branch = "submit-#{slug}"
-        run_git(bench_path, "checkout", "-b", branch)
-        run_git(bench_path, "add", entry_dir)
-        run_git(bench_path, "commit", "-qm", "corpus: add #{slug}")
-        run_git(bench_path, "push", "-q", "-u", "origin", branch)
-        out, err, status = Open3.capture3("gh", "pr", "create", "-R", @repo,
-                                          "--title", "corpus: add #{slug}",
-                                          "--body", "Adds the `#{slug}` task to the hive-bench corpus (via `hive bench submit`).",
-                                          chdir: bench_path)
-        raise UsageError, "gh pr create failed: #{err.strip}" unless status.success?
+        original_branch = optional_git_output(bench_path, "branch", "--show-current")
+        original_head = git_output(bench_path, "rev-parse", "HEAD")
+        base_ref = remote_default_ref(bench_path)
+        begin
+          run_git(bench_path, "checkout", "-b", branch, base_ref)
+          run_git(bench_path, "add", entry_dir)
+          run_git(bench_path, "commit", "-qm", "corpus: add #{slug}")
+          run_git(bench_path, "push", "-q", "-u", "origin", branch)
+          out, err, status = Open3.capture3("gh", "pr", "create", "-R", @repo,
+                                            "--title", "corpus: add #{slug}",
+                                            "--body", "Adds the `#{slug}` task to the hive-bench corpus (via `hive bench submit`).",
+                                            chdir: bench_path)
+          raise UsageError, "gh pr create failed: #{err.strip}" unless status.success?
 
-        out.strip
+          out.strip
+        ensure
+          target = original_branch.empty? ? original_head : original_branch
+          run_git(bench_path, "checkout", "-q", target)
+        end
       end
 
       def run_git(dir, *args)
         _out, err, status = Open3.capture3("git", "-C", dir, *args)
         raise UsageError, "git #{args.first} failed: #{err.strip}" unless status.success?
+      end
+
+      def git_output(dir, *args)
+        out, err, status = Open3.capture3("git", "-C", dir, *args)
+        raise UsageError, "git #{args.first} failed: #{err.strip}" unless status.success?
+
+        out.strip
+      end
+
+      def optional_git_output(dir, *args)
+        out, _err, status = Open3.capture3("git", "-C", dir, *args)
+        status.success? ? out.strip : ""
+      end
+
+      def remote_default_ref(dir)
+        symbolic = optional_git_output(dir, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+        return symbolic unless symbolic.empty?
+
+        %w[origin/main origin/master].find do |candidate|
+          git_success?(dir, "rev-parse", "--verify", candidate)
+        end || raise(UsageError, "cannot resolve hive-bench origin default branch")
+      end
+
+      def git_success?(dir, *args)
+        _out, _err, status = Open3.capture3("git", "-C", dir, *args)
+        status.success?
       end
 
       # Run hive-bench's own SecretScan (one source of truth) in a child ruby —

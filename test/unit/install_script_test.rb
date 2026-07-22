@@ -19,6 +19,17 @@ class InstallScriptTest < Minitest::Test
     refute_includes script, 'mv "${gem_home}/bin/hv" "${gem_home}/shims/hv"'
   end
 
+  def test_installer_temporarily_removes_and_restores_its_managed_hive_wrapper
+    script = File.read(INSTALL_SCRIPT)
+    removal = script.index('rm -f "$installed_bin"')
+    install = script.index('GEM_HOME="$gem_home" gem install')
+
+    refute_nil removal, "a managed wrapper must be removed before RubyGems writes its binstub"
+    assert_operator removal, :<, install
+    assert_includes script, 'hive-managed: install-wrapper/v1'
+    assert_includes script, 'mv "$previous_wrapper" "$installed_bin"'
+  end
+
 
   def test_installer_requires_cosign_for_release_identity_verification
     script = File.read(INSTALL_SCRIPT)

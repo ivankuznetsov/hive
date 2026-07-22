@@ -56,6 +56,7 @@ Gem::Specification.new do |spec|
 
   # Runtime dependencies. Dev/test dependencies stay in the Gemfile because
   # they have no business being installed for end users.
+  spec.add_dependency "base64", ">= 0.2"
   spec.add_dependency "bubbletea", "= 0.1.4"
   # faraday + faraday-multipart are required and used directly by the voice
   # transcriber (Faraday.new, Faraday::Multipart::FilePart). They resolve

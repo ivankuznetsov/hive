@@ -7,7 +7,14 @@ updated: 2026-07-22
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: The `hive-cli` gem has eleven direct runtime gems; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or `gtimeout`) for their timeout-governed Git-ref, QMD, and provider operations.
+**TLDR**: The current-default `hive-cli` gem has eleven direct runtime gems;
+queued commit `176b5053` raises that to twelve by declaring Base64. Root
+development/test tooling is declared in `Gemfile`; the Rails hivebox app under
+`web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem
+runtime with the Rails web rewrite, while the web bundle owns
+Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown
+artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or
+`gtimeout`) for their timeout-governed Git-ref, QMD, and provider operations.
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
@@ -20,15 +27,20 @@ commits also bumped RuboCop to 1.88.2, Brakeman from
 8.0.4 to 8.0.5, and `concurrent-ruby` from 1.3.6 to 1.3.7; the separate web
 bundle still resolves its own Brakeman 8.0.4 and `concurrent-ruby` 1.3.6 locks
 as of this refresh.
+Queued commit `708fd959` synchronizes the Rails path-gem stanza with the
+gemspec by adding `base64 (>= 0.2)` to `web/Gemfile.lock`; it changes no Rails
+runtime version beyond that inherited local-gem dependency.
 
 ## Runtime gems
 
-`base64 >= 0.2` is explicit because the PKCE path uses Ruby's separately
-packaged Base64 library; packaged installs do not rely on an undeclared default
-gem.
+Queued commit `176b5053` makes `base64 >= 0.2` explicit because the PKCE path
+uses Ruby's separately packaged Base64 library; packaged installs on that line
+do not rely on an undeclared default gem. The refresh branch still has the
+eleven-dependency gemspec until integration.
 
 | Gem | Version | Purpose |
 |-----|---------|---------|
+| `base64` | `>= 0.2` (queued) | Explicit runtime dependency for PKCE encoding; Ruby 3.4 packaged installs on the queued line do not rely on the library remaining an undeclared default gem. |
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
 | `telegram-bot-ruby` | `~> 2.7` (locked 2.7.0) | Telegram Bot API client for `hive bot`. Chosen because RubyGems shows an April 3, 2026 release, MFA on publish, Ruby >= 2.7 support, and four direct runtime dependencies (`dry-struct`, `faraday`, `faraday-multipart`, `zeitwerk`). The lockfile review keeps the larger dry/faraday transitive set explicit. |
 | `faraday` | `>= 2.14.2, < 3.0` (locked 2.14.2) | HTTP transport used directly by `Hive::Bot::Transcriber` and indirectly through `telegram-bot-ruby`. The lower bound is the bundler-audit floor for CVE-2026-33637 / GHSA-5rv5-xj5j-3484. |

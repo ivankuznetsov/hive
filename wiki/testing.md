@@ -550,6 +550,10 @@ answered in the browser, ending at the network-free boundary "Ready to
 open PR" with a real commit in a real worktree. Failure artifacts (daemon
 event log, daemon stdout, daemon PID liveness, HIVE_HOME log inventory,
 task files, agent logs) are printed or copied under `/tmp/golden-e2e-debug`.
+Queued commit `d28377b2` changes the final browser wait to target that durable
+PR-gate result rather than the transient `execute` badge: a fast daemon may
+complete execute between two Turbo renders, while the real worktree commit
+proves the stage ran. Current-default integration remains unverified.
 The first task-page navigation deliberately re-resolves the grid link through
 brief row-lookup misses or Playwright "not attached to the DOM" click errors
 because Turbo can replace the row while the daemon advances the task from

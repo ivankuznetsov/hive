@@ -103,6 +103,19 @@ tags: [gap, todo, release-proof, agent-skills]
   therefore describe the latest branch head as a queued projection. A
   current-main integration run, hosted patrol recurrence/retry exercise, and
   installed dry-run smoke remain unverified.
+- This batch supplies rebased/cherry-picked views of that same line:
+  `e1f431a4` is patch-equivalent to `5c1a20e9`, `3cea9e79` to `9c4b4d69`,
+  `3af0766e` and `fb4a1a9b` to the same `2f25207c` simplification, and
+  `8d582712` to `05784893`. `176b5053` carries the same 18-file operations
+  change as `01e85c89` on a different release-prep base, and `708fd959` adds
+  the resulting Base64 path dependency to the Rails lockfile. None of these
+  SHAs is an ancestor of the refresh branch, so they add immutable evidence
+  but do not close the current-main integration or installed/live gaps above.
+  The queued path manifest for `176b5053` is stale: its immutable diff changes
+  lifecycle/install/config files rather than the listed CLI/E2E/schema paths.
+  Commits `d28377b2` and `c0c6c147` are likewise branch-only focused-test
+  coverage for the durable web PR-gate wait and bot admission cleanup/task
+  resolution; they do not by themselves prove current-main hosted CI.
 - Commits `96b06792` and `4455fc06` are consecutive snapshots on
   `refactor/dhh-web-architecture-v2`, not ancestors of the refresh branch.
   They remove `Hive::Web::Dispatcher`, move mutations onto Rails

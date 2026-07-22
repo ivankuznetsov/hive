@@ -3,7 +3,9 @@ require "fileutils"
 require "json"
 require "open3"
 require "pathname"
+require "rubygems/package"
 require "tmpdir"
+require "zlib"
 
 module HiveLiveAgentProof
   SCHEMA_VERSION = 1
@@ -190,6 +192,121 @@ module HiveLiveAgentProof
         _stdout, stderr, status = Open3.capture3(*command)
         raise Error, "cannot build deterministic skill archive: #{stderr.strip}" unless status.success?
       end
+    end
+  end
+
+  # Verifies the release candidate without invoking an external model. The
+  # manifest binds the exact gem/source/skill bytes to one commit, while the
+  # archive check independently renders every supported projection and compares
+  # it with the packaged payload.
+  class CandidateVerifier
+    MANIFEST_NAME = "artifact-manifest.json".freeze
+
+    def initialize(candidate_dir:, candidate_sha:, expected_hive_version:, canonical:)
+      @candidate_dir = File.expand_path(candidate_dir)
+      @candidate_sha = HiveLiveAgentProof.validate_sha!(candidate_sha, "candidate_sha")
+      @expected_hive_version = expected_hive_version.to_s
+      @canonical = canonical
+      raise Error, "expected Hive version must not be empty" if @expected_hive_version.empty?
+    end
+
+    def call
+      manifest = validate_manifest!
+      files = manifest.fetch("files")
+      gem_name = "hive-cli-#{@expected_hive_version}.gem"
+      skill_name = "hive-agent-skills-#{@candidate_sha}.tar.gz"
+      source_name = "hive-source-#{@candidate_sha}.tar.gz"
+      validate_skill_archive!(HiveLiveAgentProof.relative_file!(@candidate_dir, skill_name))
+
+      {
+        "gem" => HiveLiveAgentProof.relative_file!(@candidate_dir, gem_name),
+        "skills" => HiveLiveAgentProof.relative_file!(@candidate_dir, skill_name),
+        "source" => HiveLiveAgentProof.relative_file!(@candidate_dir, source_name),
+        "platforms" => PLATFORMS.dup,
+        "manifest" => manifest,
+        "files" => files
+      }
+    end
+
+    private
+
+    def validate_manifest!
+      unless File.directory?(@candidate_dir) && !File.symlink?(@candidate_dir)
+        raise Error, "candidate directory is not a regular directory: #{@candidate_dir}"
+      end
+
+      manifest = HiveLiveAgentProof.read_json(File.join(@candidate_dir, MANIFEST_NAME))
+      required = %w[canonical_digest candidate_sha files hive_version schema schema_version skill_version]
+      raise Error, "artifact manifest fields are invalid" unless manifest.is_a?(Hash) && manifest.keys.sort == required.sort
+      unless manifest["schema"] == "hive-live-agent-candidate-artifacts" &&
+             manifest["schema_version"] == SCHEMA_VERSION && manifest["candidate_sha"] == @candidate_sha
+        raise Error, "artifact manifest identity does not match candidate"
+      end
+      unless manifest["hive_version"] == @expected_hive_version
+        raise Error, "artifact manifest Hive version does not match #{@expected_hive_version}"
+      end
+      unless manifest["skill_version"] == @canonical.version &&
+             manifest["canonical_digest"] == @canonical.canonical_digest
+        raise Error, "artifact manifest canonical skill identity does not match source"
+      end
+
+      expected_names = [
+        "hive-cli-#{@expected_hive_version}.gem",
+        "hive-agent-skills-#{@candidate_sha}.tar.gz",
+        "hive-source-#{@candidate_sha}.tar.gz"
+      ].sort
+      files = manifest["files"]
+      unless files.is_a?(Hash) && files.keys.sort == expected_names
+        raise Error, "artifact manifest files do not match the exact release candidate"
+      end
+      actual_names = Dir.children(@candidate_dir).sort
+      unless actual_names == (expected_names + [ MANIFEST_NAME ]).sort
+        raise Error, "candidate directory contains unmanifested artifacts"
+      end
+      files.each { |name, record| HiveLiveAgentProof.verify_file_record!(@candidate_dir, name, record) }
+
+      manifest
+    end
+
+    def validate_skill_archive!(path)
+      expected = PLATFORMS.each_with_object({}) do |platform, files|
+        @canonical.render(platform).files.each do |relative, content|
+          files["#{platform}/hive/#{relative}"] = content
+        end
+      end
+      actual = read_skill_archive(path)
+      unless actual.keys.sort == expected.keys.sort
+        raise Error, "skill archive projection file set does not match canonical source"
+      end
+      expected.each do |name, content|
+        unless Digest::SHA256.hexdigest(actual.fetch(name)) == Digest::SHA256.hexdigest(content)
+          raise Error, "skill archive projection differs from canonical source: #{name}"
+        end
+      end
+    end
+
+    def read_skill_archive(path)
+      files = {}
+      Zlib::GzipReader.open(path) do |gzip|
+        Gem::Package::TarReader.new(gzip) do |tar|
+          tar.each do |entry|
+            name = entry.full_name.sub(%r{\A\./}, "")
+            next if name.empty? || entry.directory?
+
+            clean = Pathname.new(name).cleanpath
+            if clean.absolute? || clean.each_filename.include?("..") || !entry.file?
+              raise Error, "skill archive contains an unsafe entry: #{name}"
+            end
+            clean_name = clean.to_s
+            raise Error, "skill archive contains duplicate entry: #{clean_name}" if files.key?(clean_name)
+
+            files[clean_name] = entry.read
+          end
+        end
+      end
+      files
+    rescue Zlib::GzipFile::Error, Gem::Package::TarInvalidError, EOFError => e
+      raise Error, "cannot read skill archive: #{e.message}"
     end
   end
 

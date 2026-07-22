@@ -221,9 +221,12 @@ prepends inert `systemctl`/`launchctl` stubs inside that prefix: a rewritten
 `HOME` confines unit files but does not isolate the live per-user service
 manager, so verifier lifecycle calls must never reach the operator's actual
 Hive services. The tag workflow applies the same harness before publication:
-`web-bundle` creates one tracked-file archive and digest, `proof-gate` installs
-the proven gem against those bytes, and `release-finalize` signs and publishes
-the same archive without rebuilding it.
+`web-bundle` creates one tracked-file archive and digest, `candidate-gate`
+builds and verifies the exact gem and four-platform skill archive without
+provider credentials, installs that gem against the web bytes, and
+`release-finalize` signs and publishes the same artifacts without rebuilding
+them. The credentialed live-agent workflow is optional diagnostic evidence,
+not a release prerequisite.
 
 Local usage:
 

@@ -120,37 +120,50 @@ class ReleaseContractTest < Minitest::Test
     refute_includes candidate_install_body, 'gem install "$gem_file"'
   end
 
-  def test_tag_release_consumes_attested_artifacts_without_rebuilding
+  def test_tag_release_builds_and_verifies_offline_exact_candidate
     body = File.read(RELEASE_WORKFLOW)
-    selector = read("packaging/live_agent_skills/release_selector.rb")
     workflow = YAML.safe_load_file(RELEASE_WORKFLOW, aliases: true)
     jobs = workflow.fetch("jobs")
-    gate = jobs.fetch("proof-gate")
+    gate = jobs.fetch("candidate-gate")
+    gate_body = gate.fetch("steps").filter_map { |step| step["run"] }.join("\n")
 
     refute jobs.key?("build")
-    refute_includes body, "gem build hive.gemspec"
     assert_equal "web-bundle", gate.fetch("needs")
-    assert_equal "proof-gate", jobs.fetch("install-gate").fetch("needs")
-    assert_equal [ "proof-gate", "install-gate" ], jobs.fetch("release-finalize").fetch("needs")
-    assert_includes body, "commits/${candidate_sha}/check-runs"
-    assert_includes body, "packaging/live_agent_skills/select_release_proof.rb"
-    assert_includes selector, "OpenClaw live Hive operating skill"
-    assert_includes body, "live-agent-skills-proof"
-    assert_includes body, "proof_run_attempt"
-    assert_includes body, "proof_artifact_digest"
-    assert_includes selector, "downloaded proof archive digest does not match"
-    assert_includes body, "proof archive contains a symbolic link"
-    assert_includes body, "packaging/live_agent_skills/verify.rb"
+    assert_equal "candidate-gate", jobs.fetch("install-gate").fetch("needs")
+    assert_equal [ "candidate-gate", "install-gate" ], jobs.fetch("release-finalize").fetch("needs")
+    assert_includes gate_body, '[[ "$candidate_sha" == "$(git rev-parse "${GITHUB_REF}^{commit}")" ]]'
+    assert_includes gate_body, "git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main"
+    assert_includes gate_body, 'git merge-base --is-ancestor "$candidate_sha" refs/remotes/origin/main'
+    assert_includes gate_body, "repos/${GITHUB_REPOSITORY}/branches/main"
+    assert_includes gate_body, "repository main branch is not protected"
+    assert_includes gate_body, "gem build hive.gemspec"
+    assert_includes gate_body, "git archive --format=tar.gz"
+    assert_includes gate_body, "packaging/live_agent_skills/build.rb"
+    assert_includes gate_body, "packaging/live_agent_skills/verify_candidate.rb"
+    assert_includes gate_body, "packaging/live_agent_skills/install_candidate_gem.sh"
+    assert_includes gate_body, '[[ "$installed_version" == "$version" ]]'
+    assert_includes gate_body, "test/unit/agent_skills/canonical_skill_test.rb"
+    assert_includes gate_body, "test/unit/agent_skills/manifest_test.rb"
+    assert_includes gate_body, "test/unit/openclaw_skills_test.rb"
+    assert_includes gate_body, "test/unit/packaging/live_agent_proof_test.rb"
+    assert_includes gate_body, "test/unit/live_agent_candidate_gem_installer_test.rb"
+    assert_includes gate_body, "test/unit/packaging/verify_release_test.rb"
+    refute_includes body, "commits/${candidate_sha}/check-runs"
+    refute_includes body, "packaging/live_agent_skills/select_release_proof.rb"
+    refute_includes body, "live-agent-skills-proof"
+    refute_includes body, "OPENAI_API_KEY"
+    refute_includes body, "ANTHROPIC_API_KEY"
+    refute_includes body, "CODEX_API_KEY"
     assert_includes body, "hive-proven-candidate"
     assert_includes body, "hive-agent-skills-*.tar.gz"
-    assert_equal "Verify exact-SHA live agent proof", gate.fetch("name")
+    assert_equal "Build and verify exact offline candidate", gate.fetch("name")
   end
 
   def test_release_builds_and_proves_the_exact_managed_web_archive_before_finalize
     workflow = YAML.safe_load_file(RELEASE_WORKFLOW, aliases: true)
     jobs = workflow.fetch("jobs")
     web_bundle = jobs.fetch("web-bundle")
-    proof = jobs.fetch("proof-gate")
+    proof = jobs.fetch("candidate-gate")
     finalize = jobs.fetch("release-finalize")
 
     package_step = web_bundle.fetch("steps").find do |step|
@@ -165,6 +178,7 @@ class ReleaseContractTest < Minitest::Test
     assert_equal "web-bundle", proof.fetch("needs")
     assert_includes proof_body, "EXPECTED_WEB_SHA"
     assert_includes proof_body, "verify-managed-web-setup.sh"
+    assert_includes proof_body, 'hive_bin="$RUNNER_TEMP/proven-gems/bin/hive"'
     assert_includes proof_body, "cp \"$web_archive\" proven/"
 
     finalize_body = finalize.fetch("steps").filter_map { |step| step["run"] }.join("\n")

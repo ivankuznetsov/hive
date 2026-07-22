@@ -1,4 +1,6 @@
 require "test_helper"
+require "open3"
+require "rbconfig"
 require "hive/commands/status"
 require "hive/task"
 require "hive/workflow_selection"
@@ -29,10 +31,25 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_standalone_command_require_order_can_load_a_project
+    script = <<~'RUBY'
+      require "tmpdir"
+      require "hive"
+      require "hive/commands/markers"
+
+      Dir.mktmpdir { |dir| Hive::Workflows::Project.load!(dir) }
+    RUBY
+
+    _out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", "-e", script)
+
+    assert status.success?, err
+  end
+
   def test_load_reuses_a_resolved_project_config
     with_tmp_dir do |project_root|
       write_project_workflow(project_root, "resolved-flow")
       config = Hive::Config.load(project_root)
+      Hive::Workflows::Project.reset!
 
       with_replaced_singleton_method(Hive::Config, :load, ->(*) { flunk "config should already be resolved" }) do
         Hive::Workflows::Project.load!(project_root, config: config)
@@ -42,13 +59,51 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_config_load_accepts_active_project_stage_override_and_rejects_lookalike
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "my-flow", stage_name: "assemble")
+      config_path = File.join(project_root, ".hive-state", "config.yml")
+      File.write(config_path, { "assemble" => { "agent" => "codex", "timeout_sec" => 90 } }.to_yaml)
+
+      cfg = Hive::Config.load(project_root)
+
+      assert_equal({ "agent" => "codex", "timeout_sec" => 90 }, cfg.fetch("assemble"))
+      assert_includes Hive::Workflows.all_stage_names, "assemble"
+
+      File.write(config_path, { "assembly" => { "agent" => "codex" } }.to_yaml)
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(project_root) }
+      assert_includes error.message, "Unknown top-level key `assembly`."
+    end
+  end
+
+  def test_project_load_scans_the_workflow_fingerprint_once_and_config_reuses_the_active_overlay
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "my-flow", stage_name: "assemble")
+      config_path = File.join(project_root, ".hive-state", "config.yml")
+      File.write(config_path, { "assemble" => { "agent" => "codex" } }.to_yaml)
+      original = Hive::Workflows::Loader.method(:fingerprint)
+      scans = 0
+
+      with_replaced_singleton_method(Hive::Workflows::Loader, :fingerprint, lambda { |dir|
+        scans += 1
+        original.call(dir)
+      }) do
+        Hive::Workflows::Project.load!(project_root)
+        assert_equal 1, scans, "one project load must perform one workflow fingerprint scan"
+
+        Hive::Config.load(project_root)
+        assert_equal 1, scans, "config validation must reuse the already-active project vocabulary"
+      end
+    end
+  end
+
   def test_project_load_is_memoized_per_root
     with_tmp_dir do |project_root|
       workflows_dir = File.join(project_root, ".hive-state", "workflows")
       calls = 0
       descriptor = project_descriptor("memo-flow")
 
-      with_replaced_singleton_method(Hive::Workflows::Loader, :workflow_dir, ->(_root) { workflows_dir }) do
+      with_replaced_singleton_method(Hive::Workflows::Loader, :workflow_dir, ->(_root, **) { workflows_dir }) do
         with_replaced_singleton_method(Hive::Workflows::Loader, :load_dir, lambda { |_dir|
           calls += 1
           { descriptor.id => descriptor }
@@ -162,6 +217,49 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_load_surfaces_unsupported_project_root_keys_instead_of_falling_back
+    with_tmp_dir do |project_root|
+      FileUtils.mkdir_p(File.join(project_root, ".hive-state"))
+      File.write(File.join(project_root, ".hive-state", "config.yml"), "defualt_branch: main\n")
+
+      error = assert_raises(Hive::ConfigError) do
+        capture_io { Hive::Workflows::Project.load!(project_root) }
+      end
+
+      assert_includes error.message, "Unknown top-level key `defualt_branch`."
+    end
+  end
+
+  def test_load_preserves_invalid_workflow_path_when_root_keys_are_supported
+    with_tmp_dir do |project_root|
+      FileUtils.mkdir_p(File.join(project_root, ".hive-state"))
+      File.write(
+        File.join(project_root, ".hive-state", "config.yml"),
+        { "hive_state_path" => "bad\0state" }.to_yaml
+      )
+
+      error = assert_raises(ArgumentError) do
+        Hive::Workflows::Project.load!(project_root)
+      end
+
+      assert_match(/null byte/, error.message)
+    end
+  end
+
+  def test_workflow_dir_preserves_unsupported_project_config
+    config_error = Hive::UnsupportedProjectConfigError.new("unsupported root key")
+
+    error = with_replaced_singleton_method(
+      Hive::Workflows::Loader, :workflow_dir, ->(*) { raise config_error }
+    ) do
+      assert_raises(Hive::UnsupportedProjectConfigError) do
+        Hive::Workflows::Project.send(:workflow_dir_for, "/tmp/project")
+      end
+    end
+
+    assert_same config_error, error
+  end
+
   # The documented mid-load exception safety: load! drops @active_root to nil
   # BEFORE loading and re-sets it only after a clean load, so a load that raises
   # partway leaves @active_root nil — the next same-root load! re-attempts
@@ -172,7 +270,7 @@ class WorkflowsProjectTest < Minitest::Test
       descriptor = project_descriptor("retry-flow")
       calls = 0
 
-      with_replaced_singleton_method(Hive::Workflows::Loader, :workflow_dir, ->(_root) { workflows_dir }) do
+      with_replaced_singleton_method(Hive::Workflows::Loader, :workflow_dir, ->(_root, **) { workflows_dir }) do
         with_replaced_singleton_method(Hive::Workflows::Loader, :load_dir, lambda { |_dir|
           calls += 1
           raise Hive::ConfigError, "boom mid-load" if calls == 1

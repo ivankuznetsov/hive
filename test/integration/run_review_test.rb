@@ -385,6 +385,41 @@ class RunReviewTest < Minitest::Test
 
   # --- clean fast path: zero reviewers + no CI + browser disabled --
 
+  def test_top_level_reviewers_fails_before_review_runner_side_effects
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        legacy_reviewer = {
+          "name" => "legacy-reviewer",
+          "kind" => "agent",
+          "agent" => "claude",
+          "skill" => "ce-code-review",
+          "output_basename" => "legacy-reviewer",
+          "prompt_template" => "reviewer_claude_ce_code_review.md.erb"
+        }
+        folder = setup_review_task(dir, cfg_overrides: { "reviewers" => [ legacy_reviewer ] })
+        review_runner_called = false
+
+        error = nil
+        capture_io do
+          error = assert_raises(Hive::ConfigError) do
+            with_replaced_singleton_method(Hive::Stages::Review, :run!, lambda { |_task, _cfg|
+              review_runner_called = true
+              { commit: nil, status: :review_complete }
+            }) do
+              Hive::Commands::Run.new(folder).call
+            end
+          end
+        end
+
+        assert_includes error.message,
+                        "Unknown top-level key `reviewers`; move it to `review.reviewers`."
+        refute review_runner_called, "shared config loading must fail before the review stage runs"
+        refute File.exist?(File.join(folder, "events.jsonl"))
+        refute File.directory?(File.join(folder, "reviews"))
+      end
+    end
+  end
+
   def test_clean_run_with_no_reviewers_finalizes_review_complete
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -507,22 +542,23 @@ class RunReviewTest < Minitest::Test
         SH
         File.chmod(0o755, @driver_bin)
 
+        reviewer = {
+          "name" => "local-reviewer",
+          "kind" => "agent",
+          "agent" => "claude",
+          "skill" => "ce-code-review",
+          "output_basename" => "local-reviewer",
+          "prompt_template" => "reviewer_claude_ce_code_review.md.erb",
+          "timeout_sec" => 5
+        }
         folder = setup_review_task(dir, cfg_overrides: {
           "review" => {
             "triage" => { "enabled" => false },
-            "reviewers" => [
-              {
-                "name" => "local-reviewer",
-                "kind" => "agent",
-                "agent" => "claude",
-                "skill" => "ce-code-review",
-                "output_basename" => "local-reviewer",
-                "prompt_template" => "reviewer_claude_ce_code_review.md.erb",
-                "timeout_sec" => 5
-              }
-            ]
+            "reviewers" => [ reviewer ]
           }
         })
+        assert_equal reviewer, Hive::Config.load(dir).dig("review", "reviewers", 0),
+                     "nested reviewer configuration must survive loading exactly"
 
         capture_io { Hive::Commands::Run.new(folder).call }
         marker = Hive::Markers.current(File.join(folder, "task.md"))

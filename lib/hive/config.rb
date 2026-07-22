@@ -2,6 +2,7 @@ require "yaml"
 require "fileutils"
 require "securerandom"
 require "pathname"
+require "set"
 require "hive/agent_profiles"
 require "hive/babysitter/interval"
 require "hive/permission_scope"
@@ -715,6 +716,10 @@ module Hive
     }.freeze
     IMPLEMENTATION_IDENTITY_FIELDS = %w[agent model effort].freeze
     RESOURCE_LIMIT_FIELDS = %w[budget_usd timeout_sec].freeze
+    # Project sections supported by consumers but intentionally absent from
+    # DEFAULTS. Keep this list explicit so a newly rendered section cannot
+    # silently become an unvalidated extension namespace.
+    PROJECT_KEYS_WITHOUT_DEFAULTS = Set.new(%w[gh]).freeze
 
     module_function
 
@@ -768,6 +773,16 @@ module Hive
 
     def load(project_root)
       project_root = File.expand_path(project_root)
+      candidate, data = read_project_config(project_root)
+      build_project_config(project_root, candidate, data)
+    end
+
+    # Shared raw reader for Config.load and the project-workflow loader. Keeping
+    # parsing here lets Project.load! resolve hive_state_path without calling
+    # Config.load back through Loader.workflow_dir and forming a reverse load
+    # cycle. Validation still happens through build_project_config below.
+    def read_project_config(project_root)
+      project_root = File.expand_path(project_root)
       candidate = File.join(project_root, ".hive-state", "config.yml")
       config_present = begin
         File.lstat(candidate)
@@ -791,6 +806,12 @@ module Hive
       else
                {}
       end
+      [ candidate, data ]
+    end
+
+    def build_project_config(project_root, source_path, data, stage_names: nil)
+      project_root = File.expand_path(project_root)
+      validate_project_top_level_keys!(data, source_path, project_root, stage_names: stage_names)
       resolve_patrol_mode!(data)
       merged = merge_defaults(data).merge("project_root" => project_root)
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
@@ -798,9 +819,74 @@ module Hive
       merged[EXPLICIT_RESOURCE_LIMITS_KEY] = explicit_resource_limits(data)
       merged[IMPLEMENTATION_IDENTITY_PROVENANCE_KEY] = implementation_identity_provenance(data)
       inject_bot_runtime_path_defaults!(merged)
-      validate!(merged, candidate)
+      validate!(merged, source_path)
       merged
     end
+
+    def validate_project_top_level_keys!(data, source_path, project_root, stage_names: nil)
+      supported = DEFAULTS.keys.to_set | PROJECT_KEYS_WITHOUT_DEFAULTS
+      candidates = data.keys.select { |key| key == "reviewers" || !supported.include?(key) }
+      return if candidates.empty?
+
+      dynamic_candidates = candidates.reject { |key| key == "reviewers" }
+      unless dynamic_candidates.empty?
+        stage_names ||= supported_project_stage_names(data, project_root)
+        supported |= stage_names.to_set
+      end
+      unknown = data.keys.select { |key| key == "reviewers" || !supported.include?(key) }
+      return if unknown.empty?
+
+      findings = unknown.sort_by { |key| project_key_sort_key(key) }.map do |key|
+        if key == "reviewers"
+          "Unknown top-level key `reviewers`; move it to `review.reviewers`."
+        else
+          "Unknown top-level key #{render_project_key(key)}."
+        end
+      end
+      raise UnsupportedProjectConfigError,
+            "Unsupported top-level project configuration in #{describe_source(source_path)}:\n" \
+            "#{findings.map { |finding| "- #{finding}" }.join("\n")}"
+    end
+
+    def supported_project_stage_names(data, project_root)
+      require "hive/workflows"
+
+      hive_state_path = data["hive_state_path"]
+      hive_state_path = DEFAULTS.fetch("hive_state_path") unless hive_state_path.is_a?(String)
+      Hive::Workflows::Project.stage_names_for_config(
+        project_root, hive_state_path: hive_state_path
+      )
+    rescue ArgumentError
+      # An unresolvable tilde or NUL path cannot contain a discoverable project
+      # workflow vocabulary. This helper is entered only after unsupported
+      # dynamic candidates were found, so the root-key diagnostic is terminal.
+      validate_project_top_level_keys!(data, project_config_path(project_root), project_root, stage_names: [])
+    end
+
+    def project_config_path(project_root)
+      File.join(File.expand_path(project_root), ".hive-state", "config.yml")
+    end
+
+    def project_key_sort_key(key)
+      return [ 0, key ] if key.is_a?(String)
+
+      [ 1, key.class.name, safe_project_key_inspect(key) ]
+    end
+
+    def render_project_key(key)
+      return "`#{key}`" if key.is_a?(String) && key.match?(/\A[a-zA-Z0-9_.-]+\z/)
+
+      safe_project_key_inspect(key)
+    end
+
+    def safe_project_key_inspect(key)
+      key.inspect
+    rescue StandardError
+      "<#{key.class}>"
+    end
+
+    private_class_method :supported_project_stage_names, :project_config_path,
+                         :project_key_sort_key, :render_project_key, :safe_project_key_inspect
 
     # DEFAULTS["bot"] intentionally omits state_home-derived path keys
     # so direct readers cannot get a stale developer-specific path. We

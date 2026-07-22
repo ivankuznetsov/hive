@@ -198,8 +198,10 @@ Rules:
 - `kind: council` runs a document review council over an input artifact.
 - Every agent stage must declare exactly one of `skill:` or `instruction:`.
 - `agent:`, `model:`, and `effort:` are optional on `kind: agent` and
-  `kind: council`. Descriptor values override project stage config; Claude
-  stages receive `model` / `effort` as CLI flags.
+  `kind: council`. Descriptor `agent` overrides the project stage block;
+  descriptor `model` / `effort` supply the per-stage identity values and reach
+  profiles that support native identity flags. Project stage blocks do not
+  override `model` / `effort`.
 - `budget_usd:` and `timeout_sec:` provide optional resource defaults for
   `kind: agent` and `kind: council`; explicitly authored, non-null project stage
   config takes precedence. Values inherited from Hive's merged config defaults do not
@@ -270,6 +272,32 @@ Stage indexes and stage directories are derived from array order. The example
 above produces `1-inbox`, `2-work`, and `3-done`. The first stage has no
 incoming advance verb; later stages default their incoming advance verb to the
 stage name.
+
+Project configuration has a strict top-level vocabulary. Exact stage names
+from built-in and active project workflow descriptors are the sanctioned
+dynamic extension point for per-stage agent and permission overrides. Resource
+limits remain in the existing `budget_usd` and `timeout_sec` maps, keyed by the
+exact stage name:
+
+```yaml
+work:
+  agent: codex
+  permissions: read-only
+budget_usd:
+  work: 12.50
+timeout_sec:
+  work: 3600
+```
+
+Put `model` and `effort` on the workflow stage descriptor (or use the selected
+agent profile's project-global configuration); a project `work.model` or
+`work.effort` value is not a runtime override.
+
+Hive rejects arbitrary top-level names, including stage-name lookalikes. The
+stage must be present in a registered descriptor before its override is valid.
+Project review adapters are a separate configuration surface and belong under
+`review.reviewers`; the `reviewers:` list shown inside a `kind: council` stage
+above is nested descriptor data, not a project-config root key.
 
 ## Migration Notes
 

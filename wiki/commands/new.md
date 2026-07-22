@@ -17,6 +17,11 @@ hive new PROJECT [--workflow NAME] [--base BRANCH] [--depends-on ID_OR_SLUG_OR_P
 
 `PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into the workflow entry state's file. Empty text raises `Hive::Error("missing task text")`. `--workflow NAME` is validated against `Hive::Workflows::Registry`; unknown names fail before seeding a task and list valid names.
 
+Both ordinary default-workflow resolution and managed-workflow configuration
+loading preserve `UnsupportedProjectConfigError` as a configuration failure
+(exit 78). They do not reclassify strict root-key failures as the generic
+`ProjectConfigUnreadable` exit-1 path, and no task directory is seeded.
+
 `--depends-on` accepts exactly one scalar reference. A bare slug or numeric id
 is scoped to the new task's project; `other-project:task-slug` is the only
 cross-project form. Lists, mappings, blanks, malformed separators, and

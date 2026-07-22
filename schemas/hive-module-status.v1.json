@@ -1,15 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://hivecli.sh/schemas/hive-module-list.v1.json",
-  "title": "Hive module list v1",
+  "$id": "https://hivecli.sh/schemas/hive-module-status.v1.json",
+  "title": "Hive module status v1",
   "oneOf": [
     {
       "type": "object", "additionalProperties": false,
       "required": ["schema", "schema_version", "ok", "modules"],
       "properties": {
-        "schema": {"const": "hive-module-list"}, "schema_version": {"const": 1},
-        "ok": {"const": true},
-        "modules": {"type": "array", "items": {"$ref": "#/$defs/ModuleStatus"}}
+        "schema": {"const": "hive-module-status"}, "schema_version": {"const": 1},
+        "ok": {"const": true}, "modules": {"type": "array", "items": {"$ref": "#/$defs/ModuleStatus"}}
       }
     },
     {"$ref": "#/$defs/Error"}
@@ -26,7 +25,7 @@
         "generated_at": {"type": "string", "format": "date-time"},
         "active": {"type": ["object", "null"]}, "previous": {"type": ["object", "null"]},
         "integrity": {"type": "object"}, "settings": {"type": "array"},
-        "grants": {"type": ["object", "null"]}, "grant_digest": {"type": ["string", "null"]},
+        "grants": {"type": ["object", "null"]}, "grant_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
         "hooks": {"type": "array"}, "latest_decision": {"type": ["object", "null"]},
         "latest_attempt": {"type": ["object", "null"]}, "retry": {"type": ["object", "null"]},
         "artifacts": {"type": "array"}, "failure_reason": {"type": ["string", "null"]},
@@ -37,7 +36,7 @@
       "type": "object",
       "required": ["schema", "schema_version", "ok", "error_kind", "exit_code", "message"],
       "properties": {
-        "schema": {"const": "hive-module-list"}, "schema_version": {"const": 1},
+        "schema": {"const": "hive-module-status"}, "schema_version": {"const": 1},
         "ok": {"const": false}, "error_kind": {"type": "string"},
         "exit_code": {"type": "integer"}, "message": {"type": "string"}
       }

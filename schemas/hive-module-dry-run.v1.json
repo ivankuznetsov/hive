@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-module-dry-run.v1.json",
+  "title": "Hive module dry-run v1",
+  "oneOf": [
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "module", "event", "decisions"],
+      "properties": {
+        "schema": {"const": "hive-module-dry-run"}, "schema_version": {"const": 1}, "ok": {"const": true},
+        "module": {"type": "string"}, "event": {"type": "object"},
+        "decisions": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    {
+      "type": "object", "required": ["schema", "schema_version", "ok", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": {"const": "hive-module-dry-run"}, "schema_version": {"const": 1}, "ok": {"const": false},
+        "error_kind": {"type": "string"}, "exit_code": {"type": "integer"}, "message": {"type": "string"}
+      }
+    }
+  ]
+}

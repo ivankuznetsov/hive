@@ -4,7 +4,7 @@ require "hive"
 module Hive
   module Commands
     class Module
-      SUBCOMMANDS = %w[install update enable disable uninstall list].freeze
+      SUBCOMMANDS = %w[install update enable disable uninstall list inspect status doctor dry-run].freeze
 
       class UsageError < Hive::Error
         attr_reader :value, :expected
@@ -19,7 +19,8 @@ module Hive
       end
 
       def initialize(subcommand, subject = nil, project_root: Dir.pwd, json: false, stdout: $stdout,
-                     yes: false, dry_run: false, receipt: nil, settings: [], hooks: [], grants: [])
+                     yes: false, dry_run: false, receipt: nil, settings: [], hooks: [], grants: [],
+                     event_name: nil, schedule: nil, occurred_at: nil)
         @subcommand = subcommand
         @subject = subject
         @project_root = project_root
@@ -31,6 +32,9 @@ module Hive
         @settings = settings
         @hooks = hooks
         @grants = grants
+        @event_name = event_name
+        @schedule = schedule
+        @occurred_at = occurred_at
       end
 
       def call
@@ -58,10 +62,11 @@ module Hive
             value: @subcommand, expected: SUBCOMMANDS
           )
         end
-        if @subcommand == "list"
-          raise UsageError.new("module list does not accept a name", value: @subject) if @subject
-          require "hive/commands/module/list"
-          return List.new(project_root: @project_root, json: @json, stdout: @stdout).call
+        if %w[list status].include?(@subcommand) && @subject.nil?
+          require "hive/commands/module/#{@subcommand}"
+          command_class = self.class.const_get(@subcommand.capitalize, false)
+          arguments = @subcommand == "status" ? [ "" ] : []
+          return command_class.new(*arguments, project_root: @project_root, json: @json, stdout: @stdout).call
         end
         raise UsageError.new("module #{@subcommand} requires a source or name") if @subject.to_s.empty?
         command.call
@@ -81,6 +86,13 @@ module Hive
         when "update"
           require "hive/commands/module/update"
           Update.new(@subject, **common, settings: @settings, hooks: @hooks, grants: @grants)
+        when "dry-run"
+          raise UsageError, "module dry-run requires --event" if @event_name.to_s.empty?
+          require "hive/commands/module/dry_run"
+          DryRun.new(
+            @subject, **common, event_name: @event_name, hook_id: Array(@hooks).first,
+            schedule: @schedule, occurred_at: @occurred_at
+          )
         else
           require "hive/commands/module/#{@subcommand}"
           self.class.const_get(@subcommand.capitalize, false).new(@subject, **common)
@@ -88,7 +100,13 @@ module Hive
       end
 
       def schema_for_subcommand
-        @subcommand == "list" ? "hive-module-list" : "hive-module-lifecycle"
+        case @subcommand
+        when "list" then "hive-module-list"
+        when "inspect", "status" then "hive-module-status"
+        when "doctor" then "hive-module-doctor"
+        when "dry-run" then "hive-module-dry-run"
+        else "hive-module-lifecycle"
+        end
       end
     end
   end

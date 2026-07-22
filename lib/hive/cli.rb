@@ -505,6 +505,10 @@ module Hive
         disable NAME                      Fence new trigger admission.
         uninstall NAME                    Stop dispatch while retaining history.
         list                              List installed modules for this project.
+        inspect NAME                      Inspect installed or retained history.
+        status [NAME]                     Show the shared redacted status model.
+        doctor NAME                       Diagnose without repairing state.
+        dry-run NAME                      Evaluate a supplied event without writes.
 
       Lifecycle mutations are preview-bound. Run with --dry-run first, review
       every hook, setting, binding, and grant, then repeat with --yes and the
@@ -524,12 +528,19 @@ module Hive
                   desc: "module hook choice ID=enabled|disabled (repeatable)"
     option :grant, type: :array, default: [],
                    desc: "module permission grant CATEGORY=VALUE (repeatable)"
+    option :event, type: :string,
+                   desc: "for `dry-run`: schedule or a supported named event"
+    option :schedule, type: :string,
+                      desc: "for schedule dry-run: exact five-field cron binding"
+    option :occurred_at, type: :string,
+                         desc: "for `dry-run`: ISO 8601 occurrence time"
     define_method(:module) do |subcommand = nil, subject = nil|
       require "hive/commands/module"
       Hive::Commands::Module.new(
         subcommand, subject, project_root: Dir.pwd, json: options[:json],
         yes: options[:yes], dry_run: options[:dry_run], receipt: options[:receipt],
-        settings: options[:setting], hooks: options[:hook], grants: options[:grant]
+        settings: options[:setting], hooks: options[:hook], grants: options[:grant],
+        event_name: options[:event], schedule: options[:schedule], occurred_at: options[:occurred_at]
       ).call
     end
 

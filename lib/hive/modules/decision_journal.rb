@@ -25,17 +25,22 @@ module Hive
 
       attr_reader :root, :decisions_root
 
-      def initialize(root:, id_generator: -> { SecureRandom.uuid })
+      def initialize(root:, id_generator: -> { SecureRandom.uuid }, create_directories: true)
         @root = File.expand_path(root)
         @decisions_root = File.join(@root, "decisions")
         @id_generator = id_generator
-        FileUtils.mkdir_p(@decisions_root, mode: 0o700)
-        File.chmod(0o700, @decisions_root)
+        @read_only = !create_directories
+        if create_directories
+          FileUtils.mkdir_p(@decisions_root, mode: 0o700)
+          File.chmod(0o700, @decisions_root)
+        end
       rescue SystemCallError => e
         raise DecisionJournalError, "module decision journal is unavailable: #{e.message}"
       end
 
       def append(attributes)
+        raise DecisionJournalError, "module decision journal is read-only" if @read_only
+
         data = Hive::StringifyKeys.call(attributes)
         data = normalize(data)
         token = @id_generator.call.to_s
@@ -56,11 +61,16 @@ module Hive
       end
 
       def all
-        with_lock(shared: true) do
+        reader = lambda do
+          next [].freeze unless File.directory?(decisions_root)
+
           Dir.glob(File.join(decisions_root, "dec-*.json")).sort.map do |path|
             parse(File.binread(path), expected_id: File.basename(path, ".json"))
           end.freeze
         end
+        return reader.call if @read_only
+
+        with_lock(shared: true, &reader)
       end
 
       def for_binding(module_name:, hook_id:, event_id: nil)

@@ -34,6 +34,15 @@ module Hive
         fields.each_with_index.all? { |field, index| field_match?(field, values.fetch(index), RANGES.fetch(index)) }
       end
 
+      def next_after(schedule:, now:)
+        cursor = floor_minute(now) + 60
+        MAX_SCAN_MINUTES.times do |offset|
+          candidate = cursor + (offset * 60)
+          return candidate if match?(schedule, candidate)
+        end
+        nil
+      end
+
       private
 
       def field_match?(field, value, range)

@@ -57,6 +57,7 @@ module Hive
           cleanup_generations_unlocked!(resolution.name, selection)
           commit&.call
           transaction.commit!
+          clear_failed_activation(resolution.name)
           cleanup_configurations_unlocked!(resolution.name, selection)
           selection
         rescue StandardError => e
@@ -85,6 +86,45 @@ module Hive
             selected_unlocked(File.basename(File.dirname(path)), include_tombstone: include_tombstones)
           end
         end
+      end
+
+      # Inspection deliberately bypasses transaction reconciliation and the
+      # mutation lock. Selections and configurations are published through
+      # atomic renames, so readers either see the old bytes or the new bytes.
+      # This distinction is what lets doctor/status describe an interrupted
+      # activation without healing it or creating lock files as a side effect.
+      def inspect_selection(name, include_tombstone: false)
+        selected_unlocked(name, include_tombstone: include_tombstone)
+      end
+
+      def inspect_selections(include_tombstones: false)
+        module_names.filter_map do |name|
+          inspect_selection(name, include_tombstone: include_tombstones)
+        end
+      end
+
+      def module_names
+        return [] unless File.directory?(modules_dir)
+
+        Dir.children(modules_dir).sort.select do |name|
+          Manifest::NAME.match?(name) && File.directory?(File.join(modules_dir, name))
+        end
+      rescue SystemCallError => e
+        raise Hive::ConfigError, "module installation state is unreadable: #{e.message}"
+      end
+
+      def inspect_hooks(name)
+        bytes = File.binread(File.join(runtime_path(name), HOOKS_FILE))
+        data = JSON.parse(bytes)
+        unless bytes == canonical(data) && data.is_a?(Hash) && data["schema_version"] == 1 &&
+               data["hooks"].is_a?(Hash)
+          raise Hive::ConfigError, "module hook runtime state is malformed"
+        end
+        data
+      rescue Errno::ENOENT
+        { "schema_version" => 1, "configuration_digest" => nil, "updated_at" => nil, "hooks" => {} }
+      rescue JSON::ParserError, EncodingError
+        raise Hive::ConfigError, "module hook runtime state is malformed"
       end
 
       def configuration(name, digest)
@@ -343,6 +383,16 @@ module Hive
           "reason" => "activation_failed", "error_class" => safe_error_class(error)
         }
         Hive::AtomicFile.write(failed_activation_path(name), canonical(data), mode: 0o600)
+      rescue SystemCallError, IOError
+        nil
+      end
+
+      def clear_failed_activation(name)
+        path = failed_activation_path(name)
+        return unless File.exist?(path)
+
+        FileUtils.rm_f(path)
+        Hive::AtomicFile.fsync_directory(File.dirname(path))
       rescue SystemCallError, IOError
         nil
       end

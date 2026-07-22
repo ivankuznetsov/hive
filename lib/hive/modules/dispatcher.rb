@@ -39,8 +39,9 @@ module Hive
 
       def dispatch(module_name:, hook_id:, event:, dry_run: false)
         assert_project!(event)
-        with_hook_lock(module_name, hook_id, shared: dry_run) do
-          context = load_context(module_name, hook_id)
+        lock = dry_run ? method(:without_hook_lock) : method(:with_hook_lock)
+        lock.call(module_name, hook_id) do
+          context = load_context(module_name, hook_id, read_only: dry_run)
           evaluation = evaluate(context, event)
           if dry_run || !evaluation.launch?
             decision = dry_run ? projected_decision(context, event, evaluation) : persist_decision(context, event, evaluation)
@@ -73,7 +74,8 @@ module Hive
 
       def dispatch_event(event, dry_run: false)
         assert_project!(event)
-        @store.selections.flat_map do |selection|
+        selections = dry_run ? @store.inspect_selections : @store.selections
+        selections.flat_map do |selection|
           active = selection.fetch("active")
           configuration = @store.configuration(
             selection.fetch("name"), active.fetch("configuration_digest")
@@ -113,8 +115,12 @@ module Hive
 
       private
 
-      def load_context(module_name, hook_id)
-        selection = @store.selected(module_name, include_tombstone: true)
+      def load_context(module_name, hook_id, read_only: false)
+        selection = if read_only
+          @store.inspect_selection(module_name, include_tombstone: true)
+        else
+          @store.selected(module_name, include_tombstone: true)
+        end
         return { module_name: module_name.to_s, hook_id: hook_id.to_s, selection: nil } unless selection
         active = selection["active"]
         configuration = active && @store.configuration(module_name, active.fetch("configuration_digest"))
@@ -298,6 +304,10 @@ module Hive
         end
       rescue SystemCallError, IOError => e
         raise Hive::ConfigError, "module hook admission lock is unavailable: #{e.message}"
+      end
+
+      def without_hook_lock(_module_name, _hook_id)
+        yield
       end
 
       def assert_project!(event)

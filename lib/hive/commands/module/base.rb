@@ -7,6 +7,7 @@ require "hive/git_ops"
 require "hive/lock"
 require "hive/module_package/managed_store"
 require "hive/module_package/preview"
+require "hive/modules/inspector"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -22,7 +23,7 @@ module Hive
 
       class Base
         def initialize(project_root:, json:, stdout:, stdin: $stdin, yes: false, dry_run: false,
-                       receipt: nil, store: nil, committer: nil)
+                       receipt: nil, store: nil, committer: nil, inspector: nil)
           @project_root = File.expand_path(project_root)
           @json = json
           @stdout = stdout
@@ -32,6 +33,7 @@ module Hive
           @receipt = receipt
           @store = store
           @committer = committer
+          @inspector = inspector
         end
 
         def call
@@ -49,6 +51,10 @@ module Hive
 
         def store
           @store ||= Hive::ModulePackage::ManagedStore.new(hive_state_path)
+        end
+
+        def inspector
+          @inspector ||= Hive::Modules::Inspector.new(store: store)
         end
 
         def project_config

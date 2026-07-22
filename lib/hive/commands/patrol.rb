@@ -29,7 +29,8 @@ module Hive
       def initialize(project, json: false, dry_run: false,
                      mapper_factory: nil, reviewer_factory: nil,
                      fixer_factory: nil, pr_opener_factory: nil,
-                     dismissals_factory: nil)
+                     dismissals_factory: nil, project_entry: nil,
+                     config_loader: ->(path) { Hive::Config.load(path) })
         @project = project
         @json = json
         @dry_run = dry_run
@@ -40,6 +41,8 @@ module Hive
         @fixer_factory = fixer_factory
         @pr_opener_factory = pr_opener_factory || ->(root, cfg, state) { Hive::Patrol::PrOpener.new(root, cfg: cfg, state: state) }
         @dismissals_factory = dismissals_factory || ->(root, state) { Hive::Patrol::Dismissals.new(root, state: state) }
+        @project_entry = project_entry
+        @config_loader = config_loader
       end
 
       def call
@@ -57,11 +60,11 @@ module Hive
       private
 
       def run_cycle
-        entry = Hive::Config.find_project(@project)
+        entry = @project_entry || Hive::Config.find_project(@project)
         raise Hive::ConfigError, "hive patrol: unknown project #{@project.inspect}" unless entry
 
         project_root = entry.fetch("path")
-        cfg = Hive::Config.load(project_root)
+        cfg = @config_loader.call(project_root)
         ensure_validation_configured!(cfg) unless @dry_run
         state = Hive::Patrol::StateStore.new(project_root)
         state.ensure!

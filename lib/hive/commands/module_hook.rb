@@ -5,6 +5,7 @@ require "hive/module_package/configuration"
 require "hive/module_package/managed_store"
 require "hive/modules/entrypoints"
 require "hive/modules/event_ledger"
+require "hive/modules/first_party"
 
 module Hive
   module Commands
@@ -57,6 +58,7 @@ module Hive
         unless @target_kind == "entrypoint"
           raise Hive::ConfigError, "module hook target kind #{@target_kind.inspect} has no registered executor"
         end
+        Hive::Modules::FirstParty.load!
         result = Hive::Modules::Entrypoints.fetch(@target).call(
           project: entry, module_name: @module_name, hook_id: @hook_id,
           event: event, configuration: configuration

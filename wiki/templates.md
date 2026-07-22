@@ -51,7 +51,10 @@ release semantics without a stale directory protocol. Scheduled workers consume 
 to `LLM_WIKI_MAX_DRAIN_BATCHES` (3) with
 `LLM_WIKI_DRAIN_SETTLE_SECONDS` (1) between batches, catching sources queued
 while the oneshot is already active without turning ordinary overlap into a
-manual circuit.
+manual circuit. The managed systemd service allows four hours for that bounded
+drain: each batch can spend up to 30 minutes in the wiki agent plus two
+independently bounded 15-minute QMD phases. The outer limit therefore covers
+the three-batch worst case without weakening the 4 GiB/no-swap cgroup limits.
 
 The shared runner, compiler, and config are reconciled from the primary Git
 worktree whenever it already contains the managed runtime. Starting an older
@@ -100,7 +103,9 @@ logged-in agent and consumes that provider subscription's token capacity; it is
 not a free bookkeeping command. The runner also requires GNU `timeout` or
 `gtimeout` (GNU coreutils supplies `gtimeout` on macOS) and retains queued work
 instead of falling back to unbounded Git, QMD, or provider execution when that
-binary is unavailable. See [[dependencies]].
+binary is unavailable. Provider dispatch is limited to the configured Codex,
+Claude Code, or Pi command with its fixed argument shape; the shipped worker
+has no arbitrary refresh-command environment override. See [[dependencies]].
 
 ## Rendering helper
 

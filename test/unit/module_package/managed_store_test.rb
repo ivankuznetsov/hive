@@ -94,6 +94,37 @@ class ModulePackageManagedStoreTest < Minitest::Test
     end
   end
 
+  def test_migration_rollback_atomically_restores_previous_generation_and_hooks
+    with_tmp_dir do |root|
+      store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
+      first_root = File.join(root, "first")
+      first_resolution, first_descriptor = write_module_package(first_root)
+      store.apply(preview_for(first_resolution, first_descriptor), package_root: first_root, resolution: first_resolution)
+      second_root = File.join(root, "second")
+      second_resolution, second_descriptor = write_module_package(
+        second_root, version: "1.1.0", commit: "b" * 40
+      )
+      store.apply(
+        preview_for(second_resolution, second_descriptor, store: store),
+        package_root: second_root, resolution: second_resolution
+      )
+      expected = store.selected("demo").fetch("active")
+
+      restored = store.restore_previous(
+        "demo", expected_active: expected, now: Time.utc(2026, 7, 22, 12)
+      )
+
+      assert_equal "a" * 40, restored.dig("active", "source_commit")
+      assert_equal "b" * 40, restored.dig("previous", "source_commit")
+      assert_equal restored, store.selected("demo")
+      hooks = store.inspect_hooks("demo")
+      assert_equal restored.dig("active", "configuration_digest"), hooks.fetch("configuration_digest")
+      assert_raises(Hive::ConfigError) do
+        store.restore_previous("demo", expected_active: expected)
+      end
+    end
+  end
+
   def test_pruning_fails_closed_until_nonterminal_run_has_a_complete_snapshot
     with_tmp_dir do |root|
       store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))

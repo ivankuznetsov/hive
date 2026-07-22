@@ -14,6 +14,7 @@ require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/refactor_patrol/process_group_resolver"
 require "hive/refactor_patrol/repository_ownership"
+require "hive/modules/migration/patrols"
 
 module Hive
   module Daemon
@@ -43,7 +44,8 @@ module Hive
                      checkout_guard_factory: nil, repository_resolver: nil,
                      repository_ownership: nil,
                      owner: nil, claim_resolver: ProcessGroupResolver.new,
-                     lease_sec: 7200, dry_run: false)
+                     lease_sec: 7200, dry_run: false,
+                     migration_authority: :legacy, migration_ownership: nil)
         @registry = registry
         @config_loader = config_loader
         @job_store_factory = job_store_factory
@@ -63,6 +65,13 @@ module Hive
         @claim_resolver = claim_resolver
         @lease_sec = lease_sec.to_i
         @dry_run = dry_run
+        @migration_authority = migration_authority
+        @migration_ownership = migration_ownership || lambda do |entry, module_name, authority|
+          Hive::Modules::Migration::Patrols.admission_allowed?(
+            entry.fetch("path"), module_name, authority: authority,
+            hive_state_path: entry["hive_state_path"]
+          )
+        end
         @events = []
         @schemers = SUPPORTED_REPORT_SCHEMA_VERSIONS.to_h do |version|
           [ version, JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol", version: version))) ]
@@ -312,6 +321,8 @@ module Hive
       def managed_entries
         @configuration_errors = []
         Array(@registry.call).filter_map do |entry|
+          next unless @migration_ownership.call(entry, "architecture-patrol", @migration_authority)
+
           cfg = @config_loader.call(entry.fetch("path"))
           next unless cfg.dig("daemon", "enabled") == true
 

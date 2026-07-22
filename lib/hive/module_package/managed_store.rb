@@ -165,6 +165,50 @@ module Hive
         end
       end
 
+      # Migration rollback may restore the previously reviewed executable and
+      # configuration, but never runtime ledgers. The active-generation CAS
+      # prevents a stale rollback request from overwriting a later operator
+      # update, and Transaction keeps the selection and hook bindings atomic.
+      def restore_previous(name, expected_active:, now: Time.now.utc)
+        with_mutation do
+          reconcile_unlocked!(name)
+          current = selected_unlocked(name, include_tombstone: true)
+          unless current&.fetch("installed") && current.fetch("active") == expected_active
+            raise Hive::ConfigError, "module rollback active generation changed"
+          end
+          previous = current.fetch("previous", nil)
+          return current unless previous
+
+          configuration = self.configuration(name, previous.fetch("configuration_digest"))
+          restored = current.merge(
+            "active" => previous, "previous" => current.fetch("active"),
+            "epoch" => current.fetch("epoch") + 1,
+            "receipt_digest" => ::Digest::SHA256.hexdigest(
+              canonical(
+                "operation" => "migration_rollback", "name" => name.to_s,
+                "active" => previous, "previous" => current.fetch("active"),
+                "restored_at" => now.utc.iso8601(6)
+              )
+            )
+          )
+          hooks = activation_hooks(current, configuration, now)
+          transaction = Transaction.new(module_path(name))
+          transaction.begin!(
+            candidate_path: generation_path(name, previous.fetch("source_commit")),
+            candidate_created: false
+          )
+          transaction.provisional!(selection_bytes: canonical(restored), hooks_bytes: canonical(hooks))
+          transaction.health_validated!
+          cleanup_generations_unlocked!(name, restored)
+          cleanup_configurations_unlocked!(name, restored)
+          transaction.commit!
+          restored
+        rescue StandardError
+          transaction&.rollback!
+          raise
+        end
+      end
+
       def generation_path(name, commit)
         validate_name_commit!(name, commit)
         File.join(module_path(name), "generations", commit.to_s)

@@ -30,6 +30,7 @@ require "hive/attempts/lost_outcome"
 require "hive/conditions/attempt_observer"
 require "hive/modules/event_publisher"
 require "hive/modules/daemon_runtime"
+require "hive/modules/migration/coordinator"
 require "hive/commands/service_installer/result_presenter"
 require "hive/recovery/migration"
 
@@ -268,6 +269,9 @@ module Hive
         module_runtime = Hive::Modules::DaemonRuntime.new(
           attempt_store: attempt_store, attempt_dispatcher: attempts_api
         )
+        module_migration_coordinator = Hive::Modules::Migration::Coordinator.new(
+          supervisor: supervisor, attempt_store: attempt_store, dry_run: @dry_run
+        )
         attempt_process_identity = Hive::Attempts::ProcessIdentity.new
         attempt_reconciler = Hive::Attempts::Reconciler.new(
           store: attempt_store,
@@ -309,7 +313,8 @@ module Hive
           lost_outcome_store: lost_outcome_store,
           lost_outcome_processor: lost_outcome_processor,
           operational_snapshot: operational_snapshot,
-          module_runtime: module_runtime
+          module_runtime: module_runtime,
+          module_migration_coordinator: module_migration_coordinator
         )
 
         reexec_requested = false

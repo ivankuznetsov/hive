@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-module-shadow-decision.v1.json",
+  "title": "Hive module shadow decision v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "module", "decision_id", "trigger_digest",
+    "occurred_at", "configuration_digest", "comparable", "legacy",
+    "module_decision", "explained_differences", "unexplained_differences",
+    "legacy_effects", "module_effects", "duplicate_effects"
+  ],
+  "properties": {
+    "schema": {"const": "hive-module-shadow-decision"},
+    "schema_version": {"const": 1},
+    "module": {"enum": ["patrol", "architecture-patrol"]},
+    "decision_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "trigger_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "occurred_at": {"type": "string"},
+    "configuration_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "comparable": {"type": "boolean"},
+    "legacy": {},
+    "module_decision": {},
+    "explained_differences": {"type": "array", "items": {"$ref": "#/$defs/difference"}},
+    "unexplained_differences": {"type": "array", "items": {"$ref": "#/$defs/difference"}},
+    "legacy_effects": {"type": "array", "items": {"type": "string"}},
+    "module_effects": {"type": "array", "items": {"type": "string"}},
+    "duplicate_effects": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "difference": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "legacy", "module"],
+      "properties": {"path": {"type": "string"}, "legacy": {}, "module": {}}
+    }
+  }
+}

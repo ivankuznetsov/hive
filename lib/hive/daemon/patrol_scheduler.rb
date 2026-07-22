@@ -4,6 +4,7 @@ require "shellwords"
 require "time"
 require "hive/config"
 require "hive/git_ops"
+require "hive/modules/migration/patrols"
 
 module Hive
   module Daemon
@@ -31,10 +32,18 @@ module Hive
 
       def initialize(registry: -> { Hive::Config.registered_projects },
                      config_loader: ->(path) { Hive::Config.load(path) },
-                     git: GitHelper.new)
+                     git: GitHelper.new, migration_authority: :legacy,
+                     migration_ownership: nil)
         @registry = registry
         @config_loader = config_loader
         @git = git
+        @migration_authority = migration_authority
+        @migration_ownership = migration_ownership || lambda do |entry, module_name, authority|
+          Hive::Modules::Migration::Patrols.admission_allowed?(
+            entry.fetch("path"), module_name, authority: authority,
+            hive_state_path: entry["hive_state_path"]
+          )
+        end
         @pending = {}
         @failures = {}
         @next_check_at = {}
@@ -57,6 +66,7 @@ module Hive
         dispatches = []
         @registry.call.each do |entry|
           project = entry.fetch("name")
+          next unless @migration_ownership.call(entry, "patrol", @migration_authority)
           next if pending?(project)
           next if backed_off?(project, now)
           # Slow patrol cadence (U2): once a project has been evaluated,

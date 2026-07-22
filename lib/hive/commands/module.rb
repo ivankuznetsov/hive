@@ -4,7 +4,7 @@ require "hive"
 module Hive
   module Commands
     class Module
-      SUBCOMMANDS = %w[install update enable disable uninstall list inspect status doctor dry-run].freeze
+      SUBCOMMANDS = %w[install update enable disable uninstall list inspect status doctor dry-run migration].freeze
 
       class UsageError < Hive::Error
         attr_reader :value, :expected
@@ -20,7 +20,7 @@ module Hive
 
       def initialize(subcommand, subject = nil, project_root: Dir.pwd, json: false, stdout: $stdout,
                      yes: false, dry_run: false, receipt: nil, settings: [], hooks: [], grants: [],
-                     event_name: nil, schedule: nil, occurred_at: nil)
+                     event_name: nil, schedule: nil, occurred_at: nil, reviewer: nil)
         @subcommand = subcommand
         @subject = subject
         @project_root = project_root
@@ -35,6 +35,7 @@ module Hive
         @event_name = event_name
         @schedule = schedule
         @occurred_at = occurred_at
+        @reviewer = reviewer
       end
 
       def call
@@ -61,6 +62,14 @@ module Hive
             "unknown module subcommand #{@subcommand.inspect} (expected: #{expected})",
             value: @subcommand, expected: SUBCOMMANDS
           )
+        end
+        if @subcommand == "migration"
+          raise UsageError, "module migration requires status, report, cutover, or rollback" if @subject.to_s.empty?
+          require "hive/commands/module/migration"
+          return Migration.new(
+            @subject, project_root: @project_root, json: @json, stdout: @stdout,
+            yes: @yes, reviewer: @reviewer
+          ).call
         end
         if %w[list status].include?(@subcommand) && @subject.nil?
           require "hive/commands/module/#{@subcommand}"
@@ -105,6 +114,8 @@ module Hive
         when "inspect", "status" then "hive-module-status"
         when "doctor" then "hive-module-doctor"
         when "dry-run" then "hive-module-dry-run"
+        when "migration"
+          @subject == "report" ? "hive-module-migration-report" : "hive-module-migration"
         else "hive-module-lifecycle"
         end
       end

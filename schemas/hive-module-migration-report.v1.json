@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-module-migration-report.v1.json",
+  "title": "Hive module migration report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "generated_at", "reviewer", "reviewed_at",
+    "window", "modules", "eligible", "blockers"
+  ],
+  "properties": {
+    "schema": {"const": "hive-module-migration-report"},
+    "schema_version": {"const": 1},
+    "generated_at": {"type": "string"},
+    "reviewer": {"type": "string"},
+    "reviewed_at": {"type": "string"},
+    "window": {"type": "object", "required": ["started_at", "ended_at"]},
+    "modules": {
+      "type": "object", "additionalProperties": false,
+      "required": ["patrol", "architecture-patrol"],
+      "properties": {
+        "patrol": {"$ref": "#/$defs/summary"},
+        "architecture-patrol": {"$ref": "#/$defs/summary"}
+      }
+    },
+    "eligible": {"type": "boolean"},
+    "blockers": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "summary": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "decision_count", "started_at", "ended_at", "elapsed_seconds",
+        "configuration_digest", "unexplained_difference_count",
+        "duplicate_effect_count", "blockers"
+      ],
+      "properties": {
+        "decision_count": {"type": "integer", "minimum": 0},
+        "started_at": {"type": ["string", "null"]},
+        "ended_at": {"type": ["string", "null"]},
+        "elapsed_seconds": {"type": "integer", "minimum": 0},
+        "configuration_digest": {"type": ["string", "null"]},
+        "unexplained_difference_count": {"type": "integer", "minimum": 0},
+        "duplicate_effect_count": {"type": "integer", "minimum": 0},
+        "blockers": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

@@ -3,6 +3,8 @@ require "hive/commands/refactor_patrol"
 require "hive/config"
 require "hive/daemon/refactor_patrol_scheduler"
 require "hive/modules/capability_context"
+require "hive/modules/migration/patrols"
+require "hive/modules/migration/shadow_comparator"
 require "hive/refactor_patrol/state_store"
 
 module Hive
@@ -20,7 +22,7 @@ module Hive
         }.freeze
 
         def initialize(command_factory: nil, scheduler_factory: nil,
-                       state_store_factory: nil, shadow_sink: ->(_record) { })
+                       state_store_factory: nil, shadow_sink: nil)
           @command_factory = command_factory || lambda do |project, options|
             Hive::Commands::RefactorPatrol.new(project, **options)
           end
@@ -43,22 +45,29 @@ module Hive
 
         def setup(project, context, configuration, event)
           context.require_filesystem_write!(".hive-state/refactor_patrol/**")
-          return shadow(configuration, event, "setup") if shadow?(configuration)
+          mode = migration_mode(project, configuration)
+          return shadow(
+            project, configuration, event, mode == :fenced ? "ownership_fenced" : "setup",
+            comparable: false
+          ) unless mode == :mutator
 
           @state_store_factory.call(project.fetch("path")).ensure!
           0
         end
 
         def dispatch(project, hook_id, event, configuration, context)
+          mode = migration_mode(project, configuration)
+          return shadow(project, configuration, event, "ownership_fenced") if mode == :fenced
           require_observation_capabilities!(context)
           cfg = effective_config(project)
           scheduler = @scheduler_factory.call(
             registry: -> { [ project ] }, config_loader: ->(_path) { cfg },
-            dry_run: shadow?(configuration) || configuration.settings.fetch("dry_run")
+            dry_run: mode == :shadow || configuration.settings.fetch("dry_run"),
+            migration_authority: mode == :mutator ? :module : :shadow
           )
           candidate = select_candidate(scheduler.candidates(now: event_time(event)), hook_id, event)
           rationale = candidate ? "due" : "not_due"
-          return shadow(configuration, event, rationale, candidate) if shadow?(configuration)
+          return shadow(project, configuration, event, rationale, candidate) if mode == :shadow
           return 0 unless candidate
 
           require_mutation_capabilities!(context) unless configuration.settings.fetch("dry_run")
@@ -127,17 +136,43 @@ module Hive
         end
 
         def event_time(event) = Time.iso8601(event.fetch("occurred_at"))
-        def shadow?(configuration) = configuration.settings.fetch("shadow_mode")
+        def migration_mode(project, configuration)
+          Hive::Modules::Migration::Patrols.module_mode(
+            project.fetch("path"), "architecture-patrol",
+            configured_shadow: configuration.settings.fetch("shadow_mode"),
+            hive_state_path: project["hive_state_path"]
+          )
+        end
 
-        def shadow(configuration, event, rationale, candidate = nil)
-          @shadow_sink.call(
+        def shadow(project, configuration, event, rationale, candidate = nil, comparable: true)
+          record = {
             "module" => "architecture-patrol", "hook" => event.fetch("event_name"),
             "event_id" => event.fetch("event_id"), "rationale" => rationale,
             "job_id" => candidate && candidate[:job_id],
             "phase" => candidate && candidate.fetch(:action_phase, :discovery).to_s,
             "configuration_digest" => configuration.digest
-          )
+          }
+          if @shadow_sink
+            @shadow_sink.call(record)
+          else
+            decision = {
+              "rationale" => rationale, "job_id" => record["job_id"], "phase" => record["phase"]
+            }
+            shadow_comparator(project).record!(
+              module_name: "architecture-patrol", trigger: event,
+              legacy_decision: decision, module_decision: decision,
+              configuration_digest: configuration.digest,
+              occurred_at: event.fetch("occurred_at"), comparable: comparable
+            )
+          end
           0
+        end
+
+        def shadow_comparator(project)
+          state = project["hive_state_path"] || File.join(project.fetch("path"), ".hive-state")
+          Hive::Modules::Migration::ShadowComparator.new(
+            root: File.join(state, "module-runtime", "migration", "shadow")
+          )
         end
 
         def validate_hook!(hook_id, event)

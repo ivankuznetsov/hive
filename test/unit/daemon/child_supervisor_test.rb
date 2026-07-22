@@ -91,6 +91,17 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     assert_equal [], sup.reap_all
   end
 
+  def test_in_flight_filters_by_exact_project_and_stage
+    supervisor = make(dry_run: true)
+    supervisor.spawn(
+      command_string: "hive patrol demo --json", project: "demo", slug: "patrol", stage: "patrol"
+    )
+
+    assert supervisor.in_flight?(project: "demo", stage: "patrol")
+    refute supervisor.in_flight?(project: "other", stage: "patrol")
+    refute supervisor.in_flight?(project: "demo", stage: "refactor-patrol")
+  end
+
   def test_spawn_with_invalid_json_stdout_returns_nil_envelope
     with_tmp_dir do |dir|
       sup = make(log_dir: dir)

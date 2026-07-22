@@ -89,6 +89,7 @@ module Hive
         architecture_patrol_progress
         architecture_patrol_closed
         architecture_patrol_blocked
+        module_migration
         fatal
       ].freeze
 

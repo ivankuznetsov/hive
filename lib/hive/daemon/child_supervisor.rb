@@ -269,6 +269,13 @@ module Hive
         @running.size
       end
 
+      def in_flight?(project:, stage: nil)
+        @running.values.any? do |entry|
+          entry.fetch(:project).to_s == project.to_s &&
+            (stage.nil? || entry.fetch(:stage).to_s == stage.to_s)
+        end
+      end
+
       # Terminate and await one exact child process group. Used when a spawn
       # succeeded but its durable PID/start-time/PGID fence could not be
       # persisted; releasing the claim before the child is gone would allow a

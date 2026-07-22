@@ -256,7 +256,10 @@ acquire_global_provider_lock() {
 
   command -v ruby >/dev/null 2>&1 || return 1
   coproc HIVE_GLOBAL_LOCK_KEEPER {
-    ruby -e '
+    # Commit hooks can inherit Bundler/Coverage loader state from a parent
+    # process even when PATH resolves a different system Ruby. The lock keeper
+    # only needs Ruby's core File API, so isolate it from those injected loaders.
+    RUBYOPT= RUBYLIB= ruby -e '
       lock = File.open(ARGV.fetch(0), File::RDWR | File::CREAT, 0o600)
       if lock.flock(File::LOCK_EX | File::LOCK_NB)
         STDOUT.puts("locked")

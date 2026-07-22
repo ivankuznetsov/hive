@@ -390,7 +390,8 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     result = run_refresh_from(
       @wt,
       "XDG_RUNTIME_DIR" => runtime_dir,
-      "LLM_WIKI_DISABLE_FLOCK" => "1"
+      "LLM_WIKI_DISABLE_FLOCK" => "1",
+      "RUBYOPT" => "-rbundler/setup"
     )
 
     assert_equal 0, result.fetch(:status), result.fetch(:out)
@@ -407,7 +408,8 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
       recovery = run_refresh_from(
         @wt,
         "XDG_RUNTIME_DIR" => runtime_dir,
-        "LLM_WIKI_DISABLE_FLOCK" => "1"
+        "LLM_WIKI_DISABLE_FLOCK" => "1",
+        "RUBYOPT" => "-rbundler/setup"
       )
       break unless File.exist?(pending)
 

@@ -869,7 +869,7 @@ prune_receipted_queue_files() {
 }
 
 record_batch_failure() {
-  local file queued_sha queued_branch count max_attempts count_tmp remaining=0
+  local file queued_sha queued_branch count max_attempts count_tmp unreceipted=0
   max_attempts="${LLM_WIKI_MAX_REFRESH_ATTEMPTS:-2}"
   [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] || max_attempts=2
 
@@ -884,9 +884,9 @@ record_batch_failure() {
       log_line "acknowledged committed source $queued_sha after receipt write failure"
       continue
     fi
-    remaining=1
+    unreceipted=1
   done
-  if [ "$remaining" -eq 0 ]; then
+  if [ "$unreceipted" -eq 0 ]; then
     rm -f -- "$failure_count_file"
     reconcile_circuit_after_success
     return 0

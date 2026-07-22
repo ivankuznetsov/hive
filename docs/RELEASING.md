@@ -9,44 +9,31 @@ gem, and `hive setup` authenticates and installs the matching web bundle:
   [`ivankuznetsov/homebrew-hive`](https://github.com/ivankuznetsov/homebrew-hive) tap.
 - **AUR** — `yay -S hive-bin` (or `paru -S hive-bin`).
 
-A candidate must first pass `.github/workflows/live-agent-skills.yml` from
-protected `main`. That workflow builds the gem, source archive, and canonical
-OpenClaw/Claude/Codex/Pi projections once from the exact candidate SHA; runs
-all four authenticated native-agent proofs in disposable homes; secret-scans
-and attests their structural evidence; and creates a candidate-bound
-`live-agent-skills` Check Run. The evidence artifact is private, digest-bound,
-run-attempt-specific, and retained for seven days.
-
-The proof resolves OpenClaw's exact skill path, verifies Codex's exact `$hive`
-projection in its model-visible prompt inventory, resolves Pi's exact
-`/skill:hive` command through its native RPC inventory, and requires Claude
-native activation metadata before accepting the audited status/watch commands.
-Claude runs in bare mode and Claude/Pi expose only their shell tool during the
-proof.
-
-Only after that proof should a maintainer create a `vX.Y.Z` tag on the same
-commit. The tag triggers `.github/workflows/release.yml`, which:
+A maintainer's explicit `vX.Y.Z` tag triggers `.github/workflows/release.yml`.
+The workflow requires no model-provider credentials. On GitHub-hosted runners,
+it proves the exact tag candidate as follows:
 
 1. Builds `hive-web-X.Y.Z.tar.gz` once from the tracked `web/` tree and records
-   its SHA-256 before any release proof or install gate runs.
-2. Resolves the successful `live-agent-skills` Check Run on the exact tag
-   commit, validates its workflow/run/attempt/jobs and private artifact digest,
-   verifies the attestation/candidate provenance, and installs the proven gem
-   against that exact web archive through consent-approved managed
-   `hive setup --no-init --yes --json` under inert service-manager stubs. It
-   does not rebuild the gem, skill archive, or web archive.
-3. Gem-installs the exact proven gem on macOS and native arm64 Linux.
-4. Creates and cosign-signs `SHA256SUMS` for the proven gem, four-platform
+   its SHA-256 before the candidate or install gates run.
+2. Builds one gem, source archive, and deterministic OpenClaw/Claude/Codex/Pi
+   skill archive from the exact tag commit. The candidate verifier checks the
+   manifest digests and compares every packaged projection byte-for-byte with
+   the canonical skill source, then installs and invokes that exact gem.
+3. Installs the proven gem against the exact web archive through
+   consent-approved managed `hive setup --no-init --yes --json` under inert
+   service-manager stubs. It never rebuilds the candidate after this gate.
+4. Gem-installs the exact proven gem on macOS and native arm64 Linux.
+5. Creates and cosign-signs `SHA256SUMS` for the proven gem, four-platform
    skill archive, and the already-proven web archive. `release-finalize`
    publishes those same web bytes; it never rebuilds them. The GitHub Release
    contains those assets and `SHA256SUMS{,.sig,.pem}`.
-5. Dispatches a `hive-release` `repository_dispatch` to the Homebrew tap
+6. Dispatches a `hive-release` `repository_dispatch` to the Homebrew tap
    (gated on `HOMEBREW_TAP_TOKEN`).
-6. Runs the `aur-publish` job (gated on `AUR_SSH_PRIVATE_KEY`): cosign-verifies
+7. Runs the `aur-publish` job (gated on `AUR_SSH_PRIVATE_KEY`): cosign-verifies
    the released gem, renders `PKGBUILD` from `packaging/aur/PKGBUILD.template`
    via `packaging/render.rb`, regenerates `.SRCINFO` with
    `makepkg --printsrcinfo`, and pushes a version bump to the AUR package.
-7. Announces the release on Discord with the supported `hive update` command
+8. Announces the release on Discord with the supported `hive update` command
    when `DISCORD_RELEASE_WEBHOOK` is configured. Announcement failures are
    non-fatal and do not block package publication.
 
@@ -77,10 +64,10 @@ big versions.
 depends on the gem via `path: ".."` in a source checkout, so a stale web lock fails its frozen
 `bundle install`), bump the `vX.Y.Z` installer-URL refs in `README.md` /
 `install.md`, add a `## X.Y.Z` CHANGELOG section, and merge the release-prep PR.
-Dispatch the live-agent proof for that full protected-main SHA and wait for its
-candidate-bound Check Run. Only a separate explicit release decision should
-then create/push `vX.Y.Z` on that exact proven commit. The tag drives
-`release.yml` (above). The owner bypasses the `v*` tag-protection ruleset.
+Only a separate explicit release decision should create/push `vX.Y.Z` on the
+full protected-main commit. The tag drives the exact offline candidate and
+native install gates in `release.yml` (above). The owner bypasses the `v*`
+tag-protection ruleset.
 
 **CHANGELOG style:** newest-first `## X.Y.Z` sections with user-facing `-`
 bullets (prefix fixes with "Fixed"); no `[Unreleased]` accumulator and no dates
@@ -109,10 +96,11 @@ cannot mint a release that propagates to users.
 > remain a separate, deferred hardening. Tag protection is the compensating
 > control until then.
 
-### 2. Protected live-agent environments
+### 2. Optional live-agent diagnostics
 
-Create four GitHub environments and restrict their deployment branches/tags to
-protected `main` workflow runs:
+Releases do not require provider keys or these environments. Maintainers who
+want an additional authenticated native-agent diagnostic may create four
+GitHub environments restricted to protected `main` workflow runs:
 
 - `live-agent-skills-openclaw`: `OPENAI_API_KEY` and environment variable
   `HIVE_LIVE_MODEL` naming its OpenClaw model.
@@ -130,8 +118,8 @@ passes only the selected platform's credential into its disposable child
 environment, never copies host auth state, retains no model prose, scans raw
 process output before redaction, and removes the private home before success.
 
-Also keep the repository `main` branch protected. The proof workflow refuses a
-non-main dispatch, a workflow revision not loaded from `refs/heads/main`, a
+The optional workflow refuses a non-main dispatch, a workflow revision not
+loaded from `refs/heads/main`, a
 non-full SHA, a candidate not reachable from `origin/main`, or an unprotected
 main branch.
 
@@ -217,21 +205,15 @@ version until you bump it manually or set the token.
 1. Bump the version in `lib/hive.rb` (`VERSION = "X.Y.Z"`) and update
    `CHANGELOG.md`, both lockfiles, and pinned installer URLs.
 2. Commit, open a PR, merge to `main`.
-3. Record the full merged commit and dispatch its pre-release proof from main:
+3. Record the full merged commit and confirm the release metadata matches it:
 
    ```sh
    candidate_sha="$(git rev-parse origin/main)"
-   gh workflow run live-agent-skills.yml --ref main -f candidate_sha="$candidate_sha"
-   proof_run_id="$(gh run list --workflow live-agent-skills.yml --branch main \
-     --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')"
-   gh run watch "$proof_run_id" --exit-status
+   test "$(git rev-parse HEAD)" = "$candidate_sha"
+   test "$(ruby -Ilib -e 'require "hive"; print Hive::VERSION')" = "X.Y.Z"
    ```
 
-   Confirm the `live-agent-skills` Check Run is successful on exactly
-   `$candidate_sha`, all four named live jobs and attestation succeeded, and the
-   seven-day proof artifact has not expired. A locally skipped smoke is not
-   readiness evidence.
-4. After the separate explicit release decision, tag that exact candidate and
+4. After the separate explicit release decision, tag that exact commit and
    push (this is the irreversible public trigger):
 
    ```sh
@@ -239,12 +221,13 @@ version until you bump it manually or set the token.
    git tag vX.Y.Z "$candidate_sha"
    git push origin vX.Y.Z
    ```
-5. Watch the run: **web-bundle → proof-gate → install-gate → release-finalize →
+5. Watch the run: **web-bundle → candidate-gate → install-gate → release-finalize →
    aur-publish**. Confirm:
    - `web-bundle` built the managed archive once and exposed its exact digest.
-   - `proof-gate` downloaded and verified the exact attested candidate instead
-     of rebuilding it, then exercised managed setup against the digest-pinned
-     web candidate under the isolated service-manager harness.
+   - `candidate-gate` built the tag exactly once, verified all four canonical
+     skill projections and manifest digests offline, installed and invoked the
+     exact gem, then exercised managed setup against the digest-pinned web
+     candidate under the isolated service-manager harness.
    - The GitHub Release has `hive-cli-X.Y.Z.gem`, the four-platform Hive skill
      archive, `hive-web-X.Y.Z.tar.gz`, and `SHA256SUMS{,.sig,.pem}`.
    - The tap committed `Formula/hive.rb` at `X.Y.Z` (if `HOMEBREW_TAP_TOKEN` is set).
@@ -272,16 +255,13 @@ CI does **real installs** of every channel on its native OS (no macOS/Ubuntu
 hardware needed — GitHub-hosted runners + containers). Three layers, all backed
 by `packaging/verify-channel.sh` and the reusable `.github/workflows/install-verify.yml`:
 
-1. **Exact-artifact proof gate** (`live-agent-skills.yml` plus `proof-gate` in
-   `release.yml`) — builds once before the tag, proves native Hive skill
-   discovery/use on OpenClaw, Claude, Codex, and Pi, then binds the candidate
-   gem/skill archive and evidence to the exact SHA, workflow revision, run,
-   attempt, and artifact digests. On the tag, `web-bundle` builds the tracked
-   managed web archive once before `proof-gate`; the proof gate digest-checks
-   it and runs the installed proven gem through managed setup from that archive.
-   The tag workflow accepts only the trusted GitHub Actions Check Run and
-   downloads that private proof artifact; no downstream job rebuilds a proven
-   candidate.
+1. **Exact-artifact candidate gate** (`candidate-gate` in `release.yml`) —
+   checks out the exact tag, runs the offline canonical-skill contracts, builds
+   one gem/source/four-platform skill candidate, verifies every manifest digest
+   and projected file against canonical source, then installs and invokes the
+   exact gem. `web-bundle` builds the tracked managed web archive once before
+   this gate; the gate digest-checks it and runs the installed candidate through
+   managed setup. No downstream job rebuilds the proven candidate.
 2. **Pre-release install gate** (`install-gate` in `release.yml`) — `gem
    install`s the exact proven gem on `macos-15` + `ubuntu-24.04-arm` before
    publishing. `release-finalize` needs it, so a gem that will not install never
@@ -328,16 +308,14 @@ Arch-Linux-ARM image).
 
 ## Troubleshooting
 
-- **`proof-gate` finds no trusted Check Run** → dispatch
-  `live-agent-skills.yml` from protected `main` for the exact tag commit. A
-  Check on another SHA, a rerun with an older attempt, or a locally passing
-  smoke is intentionally rejected.
-- **Private proof artifact expired** → rerun the protected live-agent workflow
-  for the same still-releasable candidate before tagging/re-running. The
-  retained proof lifetime is seven days.
-- **One live agent job skipped** → the corresponding protected environment is
-  missing its credential/model configuration. Release-mode skips are failures;
-  do not weaken the four-platform requirement.
+- **`candidate-gate` reports projection drift** → regenerate the checked-in
+  projections from `skills/hive/`, inspect the diff, and rerun the focused
+  agent-skill tests. Do not edit a generated projection directly.
+- **`candidate-gate` reports a version mismatch** → the tag, `Hive::VERSION`,
+  gem filename, and installed `hive --version` must all name the same version.
+- **Optional live-agent job skipped** → its protected environment lacks the
+  provider credential/model configuration. This does not block a release; use
+  the offline candidate gate when no provider keys are available.
 - **AUR job skipped** → `AUR_SSH_PRIVATE_KEY` is unset, or `release-finalize`
   failed before its `aur_gate` step. Set the secret / re-run the release.
 - **Tap not updated** → `HOMEBREW_TAP_TOKEN` is unset or expired. Renew the PAT

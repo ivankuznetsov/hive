@@ -20,7 +20,7 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
 1. `File.expand_path(folder)`.
 2. Match `PATH_RE`; on failure, raise `Hive::InvalidTaskPath` with the offending path.
 3. Strip a trailing `/`, then capture into `@folder`, `@project_root`, `@state_dir_basename`, `@hive_state_path`, `@stage_index`, `@stage_name`, `@slug`.
-4. Resolve `@workflow` from `<task>/meta.yml workflow:`, then project config `default_workflow`, then built-in `coding`. Missing/malformed `meta.yml` returns nil selector; broken project config falls back to `coding` with a warning. Unknown workflow ids are re-raised as `InvalidTaskPath` so one bad task is skipped like a bad stage directory.
+4. Resolve `@workflow` from `<task>/meta.yml workflow:`, then project config `default_workflow`, then built-in `coding`. Missing/malformed `meta.yml` returns nil selector; recoverable unreadable, malformed, or otherwise invalid project config falls back to `coding` with a warning. On the queued strict-config branch, unsupported project root keys are deliberately not recoverable: `UnsupportedProjectConfigError` remains a `ConfigError`/exit-78 result through ordinary and managed task resolution, before task-only commands can mutate state. Other managed configuration failures may still become `InvalidTaskPath`. Unknown workflow ids are re-raised as `InvalidTaskPath` so one bad task is skipped like a bad stage directory. The strict exception is branch-dependent until the commits listed in [[gaps]] are integrated into the default branch.
 5. Validate the parsed stage name and numeric prefix against the selected descriptor. A descriptor without the stage, or a directory like `3-brainstorm` when the descriptor says `2-brainstorm`, raises `InvalidTaskPath`.
 
 `@hive_state_path` is the *project-rooted* hive-state path: `<project_root>/<state_dir_basename>` — always `<project_root>/.hive-state` in MVP.
@@ -76,7 +76,7 @@ For stages 4 and later:
 
 ## Tests
 
-- `test/unit/task_test.rb` — path parsing, descriptor-driven stage/index validation, workflow selection fallback, derived-path correctness, slug edge cases, and `meta.yml` readers.
+- `test/unit/task_test.rb` — path parsing, descriptor-driven stage/index validation, workflow selection and recoverable fallback, queued strict-root-key propagation for ordinary and managed tasks, derived-path correctness, slug edge cases, and `meta.yml` readers.
 - `test/unit/task_meta_test.rb` — tolerant and strict sidecar reads, dependency validation, workflow selector preservation, corrupt-input mutation refusal, display-name updates, and id backfill.
 - `test/unit/task_counter_test.rb` — first id, sequential ids, fail-soft allocation, corrupt counter fallback, seeding, forked concurrency, and lock timeout.
 

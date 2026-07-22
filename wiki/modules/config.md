@@ -326,6 +326,9 @@ non-string keys, global-only namespaces, and the retired top-level
 unknown keys are reported once in deterministic string-first order. Descriptor
 loading receives the raw config's resolved `hive_state_path`, avoiding a
 recursive `Config.load` while it discovers the dynamic stage-name allowlist.
+Diagnostic rendering is defensive: if an unsupported non-string key's
+`inspect` raises, the queued implementation renders its class placeholder
+(for example `<Object>`) rather than losing the configuration error.
 
 After merge, `Config.validate!` checks values so a default value can never
 trigger a failure—only user input does. Key checks include:

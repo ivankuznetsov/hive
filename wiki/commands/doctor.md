@@ -17,6 +17,15 @@ nominally read-only upstream commands can initialize user state. `--json` is
 the versioned `hive-doctor.v2` contract.
 Legacy tmux, QMD, and deprecated-config checks remain separate rows.
 
+The queued strict-project-config branch loads the project through the shared
+`Hive::Config.load` boundary before constructing the inspector. On that branch,
+an unsupported project root key exits 78 before any tmux, QMD, agent, or skill
+probe runs and before a success table or JSON document is emitted. The error
+names the config path and all unsupported keys; a root-level `reviewers` key
+directly instructs the operator to move it under `review.reviewers`. This is a
+shared project-config failure, not a Doctor-specific validation pass. See the
+branch-integration qualification in [[gaps]].
+
 ## Usage
 
 ```bash
@@ -154,6 +163,9 @@ project.
   and Pi `/skill:hive` resolution, escaping, Pi jails, and the write-free
   global npm-root probe.
 - `test/integration/init_doctor_preflight_test.rb` covers init delegation and non-mutating flows.
+- Queued `test/integration/doctor_config_validation_test.rb` covers exit 78,
+  deterministic unknown-key diagnostics, reviewer migration guidance, and the
+  fail-before-probes boundary.
 
 ## Backlinks
 

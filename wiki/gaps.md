@@ -93,11 +93,20 @@ tags: [gap, todo, release-proof, agent-skills]
   `schemas/hive-digest.v2.json`. The digest pages document the queued committed
   contract, but default-branch integration remains unverified until that
   source branch is reconciled.
-- Commit `0624f58a` likewise contains strict project top-level-key admission
-  and descriptor-stage allowlist discovery, while the refresh worktree's
-  default-branch `lib/hive/config.rb` does not yet contain
-  `validate_project_top_level_keys!`. The config/workflow pages document the
-  queued contract; its integration state remains branch-dependent.
+- Commit `0624f58a` contains the initial strict project top-level-key admission
+  and descriptor-stage allowlist discovery. The later queued sequence
+  `c4068bf5`, `ae908e77`, `1d8c4637`, and `97259f74` documents and tests shared
+  propagation through Doctor, review, init-generated config, task/workflow
+  fallbacks, managed resolution, overlay isolation, and defensive key
+  rendering. Commits `e219f115` and `a4df6cd8` change only the compiled-log
+  artifact: the former carries accumulated generated entries, while the latter
+  removes that feature-branch residue and preserves fragment ownership.
+  None of these supplied SHAs is an ancestor of this refresh branch, and the
+  current default-branch `lib/hive/config.rb` still has no
+  `validate_project_top_level_keys!` or `UnsupportedProjectConfigError`.
+  Therefore [[modules/config]], [[modules/workflows]], [[modules/task]], and
+  [[commands/doctor]] describe the queued contract with branch qualification;
+  default-branch integration and a current-main test run remain unverified.
 - Two queue manifests do not describe their immutable commits. `02e938cc`
   changes only `lib/hive/operational_status.rb` and
   `lib/hive/daemon/stale_agent_healer.rb` to derive coding plan/review stage

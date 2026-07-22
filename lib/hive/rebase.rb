@@ -1,6 +1,7 @@
 require "yaml"
 require "fileutils"
 require "hive/git_ops"
+require "hive/gh"
 require "hive/protected_files"
 require "hive/stages/base"
 
@@ -38,6 +39,12 @@ module Hive
     # so downstream callers that imported the constant don't break;
     # the actual check is gone from `resolve_conflicts`.
     PROTECTED_BASENAMES = [].freeze
+
+    # Captured before history is rewritten. A successful post-rebase push may
+    # replace the remote branch only while it still points at this exact OID,
+    # and only after the pre-rebase HEAD proved that OID was already contained
+    # locally. That pairs lineage proof with a concurrency-safe lease.
+    PublishLease = Data.define(:branch, :remote_oid)
 
     # Result of a single `perform` call. Consumed by JSON envelope
     # (U6) and stderr logging (U4). `reason` is nil on success; a
@@ -126,7 +133,16 @@ module Hive
       commits_behind = git.commits_behind(ref)
       return Result.no_op if commits_behind.zero?
 
-      run_rebase(task, cfg, git, ref, commits_behind)
+      publish_lease, warnings = capture_publish_lease(task, cfg, git)
+      result = run_rebase(task, cfg, git, ref, commits_behind)
+      return result unless result.succeeded
+
+      warnings.concat(result.post_rebase_warnings)
+      publish_rebased_branch!(task, cfg, publish_lease, warnings)
+      Result.succeeded(commits_behind: result.commits_behind,
+                       agent_resolutions: result.agent_resolutions,
+                       resolved_files: result.resolved_files,
+                       post_rebase_warnings: warnings)
     rescue Hive::GitError, SystemCallError, IOError => e
       # Narrow rescue: only catch I/O-class and git-class failures.
       # Programmer errors (NoMethodError, NameError, ArgumentError,
@@ -304,6 +320,57 @@ module Hive
                        agent_resolutions: attempts,
                        resolved_files: resolved_files.uniq,
                        post_rebase_warnings: warnings)
+    end
+
+    # A PR branch can already exist remotely when an ordinary stage run
+    # triggers auto-rebase. Capture a publication lease only when the current
+    # remote OID is contained by the pre-rebase HEAD. Pre-PR branches have no
+    # remote OID and remain local. Diverged or unreadable remote state is never
+    # overwritten; it becomes a structured non-fatal warning instead.
+    def capture_publish_lease(task, cfg, git)
+      warnings = []
+      branch = git.current_branch
+      return [ nil, warnings ] unless branch
+
+      remote_oid = Hive::Gh.remote_branch_oid(task.worktree_path, branch, cfg: cfg)
+      return [ nil, warnings ] if remote_oid.nil?
+
+      unless git.ancestor?(remote_oid, "HEAD")
+        message = "rebased branch not published: origin/#{branch} was not contained by pre-rebase HEAD"
+        warn "[hive] #{message}; refusing to replace remote history"
+        warnings << message
+        return [ nil, warnings ]
+      end
+
+      [ PublishLease.new(branch: branch, remote_oid: remote_oid), warnings ]
+    rescue Hive::GhError, Hive::GitError, SystemCallError, IOError => e
+      message = "rebased branch publication preflight failed: #{e.class}: #{e.message}"
+      warn "[hive] #{message}; continuing without a remote rewrite"
+      warnings << message
+      [ nil, warnings ]
+    end
+
+    def publish_rebased_branch!(task, cfg, publish_lease, warnings)
+      return unless publish_lease
+
+      result = Hive::Gh.push_branch(
+        task.worktree_path,
+        publish_lease.branch,
+        cfg: cfg,
+        expected_remote_oid: publish_lease.remote_oid
+      )
+      return if result.success?
+
+      detail = result.stderr.to_s.strip
+      detail = result.stdout.to_s.strip if detail.empty?
+      message = "rebased branch not published: exact lease push failed"
+      message = "#{message}: #{detail[0, 200]}" unless detail.empty?
+      warn "[hive] #{message}; remote history was left unchanged"
+      warnings << message
+    rescue Hive::GhError, SystemCallError, IOError => e
+      message = "rebased branch not published: #{e.class}: #{e.message}"
+      warn "[hive] #{message}; remote history was left unchanged"
+      warnings << message
     end
 
     def dispatch_conflict_agent(task, cfg, profile, git, conflict_files)

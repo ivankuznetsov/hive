@@ -51,7 +51,7 @@ class HiveRebaseTest < Minitest::Test
                   :fetch_result, :commits_behind_value,
                   :rebase_onto_outcome, :rebase_continue_outcomes,
                   :unmerged_files_sequence, :head_sha_value, :default_branch_value,
-                  :project_root
+                  :current_branch_value, :ancestor_value, :project_root
 
     def initialize(project_root)
       @project_root = project_root
@@ -65,6 +65,8 @@ class HiveRebaseTest < Minitest::Test
       @unmerged_files_sequence = []   # stack consumed by staged_unmerged_files
       @head_sha_value = "newshasha"
       @default_branch_value = "master"
+      @current_branch_value = nil
+      @ancestor_value = true
       @rebase_abort_called = false
       @reset_hard_called = false
       @continued = 0
@@ -77,6 +79,8 @@ class HiveRebaseTest < Minitest::Test
     def commits_behind(_ref); @commits_behind_value; end
     def head_sha; @head_sha_value; end
     def default_branch; @default_branch_value; end
+    def current_branch; @current_branch_value; end
+    def ancestor?(_ancestor, _descendant); @ancestor_value; end
 
     def rebase_onto(_ref)
       case @rebase_onto_outcome
@@ -159,6 +163,52 @@ class HiveRebaseTest < Minitest::Test
 
   def teardown_dirs(*dirs)
     dirs.each { |d| FileUtils.rm_rf(d) if d && Dir.exist?(d) }
+  end
+
+  def make_remote_rebase_scenario(push_feature:)
+    root = Dir.mktmpdir("hive-rebase-publish")
+    origin = File.join(root, "origin.git")
+    worktree = File.join(root, "worktree")
+    folder = File.join(root, "task")
+    FileUtils.mkdir_p(folder)
+
+    run!("git", "init", "--bare", "--quiet", origin)
+    run!("git", "init", "-b", "main", "--quiet", worktree)
+    run!("git", "-C", worktree, "config", "user.email", "test@example.com")
+    run!("git", "-C", worktree, "config", "user.name", "Test")
+    run!("git", "-C", worktree, "config", "commit.gpgsign", "false")
+    run!("git", "-C", worktree, "remote", "add", "origin", origin)
+
+    File.write(File.join(worktree, "README.md"), "base\n")
+    run!("git", "-C", worktree, "add", "README.md")
+    run!("git", "-C", worktree, "commit", "-m", "base", "--quiet")
+    run!("git", "-C", worktree, "push", "-u", "origin", "main", "--quiet")
+
+    run!("git", "-C", worktree, "checkout", "-b", "feature", "--quiet")
+    File.write(File.join(worktree, "feature.txt"), "feature\n")
+    run!("git", "-C", worktree, "add", "feature.txt")
+    run!("git", "-C", worktree, "commit", "-m", "feature", "--quiet")
+    run!("git", "-C", worktree, "push", "-u", "origin", "feature", "--quiet") if push_feature
+    original_remote_head = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+
+    run!("git", "-C", worktree, "checkout", "main", "--quiet")
+    File.write(File.join(worktree, "main.txt"), "advanced base\n")
+    run!("git", "-C", worktree, "add", "main.txt")
+    run!("git", "-C", worktree, "commit", "-m", "advance main", "--quiet")
+    run!("git", "-C", worktree, "push", "origin", "main", "--quiet")
+    run!("git", "-C", worktree, "checkout", "feature", "--quiet")
+
+    {
+      root: root,
+      origin: origin,
+      worktree: worktree,
+      folder: folder,
+      original_remote_head: original_remote_head
+    }
+  end
+
+  def remote_feature_head(origin)
+    run!("git", "--git-dir", origin, "rev-parse", "refs/heads/feature").strip
   end
 
   # ---- Skip paths (no rebase attempted) ----
@@ -269,6 +319,183 @@ class HiveRebaseTest < Minitest::Test
       assert_equal 3, result.commits_behind
       assert_equal 0, result.agent_resolutions
       assert_empty result.resolved_files
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_successful_rebase_publishes_rewritten_branch_before_later_stage_commits
+    scenario = make_remote_rebase_scenario(push_feature: true)
+    worktree = scenario.fetch(:worktree)
+    task = make_task(worktree: worktree, folder: scenario.fetch(:folder))
+
+    result = Hive::Rebase.perform(task, base_cfg("default_branch" => "main"))
+
+    assert result.succeeded
+    rebased_head = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+    refute_equal scenario.fetch(:original_remote_head), rebased_head
+    assert_equal rebased_head, remote_feature_head(scenario.fetch(:origin)),
+                 "auto-rebase must publish its rewritten branch before later stages add commits"
+
+    File.write(File.join(worktree, "review-fix.txt"), "review fix\n")
+    run!("git", "-C", worktree, "add", "review-fix.txt")
+    run!("git", "-C", worktree, "commit", "-m", "review fix", "--quiet")
+    run!("git", "-C", worktree, "push", "origin", "feature", "--quiet")
+  ensure
+    teardown_dirs(scenario&.fetch(:root))
+  end
+
+  def test_successful_rebase_keeps_pre_pr_branch_local
+    scenario = make_remote_rebase_scenario(push_feature: false)
+    task = make_task(worktree: scenario.fetch(:worktree), folder: scenario.fetch(:folder))
+
+    result = Hive::Rebase.perform(task, base_cfg("default_branch" => "main"))
+
+    assert result.succeeded
+    assert_empty result.post_rebase_warnings
+    refs = run!("git", "--git-dir", scenario.fetch(:origin), "for-each-ref",
+                "--format=%(refname)", "refs/heads/feature")
+    assert_empty refs, "auto-rebase must not publish a branch before open-pr"
+  ensure
+    teardown_dirs(scenario&.fetch(:root))
+  end
+
+  def test_concurrent_remote_movement_rejects_exact_lease_without_overwrite
+    scenario = make_remote_rebase_scenario(push_feature: true)
+    worktree = scenario.fetch(:worktree)
+    origin = scenario.fetch(:origin)
+    original_push = Hive::Gh.method(:push_branch)
+    run_command = method(:run!)
+    read_remote_head = method(:remote_feature_head)
+    concurrent_head = nil
+
+    with_replaced_singleton_method(Hive::Gh, :push_branch, lambda { |path, branch, **kwargs|
+      attacker = File.join(scenario.fetch(:root), "attacker")
+      run_command.call("git", "clone", "--quiet", "--branch", "feature", "--single-branch", origin, attacker)
+      run_command.call("git", "-C", attacker, "config", "user.email", "attacker@example.com")
+      run_command.call("git", "-C", attacker, "config", "user.name", "Attacker")
+      File.write(File.join(attacker, "concurrent.txt"), "concurrent update\n")
+      run_command.call("git", "-C", attacker, "add", "concurrent.txt")
+      run_command.call("git", "-C", attacker, "commit", "-m", "concurrent update", "--quiet")
+      run_command.call("git", "-C", attacker, "push", "origin", "feature", "--quiet")
+      concurrent_head = read_remote_head.call(origin)
+      original_push.call(path, branch, **kwargs)
+    }) do
+      task = make_task(worktree: worktree, folder: scenario.fetch(:folder))
+      result = Hive::Rebase.perform(task, base_cfg("default_branch" => "main"))
+
+      assert result.succeeded
+      assert(result.post_rebase_warnings.any? { |warning| warning.include?("exact lease push failed") })
+    end
+
+    assert_equal concurrent_head, remote_feature_head(origin),
+                 "exact lease failure must preserve the concurrent remote commit"
+    refute_equal run!("git", "-C", worktree, "rev-parse", "HEAD").strip,
+                 remote_feature_head(origin)
+  ensure
+    teardown_dirs(scenario&.fetch(:root))
+  end
+
+  def test_rebase_publication_uses_exact_pre_rebase_oid_lease_and_surfaces_failure
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 2
+    git.current_branch_value = "feature"
+    remote_oid = "a" * 40
+    pushed = nil
+    failure = Hive::Gh::PushResult.new(success: false, stdout: "", stderr: "stale info")
+
+    with_replaced_singleton_method(Hive::Gh, :remote_branch_oid,
+                                   ->(*_args, **_kwargs) { remote_oid }) do
+      with_replaced_singleton_method(Hive::Gh, :push_branch, lambda { |*args, **kwargs|
+        pushed = [ args, kwargs ]
+        failure
+      }) do
+        stub_gitops!(git) do
+          result = Hive::Rebase.perform(task, base_cfg)
+          assert result.succeeded
+          assert(result.post_rebase_warnings.any? { |warning| warning.include?("exact lease push failed") })
+        end
+      end
+    end
+
+    assert_equal [ worktree, "feature" ], pushed.fetch(0)
+    assert_equal remote_oid, pushed.fetch(1).fetch(:expected_remote_oid)
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_rebase_does_not_publish_when_remote_head_was_not_contained_locally
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 2
+    git.current_branch_value = "feature"
+    git.ancestor_value = false
+    remote_oid = "b" * 40
+
+    result = nil
+    _out, err = capture_io do
+      with_replaced_singleton_method(Hive::Gh, :remote_branch_oid,
+                                     ->(*_args, **_kwargs) { remote_oid }) do
+        with_replaced_singleton_method(Hive::Gh, :push_branch,
+                                       ->(*_args, **_kwargs) { flunk "diverged remote must not be pushed" }) do
+          stub_gitops!(git) { result = Hive::Rebase.perform(task, base_cfg) }
+        end
+      end
+    end
+
+    assert result.succeeded
+    assert(result.post_rebase_warnings.any? { |warning| warning.include?("not contained") })
+    assert_match(/refusing to replace remote history/, err)
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_publication_preflight_error_keeps_successful_rebase_and_warns
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 2
+    git.current_branch_value = "feature"
+
+    result = nil
+    _out, err = capture_io do
+      with_replaced_singleton_method(Hive::Gh, :remote_branch_oid,
+                                     ->(*_args, **_kwargs) { raise Hive::GhError, "offline" }) do
+        with_replaced_singleton_method(Hive::Gh, :push_branch,
+                                       ->(*_args, **_kwargs) { flunk "failed preflight must not push" }) do
+          stub_gitops!(git) { result = Hive::Rebase.perform(task, base_cfg) }
+        end
+      end
+    end
+
+    assert result.succeeded
+    assert(result.post_rebase_warnings.any? { |warning| warning.include?("preflight failed") })
+    assert_match(/continuing without a remote rewrite/, err)
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_failed_rebase_never_uses_captured_publication_lease
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 2
+    git.current_branch_value = "feature"
+    git.rebase_onto_outcome = Hive::GitError
+
+    with_replaced_singleton_method(Hive::Gh, :remote_branch_oid,
+                                   ->(*_args, **_kwargs) { "c" * 40 }) do
+      with_replaced_singleton_method(Hive::Gh, :push_branch,
+                                     ->(*_args, **_kwargs) { flunk "failed rebase must not push" }) do
+        stub_gitops!(git) do
+          result = Hive::Rebase.perform(task, base_cfg)
+          refute result.succeeded
+          assert_equal :rebase_failed, result.reason
+        end
+      end
     end
   ensure
     teardown_dirs(worktree, folder)

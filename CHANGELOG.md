@@ -2,6 +2,17 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.6.7
+
+- Fixed large llm-wiki backlogs opening a source-pin circuit before any bounded
+  recovery could run. Source refs are now pinned in configurable batches, and
+  crash-left queue records are reconstructed when their commit and diff remain
+  available instead of silently stranding recoverable work. (#836)
+- Fixed an older linked checkout overwriting the repository-shared llm-wiki
+  runner and headless-agent configuration. Hive now keeps the primary checkout
+  authoritative for the shared runtime, preventing a stale worker from
+  restoring unsafe pre-fix behavior. (#836)
+
 ## 0.6.6
 
 - Fixed scheduled llm-wiki refreshes multiplying into thousands of host timers

@@ -81,13 +81,15 @@ class ConfigTest < Minitest::Test
         FileUtils.mkdir_p(File.dirname(config_path))
         File.write(config_path, {
           "hive_state_path" => hive_state_path,
-          "reviewers" => []
+          "reviewers" => [],
+          "unknown_stage_typo" => {}
         }.to_yaml)
 
         error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
 
         assert_includes error.message, "Unknown top-level key `reviewers`"
         assert_includes error.message, "move it to `review.reviewers`"
+        assert_includes error.message, "Unknown top-level key `unknown_stage_typo`"
       end
     end
   end

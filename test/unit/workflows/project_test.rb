@@ -230,6 +230,36 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_load_preserves_invalid_workflow_path_when_root_keys_are_supported
+    with_tmp_dir do |project_root|
+      FileUtils.mkdir_p(File.join(project_root, ".hive-state"))
+      File.write(
+        File.join(project_root, ".hive-state", "config.yml"),
+        { "hive_state_path" => "bad\0state" }.to_yaml
+      )
+
+      error = assert_raises(ArgumentError) do
+        Hive::Workflows::Project.load!(project_root)
+      end
+
+      assert_match(/null byte/, error.message)
+    end
+  end
+
+  def test_workflow_dir_preserves_unsupported_project_config
+    config_error = Hive::UnsupportedProjectConfigError.new("unsupported root key")
+
+    error = with_replaced_singleton_method(
+      Hive::Workflows::Loader, :workflow_dir, ->(*) { raise config_error }
+    ) do
+      assert_raises(Hive::UnsupportedProjectConfigError) do
+        Hive::Workflows::Project.send(:workflow_dir_for, "/tmp/project")
+      end
+    end
+
+    assert_same config_error, error
+  end
+
   # The documented mid-load exception safety: load! drops @active_root to nil
   # BEFORE loading and re-sets it only after a clean load, so a load that raises
   # partway leaves @active_root nil — the next same-root load! re-attempts

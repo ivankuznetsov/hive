@@ -2143,6 +2143,73 @@ class CommandsStatusTest < Minitest::Test
     assert_equal false, context.dig("demo", "daemon_enabled")
   end
 
+  def test_operational_project_context_preserves_unsupported_project_config
+    project = { "name" => "demo", "path" => "/tmp/unsupported-hive-project" }
+    config_error = Hive::UnsupportedProjectConfigError.new("unsupported root key")
+
+    error = with_replaced_singleton_method(
+      Hive::Config, :load, ->(_path) { raise config_error }
+    ) do
+      assert_raises(Hive::UnsupportedProjectConfigError) do
+        Hive::Commands::Status.new.send(:operational_project_context, [ project ])
+      end
+    end
+
+    assert_same config_error, error
+  end
+
+  def test_dependency_snapshot_preserves_unsupported_project_config
+    config_error = Hive::UnsupportedProjectConfigError.new("unsupported root key")
+
+    error = with_replaced_singleton_method(
+      Hive::DependencySnapshot, :admission_context, ->(*) { raise config_error }
+    ) do
+      assert_raises(Hive::UnsupportedProjectConfigError) do
+        Hive::Commands::Status.new.send(:build_admission_context, [])
+      end
+    end
+
+    assert_same config_error, error
+  end
+
+  def test_task_action_config_preserves_unsupported_project_config
+    config_error = Hive::UnsupportedProjectConfigError.new("unsupported root key")
+
+    error = with_replaced_singleton_method(
+      Hive::Config, :load, ->(_path) { raise config_error }
+    ) do
+      assert_raises(Hive::UnsupportedProjectConfigError) do
+        Hive::Commands::Status.new.send(:task_action_config, "/tmp/project")
+      end
+    end
+
+    assert_same config_error, error
+  end
+
+  def test_collect_rows_preserves_unsupported_worktree_config
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(
+        hive_state, "stages", "4-execute", "unsupported-worktree-260722-abcd"
+      )
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "task.md"), "# Task\n")
+      task = Hive::Task.new(folder)
+      config_error = Hive::UnsupportedProjectConfigError.new("unsupported root key")
+      task.define_singleton_method(:worktree_path) { raise config_error }
+
+      error = with_replaced_singleton_method(Hive::Task, :new, ->(*) { task }) do
+        assert_raises(Hive::UnsupportedProjectConfigError) do
+          Hive::Commands::Status.new.send(
+            :collect_rows, hive_state, stages: [ "4-execute" ]
+          )
+        end
+      end
+
+      assert_same config_error, error
+    end
+  end
+
   def test_full_status_legacy_warning_names_counts_and_recovery
     legacy = [
       { "stage_dir" => "5-review", "task_count" => 2 },

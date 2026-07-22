@@ -858,10 +858,9 @@ module Hive
       )
     rescue ArgumentError
       # An unresolvable tilde or NUL path cannot contain a discoverable project
-      # workflow vocabulary. Let the root-key diagnostic win when unsupported
-      # keys are present; otherwise preserve the path expansion failure.
+      # workflow vocabulary. This helper is entered only after unsupported
+      # dynamic candidates were found, so the root-key diagnostic is terminal.
       validate_project_top_level_keys!(data, project_config_path(project_root), project_root, stage_names: [])
-      raise
     end
 
     def project_config_path(project_root)

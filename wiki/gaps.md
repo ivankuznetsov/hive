@@ -73,6 +73,19 @@ tags: [gap, todo, release-proof, agent-skills]
 
 ## Queued branch integration and provenance (2026-07-22)
 
+- Commits `16f5b059` and `8a8c9234` are consecutive snapshots on the archived
+  visibility branch. The first adds immutable `completed_at` stamping and
+  legacy discovery/backfill, but the refresh branch has neither
+  `CompletionTime` nor `CompletedAtBackfiller`. The second replaces
+  `ArchiveFilter` with an action/retention/completion-clock projection while
+  its committed Status and TUI blobs still call the removed `archived?` and
+  old keyword form of `hide?`; it also contains no caller integration tests.
+  Therefore the queued projection is internally incomplete as an immutable
+  commit and the current documented 3-day mtime policy remains the only
+  default-branch contract. Reconciliation must wire all consumers and prove
+  ordinary/archive/hidden-count parity before the newer policy can be treated
+  as integrated.
+
 - Commit `03fe68af` is an immutable branch snapshot whose digest command emits
   only `hive-digest` v2 and removes the live shipped-task / merged-PR-v1 split.
   The refresh worktree's current default-branch source still contains

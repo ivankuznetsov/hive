@@ -3,7 +3,7 @@ title: hive run
 type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
-updated: 2026-07-21
+updated: 2026-07-22
 tags: [command, dispatcher, stages, json, rebase, dependencies, admission]
 ---
 
@@ -52,6 +52,15 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json] [--no-rebase]
 8. The wrapper captures exit and atomically writes a
    succeeded/failed/cancelled receipt. The client returns that exit status
    while preserving text/JSON output.
+
+Queued commit `16f5b059` adds a branch-only completion-clock transaction at
+step 7. If the post-run `TaskAction` is `archived`, Run snapshots `meta.yml`,
+writes first-writer-wins `completed_at`, and commits even when the runner did
+not return its own commit action. Commit failure restores and re-stages the
+metadata snapshot before re-raising. A malformed legacy clock is never
+overwritten or allowed to fail the completed runner; it warns and remains
+visible to retention consumers. This contract is not yet present in the
+refresh branch's default source; see [[gaps]].
 
 See [[modules/attempts]] for lease states, timers, duplicates, and loss
 recovery.

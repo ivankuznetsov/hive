@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-21
+updated: 2026-07-22
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, dependencies, admission, web]
 ---
 
@@ -151,6 +151,34 @@ admission wait is unchanged but cannot mask a later prerequisite advance.
 
 - **Per-task lock**: `<task folder>/.lock` — compatibility/work-area exclusion projection, not the restart-safe owner. Its YAML payload is `{pid, started_at, process_start_time, lock_id, attempt_id?, task_generation?, claude_pid?, claude_pid_start_time?, slug?, stage?}`; old readers tolerate the optional attempt fields. `Hive::Lock.acquire_task_lock` writes and fsyncs a sibling tempfile, then atomically hard-links the complete payload into place under an already-ignored `.lock.tmp.guard` flock. Stale check uses `Process.kill(0, pid)` plus `/proc/<pid>/stat` field-22 cross-check to defeat runner PID reuse; release compares `lock_id` so an old owner cannot remove a replacement generation and does not recreate a source folder moved by a stage transition. After spawning, both headless `Hive::Agent` and tmux-backed `Hive::ClaudeLauncher` write the child `claude_pid` and its `claude_pid_start_time`; cleanup compares that identity metadata with the live process before signalling so PID reuse cannot target an unrelated child.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
+
+## Immutable completion clock (queued branch contract)
+
+Queued commit `16f5b059` extends task `meta.yml` with optional `completed_at`,
+a normalized UTC ISO 8601 first-completion timestamp. `TaskMeta` serializes
+rewrites behind its stable rewrite lock, validates a stored clock before any
+update, and exposes snapshot/restore so terminal transitions can commit the
+clock atomically with their state change. `hive migrate`'s id backfill switches
+to the field-preserving `update_id` helper so it cannot erase this or managed
+workflow provenance.
+
+Fresh inert-terminal transitions stamp the clock in `hive approve`; completed
+agent/council terminal stages stamp it in `hive run`. Both use first-writer-wins
+semantics and restore the prior metadata if their `hive/state` commit fails.
+For legacy archived tasks, `CompletedAtBackfiller` takes commit and task locks,
+rechecks the archived `TaskAction`, then searches fixed-string slug history for
+the earliest credible terminal arrival/completion. Inert workflows accept the
+terminal approve transition; active terminal stages require a completion
+marker and non-empty deliverable in the historical commit. State-file mtime,
+then folder mtime, are fallbacks. The backfill is bounded to 100 tasks per
+projection call, separately committed as `completed_at_backfilled`, and fails
+open on discovery, validation, persistence, or rollback errors.
+
+`Digest::ShipTimes` reuses the same history reader, keeping completion-history
+interpretation in one boundary. The current refresh branch does not contain
+these source files; this section records the immutable queued commit rather
+than claiming default-branch integration. See [[commands/approve]],
+[[commands/run]], [[commands/status]], and [[gaps]].
 
 ## Task condition journal and projection
 

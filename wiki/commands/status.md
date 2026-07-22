@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-07-21
+updated: 2026-07-22
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, dependencies, scheduler]
 ---
 
@@ -173,6 +173,23 @@ does not emit archived task rows; it reports archive totals by project in
 its `archive` summary. Use `hive archive` for archived row details.
 
 `hive archive` with no target reuses Status in archive mode (`Hive::Commands::Status.new(archive: true)`): it lists only `9-done` tasks, with no age cutoff and no hidden-count summary. Empty archive projects print `no archived tasks`. Text rows are sorted newest-first by `mtime` and use the same id/PR/display-name identity column as daily status. `hive archive --json` emits a focused `hive-status` payload whose project task arrays contain only `9-done` rows. `hive archive <slug>` still runs the workflow verb that advances a completed finalize task into done.
+
+### Queued retention projection
+
+Queued commits `16f5b059` and `8a8c9234` define a newer branch-only model:
+archive membership comes from `TaskAction == archived`, while ordinary-view
+retention uses the task workflow's positive integer
+`archive_visibility_retention_days` or `never` and immutable `completed_at`.
+Exactly N full 24-hour periods remains visible; only a later instant hides the
+row. Missing, malformed, or future clocks fail open. The projection keeps one
+source of truth for ordinary rows, dedicated archive rows, hidden rows, and
+hidden count; invalid rows in a known terminal directory remain visible in the
+dedicated archive but are never retention-hidden.
+
+That immutable `8a8c9234` snapshot replaces `ArchiveFilter`'s API but does not
+update Status or TUI callers in the same commit, so it is not an end-to-end
+integrated contract and must not be read as superseding the current 3-day
+mtime policy above. The integration gap is recorded in [[gaps]].
 
 ## Legacy stage directories (`legacy_stage_dirs`)
 

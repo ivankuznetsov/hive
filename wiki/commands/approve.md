@@ -3,7 +3,7 @@ title: hive approve
 type: command
 source: lib/hive/commands/approve.rb
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-22
 tags: [command, approval, json, dependencies, admission]
 ---
 
@@ -39,6 +39,15 @@ hive approve <slug> --json                 # machine-readable result (success AN
 10. `move_task!`: direct `File.rename` from source to destination, with a rescue for `Errno::ENOTEMPTY` / `EEXIST` / `EISDIR` that surfaces as `Hive::DestinationCollision`. Cross-device fallback uses `cp_r` + `rm_rf`.
 11. Cleanup the moved `.lock`, record the slug-scoped commit, and roll the move back if commit fails.
 12. Report human prose or one `hive-approve` JSON document.
+
+Queued commit `16f5b059` adds a branch-only terminal-entry refinement. When an
+inert workflow advances into its terminal stage, Approve snapshots `meta.yml`,
+moves the folder, writes the first `completed_at` UTC timestamp, and includes
+that metadata in the same `hive/state` commit. A failed metadata write or
+commit moves the task back and restores the exact metadata snapshot; an
+`Interrupt` is preserved after rollback. Re-entry cannot replace an existing
+clock. This contract is not in the refresh worktree's default-branch source;
+see [[gaps]].
 
 ## JSON contract (`schema = "hive-approve"`, version 2)
 

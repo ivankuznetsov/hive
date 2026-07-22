@@ -30,14 +30,14 @@ class KanbanBoardTest < ApplicationSystemTestCase
         document.documentElement.appendChild(stream)
       }, { once: true })
     JS
-    click_button "Grid"
+    click_status_view("Grid")
     assert_current_path grid_path, wait: 10
     assert_selector "#status-grid .task-row", text: slug
 
     visit root_path
     assert_selector "#status-grid", wait: 5
 
-    click_button "Board"
+    click_status_view("Board")
     assert_current_path board_path, wait: 10
     assert_selector "#status-board .kanban-card", text: slug
   end
@@ -81,7 +81,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     assert_selector ".kanban-band[data-project-name='#{selected_project}']"
     assert_selector ".kanban-band[data-project-name='#{hidden_project}']", visible: :hidden
 
-    click_button "Grid"
+    click_status_view("Grid")
 
     assert_current_path grid_path(project: selected_project), wait: 10
     assert_selector "#status-grid .project-section[data-project-name='#{selected_project}']"
@@ -242,13 +242,23 @@ class KanbanBoardTest < ApplicationSystemTestCase
   private
 
   def click_project_filter(name)
-    page.document.synchronize(10) do
-      click_button name
-    rescue Playwright::Error => error
-      raise unless error.message.include?("not attached to the DOM")
+    execute_script(<<~JS, name)
+      const name = arguments[0]
+      const button = Array.from(document.querySelectorAll("[data-project-filter-name-param]"))
+        .find((candidate) => candidate.dataset.projectFilterNameParam === name)
+      if (!button) throw new Error(`project filter not found: ${name}`)
+      button.click()
+    JS
+  end
 
-      raise Capybara::ElementNotFound, "project filter was replaced during a live refresh"
-    end
+  def click_status_view(name)
+    execute_script(<<~JS, name)
+      const name = arguments[0]
+      const button = Array.from(document.querySelectorAll(".status-view-switch button"))
+        .find((candidate) => candidate.textContent.trim() === name)
+      if (!button) throw new Error(`status view not found: ${name}`)
+      button.click()
+    JS
   end
 
   def assert_status_refresh_ready

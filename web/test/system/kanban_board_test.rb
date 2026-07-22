@@ -77,7 +77,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     create_task!(hidden_project, "Hide this other project")
     visit dev_login_path(as: "alice")
 
-    click_button selected_project
+    click_project_filter(selected_project)
     assert_selector ".kanban-band[data-project-name='#{selected_project}']"
     assert_selector ".kanban-band[data-project-name='#{hidden_project}']", visible: :hidden
 
@@ -240,6 +240,16 @@ class KanbanBoardTest < ApplicationSystemTestCase
   end
 
   private
+
+  def click_project_filter(name)
+    page.document.synchronize(10) do
+      click_button name
+    rescue Playwright::Error => error
+      raise unless error.message.include?("not attached to the DOM")
+
+      raise Capybara::ElementNotFound, "project filter was replaced during a live refresh"
+    end
+  end
 
   def assert_status_refresh_ready
     page.document.synchronize(10) do

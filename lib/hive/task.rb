@@ -39,6 +39,7 @@ module Hive
     def workflow_commit = meta[:workflow_commit]
     def workflow_manifest_digest = meta[:workflow_manifest_digest]
     def workflow_configuration_digest = meta[:workflow_configuration_digest]
+    def completed_at = meta[:completed_at]
     def managed_workflow? = !workflow_commit.nil? && !workflow_manifest_digest.nil?
 
     def managed_runtime_context(slot_id)

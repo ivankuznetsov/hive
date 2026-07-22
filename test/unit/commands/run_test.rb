@@ -62,6 +62,18 @@ class CommandsRunTest < Minitest::Test
     MarkerDouble.new(name: name, attrs: attrs)
   end
 
+  def active_terminal_workflow
+    Hive::Workflow.new(
+      id: :publishing,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "publish", index: 1, state_file: "report.md", kind: :agent,
+          deliverable: "report.md"
+        )
+      ]
+    )
+  end
+
   def rebase_result(**overrides)
     RebaseResultDouble.new({
       reason: :ok,
@@ -132,6 +144,60 @@ class CommandsRunTest < Minitest::Test
         assert_equal File.join(folder, "notes.md"), t.state_file
         assert_equal Hive::Stages::Agent.method(:run!), runner
       end
+    end
+  end
+
+  def test_active_terminal_completion_is_stamped_before_commit
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Report\n<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      observed = nil
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) do |**|
+        observed = Hive::TaskMeta.read(folder)[:completed_at]
+      end
+      run = command(clock: -> { Time.utc(2026, 7, 22, 11, 0, 0) })
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        run.send(:commit_after, t, { commit: "complete" }, config: {})
+      end
+
+      assert_equal "2026-07-22T11:00:00Z", observed
+      assert_equal observed, Hive::TaskMeta.read(folder)[:completed_at]
+    end
+  end
+
+  def test_active_terminal_commit_failure_restores_prior_metadata
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Report\n<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        assert_raises(Hive::GitError) do
+          command.send(:commit_after, t, { commit: "complete" }, config: {})
+        end
+      end
+
+      refute Hive::TaskMeta.read(folder).key?(:completed_at)
     end
   end
 

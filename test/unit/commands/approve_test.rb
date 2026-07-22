@@ -36,9 +36,64 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_inert_terminal_entry_writes_completed_at_with_the_move
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "1-work", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      workflow = terminal_workflow
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 1, stage_name: "work", workflow: workflow
+      )
+      now = Time.utc(2026, 7, 22, 10, 0, 0)
+      cmd = command(clock: -> { now })
+      cmd.define_singleton_method(:record_hive_commit) { |*| nil }
+
+      folder, = cmd.send(:perform_move_and_commit, current, "2-done")
+
+      assert_equal "2026-07-22T10:00:00Z", Hive::TaskMeta.read(folder)[:completed_at]
+      refute File.directory?(source)
+    end
+  end
+
+  def test_terminal_commit_failure_rolls_back_move_and_completed_at
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "1-work", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 1, stage_name: "work", workflow: terminal_workflow
+      )
+      cmd = command(clock: -> { Time.utc(2026, 7, 22, 10, 0, 0) })
+      cmd.define_singleton_method(:record_hive_commit) { |*| raise Hive::GitError, "no commit" }
+
+      assert_raises(Hive::GitError) do
+        cmd.send(:perform_move_and_commit, current, "2-done")
+      end
+
+      assert File.directory?(source)
+      refute Hive::TaskMeta.read(source).key?(:completed_at)
+      refute File.exist?(File.join(state, "stages", "2-done", current.slug))
+    end
+  end
+
   def task(folder: "/tmp/task", hive_state_path: "/tmp/state", project_root: "/tmp/project",
            stage_index: 2, stage_name: "brainstorm", workflow: Hive::Workflows::Registry.default)
     FakeTask.new("slug-260522-abcd", stage_index, stage_name, folder, hive_state_path, project_root, workflow)
+  end
+
+  def terminal_workflow
+    Hive::Workflow.new(
+      id: :terminal,
+      stages: [
+        Hive::Workflow::Stage.new(name: "work", index: 1, state_file: "work.md", kind: :agent),
+        Hive::Workflow::Stage.new(name: "done", index: 2, state_file: "done.md", kind: :inert)
+      ]
+    )
   end
 
   def failing_status

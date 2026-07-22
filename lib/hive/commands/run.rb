@@ -14,6 +14,8 @@ require "hive/dependency_snapshot"
 require "hive/attempts/context"
 require "hive/conditions/transition_guard"
 require "hive/attempts/command_dispatch"
+require "hive/task_meta"
+require "hive/commit_or_rollback"
 
 module Hive
   module Commands
@@ -37,7 +39,8 @@ module Hive
       OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
 
       def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false,
-                     durable: false, attempt_entrypoint: nil, observation_guard: nil)
+                     durable: false, attempt_entrypoint: nil, observation_guard: nil,
+                     clock: -> { Time.now.utc })
         @target = target
         @project_filter = project
         @stage_filter = stage
@@ -47,6 +50,7 @@ module Hive
         @durable = durable
         @attempts_api = attempt_entrypoint
         @observation_guard = observation_guard
+        @clock = clock
       end
 
       def call
@@ -86,7 +90,7 @@ module Hive
           @rebase_result = perform_rebase(task, cfg)
           runner = pick_runner(task)
           result = Hive::Stages::Base.with_stage_events(task, cfg: cfg) { runner.call(task, cfg) }
-          commit_after(task, result)
+          commit_after(task, result, config: cfg)
           report(task, result)
         end
       end
@@ -180,15 +184,57 @@ module Hive
         Hive::Stages::Resolver.resolve(task, descriptor: task.workflow)
       end
 
-      def commit_after(task, result)
-        return unless result && result[:commit]
+      def commit_after(task, result, config: nil)
+        marker = Hive::Markers.current(task.state_file)
+        archived = Hive::TaskAction.for(task, marker, config: config).key ==
+                   Hive::Schemas::TaskActionKind::ARCHIVED
+        action = result.is_a?(Hash) ? result[:commit] : nil
+        return unless action || archived
 
         ops = Hive::GitOps.new(task.project_root)
+        completion_snapshot = nil
         Hive::Lock.with_commit_lock(task.hive_state_path) do
-          ops.hive_commit(stage_name: "#{task.stage_index}-#{task.stage_name}",
-                          slug: task.slug,
-                          action: result[:commit])
+          completion_snapshot = Hive::TaskMeta.snapshot(task.folder) if archived
+          begin
+            stamp_completed_at(task) if archived
+            ops.hive_commit(
+              stage_name: "#{task.stage_index}-#{task.stage_name}",
+              slug: task.slug,
+              action: action || "completed"
+            )
+          rescue Hive::Error, SystemCallError, IOError, ArgumentError, Interrupt => e
+            rollback_completed_at!(task, completion_snapshot, ops, e) if completion_snapshot
+            raise
+          end
         end
+      end
+
+      def stamp_completed_at(task)
+        Hive::TaskMeta.write_completed_at_once(task.folder, @clock.call)
+      rescue Hive::TaskMeta::InvalidMetadata => e
+        # A malformed legacy clock must not block the runner or be replaced.
+        # The visibility projection will fail open and surface the same warning.
+        warn "hive: run: #{e.message}; completed_at left unchanged"
+      end
+
+      def rollback_completed_at!(task, snapshot, ops, original_error)
+        Hive::CommitOrRollback.attempt!(
+          original_error,
+          on_undo: lambda do
+            Hive::TaskMeta.restore(task.folder, snapshot)
+            relative = File.join("stages", "#{task.stage_index}-#{task.stage_name}", task.slug, "meta.yml")
+            ops.run_git!("-C", task.hive_state_path, "add", "-A", "--", relative)
+          end,
+          rolled_back_message: lambda do |error|
+            "run completion commit aborted; completed_at rolled back. " \
+              "underlying: #{error.class}: #{error.message}"
+          end,
+          rollback_failed_message: lambda do |commit_error, rollback_error|
+            "run completion commit aborted AND completed_at rollback failed. " \
+              "commit error: #{commit_error.class}: #{commit_error.message}. " \
+              "rollback error: #{rollback_error.class}: #{rollback_error.message}"
+          end
+        )
       end
 
       def report(task, result)

@@ -40,6 +40,14 @@ write aliases or skills; or call a model. An absent agent binary is an
 `unavailable`, non-blocking row. Legacy dependency checks remain bounded and
 separate from managed-agent inventory.
 
+The CLI loads the project through the shared `Hive::Config.load` boundary
+before constructing the doctor inspector. Unsupported project root keys
+therefore stop the command with exit 78 before any tmux, QMD, agent, or skill
+probe runs and before a success table/JSON report is emitted. The error names
+the config path and every unsupported key; a root-level `reviewers` key gives
+the direct correction to move it under `review.reviewers`. This is the same
+configuration failure other project commands receive, not a doctor-only check.
+
 ## Managed target and health model
 
 `Hive::AgentSkills::TargetResolver` starts with the bundled `hive` capability
@@ -163,9 +171,9 @@ project.
   and Pi `/skill:hive` resolution, escaping, Pi jails, and the write-free
   global npm-root probe.
 - `test/integration/init_doctor_preflight_test.rb` covers init delegation and non-mutating flows.
-- Queued `test/integration/doctor_config_validation_test.rb` covers exit 78,
-  deterministic unknown-key diagnostics, reviewer migration guidance, and the
-  fail-before-probes boundary.
+- `test/integration/doctor_config_validation_test.rb` covers shared root-key
+  failures, exit 78, deterministic unknown-key diagnostics, reviewer migration
+  guidance, and the fail-before-probes boundary.
 
 ## Backlinks
 

@@ -223,6 +223,24 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_new_unsupported_project_config_preserves_config_exit_without_seeding
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        File.write(File.join(dir, ".hive-state", "config.yml"), "reviewers: []\n")
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::New.new(project, "unsupported config probe").call
+        end
+
+        assert_equal Hive::ExitCodes::CONFIG, status
+        assert_includes err, "move it to `review.reviewers`"
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", "unsupported-config-probe-*")]
+      end
+    end
+  end
+
   def test_new_with_explicit_workflow_ignores_corrupt_config
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do

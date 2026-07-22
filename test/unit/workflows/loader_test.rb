@@ -1,8 +1,19 @@
 require "test_helper"
 require "hive/workflows/loader"
+require "hive/workflows/project"
 
 class WorkflowsLoaderTest < Minitest::Test
   include HiveTestHelper
+
+  def setup
+    super
+    Hive::Workflows::Project.reset!
+  end
+
+  def teardown
+    Hive::Workflows::Project.reset!
+    super
+  end
 
   # Production resolves through `Project.load! → load_dir(workflow_dir(...))`;
   # the dead `Loader.load` one-shot was removed, so these exercise the same

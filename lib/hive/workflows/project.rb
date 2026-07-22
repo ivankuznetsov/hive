@@ -39,38 +39,120 @@ module Hive
       # call `reset!` afterwards — `reset!` is why Commands::Workflow#call!
       # clears the overlay so a LATER (separate) invocation discovers the new
       # descriptor; `call!` does not re-resolve in-process.
-      def load!(project_root, config: nil)
+      def load!(project_root, config: nil, hive_state_path: nil)
         LOCK.synchronize do
           project_root = File.expand_path(project_root)
-          workflow_dir = config ? workflow_dir_for(project_root, config:) : workflow_dir_for(project_root)
-          fingerprint = Hive::Workflows::Loader.fingerprint(workflow_dir)
-          return if @active_root == project_root && @active_fingerprint == fingerprint
-
-          # Clear the prior project's overlay BEFORE loading, and drop
-          # @active_root to nil first. @active_root is re-set to the new root only
-          # after a clean load completes, so a failure partway through can't leave
-          # @active_root pinned to a root whose overlay is now empty — which would
-          # make the next same-root load! short-circuit and serve a stale/empty
-          # registry for the rest of a long-lived TUI/daemon session.
-          Hive::Workflows::Registry.reset_project_registrations!
-          @active_root = nil
-
-          cached = loaded_workflows[project_root]
-          workflows = if cached && cached.fetch(:fingerprint) == fingerprint
-                        cached.fetch(:workflows)
-          else
-                        Hive::Workflows::Loader.load_dir(workflow_dir).tap do |loaded|
-                          loaded_workflows[project_root] = { fingerprint: fingerprint, workflows: loaded }
-                        end
+          if config || hive_state_path
+            workflow_dir = workflow_dir_for(
+              project_root, config: config, hive_state_path: hive_state_path
+            )
+            return load_overlay!(project_root, workflow_dir)
           end
-          workflows.each_value { |workflow| register_descriptor(workflow, workflow_dir, project_root) }
-          # No trailing reset_union_cache! here: both register! and
-          # reset_project_registrations! already invalidate the union cache, so an
-          # explicit call would be dead in every path (and re-spell the
-          # respond_to? guard the registry already encapsulates).
-          @active_root = project_root
-          @active_fingerprint = fingerprint
+
+          source_path, data = project_config_source(project_root)
+          unless data
+            return load_overlay!(project_root, fallback_workflow_dir(project_root))
+          end
+
+          configured_path = data["hive_state_path"]
+          configured_path = Hive::Config::DEFAULTS.fetch("hive_state_path") unless configured_path.is_a?(String)
+          workflow_dir = begin
+            workflow_dir_for(project_root, hive_state_path: configured_path)
+          rescue ArgumentError
+            Hive::Config.validate_project_top_level_keys!(
+              data, source_path, project_root, stage_names: []
+            )
+            raise
+          end
+          load_overlay!(project_root, workflow_dir)
+
+          begin
+            Hive::Config.build_project_config(
+              project_root, source_path, data, stage_names: registered_stage_names
+            )
+          rescue Hive::UnsupportedProjectConfigError
+            raise
+          rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
+            warn_config_fallback(project_root, e)
+            load_overlay!(project_root, fallback_workflow_dir(project_root))
+          end
         end
+      end
+
+      # Config.load calls this only when raw keys need a project-authored stage
+      # vocabulary. Reuse the active overlay without another directory scan;
+      # otherwise load from the already-parsed hive_state_path, which never
+      # calls Config.load and therefore cannot complete a reverse load cycle.
+      def stage_names_for_config(project_root, hive_state_path:)
+        LOCK.synchronize do
+          project_root = File.expand_path(project_root)
+          workflow_dir = workflow_dir_for(project_root, hive_state_path: hive_state_path)
+          load_overlay!(project_root, workflow_dir) unless active_overlay?(project_root, workflow_dir)
+          registered_stage_names
+        end
+      end
+
+      # This file is intentionally loadable without the aggregate
+      # `hive/workflows` entrypoint (for example, `hive markers clear` reaches
+      # it through Task). Read the registry directly so strict config
+      # validation cannot depend on `Workflows.all_stage_names` having been
+      # defined by a different command's require order.
+      def registered_stage_names
+        Hive::Workflows::Registry.all.flat_map(&:stage_names).uniq
+      end
+      private_class_method :registered_stage_names
+
+      def load_overlay!(project_root, workflow_dir)
+        # Include the resolved directory so changing hive_state_path cannot
+        # reuse an overlay cached from a different, equally empty directory.
+        fingerprint = [ workflow_dir, *Hive::Workflows::Loader.fingerprint(workflow_dir) ].freeze
+        return if @active_root == project_root && @active_fingerprint == fingerprint
+
+        # Clear the prior project's overlay BEFORE loading, and drop
+        # @active_root to nil first. @active_root is re-set to the new root only
+        # after a clean load completes, so a failure partway through can't leave
+        # @active_root pinned to a root whose overlay is now empty — which would
+        # make the next same-root load! short-circuit and serve a stale/empty
+        # registry for the rest of a long-lived TUI/daemon session.
+        Hive::Workflows::Registry.reset_project_registrations!
+        @active_root = nil
+
+        cached = loaded_workflows[project_root]
+        workflows = if cached && cached.fetch(:fingerprint) == fingerprint
+                      cached.fetch(:workflows)
+        else
+                      Hive::Workflows::Loader.load_dir(workflow_dir).tap do |loaded|
+                        loaded_workflows[project_root] = { fingerprint: fingerprint, workflows: loaded }
+                      end
+        end
+        workflows.each_value { |workflow| register_descriptor(workflow, workflow_dir, project_root) }
+        # No trailing reset_union_cache! here: both register! and
+        # reset_project_registrations! already invalidate the union cache, so an
+        # explicit call would be dead in every path (and re-spell the
+        # respond_to? guard the registry already encapsulates).
+        @active_root = project_root
+        @active_fingerprint = fingerprint
+      end
+
+      def active_overlay?(project_root, workflow_dir)
+        @active_root == project_root && @active_fingerprint&.first == workflow_dir
+      end
+
+      def project_config_source(project_root)
+        Hive::Config.read_project_config(project_root)
+      rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
+        warn_config_fallback(project_root, e)
+        [ nil, nil ]
+      end
+
+      def fallback_workflow_dir(project_root)
+        File.join(project_root, Hive::Config::DEFAULTS.fetch("hive_state_path"), "workflows")
+      end
+
+      def warn_config_fallback(project_root, error)
+        fallback = fallback_workflow_dir(project_root)
+        warn "hive: workflow loader: could not read hive_state_path for #{project_root} " \
+             "(#{error.class}: #{error.message}); falling back to #{fallback}"
       end
 
       def register_descriptor(workflow, workflow_dir, project_root)
@@ -149,19 +231,20 @@ module Hive
         @warned_skips ||= Set.new
       end
 
-      def workflow_dir_for(project_root, config: nil)
-        return Hive::Workflows::Loader.workflow_dir(project_root) unless config
+      def workflow_dir_for(project_root, config: nil, hive_state_path: nil)
+        return Hive::Workflows::Loader.workflow_dir(project_root, hive_state_path: hive_state_path) unless hive_state_path.nil?
+        return Hive::Workflows::Loader.workflow_dir(project_root, config: config) if config
 
-        Hive::Workflows::Loader.workflow_dir(project_root, config:)
+        Hive::Workflows::Loader.workflow_dir(project_root)
+      rescue Hive::UnsupportedProjectConfigError
+        raise
       rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
-        fallback = File.join(project_root, Hive::Config::DEFAULTS.fetch("hive_state_path"), "workflows")
         # Surface the fallback so a project with a CUSTOM hive_state_path whose
         # config.yml is unreadable doesn't silently load descriptors from the
         # wrong (default) directory — its workflows would otherwise go
         # unregistered and resurface later as a confusing "unknown workflow".
-        warn "hive: workflow loader: could not read hive_state_path for #{project_root} " \
-             "(#{e.class}: #{e.message}); falling back to #{fallback}"
-        fallback
+        warn_config_fallback(project_root, e)
+        fallback_workflow_dir(project_root)
       end
     end
   end

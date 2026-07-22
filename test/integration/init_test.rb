@@ -129,6 +129,8 @@ class InitTest < Minitest::Test
         assert File.directory?(File.join(dir, ".hive-state", "stages", "1-inbox"))
         assert File.exist?(File.join(dir, ".hive-state", "config.yml"))
         refute_includes File.read(File.join(dir, ".hive-state", "config.yml")), "default_workflow:"
+        assert_equal 60, Hive::Config.load(dir).dig("gh", "network_timeout_sec"),
+                     "fresh generated config, including its no-default gh section, must load immediately"
 
         log = `git -C #{dir} log --format=%s hive/state`.strip
         assert_includes log, "hive: bootstrap"
@@ -2105,6 +2107,41 @@ class InitTest < Minitest::Test
         refute raw.dig("review", "fix").key?("agent")
         assert_equal "claude", raw.dig("review", "triage", "agent")
         assert_equal "claude", raw.dig("review", "browser_test", "agent")
+      end
+    end
+  end
+
+  def test_generated_config_loads_with_project_workflow_stage_override
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        workflows_dir = File.join(dir, ".hive-state", "workflows")
+        instruction_dir = File.join(workflows_dir, "delivery")
+        FileUtils.mkdir_p(instruction_dir)
+        File.write(File.join(instruction_dir, "assemble.md"), "Assemble the delivery.\n")
+        File.write(File.join(workflows_dir, "delivery.yml"), <<~YAML)
+          id: delivery
+          stages:
+            - name: inbox
+              kind: terminal
+              state_file: idea.md
+            - name: assemble
+              kind: agent
+              state_file: assemble.md
+              instruction: ./delivery/assemble.md
+            - name: done
+              kind: terminal
+              state_file: task.md
+        YAML
+
+        config_path = File.join(dir, ".hive-state", "config.yml")
+        raw = YAML.safe_load(File.read(config_path))
+        raw["assemble"] = { "agent" => "codex", "timeout_sec" => 75 }
+        File.write(config_path, raw.to_yaml)
+
+        cfg = Hive::Config.load(dir)
+
+        assert_equal({ "agent" => "codex", "timeout_sec" => 75 }, cfg.fetch("assemble"))
       end
     end
   end

@@ -26,12 +26,14 @@ class CliVersionTest < Minitest::Test
   end
 
   def test_bin_hive_treats_help_after_delimiter_as_literal_target
-    out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", "bin/hive", "run", "--", "--help")
+    with_tmp_global_config do
+      out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", "bin/hive", "run", "--", "--help")
 
-    assert_equal 64, status.exitstatus
-    assert_empty out
-    assert_match(/no task folder for slug '--help'/, err)
-    refute_match(/Usage:/, err)
+      assert_equal 64, status.exitstatus
+      assert_empty out
+      assert_match(/no task folder for slug '--help'/, err)
+      refute_match(/Usage:/, err)
+    end
   end
 
   def test_bin_hive_accepts_json_before_status_command

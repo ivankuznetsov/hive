@@ -63,7 +63,6 @@ class GenerateNameTest < Minitest::Test
     cfg["agents"] ||= {}
     cfg["agents"]["claude"] ||= {}
     cfg["agents"]["claude"]["bin"] = bin
-    cfg["display_name_timeout_sec"] = 5
     File.write(config_path, cfg.to_yaml)
   end
 end

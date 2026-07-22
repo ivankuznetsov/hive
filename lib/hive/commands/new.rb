@@ -107,7 +107,7 @@ module Hive
       rescue ProjectNotFound, InvalidSlugError, InvalidDependencyError, InvalidBaseError,
              InvalidDraftPrCombination, InvalidAttachmentError,
              SlugCollisionError, UnregisteredProjectWorkflow, ProjectConfigUnreadable,
-             Hive::Workflows::UnknownWorkflow,
+             Hive::Workflows::UnknownWorkflow, Hive::UnsupportedProjectConfigError,
              SystemCallError, IOError => e
         warn "hive: #{e.message}"
         # Honor each typed error's contract exit code (e.g. UnknownWorkflow →
@@ -247,6 +247,8 @@ module Hive
 
       def managed_project_config(project)
         Hive::Config.load(project.fetch("path"))
+      rescue Hive::UnsupportedProjectConfigError
+        raise
       rescue Psych::Exception, Hive::ConfigError, SystemCallError, IOError => e
         cfg_path = File.join(project.fetch("hive_state_path").to_s, "config.yml")
         raise ProjectConfigUnreadable.new(
@@ -276,6 +278,8 @@ module Hive
       def project_default_workflow(project_root)
         configured = Hive::Config.load(project_root)["default_workflow"].to_s.strip
         configured.empty? ? Hive::Config::DEFAULTS["default_workflow"] : configured
+      rescue Hive::UnsupportedProjectConfigError
+        raise
       rescue Psych::Exception, Hive::ConfigError, SystemCallError, IOError => e
         # A corrupt/unparseable config.yml raises Psych::SyntaxError (or
         # ConfigError for a non-hash document) out of Config.load — neither a

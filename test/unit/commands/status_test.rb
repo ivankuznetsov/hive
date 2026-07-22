@@ -882,6 +882,38 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_json_status_surfaces_unsupported_project_config_instead_of_degrading_it
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
+      project = { "name" => "bad", "path" => project_root, "hive_state_path" => hive_state }
+
+      error = assert_raises(Hive::UnsupportedProjectConfigError) do
+        capture_io { Hive::Commands::Status.new.json_payload([ project ]) }
+      end
+
+      assert_includes error.message, "move it to `review.reviewers`"
+    end
+  end
+
+  def test_text_status_surfaces_unsupported_project_config_instead_of_skipping_it
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
+      project = { "name" => "bad", "path" => project_root, "hive_state_path" => hive_state }
+
+      error = with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ project ] }) do
+        assert_raises(Hive::UnsupportedProjectConfigError) do
+          capture_io { Hive::Commands::Status.new(full: true).call }
+        end
+      end
+
+      assert_includes error.message, "move it to `review.reviewers`"
+    end
+  end
+
   # Belt-and-suspenders for the same freeze: any unexpected per-project
   # raise inside project_payload must degrade that one project to an empty
   # task list rather than abort the whole envelope.
@@ -2109,6 +2141,73 @@ class CommandsStatusTest < Minitest::Test
     end
 
     assert_equal false, context.dig("demo", "daemon_enabled")
+  end
+
+  def test_operational_project_context_preserves_unsupported_project_config
+    project = { "name" => "demo", "path" => "/tmp/unsupported-hive-project" }
+    config_error = Hive::UnsupportedProjectConfigError.new("unsupported root key")
+
+    error = with_replaced_singleton_method(
+      Hive::Config, :load, ->(_path) { raise config_error }
+    ) do
+      assert_raises(Hive::UnsupportedProjectConfigError) do
+        Hive::Commands::Status.new.send(:operational_project_context, [ project ])
+      end
+    end
+
+    assert_same config_error, error
+  end
+
+  def test_dependency_snapshot_preserves_unsupported_project_config
+    config_error = Hive::UnsupportedProjectConfigError.new("unsupported root key")
+
+    error = with_replaced_singleton_method(
+      Hive::DependencySnapshot, :admission_context, ->(*) { raise config_error }
+    ) do
+      assert_raises(Hive::UnsupportedProjectConfigError) do
+        Hive::Commands::Status.new.send(:build_admission_context, [])
+      end
+    end
+
+    assert_same config_error, error
+  end
+
+  def test_task_action_config_preserves_unsupported_project_config
+    config_error = Hive::UnsupportedProjectConfigError.new("unsupported root key")
+
+    error = with_replaced_singleton_method(
+      Hive::Config, :load, ->(_path) { raise config_error }
+    ) do
+      assert_raises(Hive::UnsupportedProjectConfigError) do
+        Hive::Commands::Status.new.send(:task_action_config, "/tmp/project")
+      end
+    end
+
+    assert_same config_error, error
+  end
+
+  def test_collect_rows_preserves_unsupported_worktree_config
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(
+        hive_state, "stages", "4-execute", "unsupported-worktree-260722-abcd"
+      )
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "task.md"), "# Task\n")
+      task = Hive::Task.new(folder)
+      config_error = Hive::UnsupportedProjectConfigError.new("unsupported root key")
+      task.define_singleton_method(:worktree_path) { raise config_error }
+
+      error = with_replaced_singleton_method(Hive::Task, :new, ->(*) { task }) do
+        assert_raises(Hive::UnsupportedProjectConfigError) do
+          Hive::Commands::Status.new.send(
+            :collect_rows, hive_state, stages: [ "4-execute" ]
+          )
+        end
+      end
+
+      assert_same config_error, error
+    end
   end
 
   def test_full_status_legacy_warning_names_counts_and_recovery

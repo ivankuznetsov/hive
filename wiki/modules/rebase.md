@@ -3,11 +3,11 @@ title: Hive::Rebase
 type: module
 source: lib/hive/rebase.rb
 created: 2026-05-14
-updated: 2026-05-22T13:30:00Z
+updated: 2026-07-22
 tags: [rebase, orchestrator, git, agent-dispatch, fail-soft]
 ---
 
-**TLDR**: Orchestrator-side auto-rebase pre-step for `hive run`. Before dispatching the stage runner, `Hive::Rebase.perform(task, cfg)` detects whether the task's worktree branch is behind `origin/<default_branch>`, fetches with non-interactive env, attempts `git rebase`, and dispatches the project's execute-stage agent (`cfg.execute.agent`, isolated to the worktree via `add_dirs: []`) to resolve any conflicts. Fail-soft: any failure aborts the rebase, cleans agent-created untracked files via `git reset --hard ORIG_HEAD && git clean -fd`, and proceeds with the stale base. Originally added to close the REVIEW_STALE drift loop where long-running tasks accumulated phantom-deletion escalations after main moved forward. Plan: `docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md`.
+**TLDR**: Orchestrator-side auto-rebase pre-step for `hive run`. Before dispatching the stage runner, `Hive::Rebase.perform(task, cfg)` detects whether the task's worktree branch is behind `origin/<default_branch>`, fetches with non-interactive env, attempts `git rebase`, and dispatches the project's execute-stage agent (`cfg.execute.agent`, isolated to the worktree via `add_dirs: []`) to resolve any conflicts. A successful rebase of an already-published PR branch is immediately published with an exact-OID force-with-lease; pre-PR branches remain local, and diverged or concurrently moved remote branches are never overwritten. Fail-soft: any rebase failure aborts, cleans agent-created untracked files via `git reset --hard ORIG_HEAD && git clean -fd`, and proceeds with the stale base. Originally added to close the REVIEW_STALE drift loop where long-running tasks accumulated phantom-deletion escalations after main moved forward. Plan: `docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md`.
 
 ## Public API
 
@@ -20,7 +20,7 @@ tags: [rebase, orchestrator, git, agent-dispatch, fail-soft]
   - `agent_resolutions` (Integer) — count of conflict-resolution agent dispatches.
   - `resolved_files` (Array<String>) — files the agent touched during resolution.
   - `reason` (Symbol or nil) — `nil` on success; a closed-set Symbol naming the skip-or-failure cause otherwise. See [[commands/run]] for the full enum.
-  - `post_rebase_warnings` (Array<String>) — non-fatal warnings produced after a successful rebase (e.g., `worktree.yml execute_base_head` write failure). Empty on clean success.
+  - `post_rebase_warnings` (Array<String>) — non-fatal warnings produced after a successful rebase (for example, `worktree.yml execute_base_head` write failure or a refused/failed remote publication). Empty on clean success.
 
 - **`Hive::Rebase::MAX_CONFLICT_RESOLUTIONS = 5`** — hardcoded cap on conflict-resolution agent dispatches per `perform` invocation. Not configurable per the doc-review's S1 decision: projects with persistently high-conflict branches should investigate the underlying drift, not raise the cap.
 
@@ -92,6 +92,18 @@ Return value: `Result.failed(reason, commits_behind, attempts - 1, resolved_file
 After a successful rebase, `update_execute_base_head!(task, git, warnings)` rewrites `worktree.yml`'s `execute_base_head` to the post-rebase HEAD SHA via atomic temp-file + rename. Without this, 4-execute continuation passes trip `EXECUTE_WAITING(reason=head_not_descendant)` because the stored pre-rebase SHA is no longer reachable in the rebased commit graph.
 
 If the rewrite itself fails (malformed YAML, I/O error, rename failure), a stderr warning fires AND the failure lands in `Result.post_rebase_warnings` — the JSON envelope consumer can see exactly which post-success step broke, even though the rebase itself succeeded.
+
+### Successful rebase: remote publication
+
+Before rewriting history, Hive looks up the current branch's exact remote OID. It captures a publication lease only when that remote commit is an ancestor of the pre-rebase `HEAD`, proving that the local branch contains the published lineage. After either a clean rebase or an agent-resolved rebase succeeds, Hive immediately publishes the rewritten branch with `--force-with-lease=<branch>:<captured-oid>`.
+
+This keeps later review-fix commits fast-forward pushable and prevents finalize from stalling on locally rewritten but never-published history. The publication boundary is deliberately fail-soft and conservative:
+
+- If no remote branch exists yet, the task is still pre-PR and the rebased branch remains local.
+- If the remote OID is not contained by the pre-rebase `HEAD`, Hive treats it as genuine divergence, refuses the rewrite, and records a structured `post_rebase_warnings` entry.
+- If another actor moves the remote after the lease is captured, the exact lease fails and preserves the concurrent remote commit.
+- If lookup, ancestry proof, or push fails, the rebase remains successful locally and the warning makes the missing publication visible to the stage envelope and operator.
+- A failed rebase never uses the captured lease.
 
 ## Security boundaries
 

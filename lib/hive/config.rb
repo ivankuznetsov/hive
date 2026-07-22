@@ -1,6 +1,8 @@
 require "yaml"
 require "fileutils"
 require "securerandom"
+require "digest"
+require "time"
 require "pathname"
 require "set"
 require "hive/agent_profiles"
@@ -13,6 +15,7 @@ require "hive/conditions/migration"
 
 module Hive
   module Config
+    PROJECT_UUID = /\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/i
     DEFAULTS = {
       "hive_state_path" => ".hive-state",
       "worktree_root" => nil,
@@ -1183,11 +1186,41 @@ module Hive
           "name" => entry["name"],
           "path" => abs_path,
           "hive_state_path" => entry["hive_state_path"],
-          "repository_identity" => entry["repository_identity"]
+          "repository_identity" => entry["repository_identity"],
+          "project_id" => registry_project_id(entry),
+          "registration_id" => entry["registration_id"],
+          "registered_at" => entry["registered_at"]
         }
         project["hive_state_path"] = project_hive_state_path(project)
         out << project
       end
+    end
+
+    # One-time, locked registry migration. It deliberately emits no module
+    # event: historical projects did not have a durable registration
+    # occurrence and must not receive a synthetic bootstrap replay.
+    def ensure_project_identities!(now: Time.now.utc)
+      Hive::Paths.ensure_migrated!
+      return false unless File.exist?(global_config_path)
+
+      changed = false
+      with_global_config_lock do
+        data = load_global_config(global_config_path)
+        raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
+
+        Array(data["registered_projects"]).each do |entry|
+          next unless valid_registry_entry?(entry)
+          next if valid_project_id?(entry["project_id"])
+
+          project_id = SecureRandom.uuid
+          entry["project_id"] = project_id
+          entry["registration_id"] ||= "legacy:#{project_id}"
+          entry["registered_at"] ||= now.utc.iso8601(6)
+          changed = true
+        end
+        write_global_config_atomic!(data) if changed
+      end
+      changed
     end
 
     # The operator's persisted backend selection from the global config,
@@ -1702,12 +1735,18 @@ module Hive
         data["registered_projects"] = Array(data["registered_projects"])
         abs_path = File.expand_path(path)
         hive_state_path = File.join(abs_path, ".hive-state")
-        entry = { "name" => name, "path" => abs_path, "hive_state_path" => hive_state_path }
+        existing = data["registered_projects"].find { |p| p.is_a?(Hash) && p["name"] == name }
+        project_id = existing && valid_project_id?(existing["project_id"]) ? existing["project_id"] : SecureRandom.uuid
+        entry = {
+          "name" => name, "path" => abs_path, "hive_state_path" => hive_state_path,
+          "project_id" => project_id,
+          "registration_id" => existing&.fetch("registration_id", nil) || SecureRandom.uuid,
+          "registered_at" => existing&.fetch("registered_at", nil) || Time.now.utc.iso8601(6)
+        }
         identity = repository_identity == :detect ? Hive::RepositoryIdentity.current(abs_path) : repository_identity
         entry["repository_identity"] = identity if identity
         real_path = realpath_or_nil(abs_path)
         entry["real_path"] = real_path if real_path
-        existing = data["registered_projects"].find { |p| p.is_a?(Hash) && p["name"] == name }
         if existing
           existing.replace(entry)
         else
@@ -1715,6 +1754,19 @@ module Hive
         end
       end
       entry
+    end
+
+    def valid_project_id?(value)
+      value.is_a?(String) && PROJECT_UUID.match?(value)
+    end
+
+    def registry_project_id(entry)
+      return entry["project_id"] if valid_project_id?(entry["project_id"])
+
+      digest = ::Digest::SHA256.hexdigest(
+        [ "hive-project-id-v1", entry["name"], File.expand_path(entry["path"]) ].join("\0")
+      )
+      "#{digest[0, 8]}-#{digest[8, 4]}-4#{digest[13, 3]}-a#{digest[17, 3]}-#{digest[20, 12]}"
     end
 
     # Inverse of register_project: remove the entry whose name matches.

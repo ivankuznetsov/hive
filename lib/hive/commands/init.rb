@@ -14,6 +14,7 @@ require "hive/workflow_selection"
 require "hive/workflows"
 require "hive/workflows/loader"
 require "hive/llm_wiki_bootstrap"
+require "hive/modules/event_publisher"
 require "hive/commands/workflow"
 require "hive/commands/init/prompts"
 require "hive/commands/setup_agents"
@@ -85,7 +86,8 @@ module Hive
                      workflow_input: $stdin, workflow_output: $stderr,
                      provisioning_input: $stdin, provisioning_output: $stdout,
                      provisioning_error: $stderr, preflight_inspector: nil,
-                     setup_agents_factory: nil, agent_skill_preflight: !defined?(Minitest))
+                     setup_agents_factory: nil, agent_skill_preflight: !defined?(Minitest),
+                     module_event_publisher: nil)
         @project_path = File.expand_path(project_path)
         @force = force
         @json = json
@@ -113,6 +115,7 @@ module Hive
         @setup_agents_factory = setup_agents_factory || lambda do |**kwargs|
           Hive::Commands::SetupAgents.new(**kwargs)
         end
+        @module_event_publisher = module_event_publisher || Hive::Modules::EventPublisher.new
         # Optional Prompts instance for testability. Tests inject a
         # pre-fed StringIO-backed instance to drive the interactive flow
         # without touching $stdin. Production keeps this nil so the
@@ -578,6 +581,7 @@ module Hive
 
           entry = Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
           after_bootstrap&.call
+          @module_event_publisher.project_registered(entry)
           entry
         rescue StandardError
           rollback_partial_init(ops, side_effect_snapshot: side_effect_snapshot) if rollback_on_failure

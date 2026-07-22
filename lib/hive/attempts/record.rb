@@ -13,7 +13,9 @@ module Hive
     # generation lock; callers can only observe snapshots.
     class Record
       SCHEMA = "hive-attempt"
-      SCHEMA_VERSION = 2
+      SCHEMA_VERSION = 3
+      SUPPORTED_SCHEMA_VERSIONS = [ 2, SCHEMA_VERSION ].freeze
+      SUBJECT_KINDS = %w[task_stage module_hook].freeze
       STATES = %w[launching running terminal lost].freeze
       TERMINAL_OUTCOMES = %w[succeeded failed cancelled].freeze
       FINAL_STATES = %w[terminal lost].freeze
@@ -22,7 +24,7 @@ module Hive
         task_id project task_slug intended_stage task_generation progress_token
         ownership_generation task_input_epoch
         provider worker_argv claim_capability_digest starting_revision retry_charge
-        created_at accepted_at
+        subject created_at accepted_at
       ].freeze
       REQUIRED_KEYS = (IMMUTABLE_KEYS + %w[
         state outcome lease_version claim_deadline first_heartbeat_deadline
@@ -38,8 +40,12 @@ module Hive
                          worker_argv:, claim_capability_digest:, starting_revision:, retry_charge:,
                          inherited_outputs:, now:,
                          launch_timeout_sec:, ownership_generation: nil,
-                         task_input_epoch: 0)
+                         task_input_epoch: 0, subject: nil)
         timestamp = iso8601(now)
+        subject ||= {
+          "kind" => "task_stage", "task_id" => task_id,
+          "task_slug" => task_slug, "intended_stage" => intended_stage
+        }
         new(
           "schema" => SCHEMA,
           "schema_version" => SCHEMA_VERSION,
@@ -59,6 +65,7 @@ module Hive
           "claim_capability_digest" => claim_capability_digest,
           "starting_revision" => starting_revision,
           "retry_charge" => retry_charge,
+          "subject" => Hive::StringifyKeys.call(subject),
           "created_at" => timestamp,
           "accepted_at" => timestamp,
           "state" => "launching",
@@ -133,6 +140,7 @@ module Hive
       def initialize(data)
         @data = Hive::StringifyKeys.call(data)
         validate_source_schema!
+        normalize_subject_bridge!
         validate!
         @data.freeze
       end
@@ -156,6 +164,9 @@ module Hive
       def wrapper = Hive::StringifyKeys.call(@data["wrapper"])
       def worker = Hive::StringifyKeys.call(@data["worker"])
       def checkpoint = Hive::StringifyKeys.call(@data["checkpoint"])
+      def subject = Hive::StringifyKeys.call(@data["subject"])
+      def subject_kind = @data.dig("subject", "kind")
+      def module_hook? = subject_kind == "module_hook"
       def live? = %w[launching running].include?(state)
       def final? = FINAL_STATES.include?(state)
       def claimed? = state == "launching" && !@data["wrapper"].nil?
@@ -210,6 +221,7 @@ module Hive
         unless @data["retry_charge"].is_a?(Integer) && @data["retry_charge"] >= 0
           raise InvalidRecord, "attempt record retry_charge must be non-negative"
         end
+        validate_subject!
         worker_argv = @data["worker_argv"]
         unless worker_argv.is_a?(Array) && worker_argv.all? { |value| value.is_a?(String) && !value.empty? }
           raise InvalidRecord, "attempt record worker_argv must contain only non-empty strings"
@@ -235,7 +247,7 @@ module Hive
 
       def validate_source_schema!
         raise InvalidRecord, "attempt record has invalid schema" unless @data["schema"] == SCHEMA
-        return if @data["schema_version"] == SCHEMA_VERSION
+        return if SUPPORTED_SCHEMA_VERSIONS.include?(@data["schema_version"])
 
         raise InvalidRecord,
               "attempt record has unsupported schema_version #{@data['schema_version'].inspect}"
@@ -269,6 +281,46 @@ module Hive
         if state == "running"
           raise InvalidRecord, "running attempt requires wrapper identity" unless @data["wrapper"].is_a?(Hash)
           raise InvalidRecord, "running attempt requires heartbeat deadline" if @data["heartbeat_deadline"].nil?
+        end
+      end
+
+      def normalize_subject_bridge!
+        source_version = @data["schema_version"]
+        if source_version == 2
+          @data["subject"] ||= {
+            "kind" => "task_stage", "task_id" => @data["task_id"],
+            "task_slug" => @data["task_slug"], "intended_stage" => @data["intended_stage"]
+          }
+        end
+        @data["schema_version"] = SCHEMA_VERSION
+      end
+
+      def validate_subject!
+        value = @data["subject"]
+        unless value.is_a?(Hash) && SUBJECT_KINDS.include?(value["kind"])
+          raise InvalidRecord, "attempt record subject is malformed"
+        end
+        case value.fetch("kind")
+        when "task_stage"
+          expected = %w[intended_stage kind task_id task_slug]
+          unless value.keys.sort == expected && value["task_id"] == @data["task_id"] &&
+                 value["task_slug"] == @data["task_slug"] && value["intended_stage"] == @data["intended_stage"]
+            raise InvalidRecord, "attempt task subject does not match legacy identity"
+          end
+        when "module_hook"
+          expected = %w[
+            configuration_digest event_id event_name grant_digest hook kind module
+            module_generation occurrence_id project_id
+          ]
+          unless value.keys.sort == expected &&
+                 %w[project_id module hook event_id occurrence_id event_name module_generation].all? do |key|
+                   value[key].is_a?(String) && !value[key].empty?
+                 end &&
+                 %w[configuration_digest grant_digest].all? do |key|
+                   /\A[0-9a-f]{64}\z/.match?(value[key].to_s)
+                 end
+            raise InvalidRecord, "attempt module hook subject is malformed"
+          end
         end
       end
 

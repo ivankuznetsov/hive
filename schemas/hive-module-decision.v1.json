@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-module-decision.v1.json",
+  "title": "hive module decision (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "decision_id", "project_id", "project", "module", "hook",
+    "event_id", "event_name", "evaluated_at", "outcome", "reason", "binding_digest",
+    "cursor_before", "cursor_after", "module_generation", "configuration_digest",
+    "grant_digest", "concurrency", "attempt_id", "task_id", "artifacts", "retry"
+  ],
+  "properties": {
+    "schema": { "const": "hive-module-decision" },
+    "schema_version": { "const": 1 },
+    "decision_id": { "type": "string", "pattern": "^dec-[0-9a-f]{64}$" },
+    "project_id": { "type": "string", "minLength": 1 },
+    "project": { "type": "string", "minLength": 1 },
+    "module": { "type": "string", "minLength": 1 },
+    "hook": { "type": "string", "minLength": 1 },
+    "event_id": { "type": "string", "pattern": "^evt-[0-9a-f]{64}$" },
+    "event_name": {
+      "enum": ["schedule", "task.completed", "pull_request.merged", "project.registered"]
+    },
+    "evaluated_at": { "type": "string", "format": "date-time" },
+    "outcome": { "enum": ["launch", "skip"] },
+    "reason": {
+      "enum": [
+        "admitted", "activation_fenced", "capacity_blocked", "concurrency_blocked",
+        "cursor_stale", "disabled", "duplicate", "hook_disabled", "invalid_binding",
+        "no_match", "not_installed", "permission_blocked", "terminal_replay", "uninstalled"
+      ]
+    },
+    "binding_digest": { "$ref": "#/$defs/NullableDigest" },
+    "cursor_before": { "type": ["string", "null"] },
+    "cursor_after": { "type": ["string", "null"] },
+    "module_generation": { "type": ["string", "null"] },
+    "configuration_digest": { "$ref": "#/$defs/NullableDigest" },
+    "grant_digest": { "$ref": "#/$defs/NullableDigest" },
+    "concurrency": { "type": ["string", "null"], "enum": ["allow", "drop", "replace", null] },
+    "attempt_id": { "type": ["string", "null"] },
+    "task_id": { "type": ["string", "integer", "null"] },
+    "artifacts": { "type": "array", "items": { "type": "object" } },
+    "retry": { "type": ["object", "null"] }
+  },
+  "$defs": {
+    "NullableDigest": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

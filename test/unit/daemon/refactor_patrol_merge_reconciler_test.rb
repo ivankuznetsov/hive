@@ -605,6 +605,27 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
+  def test_immutable_manifest_is_published_to_module_events_after_durable_enqueue
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      gh.details = { 2 => details(2, at: T0) }
+      calls = []
+      publisher = Object.new
+      publisher.define_singleton_method(:pull_request_merged) do |entry, manifest|
+        calls << [ entry, manifest ]
+      end
+
+      aggregate = reconciler(dir, gh, module_event_publisher: publisher).ingest(
+        project: "demo", pr: "https://github.com/acme/demo/pull/2", now: T0
+      )
+
+      assert_equal 1, calls.size
+      assert_equal aggregate.fetch("job_id"), calls.first.last.fetch("job_id")
+      manifests = Dir.glob(File.join(dir, ".hive-state", "refactor_patrol", "v2", "manifests", "*.json"))
+      assert_equal 1, manifests.size
+    end
+  end
+
   def test_intake_snapshots_the_complete_action_policy
     with_tmp_dir do |dir|
       gh = FakeGh.new

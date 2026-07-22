@@ -2394,11 +2394,19 @@ class SchemaFilesTest < Minitest::Test
     refute_includes doc.fetch("properties").keys, "compatibility"
     assert_equal 1, doc.fetch("properties").dig("worker_argv", "minItems")
     assert_equal "string", doc.fetch("properties").dig("claim_capability_digest", "type")
+    assert_includes doc.fetch("required"), "subject"
     assert_equal "^[0-9a-f]{64}$", doc.fetch("properties").dig("claim_capability_digest", "pattern")
     receipt_required = doc.dig("$defs", "Receipt", "required")
     %w[attempt_id task_generation ownership_generation task_input_epoch outcome exit_status started_at ended_at final_checkpoint output_references log_reference].each do |key|
       assert_includes receipt_required, key
     end
+  end
+
+  def test_internal_attempt_v2_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-attempt", version: 2)))
+
+    assert_equal 2, doc.fetch("properties").dig("schema_version", "const")
+    refute_includes doc.fetch("properties").keys, "subject"
   end
 
 

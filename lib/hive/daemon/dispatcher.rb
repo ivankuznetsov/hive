@@ -77,7 +77,8 @@ module Hive
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                      attempt_dispatcher: nil, attempt_reconciler: nil,
                      lost_outcome_store: nil, lost_outcome_processor: nil,
-                     operational_snapshot: nil, recovery_coordinator: nil)
+                     operational_snapshot: nil, recovery_coordinator: nil,
+                     module_runtime: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -96,6 +97,7 @@ module Hive
         @lost_outcome_store = lost_outcome_store
         @lost_outcome_processor = lost_outcome_processor
         @operational_snapshot = operational_snapshot
+        @module_runtime = module_runtime
         @attempt_snapshot = nil
         @last_terminal_recovery_prune_at = nil
         @recovery_coordinator = recovery_coordinator || RecoveryCoordinator.new(
@@ -342,6 +344,21 @@ module Hive
           result.rows, projects: result.projects, now: now
         )
         run_refactor_patrol_merge_reconciler_tick(now: now)
+
+        # Project-local module occurrences are already durable at this point.
+        # Drain them only from the daemon, after attempt reconciliation and PR
+        # intake, so no command-side producer can become a second dispatcher.
+        begin
+          @module_runtime&.tick(now: now)&.each do |module_result|
+            next if module_result.fetch(:status) == :idle
+            @logger.event(:module_runtime, **module_result)
+          end
+        rescue StandardError => e
+          @logger.event(
+            :fatal, message: "module runtime raised: #{e.class}: #{e.message}",
+            keeping_previous: true
+          )
+        end
 
         # Heal AGENT_WORKING markers whose backing agent isn't alive
         # BEFORE per-row dispatch — a healed row classifies as :error on

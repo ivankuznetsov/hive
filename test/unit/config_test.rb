@@ -17,6 +17,31 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_registry_assigns_and_preserves_project_and_registration_identity
+    with_tmp_global_config do
+      first = Hive::Config.register_project(name: "sample", path: "/tmp/first")
+      second = Hive::Config.register_project(name: "sample", path: "/tmp/second")
+
+      assert_match(Hive::Config::PROJECT_UUID, first.fetch("project_id"))
+      assert_equal first.fetch("project_id"), second.fetch("project_id")
+      assert_equal first.fetch("registration_id"), second.fetch("registration_id")
+      assert_equal first.fetch("registered_at"), second.fetch("registered_at")
+    end
+  end
+
+  def test_legacy_registry_identity_backfill_is_explicit_and_emits_no_event
+    with_tmp_global_config do |home|
+      path = File.join(home, "config.yml")
+      File.write(path, { "registered_projects" => [ { "name" => "old", "path" => "/tmp/old" } ] }.to_yaml)
+
+      assert Hive::Config.ensure_project_identities!(now: Time.utc(2026, 7, 22))
+      row = YAML.safe_load(File.read(path)).fetch("registered_projects").first
+      assert_match(Hive::Config::PROJECT_UUID, row.fetch("project_id"))
+      assert_equal "legacy:#{row.fetch('project_id')}", row.fetch("registration_id")
+      assert_equal false, Hive::Config.ensure_project_identities!(now: Time.utc(2026, 7, 23))
+    end
+  end
+
   include HiveTestHelper
 
   def test_load_returns_defaults_when_no_config_file

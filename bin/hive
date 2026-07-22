@@ -42,6 +42,19 @@ if ARGV.first == "__attempt-supervise"
   end
 end
 
+# Private module-hook worker route. Only the durable attempt supervisor emits
+# this argv after admission; keeping it ahead of Thor prevents a public bypass
+# around previewed installation and hook state.
+if ARGV.first == "__module-hook"
+  require "hive/commands/module_hook"
+  begin
+    exit Hive::Commands::ModuleHook.from_argv(ARGV.drop(1)).call
+  rescue Hive::Error => e
+    warn "hive: #{e.message}"
+    exit e.exit_code
+  end
+end
+
 if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   puts Hive::VERSION
   exit 0

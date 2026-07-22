@@ -70,6 +70,24 @@ module Hive
         )
       end
 
+      # Admit a first-class module-hook subject through the same capacity,
+      # lease, handoff, and retry substrate as task-stage attempts. The
+      # caller owns hook enabled/cursor/deduplication serialization; this
+      # method owns host-wide attempt capacity and durable process handoff.
+      def dispatch_module_hook(generation:, subject:, argv:, request_id:, provider:,
+                               interactive: false, predecessor_attempt_id: nil,
+                               inherited_outputs: [], retry_charge: 0, now: @clock.call,
+                               project_root: nil)
+        @launcher.preflight!
+        admit(
+          task: nil, generation: generation, argv: argv, request_id: request_id,
+          provider: provider, interactive: interactive,
+          predecessor_attempt_id: predecessor_attempt_id,
+          inherited_outputs: inherited_outputs, retry_charge: retry_charge,
+          successor_of: nil, subject: subject, now: now
+        )
+      end
+
       def dispatch_request(request, interactive: false, now: @clock.call)
         task = @task_resolver.call(request)
         intended_stage = intended_stage_for(request.argv, task)
@@ -98,7 +116,8 @@ module Hive
       private
 
       def admit(task:, generation:, argv:, request_id:, provider:, interactive:,
-                predecessor_attempt_id:, inherited_outputs:, retry_charge:, successor_of:, now:)
+                predecessor_attempt_id:, inherited_outputs:, retry_charge:, successor_of:, now:,
+                subject: nil)
         result = nil
         created = nil
         claim_capability = nil
@@ -174,6 +193,7 @@ module Hive
               starting_revision: starting_revision(task),
               retry_charge: retry_charge,
               inherited_outputs: inherited_outputs || [],
+              subject: subject,
               launch_timeout_sec: @launch_timeout_sec,
               now: now
             )
@@ -253,6 +273,9 @@ module Hive
 
       def find_semantic_owner(records, generation)
         candidates = records.select do |record|
+          if generation.respond_to?(:subject) && generation.subject
+            next record.subject == generation.subject && record.live?
+          end
           same_task = if generation.task_id.nil?
             record["project"] == generation.project && record["task_slug"] == generation.task_slug
           else
@@ -334,6 +357,8 @@ module Hive
       end
 
       def starting_revision(task)
+        return nil unless task
+
         worktree = task.respond_to?(:worktree_path) ? task.worktree_path : nil
         return nil unless worktree && File.directory?(worktree)
 

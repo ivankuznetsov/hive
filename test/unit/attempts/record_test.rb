@@ -164,7 +164,39 @@ class AttemptsRecordTest < Minitest::Test
     end
   end
 
-  def test_only_current_schema_version_is_accepted
+  def test_legacy_v2_record_gains_a_task_subject_in_memory
+    legacy = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
+    legacy["schema_version"] = 2
+    legacy.delete("subject")
+
+    record = Hive::Attempts::Record.new(legacy)
+
+    assert_equal "task_stage", record.subject_kind
+    assert_equal "durable-task", record.subject.fetch("task_slug")
+    assert_equal Hive::Attempts::Record::SCHEMA_VERSION, record["schema_version"]
+    refute legacy.key?("subject")
+  end
+
+  def test_module_hook_subject_is_first_class_and_strict
+    subject = {
+      "kind" => "module_hook", "project_id" => "project-1", "module" => "patrol",
+      "hook" => "task-completed", "event_id" => "evt-1", "occurrence_id" => "evt-1",
+      "event_name" => "task.completed", "module_generation" => "a" * 40,
+      "configuration_digest" => "b" * 64, "grant_digest" => "c" * 64
+    }
+    record = Hive::Attempts::Record.launching(
+      **identity.merge(task_id: nil, task_slug: "module-patrol-task", intended_stage: "module-hook"),
+      subject: subject, now: NOW, launch_timeout_sec: 30
+    )
+
+    assert record.module_hook?
+    assert_equal subject, record.subject
+    assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(record.to_h.merge("subject" => subject.merge("grant_digest" => "secret")))
+    end
+  end
+
+  def test_unsupported_schema_versions_are_rejected
     [ 1, 99 ].each do |schema_version|
       invalid = Hive::Attempts::Record.launching(
         **identity, now: NOW, launch_timeout_sec: 30

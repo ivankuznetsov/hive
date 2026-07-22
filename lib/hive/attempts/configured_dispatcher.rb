@@ -37,10 +37,23 @@ module Hive
         )
       end
 
+      def dispatch_module_hook(project_root:, argv:, **attributes)
+        dispatcher_for_project(project_root, argv: argv).dispatch_module_hook(
+          argv: argv, **attributes
+        )
+      end
+
       private
 
       def dispatcher_for(task, argv:)
-        cfg = @config_loader.call(task.project_root)
+        dispatcher_for_project(
+          task.project_root, argv: argv,
+          task_resolver: ->(_request) { task }
+        )
+      end
+
+      def dispatcher_for_project(project_root, argv:, task_resolver: nil)
+        cfg = @config_loader.call(project_root)
         daemon = @daemon_config_loader.call
         launcher = @launcher_class.new(
           store: @store,
@@ -55,7 +68,7 @@ module Hive
           launcher: launcher,
           limits: LaunchPolicy.limits(daemon: daemon),
           launch_timeout_sec: cfg.fetch("attempt_launch_timeout_sec"),
-          task_resolver: ->(_request) { task }
+          task_resolver: task_resolver
         )
       end
     end

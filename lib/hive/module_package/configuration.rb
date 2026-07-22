@@ -73,6 +73,7 @@ module Hive
       def grants = data.fetch("grants")
       def generation = data.fetch("generation")
       def contract = data.fetch("contract")
+      def to_h = Hive::StringifyKeys.call(data)
 
       class << self
         private

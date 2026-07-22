@@ -28,6 +28,8 @@ require "hive/attempts/process_identity"
 require "hive/attempts/reconciler"
 require "hive/attempts/lost_outcome"
 require "hive/conditions/attempt_observer"
+require "hive/modules/event_publisher"
+require "hive/modules/daemon_runtime"
 require "hive/commands/service_installer/result_presenter"
 require "hive/recovery/migration"
 
@@ -222,9 +224,11 @@ module Hive
           )
         )
         status_consumer = Hive::Daemon::StatusConsumer.new
+        Hive::Config.ensure_project_identities!
+        module_event_publisher = Hive::Modules::EventPublisher.new
         refactor_patrol_merge_reconciler = Hive::Daemon::RefactorPatrolMergeReconciler.new(
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
-          dry_run: @dry_run
+          dry_run: @dry_run, module_event_publisher: module_event_publisher
         )
         merge_watcher = Hive::Daemon::PrMergeWatcher.new(
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
@@ -260,6 +264,9 @@ module Hive
         )
         attempts_api = Hive::Attempts::API.new(
           store: attempt_store
+        )
+        module_runtime = Hive::Modules::DaemonRuntime.new(
+          attempt_store: attempt_store, attempt_dispatcher: attempts_api
         )
         attempt_process_identity = Hive::Attempts::ProcessIdentity.new
         attempt_reconciler = Hive::Attempts::Reconciler.new(
@@ -301,7 +308,8 @@ module Hive
           attempt_reconciler: attempt_reconciler,
           lost_outcome_store: lost_outcome_store,
           lost_outcome_processor: lost_outcome_processor,
-          operational_snapshot: operational_snapshot
+          operational_snapshot: operational_snapshot,
+          module_runtime: module_runtime
         )
 
         reexec_requested = false

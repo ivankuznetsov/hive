@@ -65,6 +65,8 @@ module Hive
       "hive-workflow-publish" => 1,
       "hive-module-lifecycle" => 1,
       "hive-module-list" => 1,
+      "hive-module-event" => 1,
+      "hive-module-decision" => 1,
       # Daily digest of tasks waiting on human input (`hive answer-digest
       # --json`). The success envelope reports the send outcome plus the full
       # waiting set (count/tasks); the Thor-usage error path emits the shared
@@ -88,7 +90,7 @@ module Hive
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
       "hive-dispatch-result" => 2,
       # Internal source-of-truth record for durable task-stage ownership.
-      "hive-attempt" => 2,
+      "hive-attempt" => 3,
       # Dedicated operator-confirmed task closure input/receipt. These are
       # task-local authorities, not agent-callable command envelopes.
       "hive-task-closure-input" => 1,

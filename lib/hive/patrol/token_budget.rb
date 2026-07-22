@@ -18,6 +18,7 @@ module Hive
         "max_tokens_per_agent" => 50_000,
         "max_agent_spawns_per_cycle" => 3,
         "max_agent_spawns_per_day" => 8,
+        "max_architecture_review_spawns_per_day" => 8,
         "max_architecture_unmetered_spawns_per_day" => 96,
         "max_budget_usd_per_agent" => 25,
         "architecture_budget_multiplier" => 2,
@@ -82,6 +83,11 @@ module Hive
           architecture_safety = ", unmetered_architecture=" \
                                 "#{detail.fetch(:today_architecture_unmetered_spawns)}/" \
                                 "#{detail.fetch(:max_architecture_unmetered_spawns_per_day)} today"
+          if architecture_review_stage?(detail.fetch(:stage))
+            architecture_safety << ", architecture_reviews=" \
+                                   "#{detail.fetch(:today_architecture_review_spawns)}/" \
+                                   "#{detail.fetch(:max_architecture_review_spawns_per_day)} today"
+          end
         end
         "patrol agent budget exhausted (#{detail.fetch(:reason)}; #{headroom}" \
           "cycle=#{detail.fetch(:cycle_tokens)}/#{detail.fetch(:max_tokens_per_cycle)} tokens, " \
@@ -108,6 +114,11 @@ module Hive
           [
             detail.fetch(:max_architecture_unmetered_spawns_per_day),
             detail.fetch(:today_architecture_unmetered_spawns)
+          ]
+        when "daily_architecture_review_spawn_limit"
+          [
+            detail.fetch(:max_architecture_review_spawns_per_day),
+            detail.fetch(:today_architecture_review_spawns)
           ]
         when "cycle_agent_spawn_limit"
           [ detail.fetch(:max_agent_spawns_per_cycle), detail.fetch(:cycle_spawns) ]
@@ -148,7 +159,12 @@ module Hive
         if architecture_stage?(stage)
           daily_unmetered_remaining = @limits.fetch("max_architecture_unmetered_spawns_per_day") -
                                       activity.fetch(:architecture_unmetered_spawns)
-          return [ [ cycle_remaining, daily_unmetered_remaining ].min, 0 ].max
+          limits = [ cycle_remaining, daily_unmetered_remaining ]
+          if architecture_review_stage?(stage)
+            limits << @limits.fetch("max_architecture_review_spawns_per_day") -
+                      activity.fetch(:architecture_review_spawns)
+          end
+          return [ limits.min, 0 ].max
         end
 
         daily_remaining = @limits.fetch("max_agent_spawns_per_day") -
@@ -161,8 +177,8 @@ module Hive
         input = integer(usage[:input])
         output = integer(usage[:output])
         cached = integer(usage[:cached])
-        tokens = input + output + cached
-        metered = tokens.positive?
+        tokens = input + output
+        metered = (tokens + cached).positive?
         recorded_stage = metered ? stage : "#{stage}-unmetered"
         @cycle_tokens += tokens
         @cycle_unmetered_spawns += 1 unless metered
@@ -261,6 +277,11 @@ module Hive
              @limits.fetch("max_architecture_unmetered_spawns_per_day")
           return "daily_architecture_unmetered_spawn_limit"
         end
+        if architecture_review_stage?(stage) &&
+           activity.fetch(:architecture_review_spawns) >=
+             @limits.fetch("max_architecture_review_spawns_per_day")
+          return "daily_architecture_review_spawn_limit"
+        end
         if !architecture_stage?(stage) &&
            activity.fetch(:ordinary_agent_spawns) >= @limits.fetch("max_agent_spawns_per_day")
           return "daily_agent_spawn_limit"
@@ -299,12 +320,15 @@ module Hive
             architecture ? :architecture_agent_spawns : :ordinary_agent_spawns
           ),
           today_architecture_unmetered_spawns: activity.fetch(:architecture_unmetered_spawns),
+          today_architecture_review_spawns: activity.fetch(:architecture_review_spawns),
           max_tokens_per_cycle: effective_limit("max_tokens_per_cycle", stage),
           max_tokens_per_day: @limits.fetch("max_tokens_per_day"),
           max_agent_spawns_per_cycle: effective_limit("max_agent_spawns_per_cycle", stage),
           max_agent_spawns_per_day: architecture ? nil : @limits.fetch("max_agent_spawns_per_day"),
           max_architecture_unmetered_spawns_per_day:
-            @limits.fetch("max_architecture_unmetered_spawns_per_day")
+            @limits.fetch("max_architecture_unmetered_spawns_per_day"),
+          max_architecture_review_spawns_per_day:
+            @limits.fetch("max_architecture_review_spawns_per_day")
         }
       end
 
@@ -321,6 +345,10 @@ module Hive
 
       def architecture_stage?(stage)
         stage.to_s.start_with?("refactor-patrol")
+      end
+
+      def architecture_review_stage?(stage)
+        stage.to_s.start_with?("refactor-patrol-review")
       end
 
       def now

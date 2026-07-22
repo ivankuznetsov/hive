@@ -54,7 +54,7 @@ module Hive
         @normalizer = ThesisNormalizer.new(
           project_root: @project_root,
           commands: configured_commands,
-          min_leverage_score: @cfg.dig("refactor_patrol", "min_leverage_score") || 0.25
+          min_leverage_score: @cfg.dig("refactor_patrol", "min_leverage_score") || 0.10
         )
       end
 
@@ -269,7 +269,7 @@ module Hive
       end
 
       def min_leverage_score
-        (@cfg.dig("refactor_patrol", "min_leverage_score") || 0.25).to_f
+        (@cfg.dig("refactor_patrol", "min_leverage_score") || 0.10).to_f
       end
 
       # Proposal relief is bounded at 1.0, so it cannot score higher than the

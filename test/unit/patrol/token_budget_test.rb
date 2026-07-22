@@ -23,6 +23,7 @@ class PatrolTokenBudgetTest < Minitest::Test
         "max_tokens_per_agent" => 60,
         "max_agent_spawns_per_cycle" => 2,
         "max_agent_spawns_per_day" => 3,
+        "max_architecture_review_spawns_per_day" => 8,
         "max_architecture_unmetered_spawns_per_day" => 96,
         "max_budget_usd_per_agent" => 10,
         "architecture_budget_multiplier" => 2,
@@ -52,11 +53,13 @@ class PatrolTokenBudgetTest < Minitest::Test
       assert budget.acquire
       record(budget, now, { input: 70, output: 20, cached: 10 })
       snapshot = budget.snapshot
-      assert_equal 100, snapshot.dig("cycle", "tokens")
-      assert_equal 100, snapshot.dig("today", "tokens")
+      assert_equal 90, snapshot.dig("cycle", "tokens")
+      assert_equal 90, snapshot.dig("today", "tokens")
       assert_equal 2, snapshot.dig("limits", "architecture_budget_multiplier")
       assert_equal 2, snapshot.dig("limits", "fix_budget_multiplier")
 
+      assert budget.acquire
+      record(budget, now, { input: 10, output: 0, cached: 1 })
       refute budget.acquire
       assert_equal "cycle_token_limit", budget.last_exhaustion.fetch(:reason)
       assert_equal(
@@ -215,12 +218,12 @@ class PatrolTokenBudgetTest < Minitest::Test
   def test_architecture_gets_doubled_cycle_and_spawn_limits_but_not_a_looser_native_budget_guard
     with_budget(config(max_tokens_per_day: 300, max_agent_spawns_per_cycle: 4)) do |budget, _dir, now|
       assert budget.acquire(stage: "patrol-review")
-      record(budget, now, { input: 70, output: 20, cached: 10 })
+      record(budget, now, { input: 80, output: 20, cached: 10 })
       refute budget.acquire(stage: "patrol-fix")
 
       assert budget.acquire(stage: "refactor-patrol-review")
       record(
-        budget, now, { input: 70, output: 20, cached: 10 },
+        budget, now, { input: 80, output: 20, cached: 10 },
         stage: "refactor-patrol-review"
       )
       refute budget.acquire(stage: "refactor-patrol-fix")
@@ -285,10 +288,11 @@ class PatrolTokenBudgetTest < Minitest::Test
   def test_nine_architecture_launches_across_fresh_cycles_do_not_consume_ordinary_eight_per_day_quota
     cfg = config(
       max_agent_spawns_per_cycle: 10, max_agent_spawns_per_day: 8,
-      max_tokens_per_cycle: 1_000, max_tokens_per_day: 1_000
+      max_tokens_per_cycle: 1_000, max_tokens_per_day: 1_000,
+      max_architecture_review_spawns_per_day: 8
     )
     with_budget(cfg) do |_initial, dir, now|
-      9.times do
+      8.times do
         architecture = Hive::Patrol::TokenBudget.new(dir, cfg: cfg, clock: -> { now })
         assert architecture.acquire(stage: "refactor-patrol-review")
         record(
@@ -296,6 +300,17 @@ class PatrolTokenBudgetTest < Minitest::Test
           stage: "refactor-patrol-review"
         )
       end
+
+      blocked = Hive::Patrol::TokenBudget.new(dir, cfg: cfg, clock: -> { now })
+      refute blocked.acquire(stage: "refactor-patrol-review")
+      assert_equal "daily_architecture_review_spawn_limit", blocked.last_exhaustion.fetch(:reason)
+      assert_equal(
+        { reason: "daily_architecture_review_spawn_limit", limit: 8, observed: 8 },
+        blocked.resource_exhaustion
+      )
+      assert blocked.acquire(stage: "refactor-patrol-fix"),
+             "the review cap must preserve auto-fix capacity"
+      record(blocked, now, { input: 1, output: 0, cached: 0 }, stage: "refactor-patrol-fix")
 
       ordinary = Hive::Patrol::TokenBudget.new(dir, cfg: cfg, clock: -> { now })
       assert_equal 8, ordinary.remaining_launches(stage: "patrol-review")
@@ -311,6 +326,7 @@ class PatrolTokenBudgetTest < Minitest::Test
         scope: { project_slug: File.basename(dir) }, now: now
       )
       assert_equal 9, activity.fetch(:architecture_agent_spawns)
+      assert_equal 8, activity.fetch(:architecture_review_spawns)
       assert_equal 2, activity.fetch(:ordinary_agent_spawns)
     end
   end

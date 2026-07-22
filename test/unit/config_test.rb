@@ -355,10 +355,11 @@ class ConfigTest < Minitest::Test
 
       assert_equal false, cfg.dig("refactor_patrol", "enabled")
       assert_equal false, cfg.dig("refactor_patrol", "auto_fix", "enabled")
-      assert_equal "codex", cfg.dig("refactor_patrol", "auto_fix", "agent")
+      refute cfg.dig("refactor_patrol", "auto_fix").key?("agent")
       assert_equal false, cfg.dig("refactor_patrol", "issue_filing", "enabled")
       assert_equal 0.25, cfg.dig("refactor_patrol", "issue_filing", "min_leverage_score")
-      assert_equal "claude", cfg.dig("refactor_patrol", "agent")
+      refute cfg.fetch("refactor_patrol").key?("agent")
+      assert_equal 0.10, cfg.dig("refactor_patrol", "min_leverage_score")
       assert_equal "medium", cfg.dig("refactor_patrol", "min_confidence")
       assert_equal 1, cfg.dig("refactor_patrol", "max_theses_per_feature")
       assert_equal 10, cfg.dig("refactor_patrol", "max_theses_per_run")
@@ -465,6 +466,19 @@ class ConfigTest < Minitest::Test
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_includes err.message, "refactor_patrol.min_leverage_score"
       assert_includes err.message, "between 0 and 1"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          model: gpt-5.6-sol
+          effort: HIGH
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol identity"
+      assert_includes err.message, "effort"
     end
 
     with_tmp_dir do |dir|
@@ -843,6 +857,7 @@ class ConfigTest < Minitest::Test
         assert_equal cycle_spawns, cfg.dig("patrol", "max_agent_spawns_per_cycle")
         assert_equal daily_spawns, cfg.dig("patrol", "max_agent_spawns_per_day")
         assert_equal 96, cfg.dig("patrol", "max_architecture_unmetered_spawns_per_day")
+        assert_equal 8, cfg.dig("patrol", "max_architecture_review_spawns_per_day")
         assert_equal agent_budget, cfg.dig("patrol", "max_budget_usd_per_agent")
         assert_equal 2, cfg.dig("patrol", "architecture_budget_multiplier")
         assert_equal 2, cfg.dig("patrol", "fix_budget_multiplier")
@@ -961,6 +976,7 @@ class ConfigTest < Minitest::Test
       "max_tokens_per_agent: 0",
       "max_agent_spawns_per_cycle: 0",
       "max_agent_spawns_per_day: 1.5",
+      "max_architecture_review_spawns_per_day: 0",
       "max_architecture_unmetered_spawns_per_day: 0",
       "architecture_budget_multiplier: 0",
       "fix_budget_multiplier: 0",

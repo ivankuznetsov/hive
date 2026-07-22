@@ -2083,6 +2083,8 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       store = Hive::RefactorPatrol::JobStore.new(dir)
       action_policy = {
         "default_branch" => "main", "auto_fix_agent" => "codex", "min_confidence" => "high",
+        "auto_fix_model" => "gpt-5.6-sol", "auto_fix_effort" => "high",
+        "auto_fix_launcher_identity" => "codex-cli/v1",
         "commands" => { "docs" => nil, "format" => nil, "lint" => nil,
                         "typecheck" => nil, "test" => "bin/test", "public_contract" => nil },
         "caps" => { "single_feature_only" => true, "allow_dependency_bumps" => false,
@@ -2097,6 +2099,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
 
       mutations = [
         ->(value) { value["policy"]["epoch"] = "bad" },
+        ->(value) { value.dig("policy", "action")["auto_fix_model"] = "" },
         ->(value) { value.dig("policy", "action")["min_confidence"] = "certain" },
         ->(value) { value.dig("policy", "action", "commands")["test"] = "" },
         ->(value) { value.dig("policy", "action", "caps")["max_files"] = 0 },

@@ -2898,6 +2898,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
   def config(discovery: true, auto_fix: true, issue_filing: true)
     {
       "default_branch" => "main",
+      "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" },
       "refactor_patrol" => {
         "enabled" => discovery,
         "min_confidence" => "medium",

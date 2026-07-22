@@ -715,7 +715,7 @@ class AgentTest < Minitest::Test
         task: task,
         prompt: "x",
         max_budget_usd: 1,
-        max_tokens: 80,
+        max_tokens: 60,
         timeout_sec: 8,
         status_mode: :exit_code_only
       ).run!
@@ -724,8 +724,8 @@ class AgentTest < Minitest::Test
       assert_operator elapsed, :<, 5, "streamed token guard must stop the process before timeout"
       assert_equal :error, result[:status]
       assert_equal "token_limit", result.dig(:resource_exhaustion, :reason)
-      assert_equal 80, result.dig(:resource_exhaustion, :limit)
-      assert_operator result.dig(:resource_exhaustion, :observed), :>=, 80
+      assert_equal 60, result.dig(:resource_exhaustion, :limit)
+      assert_operator result.dig(:resource_exhaustion, :observed), :>=, 60
       assert_match(/in-flight token limit/, result[:error_message])
       refute result[:timed_out]
     end
@@ -1002,12 +1002,12 @@ class AgentTest < Minitest::Test
       "event" => { "type" => "message_delta" }
     }
 
-    assert_equal 71, meter.observe(
+    assert_equal 41, meter.observe(
       first_start, { input: 40, output: 1, cached: 30, model: "claude-test" }
     )
-    assert_equal 90, meter.observe(delta, { input: 0, output: 20, cached: 0 })
-    assert_equal 90, meter.observe(delta, { input: 0, output: 19, cached: 0 })
-    assert_equal 105, meter.observe(
+    assert_equal 60, meter.observe(delta, { input: 0, output: 20, cached: 0 })
+    assert_equal 60, meter.observe(delta, { input: 0, output: 19, cached: 0 })
+    assert_equal 70, meter.observe(
       first_start, { input: 10, output: 0, cached: 5, model: "claude-test" }
     )
     assert_equal({ input: 50, output: 20, cached: 35, model: "claude-test" }, meter.usage)
@@ -1024,7 +1024,7 @@ class AgentTest < Minitest::Test
     assert_equal 100, meter.observe(
       { "type" => "result" }, { input: 70, output: 20, cached: 0, model: "claude-test" }
     )
-    assert_equal 130, meter.observe(
+    assert_equal 120, meter.observe(
       { "type" => "result" }, { input: 90, output: 30, cached: 10, model: "claude-test" }
     )
     assert_equal({ input: 90, output: 30, cached: 10, model: "claude-test" }, meter.usage)
@@ -1034,11 +1034,11 @@ class AgentTest < Minitest::Test
     meter = Hive::Agent::StreamTokenMeter.new(:codex)
 
     assert_equal 0, meter.observe({ "type" => "item.completed" }, nil)
-    assert_equal 6, meter.observe(
+    assert_equal 3, meter.observe(
       { "type" => "item.completed" },
       { input: 1, output: 2, cached: 3, model: "codex-test" }
     )
-    assert_equal 9, meter.observe(
+    assert_equal 6, meter.observe(
       { "type" => "item.completed" },
       { input: 0, output: 3, cached: 0 }
     )

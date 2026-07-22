@@ -77,10 +77,14 @@ bash "$tmpdir/hive-install.sh"
 | `HIVE_QMD_NPM_PACKAGE` | Override the npm package spec used for QMD install; defaults to `@tobilu/qmd`. |
 | `HIVE_QMD_BIN` | Runtime override read by generated wiki scripts and `hive doctor`; points at an executable `qmd` when PATH or the managed install path is not enough. |
 
-On upgrade, the installer recognizes only Hive-managed wrappers, moves the old
-entry point aside before RubyGems writes the new executable, and restores the
-previous working wrapper if gem installation or executable verification fails.
-Unrecognized files at the install path are not treated as managed wrappers.
+On upgrade, the installer recognizes only Hive-managed wrappers and snapshots
+the existing `hive`, `hv`, and RubyGems shim launchers before RubyGems writes a
+new executable. It stages the replacement shim and wrappers beside their final
+paths, verifies their modes, wrapper marker, and shell syntax, then activates
+them with same-filesystem renames. Recovery stays armed through activation and
+verification, so a gem failure, missing binstub, write/chmod error, or partial
+launcher swap restores the previous bytes and executable modes. Unrecognized
+files at the install path are not treated as managed wrappers.
 
 For an agent-assisted install, paste the repository-root `install.md` into
 Claude Code, Codex, or Pi. It detects the host platform, chooses the channel,

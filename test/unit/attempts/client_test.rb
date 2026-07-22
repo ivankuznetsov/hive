@@ -102,6 +102,39 @@ class AttemptsClientTest < Minitest::Test
     end
   end
 
+  def test_lost_transition_drains_frames_published_during_record_fetch
+    with_tmp_dir do |root|
+      logs_root = File.join(root, "logs")
+      attempt_id = "attempt-lost-tail"
+      log = Hive::Attempts::StreamLog.new(File.join(logs_root, "#{attempt_id}.frames"))
+      log.append("stdout", "before-")
+      log.append("stderr", "warning-")
+      lost = Struct.new(:state).new("lost")
+      store = Object.new
+      store.define_singleton_method(:logs_root) { logs_root }
+      store.define_singleton_method(:fetch) do |_id|
+        log.append("stdout", "lost")
+        log.append("stderr", "tail")
+        log.close
+        lost
+      end
+      stdout = StringIO.new
+      stderr = StringIO.new
+
+      result = Hive::Attempts::Client.new(store: store, poll_interval: 0).attach(
+        attempt_id, stdout: stdout, stderr: stderr
+      )
+
+      assert_equal :lost, result.status
+      assert_equal "before-lost", stdout.string
+      assert_equal "warning-tail", stderr.string
+      assert_equal stdout.string.bytesize, result.stdout_bytes
+      assert_equal "before-".bytesize + "lost".bytesize, result.stdout_bytes
+    ensure
+      log&.close unless log&.closed?
+    end
+  end
+
   private
 
   def with_terminal_attempt

@@ -181,15 +181,21 @@ module Hive
 
       desc "clean", "Remove old e2e run artifacts"
       option :retain_days, type: :string,
-                           default: ENV.fetch("HIVE_E2E_RUNS_RETAIN_DAYS", "7"),
                            desc: "days to retain passing runs (env: HIVE_E2E_RUNS_RETAIN_DAYS)"
       option :retain_failed_days, type: :string,
-                                  default: ENV.fetch("HIVE_E2E_RUNS_RETAIN_FAILED_DAYS", "14"),
                                   desc: "days to retain failed runs (env: HIVE_E2E_RUNS_RETAIN_FAILED_DAYS)"
       option :dry_run, type: :boolean, default: false, desc: "show which runs would be deleted without deleting them"
       def clean
-        retain_days = parse_retention_window(options[:retain_days], "retain_days")
-        retain_failed_days = parse_retention_window(options[:retain_failed_days], "retain_failed_days")
+        retain_days = parse_retention_window(
+          retention_value(:retain_days, namespaced: "HIVE_E2E_RUNS_RETAIN_DAYS",
+                                         legacy: "RUNS_RETAIN_DAYS", fallback: "7"),
+          "retain_days"
+        )
+        retain_failed_days = parse_retention_window(
+          retention_value(:retain_failed_days, namespaced: "HIVE_E2E_RUNS_RETAIN_FAILED_DAYS",
+                                                legacy: "RUNS_RETAIN_FAILED_DAYS", fallback: "14"),
+          "retain_failed_days"
+        )
         result = Sandbox.cleanup_runs(retain_days: retain_days, retain_failed_days: retain_failed_days,
                                       dry_run: options[:dry_run])
         deleted = result.fetch("deleted")
@@ -261,6 +267,16 @@ module Hive
         raise ArgumentError, "#{label} must be >= 0" if days.negative?
 
         days
+      end
+
+      def retention_value(option, namespaced:, legacy:, fallback:)
+        explicit = options[option]
+        return explicit unless explicit.nil?
+        return ENV.fetch(namespaced) if ENV.key?(namespaced)
+        return fallback unless ENV.key?(legacy)
+
+        warn "hive-e2e: #{legacy} is deprecated; use #{namespaced} instead"
+        ENV.fetch(legacy)
       end
     end
   end

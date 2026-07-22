@@ -35,6 +35,12 @@ Hive::Agent.new(
 ## Constants
 
 - `FINAL_MESSAGE_TAIL_BYTES = 64 * 1024` caps the plain stdout/stderr tail retained in `result[:final_message]` when no structured final agent message was parsed.
+- Structured final messages use the same bound without masquerading a prefix
+  as a complete provider result. If streamed chunks or one complete result
+  exceed the cap, `final_message` is `nil`, `final_message_source` is
+  `structured_truncated`, and `final_message_truncated` is true. A later
+  coherent complete result within the bound replaces the stream and clears
+  truncation.
 - `TERMINATION_GRACE_SECONDS = 3` bounds graceful shutdown after a streamed token ceiling, completed-turn ceiling, or completed expected output before Hive escalates the process group to KILL.
 - `COMPLETION_EVENT_GRACE_SECONDS = 3` lets an already-generated Claude `Write`
   and its usage-bearing turn delta settle in either event order; expiry or a

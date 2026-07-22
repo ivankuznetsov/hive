@@ -155,7 +155,7 @@ contracts retain their established unversioned or schema-less shapes.
 | 2 | `ALREADY_INITIALIZED` | idempotent reject of `hive init` on existing project | `Hive::AlreadyInitialized` |
 | 3 | `TASK_IN_ERROR` | a stage agent recorded `:error` (runner itself succeeded) | `Hive::TaskInErrorState` |
 | 4 | `WRONG_STAGE` | `hive run` invoked on an inert stage (e.g. `1-inbox`) | `Hive::WrongStage` |
-| 64 | `USAGE` | EX_USAGE — bad arguments, or setup-agents consent declined/missing without TTY/`--yes` | `Hive::InvalidTaskPath`, `SetupAgents` |
+| 64 | `USAGE` | EX_USAGE — bad arguments, or setup-agents consent declined/missing without TTY/`--yes` | `Hive::UsageError`; `Hive::InvalidTaskPath` for task/path failures and preserved `invalid_task_path` contracts; `SetupAgents` |
 | 70 | `SOFTWARE` | EX_SOFTWARE — git, worktree, agent, or stage-runner failure | `GitError`, `WorktreeError`, `AgentError`, `StageError` |
 | 75 | `TEMPFAIL` | EX_TEMPFAIL — retryable lock contention | `Hive::ConcurrentRunError` |
 | 78 | `CONFIG` | EX_CONFIG — bad project/global config or invalid agent-skills manifest/filter | `Hive::ConfigError`, `SetupAgents` |
@@ -177,6 +177,7 @@ The CLI itself has no auth. Preconditions checked at runtime by individual stage
 
 | Class | Raised by |
 |-------|-----------|
+| `Hive::UsageError` | Generic command-line argument/usage failures that do not imply an invalid task path |
 | `Hive::InvalidTaskPath` | `Task#initialize` for paths not matching the regex |
 | `Hive::ConcurrentRunError` | `Lock.acquire_task_lock` when another live PID owns `.lock` |
 | `Hive::GitError` | `GitOps#run_git!` on non-zero git exit |
@@ -187,6 +188,11 @@ The CLI itself has no auth. Preconditions checked at runtime by individual stage
 | `Hive::TaskInErrorState` | `Commands::Run#report` when the stage marker is `:error` |
 | `Hive::WrongStage` | `Stages::Inbox#run!` (running an agent on an inert stage) |
 | `Hive::AlreadyInitialized` | `Commands::Init#call` when `hive/state` branch already exists |
+
+`Hive::UsageError` is the canonical generic usage exception. `Hive::InvalidTaskPath`
+remains for actual task/path resolution failures and for established structured
+surfaces whose public `error_kind` is `invalid_task_path`; callers must not infer
+that every exit `64` denotes an invalid task path.
 
 A few stage runners still call `warn`/`exit N` directly for non-bug user errors that don't yet have a typed class — most notably `Init#validate_git_repo!` / `validate_clean_tree!` (exit 1), `Execute#run!` for `plan.md missing` (exit 1), and the `OpenPr` / `Finalize` network/auth abort paths. Migrating these to typed exceptions is tracked as Phase 2 follow-up work.
 

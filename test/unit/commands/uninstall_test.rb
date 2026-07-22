@@ -203,6 +203,60 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
+  def test_linux_web_deregistration_ignores_malformed_web_config_and_failure_does_not_abort_cleanup
+    with_xdg_home do
+      unit = File.expand_path("~/.config/systemd/user/hive-web.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "unit\n")
+      FileUtils.mkdir_p(Hive::Paths.cache_home)
+      File.write(File.join(Hive::Paths.cache_home, "remove-me"), "cached\n")
+      out = StringIO.new
+
+      with_replaced_singleton_method(Hive::Config, :load_global_web, lambda {
+        raise Hive::ConfigError, "malformed web config"
+      }) do
+        status = Hive::Commands::Uninstall.new(
+          purge: true, output: out,
+          runner: ->(_argv) { false }, host_os: "linux"
+        ).call
+
+        assert_equal 0, status
+      end
+
+      assert File.exist?(unit), "a failed systemd deregistration must preserve the web unit"
+      refute File.exist?(Hive::Paths.cache_home), "later uninstall cleanup must still run"
+      assert_match(/systemctl --user disable failed for hive-web/, out.string)
+      assert_match(/core uninstall cleanup complete/, out.string)
+    end
+  end
+
+  def test_macos_web_deregistration_ignores_malformed_web_config_and_failure_does_not_abort_cleanup
+    with_xdg_home do
+      plist = File.expand_path("~/Library/LaunchAgents/local.hive-web.plist")
+      FileUtils.mkdir_p(File.dirname(plist))
+      File.write(plist, "plist\n")
+      FileUtils.mkdir_p(Hive::Paths.cache_home)
+      File.write(File.join(Hive::Paths.cache_home, "remove-me"), "cached\n")
+      out = StringIO.new
+
+      with_replaced_singleton_method(Hive::Config, :load_global_web, lambda {
+        raise Hive::ConfigError, "malformed web config"
+      }) do
+        status = Hive::Commands::Uninstall.new(
+          purge: true, output: out,
+          runner: ->(_argv) { false }, host_os: "darwin"
+        ).call
+
+        assert_equal 0, status
+      end
+
+      assert File.exist?(plist), "a failed launchd deregistration must preserve the web plist"
+      refute File.exist?(Hive::Paths.cache_home), "later uninstall cleanup must still run"
+      assert_match(/launchctl unload failed for #{Regexp.escape(plist)}/, out.string)
+      assert_match(/core uninstall cleanup complete/, out.string)
+    end
+  end
+
   def test_linux_bot_disable_failure_leaves_unit_in_place
     with_xdg_home do
       unit = File.expand_path("~/.config/systemd/user/hive-bot.service")

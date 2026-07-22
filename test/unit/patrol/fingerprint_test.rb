@@ -244,9 +244,11 @@ class HivePatrolFingerprintTest < Minitest::Test
     fps = {}
     finding = titled("Dry-run gh allows implicit POST mutations")
     finding.root_cause = "Payload flags silently change a read into a write"
+    finding.target_sha = "a" * 40
     Hive::Patrol::Fingerprint.record_seen(fps, "fp1", state: "open", finding: finding)
     assert_equal "security", fps["fp1"]["category"]
     assert_equal "f", fps["fp1"]["feature_id"]
+    assert_equal "a" * 40, fps["fp1"]["target_sha"]
     assert_includes fps["fp1"]["title_tokens"], "implicit"
     assert_includes fps["fp1"]["root_cause_tokens"], "payload"
   end

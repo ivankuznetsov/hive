@@ -40,6 +40,7 @@ class HivePatrolFindingRegistryTest < Minitest::Test
       ).admit([ current ])
 
       assert_empty result.findings
+      assert_empty result.persistable_findings
       assert_equal "semantic_duplicate", result.skipped.first.fetch("reason")
       assert_equal "old", result.skipped.first.fetch("canonical_finding_id")
       refute File.exist?(File.join(store.root, "findings", "new.json"))
@@ -60,6 +61,7 @@ class HivePatrolFindingRegistryTest < Minitest::Test
       result = registry.admit([ current ])
 
       assert_equal [ current ], result.findings
+      assert_equal [ current ], result.persistable_findings
       old = store.findings.find { |item| item.id == "old" }
       assert_equal "superseded", old.lifecycle_state
       assert_equal "new", old.superseded_by
@@ -70,18 +72,97 @@ class HivePatrolFindingRegistryTest < Minitest::Test
     end
   end
 
-  def test_terminal_record_suppresses_a_reworded_recurrence
+  def test_shipping_retry_reuses_same_target_active_record_without_persisting_the_duplicate
     with_tmp_dir do |dir|
       store = Hive::Patrol::StateStore.new(dir)
       store.ensure!
-      store.write_finding(finding(id: "old", target_sha: "a" * 40, state: "resolved"))
+      existing = finding(id: "old", target_sha: "a" * 40, state: "active")
+      store.write_finding(existing)
 
       result = Hive::Patrol::FindingRegistry.new(
-        state: store, target_sha: "b" * 40
-      ).admit([ finding(id: "new") ])
+        state: store, target_sha: "a" * 40
+      ).admit([ finding(id: "new") ], retry_active: true)
 
-      assert_empty result.findings
-      assert_equal "old", result.skipped.first.fetch("canonical_finding_id")
+      assert_equal [ "old" ], result.findings.map(&:id)
+      assert_empty result.persistable_findings
+      assert_empty result.skipped
+      assert_equal [ "old" ], store.findings.map(&:id)
+    end
+  end
+
+  def test_same_target_terminal_record_still_suppresses_a_duplicate
+    %w[resolved rejected].each do |terminal_state|
+      with_tmp_dir do |dir|
+        store = Hive::Patrol::StateStore.new(dir)
+        store.ensure!
+        store.write_finding(finding(id: "old", target_sha: "a" * 40, state: terminal_state))
+
+        result = Hive::Patrol::FindingRegistry.new(
+          state: store, target_sha: "a" * 40
+        ).admit([ finding(id: "new") ], retry_active: true)
+
+        assert_empty result.findings
+        assert_equal "old", result.skipped.first.fetch("canonical_finding_id")
+      end
+    end
+  end
+
+  def test_new_target_admits_recurrence_after_resolved_or_rejected_record
+    %w[resolved rejected].each do |terminal_state|
+      with_tmp_dir do |dir|
+        store = Hive::Patrol::StateStore.new(dir)
+        store.ensure!
+        store.write_finding(finding(id: "old", target_sha: "a" * 40, state: terminal_state))
+        recurrence = finding(id: "new")
+
+        result = Hive::Patrol::FindingRegistry.new(
+          state: store, target_sha: "b" * 40
+        ).admit([ recurrence ], retry_active: true)
+
+        assert_equal [ recurrence ], result.findings
+        assert_equal [ recurrence ], result.persistable_findings
+        assert_empty result.skipped
+        assert_equal "active", recurrence.lifecycle_state
+        assert_equal "recurrence_after_terminal", recurrence.lifecycle_reason
+        assert_equal "b" * 40, recurrence.target_sha
+      end
+    end
+  end
+
+  def test_old_terminal_ledger_does_not_redisposition_a_newer_recurrence
+    with_tmp_dir do |dir|
+      store = Hive::Patrol::StateStore.new(dir)
+      store.ensure!
+      old = finding(id: "old", target_sha: "a" * 40, state: "resolved")
+      store.write_finding(old)
+      recurrence = finding(id: "new")
+      recurrence.fingerprint = old.fingerprint
+      registry = Hive::Patrol::FindingRegistry.new(state: store, target_sha: "b" * 40)
+      result = registry.admit([ recurrence ], retry_active: true)
+      store.write_finding(result.persistable_findings.fetch(0))
+      registry = Hive::Patrol::FindingRegistry.new(state: store, target_sha: "b" * 40)
+
+      registry.reconcile!(
+        fingerprints: {
+          old.fingerprint => { "state" => "merged", "target_sha" => "a" * 40 }
+        },
+        dismissed: {}
+      )
+
+      states = store.findings.to_h { |item| [ item.id, item.lifecycle_state ] }
+      assert_equal "resolved", states.fetch("old")
+      assert_equal "active", states.fetch("new")
+
+      registry.reconcile!(
+        fingerprints: {
+          old.fingerprint => { "state" => "merged", "target_sha" => "b" * 40 }
+        },
+        dismissed: {}
+      )
+
+      recurrence_state = store.findings.find { |item| item.id == "new" }.lifecycle_state
+      assert_equal "resolved", recurrence_state,
+                   "terminal evidence for the recurrence's own target must still close it"
     end
   end
 

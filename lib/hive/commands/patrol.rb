@@ -85,7 +85,7 @@ module Hive
         fingerprints = state.fingerprints
         registry = Hive::Patrol::FindingRegistry.new(state: state, target_sha: target_sha)
         registry.reconcile!(fingerprints: fingerprints, dismissed: dismissed)
-        admission = registry.admit(findings)
+        admission = registry.admit(findings, retry_active: !@dry_run)
         findings = admission.findings
         candidates, skipped = Hive::Patrol::CandidateSelector.new(
           cfg: cfg,
@@ -96,7 +96,7 @@ module Hive
         # Persist only after target binding, semantic deduplication, lifecycle
         # admission, and portfolio scoring. The reviewer itself is a pure
         # producer and cannot accumulate untriaged duplicates.
-        findings.each { |finding| state.write_finding(finding) }
+        admission.persistable_findings.each { |finding| state.write_finding(finding) }
         write_selection_audit(state, candidates, skipped)
 
         # `max_prs_per_cycle` caps PRs opened per scan, not fix candidates.

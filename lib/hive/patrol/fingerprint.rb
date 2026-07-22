@@ -99,6 +99,7 @@ module Hive
         if finding
           entry["category"] = finding.category.to_s
           entry["feature_id"] = finding.feature_id.to_s
+          entry["target_sha"] = finding.target_sha.to_s unless finding.target_sha.to_s.empty?
           entry["title_tokens"] = title_tokens(finding)
           root_cause = semantic_tokens(finding)
           entry["root_cause_tokens"] = root_cause unless root_cause.empty?

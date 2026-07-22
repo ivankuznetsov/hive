@@ -394,6 +394,8 @@ checksums_url="${release_base}/SHA256SUMS"
 sig_url="${release_base}/SHA256SUMS.sig"
 cert_url="${release_base}/SHA256SUMS.pem"
 installed_bin="${gem_home}/bin/hive"
+hv_installed_bin="${gem_home}/bin/hv"
+installed_shim="${gem_home}/shims/hive"
 link_path="${bin_home}/hive"
 hv_path="${bin_home}/hv"
 
@@ -425,7 +427,47 @@ ruby_preflight
 command -v cosign >/dev/null 2>&1 || die "missing installer prerequisite 'cosign'"
 
 tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
+launcher_rollback_armed=0
+launcher_wrapper_had_original=0
+launcher_hv_had_original=0
+launcher_shim_had_original=0
+launcher_wrapper_backup="${tmpdir}/launcher-hive.backup"
+launcher_hv_backup="${tmpdir}/launcher-hv.backup"
+launcher_shim_backup="${tmpdir}/launcher-shim.backup"
+staged_wrapper=""
+staged_hv=""
+staged_shim=""
+
+restore_launcher_path() {
+  local path="$1" had_original="$2" backup="$3"
+
+  rm -f "$path"
+  if [[ "$had_original" -eq 1 ]]; then
+    cp -pP "$backup" "$path"
+  fi
+}
+
+cleanup() {
+  local rc=$?
+
+  # Keep recovery armed until all three launcher files are installed and
+  # verified. A failure in gem install, shim staging, wrapper construction,
+  # chmod, or activation restores the exact pre-install bytes and modes.
+  if [[ "$launcher_rollback_armed" -eq 1 ]]; then
+    set +e
+    restore_launcher_path "$installed_bin" "$launcher_wrapper_had_original" "$launcher_wrapper_backup"
+    restore_launcher_path "$hv_installed_bin" "$launcher_hv_had_original" "$launcher_hv_backup"
+    restore_launcher_path "$installed_shim" "$launcher_shim_had_original" "$launcher_shim_backup"
+    rm -f "$staged_wrapper" "$staged_hv" "$staged_shim"
+    warn "launcher update failed; restored the previous wrapper and shim state"
+  fi
+
+  rm -rf "$tmpdir"
+  trap - EXIT
+  exit "$rc"
+}
+
+trap cleanup EXIT
 
 download_with_status "$gem_url" "${tmpdir}/${gem_file}" "release gem"
 download_with_status "$checksums_url" "${tmpdir}/SHA256SUMS" "SHA256SUMS"
@@ -457,15 +499,28 @@ expected="$(printf '%s\n' "$expected_line" | awk '{print $1}')"
 mkdir -p "$bin_home" "$gem_home"
 
 # RubyGems refuses to overwrite the managed bash wrapper left by an earlier
-# installer run. Move only wrappers we can identify as ours out of the bindir;
-# if installation fails, restore the previous working entry point.
-previous_wrapper=""
+# installer run. Snapshot every launcher path before the first mutation, then
+# remove only a wrapper we can identify as ours from the bindir. The EXIT trap
+# restores these snapshots until the new wrapper and shim set is verified.
+mkdir -p "${gem_home}/bin" "${gem_home}/shims"
+if [[ -e "$installed_bin" || -L "$installed_bin" ]]; then
+  cp -pP "$installed_bin" "$launcher_wrapper_backup"
+  launcher_wrapper_had_original=1
+fi
+if [[ -e "$hv_installed_bin" || -L "$hv_installed_bin" ]]; then
+  cp -pP "$hv_installed_bin" "$launcher_hv_backup"
+  launcher_hv_had_original=1
+fi
+if [[ -e "$installed_shim" || -L "$installed_shim" ]]; then
+  cp -pP "$installed_shim" "$launcher_shim_backup"
+  launcher_shim_had_original=1
+fi
+launcher_rollback_armed=1
+
 if [[ -f "$installed_bin" ]] && {
   grep -Fq "hive-managed: install-wrapper/v1" "$installed_bin" ||
     { grep -Fq 'export HIVE_INVOKED_BIN=' "$installed_bin" && grep -Fq '/shims/hive' "$installed_bin"; }
 }; then
-  previous_wrapper="${tmpdir}/hive-wrapper"
-  cp -p "$installed_bin" "$previous_wrapper"
   rm -f "$installed_bin"
 fi
 
@@ -479,16 +534,10 @@ if ! GEM_HOME="$gem_home" gem install \
   --bindir "${gem_home}/bin" \
   --no-document \
   --source https://rubygems.org; then
-  if [[ -n "$previous_wrapper" && -f "$previous_wrapper" ]]; then
-    mv "$previous_wrapper" "$installed_bin"
-  fi
   die "gem install failed for ${gem_file}"
 fi
 
 if [[ ! -x "$installed_bin" ]]; then
-  if [[ -n "$previous_wrapper" && -f "$previous_wrapper" ]]; then
-    mv "$previous_wrapper" "$installed_bin"
-  fi
   die "gem install completed but no executable at ${installed_bin}"
 fi
 
@@ -499,10 +548,14 @@ fi
 # include $gem_home (which is our common case under XDG_DATA_HOME/hive).
 # We replace the shim with a tiny bash wrapper that exports the right
 # GEM_PATH before exec'ing the ruby shim under a sub-bindir. This
-# keeps the gem-installed scripts intact for `hive update` to refresh.
-mkdir -p "${gem_home}/shims"
-mv "${gem_home}/bin/hive" "${gem_home}/shims/hive"
-cat > "${gem_home}/bin/hive" <<WRAPPER
+# keeps the gem-installed scripts intact for `hive update` to refresh. Build
+# every replacement beside its destination, then atomically rename it into
+# place. Recovery remains armed until the activated set passes verification.
+staged_wrapper="${gem_home}/bin/.hive-wrapper.$$"
+staged_hv="${gem_home}/bin/.hv-wrapper.$$"
+staged_shim="${gem_home}/shims/.hive-shim.$$"
+mv "${gem_home}/bin/hive" "$staged_shim"
+cat > "$staged_wrapper" <<WRAPPER
 #!/usr/bin/env bash
 # hive-managed: install-wrapper/v1
 export GEM_HOME="${gem_home}"
@@ -510,14 +563,30 @@ export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
 export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"
 exec "${gem_home}/shims/hive" "\$@"
 WRAPPER
-cat > "${gem_home}/bin/hv" <<WRAPPER
+cat > "$staged_hv" <<WRAPPER
 #!/usr/bin/env bash
 export GEM_HOME="${gem_home}"
 export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
 export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"
 exec "${gem_home}/bin/hive" "\$@"
 WRAPPER
-chmod +x "${gem_home}/bin/hive" "${gem_home}/bin/hv"
+chmod +x "$staged_shim" "$staged_wrapper" "$staged_hv"
+bash -n "$staged_wrapper" "$staged_hv"
+grep -Fq "hive-managed: install-wrapper/v1" "$staged_wrapper"
+
+mv -f "$staged_shim" "$installed_shim"
+staged_shim=""
+mv -f "$staged_wrapper" "$installed_bin"
+staged_wrapper=""
+mv -f "$staged_hv" "$hv_installed_bin"
+staged_hv=""
+
+[[ -x "$installed_shim" ]] || die "installed hive shim is not executable at ${installed_shim}"
+[[ -x "$installed_bin" ]] || die "installed hive wrapper is not executable at ${installed_bin}"
+[[ -x "$hv_installed_bin" ]] || die "installed hv wrapper is not executable at ${hv_installed_bin}"
+bash -n "$installed_bin" "$hv_installed_bin"
+grep -Fq "hive-managed: install-wrapper/v1" "$installed_bin"
+launcher_rollback_armed=0
 
 install_qmd
 

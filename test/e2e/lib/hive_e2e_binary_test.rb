@@ -24,6 +24,18 @@ class E2EBinaryTest < Minitest::Test
     FileUtils.rm_f(path) if path
   end
 
+  def create_retention_run(runs_dir, failed: 0, age_days: 1)
+    run_dir = File.join(runs_dir, "2026-07-22T10-00-00Z-1234-abcd")
+    FileUtils.mkdir_p(run_dir)
+    File.write(
+      File.join(run_dir, "report.json"),
+      JSON.generate("status" => "complete", "summary" => { "failed" => failed })
+    )
+    old = Time.now - (age_days * 86_400)
+    File.utime(old, old, run_dir)
+    run_dir
+  end
+
   def test_list_json_emits_parseable_envelope_with_schema_version_1
     out, err, status = Open3.capture3(hive_e2e, "list", "--json")
     assert status.success?, "bin/hive-e2e list --json should exit 0, stderr was: #{err}"
@@ -130,16 +142,31 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
-  def test_clean_retention_environment_is_hive_e2e_namespaced
+  def test_clean_accepts_legacy_retention_environment_with_deprecation_warning
     Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
-      run_dir = File.join(tmp_runs_dir, "2026-07-22T10-00-00Z-1234-abcd")
-      FileUtils.mkdir_p(run_dir)
-      File.write(
-        File.join(run_dir, "report.json"),
-        JSON.generate("status" => "complete", "summary" => { "failed" => 0 })
+      create_retention_run(tmp_runs_dir)
+
+      out, err, status = Open3.capture3(
+        {
+          "HIVE_E2E_RUNS_DIR" => tmp_runs_dir,
+          "HIVE_E2E_RUNS_RETAIN_DAYS" => nil,
+          "RUNS_RETAIN_DAYS" => "2"
+        },
+        hive_e2e, "clean", "--json"
       )
-      old = Time.now - 86_400
-      File.utime(old, old, run_dir)
+
+      assert status.success?, err
+      payload = parse_single_json_document(out)
+      assert_equal 0, payload.fetch("deleted")
+      assert_equal 1, payload.fetch("kept")
+      assert_equal 2, payload.dig("kept_runs", 0, "retain_days")
+      assert_match(/RUNS_RETAIN_DAYS is deprecated; use HIVE_E2E_RUNS_RETAIN_DAYS instead/, err)
+    end
+  end
+
+  def test_clean_prefers_namespaced_retention_environment_when_both_are_set
+    Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
+      create_retention_run(tmp_runs_dir)
 
       out, err, status = Open3.capture3(
         {
@@ -155,6 +182,55 @@ class E2EBinaryTest < Minitest::Test
       assert_equal 0, payload.fetch("deleted")
       assert_equal 1, payload.fetch("kept")
       assert_equal 2, payload.dig("kept_runs", 0, "retain_days")
+      refute_match(/deprecated/, err)
+    end
+  end
+
+  def test_clean_prefers_namespaced_failed_retention_environment_when_legacy_conflicts
+    Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
+      create_retention_run(tmp_runs_dir, failed: 1)
+
+      out, err, status = Open3.capture3(
+        {
+          "HIVE_E2E_RUNS_DIR" => tmp_runs_dir,
+          "RUNS_RETAIN_FAILED_DAYS" => "0",
+          "HIVE_E2E_RUNS_RETAIN_FAILED_DAYS" => "2"
+        },
+        hive_e2e, "clean", "--json", "--dry-run"
+      )
+
+      assert status.success?, err
+      payload = parse_single_json_document(out)
+      assert_equal 0, payload.fetch("deleted")
+      assert_equal 1, payload.fetch("kept")
+      assert_equal 2, payload.dig("kept_runs", 0, "retain_days")
+      refute_match(/deprecated/, err)
+    end
+  end
+
+  def test_clean_dry_run_json_reports_legacy_retention_days_without_deleting
+    Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
+      run_dir = create_retention_run(tmp_runs_dir)
+
+      out, err, status = Open3.capture3(
+        {
+          "HIVE_E2E_RUNS_DIR" => tmp_runs_dir,
+          "HIVE_E2E_RUNS_RETAIN_DAYS" => nil,
+          "RUNS_RETAIN_DAYS" => "0"
+        },
+        hive_e2e, "clean", "--json", "--dry-run"
+      )
+
+      assert status.success?, err
+      assert_equal 1, out.scan(/^\{/).count
+      payload = parse_single_json_document(out)
+      assert_equal true, payload.fetch("dry_run")
+      assert_equal 1, payload.fetch("deleted")
+      assert_equal 0, payload.fetch("kept")
+      assert_equal "would_delete", payload.dig("deleted_runs", 0, "reason")
+      assert_equal 0, payload.dig("deleted_runs", 0, "retain_days")
+      assert_path_exists run_dir
+      assert_match(/RUNS_RETAIN_DAYS is deprecated; use HIVE_E2E_RUNS_RETAIN_DAYS instead/, err)
     end
   end
 

@@ -82,7 +82,8 @@ module Hive
 
         {
           exit_code: exit_code(status),
-          final_message: messages.value
+          final_message: messages.value,
+          final_message_truncated: messages.truncated?
         }
       ensure
         stdin_file&.close

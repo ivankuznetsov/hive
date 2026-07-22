@@ -26,6 +26,7 @@ hive uninstall --force-purge-state
 3. Deregister platform service units for the daemon, opt-in bot, and Hive Web using each installer's own service name and target path:
    - macOS: unload and remove the matching `local.hive-*.plist` files.
    - Linux: disable/stop the matching user services, remove their `~/.config/systemd/user/*.service` units, then daemon-reload. Each teardown warns and continues on failure so one stuck service manager never aborts the rest.
+   - Hive Web identity lookup uses an explicit inert installer config, so a malformed global `web:` section cannot abort identity-only deregistration or prevent later cleanup.
 4. Remove XDG config/cache and versioned data payload directories, unless `HIVE_HOME` collapses config/data/state/cache onto one path.
 5. Remove user symlinks `hive` and `hv` under `${XDG_BIN_HOME:-~/.local/bin}` when they are symlinks.
 6. Preserve or remove state according to `--purge` / `--force-purge-state`.
@@ -40,7 +41,7 @@ When `HIVE_HOME` is set, `Hive::Paths.hive_home_collapsed?` is true. In that sha
 
 ## Tests
 
-- `test/unit/commands/uninstall_test.rb` covers daemon/bot/web service removal, state-preserving defaults, `--purge`, `--force-purge-state`, symlink refusal, collapsed `HIVE_HOME`, user symlink cleanup, and daemon pid termination.
+- `test/unit/commands/uninstall_test.rb` covers daemon/bot/web service removal, malformed-web-config isolation, Linux/macOS manager-failure continuation, state-preserving defaults, `--purge`, `--force-purge-state`, symlink refusal, collapsed `HIVE_HOME`, user symlink cleanup, and daemon pid termination.
 - `test/unit/paths_test.rb` covers XDG path resolution and legacy registry migration helpers used by install/uninstall surfaces.
 
 ## Backlinks

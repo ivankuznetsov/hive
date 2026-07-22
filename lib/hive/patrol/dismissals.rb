@@ -38,6 +38,7 @@ module Hive
               # recognise a re-worded re-file of a dismissed issue.
               "category" => entry["category"],
               "feature_id" => entry["feature_id"],
+              "target_sha" => entry["target_sha"],
               "title_tokens" => entry["title_tokens"],
               "root_cause_tokens" => entry["root_cause_tokens"]
             }.compact

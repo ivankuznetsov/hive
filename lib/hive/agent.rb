@@ -447,6 +447,7 @@ module Hive
         log_file: log_file,
         final_message: message,
         final_message_source: messages.source,
+        final_message_truncated: messages.truncated?,
         limit_text: limit_text,
         usage: reported_usage,
         model: reported_usage&.dig(:model),

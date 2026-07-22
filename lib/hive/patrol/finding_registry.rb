@@ -7,7 +7,7 @@ module Hive
     # only durable after it has an exact scan SHA and has been compared with
     # every prior finding, including records that never reached a PR ledger.
     class FindingRegistry
-      Result = Struct.new(:findings, :skipped, keyword_init: true)
+      Result = Struct.new(:findings, :persistable_findings, :skipped, keyword_init: true)
       IndexedFinding = Struct.new(:finding, :signature, keyword_init: true)
 
       def initialize(state:, target_sha:, clock: -> { Time.now })
@@ -20,29 +20,42 @@ module Hive
         @existing.each { |finding| index(finding) }
       end
 
-      def admit(findings, persist: true)
+      def admit(findings, persist: true, retry_active: false)
         admitted = []
+        persistable = []
         skipped = []
+        returned_ids = {}
 
         Array(findings).each do |finding|
           finding.target_sha = @target_sha
           matches = semantic_matches(finding)
-          terminal = matches.find { |candidate| %w[resolved rejected].include?(lifecycle(candidate)) }
-          same_target = matches.find { |candidate| candidate.target_sha.to_s.downcase == @target_sha }
+          same_target = matches.select { |candidate| candidate.target_sha.to_s.downcase == @target_sha }
+          canonical = same_target.find { |candidate| lifecycle(candidate) != "active" } || same_target.first
 
-          if terminal || same_target
-            canonical = terminal || same_target
-            skipped << skip_entry(finding, canonical)
+          if canonical
+            if retry_active && lifecycle(canonical) == "active" && !returned_ids[canonical.id.to_s]
+              admitted << canonical
+              returned_ids[canonical.id.to_s] = true
+            else
+              skipped << skip_entry(finding, canonical)
+            end
             next
           end
 
+          terminal_recurrence = matches.any? do |candidate|
+            %w[resolved rejected].include?(lifecycle(candidate))
+          end
           supersede_active_matches(matches, finding, persist: persist)
-          activate(finding)
-          admitted << finding
+          activate(finding, reason: terminal_recurrence ? "recurrence_after_terminal" : "admitted")
+          unless returned_ids[finding.id.to_s]
+            admitted << finding
+            returned_ids[finding.id.to_s] = true
+          end
+          persistable << finding
           index(finding)
         end
 
-        Result.new(findings: admitted, skipped: skipped)
+        Result.new(findings: admitted, persistable_findings: persistable, skipped: skipped)
       end
 
       # PR/dismissal ledgers are authoritative terminal evidence. Reconcile
@@ -53,10 +66,12 @@ module Hive
           next if lifecycle(finding) == "superseded"
 
           fingerprint = finding.fingerprint.to_s
-          ledger_state = fingerprints.dig(fingerprint, "state").to_s
-          if %w[merged resolved].include?(ledger_state)
+          ledger = fingerprints[fingerprint]
+          ledger_state = ledger.is_a?(Hash) ? ledger["state"].to_s : ""
+          dismissal = dismissed[fingerprint]
+          if %w[merged resolved].include?(ledger_state) && ledger_applies?(ledger, finding)
             transition(finding, "resolved", "patrol_pr_#{ledger_state}", persist: persist)
-          elsif dismissed.key?(fingerprint)
+          elsif dismissal.is_a?(Hash) && ledger_applies?(dismissal, finding)
             transition(finding, "rejected", "patrol_pr_dismissed", persist: persist)
           end
         end
@@ -79,9 +94,9 @@ module Hive
         end
       end
 
-      def activate(finding)
+      def activate(finding, reason:)
         finding.lifecycle_state = "active"
-        finding.lifecycle_reason = "admitted"
+        finding.lifecycle_reason = reason
         finding.lifecycle_updated_at = @clock.call.utc.iso8601
         finding.superseded_by = nil
       end
@@ -128,6 +143,15 @@ module Hive
 
       def lifecycle(finding)
         finding.lifecycle_state.to_s.empty? ? "active" : finding.lifecycle_state.to_s
+      end
+
+      def ledger_applies?(entry, finding)
+        ledger_target = entry["target_sha"].to_s.downcase
+        if ledger_target.empty?
+          return finding.lifecycle_reason.to_s != "recurrence_after_terminal"
+        end
+
+        ledger_target == finding.target_sha.to_s.downcase
       end
 
       def skip_entry(finding, canonical)

@@ -57,7 +57,11 @@ module Hive
 
       def deregister_web
         require "hive/commands/web/service_installer"
-        deregister_unit(Hive::Commands::Web::ServiceInstaller.new(host_os: @host_os))
+        # Uninstall only needs the installer's platform-derived identity.
+        # Supplying an inert config keeps malformed global web settings from
+        # aborting teardown before the unit can be deregistered and the later
+        # config/cache/data cleanup can run.
+        deregister_unit(Hive::Commands::Web::ServiceInstaller.new(host_os: @host_os, config: {}))
       end
 
       # Deregister a per-user autostart unit using the installer's OWN

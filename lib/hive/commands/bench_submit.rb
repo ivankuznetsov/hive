@@ -2,6 +2,7 @@
 
 require "open3"
 require "json"
+require "pathname"
 require "hive"
 require "hive/config"
 require "hive/git_ops"
@@ -28,7 +29,7 @@ module Hive
       class UsageError < Hive::UsageError; end
 
       # extractor: ->(task_dir:, repo:, repo_path:, out_dir:) => entry_dir
-      # pr_opener: ->(bench_path:, entry_dir:, slug:) => pr_url
+      # pr_opener: ->(bench_path:, entry_dir:, slug:) => pr_url or submission details
       # secret_preflight: ->(paths) => [findings]
       def initialize(slug, project: nil, bench_path: nil, repo: DEFAULT_REPO, json: false,
                      extractor: nil, pr_opener: nil, secret_preflight: nil,
@@ -121,6 +122,7 @@ module Hive
 
       def open_pr_via_gh(bench_path:, entry_dir:, slug:)
         branch = "submit-#{slug}"
+        entry = repository_entry(bench_path, entry_dir)
         original_branch = optional_git_output(bench_path, "branch", "--show-current")
         original_head = git_output(bench_path, "rev-parse", "HEAD")
         base_ref = remote_default_ref(bench_path)
@@ -128,6 +130,7 @@ module Hive
           run_git(bench_path, "checkout", "-b", branch, base_ref)
           run_git(bench_path, "add", entry_dir)
           run_git(bench_path, "commit", "-qm", "corpus: add #{slug}")
+          commit_sha = git_output(bench_path, "rev-parse", "HEAD")
           run_git(bench_path, "push", "-q", "-u", "origin", branch)
           out, err, status = Open3.capture3("gh", "pr", "create", "-R", @repo,
                                             "--title", "corpus: add #{slug}",
@@ -135,7 +138,12 @@ module Hive
                                             chdir: bench_path)
           raise UsageError, "gh pr create failed: #{err.strip}" unless status.success?
 
-          out.strip
+          {
+            "pr_url" => out.strip,
+            "entry" => entry,
+            "submission_ref" => "refs/heads/#{branch}",
+            "commit_sha" => commit_sha
+          }
         ensure
           target = original_branch.empty? ? original_head : original_branch
           run_git(bench_path, "checkout", "-q", target)
@@ -164,6 +172,15 @@ module Hive
         branch ? "origin/#{branch}" : raise(UsageError, "cannot resolve hive-bench origin default branch")
       end
 
+      def repository_entry(bench_path, entry_dir)
+        root = Pathname.new(File.expand_path(bench_path))
+        entry = Pathname.new(File.expand_path(entry_dir))
+        relative = entry.relative_path_from(root).to_s
+        raise UsageError, "corpus entry is outside the hive-bench checkout: #{entry_dir}" if relative == ".." || relative.start_with?("../")
+
+        relative
+      end
+
       # Run hive-bench's own SecretScan (one source of truth) in a child ruby —
       # array-form, no shell — over the spec paths. Each finding comes back as
       # "<label> in <file>:<line>". Refuses if the canonical scanner is absent,
@@ -189,10 +206,18 @@ module Hive
         out.each_line.map(&:strip).reject(&:empty?)
       end
 
-      def report(entry_dir, pr_url)
+      def report(entry_dir, submission)
+        details = submission.is_a?(Hash) ? submission : { "pr_url" => submission }
+        pr_url = details.fetch("pr_url")
         if @json
-          puts JSON.generate("schema" => "hive-bench-submit", "slug" => @slug,
-                             "entry" => entry_dir, "pr_url" => pr_url)
+          payload = {
+            "schema" => "hive-bench-submit",
+            "slug" => @slug,
+            "entry" => details.fetch("entry") { repository_entry(@bench_path, entry_dir) },
+            "pr_url" => pr_url
+          }
+          %w[submission_ref commit_sha].each { |key| payload[key] = details[key] if details.key?(key) }
+          puts JSON.generate(payload)
         else
           puts "Submitted #{@slug} → #{pr_url}"
         end

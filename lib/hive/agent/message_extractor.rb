@@ -14,18 +14,19 @@ module Hive
           @source = nil
         end
 
+        def truncated? = @source == :structured_truncated
+
         def observe(data, raw_line: nil)
           message = MessageExtractor.extract(data)
           if message
             if MessageExtractor.streaming_text_event?(data)
-              @structured = +"" unless @streaming
+              reset_structured_stream unless @streaming
               append_structured(message)
               @streaming = true
             else
-              @structured = bounded_prefix(message)
+              replace_structured(message)
               @streaming = false
             end
-            @source = :structured
           elsif data.nil? && raw_line
             @plain_tail << raw_line
             @plain_tail = @plain_tail.byteslice(-@max_bytes, @max_bytes) || @plain_tail
@@ -34,6 +35,7 @@ module Hive
         end
 
         def value
+          return nil if truncated?
           return @structured unless @structured.nil?
 
           plain = @plain_tail.strip
@@ -43,14 +45,30 @@ module Hive
 
         private
 
-        def append_structured(message)
-          remaining = @max_bytes - @structured.bytesize
-          @structured << bounded_prefix(message, remaining) if remaining.positive?
+        def reset_structured_stream
+          @structured = +""
+          @source = :structured
         end
 
-        def bounded_prefix(value, limit = @max_bytes)
-          prefix = value.to_s.byteslice(0, [ limit, 0 ].max).to_s
-          prefix.valid_encoding? ? prefix : prefix.scrub
+        def append_structured(message)
+          return if truncated?
+
+          remaining = @max_bytes - @structured.bytesize
+          return mark_structured_truncated if message.bytesize > remaining
+
+          @structured << message
+        end
+
+        def replace_structured(message)
+          return mark_structured_truncated if message.bytesize > @max_bytes
+
+          @structured = +message
+          @source = :structured
+        end
+
+        def mark_structured_truncated
+          @structured = nil
+          @source = :structured_truncated
         end
       end
 

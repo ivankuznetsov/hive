@@ -2,7 +2,7 @@ require "test_helper"
 
 class TestHelperTest < ActiveSupport::TestCase
   test "test projects cannot install host llm wiki timers" do
-    assert_equal ENV.fetch("HIVE_TEST_HOME_ROOT"), File.dirname(ENV.fetch("HOME"))
+    assert_equal ENV.fetch("HIVE_TEST_HOME_ROOT"), File.dirname(ENV.fetch("HIVE_HOME"))
     assert_equal "1", ENV.fetch("HIVE_SKIP_LLM_WIKI_SCHEDULER")
     assert_equal "1", ENV.fetch("HIVE_SKIP_LLM_WIKI_SYSTEMCTL")
     assert_equal "1", ENV.fetch("HIVE_SKIP_LLM_WIKI_POST_COMMIT")

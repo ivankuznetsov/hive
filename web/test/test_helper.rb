@@ -6,12 +6,10 @@ require "tmpdir"
 ENV["RAILS_ENV"] ||= "test"
 ENV["HIVE_TEST_HOME_ROOT"] = Dir.mktmpdir("hive-web-test")
 ENV["HIVE_HOME"] = File.join(ENV["HIVE_TEST_HOME_ROOT"], "hive-home")
-ENV["HOME"] = File.join(ENV["HIVE_TEST_HOME_ROOT"], "home")
 ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"] = "1"
 ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"] = "1"
 ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"] = "1"
 FileUtils.mkdir_p(ENV["HIVE_HOME"])
-FileUtils.mkdir_p(ENV["HOME"])
 
 require_relative "../config/environment"
 require "rails/test_help"

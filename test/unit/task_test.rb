@@ -25,6 +25,30 @@ class TaskTest < Minitest::Test
     end
   end
 
+  def test_managed_task_preserves_unsupported_project_config_error
+    with_tmp_dir do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
+      task = Hive::Task.allocate
+      task.instance_variable_set(:@project_root, dir)
+      task.instance_variable_set(:@hive_state_path, hive_state)
+      task.instance_variable_set(:@meta, {
+        workflow: "demo",
+        workflow_commit: "a" * 40,
+        workflow_manifest_digest: "b" * 64,
+        workflow_configuration_digest: nil
+      })
+      store = Object.new
+      store.define_singleton_method(:workflow) { |*| flunk "managed workflow lookup must not run with invalid config" }
+
+      with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
+        error = assert_raises(Hive::UnsupportedProjectConfigError) { task.send(:resolve_workflow) }
+        assert_includes error.message, "move it to `review.reviewers`"
+      end
+    end
+  end
+
   def test_parses_valid_path
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "add-foo")
@@ -372,6 +396,23 @@ class TaskTest < Minitest::Test
       assert_equal :coding, task.workflow.id
       assert_match(/failed to read default_workflow/, err)
       assert_match(/falling back to coding/, err)
+    end
+  end
+
+  def test_unsupported_project_root_keys_do_not_fall_back_to_coding
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      File.write(config_path, "defualt_branch: main\n")
+      task = Hive::Task.allocate
+      task.instance_variable_set(:@project_root, dir)
+      task.instance_variable_set(:@hive_state_path, File.join(dir, ".hive-state"))
+
+      error = assert_raises(Hive::ConfigError) do
+        capture_io { task.send(:load_project_default_workflow, config_path) }
+      end
+
+      assert_includes error.message, "Unknown top-level key `defualt_branch`."
     end
   end
 

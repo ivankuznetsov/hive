@@ -19,4 +19,20 @@ class LlmWikiBootstrapTest < Minitest::Test
     assert_match(/cannot resolve Git common directory/, error.message)
     assert_match(/not a Git repository/, error.message)
   end
+
+  def test_primary_worktree_root_reports_git_resolution_failure
+    status = Object.new
+    status.define_singleton_method(:success?) { false }
+
+    error = with_replaced_singleton_method(
+      Open3, :capture3, ->(*_argv) { [ "", "not a Git repository", status ] }
+    ) do
+      assert_raises(ArgumentError) do
+        Hive::LlmWikiBootstrap.primary_worktree_root("/tmp/not-a-repository")
+      end
+    end
+
+    assert_match(/cannot resolve primary Git worktree/, error.message)
+    assert_match(/not a Git repository/, error.message)
+  end
 end

@@ -293,14 +293,14 @@ class BenchWorkflowInstallTest < Minitest::Test
         hive_state = File.join(project_root, ".hive-state")
         config_path = File.join(hive_state, "config.yml")
         committed_config = run!("git", "-C", hive_state, "show", "HEAD:config.yml")
-        File.open(config_path, "a") { |file| file.write("operator_note: keep\n") }
+        File.open(config_path, "a") { |file| file.write("# operator note: keep\n") }
         head_before = run!("git", "-C", hive_state, "rev-parse", "HEAD")
 
         capture_io { Hive::Commands::Init.new(project_root, workflow: "bench").call }
 
         assert_equal head_before, run!("git", "-C", hive_state, "rev-parse", "HEAD")
         assert_equal committed_config, run!("git", "-C", hive_state, "show", "HEAD:config.yml")
-        assert_includes File.read(config_path), "operator_note: keep"
+        assert_includes File.read(config_path), "# operator note: keep"
         run!("git", "-C", hive_state, "add", "config.yml")
 
         error = assert_raises(Hive::ConfigError) do

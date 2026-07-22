@@ -95,6 +95,10 @@ reports `error: project_load_failed`; each degraded project has an empty task
 array while healthy projects remain present. The machine-readable error keeps
 an unexpected failure distinguishable from a legitimately empty project, with
 the detailed exception retained in the stderr/daemon-log breadcrumb.
+`UnsupportedProjectConfigError` is the deliberate exception to project-local
+degradation: text, compatibility JSON, and operational status all propagate the
+shared configuration failure (exit 78) instead of returning an `ok: true`
+snapshot that hides unsupported root keys.
 
 ## Detailed compatibility output shape
 

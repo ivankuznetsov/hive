@@ -8,6 +8,13 @@ All notable changes are documented here, newest first. Hive ships frequent micro
   The outer systemd limit now covers the worker's bounded worst case of three
   agent and indexing batches, while retaining the 4 GiB memory limit, no-swap
   policy, and machine-wide provider lock.
+- Removed the undocumented `LLM_WIKI_REFRESH_CMD` arbitrary executable
+  override from shipped wiki workers. Headless refreshes now dispatch only to
+  the explicitly configured Codex, Claude Code, or Pi provider through fixed,
+  bounded command shapes.
+- Unified Hive's scheduled and fallback provider lock with standalone llm-wiki
+  and the marketplace plugin, preventing mixed installations from launching
+  concurrent refresh agents.
 
 ## 0.6.8
 

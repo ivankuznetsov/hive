@@ -103,7 +103,9 @@ logged-in agent and consumes that provider subscription's token capacity; it is
 not a free bookkeeping command. The runner also requires GNU `timeout` or
 `gtimeout` (GNU coreutils supplies `gtimeout` on macOS) and retains queued work
 instead of falling back to unbounded Git, QMD, or provider execution when that
-binary is unavailable. See [[dependencies]].
+binary is unavailable. Provider dispatch is limited to the configured Codex,
+Claude Code, or Pi command with its fixed argument shape; the shipped worker
+has no arbitrary refresh-command environment override. See [[dependencies]].
 
 ## Rendering helper
 

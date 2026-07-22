@@ -1926,7 +1926,7 @@ class InitTest < Minitest::Test
     flock_path = Hive::LlmWikiBootstrap::Scheduler.executable_path("flock")
     assert_includes service_contents,
                     "ExecStart=#{flock_path} --nonblock --conflict-exit-code 0 " \
-                    "%t/hive-llm-wiki-refresh.lock #{shared_runner} --project #{project_dir} --drain"
+                    "%t/llm-wiki-refresh.lock #{shared_runner} --project #{project_dir} --drain"
     assert_includes service_contents, "TimeoutStartSec=4h"
     assert_includes service_contents, "MemoryMax=4G"
     assert_includes service_contents, "MemorySwapMax=0"

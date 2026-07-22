@@ -1,0 +1,53 @@
+<% apply_path = public_send("apply_module_#{change.operation}_path") %>
+<section class="card module-preview" aria-labelledby="module-preview-heading">
+  <h2 id="module-preview-heading">Review <%= change.operation %>: <%= change.fetch("name") %></h2>
+  <% if change["candidate"] %>
+    <p class="muted">Candidate <strong><%= change.dig("candidate", "version") %></strong> at source commit
+      <code><%= change.dig("candidate", "source_commit") %></code>, catalog commit
+      <code><%= change.dig("candidate", "catalog_commit") %></code>, manifest
+      <code><%= change.dig("candidate", "manifest_digest") %></code>.</p>
+  <% else %>
+    <p class="muted">This state change is bound to the exact current selection and epoch shown below.</p>
+  <% end %>
+
+  <% if (proposal = change["proposed"]) %>
+    <h3>Effective settings</h3>
+    <dl class="permission-grid">
+      <% proposal.fetch("settings").each do |setting| %>
+        <dt><%= setting.fetch("name") %></dt>
+        <dd><% if setting.fetch("secret") %>binding <code><%= setting["binding"] || "not configured" %></code><% else %><%= setting["value"].inspect %><% end %></dd>
+      <% end %>
+    </dl>
+    <h3>Hook activation</h3>
+    <dl class="permission-grid">
+      <% proposal.fetch("hooks").each do |hook| %>
+        <dt><%= hook.fetch("id") %></dt>
+        <dd><%= hook.fetch("enabled") ? "enabled" : "disabled" %>; <%= hook.fetch("target").fetch("kind") %> <code><%= hook.fetch("target").fetch("id") %></code>;
+          schedules <%= hook.fetch("schedules").presence&.join(", ") || "none" %>;
+          events <%= hook.fetch("events").presence&.join(", ") || "none" %></dd>
+      <% end %>
+    </dl>
+    <h3>Permission grants</h3>
+    <dl class="permission-grid">
+      <% proposal.fetch("grants").each do |category, value| %>
+        <dt><%= category.humanize %></dt><dd><%= value.is_a?(Array) ? (value.presence&.join(", ") || "none") : value %></dd>
+      <% end %>
+    </dl>
+  <% end %>
+
+  <%= form_with url: apply_path, class: "preview-confirm-form" do |f| %>
+    <%= hidden_field_tag :preview_token, change.token %>
+    <label class="check">
+      <%= check_box_tag :consent, "module_#{change.operation}", false, required: true %>
+      Apply this exact <%= change.operation %> transaction
+    </label>
+    <% change.required_grants.each do |category| %>
+      <label class="check">
+        <%= check_box_tag "grant_consents[]", category, false, required: true %>
+        Separately grant <%= category.humanize %>
+      </label>
+    <% end %>
+    <p><%= f.submit "Apply #{change.operation}", data: { turbo_submits_with: "Applying…" } %></p>
+  <% end %>
+  <p><%= link_to "Cancel preview", modules_path(project: project.name), class: "btn btn-ghost btn-sm" %></p>
+</section>

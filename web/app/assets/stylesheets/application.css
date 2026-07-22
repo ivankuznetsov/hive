@@ -778,6 +778,26 @@ pre {
 .workflow-file-changes p { overflow-wrap: anywhere; }
 .workflow-publish-note p { line-height: 1.55; }
 
+/* ---- Modules ---- */
+
+.module-project-form { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.module-project-form select { min-width: 220px; }
+.module-list { display: grid; gap: 12px; margin: 14px 0 30px; }
+.module-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: start; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 15px 18px; }
+.module-title, .module-meta, .module-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.module-meta { margin: 6px 0; color: var(--ink-muted); font-family: var(--font-mono); font-size: 0.79rem; }
+.module-actions { justify-content: flex-end; }
+.module-actions details { position: relative; }
+.module-actions summary { list-style: none; cursor: pointer; }
+.module-update-form { display: grid; gap: 6px; width: min(360px, 75vw); margin-top: 8px; }
+.module-details { margin-top: 10px; }
+.module-details summary { cursor: pointer; color: var(--ink-muted); }
+.module-preview { margin: 22px 0 30px; border-color: var(--accent); }
+.module-preview code { overflow-wrap: anywhere; }
+.module-install-card { max-width: 760px; }
+.tag-module-corrupt, .tag-module-failed-activation { color: var(--danger); border-color: var(--danger); }
+.tag-module-activating, .tag-module-disabled { color: var(--warn); border-color: var(--warn); }
+
 /* ---- Auth pages ---- */
 
 .auth-card {
@@ -841,8 +861,8 @@ pre {
     scrollbar-width: none;
   }
   .topbar .nav-link {
-    padding: 5px clamp(4px, 1.5vw, 6px);
-    font-size: clamp(0.75rem, 3.5vw, 0.86rem);
+    padding: 5px clamp(3px, 1vw, 5px);
+    font-size: clamp(0.74rem, 3.35vw, 0.86rem);
   }
   .topbar nav::-webkit-scrollbar { display: none; }
   .session-login { display: none; }
@@ -873,6 +893,8 @@ pre {
   .task-meta { flex-wrap: wrap; white-space: normal; }
   .workflow-row { grid-template-columns: 1fr; }
   .workflow-actions { justify-content: flex-start; }
+  .module-row { grid-template-columns: 1fr; }
+  .module-actions { justify-content: flex-start; }
   .permission-grid { grid-template-columns: 1fr; gap: 2px; }
   .permission-grid dd { margin-bottom: 8px; }
   main { padding: 20px 14px 48px; }

@@ -22,9 +22,6 @@ module Hive
             resolution = @catalog_client.fetch(source, destination: candidate_root)
             descriptor = resolution.descriptor
             current = store.selected(resolution.name, include_tombstone: true)
-            if current && !current.fetch("installed")
-              current = nil if @operation == "install"
-            end
             current_configuration = active_configuration(current)
             issued_at, supplied_digest = receipt_parts_for_apply
             if @operation == "install" && current

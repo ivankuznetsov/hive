@@ -1,0 +1,67 @@
+<article class="module-row" data-module-name="<%= hive_module.name %>"
+         data-module-state="<%= hive_module.lifecycle_state %>">
+  <div>
+    <div class="module-title">
+      <strong><%= hive_module.name %></strong>
+      <span class="tag tag-module-<%= hive_module.lifecycle_state.dasherize %>"><%= hive_module.lifecycle_state.humanize %></span>
+      <% if hive_module.version %><span class="tag">v<%= hive_module.version %></span><% end %>
+    </div>
+    <p class="module-meta">
+      <% if hive_module.source_commit %><span title="<%= hive_module.source_commit %>">commit <%= hive_module.source_commit[0, 10] %></span><% end %>
+      <span>epoch <%= hive_module["epoch"] || "—" %></span>
+      <% if hive_module.latest_decision %>
+        <span>last: <%= hive_module.latest_decision.fetch("outcome") %> (<%= hive_module.latest_decision.fetch("reason") %>)</span>
+      <% end %>
+    </p>
+    <details class="module-details">
+      <summary>Hooks, settings, grants, and runtime status</summary>
+      <h3>Hooks</h3>
+      <ul>
+        <% hive_module.hooks.each do |hook| %>
+          <li><code><%= hook.fetch("id") %></code> — <%= hook.fetch("enabled") ? "enabled" : "disabled" %>;
+            schedules: <%= hook.fetch("schedules").presence&.join(", ") || "none" %>;
+            events: <%= hook.fetch("event_bindings").presence&.join(", ") || "none" %>
+            <% if hook["next_trigger_at"] %>; next <%= hook["next_trigger_at"] %><% end %></li>
+        <% end %>
+      </ul>
+      <h3>Effective settings</h3>
+      <dl class="permission-grid">
+        <% hive_module.settings.each do |setting| %>
+          <dt><%= setting.fetch("name") %></dt>
+          <dd><% if setting.fetch("secret") %>
+            binding <code><%= setting["binding"] || "not configured" %></code>
+            (<%= setting["available"] ? "available" : "unavailable" %>)
+          <% else %><%= setting["value"].inspect %><% end %></dd>
+        <% end %>
+      </dl>
+      <h3>Granted capabilities</h3>
+      <dl class="permission-grid">
+        <% hive_module.grants.each do |category, value| %>
+          <dt><%= category.humanize %></dt><dd><%= value.is_a?(Array) ? (value.presence&.join(", ") || "none") : value %></dd>
+        <% end %>
+      </dl>
+      <% if hive_module["failure_reason"] %><p class="flash-alert">Failure: <%= hive_module["failure_reason"].humanize %></p><% end %>
+    </details>
+  </div>
+  <div class="module-actions">
+    <% if hive_module.installed? %>
+      <details>
+        <summary class="btn btn-ghost btn-sm">Review update</summary>
+        <%= form_with url: preview_module_update_path, class: "module-update-form", data: { turbo: false } do |f| %>
+          <%= hidden_field_tag :project, project.name %><%= hidden_field_tag :name, hive_module.name %>
+          <%= f.text_area :settings, rows: 2, placeholder: "setting=value (optional overrides)", aria: { label: "#{hive_module.name} update settings" } %>
+          <%= f.text_area :hooks, rows: 2, placeholder: "hook=enabled (optional overrides)", aria: { label: "#{hive_module.name} update hooks" } %>
+          <%= f.text_area :grants, rows: 2, placeholder: "category=value (new grants)", aria: { label: "#{hive_module.name} update grants" } %>
+          <%= f.submit "Preview update", class: "btn-ghost btn-sm" %>
+        <% end %>
+      </details>
+      <% state_operation = hive_module.enabled? ? "disable" : "enable" %>
+      <%= button_to "Review #{state_operation}", public_send("preview_module_#{state_operation}_path"),
+            params: { project: project.name, name: hive_module.name }, class: "btn-ghost btn-sm",
+            form: { data: { turbo: false } } %>
+      <%= button_to "Review uninstall", preview_module_uninstall_path,
+            params: { project: project.name, name: hive_module.name }, class: "btn-ghost btn-sm",
+            form: { data: { turbo: false } } %>
+    <% end %>
+  </div>
+</article>

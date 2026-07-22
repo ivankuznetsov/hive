@@ -38,6 +38,14 @@ Rails.application.routes.draw do
   post "workflows/remove" => "workflows/changes#create",
        defaults: { operation: "remove" }, as: :remove_workflow
 
+  get "modules" => "modules#index", as: :modules
+  %w[install update enable disable uninstall].each do |module_operation|
+    post "modules/#{module_operation}/preview" => "modules/previews#create",
+         defaults: { operation: module_operation }, as: "preview_module_#{module_operation}"
+    post "modules/#{module_operation}" => "modules/changes#create",
+         defaults: { operation: module_operation }, as: "apply_module_#{module_operation}"
+  end
+
   # Task pages are addressed by project name + task slug, mirroring the CLI.
   scope "tasks/:project/:slug", constraints: { slug: /[a-z][a-z0-9-]{0,62}[a-z0-9]/, project: %r{[^/]+} } do
     get  "" => "tasks#show", as: :task

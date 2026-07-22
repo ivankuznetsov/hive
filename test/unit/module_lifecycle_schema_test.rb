@@ -9,7 +9,7 @@ class ModuleLifecycleSchemaTest < Minitest::Test
       "schema" => "hive-module-lifecycle", "schema_version" => 1, "ok" => true,
       "operation" => "install", "status" => "preview", "name" => "demo",
       "preview_receipt" => "1.#{'a' * 64}", "candidate" => {},
-      "configuration_digest" => "b" * 64, "diff" => {}, "selection" => nil
+      "configuration_digest" => "b" * 64, "diff" => {}, "proposed" => {}, "selection" => nil
     }
     error = Hive::Schemas::ErrorEnvelope.build(
       schema: "hive-module-lifecycle", error: Hive::ConfigError.new("bad"), error_kind: "config"

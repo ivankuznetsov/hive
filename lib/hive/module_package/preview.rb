@@ -16,7 +16,7 @@ module Hive
       def self.build(operation:, descriptor:, generation:, current:, current_configuration:,
                      settings:, hooks:, grants:, now: Time.now.utc)
         raise Hive::ConfigError, "unsupported module preview operation" unless OPERATIONS.include?(operation)
-        if operation == "install" && current
+        if operation == "install" && current&.fetch("installed")
           raise Hive::ConfigError, "module is already installed"
         elsif operation == "update" && !current
           raise Hive::ConfigError, "module is not installed"

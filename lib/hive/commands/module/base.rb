@@ -115,7 +115,28 @@ module Hive
             "candidate" => preview&.data&.fetch("candidate", nil),
             "configuration_digest" => preview&.configuration&.digest,
             "diff" => preview&.diff&.to_h,
+            "proposed" => preview && preview_proposal(preview),
             "selection" => selection
+          }
+        end
+
+        def preview_proposal(preview)
+          configuration = preview.configuration
+          settings = configuration.contract.fetch("settings").map do |spec|
+            name = spec.fetch("name")
+            secret = spec.fetch("type") == "secret" || spec["secret"] == true
+            {
+              "name" => name, "type" => spec.fetch("type"), "required" => spec.fetch("required"),
+              "secret" => secret, "value" => secret ? nil : configuration.settings[name],
+              "binding" => secret ? configuration.settings[name] : nil
+            }
+          end
+          hooks = configuration.contract.fetch("hooks").map do |hook|
+            hook.merge("enabled" => configuration.hooks.fetch(hook.fetch("id")))
+          end
+          {
+            "settings" => settings, "hooks" => hooks, "grants" => configuration.grants,
+            "permission_digest" => configuration.data.fetch("permission_digest")
           }
         end
 

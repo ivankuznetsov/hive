@@ -5,6 +5,7 @@ module ApplicationHelper
     status: ->(c) { c == "status" || c == "tasks" || c == "ideas" },
     repos: ->(c) { c == "repos" },
     workflows: ->(c) { c == "workflows" },
+    modules: ->(c) { c == "modules" },
     agents: ->(c) { c == "agents" },
     telegram: ->(c) { c == "telegram" }
   }.freeze

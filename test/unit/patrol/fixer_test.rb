@@ -542,6 +542,22 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_fix_proof_validation_key_must_match_the_reviewed_finding
+    with_tmp_dir do |repo|
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["lint"] = "ruby -c app.rb"
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: configured)
+
+      command, error = fixer.send(
+        :configured_validation_command, "lint", expected_key: "test"
+      )
+
+      assert_nil command
+      assert_equal "invalid_validation_key", error.fetch("reason")
+      assert_match(/reviewed finding requires "test"/, error.fetch("error"))
+    end
+  end
+
   def test_machine_diff_guard_blocks_hard_forbidden_patrol_changes
     hazards = {
       "hive state" => lambda do |path|

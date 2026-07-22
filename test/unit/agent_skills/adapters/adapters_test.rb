@@ -282,6 +282,29 @@ class AgentSkillAdaptersTest < Minitest::Test
     end
   end
 
+  def test_codex_dependent_operation_accepts_owned_config_drift_without_a_recorded_snapshot
+    with_tmp_dir do |dir|
+      codex_home = File.join(dir, "codex")
+      config_path = File.join(codex_home, "config.toml")
+      FileUtils.mkdir_p(codex_home)
+      File.write(config_path, "")
+      row = inspection(
+        agent: "codex", capability: "ce-brainstorm", package: "compound-engineering",
+        health: "missing", bin: "/fake/codex",
+        marketplace: nil
+      )
+      codex = adapter(
+        Hive::AgentSkills::Adapters::Codex, dir: dir,
+        environment: { "CODEX_HOME" => codex_home }
+      )
+      operation = codex.plan([ row ]).operations.find { |item| item.kind == "plugin_install" }
+      package = operation.metadata.fetch("native_package")
+      File.write(config_path, "[plugins.\"#{package}\"]\nenabled = true\n")
+
+      assert_nil codex.send(:validate_preconditions, operation)
+    end
+  end
+
   def test_codex_success_preserves_comments_unrelated_content_and_mode
     with_tmp_dir do |dir|
       codex_home = File.join(dir, "codex")
@@ -292,6 +315,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       File.chmod(0o600, config_path)
       runner = FakeRunner.new do |_argv, _env, _timeout|
         File.open(config_path, "a") { |file| file.write("[plugins.\"compound-engineering@compound-engineering-plugin\"]\nenabled = true\n") }
+        File.chmod(0o644, config_path)
         command_result
       end
       row = inspection(

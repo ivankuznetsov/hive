@@ -216,4 +216,61 @@ class HivePatrolFindingRegistryTest < Minitest::Test
       assert_equal now.iso8601, original_findings.call.first.lifecycle_updated_at
     end
   end
+
+  def test_in_memory_transition_updates_lifecycle_without_persisting
+    with_tmp_dir do |dir|
+      store = Hive::Patrol::StateStore.new(dir)
+      store.ensure!
+      record = finding(id: "memory", state: "active")
+      now = Time.utc(2026, 7, 22, 13, 0, 0)
+      registry = Hive::Patrol::FindingRegistry.new(
+        state: store, target_sha: "a" * 40, clock: -> { now }
+      )
+
+      transitioned = registry.transition_current!(
+        record, state: "superseded", reason: "newer_target_evidence", persist: false
+      )
+
+      assert_same record, transitioned
+      assert_equal "superseded", record.lifecycle_state
+      assert_equal "newer_target_evidence", record.lifecycle_reason
+      assert_equal now.iso8601, record.lifecycle_updated_at
+      assert_nil record.superseded_by
+      assert_empty store.findings
+    end
+  end
+
+  def test_state_store_ignores_invalid_finding_records
+    with_tmp_dir do |dir|
+      store = Hive::Patrol::StateStore.new(dir)
+      store.ensure!
+      File.write(
+        File.join(store.root, "findings", "invalid.json"),
+        JSON.generate("id" => "missing-required-fields")
+      )
+
+      assert_empty store.findings
+    end
+  end
+
+  def test_state_store_transitions_by_id_and_rejects_unknown_states
+    with_tmp_dir do |dir|
+      store = Hive::Patrol::StateStore.new(dir)
+      store.ensure!
+      store.write_finding(finding(id: "stored", state: "active"))
+
+      assert_raises(ArgumentError) do
+        store.transition_finding("stored", state: "unknown", reason: "invalid")
+      end
+      store.transition_finding(
+        "stored", state: "resolved", reason: "patrol_pr_merged",
+        now: Time.utc(2026, 7, 22, 14, 0, 0)
+      )
+      transitioned = store.findings.fetch(0)
+
+      assert_equal "stored", transitioned.id
+      assert_equal "resolved", transitioned.lifecycle_state
+      assert_equal "patrol_pr_merged", transitioned.lifecycle_reason
+    end
+  end
 end

@@ -487,6 +487,21 @@ class OperationalStatusTest < Minitest::Test
     end
   end
 
+  def test_human_outcomes_are_preserved_in_operational_position
+    human = task(action: "needs_input", slug: "approval", stage: "3-approval")
+    human["workflow"] = "editorial"
+    human["outcomes"] = [
+      { "name" => "approve", "complete" => true, "artifact" => "draft.md", "to" => nil },
+      { "name" => "reject", "complete" => false, "artifact" => nil, "to" => "draft" }
+    ]
+
+    projected = project(status_payload(human)).fetch("tasks").first
+
+    assert_equal human.fetch("outcomes"), projected.dig("position", "allowed_outcomes")
+    assert_equal "waiting_on_you", projected.fetch("state")
+    assert_nil projected.fetch("action")
+  end
+
   def test_payload_validates_against_published_schema
     result = project(status_payload(task(action: "ready_to_plan", slug: "valid")))
     schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))

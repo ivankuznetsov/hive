@@ -8,6 +8,7 @@ require "hive/lock"
 require "hive/paths"
 require "hive/task_counter"
 require "hive/task_meta"
+require "hive/markers"
 require "hive/workflows"
 require "hive/workflow_selection"
 require "hive/workflow_package/managed_store"
@@ -162,6 +163,9 @@ module Hive
         id = nil
         begin
           File.write(idea_path, render_initial_state(slug, @text, body_override: @body_override, workflow: workflow))
+          if entry_stage.kind == :human
+            Hive::Markers.set(idea_path, :waiting, "decision_id" => SecureRandom.hex(8))
+          end
           copy_attachments!(task_dir)
           id = Hive::TaskCounter.next_or_nil
           write_task_meta(task_dir, id: id, slug: slug, depends_on: depends_on,

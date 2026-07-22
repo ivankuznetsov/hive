@@ -1,6 +1,7 @@
 require "fileutils"
 require "json"
 require "open3"
+require "securerandom"
 require "hive/config"
 require "hive/task"
 require "hive/task_resolver"
@@ -261,24 +262,59 @@ module Hive
       def perform_move_and_commit(task, dest_stage, enforce_admission: false)
         new_folder = nil
         commit_action = nil
-        Hive::Lock.with_commit_lock(task.hive_state_path) do
-          Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "approve") do
-            # Preserve the command's typed collision contract before building
-            # a multi-project snapshot: a pre-existing destination necessarily
-            # duplicates the slug, but it is first and foremost an unsafe move
-            # destination and requires no dependency inference to reject.
-            raise_destination_collision(destination_folder(task, dest_stage)) if
-              destination_exists?(destination_folder(task, dest_stage))
-            Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
-            Hive::Attempts::Context.current&.validate_generation!(task)
-            @observation_guard&.call(task)
-            new_folder = move_task!(task, dest_stage)
+        human_state_snapshot = nil
+        begin
+          Hive::Lock.with_commit_lock(task.hive_state_path) do
+            Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "approve") do
+              # Preserve the command's typed collision contract before building
+              # a multi-project snapshot: a pre-existing destination necessarily
+              # duplicates the slug, but it is first and foremost an unsafe move
+              # destination and requires no dependency inference to reject.
+              raise_destination_collision(destination_folder(task, dest_stage)) if
+                destination_exists?(destination_folder(task, dest_stage))
+              Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
+              Hive::Attempts::Context.current&.validate_generation!(task)
+              @observation_guard&.call(task)
+              human_state_snapshot = initialize_human_destination!(task, dest_stage)
+              new_folder = move_task!(task, dest_stage)
+            end
+            cleanup_orphan_task_lock(new_folder)
+            commit_action = "approve #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
+            record_commit_or_rollback!(task, dest_stage, new_folder, commit_action)
           end
-          cleanup_orphan_task_lock(new_folder)
-          commit_action = "approve #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
-          record_commit_or_rollback!(task, dest_stage, new_folder, commit_action)
+        rescue StandardError
+          restore_human_destination!(task, new_folder, human_state_snapshot)
+          raise
         end
         [ new_folder, commit_action ]
+      end
+
+      def initialize_human_destination!(task, dest_stage)
+        stage = stage_for_dest!(task, dest_stage)
+        return nil unless stage.kind == :human
+
+        path = File.join(task.folder, stage.state_file)
+        snapshot = {
+          state_file: stage.state_file,
+          existed: File.exist?(path),
+          body: File.exist?(path) ? File.binread(path) : nil
+        }
+        Hive::Markers.set(path, :waiting, "decision_id" => SecureRandom.hex(8))
+        snapshot
+      end
+
+      def restore_human_destination!(task, new_folder, snapshot)
+        return unless snapshot
+
+        folder = File.directory?(task.folder) ? task.folder : new_folder
+        return unless folder && File.directory?(folder)
+
+        path = File.join(folder, snapshot.fetch(:state_file))
+        if snapshot.fetch(:existed)
+          Hive::Markers.write_atomic(path, snapshot.fetch(:body))
+        else
+          File.delete(path) if File.exist?(path)
+        end
       end
 
       def move_task!(task, dest_stage)

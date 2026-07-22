@@ -510,6 +510,7 @@ module Hive
           "action" => row[:action_key],
           "action_label" => row[:action_label],
           "suggested_command" => row[:suggested_command],
+          "outcomes" => row[:outcomes] || [],
           "next_action" => row[:next_action],
           "diagnostic" => row[:diagnostic]
         }
@@ -1241,6 +1242,7 @@ module Hive
         "Answer questions",
         "Review plan draft",
         "Needs your input",
+        "Awaiting human decision",
         "Needs review decision",
         "Confirm finalize",
         "Ready to plan",
@@ -1354,6 +1356,7 @@ module Hive
             action_key: action.key,
             action_label: action.label,
             suggested_command: action.command,
+            outcomes: action.allowed_outcomes,
             next_action: action.next_action,
             diagnostic: with_diagnostic ? action.diagnostic : nil,
             condition_gate: action.condition_gate&.to_h,

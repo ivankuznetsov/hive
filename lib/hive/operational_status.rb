@@ -295,7 +295,11 @@ module Hive
           "folder" => row.fetch("folder")
         },
         "workflow" => row["workflow"],
-        "position" => { "stage" => row.fetch("stage"), "marker" => row.fetch("marker") },
+        "position" => {
+          "stage" => row.fetch("stage"),
+          "marker" => row.fetch("marker"),
+          "allowed_outcomes" => Array(row["outcomes"])
+        },
         "liveness" => {
           "status" => liveness_status(row),
           "pid" => row["task_lock_pid"] || row["claude_pid"],

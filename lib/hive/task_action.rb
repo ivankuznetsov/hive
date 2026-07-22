@@ -160,6 +160,11 @@ module Hive
         label: "Needs your input",
         command: "run"
       },
+      human_needs_input: {
+        key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+        label: "Awaiting human decision",
+        command: nil
+      },
       recover_draft_pr: {
         key: Hive::Schemas::TaskActionKind::RECOVER_DRAFT_PR,
         label: "Retry draft PR handoff manually",
@@ -280,8 +285,23 @@ module Hive
         "key" => key,
         "label" => label,
         "command" => command,
-        "next_action" => next_action
+        "next_action" => next_action,
+        "outcomes" => allowed_outcomes
       }
+    end
+
+    def allowed_outcomes
+      stage = workflow_stage
+      return [] unless stage&.kind == :human
+
+      stage.outcomes.values.map do |outcome|
+        {
+          "name" => outcome.name,
+          "complete" => outcome.complete,
+          "artifact" => outcome.artifact,
+          "to" => outcome.to
+        }
+      end
     end
 
     def migration_selection
@@ -363,6 +383,8 @@ module Hive
         review_action
       when :finalize
         finalize_action
+      when :human
+        human_action
       when :agent, :council, :inert
         # `|| generic_action(stage)` is the LIVE path for NON-coding
         # `:agent`/`:inert` workflows: `coding_table_action` returns nil for any
@@ -375,6 +397,10 @@ module Hive
       else
         generic_action(stage)
       end
+    end
+
+    def human_action
+      marker.name == :complete ? ACTIONS.fetch(:done) : ACTIONS.fetch(:human_needs_input)
     end
 
     def coding_table_action(stage)

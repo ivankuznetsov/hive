@@ -720,7 +720,7 @@ class TaskActionTest < Minitest::Test
   def test_payload_has_expected_keys
     task = fake_task(stage_name: "brainstorm", stage_index: 2)
     payload = Hive::TaskAction.for(task, marker(:complete)).payload
-    assert_equal %w[command key label next_action].sort, payload.keys.sort
+    assert_equal %w[command key label next_action outcomes].sort, payload.keys.sort
     assert_equal "ready_to_plan", payload["key"]
   end
 

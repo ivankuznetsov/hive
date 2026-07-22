@@ -100,6 +100,23 @@ class TaskActionGenericTest < Minitest::Test
     assert_equal "hive approve #{SLUG} --from 2-review", complete_middle.command
   end
 
+  def test_human_stage_waits_for_a_named_decision_and_never_dispatches
+    action = action_for("approval", :waiting, { "decision_id" => "a" * 16 }, descriptor: human_workflow)
+
+    assert_equal "needs_input", action.key
+    assert_equal "Awaiting human decision", action.label
+    assert_nil action.command
+    assert_equal [
+      { "name" => "approve", "complete" => true, "artifact" => "draft.md", "to" => nil },
+      { "name" => "reject", "complete" => false, "artifact" => nil, "to" => "draft" }
+    ], action.allowed_outcomes
+    assert_equal :skip, policy_decision(action)
+
+    completed = action_for("approval", :complete, descriptor: human_workflow)
+    assert_equal "archived", completed.key
+    assert_nil completed.command
+  end
+
   def test_terminal_agent_complete_requires_non_empty_deliverable
     missing = action_for_terminal_active(:agent, write_deliverable: false)
     assert_equal "error", missing.fetch(:key)
@@ -318,6 +335,22 @@ class TaskActionGenericTest < Minitest::Test
           council: Hive::Workflow::Council.new(quorum: 1)
         ),
         Hive::Workflow::Stage.new(name: "done", index: 3, state_file: "done.md", kind: :inert)
+      ]
+    )
+  end
+
+  def human_workflow
+    Hive::Workflow.new(
+      id: :human_status,
+      stages: [
+        Hive::Workflow::Stage.new(name: "draft", index: 1, state_file: "draft.md", kind: :agent, skill: "/draft"),
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: {
+            "approve" => Hive::Workflow::Outcome.new(name: "approve", complete: true, artifact: "draft.md"),
+            "reject" => Hive::Workflow::Outcome.new(name: "reject", to: "draft")
+          }.freeze
+        )
       ]
     )
   end

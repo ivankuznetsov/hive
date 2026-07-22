@@ -1150,6 +1150,31 @@ module Hive
       ).call
     end
 
+    desc "decide TARGET OUTCOME", "Apply a named outcome to a durable human workflow stage"
+    long_desc <<~DESC
+      TARGET is a task slug or folder currently waiting at a descriptor-declared
+      human stage. OUTCOME must be one of that stage's closed named outcomes.
+
+      --from is required and identifies the expected human stage. Repeating the
+      same decision is a no-op; a conflicting or stale decision fails with
+      WRONG_STAGE instead of changing the moved task.
+    DESC
+    option :from, type: :string, required: true,
+                  desc: "expected human stage, full or short form"
+    option :note, type: :string, desc: "optional audit note recorded with the decision"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def decide(target, outcome)
+      require "hive/commands/decide"
+      Hive::Commands::Decide.new(
+        target,
+        outcome,
+        from: options[:from],
+        note: options[:note],
+        project: options[:project],
+        json: options[:json]
+      ).call
+    end
+
     desc "findings TARGET", "List findings in the latest reviews/ce-review-NN.md (or --pass N)"
     long_desc <<~DESC
       TARGET is either a 4-execute task folder path or a bare slug. Findings

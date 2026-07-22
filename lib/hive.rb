@@ -26,6 +26,7 @@ module Hive
       "hive-status-diagnose" => 2,
       "hive-run" => 2,
       "hive-approve" => 2,
+      "hive-decide" => 1,
       "hive-findings" => 1,
       "hive-stage-action" => 2,
       "hive-metrics-rollback-rate" => 1,

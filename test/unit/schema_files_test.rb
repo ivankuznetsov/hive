@@ -8,6 +8,7 @@ require "hive/commands/daemon"
 require "hive/commands/digest"
 require "hive/commands/drop"
 require "hive/commands/doctor"
+require "hive/commands/decide"
 require "hive/commands/forget"
 require "hive/commands/init"
 require "hive/commands/patrol"
@@ -30,6 +31,15 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_hive_decide_schema_matches_success_payload_contract
+    path = Hive::Schemas.schema_path("hive-decide")
+    assert File.exist?(path)
+    doc = JSON.parse(File.read(path))
+    assert_equal Hive::Commands::Decide::SUCCESS_KEYS.sort,
+                 doc.dig("$defs", "SuccessPayload", "required").sort
+    assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
   def test_native_web_schema_files_accept_versioned_success_and_error_shapes
     service = {
       "platform" => "linux", "unit_path" => "/tmp/hive-web.service",

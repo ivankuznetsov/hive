@@ -42,6 +42,32 @@ class HvTest < Minitest::Test
     end
   end
 
+  def test_hive_bin_override_accepts_prerelease_version
+    with_tmp_dir do |dir|
+      override = File.join(dir, "custom", "hive")
+      FileUtils.mkdir_p(File.dirname(override))
+      File.write(override, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then echo "1.2.3-rc.1"; exit 0; fi
+        echo prerelease:$1
+      SH
+      FileUtils.chmod(0o755, override)
+
+      out, err, status = Open3.capture3(
+        {
+          "HIVE_BIN_OVERRIDE" => override,
+          "XDG_BIN_HOME" => File.join(dir, "empty-xdg"),
+          "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew")
+        },
+        HV_BIN,
+        "probe"
+      )
+
+      assert status.success?, err
+      assert_equal "prerelease:probe\n", out
+    end
+  end
+
   def test_skips_executable_hive_candidate_without_bare_semver_version
     with_tmp_dir do |dir|
       bin = File.join(dir, "bin")
@@ -66,6 +92,8 @@ class HvTest < Minitest::Test
 
       assert_equal "", out
       refute status.success?
+      assert_includes err, "were found but did not report a supported bare semantic version"
+      assert_includes err, "Hive 4.0.0"
       assert_includes err, "HIVE_BIN_OVERRIDE"
       refute_includes out, "wrong:probe"
     end

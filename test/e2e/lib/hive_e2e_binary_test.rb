@@ -188,6 +188,19 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_version_subcommand_json_emits_one_versioned_document
+    [ %w[version --json], %w[--json version] ].each do |argv|
+      out, err, status = Open3.capture3(hive_e2e, *argv)
+
+      assert status.success?, "#{argv.inspect}: #{err}"
+      assert_empty err
+      payload = parse_single_json_document(out)
+      assert_equal "hive-e2e-version", payload["schema"]
+      assert_equal 1, payload["schema_version"]
+      assert_equal Hive::VERSION, payload["version"]
+    end
+  end
+
   # Thor's default for unknown commands is to print a deprecation warning
   # and exit 0; we override `exit_on_failure?` to true so wrappers / CI
   # see a non-zero status instead. Pin the contract here.
@@ -208,6 +221,14 @@ class E2EBinaryTest < Minitest::Test
     assert status.success?, "bin/hive-e2e run --help should exit 0, stderr was: #{err}"
     assert_includes out, "Run e2e scenarios"
     refute_includes err, "no scenarios match"
+  end
+
+  def test_pattern_help_shows_run_help
+    out, err, status = Open3.capture3(hive_e2e, "some-pattern", "--help")
+
+    assert status.success?, err
+    assert_includes out, "hive-e2e run [PATTERN]"
+    assert_includes out, "Run e2e scenarios"
   end
 
   def test_leading_json_top_level_help_shows_usage
@@ -313,6 +334,50 @@ class E2EBinaryTest < Minitest::Test
     assert_equal false, payload["ok"]
     assert_equal "missing_repro", payload["error_kind"]
     assert_equal 78, payload["exit_code"]
+    assert_equal "replay", payload["command"]
+  end
+
+  def test_run_error_envelope_names_run_command
+    out, err, status = Open3.capture3(hive_e2e, "run", "definitely-no-scenario", "--json")
+
+    assert_equal 64, status.exitstatus
+    assert_empty err
+    assert_equal "run", JSON.parse(out)["command"]
+  end
+
+  def test_binary_run_contract_covers_success_and_scenario_failure
+    Dir.mktmpdir("e2e-binary-contract-runs") do |runs_dir|
+      passing = "binary_contract_pass_#{Process.pid}"
+      with_temp_scenario(passing, <<~YAML) do
+        name: #{passing}
+        steps:
+          - kind: write_file
+            path: "{sandbox}/created.txt"
+            content: ok
+      YAML
+        out, err, status = Open3.capture3(
+          { "HIVE_E2E_RUNS_DIR" => runs_dir }, hive_e2e, "run", passing, "--json"
+        )
+        assert status.success?, err
+        assert_equal "complete", JSON.parse(out)["status"]
+      end
+
+      failing = "binary_contract_fail_#{Process.pid}"
+      with_temp_scenario(failing, <<~YAML) do
+        name: #{failing}
+        steps:
+          - kind: state_assert
+            path: "{sandbox}/missing.txt"
+      YAML
+        out, err, status = Open3.capture3(
+          { "HIVE_E2E_RUNS_DIR" => runs_dir }, hive_e2e, "run", failing, "--json"
+        )
+        assert_equal 1, status.exitstatus, err
+        report = JSON.parse(out)
+        assert_equal 1, report.dig("summary", "failed")
+        assert_equal "failed", report.fetch("scenarios").first.fetch("status")
+      end
+    end
   end
 
   def test_replay_non_executable_repro_emits_json_artifact_error_when_requested
@@ -639,7 +704,7 @@ class E2EBinaryTest < Minitest::Test
 
       payload = JSON.parse(out)
       assert_equal "usage", payload["error_kind"]
-      assert_match(/retain_days must be a non-negative integer/, payload["message"])
+      assert_match(/retain_days must be >= 0/, payload["message"])
     end
   end
 

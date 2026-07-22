@@ -509,6 +509,14 @@ module Hive
     end
   end
 
+  # Generic command-line usage failure. Unlike InvalidTaskPath, this does not
+  # imply that a task identifier or filesystem path was malformed.
+  class UsageError < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
   class OperationalActionUsageError < Error
     def exit_code
       ExitCodes::USAGE

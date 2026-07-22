@@ -7,6 +7,7 @@ require "json"
 require "open3"
 require "thor"
 require "hive"
+require "hive/cli_json_options"
 require "runner"
 require "schemas"
 require "path_safety"
@@ -43,10 +44,6 @@ module Hive
       TMUX_INSTALL_HINT = "tmux not found. Install with: `brew install tmux` (macOS), " \
                           "`apt install tmux` (Debian/Ubuntu), or `pacman -S tmux` (Arch).".freeze
 
-      ASCIINEMA_INSTALL_HINT = "asciinema 2.4+ not found. Install with: `pipx install asciinema` " \
-                               "(cross-platform), `brew install asciinema` (macOS), or " \
-                               "`pacman -S asciinema` (Arch).".freeze
-
       def require_tmux!
         _out, _err, status = Open3.capture3("tmux", "-V")
         raise PreflightError, TMUX_INSTALL_HINT unless status.success?
@@ -54,13 +51,6 @@ module Hive
         raise PreflightError, TMUX_INSTALL_HINT
       end
 
-      def require_asciinema!
-        require "asciinema_driver"
-        return if AsciinemaDriver.available? && AsciinemaDriver.version &&
-                  AsciinemaDriver.version >= AsciinemaDriver::MIN_VERSION
-
-        raise PreflightError, ASCIINEMA_INSTALL_HINT
-      end
     end
 
     module JsonError
@@ -106,7 +96,7 @@ module Hive
         end
 
         Preflight.require_tmux! if scenarios.any? { |scenario| tui_scenario?(scenario) }
-        report = runner.run_all(pattern: pattern, tag: options[:filter], keep_artifacts: options[:keep_artifacts])
+        report = runner.run_all(scenarios: scenarios, keep_artifacts: options[:keep_artifacts])
         if options[:json]
           puts JSON.pretty_generate(report)
         else
@@ -128,7 +118,15 @@ module Hive
 
       desc "version", "Print hive gem version"
       def version
-        puts Hive::VERSION
+        if options[:json]
+          puts JSON.pretty_generate(
+            "schema" => "hive-e2e-version",
+            "schema_version" => Hive::E2E::Schemas.version_for("hive-e2e-version"),
+            "version" => Hive::VERSION
+          )
+        else
+          puts Hive::VERSION
+        end
       end
 
       desc "list", "List available e2e scenarios"
@@ -226,7 +224,7 @@ module Hive
       end
 
       def tui_scenario?(scenario)
-        !scenario.pending && scenario.steps.any? { |step| %w[tui_keys tui_expect tui_refute wait_subprocess].include?(step.kind) }
+        !scenario.pending && scenario.steps.any? { |step| ScenarioParser::TMUX_STEP_KINDS.include?(step.kind) }
       end
 
       def artifact_path_without_symlinks?(*paths)
@@ -247,25 +245,26 @@ module Hive
       end
 
       def invoked_command
-        self.class.invocation_command
-      rescue StandardError
-        nil
+        command = current_command_chain.last
+        command.to_s == "run_scenarios" ? "run" : command&.to_s
       end
 
       def parse_retention_window(value, label)
-        days = Integer(value.to_s, 10)
+        days = begin
+          Integer(value.to_s, 10)
+        rescue ArgumentError
+          raise ArgumentError, "#{label} must be a non-negative integer (got #{value.inspect})"
+        end
         raise ArgumentError, "#{label} must be >= 0" if days.negative?
 
         days
-      rescue ArgumentError
-        raise ArgumentError, "#{label} must be a non-negative integer (got #{value.inspect})"
       end
     end
   end
 end
 
 def wrapper_option_argv(argv)
-  argv.take(argv.index("--") || argv.length)
+  Hive::CliJsonOptions.option_argv(argv)
 end
 
 def rewrite_help_flag!(argv)
@@ -278,25 +277,16 @@ def rewrite_help_flag!(argv)
   help_idx = option_argv[(cmd_idx + 1)..]&.index { |arg| arg == "--help" || arg == "-h" }
   return unless help_idx
 
-  cmd = argv[cmd_idx]
-  argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
+  command = argv[cmd_idx]
+  known_commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
+  help_target = known_commands.include?(command) ? command : "run"
+  argv.replace(argv[0...cmd_idx] + [ "help", help_target ])
 end
 
-JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
-JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
-JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
+JSON_TRUE_OPTIONS = Hive::CliJsonOptions::TRUE_OPTIONS
+JSON_FALSE_OPTIONS = Hive::CliJsonOptions::FALSE_OPTIONS
+JSON_BOOLEAN_OPTIONS = Hive::CliJsonOptions::BOOLEAN_OPTIONS
 TOP_LEVEL_FLAGS = %w[--help -h --version -v].freeze
-
-def normalize_leading_class_options!(argv)
-  return if argv.length < 2
-
-  leading_class_options = []
-  leading_class_options << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
-  return if leading_class_options.empty? || argv.empty?
-  return argv.unshift(*leading_class_options) unless %w[clean help list replay run version].include?(argv.first)
-
-  argv.insert(1, *leading_class_options)
-end
 
 # Mirror Thor's boolean grammar for --json so the envelope/prose decision
 # matches what the inner commands actually parse. Thor's truthy set for a
@@ -306,8 +296,7 @@ end
 # `--json=<value>` assignments are rejected before Thor can use the value as a
 # command or pattern.
 def json_requested?(argv)
-  options = wrapper_option_argv(argv)
-  JSON_TRUE_OPTIONS.include?(options.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
+  Hive::CliJsonOptions.requested?(argv)
 end
 
 def reject_invalid_argv_encoding!(argv)
@@ -318,9 +307,7 @@ def reject_invalid_argv_encoding!(argv)
 end
 
 def reject_unsupported_json_assignments!(argv)
-  arg = wrapper_option_argv(argv).find do |candidate|
-    candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate)
-  end
+  arg = Hive::CliJsonOptions.unsupported_assignment(argv)
   return unless arg
 
   raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"

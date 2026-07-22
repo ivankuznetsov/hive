@@ -21,13 +21,13 @@ module Hive
         @scenario_metadata = []
       end
 
-      def run_all(pattern: nil, tag: nil, keep_artifacts: false)
+      def run_all(pattern: nil, tag: nil, scenarios: nil, keep_artifacts: false)
         @run_id = generate_run_id
         @run_dir = File.join(@runs_dir, @run_id)
         FileUtils.mkdir_p(File.join(@run_dir, "scenarios"))
         @started_at = Time.now.utc
         @harness_errors = []
-        selected_scenarios = select_scenarios(pattern: pattern, tag: tag)
+        selected_scenarios = scenarios || select_scenarios(pattern: pattern, tag: tag)
         raise "no scenarios match #{pattern || tag || 'all'}" if selected_scenarios.empty?
 
         @scenario_metadata = selected_scenarios.map { |scenario| scenario_metadata(scenario) }

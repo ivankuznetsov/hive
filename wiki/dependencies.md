@@ -22,6 +22,10 @@ as of this refresh.
 
 ## Runtime gems
 
+`base64 >= 0.2` is explicit because the PKCE path uses Ruby's separately
+packaged Base64 library; packaged installs do not rely on an undeclared default
+gem.
+
 | Gem | Version | Purpose |
 |-----|---------|---------|
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |

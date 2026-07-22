@@ -95,6 +95,15 @@ Fresh installs use XDG locations:
 | Cache | `~/.cache/hive/` |
 | User binary symlink | `~/.local/bin/hive` |
 
+On a repeat `install.sh` run, RubyGems must replace the installer-generated
+GEM_HOME-aware `hive` wrapper with a fresh binstub before Hive wraps it again.
+The installer temporarily removes only a wrapper carrying the current
+`hive-managed: install-wrapper/v1` marker or the recognizable legacy
+`HIVE_INVOKED_BIN` plus `/shims/hive` shape. If gem installation fails or does
+not produce an executable binstub, it restores the previous working wrapper;
+unrecognized files at that path are left for RubyGems to reject rather than
+being overwritten by Hive.
+
 `HIVE_HOME` remains a legacy/test override. Project state stays at
 `<project>/.hive-state/`; install and uninstall do not move completed pipeline
 work.

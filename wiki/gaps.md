@@ -699,3 +699,17 @@ primary worktree whenever its managed files exist, with regression coverage
 for a deliberately stale linked copy. The bootstrap-only fallback remains for
 repositories whose primary worktree does not yet contain managed wiki files.
 No unresolved recovery gap remains for this incident.
+
+## Patrol-finding hardening needs installed/live smoke (2026-07-22)
+
+Focused tests pin the coalesced patrol fixes: repeat `install.sh` upgrades
+preserve a recognized working wrapper on failure, uninstall delegates Hive web
+unit removal to its service installer, registered relative/blank state roots
+normalize consistently for babysitter paths, already-green fork PRs avoid a
+spurious `needs-human` label, and bench submission branches from the remote
+default while restoring the caller checkout. No checked-in artifact exercises
+these together through a published installer, a live systemd/launchd web
+teardown, a real GitHub fork PR, or a hosted hive-bench submission. Keep those
+as operational evidence gaps; the source and focused regression contracts are
+documented in [[operating]], [[commands/uninstall]], [[modules/config]],
+[[modules/babysitter]], [[commands/bench-submit]], and [[testing]].

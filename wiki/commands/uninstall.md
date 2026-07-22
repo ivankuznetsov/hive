@@ -3,7 +3,7 @@ title: hive uninstall
 type: command
 source: lib/hive/commands/uninstall.rb, lib/hive/paths.rb
 created: 2026-05-21
-updated: 2026-05-27
+updated: 2026-07-22
 tags: [command, install, uninstall, xdg]
 ---
 
@@ -23,9 +23,14 @@ hive uninstall --force-purge-state
 
 1. Read registered projects from global config. Config errors become warnings and skip per-project cleanup.
 2. Stop a foreground daemon using the XDG state-home `.daemon.pid` when present, and a foreground bot using `.bot.pid` (a YAML payload; a corrupt/legacy pid file degrades to a no-op rather than aborting uninstall).
-3. Deregister platform service units (both the daemon and the opt-in bot autostart service from `hive bot install`):
-   - macOS: unload and remove `~/Library/LaunchAgents/local.hive-daemon.plist` and `local.hive-bot.plist`.
-   - Linux: `systemctl --user disable --now hive-daemon` / `hive-bot`, remove `~/.config/systemd/user/hive-daemon.service` / `hive-bot.service`, then daemon-reload. Each teardown warns and continues on failure so one stuck service manager never aborts the rest.
+3. Deregister platform service units for the daemon, opt-in bot autostart, and
+   Hive web. Each command delegates identity and paths to that service's own
+   installer so install and uninstall cannot drift:
+   - macOS: unload and remove the `local.hive-daemon`, `local.hive-bot`, and
+     `local.hive-web` launchd plists.
+   - Linux: disable and stop `hive-daemon`, `hive-bot`, and `hive-web`, remove
+     their user units, then daemon-reload. Each teardown warns and continues on
+     failure so one stuck service manager never aborts the rest.
 4. Remove XDG config/cache and versioned data payload directories, unless `HIVE_HOME` collapses config/data/state/cache onto one path.
 5. Remove user symlinks `hive` and `hv` under `${XDG_BIN_HOME:-~/.local/bin}` when they are symlinks.
 6. Preserve or remove state according to `--purge` / `--force-purge-state`.
@@ -40,7 +45,9 @@ When `HIVE_HOME` is set, `Hive::Paths.hive_home_collapsed?` is true. In that sha
 
 ## Tests
 
-- `test/unit/commands/uninstall_test.rb` covers service removal, state-preserving defaults, `--purge`, `--force-purge-state`, symlink refusal, collapsed `HIVE_HOME`, user symlink cleanup, and daemon pid termination.
+- `test/unit/commands/uninstall_test.rb` covers daemon, bot, and web service
+  removal, state-preserving defaults, `--purge`, `--force-purge-state`, symlink
+  refusal, collapsed `HIVE_HOME`, user symlink cleanup, and daemon pid termination.
 - `test/unit/paths_test.rb` covers XDG path resolution and legacy registry migration helpers used by install/uninstall surfaces.
 
 ## Backlinks

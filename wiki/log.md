@@ -60,6 +60,38 @@ tags: [wiki, attempts, conditions, web, workflows, digest, patrol, e2e]
   command/API, dependency, data-model, planning, gap, or index page required
   another edit; page coverage remains 94.
 
+# Wiki — coalesced backlog-recovery and patrol-finding refresh
+
+Refreshed the managed wiki for queued commits `625431de`, `798998e7`,
+`79d37359`, and `c9f31811`. The three overlapping LLM-wiki commits were
+inspected as commit snapshots; current [[commands/init]], [[templates]],
+[[testing]], and [[gaps]] already describe the final large-backlog recovery,
+live drain evidence, and primary-worktree-owned shared runtime, so no duplicate
+coverage was added.
+
+Documented the remaining patrol-finding fixes: `hive bench submit` now branches
+from the hive-bench remote default and restores the caller checkout;
+`hive uninstall` also deregisters Hive web through its service installer;
+registered relative and blank `hive_state_path` values normalize before
+babysitter status/worktree paths are built; already-green non-behind fork PRs
+no-op before the fork label boundary; `base64 >= 0.2` is an explicit PKCE
+runtime dependency; and repeat `install.sh` upgrades recognize, temporarily
+remove, and failure-restore Hive-managed wrappers. Focused test coverage and
+the remaining installed/live-smoke uncertainty are recorded in [[testing]] and
+[[gaps]]. Page coverage did not change, so [[index]] was not updated. QMD was
+not run because bounded index maintenance is owned by the refresh wrapper.
+
+**Refreshed pages:**
+- [[commands/bench-submit]]
+- [[commands/uninstall]]
+- [[modules/babysitter]]
+- [[modules/config]]
+- [[dependencies]]
+- [[operating]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+
 ---
 title: Audit queued 5x committed contracts against current wiki
 date: 2026-07-22T15:00:00Z
@@ -290,6 +322,45 @@ tags: [wiki, digest, config, attempts, conditions, patrol, web, e2e]
   relative to this refresh worktree's default source, and that the queued path
   manifests for `02e938cc` and `05b4c137` disagree with their actual diffs.
   Page count stayed 94. QMD was intentionally not run.
+
+---
+title: Bound LLM-wiki backlog source preservation
+type: change
+source: .llm-wiki/post-commit-refresh.sh, templates/llm-wiki/post-commit-refresh.sh, lib/hive/llm_wiki_bootstrap.rb
+created: 2026-07-22
+---
+
+**Action:** Fixed the live Hive LLM-wiki recovery path after an older missing
+managed-worktree registration accumulated more than six hundred durable queue
+entries and the replacement runner attempted to pin every source in one
+five-second `git update-ref --stdin` transaction. Source preservation now uses
+independently bounded 64-ref transactions, interrupted temp entries are
+reconstructed when their filename identifies an available commit, and config
+reconciliation removes a configured `main_wiki_path` after that directory
+disappears. Regression tests force ref transactions above two sources to fail,
+prove a five-source queue is split `2/2/1`, recover an empty interrupted queue
+write, retain it when its commit or changed paths cannot be read, recover from
+a later ref-transaction failure without losing queue entries, preserve or
+receipt every source, keep both user checkouts clean, rediscover a moved main
+wiki, and preserve an existing custom path. Updated [[templates]],
+[[commands/init]], [[testing]], and [[gaps]]; page coverage did not change, so
+[[index]] did not need a catalog update.
+
+The operator-authorized live recovery reconstructed all five interrupted temp
+writes and drained 637 complete entries to zero pending, hidden, or failed
+entries. It left no breaker or publication block, published the same refresh
+head held locally, preserved a wiki-only branch diff, and kept the primary
+checkout clean. Scheduler inventory remained 13 repository-owned units before
+and after the drain, all with 4 GiB memory ceilings and none active or failed.
+Final QMD maintenance confirmed 688 indexed documents with no outstanding
+content-hash embeddings.
+
+Post-recovery verification found that startup reconciliation from an older
+linked checkout could still replace the shared runtime with that checkout's
+stale scripts. Shared-runtime copies now come from the primary worktree whenever
+its managed files exist; linked files are accepted only for a repository's
+first bootstrap. An integration test corrupts a linked copy deliberately and
+proves that the shared runner and config continue to match the primary.
 
 ---
 title: Publish rewritten PR branches at the rebase boundary

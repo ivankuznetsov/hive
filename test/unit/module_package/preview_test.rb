@@ -52,7 +52,8 @@ class ModulePackagePreviewTest < Minitest::Test
         "source_commit" => resolution.source_commit, "manifest_digest" => resolution.manifest_digest,
         "configuration_digest" => configuration.digest
       },
-      "previous" => nil, "epoch" => 1, "high_water_at" => "2026-07-22T00:00:00Z"
+      "previous" => nil, "epoch" => 1, "high_water_at" => "2026-07-22T00:00:00Z",
+      "receipt_digest" => "f" * 64
     }
   end
 end

@@ -86,6 +86,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
   # (for example too many positionals) must ride the same JSON envelope as the
   # command's own UsageError. Bare `hive workflow` is handled in-command.
   "workflow" => { schema: "hive-workflow-new", error_kind: "usage" },
+  "module" => { schema: "hive-module-lifecycle", error_kind: "usage" },
   "pr" => {
     schema: "hive-stage-action",
     error_kind: "invalid_task_path",
@@ -370,6 +371,12 @@ def json_usage_error_contract(argv)
     else "hive-workflow-new"
     end
     return { schema: schema, error_kind: "usage" } if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+  when "module"
+    subcommand = json_usage_subcommand(
+      argv, command_index, value_options: %w[--receipt --setting --hook --grant]
+    )
+    schema = subcommand == "list" ? "hive-module-list" : "hive-module-lifecycle"
+    return { schema: schema, error_kind: "usage" }
   end
 
   JSON_USAGE_ERROR_CONTRACTS[command]

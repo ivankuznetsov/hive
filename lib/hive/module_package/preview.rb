@@ -42,7 +42,7 @@ module Hive
       def initialize(operation:, generation:, current:, configuration:, diff:, now:)
         @configuration = configuration
         @diff = diff
-        @issued_at = now.utc
+        @issued_at = Time.at(now.to_i, in: "UTC")
         @expires_at = @issued_at + TTL_SECONDS
         @data = {
           "schema_version" => SCHEMA_VERSION,
@@ -70,6 +70,18 @@ module Hive
           raise Hive::ConcurrentRunError.new("module selection changed after preview")
         end
         true
+      end
+
+      def receipt
+        "#{issued_at.to_i}.#{digest}"
+      end
+
+      def self.receipt_parts(receipt)
+        match = /\A(?<timestamp>[0-9]{1,12})\.(?<digest>[0-9a-f]{64})\z/.match(receipt.to_s)
+        raise Hive::ConfigError, "module preview receipt is malformed" unless match
+        [ Time.at(Integer(match[:timestamp]), in: "UTC"), match[:digest] ]
+      rescue ArgumentError, RangeError
+        raise Hive::ConfigError, "module preview receipt is malformed"
       end
 
       class << self

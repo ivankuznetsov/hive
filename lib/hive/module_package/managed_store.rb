@@ -22,7 +22,7 @@ module Hive
         @modules_dir = File.join(@hive_state_path, "modules")
       end
 
-      def apply(preview, package_root:, resolution:, health_check: nil, failpoint: nil, now: Time.now.utc)
+      def apply(preview, package_root:, resolution:, health_check: nil, failpoint: nil, commit: nil, now: Time.now.utc)
         validate_resolution!(resolution)
         raise Hive::ConfigError, "module preview generation does not match resolution" unless same_generation?(
           preview.configuration.generation, resolution
@@ -38,7 +38,7 @@ module Hive
           transaction = Transaction.new(module_path(resolution.name))
           transaction.begin!(candidate_path: placed, candidate_created: !generation_existed)
           failpoint&.call(:prepared)
-          selection = activation_selection(current, resolution, preview.configuration, now)
+          selection = activation_selection(current, resolution, preview.configuration, preview.digest, now)
           hooks = activation_hooks(current, preview.configuration, now)
           transaction.provisional!(
             selection_bytes: canonical(selection), hooks_bytes: canonical(hooks)
@@ -55,6 +55,7 @@ module Hive
           transaction.health_validated!
           failpoint&.call(:health_validated)
           cleanup_generations_unlocked!(resolution.name, selection)
+          commit&.call
           transaction.commit!
           cleanup_configurations_unlocked!(resolution.name, selection)
           selection
@@ -96,15 +97,15 @@ module Hive
         raise Hive::ConfigError, "module configuration is missing or unreadable"
       end
 
-      def disable(name, now: Time.now.utc)
-        mutate_state(name) do |selection|
+      def disable(name, now: Time.now.utc, commit: nil)
+        mutate_state(name, commit: commit) do |selection|
           raise Hive::ConfigError, "module is not installed" unless selection.fetch("installed")
           selection.merge("enabled" => false, "epoch" => selection.fetch("epoch") + 1)
         end
       end
 
-      def enable(name, now: Time.now.utc)
-        mutate_state(name) do |selection|
+      def enable(name, now: Time.now.utc, commit: nil)
+        mutate_state(name, commit: commit) do |selection|
           raise Hive::ConfigError, "module is not installed" unless selection.fetch("installed")
           selection.merge(
             "enabled" => true, "epoch" => selection.fetch("epoch") + 1,
@@ -113,8 +114,8 @@ module Hive
         end
       end
 
-      def uninstall(name, now: Time.now.utc)
-        mutate_state(name) do |selection|
+      def uninstall(name, now: Time.now.utc, commit: nil)
+        mutate_state(name, commit: commit) do |selection|
           active = selection["active"]
           selection.merge(
             "installed" => false, "enabled" => false, "active" => nil,
@@ -223,7 +224,7 @@ module Hive
         path
       end
 
-      def activation_selection(current, resolution, configuration, now)
+      def activation_selection(current, resolution, configuration, receipt_digest, now)
         active = generation_identity(resolution, configuration)
         previous = current && current["active"] unless current&.dig("active", "source_commit") == resolution.source_commit
         {
@@ -231,7 +232,8 @@ module Hive
           "installed" => true, "enabled" => current ? current.fetch("enabled") : true,
           "active" => active, "previous" => previous || current&.fetch("previous", nil),
           "epoch" => current ? current.fetch("epoch") + 1 : 1,
-          "high_water_at" => current&.fetch("high_water_at", nil) || now.utc.iso8601(6)
+          "high_water_at" => current&.fetch("high_water_at", nil) || now.utc.iso8601(6),
+          "receipt_digest" => receipt_digest
         }
       end
 
@@ -307,13 +309,20 @@ module Hive
         end
       end
 
-      def mutate_state(name)
+      def mutate_state(name, commit: nil)
         with_mutation do
           reconcile_unlocked!(name)
           selection = selected_unlocked(name, include_tombstone: true)
           raise Hive::ConfigError, "module is not installed" unless selection
           updated = yield(selection)
+          old_bytes = canonical(selection)
           Hive::AtomicFile.write(selection_path(name), canonical(updated), mode: 0o600)
+          begin
+            commit&.call
+          rescue StandardError
+            Hive::AtomicFile.write(selection_path(name), old_bytes, mode: 0o600)
+            raise
+          end
           updated
         end
       end
@@ -366,10 +375,11 @@ module Hive
       end
 
       def validate_selection!(data, name)
-        unless data.is_a?(Hash) && data.keys.sort == %w[active enabled epoch high_water_at installed name previous schema_version] &&
+        unless data.is_a?(Hash) && data.keys.sort == %w[active enabled epoch high_water_at installed name previous receipt_digest schema_version] &&
                data["schema_version"] == 1 && data["name"] == name.to_s &&
                [ true, false ].include?(data["installed"]) && [ true, false ].include?(data["enabled"]) &&
-               data["epoch"].is_a?(Integer) && data["epoch"].positive?
+               data["epoch"].is_a?(Integer) && data["epoch"].positive? &&
+               Manifest::SHA256.match?(data["receipt_digest"].to_s)
           raise Hive::ConfigError, "module selection for #{name.inspect} is malformed"
         end
         [ data["active"], data["previous"] ].compact.each { |row| validate_generation_identity!(row) }

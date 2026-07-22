@@ -496,6 +496,43 @@ module Hive
       ).call
     end
 
+    desc "module SUBCOMMAND [SOURCE_OR_NAME]", "Manage reviewed project-local modules"
+    long_desc <<~DESC
+      Subcommands:
+        install honeycomb/NAME[@VERSION]  Preview or activate a reviewed module.
+        update NAME                       Preview or activate its reviewed update.
+        enable NAME                       Resume future trigger admission.
+        disable NAME                      Fence new trigger admission.
+        uninstall NAME                    Stop dispatch while retaining history.
+        list                              List installed modules for this project.
+
+      Lifecycle mutations are preview-bound. Run with --dry-run first, review
+      every hook, setting, binding, and grant, then repeat with --yes and the
+      exact --receipt value. Non-interactive callers must explicitly provide
+      every install setting and hook choice. Grants are repeated CATEGORY=VALUE
+      values; repository_write is the only boolean grant.
+    DESC
+    option :yes, type: :boolean, default: false,
+                 desc: "apply a reviewed module preview"
+    option :dry_run, type: :boolean, default: false,
+                     desc: "build a read-only preview receipt"
+    option :receipt, type: :string,
+                     desc: "exact receipt emitted by the matching --dry-run"
+    option :setting, type: :array, default: [],
+                     desc: "module setting choice NAME=VALUE (repeatable)"
+    option :hook, type: :array, default: [],
+                  desc: "module hook choice ID=enabled|disabled (repeatable)"
+    option :grant, type: :array, default: [],
+                   desc: "module permission grant CATEGORY=VALUE (repeatable)"
+    define_method(:module) do |subcommand = nil, subject = nil|
+      require "hive/commands/module"
+      Hive::Commands::Module.new(
+        subcommand, subject, project_root: Dir.pwd, json: options[:json],
+        yes: options[:yes], dry_run: options[:dry_run], receipt: options[:receipt],
+        settings: options[:setting], hooks: options[:hook], grants: options[:grant]
+      ).call
+    end
+
     desc "bench SUBCOMMAND [SLUG]", "Contribute to hive-bench: `bench submit SLUG` extracts a 9-done task and opens a PR"
     long_desc <<~DESC
       Subcommands:

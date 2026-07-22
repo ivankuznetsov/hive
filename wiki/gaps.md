@@ -116,6 +116,20 @@ tags: [gap, todo, release-proof, agent-skills]
   config IU3/IU4, dependency-admission refresh, and digest U3/U4 pairs).
   Therefore this refresh treats each SHA as immutable evidence but does not
   infer merge provenance from commit ancestry.
+- The 64-source `e77c47d7`-through-`ff79f706` batch is another view of that
+  branch-heavy series. Direct commit and blob inspection found 720 changed
+  paths (including 25 deletions read from their parent commits), with repeated
+  implementations for durable-attempt supervision/routing, condition
+  projection, strict config loading, digest v2, and the Rails board/drawer.
+  The `e88c739e` v0.5.1 and `efbc3ce7` v0.6.3 commits are historical release
+  snapshots rather than the current release contract. The custom board cursor
+  and drawer snapshots in `e8494aee`/`fae3b418` and
+  `f0a2f667`/`f6a83101` are likewise not the current native-web design: the
+  refresh branch deliberately uses URL-aware Turbo reconciliation and shared
+  task pages without a parallel cursor/drawer subsystem. Existing command,
+  module, state, testing, release, and web pages therefore document the later
+  default-branch contracts; the queued SHAs are evidence of their development,
+  not authority to restore superseded branch-local designs.
 - The queued path manifest for `067171bf` names
   `docs/notes/hivebox-agent-oauth-relay.md`, but that path does not exist in
   the commit. The actual committed note is

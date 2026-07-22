@@ -2,6 +2,7 @@ require "fileutils"
 require "rbconfig"
 require "shellwords"
 require "tmpdir"
+require_relative "stub_environment"
 
 module Hive
   module Babysitter
@@ -17,25 +18,10 @@ module Hive
       # diagnostic record and callers/tests read it after `with_env` returns.
       OVERLAY_DIRNAME = ".hive-babysitter-dry-run-bin"
       SKIP_LOG_BASENAME = ".babysitter-dry-run-skipped.log"
-      RUBY_STARTUP_ENV = %w[
-        RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH GEM_HOME GEM_PATH
-        BUNDLER_SETUP BUNDLER_VERSION
-        BUNDLER_ORIG_RUBYOPT BUNDLER_ORIG_RUBYLIB
-        BUNDLER_ORIG_BUNDLE_GEMFILE BUNDLER_ORIG_BUNDLE_BIN_PATH
-        BUNDLER_ORIG_GEM_HOME BUNDLER_ORIG_GEM_PATH
-        BUNDLER_ORIG_BUNDLER_SETUP BUNDLER_ORIG_BUNDLER_VERSION
-      ].freeze
-      DYNAMIC_LOADER_ENV = %w[
-        LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_BIND_NOT LD_BIND_NOW LD_DEBUG LD_DEBUG_OUTPUT
-        LD_DYNAMIC_WEAK LD_HWCAP_MASK LD_ORIGIN_PATH LD_PROFILE LD_SHOW_AUXV
-        LD_TRACE_LOADED_OBJECTS LD_USE_LOAD_BIAS LD_VERBOSE LD_WARN
-        DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH
-        DYLD_FALLBACK_LIBRARY_PATH DYLD_FALLBACK_FRAMEWORK_PATH
-        DYLD_VERSIONED_LIBRARY_PATH DYLD_VERSIONED_FRAMEWORK_PATH
-        DYLD_IMAGE_SUFFIX DYLD_PRINT_TO_FILE
-      ].freeze
-      DYNAMIC_LOADER_ENV_PATTERN = /\A(?:LD|DYLD)_/.freeze
-      STUB_STARTUP_ENV = (RUBY_STARTUP_ENV + DYNAMIC_LOADER_ENV).freeze
+      RUBY_STARTUP_ENV = StubEnvironment::RUBY_STARTUP_ENV
+      DYNAMIC_LOADER_ENV = StubEnvironment::DYNAMIC_LOADER_ENV
+      DYNAMIC_LOADER_ENV_PATTERN = StubEnvironment::DYNAMIC_LOADER_ENV_PATTERN
+      STUB_STARTUP_ENV = StubEnvironment::STUB_STARTUP_ENV
 
       def with_env(worktree_path)
         # Resolve real git/gh *before* prepending the overlay onto PATH,

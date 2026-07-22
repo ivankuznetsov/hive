@@ -73,6 +73,9 @@ class E2EArtifactCaptureTest < Minitest::Test
       assert system("git", "-C", sandbox, "init", "-b", "master", "--quiet"),
         "expected git init fixture setup to succeed"
       File.write(File.join(sandbox, "visible.txt"), "visible\n")
+      nested_git = File.join(sandbox, "vendor", "repo", ".git")
+      FileUtils.mkdir_p(nested_git)
+      File.write(File.join(nested_git, "config"), "secret metadata\n")
 
       collect(scenario_dir, sandbox, run_home)
 
@@ -80,6 +83,8 @@ class E2EArtifactCaptureTest < Minitest::Test
       assert_includes tree, "visible.txt\n"
       refute tree.lines.any? { |line| line == ".git\n" || line.start_with?(".git/") },
         "sandbox-tree.txt must not publish git metadata paths"
+      refute tree.lines.any? { |line| line.chomp.split("/").include?(".git") },
+        "sandbox-tree.txt must not publish nested git metadata paths"
     end
   end
 
@@ -232,14 +237,12 @@ class E2EArtifactCaptureTest < Minitest::Test
 
   def test_tui_subprocess_diagnostics_ignore_global_tmp_logs
     with_dirs do |scenario_dir, sandbox, run_home|
-      spawn_log = File.join(Dir.tmpdir, "hive-tui-spawn-GLOBAL.log")
-      File.write(spawn_log, "GLOBAL\n")
-      begin
+      Dir.mktmpdir("hive-global-tui-log") do |global_dir|
+        spawn_log = File.join(global_dir, "hive-tui-spawn-GLOBAL.log")
+        File.write(spawn_log, "GLOBAL\n")
         collect(scenario_dir, sandbox, run_home)
         refute File.exist?(File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-GLOBAL.log")),
           "artifact capture must not copy stale global /tmp TUI logs into this scenario"
-      ensure
-        File.delete(spawn_log) if File.exist?(spawn_log)
       end
     end
   end
@@ -254,11 +257,12 @@ class E2EArtifactCaptureTest < Minitest::Test
       collect(scenario_dir, sandbox, run_home, tui_log_dir: log_dir)
 
       copied_spawn = File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-BIG.log")
-      assert File.size(copied_spawn) < File.size(spawn_log),
+      assert File.size(copied_spawn) < Hive::E2E::ArtifactCapture::TUI_SPAWN_CAPTURE_MAX_BYTES + 10,
              "artifact bundle should not copy oversized per-spawn captures wholesale"
       assert File.size("#{copied_spawn}.tail") <= File.size(copied_spawn),
              "tail companion should be derived from the truncated bundle copy"
       assert_includes File.read(copied_spawn, 128), "truncated to last"
+      refute File.directory?(log_dir), "the supplied live diagnostics directory must be removed"
     end
   end
 

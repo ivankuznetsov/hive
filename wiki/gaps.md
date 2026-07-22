@@ -241,7 +241,7 @@ evidence closing the following June 16 gaps.
 ## Release install follow-ups
 
 Latest refresh (2026-07-22): the source version and installer references are
-currently v0.6.6. This feature branch does not itself prove a public tag,
+prepared as v0.6.7. This release-prep branch does not itself prove a public tag,
 signed assets, Homebrew/AUR updates, ClawHub publication, or
 multi-architecture hivebox images. The release boundary uses an exact-tag
 offline candidate gate and does not require provider credentials. The live

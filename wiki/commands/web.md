@@ -28,7 +28,8 @@ path with separate gates.
 
 The Rails resource-ownership and subscriber-owned status lifecycle described
 below are queued on `refactor/dhh-web-architecture-v2` (`96b06792` →
-`4455fc06`); they are not yet ancestors of this refresh branch's default.
+`4455fc06`), with server-rendered project filtering added at later head
+`affc392f`; they are not yet ancestors of this refresh branch's default.
 
 ## CLI
 
@@ -176,18 +177,22 @@ so the login gate can run.
   drawer, cursor, transition, or audit subsystem: workflow mutation continues
   through the existing task controllers. Each band scrolls horizontally
   inside the page at narrow widths. `Grid` retains the compact per-project task
-  rows. A TUI-left-pane-parity project rail filters either view client-side
-  ("All projects" + one button per registered project;
-  projects are ordered by descending in-flight task count, preserving registry
-  order for ties, and the grid plus permanent composer selector stay in that
-  same order across live updates without losing the current selection;
-  buttons not links so the permanent composer's typed text survives; a
-  `+ Add project` link navigates to Repos because adding a project is a real
-  page change; choice mirrored to `?project=` via replaceState; explicit
-  project clicks sync the composer project select so new ideas land in that
-  context, while filtered deep-links preselect the composer only when it is
-  unset; the filter is re-applied after server reconciliation without moving
-  or rebuilding server-rendered project navigation), composer (new idea with image attach: clipboard
+  rows. At queued head `affc392f`, a TUI-left-pane-parity project rail filters
+  either view through ordinary GET links ("All projects" + one link per
+  registered project). Projects are ordered by descending in-flight task
+  count, preserving registry order for ties. `StatusController` resolves the
+  optional `?project=` against that registered set and renders only the chosen
+  project's Board/Grid subtree; an unknown project redirects to the same route
+  without the invalid parameter. The active link and `aria-current` are
+  server-rendered. `+ Add project` still navigates to Repos. A small Stimulus
+  enhancement copies an unmodified in-tab project-link choice into the
+  permanent composer before Turbo visits, preserving its draft while targeting
+  the visible project; it reads the raw data attribute so JSON-looking project
+  names remain strings. Back/Forward realigns the composer for a filtered URL.
+  Modified clicks and alternate targets keep ordinary link behavior. There is
+  no client-side row hiding, active-class mutation, history rewrite, view-form
+  rewrite, mutation observer, or animation-frame reconciliation. The composer
+  itself supports new ideas with image attach (clipboard
   paste AND upload button; images become `[imageN]` placeholders and land in
   the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
@@ -208,11 +213,13 @@ so the login gate can run.
   `folder_mtime` as liveness signals, and reuses the existing token when the
   comparable key is unchanged. Connected pages share one five-second poller.
   The broadcaster renders one complete Turbo Stream message containing the
-  refresh plus server-sorted project rail and composer selector, then sends it
-  once over solid_cable. A partial render failure therefore sends nothing. The
-  refresh re-renders the current URL (or `/`'s saved preference), so Board and Grid
-  cannot be cross-patched with markup for the other view; task pages without
-  the dashboard targets still receive the same morph signal. Stable digest IDs
+  refresh plus composer selector, then sends it once over solid_cable. A
+  partial render failure therefore sends nothing. The refresh GET owns the
+  project rail and URL-selected subset; broadcasting a second rail would race
+  the browser's current filter. The refresh re-renders the current URL (or
+  `/`'s saved preference), so Board and Grid cannot be cross-patched with
+  markup for the other view; task pages without the dashboard targets still
+  receive the same morph signal. Stable digest IDs
   keep project/workflow bands, columns, and task cards attached to the same DOM
   identity across reorder morphs. A status-level submission guard marks the
   mutation at Turbo's confirmed `submit-start` boundary and defers one refresh
@@ -532,8 +539,9 @@ button for real; clipboard paste via a synthetic DataTransfer event — the
 sanctioned JS exception), Board/Grid route switching with saved preference,
 descriptor-ordered board cards with native task actions, mobile board
 containment, Turbo Stream live row arrival without reload, grid
-project-rail filtering with URL sync, composer project sync, and
-`+ Add project` routing, plus re-application after a live broadcast, grid
+server-rendered project-link filtering with URL/composer sync, unknown-name
+rejection, JSON-looking project-name preservation, Back/Forward realignment,
+and `+ Add project` routing, plus filtered refresh after a live broadcast, grid
 scroll plus composer draft preservation across a live broadcast, successful
 composer text/chip/file reset before Turbo renders with project-context
 retention, failed-submit

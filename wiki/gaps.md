@@ -93,8 +93,18 @@ tags: [gap, todo, release-proof, agent-skills]
   `schemas/hive-digest.v2.json`. The digest pages document the queued committed
   contract, but default-branch integration remains unverified until that
   source branch is reconciled.
-- The live `fix/all-worthy-patrol-findings` line now runs `5c1a20e9` →
-  `01e85c89` → `9c4b4d69` → `05784893`; `2f25207c` is an older immutable
+- Commit `071d0d71` is the U5 observability head of a branch-only managed-module
+  sequence. It adds the `hive module` list/inspect/status/doctor/dry-run
+  surfaces, shared redacted status, no-repair diagnosis, and write-free
+  production-evaluator dry-runs on top of earlier package/lifecycle/dispatch
+  commits. The refresh branch's current default has no
+  `lib/hive/module_package/` or `lib/hive/modules/` tree, so [[commands/module]],
+  [[architecture]], and [[state-model]] describe a queued contract. Integration
+  with current main and an installed-package/live-event exercise remain open.
+- The previously documented worthy-finding sequence runs `5c1a20e9` →
+  `01e85c89` → `9c4b4d69` → `05784893`; the live
+  `fix/all-worthy-patrol-findings` ref now ends at test-only `33888cc8` on the
+  rebased-equivalent line detailed below. `2f25207c` is an older immutable
   simplification snapshot from that work. None is an ancestor of the refresh
   branch. The current default still packages the shell GitHub dry-run launcher,
   lacks `StubEnvironment` and `FindingRegistry`, and produces patrol v2.
@@ -113,16 +123,21 @@ tags: [gap, todo, release-proof, agent-skills]
   but do not close the current-main integration or installed/live gaps above.
   The queued path manifest for `176b5053` is stale: its immutable diff changes
   lifecycle/install/config files rather than the listed CLI/E2E/schema paths.
-  Commits `d28377b2` and `c0c6c147` are likewise branch-only focused-test
-  coverage for the durable web PR-gate wait and bot admission cleanup/task
-  resolution; they do not by themselves prove current-main hosted CI.
-- Commits `96b06792` and `4455fc06` are consecutive snapshots on
+  Commits `d28377b2`/`eb8f6181` and `c0c6c147`/`72b95280` are patch-equivalent
+  branch-only pairs covering the durable web PR-gate wait and bot admission
+  cleanup/task resolution; they do not by themselves prove current-main hosted
+  CI. Commit `e1c41ea0` changes only the Brakeman ignore fingerprint/note for an
+  already-bounded registered-task lookup and supplies no new runtime behavior.
+- Commits `96b06792` and patch-equivalent queued `2fef1f47`, followed by
+  `4455fc06` and later `affc392f`, are snapshots on
   `refactor/dhh-web-architecture-v2`, not ancestors of the refresh branch.
   They remove `Hive::Web::Dispatcher`, move mutations onto Rails
   `Task`/`Project`/`Daemon` resources, and make status scans
-  confirmed-subscriber-owned. Source/Rails/browser tests pin the contracts,
-  but current-main integration and a long-running multi-worker/multi-client
-  deployed smoke remain open.
+  confirmed-subscriber-owned. The later head moves project filtering into the
+  Rails GET/URL boundary and limits broadcasts to refresh plus composer
+  reconciliation. Source/Rails/browser tests pin the contracts, but
+  current-main integration and a long-running multi-worker/multi-client
+  deployed smoke across differently filtered URLs remain open.
 - Commits `aae95f78` and `8944dfba` carry the same headless wiki signal fix
   from different parents; the latter is the newer-base authority. All queued
   source blobs match except pre-existing wiki testing context. The v0.6.8
@@ -781,17 +796,35 @@ transaction. Those operational smokes remain open after branch integration.
 
 ## Queued Rails resource/status delivery needs deployed smoke (2026-07-22)
 
-Commits `96b06792` and `4455fc06` replace the former
+Commits `96b06792` (patch-equivalent to queued `2fef1f47`), `4455fc06`, and
+`affc392f` replace the former
 `Hive::Web::Dispatcher` references retained in older historical gap entries:
 filesystem-backed `Task` now owns task mutations, `Project` owns idea capture,
 and `Daemon` owns repair. Status polling starts only for confirmed Cable
-subscribers and uses canonical semantic tokens for one-shot catch-up. Focused
-model/channel/integration/E2E tests cover ownership, deferred registration,
-reconnect, cancellation, and idle-browser behavior. No checked-in deployed
-artifact yet proves zero fleet scans for a long idle period followed by many
-simultaneous Board/Grid/task clients across multiple Puma workers, continued
-mutation safety during real daemon changes, and complete lease release after
-disconnect storms.
+subscribers and uses canonical semantic tokens for one-shot catch-up. The later
+head renders project filtering at the Rails GET boundary, rejects unknown
+project names, and lets the refresh request own the URL-selected subset instead
+of broadcasting another rail. Focused model/channel/integration/E2E tests cover
+ownership, deferred registration, reconnect, cancellation, idle-browser
+behavior, server-rendered selection, composer preservation, and differently
+filtered refreshes. No checked-in deployed artifact yet proves zero fleet scans
+for a long idle period followed by many simultaneous Board/Grid/task clients
+across multiple Puma workers and different project URLs, continued mutation
+safety during real daemon changes, and complete lease release after disconnect
+storms.
+
+## Queued managed-module observability needs integration/live smoke (2026-07-22)
+
+Queued head `071d0d71` and its branch ancestry have focused tests for package
+validation, preview-bound lifecycle changes, atomic activation, trigger
+decisions, status redaction, doctor integrity checks, schedule calculation, and
+byte-stable doctor/dry-run calls. This refresh found no current-default source,
+installed reviewed module, or live event/schedule run proving the sequence as a
+whole. A reconciliation should run the complete suite on current main, install
+one package through the receipt flow, inspect an interrupted activation without
+repair, prove secret values stay absent from every JSON surface, and compare a
+dry-run decision with the corresponding live dispatcher admission before this
+queued contract is treated as integrated.
 
 ## Headless wiki signal recovery needs installed-service smoke (2026-07-22)
 

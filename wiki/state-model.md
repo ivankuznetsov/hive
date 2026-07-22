@@ -283,11 +283,51 @@ subscriber means no fleet scan. Semantic SHA-256 tokens are derived from a
 canonical comparable snapshot with volatile `generated_at` / `age_seconds`
 removed; `mtime` and `folder_mtime` remain because task pages use them as
 liveness signals while agents write. Unchanged polls reuse the comparable key
-and token. `StatusBroadcaster` renders the complete refresh, project rail, and
-composer replacement into one message before a single Cable send; a partial
-render failure publishes nothing and is retryable. Channel state separately
-tracks pending/active/closed ownership so disconnect and deferred adapter
-registration cannot leak or double-release a feed lease.
+and token. On later queued head `affc392f`, `StatusBroadcaster` renders the
+complete refresh and composer-selector morph into one message before a single
+Cable send; a partial render failure publishes nothing and is retryable. The
+refresh GET re-renders the project rail and only the Board/Grid subset selected
+by the current URL, so there is no separate broadcast copy of filter state.
+Channel state separately tracks pending/active/closed ownership so disconnect
+and deferred adapter registration cannot leak or double-release a feed lease.
+
+## Managed module state (queued branch contract)
+
+Queued head `071d0d71` stores reviewed module packages and runtime evidence
+under two project-local roots:
+
+```text
+<hive_state_path>/
+├── modules/<name>/
+│   ├── selection.json                 # installed/enabled/epoch + active/previous generation
+│   ├── generations/<source-commit>/   # immutable validated package bytes
+│   ├── configurations/<sha256>.json   # immutable normalized choices/grants
+│   ├── diagnostics/failed-activation.json
+│   └── runtime/
+│       ├── hooks.json                 # enabled flag, binding digest, cursor
+│       ├── activation-barrier.json    # interrupted activation fence when present
+│       └── runs/<run-id>.json         # admission/retry + execution snapshot
+└── module-runtime/
+    └── decisions/dec-<sha256>.json    # immutable launch/skip receipts
+```
+
+The selection pointer retains both active and previous generation identity,
+an epoch, high-water timestamp, and the preview receipt digest. Uninstall
+publishes a disabled tombstone with `active: null` and keeps the prior
+generation in `previous`, so status distinguishes `uninstalled_history` from
+a missing name. A successful later activation removes stale failed-activation
+diagnostics after the transaction commits; failure evidence stores only a safe
+error class, bounded reason, and timestamp.
+
+`Hive::Modules::Status` is the immutable redacted join across those files,
+module-hook attempts, and decision history. It exposes lifecycle/integrity,
+package provenance, secret binding names and availability (never secret
+values), grants/digest, hooks/cursors/next trigger, latest decision/attempt,
+retry/failure state, bounded artifact references, and history availability.
+Malformed state becomes a bounded `corrupt` projection rather than copied raw
+bytes. Read-only list/inspect/status/doctor use inspection paths that do not
+reconcile transactions or create state. See [[commands/module]]; default-branch
+integration is still open in [[gaps]].
 
 ## Architecture-patrol v2 state
 

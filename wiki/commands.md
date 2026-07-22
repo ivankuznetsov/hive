@@ -33,6 +33,8 @@ one ClawHub listing per Hive verb.
 - `lib/hive/commands/bench_submit.rb`
 - `lib/hive/commands/digest.rb`
 - `lib/hive/commands/pairing.rb`
+- `lib/hive/commands/module.rb`
+- `lib/hive/commands/module/`
 - `lib/hive/commands/setup_agents.rb`
 - `lib/hive/commands/watch.rb`
 - `lib/hive/commands/act.rb`
@@ -131,6 +133,13 @@ Hive task/stage state and pairing state are not read. Dry-run and real delivery
 share the same MarkdownV2 result, and JSON uses only `hive-digest` v2. The
 daemon can schedule it as a global, non-project-scoped child. See
 [[commands/digest]] and [[modules/digest]].
+
+Queued branch head `071d0d71` also adds `hive module`: preview-bound
+install/update/enable/disable/uninstall plus shared redacted
+list/inspect/status, no-repair doctor, and write-free event evaluation. This
+surface is not integrated into the refresh branch's current default source;
+see [[commands/module]] for the exact branch-qualified command and JSON
+contracts.
 
 `hive setup` is the local workstation provisioning bridge for installs that
 `hive setup` is the normal native workstation provisioning bridge: it first

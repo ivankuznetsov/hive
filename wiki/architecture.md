@@ -309,8 +309,10 @@ buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
 ## Hive Web and Hivebox pipeline
 
-Queued commits `96b06792` and `4455fc06` supply the Rails mutation ownership
-and subscriber-owned status-delivery clauses in this section. Current-default
+Queued commit `2fef1f47` is patch-equivalent to the already documented
+`96b06792` Rails resource-mutation snapshot. `4455fc06` supplies the
+subscriber-owned status-delivery clauses, and later queued head `affc392f`
+makes project filtering server-rendered and URL-addressed. Current-default
 integration remains open in [[gaps]].
 
 `hive web` serves the shared vanilla Rails 8 + Turbo app from `web/` (ADR-037;
@@ -335,7 +337,7 @@ Streams, with production Action Cable accepting same-origin-as-host and
 `HIVE_WEB_ORIGIN` only as an extra allow for split-origin deployments:
 `StatusBroadcaster` (self-healing subscriber loop) bridges
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
-broadcast morph refresh plus targeted project-rail/composer updates over
+broadcast morph refresh plus a targeted composer-selector update over
 solid_cable. Polling is subscriber-owned: each accepted `StatusChannel`
 acquires one lease and releases it exactly once, while synchronized
 pending/active/closed transitions fence teardown against deferred Action Cable
@@ -348,8 +350,16 @@ The broadcaster renders the complete multi-action Turbo Stream before one
 Cable send, so a partial render failure delivers nothing and remains
 retryable. The current route renders either the Rails-native workflow Board
 or compact Grid, so live reconciliation does not maintain a second board patch
-protocol. Digest-based DOM identities preserve the owning band/card across
-reorder morphs, and the status-level refresh guard defers background refreshes
+protocol. The project rail is ordinary Rails navigation: `?project=` selects
+the only project whose Board/Grid markup is rendered, and an unknown project
+redirects to the same route without that stale parameter. A small Stimulus
+enhancement moves an explicit project choice into the permanent composer
+before Turbo visits the link and realigns it after Back/Forward restoration;
+it does not own filtering. There is no client-side hide/show pass,
+MutationObserver, animation-frame reapplication, History API mutation, or
+separate project-rail broadcast. Digest-based DOM identities preserve the
+owning band/card across reorder morphs, and the status-level refresh guard
+defers background refreshes
 from Turbo's confirmed `submit-start` boundary while status forms submit, using a
 successful redirect's fresh GET as the reconciliation instead of racing a
 replay against the old URL. Document-level submission admission survives the
@@ -429,6 +439,27 @@ a thin HTTP boundary over `Task`. Task owns the mutation invariants and delegate
 mechanics to canonical Hive commands/queue writers; `Project` owns idea
 capture, and `Daemon` owns liveness and queued repair. The former
 `Hive::Web::Dispatcher` compatibility layer is removed.
+
+## Queued managed-module boundary
+
+Queued branch head `071d0d71` adds a separate project-local managed-module
+control plane above reviewed Honeycomb packages. `ModulePackage::ManagedStore`
+owns immutable generations/configurations plus the atomic selection pointer;
+`Modules::Dispatcher` joins hook binding, cursor, deduplication, concurrency,
+durable-attempt admission, and immutable decision evidence under one per-hook
+lock. The U5 observability slice makes that state consumable through one
+frozen redacted `Modules::Status` projection.
+
+Inspection is deliberately not reconciliation. `ManagedStore#inspect_*`
+reads atomically published bytes without the mutation lock, and the inspector
+opens attempt/decision stores without creating directories. Status can
+therefore report `activating`, `failed_activation`, retained uninstall
+history, or bounded corrupt state without healing the evidence. Doctor adds
+checks but no repairs; module dry-run feeds a synthetic event through the same
+trigger evaluator without locks, cursors, journal writes, run files, or
+attempt admission. CLI/schema/state details are in [[commands/module]] and
+[[state-model]]. This branch is not integrated into current default; see
+[[gaps]].
 
 ## Dispatch flow (durable generation ownership)
 

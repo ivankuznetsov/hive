@@ -134,7 +134,8 @@ class StagesDraftPrHandoffTest < Minitest::Test
       VALID_REPORT.delete_suffix("\n"),
       VALID_REPORT,
       "#{VALID_REPORT}\n",
-      "#{VALID_REPORT.delete_suffix("\n")}  "
+      "#{VALID_REPORT.delete_suffix("\n")}  ",
+      VALID_REPORT.sub("response mapper", "résumé mapper")
     ]
     variants.each do |source|
       with_handoff_fixture(create_visible: false) do |fixture|
@@ -152,6 +153,8 @@ class StagesDraftPrHandoffTest < Minitest::Test
           expected_sha256: read_receipt(fixture).fetch("report_sha256")
         )
         assert_equal source, resumed_source
+        assert_equal Encoding::UTF_8, resumed_source.encoding
+        assert_equal fixture.fetch(:report), Hive::Stages::AgentReport.parse(resumed_source)
       end
     end
   end
@@ -175,6 +178,15 @@ class StagesDraftPrHandoffTest < Minitest::Test
       assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
         Hive::Stages::DraftPrHandoff.report_source_for_resume(path, expected_sha256: digest)
       end
+
+      invalid_prefix = VALID_REPORT.b.sub("response mapper".b, "\xFF".b)
+      File.binwrite(path, invalid_prefix + "<!-- ERROR -->\n".b)
+      error = assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+        Hive::Stages::DraftPrHandoff.report_source_for_resume(
+          path, expected_sha256: Digest::SHA256.hexdigest(invalid_prefix)
+        )
+      end
+      assert_includes error.message, "valid UTF-8"
 
       target = File.join(dir, "outside.md")
       File.write(target, VALID_REPORT)

@@ -74,8 +74,13 @@ preserves the unfamiliar state and blocks.
 `Hive::Stages::AgentWorktree` preflights one GitHub.com origin fetch URL whose
 identity matches the single push URL, controller `gh` authentication, no
 dependency stacking, and a structured base branch. It atomically initializes
-the pointer and versioned `handoff.yml`, then requires both to agree on every
-resume. It then launches exactly one configured stage profile in the saved
+the pointer and versioned `handoff.yml`, then requires their immutable
+repository, branch, base OID, and worktree identities to agree on every
+resume. The receipt's phase is independent monotonic recovery state, so an
+advanced handoff resumes without being compared to the pointer's initial
+`worktree_created` shape; `DraftPrReceipt.read(expected_identity:)` makes that
+narrow comparison explicit while ordinary `expected:` reads remain
+phase-sensitive. It then launches exactly one configured stage profile in the saved
 worktree, protects controller-owned task state across the spawn, parses
 task-root `fix-report.md`, and validates the reported decision against the
 actual branch, base ancestry, cleanliness, and descendant commit count. Remote
@@ -183,11 +188,13 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 ## Tests
 
 - `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), explicit remote-head fetching despite a same-named tag, stalled-transport process-group timeout, empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.
-- `test/unit/draft_pr_receipt_test.rb` — versioned initialization, exact resume, duplicate/malformed/symlink rejection, root containment, and contradictory-state rejection.
+- `test/unit/draft_pr_receipt_test.rb` — versioned initialization, exact and
+  identity-only advanced-phase resume, duplicate/malformed/symlink rejection,
+  root containment, and per-field contradictory-state rejection.
 - `test/unit/stages/agent_test.rb` — draft-PR setup delegation, auth-first
-  failure, exact pointer/receipt creation, matching resume, incomplete-state
-  preservation, exact-cwd one-agent execution, protected-state enforcement,
-  and runtime/report outcome separation.
+  failure, exact pointer/receipt creation, initial and advanced-phase resume,
+  incomplete-state preservation, exact-cwd one-agent execution,
+  protected-state enforcement, and runtime/report outcome separation.
 - `test/unit/managed_git_test.rb` — proves agent-selected fsmonitor and
   `.gitattributes` external-diff helpers execute under ordinary Git but never
   at the managed controller boundary; also pins environment and command

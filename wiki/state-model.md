@@ -472,6 +472,18 @@ no credentials, report prose, logs, or remote error payloads. Existing
 non-nil fields are immutable; malformed, contradictory, skipped, or regressed
 phases fail closed.
 
+Resume compares the receipt with `worktree.yml` using only immutable identity
+fields. The receipt's current phase is validated by its own phase-machine
+schema and may be ahead of `worktree_created`; downstream reconciliation then
+continues from that saved phase without resetting it. This uses the explicit
+identity-only receipt comparison; ordinary expected-state reads still include
+the phase.
+
+When a recoverable controller marker follows the validated report, resume
+removes that marker only after matching the stored report digest, restores the
+original bytes as valid UTF-8, and reparses the report before remote
+reconciliation.
+
 An explicit `worktree.yml` pointer is visible to status and recovery at every
 workflow stage, including generic stage indexes below coding's `4-execute`;
 the stage-index guard now applies only to deriving an absent legacy coding

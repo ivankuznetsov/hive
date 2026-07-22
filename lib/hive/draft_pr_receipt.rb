@@ -33,6 +33,7 @@ module Hive
     BASE_KEYS = %w[
       version phase repository base_branch base_oid task_branch worktree_path
     ].freeze
+    IDENTITY_KEYS = (BASE_KEYS - %w[phase]).freeze
     OPTIONAL_KEYS = %w[
       head_oid report_sha256 scan_sha256
       push_intent_id push_attempted_at observed_remote_oid pushed_at
@@ -107,7 +108,14 @@ module Hive
       read(task_folder, expected: data, worktree_root: worktree_root)
     end
 
-    def read(task_folder, expected: nil, worktree_root:)
+    def read(task_folder, expected: nil, expected_identity: nil, worktree_root:)
+      expected_state_supplied = !expected.nil?
+      expected_identity_supplied = !expected_identity.nil?
+      if expected_state_supplied && expected_identity_supplied
+        raise Hive::WorktreeError,
+              "#{FILENAME} expected state and expected identity are mutually exclusive"
+      end
+
       receipt_path = path(task_folder)
       source = File.open(receipt_path, File::RDONLY | File::NOFOLLOW) do |file|
         raise Hive::WorktreeError, "#{FILENAME} must be a regular file" unless file.stat.file?
@@ -123,9 +131,13 @@ module Hive
       end
       raw = YAML.safe_load(source, permitted_classes: [], permitted_symbols: [], aliases: false)
       data = validate(raw, worktree_root: worktree_root)
-      if expected
-        canonical_expected = validate(expected, worktree_root: worktree_root)
-        mismatches = BASE_KEYS.reject { |key| data.fetch(key) == canonical_expected.fetch(key) }
+      comparison = expected_identity_supplied ? expected_identity : expected
+      if expected_state_supplied || expected_identity_supplied
+        canonical_expected = validate(comparison, worktree_root: worktree_root)
+        comparison_keys = expected_identity_supplied ? IDENTITY_KEYS : BASE_KEYS
+        mismatches = comparison_keys.reject do |key|
+          data.fetch(key) == canonical_expected.fetch(key)
+        end
         unless mismatches.empty?
           raise Hive::WorktreeError,
                 "#{FILENAME} contradicts saved task state for: #{mismatches.join(', ')}"

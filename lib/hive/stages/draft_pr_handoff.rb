@@ -104,6 +104,10 @@ module Hive
           end
           value
         end
+        source.force_encoding(Encoding::UTF_8)
+        unless source.valid_encoding?
+          raise IdentityError, "fix-report.md must remain valid UTF-8"
+        end
         matches = source.to_enum(:scan, Hive::Markers::MARKER_RE).map { Regexp.last_match }
         if matches.any?
           last = matches.last

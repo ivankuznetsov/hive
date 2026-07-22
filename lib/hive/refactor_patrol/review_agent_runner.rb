@@ -8,6 +8,7 @@ require "hive/patrol/runner_task"
 require "hive/patrol/token_budget"
 require "hive/patrol/agent_launch"
 require "hive/permission_scope"
+require "hive/refactor_patrol/agent_identity"
 require "hive/stages/base"
 
 module Hive
@@ -27,6 +28,9 @@ module Hive
         @state = state
         @dry_run = dry_run
         @read_only = read_only
+        @review_identity = Hive::RefactorPatrol::AgentIdentity.new(
+          cfg: cfg, project_root: @project_root
+        ).review
         @token_budget = token_budget || Hive::Patrol::TokenBudget.new(@project_root, cfg: cfg)
       end
 
@@ -41,7 +45,7 @@ module Hive
           log_dir: @dry_run ? File.join(run_dir, "logs") : File.join(@state.root, "logs"),
           slug: STAGE
         )
-        profile = Hive::AgentProfiles.lookup(configured_agent, cfg: @cfg)
+        profile = Hive::AgentProfiles.lookup(@review_identity.provider, cfg: @cfg)
         scope = read_only_scope(profile)
         launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :review)
         unless @token_budget.acquire(stage: STAGE, minimum_tokens: launch.fetch(:minimum_tokens))
@@ -71,6 +75,7 @@ module Hive
             expected_output: @read_only ? nil : output_path,
             status_mode: @read_only ? :exit_code_only : :output_file_exists,
             cli_flags: launch.fetch(:cli_flags),
+            identity_arguments: @review_identity.native_arguments,
             **scope
           ).run!
           if @read_only && resource_limited_with_final_message?(result)
@@ -96,19 +101,22 @@ module Hive
 
       def read_only_scope(profile)
         return {} unless @read_only
-        unless profile.name == :claude
-          raise Hive::ConfigError,
-                "refactor patrol provider #{profile.name.inspect} cannot enforce read-only discovery; " \
-                "configure refactor_patrol.agent: claude"
+        if profile.name == :claude
+          scope = Hive::PermissionScope.resolve(
+            "read-only",
+            task_folder: @project_root,
+            profile: profile,
+            stage: STAGE
+          )
+          return Hive::Stages::Base.tool_scope_kwargs(scope.to_h)
+        end
+        if profile.respond_to?(:read_only_supported?) && profile.read_only_supported?
+          return { permission_mode: Hive::AgentProfile::READ_ONLY_PERMISSION_MODE }
         end
 
-        scope = Hive::PermissionScope.resolve(
-          "read-only",
-          task_folder: @project_root,
-          profile: profile,
-          stage: STAGE
-        )
-        Hive::Stages::Base.tool_scope_kwargs(scope.to_h)
+        raise Hive::ConfigError,
+              "refactor patrol provider #{profile.name.inspect} cannot enforce read-only discovery; " \
+              "configure a provider with read-only sandbox support"
       end
 
       def materialize_read_only_output(result, output_path)
@@ -161,10 +169,6 @@ module Hive
         @token_budget.record!(
           result: result, profile: profile, stage: STAGE, started_at: started_at
         )
-      end
-
-      def configured_agent
-        (@cfg.dig("refactor_patrol", "agent") || "claude").to_s
       end
     end
   end

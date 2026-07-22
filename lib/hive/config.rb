@@ -438,15 +438,16 @@ module Hive
         "max_fixes_per_feature_per_cycle" => 1,
         "max_fix_attempts_per_cycle" => 6,
         "max_prs_per_cycle" => 3,
-        # Patrol tiers bound both measured tokens and agent launches. The
+        # Patrol tiers bound both input-plus-output tokens and agent launches. The
         # launch ceilings are the provider-independent fail-safe when a CLI
-        # omits usable token accounting. Cached tokens count toward the token
-        # ceilings because they still consume provider capacity.
+        # omits usable token accounting. Cached tokens remain visible in usage
+        # telemetry but do not consume Hive's input-plus-output ceilings.
         "max_tokens_per_cycle" => 200_000,
         "max_tokens_per_day" => 600_000,
         "max_tokens_per_agent" => 50_000,
         "max_agent_spawns_per_cycle" => 3,
         "max_agent_spawns_per_day" => 8,
+        "max_architecture_review_spawns_per_day" => 8,
         # Metered architecture launches follow merge demand and do not consume
         # the ordinary daily count. Keep a separate durable backstop for a
         # provider that repeatedly returns no usable token totals.
@@ -506,11 +507,10 @@ module Hive
       "refactor_patrol" => {
         "enabled" => false,
         "auto_fix" => {
-          "enabled" => false,
+          "enabled" => false
           # Fix agents need a real root-confined write sandbox. Discovery may
           # use any configured reviewer, but only the Codex profile currently
           # advertises workspace-write enforcement.
-          "agent" => "codex"
         },
         "issue_filing" => {
           "enabled" => false,
@@ -519,9 +519,8 @@ module Hive
           # leverage in addition to a strategic routing reason.
           "min_leverage_score" => 0.25
         },
-        "agent" => "claude",
         "min_confidence" => "medium",
-        "min_leverage_score" => 0.25,
+        "min_leverage_score" => 0.10,
         "max_theses_per_feature" => 1,
         "max_theses_per_run" => 10,
         # One architecture-discovery child must never multiply the per-agent
@@ -2737,6 +2736,7 @@ module Hive
       [ "max_tokens_per_agent", 1 ],
       [ "max_agent_spawns_per_cycle", 1 ],
       [ "max_agent_spawns_per_day", 1 ],
+      [ "max_architecture_review_spawns_per_day", 1 ],
       [ "max_architecture_unmetered_spawns_per_day", 1 ],
       [ "architecture_budget_multiplier", 1 ],
       [ "fix_budget_multiplier", 1 ]
@@ -2925,7 +2925,7 @@ module Hive
         validate_integer_min!(refactor[key], "refactor_patrol.#{key}", min, source_path)
       end
 
-      validate_agent_name!(refactor["agent"], "refactor_patrol.agent", source_path)
+      validate_refactor_patrol_identity!(refactor, "refactor_patrol", source_path)
       validate_path_glob_list!(refactor["include"], "refactor_patrol.include", source_path)
       validate_path_glob_list!(refactor["exclude"], "refactor_patrol.exclude", source_path)
       validate_refactor_patrol_commands!(refactor, source_path)
@@ -2943,7 +2943,7 @@ module Hive
       end
 
       validate_required_boolean!(gate["enabled"], "refactor_patrol.#{key}.enabled", source_path)
-      validate_agent_name!(gate["agent"], "refactor_patrol.auto_fix.agent", source_path) if key == "auto_fix"
+      validate_refactor_patrol_identity!(gate, "refactor_patrol.auto_fix", source_path) if key == "auto_fix"
       if key == "issue_filing"
         score = gate["min_leverage_score"]
         unless score.is_a?(Numeric) && score.between?(0, 1)
@@ -2952,6 +2952,18 @@ module Hive
                 "must be a number between 0 and 1; got #{score.inspect} (#{score.class})"
         end
       end
+    end
+
+    def validate_refactor_patrol_identity!(block, label, source_path)
+      validate_agent_name!(block["agent"], "#{label}.agent", source_path) if block.key?("agent")
+      if block.key?("model")
+        Hive::ImplementationIdentity.normalize_model(block["model"], concrete: true)
+      end
+      if block.key?("effort")
+        Hive::ImplementationIdentity.normalize_effort(block["effort"])
+      end
+    rescue Hive::ImplementationIdentity::Error => e
+      raise ConfigError, "#{label} identity in #{describe_source(source_path)} is invalid: #{e.message}"
     end
 
     def validate_required_boolean!(value, label, source_path)

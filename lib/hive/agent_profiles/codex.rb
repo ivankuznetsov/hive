@@ -27,6 +27,11 @@ module Hive
         "-c", 'approval_policy="never"',
         "--ephemeral", "--ignore-user-config", "--ignore-rules"
       ],
+      read_only_flags: [
+        "--sandbox", "read-only",
+        "-c", 'approval_policy="never"',
+        "--ephemeral", "--ignore-user-config", "--ignore-rules"
+      ],
       add_dir_flag: "--add-dir",
       budget_flag: nil, # codex has no native --max-budget-usd
       output_format_flags: [ "--json" ],

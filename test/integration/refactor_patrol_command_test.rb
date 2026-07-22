@@ -1763,6 +1763,9 @@ class RefactorPatrolCommandTest < Minitest::Test
           {
             "project_name" => "demo",
             "default_branch" => "master",
+            "execute" => {
+              "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high"
+            },
             "refactor_patrol" => {
               "enabled" => true,
               # Most command tests exercise discovery/checkpoint semantics.

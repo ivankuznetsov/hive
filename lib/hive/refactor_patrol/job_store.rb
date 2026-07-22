@@ -40,6 +40,9 @@ module Hive
         default_branch auto_fix_agent min_confidence commands caps
         issue_min_leverage_score
       ].freeze
+      POLICY_ACTION_OPTIONAL_KEYS = %w[
+        auto_fix_model auto_fix_effort auto_fix_launcher_identity
+      ].freeze
       POLICY_COMMAND_KEYS = %w[docs format lint typecheck test].freeze
       POLICY_OPTIONAL_COMMAND_KEYS = %w[public_contract].freeze
       POLICY_CAP_KEYS = %w[

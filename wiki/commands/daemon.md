@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-07-20
+updated: 2026-07-22
 tags: [command, daemon, automation, json]
 ---
 
@@ -22,7 +22,7 @@ normal policy dispatch. Separately, it ingests merged PRs and fairly schedules
 ordinary patrol alongside language-neutral architecture discovery/action
 resumes. When global `digest.enabled: true`, the same daemon
 also schedules one non-project-scoped `hive digest --date <day> --json` child
-after local midnight for the daily shipped digest.
+for the daily Europe/London merged-PR changelist.
 
 ## Subcommands
 
@@ -64,9 +64,11 @@ digest:
 `hive daemon start` loads this block via `Hive::Config.load_global_digest_block` and
 wires `Hive::Daemon::DigestScheduler`. The scheduler stores its cursor in
 `<state_home>/digest_state.json`, initializes to the most recently completed
-local day on first run without backfilling history, dispatches missed days
-oldest-first one at a time, retries non-zero exits by leaving the cursor
-behind, and logs `digest_catchup_skipped` when missed history exceeds
+Europe/London day on first run without backfilling history, dispatches missed
+days oldest-first one at a time, and advances after empty, full, or
+warning-bearing partial success. Total collection, generation, or delivery
+failure is nonzero and leaves the day owed under bounded backoff. It logs
+`digest_catchup_skipped` when missed history exceeds
 `digest.max_catchup_days`. The child command is always
 `hive digest --date YYYY-MM-DD --json`; see [[commands/digest]].
 

@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-20
+updated: 2026-07-22
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` first rejects unsupported top-level project keys, then captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS` and runs value validation. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
 ## Condition authority
 
@@ -229,10 +229,10 @@ paths, validates the result, and returns the config-shaped hash the digest
 pipeline needs. Direct callers can still pass `cfg:` explicitly. The relevant
 keys are:
 
-- `digest.agent`, then `patrol.agent`, then `"claude"` for the categorizer
+- `digest.agent`, then `patrol.agent`, then `"claude"` for the changelist
   agent.
-- `budget_usd.digest` and `timeout_sec.digest` for categorizer limits,
-  defaulting inside `Hive::Digest::Categorizer` to `50` and `1800`.
+- `budget_usd.digest` and `timeout_sec.digest` for generator limits,
+  defaulting inside `Hive::Digest::ChangelogGenerator` to `50` and `1800`.
 - `bot.chat_id_allowlist[0]` for Telegram delivery.
 - `bot.log_file` for the sender's bot logger path.
 
@@ -246,7 +246,8 @@ integer chat id, else `false` (the predicate is the private
 (true or false) is always honored; only the unset case is derived. Both
 scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher
 SIGHUP reconfigure) load through `load_global_digest_block`, so the derived
-value applies in both.
+value applies in both. The block has no `source` field: the sole digest mode is
+the registered-repository PR changelist, and CLI `--repo` is a runtime filter.
 
 ## Screenote config
 
@@ -312,7 +313,19 @@ key → descriptor default → merged Hive default/fallback.
 
 ## Validation (`Config.validate!`)
 
-Runs after merge so a default value can never trigger a failure — only user input does. Raises `Hive::ConfigError` (single class for all "config is bad" cases). Key checks include:
+`Config.load` applies two validation layers and raises `Hive::ConfigError` for
+both. Before defaults are merged, `validate_project_top_level_keys!` accepts
+only keys declared by `Config::DEFAULTS`, the explicit default-less `gh`
+section, or an active built-in/project workflow stage name. This keeps
+descriptor-stage overrides such as `assemble:` valid while rejecting typos,
+non-string keys, global-only namespaces, and the retired top-level
+`reviewers:` spelling (whose diagnostic points to `review.reviewers`). All
+unknown keys are reported once in deterministic string-first order. Descriptor
+loading receives the raw config's resolved `hive_state_path`, avoiding a
+recursive `Config.load` while it discovers the dynamic stage-name allowlist.
+
+After merge, `Config.validate!` checks values so a default value can never
+trigger a failure—only user input does. Key checks include:
 
 1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `web`, `babysitter`, `patrol`, `digest`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
 2. **`validate_reviewers!` / `validate_review_adhoc!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`. `review.adhoc.reviewers` is either nil or the same reviewer-entry Array shape, and `review.adhoc.fix` is boolean.

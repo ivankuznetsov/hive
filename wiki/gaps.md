@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-21
+updated: 2026-07-22
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -70,6 +70,29 @@ tags: [gap, todo, release-proof, agent-skills]
 - The packaged mixed Sol/Terra/Grok profiles, stage-specific Codex shim, sole
   Sol `ce-code-review` policy, and combined Sol-runner selection are locally
   test-pinned but still need their first paid end-to-end cell.
+
+## Queued branch integration and provenance (2026-07-22)
+
+- Commit `03fe68af` is an immutable branch snapshot whose digest command emits
+  only `hive-digest` v2 and removes the live shipped-task / merged-PR-v1 split.
+  The refresh worktree's current default-branch source still contains
+  `hive-digest` v1 plus `hive-merged-pr-digest` v1 and has no
+  `schemas/hive-digest.v2.json`. The digest pages document the queued committed
+  contract, but default-branch integration remains unverified until that
+  source branch is reconciled.
+- Commit `0624f58a` likewise contains strict project top-level-key admission
+  and descriptor-stage allowlist discovery, while the refresh worktree's
+  default-branch `lib/hive/config.rb` does not yet contain
+  `validate_project_top_level_keys!`. The config/workflow pages document the
+  queued contract; its integration state remains branch-dependent.
+- Two queue manifests do not describe their immutable commits. `02e938cc`
+  changes only `lib/hive/operational_status.rb` and
+  `lib/hive/daemon/stale_agent_healer.rb` to derive coding plan/review stage
+  directories; it does not change the listed skill/setup/status/watch files.
+  `05b4c137` is the status-v5 admission projection commit (12 status/schema/TUI
+  paths), not the listed repository-identity/config dependency commit. This
+  refresh attributes behavior to `git show` results, not those stale path
+  lists.
 
 ## Source-file coverage (representative map)
 

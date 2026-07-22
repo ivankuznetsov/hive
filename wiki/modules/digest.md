@@ -3,244 +3,184 @@ title: Hive::Digest
 type: module
 source: lib/hive/digest.rb, lib/hive/digest/, templates/digest_prompt.md.erb
 created: 2026-06-14
-updated: 2026-07-19
-tags: [digest, shipped, telegram, module]
+updated: 2026-07-22
+tags: [digest, github, telegram, module]
 ---
 
-**TLDR**: `Hive::Digest` is the library pipeline behind [[commands/digest]].
-It finds tasks that reached `9-done` on a requested local date, turns their PR
-metadata into `ShippedItem` records, optionally asks an agent to classify and
-summarize them, renders Telegram MarkdownV2, and delivers through the existing
-bot Telegram client. The module has injectable seams for collector,
-categorizer, sender, clock, and config. The default runtime config is loaded
-through `Hive::Config.load_global_digest_config`. `Hive::Digest::MergedPr` is a
-parallel, read-only GitHub source for `hive digest --source merged-prs`; it
-shares the date window helper and sender but does not use the shipped-task
-collector, categorizer, stats footer, or `hive-digest` schema.
+**TLDR**: `Hive::Digest` is one fail-closed pipeline for a complete daily
+GitHub PR changelist. It resolves registered repositories, collects every PR
+merged in a Europe/London day with required body/diff/file evidence, validates
+an exhaustive generated changelog, computes honest optional statistics,
+renders MarkdownV2, and dry-runs or sends through Telegram. It has no edge to
+Hive task, stage, completion, ship-time, matcher, or pairing state.
 
 ## API Map
 
 | API | Purpose |
-|-----|---------|
-| `Hive::Digest.run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now }, collector: nil, categorizer: nil, sender: nil, stats: nil, pairing_store: Hive::Bot::PairingStore.new)` | Orchestrates collection, categorization, stats, rendering, pairing-request reminder appending, and delivery. Defaults `cfg` via `Config.load_global_digest_config` and `stats` to `Stats.new`. For a real send (not `dry_run`) it first calls `Hive::EnvFile.load!` so `~/.config/hive/.env` supplies `HIVE_TELEGRAM_BOT_TOKEN` even when the environment doesn't export it — this is what lets the daemon-dispatched `hive digest` authenticate (its systemd/detached launch env has no token; previously only `hive bot start` loaded the `.env`). An exported env var still wins; a dry-run never loads it. Returns `Result(status:, date:, message:, delivery:)`. |
-| `Digest::Window.local_today`, `previous_local_day`, `on_local_date?`, `parse_date`, `parse_time` | Local-date window helpers. `previous_local_day(now:)` is the shared "yesterday local" default used by both the CLI command and `Digest.run`. Collection compares `shipped_at.getlocal.to_date` to the requested date. |
-| `Digest::ShipTimes#shipped_at(hive_state_path:, slug:)` | Reads git log on `hive/state` (fixed-string `-F` grep) and picks the ship commit by **action preference** — `pr_finalized`, else `archived`, else approval into `9-done` — not whichever commit is chronologically first. |
-| `Digest::Collector#for_date(date)` | Scans registered projects and builds grouped `ShippedItem` rows from `9-done` task folders, `meta.yml`, `pr.md`, and ship times. |
-| `Digest::Categorizer#categorize(grouped, date:)` | Renders the digest prompt and runs an `AgentProfile` expecting an `items.json` file. Returns `Digest::Output(by_project:, summary:)`. |
-| `Digest::Categorizer.map_output_file` / `map_document` | Validates and maps model JSON rows back to shipped items (the `{project => [CategorizedItem]}` shape), defaulting bad/missing categories safely. `load_doc!` reads/parses the file; `summary_from` extracts the overall summary with a count fallback. |
-| `Digest::Stats#for_items(items)` | Sums per-PR `Hive::Gh.pr_stats(pr_url)` (injectable `fetch:`) into `Totals(prs:, commits:, additions:, deletions:, measured_prs:)`; a per-PR `gh` failure is logged and skipped. |
-| `Digest::Renderer.render(by_project, date:, summary:, totals:)`, `.empty`, `.failed`, `.escape_mdv2` | Builds the Telegram MarkdownV2 message: brand header + date, `_Summary_`, per-project sections, and the global stats footer. |
-| `Digest::Sender#deliver(text, dry_run:)` | Returns dry-run text or sends the Telegram MarkdownV2 message (chunked into one `send_message` per chunk above Telegram's 4096-char limit). |
-| `Digest::MergedPr.run(date: nil, dry_run: false, repos: [], cfg: nil, clock: -> { Time.now }, resolver: nil, collector: nil, sender: nil)` | Orchestrates the merged-PR source: resolve repos, collect PRs merged on the local date, render mechanically, and deliver through `Digest::Sender`. Returns `MergedPr::Result`. |
-| `Digest::MergedPr::RepoResolver#resolve(repos:)` | Uses explicit `owner/name` repos when supplied, otherwise resolves registered project paths through `Gh.repo_name_with_owner`. Per-project failures are warned and dropped. |
-| `Digest::MergedPr::Collector#for_date(date, repos:)` | Calls `Gh.list_merged_prs` per repo, filters by `Window.on_local_date?(mergedAt, date)`, maps author/bot/fork metadata, and best-effort annotates `hive/<slug>` branches. |
-| `Digest::MergedPr::Renderer.render(prs, date:)` | Mechanical Telegram MarkdownV2 renderer grouped by repo with total/per-repo counts and PR links. |
+|---|---|
+| `Hive::Digest.run(date: nil, dry_run: false, repos: [], cfg: nil, clock: -> { Time.now }, resolver: nil, collector: nil, generator: nil, stats: nil, renderer: Renderer, sender: nil)` | Canonical orchestration. Returns `Result(status:, date:, dry_run:, resolved_repository_count:, collected_repository_count:, projects:, pr_count:, stats:, warnings:, message:, delivery:)`. Raises before rendering/sending on zero scope, total collection failure, or invalid generated coverage. |
+| `Digest::RepoResolver#resolve(repos:)` | Resolves configured registered projects to `RepositoryTarget` values that retain project path, canonical repository, and GitHub host. Applies case-insensitive `--repo` filters and returns discovery warnings. |
+| `Digest::LondonWindow` | Owns digest-only Europe/London default date, parsing, membership, and UTC bounds using `tzinfo`. `Digest::Window` remains separate for AnswerDigest's host-local contract. |
+| `Digest::Collector#for_date(date, targets:)` | Collects repository metadata and complete qualifying PR body/raw-diff/file evidence into repository-atomic `CollectionReport` outcomes. |
+| `Digest::ChangelogGenerator#generate(repositories, date:)` | Builds private evidence chunks, runs one bounded agent, validates the fact ledger and exact project/PR/material-fact coverage, redacts generated text, and returns `Changelog`. |
+| `Digest::Stats#for_repositories(repositories)` | Produces per-repository and overall `Aggregate` values with independently optional additions, deletions, and commits plus incomplete-statistics warnings. |
+| `Digest::Renderer.render(changelog:, date:, stats:, warnings:)` | Produces deterministic MarkdownV2 project sections, PR links/bullets, warnings, and divider/middle-dot statistics. |
+| `Digest::Sender#preflight!` / `#deliver(text, dry_run:)` | Validates Telegram credentials before paid generation, or returns a credential-free dry-run. Real sends use safe chunks and report partial-send context on failure. |
 
-`Digest::Result#status` is one of:
+## Data And Outcome Model
 
-- `:empty` — no shipped items, empty message delivered or printed.
-- `:sent` — non-empty digest rendered and delivered or printed.
-- `:failed_notice` — categorizer model failed, so a failure notice was
-  delivered or printed.
+`RepositoryTarget` binds a registered project name/path to a validated
+`owner/name` and explicit GitHub host. `RepositoryCollection` contains metadata
+and every qualifying `PullRequest` for one successfully collected repository.
+`CollectionReport` keeps successful repositories, failures, and warnings
+separate, so an empty successful query cannot be confused with an outage.
 
-## Data Flow
+`PullRequest` always has number, URL, title, merge timestamp, redacted body,
+redacted raw diff, and complete file identities. Additions, deletions, and
+commits are independently optional. `Warning` carries a stable kind/message
+and optional repository, PR number, and metric list for both human and JSON
+output.
+
+`Result#status` is only:
+
+- `:empty` when at least one repository succeeded and the represented PR count
+  is zero;
+- `:sent` when at least one PR is represented (including a dry-run preview).
+
+There is no `failed_notice`. Failure to establish complete collection or
+generated coverage raises and sends nothing, allowing the daemon to retry the
+date.
+
+## Pipeline
 
 ```text
-registered projects
-  -> .hive-state/stages/9-done/* folders
-  -> Digest::ShipTimes over git log hive/state
-  -> ShippedItem(project, slug, display_name, pr_url, pr_number, pr_title, pr_body, shipped_at)
-  -> Digest::Categorizer (agent writes {summary, items} to items.json)
-  -> Output(by_project: {project => [CategorizedItem(item, category, summary)]}, summary:)
-  -> Digest::Stats.for_items (gh pr view per PR) -> Totals(prs, commits, additions, deletions, measured_prs)
-  -> Digest::Renderer.render(by_project, date:, summary:, totals:) (Telegram MarkdownV2)
-  -> Digest::Sender (Telegram bot client)
+registered project Git origins
+  -> RepoResolver (targets + discovery warnings)
+  -> LondonWindow (exact UTC bounds for one London date)
+  -> Collector (repository metadata + complete PR body/diff/files)
+  -> ChangelogGenerator (evidence IDs -> fact ledger -> project/PR bullets)
+  -> Stats (known totals + explicit incomplete warnings)
+  -> Renderer (deterministic MarkdownV2)
+  -> Sender (dry-run or Telegram chunks)
 ```
 
-The rendered message is: a brand header (`*Hive* #Digest`) + human date, an
-italic `_Summary_` block (the model's one-line overview, or a neutral count
-fallback), one **per-project** section (`*Hive*`, capitalized) each with
-`Features`/`Fixes`/`Patrol` subsections in fixed order, then a global footer
-under a divider — `Lines +A/-D · PRs P · Commits C`. Lines/Commits are shown
-only when `Totals#measured_prs` is positive, so a `gh`-unavailable run degrades
-to just the PR count instead of a misleading `+0/-0`.
-When `PairingStore#pending.size` is positive, `Digest.run` appends one final
-line shaped as `🔑 N pairing request(s) waiting — run hive pairing list` to both the
-empty and successfully-rendered digest paths. This local file read happens
-outside the categorizer prompt, so pending pairing requests do not spend agent
-budget.
+Resolution fails closed when no registered GitHub target survives. Collection
+is atomic per repository. Total repository failure raises `CollectionError`;
+partial failure keeps the complete successful repositories and warnings. A
+successful all-empty report skips `ChangelogGenerator` but still passes through
+statistics, rendering, and delivery.
 
-Collection is deliberately tolerant of incomplete task artifacts:
+Real sends load the environment file, collect GitHub evidence, then call
+`Sender#preflight!` before launching the paid generator. This preserves the
+ability to report GitHub collection errors without Telegram config while still
+avoiding agent spend when the recipient or token is missing. Dry-run bypasses
+Telegram credential lookup entirely.
 
-- Missing `meta.yml` falls back to the folder basename for slug/display name.
-- Missing `pr.md` leaves PR URL/body blank.
-- Malformed PR frontmatter is handled by `Hive::Gh.pr_frontmatter`; the body
-  is read via the shared `Hive::Gh.pr_body` helper (one definition of the
-  `---…---` frontmatter delimiter) and capped to a generous per-item length so
-  one oversized `pr.md` can't blow the categorizer's context/budget.
-- `Hive::GitError` — or an unreadable/directory-shaped `pr.md` surfacing as
-  `SystemCallError`/`IOError` from `Hive::Gh.pr_frontmatter` — while building
-  one item drops that item rather than failing the whole multi-project digest.
+## GitHub Evidence Contract
 
-## Categorizer Contract
+`Hive::Gh.digest_merged_pr_candidates` paginates
+`repos/{owner}/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100`
+through explicit-host `gh api` calls. It validates monotonic `updated_at`,
+de-duplicates repository/PR identity, and stops only after an empty page or a
+page whose remaining rows all predate the London window. Filtering by validated
+`merged_at` happens afterward.
 
-The agent prompt lives in `templates/digest_prompt.md.erb`. It gives the model
-one row per shipped item and asks it to write JSON to an exact output path:
+Each qualifying PR is hydrated through:
 
-```json
-{"items":[{"id":"<id>","category":"feature|fix|patrol","summary":"One sentence."}]}
+- `digest_pr_detail` for canonical body, merge identity, changed-file count,
+  and optional metrics;
+- `digest_pr_diff` with `Accept: application/vnd.github.diff`;
+- paginated `digest_pr_files` for authoritative file identities.
+
+The collector rejects transport/JSON errors, inconsistent identities or merge
+times, incomplete pagination, changed-file mismatches, a missing nonempty diff,
+scratch/checksum/redaction failures, and fixed evidence-ceiling breaches. One
+bad qualifying PR fails its repository instead of disappearing from the
+changelist.
+
+Scratch directories and files use modes 0700/0600. Raw body/diff bytes exist
+only long enough to construct and verify redacted evidence, then are removed.
+The entire per-collection scratch run is removed on both success and failure.
+
+## Generation And Trust Boundaries
+
+The private manifest gives every body section and diff hunk/file marker a
+stable evidence ID outside nonce-fenced untrusted repository text. One agent
+invocation must return:
+
+1. facts covering every evidence ID exactly once, each classified as material
+   or accompanied by a concrete no-user-facing-change rationale;
+2. exactly one significance sentence per repository and one row per PR;
+3. one or more concrete bullets per PR, collectively citing every material
+   fact for that PR.
+
+Validation accepts model row reordering but rejects identity drift, duplicates,
+unknowns, omissions, blanks, title repetition, zero bullets, uncovered
+evidence, and uncovered material facts. Failures retain only safe run/log
+breadcrumbs. Successful diagnostics retain a redacted ledger and checksums,
+not raw evidence or prompt payloads.
+
+`Hive::SecretPatterns` scans repository metadata/body/diff before agent
+provider egress and scans generated significance/bullets before rendering.
+Recognized values become typed placeholders, and warnings contain pattern
+counts/kinds without snippets. Unsafe or unverifiable redaction fails the
+repository or generation. Real rendered text then crosses the Telegram
+boundary; dry-run keeps it local.
+
+## Statistics And Rendering
+
+For each metric, `MetricTotal` records the measured subtotal, known contributor
+count, and total contributor count. The value is absent exactly when no
+contributor is known. A known subset is `partial?`; measured zero remains zero.
+The same rules apply per project and overall, with a scoped warning for each PR
+and missing metric.
+
+The renderer owns all deterministic evidence: order, repository headings,
+project/PR counts, PR numbers and links, warnings, and metric labels. Generated
+text supplies only project significance and bullets and is always escaped as
+untrusted MarkdownV2 text. Long plain-text lines are split on grapheme-safe
+boundaries before Telegram performs message chunking, so an escape or link
+entity is never hard-cut. The footer retains:
+
+```text
+──────────
+Lines +A/-D · PRs P · Commits C
 ```
 
-IDs are project-scoped via `ShippedItem#categorizer_id`: `<project_name>/<pr_number>`
-when a PR number is present, otherwise `<project_name>/<slug>`. The mandatory
-`project_name/` prefix keeps two projects that ship the same PR number (or slug)
-on one day from colliding onto a single key in the id→row map. Both the PR
-**title** and the `pr_body` are wrapped in the per-spawn `user_supplied_<hex>`
-tag from `Hive::Stages::Base`, and the prompt instructs the model to treat
-everything inside those tags as untrusted data rather than instructions. The
-categorizer runs with:
+Partial known values carry `(partial)`. Entirely unknown metrics are omitted;
+an empty digest shows only `PRs 0`.
 
-- `status_mode: :output_file_exists`
-- `expected_output: <run_dir>/items.json`
-- `log_label: "digest"`
-- `add_dirs: []`
-- `cwd` set to the run directory under `<state_home>/digest/runs/<date>-<hex>`
+## JSON And Daemon Contract
 
-Agent selection and limits come from the supplied `cfg` hash:
+`Hive::Commands::Digest` serializes only `hive-digest` v2. Project and PR rows
+mirror the rendered changelist; unknown numeric properties are omitted.
+`schemas/hive-digest.v1.json` is retained only as immutable history, and the
+former merged-PR schema/registry identity has been removed.
 
-- `digest.agent`, then `patrol.agent`, then `"claude"`.
-- `budget_usd.digest`, default `50`.
-- `timeout_sec.digest`, default `1800`.
-
-The output mapper is fail-closed on missing/empty/malformed JSON, but
-row-level model mistakes are tolerated: an omitted item, invalid category, or
-duplicate model id logs a warning (falling back to `$stderr` when no logger is
-wired, so the signal can't be configured away), uses category `feature`, and
-falls back to the PR title or display label for summary when needed.
-
-## Delivery Contract
-
-`Digest::Sender.resolve_chat_id(cfg)` resolves to `bot.chat_id_allowlist[0]`
-only and raises `Hive::ConfigError`
-(`"bot.chat_id_allowlist[0] must be configured before sending digest"`) when no
-allowlisted chat is set. Dry-run bypasses token and chat lookup entirely.
-
-Real delivery builds `Hive::Bot::Telegram` with
-`Hive::Config.telegram_bot_token!` and calls:
-
-```ruby
-send_message(chat_id: chat_id, text: text, parse_mode: :markdown_v2)
-```
-
-`send_in_chunks` splits a digest longer than Telegram's 4096-char limit into
-one `send_message` call per chunk. A mid-stream chunk failure is recorded as a
-structured `:send_failure` event on the bot logger (which exposes only
-`#event`, not `#error`) and re-raised; the daemon scheduler then retries the
-whole date on a later tick (at-least-once delivery across restarts). The
-renderer caps each model summary well under the limit so a single rendered
-line can never split a MarkdownV2 escape across a chunk boundary. Summary,
-overall-summary, shipped-task label, and merged-PR label caps share one raw-text
-truncation primitive in `Digest::Renderer`; each public policy method retains
-its own limit constant.
-
-The default log path is `cfg.dig("bot", "log_file")` or
-`<state_home>/logs/bot.log`, sharing the bot logger surface.
-
-## Merged-PR Source
-
-`Hive::Digest::MergedPr` exists under its own namespace so the shipped-task
-pipeline remains independent. It reuses only:
-
-- `Digest::Window` for the default previous local day and the
-  `mergedAt.getlocal.to_date == date` boundary rule.
-- `Digest::Sender` for dry-run / Telegram delivery.
-- `Hive::Config.load_global_digest_config` for bot config and `.env` loading on
-  real sends.
-
-The repo resolver returns an ordered, de-duped `owner/name` list. Explicit
-`repos:` validates slug shape and bypasses discovery; discovered repos come
-from `Hive::Config.registered_projects` and `Gh.repo_name_with_owner(path)`.
-
-The collector queries a broad UTC search window (`D-1` through `D+1`) with
-`Gh.list_merged_prs(repo, since:, until_date:)`, then applies the local-date
-filter in Ruby. This protects local-midnight boundaries where GitHub's UTC
-timestamp date differs from the operator's local calendar date. Each PR record
-carries `repo`, `number`, `title`, `url`, raw `mergedAt`, `author`,
-`authorIsBot`, `headRefName`, `isCrossRepository`, and optional `hive_slug` /
-`hive_stage`.
-
-`MergedPr::HiveMatcher` is intentionally best effort and read-only. It only
-recognizes branches shaped `hive/<slug>` and looks for matching directories
-under registered projects' `.hive-state/stages/*/<slug>`. Any matcher error
-leaves the annotation blank.
-
-The source emits a separate JSON contract, `hive-merged-pr-digest` v1, so
-consumers do not need to overload `hive-digest`'s shipped-task statuses.
-
-## Scheduler Contract
-
-`Hive::Daemon::DigestScheduler` is the daemon-side cursor for the daily job.
-It persists `last_digested_date` in `<state_home>/digest_state.json` and emits
-one global dispatch hash at a time:
-
-```bash
-hive digest --date YYYY-MM-DD --json
-```
-
-The due model is local-date based: at any tick, the most recent completed
-local day is `Window.local_today(now:) - 1`. Missing state is a first-run guard
-that initializes the cursor to that completed day without sending history.
-After downtime, owed days dispatch oldest-first, one per successful child
-completion, and `digest.max_catchup_days` (default `7`, `0` = unbounded)
-skips/logs the oldest excess days. The dispatcher runs this global scheduler
-before the status fetch and bypasses per-project daemon gates, but still gates
-the dispatch through the concurrency controller (tagged `kind: :digest`, off
-the task caps, at most one in flight). A successful child exit advances the
-cursor; a non-zero exit clears the pending marker, leaves the cursor for retry,
-and records an escalating failure backoff (`60`/`300`/`900`s) so the same date
-is **not** re-dispatched every tick. A successful send whose cursor write fails
-also records that bounded backoff before re-raising; the day stays owed without
-being re-sent on every daemon poll. Shared atomic writes retain the original
-write/rename policy (`fsync: false`) rather than adding a new per-tick flush.
-The dispatcher isolates scheduler
-`tick` / `complete` exceptions as `fatal` log events with
-`keeping_previous: true`, so digest-state I/O faults do not crash the daemon
-poll loop. Dry-run pseudo-child reaping calls the same `complete` hook as real
-child reaping, which prevents dry-run digest dispatches from wedging behind a
-stale pending marker. `digest.enabled` / `max_catchup_days` are re-read on
-SIGHUP (the scheduler is reconfigured in place within one tick).
-
-`digest.enabled` is **opt-out**: when the operator has not set it, both
-scheduler-config callers load it through `Config.load_global_digest_block`,
-which derives the flag ON from the bot config (the bot is enabled with an
-allowlisted chat) and OFF otherwise — see [[commands/daemon]] and
-[[modules/config]]. An explicit value (true or false) is always honored.
+`Hive::Daemon::DigestScheduler` uses `LondonWindow`, persists
+`last_digested_date`, and emits the canonical bare command
+`hive digest --date D --json`. Exit 0 advances empty, full, and honest partial
+success. Nonzero total-collection, generation, delivery, or cursor-write
+failure leaves the day owed under bounded 60/300/900-second backoff. First run,
+oldest-first catch-up, cap, one global slot, SIGHUP reconfiguration, dry-run
+pseudo-child completion, and the 3600-second child timeout are unchanged.
 
 ## Tests
 
-- `test/unit/digest/window_test.rb` — local-date parsing and timezone window membership.
-- `test/unit/digest/ship_times_test.rb` — ship-commit preference and nil fallback.
-- `test/unit/digest/collector_test.rb` — registered-project grouping, missing artifact tolerance, local timezone boundary.
-- `test/unit/digest/categorizer_test.rb` — model output mapping, bad-category fallback, missing-row fallback, prompt rendering.
-- `test/unit/digest/renderer_test.rb` — category/project ordering, MarkdownV2 escaping, empty/failed messages, no-link rows.
-- `test/unit/digest/run_test.rb` — orchestration status branches and default date.
-- `test/unit/digest/merged_pr/*_test.rb` — merged-PR repo resolution,
-  local-date filtering, partial GitHub failure tolerance, Hive matching,
-  mechanical rendering, and runner orchestration.
-- `test/unit/digest/sender_test.rb` — chat-id resolution, dry-run bypass, Telegram send args.
-- `test/unit/daemon/digest_scheduler_test.rb` — first-run guard, catch-up,
-  cap logging, child/write-failure backoff, disabled mode, and DST local-date
-  behavior.
-- `test/unit/daemon/dispatcher_test.rb` — scheduler dispatch/reap wiring,
-  dry-run digest completion, and fatal-log isolation when scheduler completion
-  raises.
-- `test/digest/e2e_test.rb` — opt-in live model + Telegram fixture run; fails
-  loudly when required live env vars are missing.
+- `test/unit/digest/london_window_test.rb` and `repo_resolver_test.rb`
+- `test/unit/gh_digest_test.rb`, `digest/collector_test.rb`, and
+  `digest/stats_test.rb`
+- `test/unit/digest/changelog_generator_test.rb`
+- `test/unit/digest/run_test.rb`, `renderer_test.rb`, and `sender_test.rb`
+- `test/unit/commands/digest_test.rb`, schema/CLI integration tests, and
+  `test/unit/daemon/digest_scheduler_test.rb`
 
 ## Backlinks
 
 - [[commands/digest]]
 - [[commands]]
+- [[commands/daemon]]
 - [[modules/config]]
-- [[commands/bot]]
-- [[templates]]
+- [[modules/daemon]]
+- [[modules/gh]]
+- [[modules/secret_patterns]]

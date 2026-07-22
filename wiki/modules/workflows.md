@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/workflow_package/
 created: 2026-04-26
-updated: 2026-07-21
+updated: 2026-07-22
 tags: [module, workflow, verbs, selection, honeycomb, registry]
 ---
 
@@ -48,7 +48,7 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
   validation reject every partial or alternate shape, including workflows
   constructed directly in Ruby rather than parsed from YAML.
 
-`Hive::Workflows::Loader` discovers project descriptors, and `Hive::Workflows::Project.load!(project_root, config: nil)` is the idempotent boundary call. Callers that already resolved the project config may pass it so descriptor discovery does not parse the same file again; legacy callers keep the existing self-loading behavior. It swaps the active project overlay in `Hive::Workflows::Registry`, rejects collisions with built-in/runtime ids, and resets the memoized cross-workflow stage unions (`all_stage_dirs`, `all_stage_names`, `all_terminal_stage_dirs`). `Task`, `WorkflowSelection`, `init`, `new`, `status`, `drop`, and stage-filtered resolver paths call it before resolving workflow ids or stage refs.
+`Hive::Workflows::Loader` discovers project descriptors, and `Hive::Workflows::Project.load!(project_root, hive_state_path: nil)` is the idempotent boundary call. Config's strict top-level-key pass supplies the raw config's resolved `hive_state_path` while discovering descriptor stage names, so the loader does not recursively call `Config.load`; legacy callers may omit it and retain self-loading behavior. The resolved workflow directory participates in the overlay fingerprint, preventing two equally empty but differently configured state roots from sharing a stale cache entry. The loader swaps the active project overlay in `Hive::Workflows::Registry`, rejects collisions with built-in/runtime ids, and resets the memoized cross-workflow stage unions (`all_stage_dirs`, `all_stage_names`, `all_terminal_stage_dirs`). `Task`, `WorkflowSelection`, `init`, `new`, `status`, `drop`, and stage-filtered resolver paths call it before resolving workflow ids or stage refs.
 
 The one compatibility exception is an exact semantic match for the project-local
 `bench.yml` shipped before `bench` became built in. Hive temporarily keeps that

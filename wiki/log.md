@@ -4,6 +4,2177 @@ Append-only log of all wiki operations.
 
 <!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
 ---
+title: Refresh queued cross-cutting branch contracts
+date: 2026-07-22T13:28:14Z
+tags: [wiki, digest, config, attempts, conditions, patrol, web, e2e]
+---
+
+- Inspected all 16 queued commits directly with `git show`, plus branch-tree
+  source blobs with `git show <sha>:<path>`. Existing pages already contain
+  equal or richer coverage for incident budgets, refactor-patrol identity and
+  budgets, durable attempt leases/loss healing, shared TUI/error helpers, Hive
+  web naming and kanban transitions, operational stage labels, workflow
+  publication, generation-scoped conditions, dependency admission, and the
+  v0.5.2 release snapshot.
+- Replaced the obsolete dual digest documentation with the queued
+  `03fe68af` contract: one registered-repository, Europe/London PR changelist;
+  exhaustive GitHub evidence and generated fact/bullet coverage; honest
+  optional statistics; Telegram delivery; and sole `hive-digest` v2 JSON.
+  Refreshed [[commands/digest]], [[modules/digest]], [[cli]], [[commands]],
+  daemon/config/GitHub/template/testing references, [[decisions]], and
+  [[index]].
+- Documented `0624f58a`'s fail-closed project-key grammar in [[modules/config]]
+  and [[modules/workflows]]: static project keys, default-less `gh`, and active
+  workflow stage names are accepted; unknown/global-only/non-string keys and
+  top-level `reviewers` are rejected before merge, without recursive config
+  loading. Added the focused coverage map to [[testing]].
+- Recorded in [[gaps]] that those two contracts are still branch snapshots
+  relative to this refresh worktree's default source, and that the queued path
+  manifests for `02e938cc` and `05b4c137` disagree with their actual diffs.
+  Page count stayed 94. QMD was intentionally not run.
+
+---
+title: Publish rewritten PR branches at the rebase boundary
+date: 2026-07-22
+updated: 2026-07-22T10:43:54Z
+tags: [rebase, finalize, git, pull-request, recovery]
+---
+
+`Hive::Rebase.perform` now captures the current remote branch OID before rewriting history and, after a successful rebase, publishes the rewritten PR branch with an exact-OID force-with-lease. The lease is captured only when the remote commit is already contained by the pre-rebase local `HEAD`, pairing lineage proof with concurrent-update protection.
+
+Branches that do not exist remotely remain local for the normal pre-PR workflow. Diverged remotes, preflight failures, and exact-lease rejection become structured non-fatal warnings; failed rebases never publish. Real bare-remote regressions cover the successful later-fast-forward path, pre-PR absence, and a concurrent actor moving the remote immediately before the leased push.
+
+This closes the recovery gap where Hive rebased an already-published PR locally, accumulated review-fix commits on the rewritten history, and then reached finalize with commits that an ordinary push could not publish. Finalize's patch-identity recovery remains a backstop rather than the first publication point.
+
+## 2026-07-22 — Resume advanced managed draft-PR receipts
+
+- Fixed managed worktree resume so immutable pointer identity is checked
+  independently from the receipt's monotonic handoff phase.
+- Preserved advanced phases such as `push_intent` for reconcile-first recovery
+  instead of rejecting them as contradictions with the initial
+  `worktree_created` receipt shape.
+- Kept ordinary expected-state reads phase-sensitive and added an explicit
+  identity-only comparison for the worktree resume boundary; simultaneous or
+  malformed comparison inputs fail closed.
+- Added focused receipt and real-worktree regressions covering every immutable
+  identity mismatch plus authenticated resume from `push_intent` without
+  resetting the receipt.
+- Restored and validated UTF-8 on byte-exact report recovery after removing a
+  controller marker, so the recovered report can be reparsed before push or PR
+  reconciliation continues.
+
+---
+title: Release candidate verification no longer requires provider keys
+date: 2026-07-22
+tags: [release, agent-skills, packaging, ci]
+---
+
+The tag-driven release workflow now builds and verifies its exact candidate
+offline. It rejects tags outside protected `main`, checks manifest digests,
+compares the packaged OpenClaw, Claude, Codex, and Pi projections byte-for-byte
+with the canonical skill source, installs and invokes the exact gem, and
+exercises the digest-pinned managed web archive before publication. The
+authenticated `live-agent-skills.yml` workflow remains available as an optional
+diagnostic but is no longer a credential-bound release prerequisite. The
+managed-web verifier also provides hermetic Ruby/Bundler launchers so the
+candidate gem's private gem-path isolation does not hide Bundler during
+dependency installation or asset compilation.
+
+---
+title: Make the live proof candidate gem self-contained
+date: 2026-07-22
+tags: [release, live-agent, rubygems, ci]
+---
+
+Fixed the four-agent release proof's private gem installation. RubyGems writes
+an executable stub that still needs the non-default install directory on
+`GEM_HOME`/`GEM_PATH`; invoking that stub directly made every matrix job fail
+after installation and before provider access. The workflow now installs the
+raw stub behind a self-contained wrapper that restores the private gem path on
+every invocation and clears inherited Ruby/Bundler startup injection, including
+when the proof harness invokes it from a Bundler-managed test process.
+
+Added an offline regression that builds a dependency-free fixture gem,
+installs it into a path containing spaces, clears inherited RubyGems path
+variables, and proves the public wrapper can still execute the private gem.
+
+# Preserve the status refresh guard across redirects
+
+- Kept form submission admission at document scope across Stimulus morph reconnects, and kept the successful redirect destination on the document root across Turbo body replacement.
+- Suppressed late background refresh signals only while the browser remains on the submitting URL; refreshes resume after the final redirect URL is active.
+- Blocked same-URL Turbo replace visits while a status mutation or redirect handoff is active, so a refresh accepted just before the native submit boundary cannot later win over the mutation redirect.
+- Delayed the redirect-handoff system-test refresh injection until after `turbo:submit-end` listeners return, covering the cross-controller race that intermittently pulled Board/Grid switches back to `/` in hosted CI.
+
+---
+title: Release v0.6.6
+date: 2026-07-22
+tags: [release, llm-wiki, scheduler, web, agent-skills]
+---
+
+Prepared Hive v0.6.6 with synchronized gem and web lockfile versions, pinned
+installer URLs, canonical agent-skill projections, and user-facing release
+notes. This urgent patch includes the llm-wiki scheduler safety fix: one
+bounded timer per primary repository, no persistent catch-up stampede,
+machine-wide serialization and memory limits, startup reconciliation, and
+refresh-branch publication that does not dirty protected checkouts.
+
+The release also packages the managed agent draft-PR handoff, native Hive web
+and workflow-derived Kanban defaults, current multi-agent operating skill, and
+the latest workflow, patrol, mobile, and stage-approval fixes.
+
+# Bound scheduled LLM-wiki refreshes
+
+- Prevented the main, Rails, and E2E test harnesses from installing LLM-wiki systemd units in the developer's real home while creating disposable projects.
+- Serialized all scheduled project refreshes through one non-blocking user-runtime lock, randomized timer starts, and capped each service at 4 GiB with swap disabled.
+- Routed commit-triggered Hive refreshes through the same memory-bounded systemd service; unavailable user managers remove the unusable dispatch marker and fall back to machine-wide admission across repositories.
+- Added bounded multi-batch draining for commits arriving while a oneshot is active, plus a Ruby-native OS lock keeper when the `flock` executable is unavailable.
+- Isolated the portable Ruby lock keeper from inherited Bundler and coverage loader variables so a hook cannot mistake an incompatible system Ruby startup failure for a busy global lock.
+- Deployed the packaged refresh runner in each repository's shared Git directory and added an executable-runner condition so protected checkouts stay clean and units for removed projects are skipped without launching a process.
+- Canonicalized linked worktrees to one primary-checkout timer per repository.
+- Added first-command migration that stops rewritten services, retries interrupted stops, preserves disabled schedules, removes only marked/config-confirmed/test Hive debris (including exact `/tmp/e2e-runs?<date>-<pid>-<suffix>` and marked timer-only debris), collapses legacy linked-worktree units onto the primary checkout, and durably retries failed systemd reloads without breaking init.
+- Published generated wiki commits to `llm-wiki/refresh` with fetched/merged remote history; push failures retain the generated commit and queue without opening the provider circuit or mutating protected `main`.
+- Added freshly fetched default-branch integration, crash-safe remote receipt reachability even after remote rewind/deletion, partitioned retained-commit publication, no-diff acknowledgement commits, and a durable publication-conflict marker that suppresses automatic retries until explicit recovery.
+- Added regression coverage for generated units, stale-unit migration and ownership, disabled schedules, systemctl failure recovery, publication retry/conflicts, and the Rails/E2E environment isolation contracts.
+
+---
+title: Rails-native kanban board rebuild
+date: 2026-07-21
+tags: [web, rails, kanban, turbo]
+---
+
+Rebuilt the status kanban on the current native Rails foundation. `/board` and
+`/grid` are explicit, equal views; first use defaults to Board and either route
+can be opened without side effects, while the view-switch mutation stores the
+signed preference used by `/`. `Board` groups existing `Project`
+and `Task` models into project/workflow bands, derives ordered columns from the
+workflow descriptor, keeps unknown live stages visible, marks degraded projects
+and unavailable workflows, and reuses the task page's native Retry, Approve,
+Run, and Diff forms.
+
+Live reconciliation stays with the existing Turbo morph refresh. The rebuild
+does not retain the superseded PR's drag/drop, drawer, cursor, targeted board
+patch, transition, lock, or audit layers. Stable digest IDs preserve card and
+band identity across reorder morphs, and a shared status submission guard marks
+the native submit boundary so background refreshes cannot abort composer or
+card mutations. The guard also
+lets successful redirects reconcile from their fresh destination GET instead
+of racing a replay against the old URL. Its permanent Action Cable source keeps
+connection history on a clone-stable DOM attribute across Stimulus lifecycles
+and Turbo cache clones, then requests one catch-up refresh after a reconnect
+without duplicating the fresh initial page load, so a broadcast missed while
+offline cannot strand the page. Board assembly
+reuses one parsed config per project, and shared `Hive::StageLabel` formatting
+keeps web/bot stage names consistent. Focused model/integration tests and
+Playwright coverage pin route preference, board rendering/actions, existing
+grid behavior, same-view composer redirects, deferred-refresh replay after failed submissions, filter
+preservation, and mobile horizontal containment. A remaining external
+multi-client daemon smoke is tracked in [[gaps]].
+
+## [2026-07-21T18:07:51Z] tmux — keep exited-target cleanup idempotent
+
+- Classified tmux's `no current target` response as the same typed
+  session-unavailable state as `can't find session` and `no server running`.
+- This keeps `kill_session` idempotent when a short-lived detached command
+  exits between observation and cleanup, while other tmux command failures
+  continue to raise `CommandFailed`.
+- Added a deterministic fake-tmux regression for the exact hosted-CI error.
+
+## [2026-07-21T17:50:05Z] native web — restore root coverage proof
+
+- Added root-suite behavioral coverage for loopback host authorization so the
+  production Rails contract also participates in the repository's 100% line
+  gate.
+- Pinned authenticated `Gemfile.lock` byte/mode restoration across both
+  Bundler and asset compilation, plus successful and escalated bounded verifier
+  process cleanup.
+- Covered setup's safe observed-service fallback and readiness polling that
+  stops when an initially enabled service becomes disabled.
+- Focused coverage reports 100% for setup, app bundle, host authorization, and
+  service status; the production coverage threshold remains unchanged.
+
+## [2026-07-21T17:23:39Z] native web — align CI with readiness and shell proof
+
+- Kept the strict nonzero `hive web install` result when a managed service
+  cannot answer `/health`, while teaching the real macOS launchd job to accept
+  only a structurally valid `inactive` or `active_not_ready` install envelope
+  for its intentionally unbootstrapped service.
+- The launchd proof still requires the macOS target path, written outcome,
+  manager availability, installed/enabled state, plist bytes, and live
+  `launchctl` registration; ready installs must still exit zero.
+- Made the authenticated managed-web verifier clean under ShellCheck 0.11 by
+  preserving the generated launchctl stub's runtime interpolation explicitly
+  and representing scrubbed provider keys as explicit empty strings.
+- Added a source-level regression contract for the launchd workflow. The exact
+  ShellCheck verifier, focused packaging tests, workflow shell syntax, and the
+  native-web positioning contract pass locally.
+
+# 2026-07-21 — review-harden managed repair handoff
+
+**Action:** Closed the managed worktree/draft-PR review findings. The descriptor
+now admits only the exact terminal `workspace: worktree` + `handoff: draft_pr`
+pair with task-root `fix-report.md`; managed runs skip auto-rebase, surface
+early explicit worktree pointers, and project every provider/validation failure
+to a controller-owned error marker. Terminal replay retries no-fix cleanup and
+quarantine redaction, preserves exact report bytes, and returns a durable
+recovery action.
+
+**Security:** Added `Hive::ManagedGit` for every post-agent Git validation,
+scan, cleanup, observation, and push. It uses an allowlisted command surface,
+reduced environment, null global/system config, disabled hooks/fsmonitor and
+external diff/textconv, closed protocols, and explicit GitHub credential
+handling. Agent-spawn integrity snapshots now include Git control/config paths,
+and structured provider message payloads are omitted from durable logs so
+credentials split across JSON events cannot be reconstructed.
+
+**Coverage:** Added focused regression coverage for Git helper suppression,
+Git/task control tampering, runtime failure markers, shared branch validation,
+closed descriptor shapes, managed rebase skipping, low-stage pointer visibility,
+ambiguous mutation retry guards, raw report-byte recovery, cleanup/redaction
+resume, unfamiliar post-push OIDs, trusted prompt context, and structured-log
+redaction. Updated [[cli]], [[commands/run]], [[commands/status]], [[modules/workflows]],
+[[modules/worktree]], [[modules/gh]], [[modules/agent]], [[stages/agent]],
+[[state-model]], [[testing]], and [[gaps]]. The configured main wiki path was absent; no compiled
+`wiki/log.md` edit or QMD index mutation was performed.
+
+---
+title: Add truthful Build and Content launch fixtures
+date: 2026-07-21T15:30:00Z
+---
+
+- Added a public first-run guide plus deterministic Build and Content inputs
+  and stage artifacts using source-pinned cross-surface web/status vocabulary.
+- Made the Build patch independently runnable from an empty repository and made
+  the startup sequence start stopped daemon/web services without blocking the
+  launch shell.
+- Added a focused fixture contract test that rejects provider-completion and
+  measured-time claims and source-pins the state vocabulary.
+- Recorded the installed Hive 0.6.4 generic-approve binding failure, bounded
+  recovery, and remaining clean-replay/timing gap without exposing private task
+  identifiers, attempt identifiers, costs, or artifact sizes.
+
+## 2026-07-21 — Add non-binding managed mapping recommendations
+
+- Registry `x-hive` metadata may now declare a sorted, unique
+  `mapping_recommendations` array for known executable slots. Entries contain
+  only `slot` and an optional portable `low`, `medium`, or `high` effort; agent,
+  model, unknown fields, terminal slots, duplicates, and unsorted entries fail
+  validation.
+- Managed configuration resolves each effort through explicit install override,
+  compatible prior installed mapping, package recommendation, then project
+  default. Profiles that cannot pin a recommended effort remain explicitly
+  unpinned, while explicit unsupported pins still fail closed.
+- Interactive install now displays pinned and unpinned model/effort values,
+  recomputes those suggestions after an agent change, and lets `unpinned`
+  explicitly clear either pin. Web preview and apply use
+  the same immutable configuration digest, and manifests without recommendations
+  retain their existing configuration bytes.
+- Added focused validator, configuration, interactive lifecycle, update-retention,
+  and real immutable-registry preview/apply coverage.
+
+## [2026-07-21T13:36:11Z] native web — reconcile the current main integration
+
+- Kept current-main Rails controllers, status/mobile behavior, and repository
+  models while replaying the native-web setup and delivery review fixes.
+- Kept temporary asset compilation on the canonical
+  `HIVE_WEB_STORAGE_DIR` contract after the legacy alias migration.
+- Routed Rails task-diff and repository-clone timeout constants through the
+  canonical environment resolver instead of reading deprecated aliases.
+- Isolated both canonical and legacy loopback variables in integration tests
+  so the host-authorization gate cannot leak state between requests.
+- Native authenticated installs now retain the `Hive web` identity, verified
+  local installs use `hive`, and the container-only precompiled-assets marker
+  preserves the `hivebox` identity.
+- Consent-approved install guidance and the packaged-layout fixture now pass
+  `--yes`; the canonical Hive skill and regenerated OpenClaw projection explain
+  the default managed-service mutation, opt-out, and read-only status contract.
+- `hive web install --json` retains one versioned error document through both
+  bundle and service-install failures, while read-only status performs one
+  health probe and mutating setup keeps its bounded retry window.
+- Linux without systemd-user remains a truthful successful platform exception:
+  lifecycle/readiness fields stay false, recovery guidance is explicit, and
+  genuine install or active-not-ready failures remain nonzero.
+- Release verification now builds the managed web archive once, runs the
+  installed proven gem through setup against those exact digest-pinned bytes,
+  and carries the same archive forward to signing and publication.
+- Foreground and managed-service launches now share the same bind-aware local
+  loopback decision; explicit non-loopback binds cannot inherit the local
+  no-auth/Host-lockdown mode.
+- Regression coverage now drives real Linux/macOS restart commands, the
+  non-loopback production Host branch, and Docker installer argument boundaries
+  for data paths containing spaces.
+
+## 2026-07-21 — Align public category and native-web claims
+
+Updated the README and RubyGems metadata to describe Hive as a durable,
+local-first workflow engine for AI agents, with software delivery as flagship
+proof rather than a coding-only boundary. The public overview now names the
+built-in `content` and `bench` workflows, installable Honeycombs, owner-authored
+workflows, Claude/Codex/Pi/Grok profiles, OpenClaw, and the native local web UI.
+
+Replaced the obsolete FAQ claim that Hive had no built-in web UI with the
+current `hive setup` / `hive web` contract over shared local workflow state and
+closed the matching known gap. The source evidence remains [[commands/web]],
+[[modules/agent_profile]], [[commands]], and [[operating]].
+
+**Tests:** focused public-credibility assertions in
+`test/unit/release_contract_test.rb`; release metadata and workflow contracts
+remain covered by their existing focused suites.
+
+## 2026-07-21 — Managed agent draft-PR handoff
+
+- Added a strict controller-owned `handoff.yml` phase machine for terminal
+  worktree agents, with exact base/head/report/scan identity and durable
+  push/create intent evidence.
+- Added pre-publication scanning of every new commit and reachable blob,
+  including intermediate add-then-remove content, plus final changed files and
+  bounded PR text. Binary, LFS, oversized, credential, and unsafe identity
+  states fail closed before publication; controller receipts and resume reports
+  use bounded no-follow reads, bounded Git output is stopped at its limit,
+  credential gates short-circuit on the first match, and current `github_pat_`
+  tokens are detected and redacted.
+- Draft-PR publication now uses an ordinary immutable-OID refspec and an
+  explicit `gh pr create --draft --head --base --title --body-file` call.
+  Resume reconciles exact remote branch/PR identity and never force-pushes or
+  repeats an ambiguous mutation.
+- Generic status exposes the verified `pr_url`. Recoverable remote failures
+  preserve the worktree and surface an operator-only `hive run` action that
+  the daemon does not dispatch automatically.
+
+## 2026-07-21 13:24 UTC — Bind durable generic approvals to the current stage
+
+**Action:** Fixed authenticated durable-attempt startup for daemon-dispatched
+`hive approve` commands. Generic approval now validates against the resolved
+task's current descriptor stage, matching `hive run`, while workflow-specific
+verbs continue to validate against their registered target stage.
+
+**Why:** The attempt context previously looked up `approve` as a workflow verb.
+Because it is a generic command, that lookup raised before `Approve` could move
+the task, terminalized the attempt as failed, and made every later daemon tick
+replay the unchanged failed generation.
+
+**Coverage:** Added a focused context regression for an inbox approval with an
+idempotent `--from` assertion; existing workflow-verb binding coverage remains
+the comparison case.
+
+## [2026-07-21T02:37:07Z] operations — close the fresh agent-operations review
+
+**Action:** Re-ran the review against the exact current feature diff and closed
+its remaining agent-facing contract gaps. Partial `hive act --json` usage
+failures now retain available action/target identity, and `hive watch` bounds
+status fetches, rejects ambiguous physical rows with stage/folder evidence,
+pins durable task ids across slug reuse, and safely adopts a daemon-backfilled
+id only when the selected task directory keeps the same device/inode identity.
+The same overall deadline bounds status reads and physical-identity lookups, so
+a blocked task path cannot publish a late transition or terminal result, while
+an upstream timeout remains a source failure rather than impersonating that
+deadline.
+Daemon snapshots preserve durable admission outcomes, use completion-anchored
+validity with SIGHUP reconfiguration, reject duplicate project/slug source rows
+before any overlay becomes authoritative, and scope recovery exhaustion to the
+current stage and marker reason.
+
+**Release proof:** Claude evidence now requires the typed native `system/init`
+skill and slash-command inventories, so generic file access cannot pass. The
+tag workflow invokes the fixture-tested selector for Check Run, workflow/run,
+job, artifact expiry, and downloaded archive-digest verification instead of
+relying on string-fragment assertions.
+
+**Uncertainty:** The authenticated protected workflow has not yet been
+dispatched for this candidate. Until all four native jobs and attestation pass
+and the exact-SHA Check Run exists, the implementation is locally validated but
+not release-proven. No tag, package release, ClawHub publish, or deployment was
+performed.
+
+**Hosted CI follow-up:** Exact-head coverage exposed integration contracts that
+the focused suites had not exercised. Scheduler `mtime` is now distinct from
+action-token `observation_mtime`, concise legacy-layout warnings retain exact
+directory evidence and grammar, and `Commands::Act` owns missing-token usage
+errors so Thor does not truncate unrelated command summaries. The typed act
+envelope now also classifies `AmbiguousSlug` before its `InvalidTaskPath`
+parent, preserving the closed `ambiguous_target` error vocabulary. Defensive
+coverage now exercises watch input/source boundaries, skill inventory and
+publication failures, scheduler snapshot joins, and recovery fallbacks. The
+TUI snapshot mirrors the additive `observation_mtime` field as well, preserving
+its one-to-one compatibility-status mapping for both current and older payloads.
+
+# Whole-PR review findings
+
+- Grouped primary navigation by Rails `controller_path` so namespaced task,
+  workflow, and Telegram controllers retain their parent active link.
+- Made `Task#run_verb` consume [[commands]]' canonical
+  `TaskAction::READY_COMMANDS` mapping instead of reconstructing commands from
+  action names.
+- Added deterministic failure and timeout coverage for Repository clone and
+  Task diff subprocesses, including process-group kill/reap, readable errors,
+  partial-target cleanup, and tempfile cleanup.
+- Replaced the literal gaps-page path in the original refactor fragment with
+  the required [[gaps]] backlink.
+- The independent review validator rejected a proposed Telegram Turbo fix as
+  pre-existing behavior outside this PR's diff; no production change was made
+  for that item.
+
+---
+title: Complete the Rails task behavior boundary
+date: 2026-07-20
+tags: [web, rails, architecture, tasks]
+---
+
+Rails status snapshots now wrap projects and tasks before rendering, so the
+dashboard and detail page share `Project`/`Task` behavior. `Task` owns original
+idea parsing and title fallback, passable/recovery/terminal state, coding and
+generic-workflow dispatch actions, displayed run verbs, and the bounded
+worktree diff alongside its existing artifacts, questions, media, and log
+reads.
+
+`ApplicationHelper` no longer performs filesystem reads or duplicates Hive's
+workflow/action rules. `Tasks::DiffsController#show` delegates the bounded
+process-group/tempfile/truncation contract to `Task#diff`, leaving the
+controller as a ten-line HTTP resource. Existing dashboard/task/diff behavior
+remains covered by focused model and request tests.
+
+---
+title: Move Telegram configuration into a Rails model
+date: 2026-07-20
+tags: [web, rails, architecture, telegram]
+---
+
+Hive Web now represents the configured bot as `TelegramBot`. The model owns
+strict numeric allowlist parsing, saved-secret lookup and persistence, live
+token validation, global configuration, supervisor reload signalling,
+round-trip test delivery, pending pairing rows, and consent-gated approval.
+
+`TelegramController` is reduced to the settings resource's `show` and `update`
+actions. The established `/telegram/test` and `/telegram/pairings/:code` URLs
+now create `Telegram::TestMessage` and `Telegram::PairingApproval` resources
+through small namespaced controllers. The page consumes named model predicates
+and typed pairing rows instead of configuration/pairing hashes.
+
+---
+title: Model reviewed workflow changes in Rails
+date: 2026-07-20
+tags: [web, rails, architecture, workflows, security]
+---
+
+Hive Web now represents lifecycle rows as `Workflow` models and a reviewed
+install, update, or removal as a `WorkflowChange`. These models own the native
+lifecycle seam, typed row predicates, dry-run identity, expiring signed
+receipt, operation-specific consent, separate security-escalation consent, and
+application outcome.
+
+The established workflow URLs and helpers are unchanged, but preview and
+application requests now enter small namespaced controllers through standard
+`create` actions. The operation is read from the matched route instead of
+submitted form/query parameters, and a regression proves an injected
+`operation` field cannot change the lifecycle action. `WorkflowsController`
+now owns only collection display and authored-workflow creation.
+
+The Rails scan also re-identified the already-audited task-media `send_file`
+false positive after task lookup moved into the model, so its stale Brakeman
+fingerprint was refreshed without changing the containment justification.
+
+---
+title: Move repository admission into a Rails model
+date: 2026-07-20
+tags: [web, rails, architecture, repositories]
+---
+
+Hive Web now models an incoming checkout as `Repository`. The model owns the
+GitHub source allowlist, safe local name/path, target ownership, bounded
+process-group clone, partial-clone cleanup, and GitHub SSH-to-HTTPS origin
+normalization before delegating initialization to `Project#setup!`.
+
+`ReposController` is now request orchestration over `Repository`, `Project`,
+`InitSetup`, and `GithubApi` instead of implementing process and filesystem
+behavior itself. Target hardening also now rejects symlinks explicitly,
+including symlinks to directories and dangling links, before setup can escape
+the configured repositories root; focused model coverage pins that boundary.
+
+---
+title: Model registered projects in Rails
+date: 2026-07-20
+tags: [web, rails, architecture, projects]
+---
+
+Hive Web now wraps global-registry entries in a Rails `Project` model rather
+than passing anonymous hashes through every controller and view. The model owns
+typed name/path/state access, registered lookup, workflow/default discovery,
+daemon enrollment policy, and the non-interactive `hive init` setup seam.
+
+Project-scoped task, repository, workflow, agent, and idea surfaces now use the
+same model. Existing gem adapters retain a narrow `fetch` compatibility method,
+while Rails code uses named project behavior. This also moved setup warning
+capture and resilient config reads out of `ReposController` and
+`TasksController`.
+
+---
+title: Make task endpoints small Rails resources
+date: 2026-07-20
+tags: [web, rails, architecture, controllers]
+---
+
+Hive Web's task routes keep their established URLs and helpers, but now target
+small namespaced resource controllers with standard `show` or `create`
+actions. `TasksController` renders only the task itself; diff, log, media,
+approval, rejection, drop, run, recovery, answers, and intervention each have
+one focused controller over `Task` or `Hive::Web::Dispatcher`.
+
+`Tasks::BaseController` centralizes only the common registered-project and task
+lookup boundaries. Stale-page mutations still intentionally avoid loading a
+fresh task snapshot before handing their rendered `from` guard to the native
+dispatcher, preserving the existing race-safety contract.
+
+Moving the log read behind `Task#latest_log` also retired the old Brakeman
+controller-path false positive. The obsolete ignore is removed, and focused
+log-route coverage now pins unknown-project and unknown-task 404s before any
+filesystem read.
+
+---
+title: Give Hive Web tasks a Rails model
+date: 2026-07-20
+tags: [web, rails, architecture, tasks]
+---
+
+Hive Web now represents the selected status row as a filesystem-backed Rails
+`Task` model. The model owns task lookup and read behavior: workflow-aware
+artifacts, media manifest and containment checks, unanswered brainstorm
+questions, worktree presence, and the bounded log tail.
+
+`TasksController` now concentrates on HTTP concerns and dispatching mutations,
+while task views receive `@task` rather than an anonymous status `@row`. The
+media reader also enforces the documented single-filename contract directly,
+so callers outside the route constraint cannot normalize a traversal-shaped
+name into an allowed basename.
+
+---
+title: Server-rendered live project order
+date: 2026-07-20
+tags: [web, turbo, stimulus, status]
+---
+
+Live project ordering now has one rendering authority. `StatusBroadcaster`
+sorts each snapshot once and broadcasts the project rail, composer selector,
+and project grid from Rails partials. The project filter controller only owns
+filter state; it no longer rebuilds or moves server-rendered DOM.
+
+This removes a MutationObserver feedback loop caused by repeatedly moving the
+same navigation buttons during every observer callback. The composer keeps its
+selected project across a targeted Turbo morph when that option still exists,
+preserving unfinished browser state without duplicating ordering logic.
+
+Focused model coverage pins the broadcast targets and shared order. The
+Playwright project-rail flow proves that live updates finish, reorder all three
+surfaces, retain the active filter, and preserve the operator's selection.
+
+# Hive v0.6.5 release preparation
+
+**Action:** Prepared Hive v0.6.5 from the complete post-v0.6.4 change set. The
+version constant, root and web lockfiles, installer references, changelog,
+dependency wiki, and remaining dogfood gap now agree on v0.6.5.
+
+The release narrative groups the shipped behavior around three operator-facing
+outcomes: patrol findings that survive validation and reach a fix or reviewable
+issue; durable unattended execution with hourly provider-limit recovery and
+checkout-safe, subscription-bounded wiki maintenance; and reliable native web
+and consent-safe OpenClaw setup. It also records the StreamLog and bot-logger
+recovery fixes and the ERB 6.0.5 dependency update.
+
+Publication remains tag-driven. The release PR must merge and its exact commit
+must pass the release contract, bundle, gem-build, and hosted CI gates before
+the protected `v0.6.5` tag is pushed.
+
+---
+title: Revalidate broad refactor patches and bound documentation fallback
+date: 2026-07-20
+tags: [refactor-patrol, review, safety, compatibility]
+---
+
+- Revalidated persisted cross-feature patch receipts against the effective
+  captured/current policy so a live permission revocation fences publication.
+- Restricted Hive's built-in documentation fallback to inert documentation
+  formats, kept executable documentation formats report-only without an
+  explicit command, and preserved short `git diff --check` diagnostics in
+  action receipts.
+- Retained a fixed-size mapper-selected context/test path list in discovery
+  prompts and made documentation validation instructions unambiguous.
+- Added regressions for live cross-feature revocation, executable files under
+  documentation directories, short failure diagnostics, and outcome-only
+  legacy remote-continuation recovery.
+
+# 2026-07-20: Make llm-wiki timers reactivation-safe
+
+**Action:** Changed generated Linux llm-wiki timers from boot-relative
+`OnBootSec=10min` to activation-relative `OnActiveSec=10min`, while retaining
+`OnUnitActiveSec=1d` for the daily cadence. Removed the ineffective
+`Persistent=true` setting for the monotonic timer. A timer installed or
+re-enabled more than ten minutes after boot now gets a concrete first trigger
+instead of remaining `active (elapsed)` indefinitely.
+
+**Tests:** Extended the init scheduler contract to require the activation delay
+and daily cadence and to reject the stale boot-relative/persistent directives.
+
+---
+title: Native web mobile status layout
+date: 2026-07-20
+tags: [web, mobile, responsive, daemon]
+---
+
+The native status page now keeps the idea composer within narrow mobile
+viewports even when registered projects have long names. Its project selector
+uses a full-width row, image and submit actions share the row below, and the
+scrolling project rail retains readable edge padding.
+
+Daemon health is presented as a compact state banner instead of exposing raw
+service fields. Healthy state is one line; actionable binary drift becomes a
+plain-language warning with Repair; stopped state keeps the relevant CLI
+recovery command.
+
+Focused Rails integration and Playwright system coverage pin the banner
+contract and prove a 390px status page has no document or control overflow.
+
+The status page also orders projects by active task count, so the busiest
+projects appear first in the filter rail, composer selector, and project grid.
+Projects with the same count keep their registry order, avoiding unnecessary
+movement between live updates. The permanent composer reconciles its project
+options after those updates while preserving the operator's current choice.
+
+## [2026-07-20T18:03:56Z] web/setup — close native web review pass 02 gaps
+
+**Action:** Hardened the managed native web delivery contract after stage 6 review. Repeated macOS setup now leaves an unchanged already-loaded launchd job alone, mutating setup/install resamples asynchronous lifecycle state before readiness, explicit web install fails unless the observed app is installed/enabled/running/ready, and status configuration failures retain the versioned JSON envelope.
+
+**Coverage:** The packaged-layout integration fixture now drives real Bundler and Rails asset compilation from the installed gem root. Release certificates are pinned across the CLI, installers, verifier, and AUR workflow to `.github/workflows/release.yml` at the exact expected version tag. Production Host authorization is exercised through the real middleware, Hivebox smoke rejects missing baked assets, doctor alias coverage lives in a focused file below the 1,000-line rubric, and the legacy published-release CI fixture skips only when its release predates the managed web asset.
+
+---
+title: Let architecture value determine refactor PR scope
+date: 2026-07-20
+tags: [refactor-patrol, architecture, autofix, policy]
+---
+
+- Removed `max_files` and `max_diff_lines` from Refactor Patrol defaults,
+  policy capture, discovery schema requirements, prompts, mutation guards, and
+  publication receipt validation.
+- Refactor theses now describe one complete coherent architectural resolution;
+  they are not rejected, down-ranked, split, truncated, or routed to an issue
+  because of estimated or actual patch size.
+- Kept behavior-preservation validation, protected-path and secret checks,
+  dependency and public-contract guards, root confinement, exact-base
+  worktrees, trunk-overlap reanalysis, and normal PR review as the mutation
+  safety boundary.
+- Legacy persisted policy keys and thesis size flags remain readable for safe
+  recovery. Size-only flagged findings are promoted back to accepted action
+  candidates, while any remaining safety reason keeps the finding flagged.
+- Published v1/v2 thesis and report schemas remain frozen for compatibility;
+  new PR-scoped discovery and action output uses the size-free v3 contracts.
+
+# Keep scheduled wiki refreshes out of user checkouts
+
+- Replaced Hive's scheduled direct-Codex wiki writer with a thin managed
+  wrapper that delegates `--project <root> --drain` to the canonical shared
+  Git runner, with a safe project-local fallback. Delegation requires an
+  explicit drain-capability marker and fails closed for legacy runners.
+- Scheduled and post-commit refreshes now share the same queue, lock, circuit,
+  subscription limits, disposable worktree, and `llm-wiki/refresh` branch.
+  Empty scheduled drains do not launch a provider.
+- Hive bootstrap now installs the validated config and canonical executable
+  runners under the absolute Git common directory. The common post-commit
+  hook resolves the committing worktree at runtime, prefers that shared
+  runner, and passes its exact root with `--project`, so linked worktrees do
+  not depend on stale checkout-local scripts.
+- Fresh-init rollback now snapshots that common hook and managed shared
+  runtime. A late failure restores existing bytes and modes without removing
+  unrelated queue state, or removes the whole shared runtime when init created
+  it, including when the target checkout is a linked worktree with a `.git`
+  file.
+- Shared runtime copies use binary-safe writes, so applications that configure
+  Ruby's default internal encoding can install the UTF-8 log compiler without
+  a transcoding failure.
+- Added subprocess coverage proving the wrapper preserves dirty tracked and
+  untracked primary-checkout work, never launches Codex itself, prefers the
+  shared runner, and falls back locally when shared state is unavailable.
+- Documented GNU `timeout`/`gtimeout` as the required bounded-execution
+  dependency. Missing coreutils now has explicit fail-closed guidance rather
+  than suggesting an unbounded provider or Git fallback.
+- Documented the shared-Git-dir queue, failed-source, breaker, and log paths;
+  the 25-source automatic backlog limit; 10-source batch default; pin,
+  deferred-work, quarantine, and repeated-failure breaker cases; and the
+  explicit subscription-backed `--retry-failed <sha|all>` recovery loop.
+
+# Compile production web assets during startup
+
+- Made production `hive web` guarantee fingerprinted CSS and JavaScript before
+  Rails starts: managed bundles compile and validate during provisioning, while
+  source checkouts and operator overrides compile at startup using storage
+  isolated from the live web databases.
+- Made startup fail closed when precompilation does not produce a usable
+  Propshaft manifest and application entrypoints, preventing an apparently
+  healthy web service from returning 404s for its advertised assets.
+- Kept Hivebox's separate image lifecycle unchanged: its image build compiles
+  and validates assets once, then marks them precompiled so container startup
+  does not repeat the native web preparation step.
+- Added command-level regression coverage for successful compilation and for
+  unusable compiler output.
+
+---
+title: Harden native Hive web setup contracts
+type: fix
+date: 2026-07-20
+tags: [web, setup, service, auth, schemas]
+---
+
+- Made managed bundle activation prepare writable dependencies and verified
+  production assets before stamping, with bounded cosign verification.
+- Kept foreground, managed-service, status, and error paths on one resolved
+  environment and lifecycle contract; refreshed running services restart
+  before local readiness is probed.
+- Preserved loopback-proxy and authenticated LAN access without allowing local
+  GitHub connection or inherited bypass state to change the authorization
+  boundary.
+- Tightened the published setup/web schemas and install-agent consent flow,
+  and added regression coverage for service crash-loop guards and rejected
+  Host mutations.
+
+## [2026-07-20T14:31:28Z] operations — add an agent-first Hive control plane
+
+**Action:** Added the additive `hive-operational-status.v1` projection while
+preserving `hive-status.v6`, made concise operational status the human default
+with `--full` compatibility, added bounded semantic `hive watch` JSON Lines and
+fresh tokenized `hive act`, and joined task state to a coherent owner-private
+daemon scheduler snapshot. Status remains read-only and never performs daemon
+reconciliation.
+
+**Agent skills:** Established `skills/hive/` as one canonical operating policy
+projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, and Pi
+`/skill:hive`. Added provenance/digest validation, safe whole-directory atomic
+publication for Claude/Codex/Pi, read-only OpenClaw/ClawHub diagnosis, and
+agent-skills-first normal setup with one consent boundary. JSON/non-TTY setup
+without `--yes` now refuses before diagnostics or native discovery, preventing
+nominally read-only upstream probes from initializing user state.
+The canonical progressive setup reference preserves the current OpenClaw
+v0.1.3 consent rules: package-manager confirmation remains interactive, core
+provisioning uses approved `setup --no-init`, project enrollment stays in the
+user's real terminal, and agents never patch installed runtimes or service
+overrides directly.
+
+**Release proof:** Added a protected exact-SHA workflow that builds the
+candidate gem/source/four-platform skill archive once, requires authenticated
+native discovery and bounded status/watch use on all four agents, retains only
+secret-scanned structural evidence, and creates a candidate-bound Check Run.
+The tag workflow now verifies that Check Run, run attempt, required jobs,
+Actions artifact digest, attestation, and candidate provenance, then publishes
+the exact proven gem/skill archive without rebuilding them.
+
+**Coverage and compatibility:** Added operational status/action/watch, daemon
+snapshot, canonical projection/publisher, setup/doctor/OpenClaw, four-agent
+smoke, proof builder/attestor/verifier, and release-contract coverage. Updated
+the README, release guide, command/API/operating/testing/module pages, and this
+index; the compiled `wiki/log.md` is intentionally untouched in this feature
+branch. The legacy full JSON graph and existing daemon/bot/TUI consumers remain
+unchanged.
+
+**Read-only diagnosis:** Doctor now derives Claude, Codex, Pi, and OpenClaw
+package/provenance evidence entirely from durable filesystem state and records
+`inventory_source: filesystem` with an empty command audit. This closes the
+case where upstream version/list commands initialized config, identity, backup,
+or database state during diagnosis. Setup retains refreshed native discovery
+only behind its explicit consent boundary; disposable-home tests and a real CLI
+probe prove Doctor leaves the home byte-identical.
+
+**Current-head review hardening:** Revalidated the feature after rebasing and
+discarded the earlier review as stale. Dependency-blocked tasks now project as
+scheduler waits instead of idle; daemon snapshots and later status joins bind
+decisions to marker attrs, mtime, action, dependency, blocked, and admission
+policy; task capacity excludes separately budgeted patrol/digest workers; and
+markerless generic action tokens use stable task metadata so their own lock
+cannot invalidate them. Doctor's OpenClaw adapter is now filesystem-only by
+construction, managed-skill Doctor tests are split from legacy checks, all
+three real operational executor branches are covered, and the live proof's
+audited shim delegates status/watch to the exact candidate instead of emitting
+fixture payloads.
+
+**Uncertainty:** The authenticated protected workflow has not yet been
+dispatched for this candidate. Until all four native jobs and attestation pass
+and the exact-SHA Check Run exists, the implementation is locally validated
+but not release-proven. No tag, package release, ClawHub publish, or deployment
+was performed.
+
+# 2026-07-20 — Architecture patrol auto-fix by default
+
+- Fresh terminal and web initialization now enable architecture-patrol
+  discovery, confined auto-fix/PR attempts, and GitHub issue fallback together.
+- Choosing `--no-refactor-patrol` or unchecking the setup choice writes all
+  three gates off. Legacy projects without a `refactor_patrol` block remain
+  inert, and older discovery-only configs do not silently inherit mutation or
+  issue-filing authority.
+
+---
+title: Prefer bounded cross-feature refactors as reviewed fix PRs
+date: 2026-07-20
+tags: [refactor-patrol, architecture, autofix, review]
+---
+
+- Made cross-feature scope normal for architecture refactoring; mapped feature
+  slices remain discovery anchors rather than automatic mutation boundaries.
+- Kept automatic patches bounded by root confinement, `.hive-state`
+  control-plane protection, dependency and
+  public-contract guards, secrets checks, canonical receipt paths, and
+  trunk-overlap reanalysis across every changed path.
+- Allowed docs-only patches without a project docs command to use Hive's
+  built-in staged-diff check before entering the normal review workflow.
+- Reserved strategic issue routing for contract-changing, dependency-changing,
+  validation-failing, or deterministically unsafe work where human design
+  participation is useful before implementation.
+
+# Prevent live refreshes from aborting idea submissions
+
+- Reproduced the hivebox composer failure as a real Turbo race: the
+  filesystem-driven status refresh could stop the originating form request
+  after `Commands::New` created the task but before the permanent composer saw
+  a successful response, leaving a duplicate-ready draft and staged image.
+- The composer now suppresses only page-wide refresh stream actions while its
+  POST is in flight. Targeted project replacements on the submitting page and
+  all live refreshes on other clients continue normally.
+- The pipeline browser test injects the competing refresh at submit-start and
+  verifies the successful flash, cleared text/chip/upload transport, retained
+  project selection, persisted asset, live external update, and approval path.
+- The Grok first-login integration scenario now fixes its authentication state
+  explicitly, so a developer's real local subscription credentials cannot turn
+  the expected `Start login` CTA into `Log in again` and fail the suite.
+
+---
+title: Serialize bot logger fallback writes
+type: fix
+date: 2026-07-20
+tags: [bot, logging, concurrency, errors]
+---
+
+- Serialized bot log rotation, fallback-state transitions, and file writes so
+  the supervisor's shared logger cannot race across its worker threads.
+- If rotation and the recovery reopen both fail, the in-flight JSON line and
+  future log lines fall back to stderr instead of raising on a missing file
+  handle.
+
+---
+title: Make native Hive web the default
+---
+
+- `hive setup` now installs, starts, and truthfully probes the managed
+  loopback Hive web service by default on supported Linux and macOS; users can
+  opt out with `--no-service` or keep using bare `hive web` in the foreground.
+- Setup and web JSON contracts separate installed, enabled, running, manager,
+  URL, and readiness state, and loopback no-auth rejects untrusted Host values.
+- Released managed web bundles resolve the installed `hive-cli` package root
+  and are authenticated before extraction; custom remote URLs require an exact
+  companion digest.
+- Six canonical `HIVE_WEB_*` settings replace named native-web `HIVEBOX_*`
+  aliases with next-major migration warnings, while container-only Hivebox
+  variables remain canonical.
+- Maintained Hive and OpenClaw guidance now leads with native Hive web and
+  keeps Hivebox as the supported container path for isolation, multiple
+  instances, untrusted-agent containment, and server/NAS deployment.
+
+# Restore local Hive Web access and assets
+
+- Kept `hive web` as a local browser control plane over the same registry and
+  workflow state as the CLI/TUI, distinct from the owner-gated Hivebox product.
+- Made loopback authentication use the real socket peer so Tailscale Serve and
+  similar localhost proxies do not turn forwarded tailnet addresses into a
+  Hivebox login gate. The proxy remains part of the access boundary and must
+  restrict/authenticate its clients. Local GitHub connection remains optional
+  and never claims `web.github.owner`.
+- Made managed web installation precompile and verify production CSS/JavaScript
+  manifest graph before atomically activating a bundle, repair same-version
+  installs whose assets are missing, and preserve the last working bundle on
+  build failure.
+- Extended integration, unit, and Docker smoke coverage for forwarded local
+  access, product copy/branding, optional GitHub sessions, missing-asset repair,
+  and fetching every digest-stamped asset advertised by the login page.
+
+## [2026-07-20T08:55:57Z] openclaw — refresh and simplify the ClawHub Hive skill
+
+**Action:** Updated the single public OpenClaw source to v0.1.3 and the current scoped install reference `@ivankuznetsov/hive-cli`. Replaced stale Hive v0.2.0 setup with the signed v0.6.4 installer path; added managed agent skills, reviewed Honeycomb workflows, dependency/permission guarantees, ordinary versus architecture patrol limits, subscription/token accounting, digest/bench, TUI/web, and bounded status monitoring. Simplified the skill by removing its embedded polling program, installed-runtime patch flow, direct service override writes, and unattended Arch package flags. Core provisioning now uses `hive setup --no-init --json`; initial enrollment is a separate interactive terminal step that discloses patrol, architecture-discovery, daemon, and babysitter defaults. Setup-agents and Honeycomb mutations use structured preview/approval flows, patrol dry-runs remain consent-gated, exact token totals are handed to the human-only TUI, and daemon auto-advance relies on previously approved enrollment. Persistent, destructive, publishing, outbound, and foreground actions require reviewable consent. The publish checklist uses the current `clawhub skill publish` surface and an absolute skill path, matching ClawHub CLI v0.23 path resolution.
+
+**Audit context:** The previous live v0.1.2 version had clean static and VirusTotal results but a behavioral `Review`, led by the `--noconfirm` package-install finding and expected-risk notes about auto-advance and persistent repairs. ClawHub accepted v0.1.3, and its explicit immutable-version scan returned clean static analysis, zero Skillspector issues (`SAFE`), and a benign ClawScan verdict. After staged pre-publication finalization, the public listing reports v0.1.3 as `latest` with a clean moderation verdict and no reason codes. Clean temporary pinned and unversioned installs both selected v0.1.3 and matched the reviewed `SKILL.md` SHA-256 `f7a0981a6058a7b5e7fa0a385589edb558905cca295fa041c673d46a40395202` byte-for-byte. The publish checklist explains staged visibility, forbids duplicate/version-bump retries, and requires public exact-version plus byte-for-byte install verification before declaring a release live.
+
+**Tests:** `bundle exec ruby -Itest test/unit/openclaw_skills_test.rb` (15 runs, 401 assertions); full `rake test` task (9,466 runs, 132,561 assertions, 0 failures, 0 errors, 7 skips) before the final publish-path documentation assertions; RuboCop on the changed test; YAML frontmatter parse through the focused test; `git diff --check`.
+
+## [2026-07-20T08:50:28Z] daemon — retry provider-limit holds hourly despite reset estimates
+
+**Action:** Split provider-limit display from scheduling. Complete provider reset dates remain in `retry_after` for status/TUI visibility, but `StaleAgentHealer` now admits review and terminal `limits_reached` rows one configured cooldown interval after the latest quota marker mtime. Repeated walls write a fresh marker and restart the interval; account switches, usage resets, and credit top-ups can therefore recover before the advertised date. Quota readiness attempts no longer consume the bounded task-failure recovery budgets.
+
+**Tests:** Added `Hive::AgentLimit` marker-age eligibility coverage, review/terminal healer coverage for distant/missing/malformed reset hints and retries beyond a one-attempt budget, plus status-to-healer integration proving a five-day provider estimate is retried after one hour. Updated quota-held text to distinguish the provider estimate from Hive's hourly retry policy.
+
+**Uncertainty:** No installed-daemon live replay has yet exercised an early account reset/top-up against a real provider hold, and a same-tick cohort of eligible tasks has not been live load-smoked beyond the daemon's normal concurrency caps; [[gaps]] keeps those boundaries explicit.
+
+---
+title: Architecture patrol issues and merge-driven launch capacity
+date: 2026-07-20
+---
+
+- Made deduplicated GitHub issues the default review surface for architecture
+  patrol while keeping automatic fixes independently disabled.
+- Routed accepted theses without an auto-fix action to a pending-approval issue
+  instead of completing with JSON-only output.
+- Removed the ordinary daily agent-launch count from post-merge architecture
+  stages and split durable ordinary/architecture accounting so merge volume
+  cannot consume ordinary patrol's quota. Shared daily tokens, multiplied
+  per-cycle launches, per-agent tokens, the full-lifetime launch lock, and the
+  native budget guard remain enforced.
+- Added a configurable 96/day architecture-only backstop for providers that
+  repeatedly omit token accounting, with next-UTC-day scheduler backoff.
+- Updated fresh-init disclosure: choosing architecture discovery also writes
+  GitHub issue output on, while automatic code changes remain off.
+- Added regression coverage for issue actionability, issue content/routing, init
+  defaults, and architecture launches after ordinary daily capacity is spent.
+- Dogfooded the exact-source path without a dry run: replaying merged PR 785
+  completed 13 architecture reviews while the ordinary launch count remained
+  zero, then filed the two accepted theses as GitHub issues 811 and 812.
+- Dogfooded ordinary patrol separately: it found a reachable bot logger crash,
+  proved the regression failed on the base and passed after the generated fix,
+  opened pull request 814, and handed it to the standard 6-review flow.
+
+---
+date: 2026-07-20
+slug: patrol-meaningful-findings
+---
+
+**Context:** Live normal and architecture patrol dogfooding showed that broad
+initial review context consumed the finalization turn, architecture read-only
+responses could place rationale before a single valid JSON fence, fix agents
+could finish `fix.json` just before a token boundary, and the independent
+regression proof could time out at the validator's 600-second fallback even
+when `timeout_sec.patrol` allowed the project's full suite to run longer.
+
+**Decision:** Bound ordinary review to architecture patrol's four-owned-file,
+32 KiB initial view, require third-response finalization with one emergency
+fourth turn, accept one
+architecture JSON fence with rationale on either side, and use a completed
+ordinary `fix.json` only as the boundary for entering Hive's independent proof.
+Ordinary fix agents get configurable 2x per-agent headroom without enlarging
+shared cycle/day totals. Shipping cycles reserve configured fix-attempt launch
+capacity, stop after terminal quota exhaustion, and both ordinary and
+architecture validators honor `timeout_sec.patrol`. JSON CLI integration tests
+parse stdout independently so incidental diagnostics on stderr cannot corrupt
+full-suite validation.
+
+**Evidence:** Focused unit/integration coverage exercises source bounding,
+severity guidance, launch budgeting, structured exhaustion, proof-file
+completion, fenced JSON parsing, multiplier isolation, and configured validator
+timeouts. Live dogfood produced a concrete StreamLog torn-tail data-loss
+finding and a CLI contract-ownership architecture thesis. Normal patrol then
+proved the StreamLog regression fail-before/pass-after, passed the full
+configured validation command, opened PR #807, and handed it to `6-review`.
+
+---
+title: Align patrol evidence prompts with source verification
+---
+
+- Ordinary patrol now tells reviewers that every evidence snippet must be an
+  exact substring of one claimed source line, without multiline excerpts,
+  ellipses, or explanatory annotations.
+- This keeps the existing fail-closed evidence validator intact while
+  preventing source-backed findings from being discarded because the agent was
+  not told the validator's exact wire contract.
+
+# Hive v0.6.4 release preparation
+
+**Action:** Prepared Hive v0.6.4 after v0.6.3 was published in parallel from
+the Honeycomb scaffold cleanup. Preserved the public v0.6.3 tag and changelog,
+recorded the Architecture Patrol parser fix that shipped in that tag, and
+synchronized the gem version, both lockfiles, installer URLs, dependency wiki,
+and patrol evidence for the next patch release. v0.6.4 adds the hivebox
+permanent-composer response-race fix and reliable concurrent babysitter dry-run
+audit logging.
+
+**Verification:** The hivebox fix passed two complete Playwright system-suite
+orders (20 runs / 155 assertions each) and exact-head GitHub CI. The babysitter
+fix passed 67 focused runs / 2,060 assertions and 100 consecutive concurrent-log
+stress iterations after the old code reproduced the failure at iteration 8.
+The v0.6.4 exact-head CI, release workflow, channel verification, installed-CLI
+patrol dogfood, and final gap closure remain release gates.
+
+---
+title: Pre-create the babysitter dry-run audit log
+type: fix
+date: 2026-07-19
+tags: [babysitter, dry-run, concurrency, security, testing]
+---
+
+- `DryRunEnv` now creates and validates an owned `0600` regular skip log before
+  agent subprocesses launch, eliminating the first-writer `File::EXCL` race
+  between concurrent denied commands.
+- Existing paths are left untouched during setup and every stub append retains
+  the regular-file, owner, link-count, permission, no-follow, and descriptor
+  identity checks. Direct-stub creation and replacement races remain fail-closed.
+- The concurrent large-record regression now models the production invariant;
+  focused stress reproduced the old failure and verifies lossless serialization
+  after pre-creation.
+
+---
+title: Clear submitted web composer before permanent-node rendering
+type: fix
+date: 2026-07-19
+tags: [web, composer, turbo, stimulus, testing]
+---
+
+- A successful idea response now clears the permanent composer on
+  `turbo:before-fetch-response`, while its Stimulus controller is guaranteed to
+  remain connected; `turbo:submit-end` stays as a compatibility fallback.
+- This closes a CI-observed race where the idea was captured successfully but
+  Turbo moved the permanent form during rendering and the completed text could
+  remain duplicate-ready in the browser.
+- Playwright coverage dispatches the pre-render success event and pins text,
+  chip, upload transport, and retained-project behavior.
+
+# Architecture Patrol accepts a canonical leading JSON fence
+
+**Action:** Updated the read-only Architecture Patrol reviewer to normalize one leading JSON fence even when Claude appends a plain-text leverage rationale. The first fenced document remains the only canonical result: leading prose and any additional fence still fail closed, while the exact provider response remains durable in `final-message.txt` for audit. Added focused regression coverage and updated [[commands/refactor-patrol]] and [[testing]].
+
+---
+title: Prepare v0.6.2 patrol reliability fixes
+date: 2026-07-19
+tags: [release, patrol, refactor-patrol, worktree, quota]
+---
+
+- Prepared Hive v0.6.2 from the merged patrol quota-progress and Architecture Patrol isolated-analysis fixes.
+- Synchronized `Hive::VERSION`, both path-gem lockfiles, public installer references, and the changelog.
+- Kept the post-release patrol dogfood gap open until the published build is installed and ordinary plus architecture patrol produce live evidence.
+
+# Retire Honeycomb flagship scaffolds
+
+- Removed Hive's reduced Architecture and Writing project scaffold templates after public Honeycomb packages for Architecture, Writing, and SEO Content installed with runnable per-slot defaults and completed full archived canaries.
+- Retired template names now return their exact `hive workflow install honeycomb/<name>` command; the owner-authored `blank` and `research` templates remain.
+- Prepared Hive v0.6.3 so the packaged gem, installer documentation, and both lockfiles ship the retirement together.
+
+## [2026-07-19T11:15:33Z] Web workflow receipts bind immutable configuration
+
+**Action:** Reconciled Hive Web's two-step install/update/remove lifecycle with
+Honeycomb's immutable configuration snapshots. Signed receipts now carry the
+reviewed configuration digest alongside package and selected-generation
+identity, command adapters reject changed candidate mappings or input bindings,
+and the managed store compares source, manifest, and configuration under the
+mutation lock. Post-commit cleanup failures remain successful mutations with
+visible warnings.
+
+**Why:** A package can keep the same source and manifest while its project
+mapping or optional-input binding changes. Applying that configuration after a
+different preview would violate the operator's review boundary.
+
+**Security maintenance:** Refreshed the web bundle's vulnerable parser,
+sanitizer, networking, concurrency, and WebSocket transitive dependencies to
+their patched releases after the configured audit detected current advisories.
+
+---
+title: Keep managed workflow mapping defaults runnable
+type: fix
+date: 2026-07-19
+---
+
+- Managed workflow installation now suggests Claude when a project-default
+  agent cannot enforce a stage, reviewer, or reviser's non-`yolo` permission
+  scope.
+- Explicit agent mappings remain unchanged and continue to fail closed during
+  runtime admission when the selected runner cannot enforce the actor policy.
+- Added regression coverage for both automatic fallback and explicit mapping
+  preservation.
+- Prepared the `0.6.1` patch release and synchronized the gem lockfiles,
+  changelog, and public installer references.
+
+---
+title: Composer failure and reconnect browser regressions
+type: test
+date: 2026-07-19
+tags: [web, composer, turbo, stimulus, testing]
+---
+
+- Browser coverage now proves a failed Turbo submission preserves typed text,
+  chips, and the staged upload transport.
+- Browser coverage forces a real Stimulus disconnect/reconnect of the permanent
+  composer, adds a second image, and submits both files to prove attachment
+  state rebuilds from the preserved FileList.
+- Loopback integration coverage now asserts all five primary navigation links,
+  including Workflows.
+
+# Radical simplification follow-up
+
+- Derived ready-action command routing from `TaskAction::ACTIONS` so the bot
+  and web no longer maintain independent command maps.
+- Kept web dispatch narrower by projecting the shared map through the daemon
+  queue allowlist; `ready_to_advance` remains an in-process approve action.
+- Closed the corresponding Hivebox residual in [[gaps]].
+- Made `Hive::Workflow#executable_slots` the shared actor topology for
+  configuration, managed validation, and runtime admission.
+- Moved redacted mapping/input presentation onto the configuration snapshot and
+  made lifecycle resolution consume a single validated package result.
+- Reused the shared recursive key normalizer, digest pattern, and mapping-role
+  vocabulary instead of maintaining workflow-package copies.
+- Hoisted project configuration and temporary runtime admission into the
+  workflow command base, and made update reports single-evaluation values.
+- Routed task metadata mutations through one field-preserving rewrite and
+  generic agent/council marker actions through their shared stage base.
+- Reused one immutable managed runtime context across each actor's prompt and
+  permission setup, and stopped creating empty actor-policy directories.
+- Made task capture resolve managed selection once, loading project config only
+  when a legacy lock actually needs its compatibility snapshot.
+- Kept managed context failures inside the permission-error marker boundary,
+  reused the remaining exact helpers, and corrected actor-policy documentation.
+
+---
+title: Hive Web preserves operator failure causes
+type: change
+date: 2026-07-19
+tags: [web, agents, init, errors]
+---
+
+- Managed agent-skill repair failures now show and log the command
+  classification plus bounded failed-operation messages, residual health, or
+  captured stderr instead of a fixed generic alert.
+- The web adapter's health method no longer shadows Ruby's zero-argument
+  `Object#inspect` contract.
+- Repo registration and settings re-init now capture Init's non-interactive
+  provisioning findings and render them as an alert alongside the successful
+  setup notice.
+
+---
+title: Workflow lifecycle failure semantics and real web adapter coverage
+type: change
+date: 2026-07-19
+tags: [workflows, web, concurrency, testing, errors]
+---
+
+- Workflow preview registries now reject incomplete candidate identities, and
+  update receipts require the original commit and manifest digest explicitly.
+- A local immutable registry fixture drives preview/apply install, update, and
+  remove through the real Hive Web adapter and real command constructors.
+- Failed activation cleanup preserves the original error. Failures after a
+  committed update/removal return success plus operator-visible warnings.
+- Mutation-lock yield errors keep their real classification, registry git
+  errors retain bounded stderr, and the managed-store CAS sentinel is private
+  and documented.
+- Added receipt replay, expiry, and per-operation consent negatives plus
+  command failure-path regressions.
+
+---
+title: Web pairing failures and workflow terminal state
+type: change
+date: 2026-07-19
+tags: [web, telegram, pairing, workflows, daemon]
+---
+
+- Owner-facing pairing list reads now surface malformed or unreadable pairing
+  state through the CLI error envelope and Hive Web alert instead of presenting
+  a false empty list; bot-side recovery reads remain tolerant.
+- The task daemon-paused banner now derives terminal directories from all
+  registered workflow descriptors rather than assuming coding's `9-done`.
+- Added web and unit regressions for corrupt pairing state, blank first-time
+  tokens, expired approval errors, running-daemon suppression, and non-coding
+  terminal tasks.
+
+---
+title: Harden managed inputs and add bounded council delivery
+date: 2026-07-19
+---
+
+Managed package validation now rejects optional input names that can override
+child process controls and validates manifest-bound prompt assets alongside
+package tools. Managed prompts expose only absolute asset paths. Council
+descriptors gained `on_max_rounds: wait|complete`; the default preserves the
+operator wait, while `complete` lets a downstream delivery stage report an
+explicit capped outcome.
+
+---
+title: Release v0.6.0 workflow-package runtime
+date: 2026-07-19
+---
+
+Prepared Hive v0.6.0 with operator-owned immutable execution mappings for
+managed Honeycomb workflows, slot-scoped optional inputs, declared package
+tools and prompt assets, hardened lifecycle reconciliation, and an opt-in
+bounded council completion policy for capped editorial workflows.
+
+---
+title: Preserve all envelope serialization policies
+tags: [refactor, ci, envelopes, compatibility]
+---
+
+**Action:** Exact-head CI exposed a third pre-refactor error-envelope policy
+outside the seven migrated commands: the shared emitter's existing daemon and
+maintenance consumers warn when JSON generation itself fails, mark stdout as
+handled, and then preserve the original typed failure. Replaced the temporary
+boolean hook with an explicit three-way policy so legacy warning consumers,
+silent `run`/`status`, and raising approve/findings/markers/stage-action
+producers all retain their original behavior. The existing daemon-emitter,
+Run/Status, and Approve tests pin each arm.
+
+---
+title: Final radical-simplification review fixes
+tags: [refactor, review, envelopes, digest, testing]
+---
+
+**Action:** The final structured review of PR #793 restored three boundary
+contracts exposed by consolidation: shipped-digest cursor write failures now
+engage bounded retry backoff, `run`/`status` retain their silent
+`JSON::GeneratorError` fallback while other envelope producers still raise,
+and `hive-markers-clear.v1` does not gain commit-lock metadata outside its
+closed schema. Shared digest writes explicitly keep the pre-refactor no-fsync
+policy.
+
+**Proof:** Added regression coverage for cursor-write failure, both envelope
+serialization policies, markers' exact error keys, non-JSON durable failure
+exits, recursive copy isolation, and the task-grid link target without
+reintroducing the live Turbo-row click race. Updated the stale Metrics comment
+to point at the shared emitter.
+
+---
+title: Make Hive Web workflow acceptance deterministic across CI browsers
+created: 2026-07-19T01:00:00Z
+tags: [web, workflow, testing, playwright, coverage]
+---
+
+- Added root-suite coverage for Hivebox's workflow lifecycle adapter, including
+  exact install/update candidate rebinding and selected-generation checks for
+  update/remove.
+- Made the workflow-authoring browser path choose its target project explicitly,
+  matching the real multi-project experience instead of depending on test order.
+- Tightened the five-item mobile navigation spacing so every capability remains
+  visible across Chromium/font metric differences without page overflow.
+
+---
+title: Keep patrol review progress within launch budgets
+date: 2026-07-19
+tags: [patrol, refactor-patrol, quotas, review, audit]
+---
+
+- Bounded ordinary review batches by the tighter remaining cycle or shared UTC-day launch envelope and reserved one launch for fixing when headroom permits it.
+- Advanced a failed batch cursor past its proven-clean prefix while retaining the first failed feature and remaining suffix for retry.
+- Accepted a single whole-message JSON fence from read-only architecture reviewers without permitting surrounding prose.
+- Bounded architecture review batches by remaining launch headroom, stopped on the first failed slice, and checkpointed clean bounded progress while leaving untouched slices retryable without synthetic failures.
+- Backed daily architecture quota failures, including insufficient remaining daily token headroom for another launch, off until the next UTC budget window instead of retrying every minute.
+- Preserved every real read-only architecture final response beside the normalized thesis artifact in a durable run directory with job, PR, analysis-SHA, and feature context so failed and successful review quality remains attributable.
+
+---
+title: Bring workflow discovery and reviewed lifecycle operations to Hive Web
+created: 2026-07-19T00:30:00Z
+tags: [web, workflow, honeycomb, consent, browser]
+---
+
+- Added a primary Workflows surface with project-scoped built-in, authored,
+  managed selected/retained, integrity, provenance, and default-workflow state.
+- Added real owner-authored template scaffolding and links to choose the project
+  default.
+- Added install/update/remove preview pages backed by the CLI dry-runs, expiring
+  signed receipts, exact candidate/selection identity checks, ordinary consent,
+  and separate security-escalation consent.
+- Kept the legacy Honeycomb publisher limitation explicit instead of exposing a
+  browser action that would open an unusable v2 registry PR.
+- Added Rails request/model coverage and Playwright paths for real scaffolding
+  plus permission-reviewed install; live desktop/mobile dogfood found and fixed
+  the five-item mobile navigation squeeze with a full-width second nav row.
+
+---
+title: Share repository registration evidence
+type: changed
+date: 2026-07-19
+---
+
+Architecture-patrol repository ownership now projects diagnostic registration
+evidence through the same normalized name/expanded-path representation used by
+ownership keys. Decisions, evidence fields, sorting, and blocked reason codes
+are unchanged.
+
+---
+title: Bind workflow lifecycle mutations to the reviewed selection
+created: 2026-07-19T00:10:00Z
+tags: [workflow, honeycomb, concurrency, consent, web]
+---
+
+- Added source-commit and manifest-digest baseline checks for update/remove
+  callers that apply a previously reviewed dry-run.
+- Rechecked removal baselines inside the workflow mutation lock and taught
+  activation to distinguish no guard from an explicit still-unselected guard.
+- Bound first install activation to the selection observed after package
+  validation, preventing a concurrent install/update from being overwritten.
+- Added command/store regressions for stale update, stale removal, and a
+  selection appearing between validation and activation.
+
+---
+title: Share TUI viewport calculation
+type: changed
+date: 2026-07-19
+---
+
+Project and task panes now use `Hive::Tui::Views::Format.viewport_start` for
+their identical cursor-following scroll-window calculation. Pane content,
+selection clamping, visible rows, padding, narrow-terminal behavior, and
+rendered frames are unchanged.
+
+---
+title: Share PATH executable lookup
+type: changed
+date: 2026-07-19
+---
+
+Doctor, update, and service installation now delegate their PATH-only
+executable lookup to `Hive::InvokedBinary.which`. Their private test seams,
+injected update environment, lookup order, executable checks, and nil fallbacks
+are unchanged. Babysitter dry-run keeps its distinct realpath-resolving lookup.
+
+---
+title: Delegate legacy clear-retry callbacks to Autofix
+type: changed
+date: 2026-07-19
+---
+
+Telegram buttons carrying the legacy `clear_retry` callback now delegate
+directly to the current Autofix handler instead of duplicating its parser and
+`RecoverySequence` call. Callback compatibility, marker matching, manual-only
+refusals, workflow selection, keyboard clearing, and dispatches are unchanged.
+
+---
+title: Prevent duplicate ideas and unblock stopped-daemon tasks in Hive Web
+created: 2026-07-18T23:59:00Z
+tags: [web, composer, daemon, tasks, browser]
+---
+
+- Kept the idea composer permanent for unsent work, but now clear completed
+  text, attachment chips, preview URLs, and the upload transport after a
+  successful Turbo submission. The project selection remains as intentional
+  working context, and controller reconnects rebuild staged attachment state.
+- Added stopped-daemon recovery guidance to daemon-enabled task pages without
+  bypassing Hive's single-dispatcher queue boundary or presenting a Run button
+  that cannot be consumed.
+- Made the status daemon strip distinguish a healthy stopped installation
+  (`hive daemon start --detach`) from missing/drifted service repair
+  (`hive daemon install --force`).
+- Covered the behavior with Rails integration tests and a real Playwright
+  composer submission that verifies text, chips, and the file transport reset
+  while the selected project survives.
+
+---
+title: Share digest truncation
+type: changed
+date: 2026-07-18
+---
+
+Shipped-task summary and label caps now share one private raw-text truncation
+primitive in `Hive::Digest::Renderer`, and the merged-PR renderer delegates its
+identical label cap to the existing public label policy. Length constants,
+ellipsis placement, MarkdownV2 escaping, and rendered messages are unchanged.
+
+---
+title: Complete Telegram pairing in Hive Web
+created: 2026-07-18T23:55:00Z
+tags: [web, telegram, pairing, authentication]
+---
+
+- Allowed the Telegram form to bootstrap securely with pairing enabled and no
+  pre-known chat ID, while continuing to reject an empty authorization boundary
+  when pairing is off.
+- Added pending-code visibility and explicit, owner-confirmed approval through
+  the existing atomic Pairing command lifecycle.
+- Allowed authorization settings to change without re-entering a previously
+  validated bot token; replacement tokens still pass `getMe` before persistence.
+- Added adapter and request coverage for list/approve delegation, empty-list
+  bootstrap, saved-token reuse, consent enforcement, and disabled-mode laziness.
+
+---
+title: Share fail-soft task id allocation
+type: changed
+date: 2026-07-18
+---
+
+`Hive::TaskCounter.next_or_nil` now owns the capture-time policy that turns
+counter-lock contention into a null task id. New-task capture, ad-hoc review,
+and patrol review handoff keep their existing durable fallback for later daemon
+backfill, while migration and the backfiller retain strict `next!` allocation.
+
+---
+title: Share TUI character chunking
+type: changed
+date: 2026-07-18
+---
+
+The new-idea composer and read-only idea preview now use
+`Hive::Tui::Views::Format.character_chunks` for their identical fixed-width
+character slicing. Empty-buffer rows, cursor placement, attachment rendering,
+preview wrapping, and truncation behavior are unchanged.
+
+---
+title: Bring managed agent-skill readiness to Hive Web
+created: 2026-07-18T23:50:00Z
+tags: [web, agents, skills, doctor, provisioning]
+---
+
+- Added explicit per-project managed-skill health checks to the Agents page,
+  using the same Inspector payload that backs `hive doctor`.
+- Added a confirmation-gated safe repair action through the shared
+  `SetupAgents` command with a non-TTY input and `web_confirmed` consent
+  provenance; conflicting and user-owned custom skills remain untouched.
+- Kept expensive native CLI inventory opt-in instead of running it for every
+  registered project whenever the Agents page opens.
+- Added unit coverage for the web adapter boundary and request coverage for
+  health rendering, consent enforcement, repair, and the no-automatic-scan
+  performance contract.
+
+---
+title: Share the PID liveness probe
+type: changed
+date: 2026-07-18
+---
+
+Claude-session completion, migration guards, status, dispatcher recovery,
+display-name backfill, and stale-agent healing now delegate their PID-only
+liveness checks to `Hive::ProcessKill.pid_alive?`. Their private method seams,
+`ESRCH`-means-dead behavior, and conservative `EPERM`-means-alive behavior are
+unchanged.
+
+---
+title: Share reviewer retry-budget parsing
+type: changed
+date: 2026-07-18
+---
+
+`Hive::Reviewers::Base` now owns the `max_attempts` parser used by the Agent
+and native Codex review adapters. Valid values, the default, the defensive
+warning for direct/custom construction, retry counts, and backoff behavior are
+unchanged.
+
+---
+title: Share transition error kinds
+type: changed
+date: 2026-07-18
+---
+
+Workflow stage actions now delegate their transition error-kind classification
+to `Hive::Commands::Approve`, the command they compose for promotion. Direct
+approve and outer stage-action envelopes retain the same closed enum, exit
+codes, structured extras, and public schemas.
+
+---
+title: Share reviewer deadline policy
+type: changed
+date: 2026-07-18
+---
+
+`Hive::Reviewers::Base` now owns the monotonic remaining-time calculation and
+per-spawn timeout clamp shared by the agent and native Codex review adapters.
+Their configured timeouts, expired-deadline behavior, retry decisions, and
+spawn interfaces are unchanged.
+
+---
+title: Expose Grok device login in Hive Web
+created: 2026-07-18T23:30:00Z
+tags: [web, agents, grok, authentication]
+---
+
+- Connected the existing Grok device-auth relay to the Agents page and its
+  constrained start, status, and completion routes.
+- Corrected the Agents page's persistence copy for both local and container
+  installs instead of describing every installation as a `/data` mount.
+- Added request-level coverage that distinguishes Grok's operator-ward device
+  flow from Pi's token form.
+
+---
+title: Share digest scheduler state writes
+type: changed
+date: 2026-07-18
+---
+
+The shipped-task and answer digest schedulers now inherit pending-date
+ownership, cancellation, failure backoff, dispatch-envelope construction,
+observable state reads, and atomic cursor persistence from
+`Hive::Daemon::DigestSchedulerBase`. Their cadence, cursor fields, JSON
+content, scheduling decisions, and failure/backoff behavior are unchanged.
+
+---
+timestamp: 2026-07-18T23:20:50Z
+slug: architecture-patrol-isolated-analysis
+tags: [patrol, architecture, worktree, daemon]
+---
+
+## [2026-07-18T23:20:50Z] architecture patrol — isolate analysis from the registered checkout
+
+**Fixed:** Architecture-patrol v2 no longer treats a developer's active branch
+or uncommitted files as analysis state. New jobs pin the freshly fetched
+committed default branch; discovery runs mapper, leverage, and reviewer reads
+inside a detached exact worktree and removes it before completion. Partial jobs
+rematerialize their durable `analysis_sha` after default-branch advancement,
+and automatic fixes fence against the committed default ref rather than the
+operator's checkout. A terminal manual replay now pins only after its new
+occurrence exists, dry-run previews receive invocation-unique analysis paths,
+and stale worktree registrations self-heal before materialization. Dirty or
+mismatched analysis trees still fail closed.
+
+**Tests:** Added fresh-remote pinning, dirty-checkout and branch-switch
+isolation, exact detached materialization, partial-retry SHA reuse, contaminated
+analysis cleanup, malformed pinned-OID rejection, and automatic-fix regression
+coverage, plus replay-after-default-advance, dry-run ownership, and orphaned
+worktree-registration recovery. Git commit resolution now also fences option
+parsing and validates the resolved full object ID.
+
+---
+title: Share patrol review error details
+type: changed
+date: 2026-07-18
+---
+
+Ordinary patrol and architecture patrol reviewers now use
+`Hive::Patrol::ReviewErrorDetails` to persist the same agent
+resource-exhaustion envelope. Their failure detection, messages, state writes,
+and domain-specific review records remain separate.
+
+---
+title: Avoid the system-test live-grid race
+type: fixed
+date: 2026-07-18
+---
+
+The Hivebox pipeline system test now visits the task route through the folder
+it just created instead of retaining and clicking a `.task-row` while Turbo can
+replace the grid. This applies the existing live-grid synchronization rule to
+the remaining system-test path and removes its one-use row helper.
+
+## 2026-07-18 — Complete shared durable value copying
+
+- Replaced the remaining recursive `deep_copy` implementations in durable
+  attempt records and task projection with `Hive::StringifyKeys`.
+- Migrated attempt-store transition callers that had treated
+  `Record.deep_copy` as a namespace utility, preserving new-container,
+  string-key, and scalar-value semantics.
+- Verified attempt records/transitions, projection storage, condition
+  reconciliation, action gates, generation, and the shared transform together:
+  72 runs, 287 assertions, zero failures, zero errors, and zero skips.
+
+---
+title: Make local Hive Web sessions fully operable
+created: 2026-07-18T23:00:00Z
+tags: [web, auth, repositories, local-mode]
+---
+
+- Exposed Status, Repos, Agents, and Telegram navigation to operators using the
+  loopback connection-auth bypass, with a clear Local identity and an explicit
+  GitHub connection action for account-dependent repository browsing.
+- Made browser-driven repository setup explicitly non-interactive so agent-skill
+  preflight additions cannot inherit Puma's terminal and leave an HTTP request
+  waiting for an answer that the browser cannot provide.
+- Added integration coverage for local navigation, repository reconnect copy,
+  and the non-TTY init boundary.
+
+## 2026-07-18 — Share implementation identity event assembly
+
+- Added `Hive::ImplementationIdentity::EventBuilder` for the identical durable
+  journal envelope used by live identity capture and legacy reconstruction.
+- Kept generation/selection policy in `Store` and recovery policy in
+  `Reconstructor` while centralizing attempt lookup, coding-stage identity,
+  generations, lease evidence, provenance, and payload shape.
+- Verified capture, reconstruction, journal, and routing behavior together: 31
+  runs, 130 assertions, zero failures, zero errors, and zero skips.
+
+## 2026-07-18 — Share strict GitHub repository identity validation
+
+- Added `Hive::Gh::RepositoryIdentity` as the single owner of GitHub/GHES
+  hostname, owner/name slug, and combined repository-target validation.
+- Routed both normal `Hive::Gh` operations and architecture-patrol's
+  `GithubGateway` through that policy without changing accepted inputs or
+  `Hive::GhError` messages.
+- Verified transport, issue, and patrol publication boundaries together: 146
+  runs, 799 assertions, zero failures, zero errors, and zero skips.
+
+## 2026-07-18 — Share recursive string-key normalization
+
+- Added `Hive::StringifyKeys` as the single owner of the identical recursive
+  hash-key normalization used by task journals, task conditions, and Screenote
+  credentials.
+- Preserved array recursion, scalar values, and non-mutating container copies;
+  shallow validators and JSON canonicalizers with different contracts remain
+  local.
+- Verified every migrated consumer together: 42 runs, 184 assertions, zero
+  failures, zero errors, and zero skips.
+
+## 2026-07-18 — Share stage worktree pointer validation
+
+- Moved the identical open-PR and finalize stage-entry checks into
+  `Hive::Stages::Base.worktree_pointer_or_exit`.
+- Preserved the pointer shape, warnings, and exit status while giving the
+  missing-pointer and missing-directory policy one owner.
+- Verified the affected stage and base behavior together: 62 runs, 303
+  assertions, zero failures, zero errors, and zero skips.
+
+## 2026-07-18 — Share durable command result interpretation
+
+- Added `Hive::Attempts::CommandDispatch` for the identical durable dispatch
+  and attach-result policy used by `hive run` and workflow stage actions.
+- Kept command-owned intended-stage resolution, worker argv, error schema, and
+  error-kind mapping separate while centralizing lost-attempt translation,
+  worker-JSON deduplication, empty-output fallback, and receipt exit status.
+- Verified both command surfaces and their integration envelopes together: 64
+  runs, 317 assertions, zero failures, zero errors, and zero skips.
+
+## 2026-07-18 — Share bot and daemon service-install results
+
+- Added `Hive::Commands::ServiceInstaller::ResultPresenter` as the common
+  command-side boundary above the existing platform installer base.
+- Removed parallel bot/daemon copies of install invocation, human summaries,
+  success/error JSON envelopes, drift/failure translation, and hostile-accessor
+  fallbacks.
+- Preserved each command's label, schema, error classes, exit codes, force and
+  backup guidance, target path, restart flag, and operator messages.
+- Verified command, installer, schema, and subprocess coverage together: 406
+  runs, 1,663 assertions, zero failures, zero errors, and one existing opt-in
+  skip.
+
+## 2026-07-18 — Share runtime command error-envelope production
+
+- Migrated approve, findings inspection/toggles, marker clearing, run, workflow
+  stage actions, and status/diagnose to `Hive::Schemas::EnvelopeEmitter`.
+- Extended the mixin with hooks for composed-command suppression and
+  error-specific fields, preserving quiet approve behavior and the final-stage
+  field without duplicating the rescue and JSON-write scaffold.
+- Kept each published schema, error-kind mapping, exit code, recovery field,
+  and single-document stdout guard unchanged. Specialised producers retain
+  dedicated emitters when their output destination, schema routing, or wire
+  shape differs from the common `ErrorEnvelope` contract.
+- Verified the affected command and integration suites together: 221 runs,
+  1,027 assertions, zero failures, and zero errors.
+
+---
+title: Share legacy patrol state persistence
+created: 2026-07-18T21:50:17Z
+tags: [patrol, refactor-patrol, refactor, state]
+---
+
+- Extracted the identical ordinary-patrol and architecture-patrol legacy JSON
+  lifecycle into `Hive::Patrol::BaseStateStore`.
+- Kept both public state-store classes, on-disk namespaces, domain records,
+  tolerant-read behavior, and prior no-fsync write semantics unchanged.
+- Routed atomic replacement through the existing `Hive::AtomicFile` primitive,
+  removing duplicate temporary-file and rename implementations.
+
+---
+timestamp: 2026-07-18T21:39:50Z
+slug: current-main-wiki-reconciliation
+tags: [wiki, atomic-file, digest, testing]
+---
+
+## [2026-07-18T21:39:50Z] wiki — reconcile accumulated refresh work with v0.5.3 main
+
+**Action:** Compared an accumulated v0.3.6-era wiki refresh against current
+`main` at `b03d525c` (`0.5.3`). Discarded stale release/audit fragments and
+page edits that would have rolled back newer workflow, patrol, durability, and
+babysitter documentation. Kept only still-current gaps: added
+[[modules/atomic_file]] with the present `write` and `fsync_directory`
+contracts, linked bot pairing writes to the shared helper, corrected digest
+error-schema and merged-PR test-map coverage, normalized duplicate reviewer
+frontmatter, added the new page to [[index]], and reconciled the catalog count
+to the 93 non-fragment pages actually indexed. Compiled [[log]] was not edited.
+
+**Refreshed pages:**
+
+- [[commands/digest]]
+- [[index]]
+- [[modules/atomic_file]]
+- [[modules/bot]]
+- [[modules/reviewers]]
+- [[testing]]
+
+---
+title: Prepare v0.5.3 Architecture Patrol merge intake fix
+created: 2026-07-18T20:34:17Z
+tags: [release, packaging, refactor-patrol, github]
+---
+
+- Prepared Hive v0.5.3 from the merged Architecture Patrol intake fix.
+- Synchronized `Hive::VERSION`, both path-gem lockfiles, and public pinned
+  installer URLs at `0.5.3` / `v0.5.3`.
+- Added user-facing notes for the exact merged-time range that keeps scheduled
+  intake within its current patrol window and daemon tick budget.
+- Publication remains unproven until the release branch merges and the
+  protected tag workflow publishes signed artifacts, downstream channels, and
+  both hivebox architectures.
+
+## Fix architecture-patrol merged-PR range filtering
+
+- Changed GitHub merged-PR catch-up to express a bounded scan as one exact ISO
+  timestamp range qualifier instead of two independent `merged:` qualifiers.
+- Added regression assertions that the GraphQL search contains exactly one
+  `merged:` qualifier, preserves both frozen timestamps, and retains the
+  lower-only and upper-only query forms.
+- Documented the single-range invariant for merge-intake pagination and result
+  count convergence.
+
+---
+title: Prepare v0.5.2 Honeycomb catalog client release
+created: 2026-07-18T17:00:00Z
+tags: [release, packaging, honeycomb, workflow-registry]
+---
+
+- Prepared Hive v0.5.2 from the merged Honeycomb catalog-v2 client.
+- Synchronized `Hive::VERSION`, both path-gem lockfiles, and public pinned
+  installer URLs at `0.5.2` / `v0.5.2`.
+- Added user-facing notes for flat-catalog resolution, immutable catalog-commit
+  generations, full manifest and tree verification, lifecycle handling,
+  security-sensitive updates, and fail-closed task-local read-only admission.
+- Publication remains unproven until the release branch merges, the protected
+  tag workflow publishes signed artifacts and downstream channels, and a real
+  listed Honeycomb installs from the released CLI.
+
+---
+title: Prepare v0.5.1 dogfood hotfix release
+created: 2026-07-18T16:01:46Z
+tags: [release, packaging, doctor, hivebox]
+---
+
+- Prepared Hive v0.5.1 from the merged v0.5.0 dogfood fixes.
+- Synchronized `Hive::VERSION`, both path-gem lockfiles, and the public pinned
+  installer URLs at `0.5.1` / `v0.5.1`.
+- Added user-facing patch notes for mixed-agent doctor diagnostics, verifier
+  service-manager isolation, the packaged architecture-patrol schema runtime,
+  stable daemon-deep hivebox smoke, exact native digest promotion, and
+  supervised-daemon status truthfulness.
+- Publication remains unproven until the release branch merges, the tag-driven
+  workflow publishes and verifies all channels, and the released AUR package
+  is installed and exercised on the operator workstation.
+
+## [2026-07-18T13:49:05Z] release/doctor — fix v0.5.0 dogfood regressions
+
+**Action:** Fixed four regressions found while dogfooding the published v0.5.0
+artifact. The release verifier now places inert platform service-manager stubs
+ahead of `PATH` before install, init, daemon-install, or uninstall checks, so a
+sandboxed `HOME` cannot still disable or restart the operator's live user
+service. Managed-skill inspection now keeps an unmanaged custom reviewer on a
+registered agent without a Hive skill resolver (such as Grok) as informational
+unavailable evidence instead of aborting all of `hive doctor` with a config
+error.
+
+The published hivebox image also proved Rails could be healthy while its
+supervised daemon crashed on `LoadError: json_schemer`: architecture patrol
+made schema validation a runtime path but the validator remained test-only in
+the root Gemfile. Declared it as a gem runtime dependency and made the image
+smoke require daemon-backed `/health?deep=1` across the supervisor's
+ten-second fast-failure window, with a final post-front-door probe, before
+publication. Every curl call has explicit connect/request timeouts and both
+polling phases have absolute deadlines. Native amd64 and arm64 jobs now smoke
+their exact untagged registry digests before a downstream job promotes those
+immutable inputs to the public versioned and `latest` multi-arch tags.
+
+Finally, the live hivebox dashboard rendered contradictory daemon state:
+`running` followed by `daemon is down`. The supervisor intentionally runs the
+daemon without a platform service unit, so the view now gates service-repair
+guidance on the daemon actually being down rather than treating
+`service_installed: false` alone as an outage.
+
+**Tests:** Added focused inspector coverage for a Grok custom reviewer, gemspec
+coverage for the architecture-patrol validator, and packaging contract tests
+that pin service-manager isolation before the first installed Hive invocation
+plus stable daemon-deep hivebox health around the front-door assertions. The
+smoke harness rejects a single transient healthy probe. Added a Rails
+integration regression for the supervised-running daemon strip and a release
+workflow contract for digest-only promotion after both architecture smokes.
+
+**Refreshed pages:**
+- [[commands/doctor]]
+- [[commands/web]]
+- [[dependencies]]
+- [[operating]]
+- [[testing]]
+
+# Honeycomb v2 client contract
+
+**Action:** Replaced the official install reader's legacy nested catalog and
+`workflows/NAME/manifest.json` assumptions with canonical
+`honeycomb-catalog/v2` flat entries and immutable
+`packages/NAME/VERSION/manifest.yml` snapshots. The catalog commit is now the
+durable materialization/task-pin identity; review head and upstream source SHA
+remain separate audit/provenance identities. Added canonical YAML,
+`release_sha256`, complete tree/hash, catalog-binding, lifecycle, update diff,
+and task-pin coverage.
+The registry manifest uses an absolute `::Digest` lookup so its release check
+remains valid after Hive's own `Hive::Digest` namespace is loaded by the full
+suite. Hive-version admission also ignores SemVer build metadata, matching
+SemVer precedence while remaining compatible with RubyGems version comparison.
+
+**Safety boundary:** Hive only maps the lossless low-risk task-local read-only
+v2 disclosure to its exact managed runtime policy. Broader v2 disclosures fail
+closed before mutation. Bench and Docs Sync currently resolve/verify but remain
+uninstallable, and the existing publish command remains a legacy package
+producer.
+
+**Coverage:** Updated [[modules/workflows]], [[commands/workflow]], [[testing]],
+[[gaps]], `docs/workflows.md`, and `docs/permissions.md`. Did not edit compiled
+[[log]] and did not run `qmd update` or `qmd embed`.
+
+---
+title: Prepare v0.5.0 minor release
+created: 2026-07-18T11:53:14Z
+tags: [release, packaging, workflows, attempts, patrol]
+---
+
+- Prepared Hive v0.5.0 as the next minor release from the published v0.4.2
+  baseline, superseding the untagged v0.4.3 prep and including every subsequent
+  merged change.
+- Synchronized `Hive::VERSION`, both path-gem lockfiles, and the public pinned
+  installer URLs at `0.5.0` / `v0.5.0`.
+- Replaced the unpublished v0.4.3 changelog section with explicit, grouped
+  v0.5.0 notes focused on Honeycomb workflow lifecycle commands, managed agent
+  skill setup, durable task-stage/condition/implementation ownership, workflow
+  permissions and dependencies, patrol quality, and architecture patrol.
+- Publication remains unproven until the release branch merges, tag-triggered
+  GitHub workflow completes, signed assets and install channels verify, and the
+  released binary is exercised locally.
+
+## [2026-07-18T04:45:00Z] agents - harden provisioning prerequisites and timeouts
+
+**Action:** Review-hardened managed agent-skill provisioning. Filtered target
+resolution now recursively retains manifest-declared package prerequisites,
+and adapter planning blocks a dependent package unless each prerequisite is
+scheduled or proven healthy. Native inventory and install commands now run in
+dedicated process groups with bounded TERM/KILL cleanup and reaping, preventing
+a timed-out installer or descendant from continuing mutations after Hive has
+reported failure.
+
+**Safety and coverage:** Added real TERM-resistant parent/child cleanup
+coverage, filtered-prerequisite resolution coverage, and fail-closed tests for
+missing and unhealthy prerequisites. Updated [[commands/setup-agents]],
+[[modules/agent_profile]], and [[testing]]; did not edit compiled [[log]].
+
+## 2026-07-18 — Harden Honeycomb runtime and lifecycle review boundaries
+
+- Moved generated managed-policy files outside agent-writable task trees,
+  isolated tmux launches with the same compiled child environment as headless
+  runs, and closed shell/path/domain hook bypasses.
+- Bound catalog disclosures to the verified manifest and serialized selection
+  recovery and generation cleanup with task creation/moves.
+- Added inspect-before-consent install/remove dry runs, closed lifecycle JSON
+  schema arms, and adversarial regression coverage for each repaired boundary.
+
+## [2026-07-17T23:25:26Z] implementation identity — harden durable ownership boundaries
+
+**Action:** Bound legacy identity reconstruction to the current durable attempt's project, task, and numeric generation; made downstream generation reads validate journal records against the Attempts store and fail closed on malformed, empty, unreadable, or unbound journals; and carried the persisted provider into execute failure markers.
+
+**Protection:** Implementation-owning stages now resolve identity before their protected-file snapshot and pass that exact resolution into the agent spawn, avoiding heartbeat-driven projection rebuilds inside the protected interval. `task-journal.jsonl` plus `task-projection.json` are orchestrator-owned files. Review synthetic tasks carry the durable slug/id required by journal events. Focused regression coverage exercises cross-project attempt collisions, CI task identity, journal tampering, generation corruption, and provider drift.
+
+**Compatibility:** Provider-default discovery accepts a top-level Codex TOML model assignment with an inline comment. The web golden-path fixture pins the concrete model exposed by its fake Claude CLI, and the CLI E2E sandbox pins its synthetic Codex model, so clean runners capture execute identity before launch without borrowing operator-owned provider settings.
+
+---
+title: Patrol scans fresh remote defaults
+type: log
+created: 2026-07-17
+tags: [patrol, git, worktree, freshness]
+---
+
+**Action:** Changed every new ordinary-patrol sweep to fetch and review the
+exact `refs/heads/<default_branch>` commit instead of resolving a potentially
+stale local default branch. The explicit source ref cannot be shadowed by a
+same-named tag, and a process-group deadline bounds stalled transports. A
+configured remote fetch failure now stops before mapper or reviewer work;
+repositories without an origin retain the local-only path. An active snapshot
+that Git can no longer materialize restarts at the current default and cursor
+zero instead of remaining stuck.
+
+**Safety chain:** The scan checkout leaves the operator's local default branch
+untouched. The fixer independently re-fetches immediately before creating each
+patrol branch, publication verifies the remote base before and after the leased
+push, and synthetic `6-review` handoff requires the created PR's exact validated
+base/head identity, and rechecks the live remote head/base immediately before
+every first or retried task handoff. An older cursor-pinned review snapshot or
+failed-handoff retry therefore cannot create a task on an old-base branch.
+
+**Coverage:** `test/integration/patrol_command_test.rb` advances a bare remote
+while local main stays behind, proves the detached scan uses the remote commit,
+and proves an unreachable configured origin fails before reviewer creation.
+Real-Git coverage adds same-name branch/tag resolution and a TERM-resistant
+stalled SSH transport; command and PR-opener regressions cover dead snapshot
+replacement and base advancement before first/retried handoff.
+
+Pages: [[commands/patrol]], [[modules/patrol]], [[modules/worktree]], [[testing]].
+
+---
+title: Condition journal review hardening
+date: 2026-07-17
+tags: [conditions, journal, projection, status, review]
+---
+
+- Reused one authoritative-record validator for journal writes and projection
+  replay, including exact schema-version and durable attempt task/stage/input-
+  epoch/ownership checks; forged and future-version records now fail closed.
+- Made authoritative appends retry short writes and roll back to the prior
+  fsynced byte boundary when a later write or sync fails.
+- Separated strict `task-journal.jsonl` authority from fail-soft
+  `events.jsonl` telemetry, and made even binding-matched projection snapshots
+  revalidate their journal's durable attempt identity.
+- Preserved published `hive-attempt` v1 and `hive-status` v5, moved the new
+  wire shapes to v2 and v6, and kept the compatibility lock's
+  `task_generation` field as the opaque owner token.
+- Isolated `project_load_failed` per project so one bad projection cannot
+  masquerade as a healthy empty project or erase healthy sibling rows.
+- Wired terminal/lost execute attempt reconciliation into idempotent
+  `AgentHealthy` journal observations, and made research waivers derive from
+  persisted file evidence rather than caller booleans.
+- Added fault-injection, replay, fixture, snapshot, and status regressions for
+  the hardened boundaries.
+- Added a bounded valid-snapshot path that hashes journal bytes and validates
+  each unique current/predecessor attempt once; changed bindings still take a
+  full parse/replay. Terminal observer deliveries are memoized per daemon
+  process, while durable restart idempotency remains journal-backed.
+- Made predecessor lineage causal authority: missing/incompatible/cyclic links
+  fail closed and a clock-regressed successor still supersedes its predecessor.
+  Terminal/lost durable state also reconciles current `AgentHealthy` before the
+  daemon observer lands.
+- Missing/empty post-handoff journals now fail both read and rebuild without
+  overwriting the last snapshot. Marker-only proof is scoped to attempt-stamped
+  `execute_*` markers so review and other stage markers do not falsely claim an
+  execute condition-journal handoff. First-create retries fsync the task
+  directory.
+- Added condition-specific recovery actions and structured blocked-transition
+  error envelopes. Forced condition overrides must durably append an
+  idempotent `operator_action`; status exposes the latest 20 overrides while
+  the journal retains their complete history.
+
+---
+title: Generation-scoped execute task conditions
+date: 2026-07-17
+tags: [conditions, projection, journal, execute, status]
+---
+
+- Added a strict, fsynced authoritative record path to task-local
+  `task-journal.jsonl`, reusing durable attempt identity and adding numeric task and
+  commit generations without rewriting legacy attempts.
+- Added the seven-condition registry, typed evidence, pure supersession
+  projection, cursor/hash-bound atomic snapshots, versioned execute policy,
+  marker/shadow/conditions authority, legacy baseline, and parity audit.
+- Routed execute reconciliation, completion, and forward transition guards
+  through journal → snapshot → gate → compatibility marker ordering.
+- Put the canonical projection under TaskAction/status and passed the additive
+  condition contract through daemon, TUI, bot, and web consumers.
+- Added a reusable incident replay harness plus sanitized task-1849 fixture,
+  operator rollout/repair/rollback documentation, and an explicit live-shadow
+  evidence gap.
+
+---
+date: 2026-07-17
+summary: Close exact-head durable-attempt admission and output gaps
+---
+
+- Serialized capacity scan and reservation creation with one shared admission
+  lock outside the per-generation lock, preventing different task generations
+  from simultaneously consuming the same final capacity slot.
+- Recomputed the admitted generation under the task lock immediately before
+  run/approve side effects, so a task or dependency change between dispatch and
+  worker start fails retryably instead of executing stale work twice.
+- Tracked replayed stdout bytes and routed non-zero durable JSON outcomes with
+  no worker document through the command's normal versioned error envelope.
+- Preserved nullable process-identity keys on compatibility backfills so their
+  stored records satisfy the published attempt schema.
+- Clarified that durable context is an application ownership boundary: Hive's
+  process-level state-root environment remains trusted, and stronger same-UID
+  isolation requires a separate broker/protected authority.
+
+---
+title: Bind durable attempts to dependency admission
+date: 2026-07-17
+---
+
+**Action:** Added the task's deterministic dependency-admission verdict to the
+durable attempt progress token. Terminal receipts still replay for an unchanged
+generation, but a prerequisite advancing from a blocking stage to the configured
+gate now creates a fresh generation instead of replaying the earlier exit-75
+dependency wait. The real incident-regression scenario pins the wait-to-clear
+transition through the public CLI.
+
+---
+date: 2026-07-17
+summary: Close durable-attempt review gaps across launch, recovery, and daemon restart
+---
+
+- Failed or false launcher handoffs now mark unclaimed reservations lost and
+  defer retryably; a wrapper that already claimed is adopted after a CAS race.
+- Lost foreground attachments raise a typed retryable error so both run and
+  workflow JSON surfaces emit versioned envelopes.
+- Loss successors preserve exact admitted workflow argv/flags, retarget moved
+  task folders, and remove only a source assertion already satisfied on disk.
+- Queue claims repair a crash-window missing attempt ID from immutable request
+  correlation, and daemon admissions resolve attempt timers per project.
+- Removed production context construction/thread overrides and ignored
+  worker-supplied store paths; documented the remaining same-UID privilege
+  boundary explicitly.
+- Preserved attempt process groups across systemd daemon replacement and made
+  a surviving leaderless group fail closed during orphan reconciliation.
+
+## [2026-07-17T13:10:00Z] fix — preserve task-lock identity in TUI snapshots
+
+**Action:** Extended `Hive::Tui::Snapshot::Row` and its status-payload mapper
+to retain `task_lock_pid`, `task_lock_process_start_time`, and `task_lock_id`.
+The renderer still classifies rows from the strict `live_task_lock` boolean,
+but the lossless snapshot now matches the additive `hive-status` v5 contract.
+Added mapping assertions plus coverage for task-folder disappearance during
+lock release, missing lock reads, and the healer's TERM grace loop. The full
+coverage gate passed at 100.00% line coverage.
+
+---
+title: Authenticate durable attempt launch and worker context
+date: 2026-07-17
+tags: [attempts, security, ownership, supervisor]
+---
+
+- Persist the exact admitted worker argv and only a SHA-256 digest of a random
+  per-attempt launch capability in the immutable attempt record.
+- Pass claim authority through an inherited descriptor, remove arbitrary worker
+  argv from `__attempt-supervise`, and make the supervisor execute the record.
+- Gate Hive worker startup until its PID/start/session/group identity is
+  durably checkpointed, then authenticate argv, task, intended stage, state,
+  identity, and capability before installing process-local attempt context.
+- Scrub inherited `HIVE_ATTEMPT_*` transport keys before any worker descendants
+  can inherit the durable-admission bypass.
+
+# Review marker generation and reset-date preservation
+
+**Action:** Review-owned `REVIEW_WORKING` and `REVIEW_ERROR` writes now receive
+the same generated recovery identity as generic `ERROR` markers. Stale-agent
+healing matches the observed identity and claims the task lock before clearing
+a marker, preventing an old status row from disrupting a newer review run or
+deleting a lock acquired after the snapshot.
+Task locks now appear only after their complete payload is fsynced, carry a
+generated lock id, and use ownership-scoped release. Status publishes the
+verified holder identity, so wedged-review recovery terminates only the
+observed process generation and clears a marker only after claiming the lock.
+Generic descriptor stages also preserve a provider's raw quota reset text when
+synthesizing `limits_reached`, so dated multi-day reset windows do not collapse
+to the one-hour fallback.
+
+**Verification:** Added marker rotation, stale review-generation, and dated
+quota-envelope regressions alongside the existing focused agent/daemon suites.
+
+# 2026-07-17 — Harden legacy bench migration review findings
+
+- Made the legacy descriptor archive, packaged runtime replacement, and
+  `default_workflow: bench` rebind one commit-locked hive-state transaction.
+- Reset staged migration paths before filesystem rollback and restore config,
+  descriptor, and prior runtime after rejected commits or Ctrl-C.
+- Retain and report the previous runtime backup when deletion of a failed new
+  runtime does not converge, preventing backup nesting or overwrite.
+- Reject symlinked legacy workflow roots, descriptors, and instruction roots
+  before archive copying, with realpath confinement beneath hive state.
+- Added fault-injection coverage for rejected-commit retry, both interrupt
+  windows, symlink escape attempts, archive tracking, automatic cache reset,
+  and rollback deletion failure.
+- Deferred asynchronous interrupts across each mutation/bookkeeping pair and
+  commit-result capture, preserving a migration that was already committed.
+- Required a clean hive-state index and made the config pathspec conditional on
+  an actual rebind so idempotent refresh cannot absorb unrelated config edits.
+- Published instruction archives from private staging and refused a raced
+  symlink destination without traversing it.
+- Bound legacy classification and archival to the same no-follow descriptor
+  inode/content snapshot, rejecting atomic replacement by a custom descriptor.
+- Pinned the validated workflows directory for archive and rollback operations,
+  then rejected logical-parent replacement before commit so an external symlink
+  cannot redirect migration writes or deletion.
+- Replaced the final descriptor path deletion with atomic quarantine,
+  snapshot revalidation, and no-clobber archive publication; a reappearing
+  custom descriptor is preserved and the legacy copy is retained for recovery.
+- Added a post-staging Git invariant for the pinned descriptor path and index,
+  preventing a replacement at commit entry from being included in migration.
+
+# 2026-07-17 — Prepare Hive v0.4.3
+
+**Action:** Bumped the CLI and both local path-gem locks to `0.4.3`, pinned the
+public installer snippets to `v0.4.3`, and added the matching patch changelog.
+
+**Why:** The release carries path-qualified workflow file permissions required
+by scoped Honeycomb packages, together with repository-aware dependency
+admission, durable architecture patrol, and the post-v0.4.2 safety hardening
+already merged to `main`.
+
+**Verification boundary:** Release metadata tests, the complete repository test
+suite, package build, and local gem inspection cover the prepared source. The
+public release, signed assets, channel updates, and install verification remain
+unproven until an authorized `v0.4.3` tag triggers the release workflow.
+
+**Trust note:** The live repository's active `v*` tag ruleset now supplies the
+documented creation/update/delete/non-fast-forward protection. Independent
+cryptographic maintainer git-tag verification remains a deferred hardening.
+
+---
+title: Automatic generation-scoped implementation ownership
+date: 2026-07-17
+tags: [agents, identity, journal, execute, open-pr, review, status]
+---
+
+- Added immutable normalized provider/model/effort selections and provider-native argv translation for Claude, Codex, pi, and Grok.
+- Captured concrete execute ownership in the authoritative task journal before spawn, with idempotent per-generation replay, legacy reconstruction/backfill, and retained history.
+- Routed PR opening to provider-local utility/default models and review/CI repairs to the exact execute model, while preserving raw field-level overrides and independent reviewer/triage/browser identities.
+- Exposed resolved and preview ownership through status JSON/text, the TUI `I` detail view, and Hivebox without turning reads into mutation boundaries.
+- Added lifecycle, generation-drift, unsupported-effort, schema, launcher-envelope, and status-purity coverage; recorded native pi/grok config-schema drift as a known gap.
+
+# 2026-07-17: Path-scoped workflow permissions
+
+- Added portable task-relative `Read(path)` and `Edit(path)` rules to scoped
+  workflow permissions.
+- Scoped launches now use Claude `dontAsk` and normalize file rules to absolute
+  permission paths, allowing project reads with docs-only writes without an
+  interactive permission prompt.
+- Treat qualified `Edit` as the family rule for every built-in file editor and
+  reject unsupported file-tool path rules in favor of Claude's enforced
+  `Read(path)` / `Edit(path)` forms.
+- Preserved MCP wildcard/hyphenated tool rules, normalized Windows drive paths,
+  and moved unresolvable file-rule failures to config load.
+- Documented that Claude merges CLI permission rules with loaded setting
+  sources, so descriptor scopes express Hive's request but do not erase
+  broader trusted operator policy.
+
+---
+title: Harden incident e2e isolation and activate landed dependency contracts
+date: 2026-07-17
+tags: [e2e, incidents, dependencies, hermetic, review]
+---
+
+- Activated the #9771 plan-only dependency-gate and cross-project repository-identity incidents against their merged fail-closed reason codes; four sibling-gated fixtures remain pending.
+- Made GitHub evidence append-only and lock-verified after background and tmux/TUI producers stop, pinned both PATH and `HIVE_GH_BIN`, inferred cwd-origin repository identity, and rejected replacement scripts.
+- Protected run-local home/bundle, all built-in fake-agent binaries, and checkout binaries from scenario overrides so routine e2e cannot reach operator state or consume a real agent subscription.
+- Moved nested `script_gh` validation to scenario preflight, rejected untagged incident metadata and duplicate scenario names, exposed lifecycle fields in inventory output, and included sandbox bootstrap in incident duration budgets.
+- Kept generated repros hermetic, headless for secondary projects, and fail-closed on unconsumed GitHub interactions after replay producers stop.
+- Kept the incident run directory in the runner temp area while scoping the `runner.temp` expression to workflow steps, where GitHub Actions permits that context, so the required CI workflow parses and starts.
+- Preserved Bundler's exact resolved require paths as a protected subprocess `RUBYLIB`, allowing hermetic `bin/hive` launches to resolve locked dependencies when CI installs gems only under `vendor/bundle`.
+
+**Action:** Hardened fail-closed dependency admission after the #764 review. Strict metadata and plan reads now reject duplicate top-level `depends_on` keys; plan frontmatter reads are bounded; explicit cross-project repository lookups are selective and process-group timed; and task-folder snapshots detect concurrent stage moves.
+
+**Behavior:** Admission contexts index projects, slugs, ids, and cycle positions, then memoize verdicts across shared dependency tails. The TUI reuses lossless immutable archived TaskSnapshots as an indexed fallback, preserving custom workflows, transitive edges, exact errors, and enrolled repository identity without scanning the archive on each hot refresh. Active tasks shadow cached terminal snapshots, while transient per-project archive degradation retains the last good context.
+
+**Daemon:** File-backed run/advance/archive requests now honor the same tick's dependency/admission holds before spawn; marker repair remains available. A task-local admission CONFIG/78 envelope no longer drops unrelated tasks in the project.
+
+**Coverage:** Added regressions for duplicate declarations, long/nested fallback resolution, stale-folder races, degraded archive retention, selective and TERM-resistant repository lookup, queued-request gating, marker-repair exemption, and task-local admission child exits. Updated [[modules/task_dependencies]], [[commands/status]], [[modules/daemon]], [[commands/stage_action]], and [[testing]].
+
+---
+date: 2026-07-17
+summary: Keep durable attempt timeouts, drains, and capacity fail-closed
+---
+
+- Wired foreground and daemon durable-attempt launchers to resolve the exact
+  Hive verb's `daemon.child_verb_timeouts` fallback and configured
+  `child_kill_grace_sec` from the fresh global daemon config.
+- Made `ConfiguredDispatcher` derive global, per-project, and daily limits from
+  each fresh global config load, while project config still supplies lease
+  timers, so raised caps and timeout settings apply to the next initial attempt
+  or loss successor without a daemon restart.
+- Kept supervisor heartbeat and timeout enforcement active after the worker
+  leader exits. Descendants that retain stdout/stderr now receive bounded
+  TERM/KILL cleanup and cannot strand the wrapper waiting forever for EOF.
+- Kept lost attempts with a recorded worker capacity-reserving until durable
+  cleanup proves `absent`, `terminated`, or `no_worker`; missing, corrupt, or
+  unsafe/manual cleanup evidence remains fail-closed.
+
+---
+date: 2026-07-17
+summary: Preserve durable attempt processes across daemon replacement
+---
+
+- Changed the shipped Linux daemon unit to `KillMode=process`, so systemd
+  stop/restart targets the daemon while detached, lease-owned attempt wrappers
+  and workers remain available for adoption by its replacement.
+- Made orphan cleanup probe the recorded process group when its worker leader
+  is missing. A live or unverifiable group now fails closed instead of being
+  classified absent and permitting a concurrent successor.
+- Added focused process-identity and rendered-service regressions for both
+  lifecycle boundaries.
+
+---
 title: Refresh pending E2E incidents and hermetic runtime coverage
 date: 2026-07-16T21:05:27Z
 tags: [wiki, e2e, incidents, bundler, tmux, fixtures]
@@ -52,6 +2223,91 @@ tags: [wiki, e2e, github, testing]
   edited. QMD was intentionally not run.
 
 ---
+date: 2026-07-16
+slug: babysitter-gh-api-option-values
+pages: [commands/babysit, modules/babysitter]
+---
+
+The shared pflag-compatible scanner in `bin/hive-babysitter-stub-gh.rb`
+consumes all separate values for known value-taking `gh api` options before
+deriving method and payload state. This fragment adds a focused regression for
+the security boundary: a `-XGET` value belonging to header, jq, preview, or
+template is data, so a following scalar field remains an implicit POST and is
+skipped instead of reaching the authenticated real `gh` binary.
+
+`test/unit/babysitter/dry_run_env_test.rb` now covers both long and short forms
+of those four options with a GraphQL mutation and a recording fake `gh` binary.
+
+---
+title: Patrol launch headroom and finding quality
+date: 2026-07-16T20:38:16Z
+---
+
+- Added conservative initial-context admission to ordinary and architecture
+  patrol review/fix launches. Claude reserves 20,000 provider-context tokens
+  plus the rendered prompt bytes before a launch can consume the shared
+  subscription-backed daily allowance.
+- Restricted Claude patrol context to verified role-specific tool sets,
+  disabled slash commands, capped reviews at three completed turns, and stopped them
+  once an expected structured artifact is written. Completed artifacts still
+  pass through the existing schema/evidence validators.
+- Preserved the final usage delta and an already-generated `Write` regardless
+  of which provider event arrives first. A three-second protocol grace closes
+  the race without allowing a fourth reasoning turn.
+- Narrowed ordinary mapping to four owned plus four context files. Architecture
+  retains six plus six for full-component leverage measurement while its agent
+  sees at most four owned files selected with a 32 KiB source budget, retaining
+  the first entrypoint when it alone is larger. Both prompts allow one
+  bounded evidence follow-up and prefer empty output to speculative findings.
+- Live local Hive sampling produced one concrete ordinary-patrol defect:
+  `Fingerprint.snippet_at` called `join` on a nil out-of-range slice. The
+  reproducer is now a regression test and the helper safely normalizes that
+  slice to an empty array. The architecture sample correctly returned no
+  thesis when it could not establish a current material consequence.
+- Architecture keeps its 2x cycle/per-agent/launch allowance, while ordinary
+  and architecture patrols retain one shared per-project daily token ceiling.
+
+---
+title: Bound babysitter dry-run skip-log growth
+date: 2026-07-16T20:09:44Z
+tags: [babysitter, dry-run, logging, performance]
+---
+
+**Action:** Capped escaped dry-run stub argv at 4 KiB and stopped new records from growing the persistent skipped-command audit log beyond 64 KiB. The shared git/gh helper locks the validated log inode around its size check and append so concurrent denied commands cannot race past the cap. If a complete record would overflow the cap, the existing history is preserved and the best-effort write warning is emitted; lock acquisition uses a short monotonic deadline so a stalled holder warns instead of hanging a denied command. Added exact-boundary, concurrent record-integrity, and pre-held-lock latency regressions while retaining the existing unsafe-target and binary-argv coverage.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+
+---
+title: Durable task-stage attempt ownership
+date: 2026-07-16
+tags: [attempts, daemon, recovery, e2e]
+---
+
+- Unified CLI, workflow actions, queued bot/web delivery, daemon auto-advance,
+  and loss successors behind generation-idempotent durable admission.
+- Added detached wrappers, guarded lease/receipt records, framed logs,
+  restart adoption, lease-first capacity, and conservative legacy backfill.
+- Added verified orphan cleanup, mutation-free dirty capture, one durable
+  `attempt_lost` outcome, and bounded same-generation successors.
+- Added the YAML 1849 replay proving three commits survive temporary caller
+  termination and finish from one wrapper receipt without a daemon.
+- Updated the hivebox golden-path ordering gate to treat `attempt_terminal` as
+  the durable equivalent of legacy `child_exited` before it accepts the
+  brainstorm edit-resume baseline.
+
+---
+title: Make the routine e2e runtime hermetic under Bundler and host overrides
+date: 2026-07-16
+tags: [e2e, bundler, tmux, fixtures]
+---
+
+- Started harness-owned TUI tmux servers inside the unbundled environment so a root `bundle exec` cannot combine startup flags with the sample project's lockfile.
+- Pinned nested Hive commands to the checkout binary and fake Claude to headless mode, preventing operator environment overrides and interactive readiness races.
+- Refreshed the full-pipeline artifacts output and TUI scope anchors to the current production contracts, restoring all existing scenarios in the new routine CI job.
+
+---
 title: Isolate wiki refreshes and bound patrol signal cost
 date: 2026-07-16
 tags: [llm-wiki, patrol, refactor-patrol, tokens, findings]
@@ -76,6 +2332,18 @@ tags: [patrol, refactor-patrol, tokens, config, observability]
 - Reused the canonical PR-manifest JSON encoder for architecture proof digests.
 
 ---
+title: Add sibling-gated incident regression coverage to the outer e2e harness
+date: 2026-07-16
+tags: [e2e, incidents, github, ci]
+---
+
+- Added validated incident/sibling metadata and report-visible pending fixtures without changing ordinary result statuses or v1 compatibility.
+- Added a staged, exact-match, default-deny `gh` shim whose scripts and invocation audit are retained with failure evidence.
+- Added a condition-driven fake-agent barrier while leaving durable attempt lease details gated on #9767's authoritative contract.
+- Added six synthetic sibling-owned incident scenario shells for #9767 through #9771 and documented their activation rules.
+- Added a separate pull-request e2e job, report-driven incident duration budgets, retained artifacts, and an inventory consistency test.
+
+---
 title: Give architecture patrol a larger bounded cycle envelope
 date: 2026-07-16
 tags: [patrol, refactor-patrol, tokens, config, subscription]
@@ -84,6 +2352,39 @@ tags: [patrol, refactor-patrol, tokens, config, subscription]
 - Added `patrol.architecture_budget_multiplier`, defaulting to `2`, for architecture review/fix cycle tokens, cycle launches, and the per-agent budget-equivalent guard.
 - Kept the selected patrol tier's UTC-day token and launch ceilings shared across ordinary and architecture patrol.
 - Clarified that `max_budget_usd_per_agent` follows agent CLI terminology and is a runaway kill switch for subscription-backed agents, not a separate Hive payment.
+
+---
+title: Fail-closed dependency admission across dispatch boundaries
+type: log
+created: 2026-07-16
+tags: [dependencies, admission, status, daemon, cli, repository]
+---
+
+**Action:** Replaced the daemon-only same-project dependency gate with one
+strict three-verdict admission subsystem shared by status, daemon policy,
+manual run, and forward approval. The scalar grammar now supports same-project
+slug/numeric references and explicit `project:slug`, verifies enrolled
+canonical remotes, walks complete cross-project chains and cycles, checks
+workflow gates, and cross-checks optional structured plan frontmatter.
+
+**Safety:** Corrupt or inconsistent evidence produces a structured admission
+error and inert status action. Daemon merge watching and metadata healing stop
+for held rows; manual commands revalidate under task/commit locks, and
+`--force` cannot bypass the gate. Backward recovery and same-stage no-ops
+remain available.
+
+The TUI's active-only poll reuses immutable prevalidated terminal snapshots,
+so admission remains fail-closed without making hot refresh time grow with the
+archive.
+
+**Contract:** `hive-status` is now v5 with required nullable
+`admission_error`. Command error envelopes distinguish retryable
+`dependency_wait` (exit 75) from non-retryable `admission_error` (exit 78) and
+carry `reason_code`, `offending_ref`, and `safe_correction`.
+
+**Evidence:** Focused parser, metadata, identity, graph, status/TUI, daemon,
+manual-command, creation, schema, and anonymized two-project integration suites
+cover the plan-only ordering failure and repository-mismatch provenance.
 
 # Ordinary patrol resume and publication hardening
 
@@ -118,6 +2419,18 @@ Ordinary optional review handoffs now use the same fingerprint-locked exact
 reconciliation as mandatory handoffs. A retry after an ambiguous rename or
 directory-fsync failure reuses the matching synthetic review task and rejects
 conflicting PR/head metadata instead of creating a duplicate.
+
+# Contain project-config and Patrol failures
+
+**Action:** Wrapped malformed or unreadable per-project YAML in Hive's `ConfigError` contract, added a normal-mode Patrol preflight for missing validation commands, and captured each Patrol worktree's immutable pre-agent HEAD for patch measurement.
+
+**Result:** One bad registered-project config is isolated by existing daemon gates instead of terminating the service and its active workers. Patrol no longer spends reviewer/fixer quota when it cannot validate a fix, while `--dry-run` remains available for review-only scans. A patrol-only CONFIG exit bypasses controller-level project drops and enters scheduler backoff without blocking ordinary tasks or consuming their daily quota. Patch JSON now records `base_sha` and `head_sha`, and attempt diffstats no longer depend on a stale local default branch.
+
+**Coverage:** Config and dispatcher regressions exercise syntax, safe-load,
+filesystem-read, inaccessible-parent, and symlink-loop failures; Patrol command
+tests prove the preflight runs before agents or state mutation; fixer tests
+cover stale default refs, no-op agents, self-contained diffstats, and
+failed-attempt provenance.
 
 # 2026-07-16 — Patrol timeout and publication ledger hardening
 
@@ -162,6 +2475,42 @@ from recognized pre-delimiter options in that snapshot.
 invalid JSON assignments plus both true/false JSON precedence directions.
 Focused wrapper suites, adjacent `hive new` and JSON usage-error suites,
 targeted RuboCop, and the full 7,281-test suite pass.
+
+## 2026-07-15 — Hive-owned Honeycomb registry lifecycle
+
+- Added canonical manifests/catalog schemas, path-safe package verification,
+  location-only security diagnostics, and deterministic package generation.
+- Added fail-closed managed Claude policy compilation shared by headless/tmux,
+  with isolated settings/MCP/environment and command/domain pre-tool checks.
+- Added official catalog resolution, immutable local generations, atomic
+  activation journals, Loader refresh, and task commit/digest provenance.
+- Added `workflow install`, `list`, `update`, `remove`, and `publish` with
+  versioned JSON schemas, offline ownership safety, semantic update escalation,
+  and fork-aware pending-review submissions.
+- Deferred Honeycomb repository contents, GitHub rules, catalog publication,
+  release pinning, and live trust-chain acceptance to the separate Honeycomb
+  project task.
+
+---
+date: 2026-07-14
+slug: legacy-bench-workflow-migration
+---
+
+## Legacy bench workflow migration
+
+- Keep tasks using the exact pre-built-in project `bench.yml` visible and
+  runnable after upgrading to the built-in `bench` workflow.
+- Teach `hive init PROJECT --workflow bench` to archive that legacy descriptor
+  and a copy of its instructions while retaining the shared instruction path
+  and installing the packaged runtime in the same hive-state commit.
+- Restore the legacy descriptor, prior runtime, and clean index state when that
+  hive-state commit fails, so a rejected migration remains retryable.
+- Preserve strict built-in collision failures for modified or independently
+  authored project workflows named `bench`.
+- Live-smoke the migration against hive-bench's existing state: retain the
+  shared instruction path used by `bench-generate`, pin the one field-less
+  coding task before rebinding the default, and preserve all nine status rows
+  plus the unrelated dirty-state fingerprint.
 
 ## [2026-07-14T21:49:46Z] babysitter - block verbose status textconv execution
 
@@ -381,6 +2730,26 @@ bytes are now rejected under `LC_ALL=C` instead of being accepted as valid
 
 **Tests:** Added a six-case binary regression covering both retention flags as the final token and immediately before `--json` or `--dry-run`. Every case must exit `64`, use the expected JSON or human error surface, and preserve an eligible old run directory. Verified the full `test/e2e/lib/hive_e2e_binary_test.rb` suite (38 tests, 305 assertions).
 
+---
+title: Manual marker recovery purges shadowed history
+module: markers
+tags: [markers, recovery, daemon]
+---
+
+## [2026-07-12T21:58:00Z] markers — manual recovery leaves a markerless retry artifact
+
+**Action:** Changed `hive markers clear` to remove all recognized marker comments
+after its current-marker and optional `--match-attr` guards succeed. Generic
+stage runs append terminal markers after transient `AGENT_WORKING` markers, so
+removing only the newest `ERROR` could expose the completed run's older working
+marker and make the daemon defer redispatch until stale-agent recovery. Manual
+and daemon-managed recovery now share the same markerless postcondition while
+preserving state-file prose and the guarded clear audit commit.
+
+**Coverage:** Added an integration regression with a shadowed
+`AGENT_WORKING` plus a marker-ID-guarded `ERROR` clear; it asserts no marker is
+current afterward and surrounding implementation prose remains intact.
+
 # 2026-07-12 — Higher-alpha ordinary patrol
 
 - Audited every patrol-titled GitHub PR created from 2026-05-12 through
@@ -443,6 +2812,23 @@ bytes are now rejected under `LC_ALL=C` instead of being accepted as valid
   `hive-patrol.v2` and `hive-patrol-finding.v2` while preserving both v1
   schemas. The response exposes review completeness/errors and closed per-attempt
   fix/publication outcomes with dynamic detail separated from reason codes.
+
+## [2026-07-12T20:20:00Z] agent/daemon — honor complete provider reset dates
+
+**Action:** A live Codex quota wall said `try again at Jul 18th, 2026 7:50 AM`,
+but every `limits_reached` writer discarded that text and stamped the fixed
+one-hour cooldown. The daemon consequently spent all three bounded retries in
+three hours and parked the task days before the real reset. `Hive::AgentLimit`
+now conservatively parses only complete dated reset hints (month, day, year,
+and time), adds a one-minute boundary grace, rejects expired or more-than-one-
+year dates, and otherwise retains the fixed cooldown. Agent, Claude launcher,
+execute, CI, triage, and fix marker writers forward their captured provider
+text into the helper. Live tmux detection passes only the matched limit menu
+and its adjacent reset lines, so unrelated dated transcript prose cannot forge
+a hold. When every reviewer is limited, Hive waits for the latest captured
+provider boundary rather than whichever reviewer happened to run first. Added
+parser, headless-agent, launcher, reviewer, and execute-stage regression
+coverage for the exact Codex shape and multiline Claude menu path.
 
 # 2026-07-12 — Architecture patrol review resolution
 
@@ -521,6 +2907,19 @@ bytes are now rejected under `LC_ALL=C` instead of being accepted as valid
   mandatory review handoff. Refreshed CLI, command, GitHub, daemon,
   state-model, testing, and public documentation for the resolved contracts.
 
+---
+title: Pin manual daemon children to the invoked Hive binary
+date: 2026-07-12
+---
+
+- `hive daemon start` now fills an absent `HIVE_BIN` from the invoked
+  `hive`/`hv` executable after daemonization. Manual foreground and detached
+  daemons therefore dispatch the same checkout or package that launched them
+  instead of silently resolving an older `hive` from `PATH`.
+- Explicit `HIVE_BIN` values from systemd/launchd units or operators remain
+  authoritative.
+- Added command tests for both inferred and explicit runtime binary selection.
+
 # 2026-07-12 — Architecture patrol review fixes
 
 - Hardened read-only discovery with Claude's verified `--safe-mode`
@@ -542,6 +2941,38 @@ bytes are now rejected under `LC_ALL=C` instead of being accepted as valid
 - Refreshed architecture-patrol, daemon, agent-profile, GitHub, state, and test
   wiki coverage for these reviewed boundaries. Auto-fixing and issue filing
   remain separate default-off gates from default-recommended discovery.
+
+---
+title: Purge shadowed markers during daemon retries
+type: fix
+date: 2026-07-11
+---
+
+Healer-managed marker clears now atomically remove shadowed marker history
+after the current marker name and attributes pass their race guard. Repeated
+generic workflow attempts can leave an older `AGENT_WORKING` plus terminal
+errors beneath the current retryable error; clearing only the newest marker
+made the daemon rediscover that dead history and wait through another stale
+grace cycle instead of redispatching.
+
+Manual `hive markers clear` remains a single-current-marker operation. New
+marker and stale-healer regressions cover stacked working/error history while
+proving that state-file prose remains intact.
+
+---
+title: Preserve generic-stage agent limit markers
+type: fix
+date: 2026-07-11
+---
+
+Generic workflow agent stages now distinguish an unchanged terminal marker
+from a fresh marker written during the spawn. Error envelopes synthesize
+`agent_preflight_failed` only in the unchanged/preflight case, preserving
+specific runtime errors such as `limits_reached` and their daemon
+`retry_after` metadata.
+
+A regression covers the Codex usage-wall shape that previously lost its timed
+retry as the generic runner returned.
 
 # 2026-07-11 — Scheduled architecture patrol
 
@@ -834,6 +3265,39 @@ registered surfaces against their published JSON schemas. Legacy web JSON
 envelopes remain unversioned to match their successful output. Collision cases
 cover web option values, later pairing arguments, invalid digest source values,
 and invalid command-position bytes.
+
+## [2026-07-10T06:00:00Z] agents - make provisioning digests load-order safe
+
+**Fix:** Qualified provisioning SHA-256 references as top-level
+`::Digest::SHA256`. In the complete suite, loading the existing `Hive::Digest`
+feature before agent-skill adapters caused Ruby constant lookup to select
+`Hive::Digest` and fail planning; focused agent-skill tests had not loaded that
+unrelated namespace. Adapter/provisioner tests now deliberately load
+`hive/digest` first to pin the collision regression.
+
+**Verification:** Focused adapter, provisioner, and process-level setup
+acceptance suites pass with the colliding namespace loaded. Did not edit
+compiled [[log]].
+
+## [2026-07-10T05:00:00Z] agents - provision enabled built-in skills
+
+**Action:** Added the packaged `config/agent-skills.yml` source of truth, strict
+default-coverage validation, effective target resolution, and one shared
+evidence-rich inspector for Claude, Codex, and Pi. `hive doctor` is read-only
+and now emits `hive-doctor.v2`; `hive setup-agents` previews one aggregate
+native-operation plan, enforces consent, revalidates ownership/state, continues
+independent operations, and post-verifies with `hive-setup-agents.v1` automation
+output. Interactive init may delegate to the same setup engine after project
+creation while JSON/non-TTY init remains non-mutating.
+
+**Safety and coverage:** Native adapters preserve user-owned Codex sources,
+unrelated TOML bytes/mode, concurrent edits, and user-authored Claude `/plan`
+aliases. Process-level fake CLI acceptance covers fresh convergence, no-op
+reruns, conflicts, unavailable agents, unattended consent, and partial failure.
+Authenticated provider activation remains opt-in through disposable-home smoke
+tests. Updated [[commands/doctor]], [[commands/setup-agents]], [[commands/init]],
+[[modules/agent_profile]], [[testing]], and [[gaps]]; did not edit compiled
+[[log]].
 
 # Drop terminates descendant processes
 
@@ -8139,6 +10603,104 @@ future changes are guarded against broadening terminal agent-loss auto-retry bey
 - [[commands/wiki]]
 - [[index]]
 - [[testing]]
+
+---
+date: 2026-07-19
+slug: workflow-scanner-negation-hardening
+---
+
+- Hardened Honeycomb workflow-package security scanning so a negation suppresses
+  a restricted-behavior finding only when a recognized prohibition directly
+  governs that match.
+- Added fail-closed coverage for `do not forget` / `do not hesitate`, `never
+  fail` / `never skip`, `not only`, `without exception`, and comma/semicolon
+  clause transitions across exfiltration, shell, credential, and network
+  behavior while retaining genuine prohibition documentation.
+
+---
+date: 2026-07-19
+slug: workflow-list-configuration-discovery
+---
+
+- Bumped `hive workflow list --json` to schema v2 and made verified selected
+  managed rows rediscoverable by active configuration digest and stable-slot
+  agent/model/effort mapping.
+- Added optional-input binding and availability disclosure without environment
+  values; built-in/authored rows retain their prior shape.
+- Distinguished task-retained configuration pins from a newer active
+  configuration on the same immutable package generation.
+
+---
+date: 2026-07-19
+slug: workflow-input-consent
+---
+
+- Added redacted optional-input binding and authorized-slot lines to install
+  and update previews before interactive consent.
+- Changed update binding precedence to preserve compatible installed bindings
+  ahead of same-name environment suggestions while keeping explicit bindings
+  authoritative.
+- Added an input-binding configuration-change flag to update reports; secret
+  values remain absent from output and immutable configuration snapshots.
+
+---
+date: 2026-07-19
+slug: workflow-configuration-reconciliation
+---
+
+- Made same-source install and update reconcile mapping and optional-input
+  changes instead of returning before configuration resolution; true no-ops
+  now report the selected configuration and redacted input state.
+- Added configuration-digest compare-and-swap coverage for configuration-only
+  activation on an unchanged immutable generation.
+- Classified scoped shell and unqualified file-write actors as unbounded for
+  separate escalation consent and rejected narrower Honeycomb v2 permission
+  disclosures.
+
+---
+date: 2026-07-19
+slug: managed-store-residual-hardening
+---
+
+- Made invalid managed selections observable without sacrificing sibling
+  isolation: missing, malformed, and digest-tampered configuration snapshots
+  each produce one workflow-named warning while healthy selections still load.
+- Made generation cleanup fail closed when a task declares any managed
+  provenance value without the complete workflow/source-commit/manifest-digest
+  tuple. Legacy task pins may still omit only the configuration digest.
+- Hardened generation directories and payload files before same-parent atomic
+  publication, retained trusted executable payloads, and repaired exact modes
+  when an already validated generation is reused.
+
+## Legacy managed-workflow tasks keep resolvable project configuration
+
+- Legacy lock-schema-v1 configuration derivation now uses the effective project
+  agent profile overrides instead of the shipped-profile defaults.
+- Task creation materializes the derived digest-addressed snapshot before
+  writing its configuration pin, so a later schema-v2 workflow update cannot
+  strand the task on a digest that exists only in memory.
+- Update and same-generation install comparisons use the same project-aware
+  legacy derivation, while old task snapshots remain retained until their final
+  task reference is removed.
+
+---
+date: 2026-07-18
+slug: full-honeycomb-runtime
+---
+
+- Added immutable digest-addressed managed-workflow configuration snapshots,
+  lock schema v2, task configuration pins, in-memory agent/model/effort overlay,
+  profile-drift checks, and retention across update/removal. Unsupported
+  non-null pins now fail during snapshot construction, unsupported defaults
+  remain nil, and managed council children use only their own mapped identity
+  instead of inheriting parent-stage model/effort values across providers.
+- Changed managed execution to enforce each stage/reviewer/reviser permission
+  descriptor instead of reconstructing policy from the catalog union. Explicit
+  unbounded actors require separate escalation consent.
+- Added strict `x-hive` tool/input validation, Git executable-mode preservation,
+  immutable package-root prompt context, and per-slot optional-input isolation.
+- Bumped workflow install/update JSON contracts to v2 with mappings,
+  configuration identity, policy fingerprints, and redacted input state.
 <!-- END GENERATED WIKI LOG FRAGMENTS -->
 
 ## [2026-06-07T13:24:34Z] wiki - audit babysitter dry-run env hardening coverage

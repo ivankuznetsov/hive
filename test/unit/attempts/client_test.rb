@@ -73,6 +73,35 @@ class AttemptsClientTest < Minitest::Test
     refute result.stdout_emitted?
   end
 
+  def test_terminal_transition_drains_frames_published_during_receipt_fetch
+    with_tmp_dir do |root|
+      logs_root = File.join(root, "logs")
+      attempt_id = "attempt-tail"
+      log = Hive::Attempts::StreamLog.new(File.join(logs_root, "#{attempt_id}.frames"))
+      log.append("stdout", "before-")
+      terminal = Struct.new(:state, :receipt).new(
+        "terminal", { "exit_status" => 0, "outcome" => "succeeded" }
+      )
+      store = Object.new
+      store.define_singleton_method(:logs_root) { logs_root }
+      store.define_singleton_method(:fetch) do |_id|
+        log.append("stdout", "terminal")
+        log.close
+        terminal
+      end
+      stdout = StringIO.new
+
+      result = Hive::Attempts::Client.new(store: store, poll_interval: 0).attach(
+        attempt_id, stdout: stdout, stderr: StringIO.new
+      )
+
+      assert_equal "before-terminal", stdout.string
+      assert_equal "before-terminal".bytesize, result.stdout_bytes
+    ensure
+      log&.close unless log&.closed?
+    end
+  end
+
   private
 
   def with_terminal_attempt

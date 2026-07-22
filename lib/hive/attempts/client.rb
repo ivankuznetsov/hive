@@ -25,17 +25,16 @@ module Hive
         sequence = 0
         stdout_bytes = 0
         loop do
-          StreamLog.read(log_path(attempt_id), after_sequence: sequence).each do |frame|
-            target = frame.channel == "stdout" ? stdout : stderr
-            target.write(frame.bytes)
-            target.flush if target.respond_to?(:flush)
-            stdout_bytes += frame.bytes.bytesize if frame.channel == "stdout"
-            sequence = frame.sequence
-          end
+          sequence, stdout_bytes = drain_frames(
+            attempt_id, sequence, stdout_bytes, stdout: stdout, stderr: stderr
+          )
 
           record = @store.fetch(attempt_id)
           raise StoreError, "unknown attempt #{attempt_id}" unless record
           if record.state == "terminal"
+            sequence, stdout_bytes = drain_frames(
+              attempt_id, sequence, stdout_bytes, stdout: stdout, stderr: stderr
+            )
             receipt = record.receipt
             return ClientResult.new(
               status: :terminal, exit_status: receipt.fetch("exit_status"),
@@ -44,6 +43,9 @@ module Hive
             )
           end
           if record.state == "lost"
+            sequence, stdout_bytes = drain_frames(
+              attempt_id, sequence, stdout_bytes, stdout: stdout, stderr: stderr
+            )
             return ClientResult.new(
               status: :lost, exit_status: Hive::ExitCodes::TEMPFAIL,
               outcome: "lost", receipt: nil, attempt_id: attempt_id,
@@ -60,6 +62,17 @@ module Hive
       end
 
       private
+
+      def drain_frames(attempt_id, sequence, stdout_bytes, stdout:, stderr:)
+        StreamLog.read(log_path(attempt_id), after_sequence: sequence).each do |frame|
+          target = frame.channel == "stdout" ? stdout : stderr
+          target.write(frame.bytes)
+          target.flush if target.respond_to?(:flush)
+          stdout_bytes += frame.bytes.bytesize if frame.channel == "stdout"
+          sequence = frame.sequence
+        end
+        [ sequence, stdout_bytes ]
+      end
 
       def log_path(attempt_id)
         File.join(@store.logs_root, "#{attempt_id}.frames")

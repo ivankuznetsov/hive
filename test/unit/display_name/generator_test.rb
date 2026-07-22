@@ -168,6 +168,18 @@ class DisplayNameGeneratorTest < Minitest::Test
     end
   end
 
+  def test_streaming_text_events_are_accumulated_into_one_display_name
+    script = <<~'SH'
+      #!/bin/sh
+      printf '%s\n' '{"type":"text","data":"Readable "}'
+      printf '%s\n' '{"type":"text","data":"streamed name"}'
+    SH
+
+    with_generator(agent: "codex", script: script, commit: false) do |gen|
+      assert_equal "Readable streamed name", gen.send(:generate_name)
+    end
+  end
+
   private
 
   # Builds a real task folder (valid PATH_RE) plus a config that points the

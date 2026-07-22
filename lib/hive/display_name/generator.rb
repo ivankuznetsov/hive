@@ -62,15 +62,24 @@ module Hive
         w.close
         pgid = process_group(pid)
         final_message = nil
+        streaming_text = false
         plain_tail = +""
         reader = Thread.new do
           File.open(log_path, "a") do |log|
             r.each_line do |line|
               log.write(line)
               log.write("\n") unless line.end_with?("\n")
-              if (message = Hive::Agent::MessageExtractor.extract(line))
-                final_message = message
-              elsif Hive::Agent::MessageExtractor.parse_json_line(line).nil?
+              json = Hive::Agent::MessageExtractor.parse_json_line(line)
+              if (message = Hive::Agent::MessageExtractor.extract(json))
+                if Hive::Agent::MessageExtractor.streaming_text_event?(json)
+                  final_message = +"" unless streaming_text
+                  final_message << message
+                  streaming_text = true
+                else
+                  final_message = message
+                  streaming_text = false
+                end
+              elsif json.nil?
                 plain_tail << line
                 plain_tail = plain_tail.byteslice(-TAIL_BYTES, TAIL_BYTES) || plain_tail
               end

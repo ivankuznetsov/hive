@@ -201,6 +201,38 @@ class AgentSkillAdaptersTest < Minitest::Test
     end
   end
 
+  def test_codex_executes_dependent_packages_against_the_advancing_config
+    with_tmp_dir do |dir|
+      codex_home = File.join(dir, "codex")
+      config_path = File.join(codex_home, "config.toml")
+      FileUtils.mkdir_p(codex_home)
+      runner = FakeRunner.new do |argv, _env, _timeout|
+        section = if argv[2] == "marketplace"
+          name = argv[-2].include?("EveryInc") ? "compound-engineering-plugin" : "aikuznetsov-marketplace"
+          "[marketplaces.#{name}]\nsource = \"#{argv[-2]}\"\n"
+        else
+          "[plugins.\"#{argv[3]}\"]\nenabled = true\n"
+        end
+        File.open(config_path, "a") { |file| file.write(section) }
+        command_result
+      end
+      rows = [
+        inspection(agent: "codex", capability: "ce-brainstorm", package: "compound-engineering",
+                   health: "missing", bin: "/fake/codex"),
+        inspection(agent: "codex", capability: "wiki-plan", package: "llm-wiki",
+                   health: "missing", bin: "/fake/codex")
+      ]
+      instance = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: runner,
+                         environment: { "CODEX_HOME" => codex_home })
+
+      outcomes = instance.plan(rows).operations.map { |operation| instance.execute(operation) }
+
+      assert_equal %w[succeeded succeeded succeeded succeeded], outcomes.map(&:status),
+                   outcomes.map(&:message).inspect
+      assert_equal 4, runner.calls.size
+    end
+  end
+
   def test_codex_conflicting_marketplace_owner_is_preserved
     with_tmp_dir do |dir|
       codex_home = File.join(dir, "codex")

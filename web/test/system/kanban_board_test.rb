@@ -25,14 +25,17 @@ class KanbanBoardTest < ApplicationSystemTestCase
         document.documentElement.appendChild(stream)
       }, { once: true })
       document.addEventListener("turbo:submit-end", () => {
-        const stream = document.createElement("turbo-stream")
-        stream.setAttribute("action", "refresh")
-        document.documentElement.appendChild(stream)
+        setTimeout(() => {
+          const stream = document.createElement("turbo-stream")
+          stream.setAttribute("action", "refresh")
+          document.documentElement.appendChild(stream)
+        }, 0)
       }, { once: true })
     JS
     click_status_view("Grid")
     assert_current_path grid_path, wait: 10
     assert_selector "#status-grid .task-row", text: slug
+    assert_status_redirect_guard_cleared
 
     visit root_path
     assert_selector "#status-grid", wait: 5
@@ -270,6 +273,21 @@ class KanbanBoardTest < ApplicationSystemTestCase
         })()
       JS
       raise Capybara::ElementNotFound, "status-refresh controller did not connect" unless ready
+    end
+  end
+
+  def assert_status_redirect_guard_cleared
+    page.document.synchronize(10) do
+      guarded = evaluate_script(
+        'document.documentElement.hasAttribute("status-refresh-redirect-destination")'
+      )
+      if guarded
+        destination = evaluate_script(
+          'document.documentElement.getAttribute("status-refresh-redirect-destination") || ""'
+        )
+        raise Capybara::ElementNotFound,
+              "status redirect guard did not clear (destination=#{destination.inspect}, current=#{page.current_url.inspect})"
+      end
     end
   end
 

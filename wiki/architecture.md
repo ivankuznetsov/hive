@@ -338,7 +338,11 @@ protocol. Digest-based DOM identities preserve the owning band/card across
 reorder morphs, and the status-level refresh guard defers background refreshes
 from the native submit-bubble boundary while status forms submit, using a
 successful redirect's fresh GET as the reconciliation instead of racing a
-replay against the old URL. It also
+replay against the old URL. Document-level submission admission survives the
+Stimulus disconnect/reconnect gap during a morph, and the redirect destination
+is kept on the document root across the Turbo body swap, so late refresh
+signals and their same-URL replace visits remain suppressed until the browser
+reaches that destination. It also
 keeps first-connection history on the permanent status Action Cable source as
 a clone-stable DOM attribute, surviving both Stimulus disconnects and Turbo
 history restoration without leaking across fresh sources, and issues one

@@ -2,6 +2,19 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.6.8
+
+- Fixed headless llm-wiki hooks losing their memory-bounded scheduler after a
+  missing user-systemd bus environment. Hive now reconstructs the standard bus
+  variables, preserves the installed service marker when signaling fails, and
+  safely falls back through the host-wide provider lock.
+- Fixed generated `wiki/log.md`-only commits recursively entering the wiki
+  queue and launching an agent despite containing no new source material.
+  Source fragments and other project/wiki changes continue to refresh.
+- Fixed project configuration accepting unsupported root keys at some command
+  boundaries; Hive now rejects them consistently before task work begins.
+  (#790)
+
 ## 0.6.7
 
 - Fixed large llm-wiki backlogs opening a source-pin circuit before any bounded

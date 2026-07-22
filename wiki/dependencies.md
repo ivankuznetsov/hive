@@ -11,14 +11,16 @@ tags: [dependencies, gems, runtime]
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
-tools. The v0.6.4 release-prep checkout is `0.6.4`: `lib/hive.rb`, root
+tools. The v0.6.4 tagged checkout is `0.6.4`: `lib/hive.rb`, root
 `Gemfile.lock`, and `web/Gemfile.lock` all pin the local path gem as
-`hive-cli (0.6.4)`. The release-prep change keeps both lockfiles synchronized
-with public installer URLs and the changelog. Recent root bundle dependency
-commits also bumped RuboCop to 1.88.2, Brakeman from
-8.0.4 to 8.0.5, and `concurrent-ruby` from 1.3.6 to 1.3.7; the separate web
-bundle still resolves its own Brakeman 8.0.4 and `concurrent-ruby` 1.3.6 locks
-as of this refresh.
+`hive-cli (0.6.4)`. Release preparation keeps both lockfiles synchronized with
+public installer URLs and the changelog. The root bundle resolves RuboCop
+1.88.2, Brakeman 8.0.5, `concurrent-ruby` 1.3.7, and Faraday 2.14.3. The web
+bundle remains independently resolved but now also carries Brakeman 8.0.5,
+`concurrent-ruby` 1.3.7, and Faraday 2.14.3 after the workflow-UI security
+refresh; that refresh additionally moved `crass` to 1.0.7, `json` to 2.21.1,
+`loofah` to 2.25.2, Nokogiri to 1.19.4, `rails-html-sanitizer` to 1.7.1, and
+`websocket-driver` to 0.8.2.
 
 ## Runtime gems
 
@@ -26,7 +28,7 @@ as of this refresh.
 |-----|---------|---------|
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
 | `telegram-bot-ruby` | `~> 2.7` (locked 2.7.0) | Telegram Bot API client for `hive bot`. Chosen because RubyGems shows an April 3, 2026 release, MFA on publish, Ruby >= 2.7 support, and four direct runtime dependencies (`dry-struct`, `faraday`, `faraday-multipart`, `zeitwerk`). The lockfile review keeps the larger dry/faraday transitive set explicit. |
-| `faraday` | `>= 2.14.2, < 3.0` (locked 2.14.2) | HTTP transport used directly by `Hive::Bot::Transcriber` and indirectly through `telegram-bot-ruby`. The lower bound is the bundler-audit floor for CVE-2026-33637 / GHSA-5rv5-xj5j-3484. |
+| `faraday` | `>= 2.14.2, < 3.0` (locked 2.14.3) | HTTP transport used directly by `Hive::Bot::Transcriber` and indirectly through `telegram-bot-ruby`. The lower bound is the bundler-audit floor for CVE-2026-33637 / GHSA-5rv5-xj5j-3484. |
 | `faraday-multipart` | `~> 1.0` (locked 1.2.0) | Multipart upload support for `Hive::Bot::Transcriber` voice-note POSTs and Telegram Bot API file transport. |
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
 | `erb` | `>= 4.0` | Template rendering used by stages, task creation, workflows, and display names. Declared because Ruby is unbundling it and packaged installs cannot assume it is present. |
@@ -40,7 +42,7 @@ as of this refresh.
 Hive declares both directly because `Hive::Bot::Transcriber` requires
 them itself to POST Telegram voice-note bytes to the configured
 OpenAI-compatible audio transcription endpoint. `Gemfile.lock` keeps
-`faraday` at `2.14.2` or newer because `bundler-audit` flags `2.14.1`
+`faraday` at `2.14.2` or newer (currently 2.14.3) because `bundler-audit` flags `2.14.1`
 for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
 
 ## Web app bundle
@@ -66,6 +68,12 @@ Direct web development/test dependencies include `debug`,
 Rails/Capybara and the web integration upload tests use
 `Rack::Test::UploadedFile`.
 
+The root and web lockfiles intentionally remain separate. They now agree on
+the security-sensitive Brakeman, `concurrent-ruby`, and Faraday versions named
+above, while other development/transitive versions can still differ (for
+example root `json` 2.20.0 versus web `json` 2.21.1, and root RuboCop 1.88.2
+versus web RuboCop 1.87.0).
+
 The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 
 Why Thor: de-facto Ruby CLI framework (Rails generators use it), fits the Ruby-heavy stack. Bash rejected for not scaling past three commands; Go/Python rejected for stack mismatch.
@@ -78,9 +86,9 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 |-----|---------|---------|
 | `minitest` | `~> 6.0` (locked 6.0.6) | Test framework — all tests under `test/` extend `Minitest::Test`. Chosen over RSpec for lower ceremony. Bumped 5.x → 6.0 in commit `429ff4c`. |
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
-| `rubocop` | `~> 1.88` (locked 1.88.0 in the root bundle) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
+| `rubocop` | `~> 1.88` (locked 1.88.2 in the root bundle) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
 | `rubocop-rails-omakase` | `~> 1.1` (locked 1.1.0) | Rails/Omakase lint rules layered onto RuboCop. Declared in the root dev/test bundle and mirrored in the web bundle. |
-| `brakeman` | `~> 8.0` (locked 8.0.5 in the root bundle; 8.0.4 in the web bundle) | Static security scanner. `CONTRIBUTING.md` lists `bundle exec brakeman --no-pager`; the web app also has `web/bin/brakeman`. |
+| `brakeman` | `~> 8.0` (locked 8.0.5 in both bundles) | Static security scanner. `CONTRIBUTING.md` lists `bundle exec brakeman --no-pager`; the web app also has `web/bin/brakeman`. |
 | `bundler-audit` | `~> 0.9` (locked 0.9.3) | Gem vulnerability audit tool. `CONTRIBUTING.md` lists `bundle exec bundler-audit check --update`; the web app also wraps it with `web/bin/bundler-audit`. |
 
 Commit `b0a31edf` removed the root `rack-test` declaration from `Gemfile`,

@@ -3,11 +3,11 @@ title: ERB Templates
 type: reference
 source: templates/
 created: 2026-04-25
-updated: 2026-06-18
+updated: 2026-07-19
 tags: [template, erb, prompt]
 ---
 
-**TLDR**: ERB templates under `templates/` cover config scaffolding, task capture, single-agent stage prompts, auto-rebase conflict resolution, 6-review sub-prompts, PR-first draft creation, artifact collection, final PR wrap-up, and the shipped-digest categorizer prompt. Agent-owned tmux-stage templates now finish with an explicit required completion section that makes the terminal marker the literal final instruction. The 6-review fix prompt stays scoped to accepted findings, with one bounded exception: when a finding names a recurring defect class, the fix agent should fix every same-defect site in that pass rather than one cited line. (The retired Telegram "Codex draft-assist" brainstorm template `bot_brainstorm_codex_prompt.md.erb` was deleted; see [[modules/bot]].)
+**TLDR**: ERB templates under `templates/` cover config and task scaffolding, generic agent/council stages, auto-rebase conflict resolution, 6-review, ordinary and refactor patrol, babysitter fixes, display names, PR-first delivery, artifacts/finalization, and digest categorization. The tree also packages the `blank`/`research` workflow scaffolds and the self-contained built-in `bench` instructions/runtime. Agent-owned tmux-stage templates finish with an explicit required completion section that makes the terminal marker the literal final instruction. The 6-review fix prompt stays scoped to accepted findings, with one bounded exception: when a finding names a recurring defect class, the fix agent should fix every same-defect site in that pass rather than one cited line.
 
 ## Rendering helper
 
@@ -33,15 +33,42 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 | `fix_prompt.md.erb` | `Stages::Review#spawn_fix_agent` (Phase 4) | `project_name`, `worktree_path`, `task_folder`, `pass`, `accepted_findings`, `task_slug`, `triage_bias`, `reviewer_sources`, `user_supplied_tag` |
 | `ci_fix_prompt.md.erb` | `Stages::Review::CiFix#spawn_fix_agent` (Phase 1) | `project_name`, `worktree_path`, `task_folder`, `task_slug`, `command`, `attempt`, `max_attempts`, `captured_output`, `user_supplied_tag` |
 | `browser_test_prompt.md.erb` | `Stages::Review::BrowserTest#run_attempt` (Phase 5) | `project_name`, `worktree_path`, `task_folder`, `pass`, `attempt`, `max_attempts`, `result_path`, `skill_invocation`, `user_supplied_tag` |
+| `agent_prompt.md.erb` | `Stages::Agent#render_prompt` for descriptor agent stages | `stage_name`, `output_file`, `prior_context`, `skill_invocation`, `instruction_body`, `user_supplied_tag` |
+| `council_reviewer_prompt.md.erb` | `Stages::Council::Reviewer#prompt` | reviewer/round identity, target document/output paths, optional skill or instruction/prompt body, `user_supplied_tag` |
+| `council_revise_prompt.md.erb` | `Stages::Council::Revise#prompt` | round, target document, triage content/path, optional skill or instruction/prompt body, `user_supplied_tag` |
 | `triage_courageous.md.erb` | `Stages::Review::Triage` (Phase 3 default bias) | `project_name`, `worktree_path`, `task_folder`, `pass`, `reviewer_files`, `reviewer_contents`, `escalations_path`, `user_supplied_tag` |
 | `triage_safetyist.md.erb` | `Stages::Review::Triage` (opt-in bias preset) | same as `triage_courageous.md.erb` |
 | `reviewer_claude_ce_code_review.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | `project_name`, `worktree_path`, `task_folder`, `default_branch`, `pass`, `output_path`, `skill_invocation`, `user_supplied_tag` |
 | `reviewer_codex_ce_code_review.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | same as above |
+| `reviewer_grok_ce_code_review.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | same reviewer context as the Claude/Codex agent templates |
+| `reviewer_codex_native_review.md.erb` | `Reviewers::CodexReview#render_prompt` | native Codex review context, findings output contract, plan context, and `user_supplied_tag` |
 | `reviewer_pr_review_toolkit.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | same as above |
+| `patrol_review_prompt.md.erb` / `patrol_fix_prompt.md.erb` | `Patrol::Reviewer#render_prompt` / `Patrol::Fixer#render_prompt` | bounded feature/finding context, project/output paths, proof limits, and `user_supplied_tag` |
+| `refactor_patrol_review_prompt.md.erb` / `refactor_patrol_fix_prompt.md.erb` | `RefactorPatrol::Reviewer#render_prompt` / `RefactorPatrol::Fixer#render_prompt` | bounded feature/leverage/thesis context, configured proof commands, source PR/output mode, worktree path, and `user_supplied_tag` |
+| `babysitter_pr_fix_prompt.md.erb` | `Babysitter::PrFixer#render_prompt` | PR refs/status, failing jobs, diff/base identity, budget/dry-run context, worktree path, and `user_supplied_tag` |
+| `rebase_conflict_resolution.md.erb` | `Hive::Rebase#render_conflict_prompt` | `worktree_path`, `task_folder`, `default_branch`, `current_commit_msg`, `conflict_files`, `user_supplied_tag` |
+| `display_name_prompt.md.erb` | `DisplayName::Generator#render_prompt` | generator instance context, including the task's original text and slug fallback |
 | `digest_prompt.md.erb` | `Digest::Categorizer#render_prompt` | `date`, `items`, `output_path`, `user_supplied_tag` |
 | `finalize_prompt.md.erb` | `Stages::Finalize.run!` | `project_name`, `task_folder`, `worktree_path`, `slug`, `pr_url`, `plan_text`, `reviews_summary`, `user_supplied_tag` |
 | `finalize_summary.md.erb` | `Stages::Finalize.run!` fallback summary renderer | `summary`, `pr_url`, `commits`, `review`, `open_escalations` |
 | `pr_body.md.erb` | legacy body-shape helper retained for compatibility | `summary`, `test_plan`, `task_folder` |
+
+## Workflow and packaged-runtime assets
+
+`templates/workflows/` currently contains only the descriptor-bearing `blank`
+and `research` scaffolds. `Commands::Workflow.available_templates` enumerates
+directories with `descriptor.yml.erb`; a stray directory or file is not an
+available template. The former local `architecture` and `writing` scaffolds
+are intentionally absent. Asking for either name fails with exact guidance to
+install `honeycomb/architecture` or `honeycomb/writing` instead.
+
+`templates/builtins/bench/` contains the four packaged stage instructions and
+the self-contained benchmark runtime snapshot. `Workflows::Bench.install_runtime!`
+copies that runtime into a newly initialized standalone bench project, and
+`hive.gemspec` includes `templates/**/*` plus the runtime `.dockerignore` in the
+gem payload. Managed Honeycomb package prompt/config assets are resolved from
+their verified immutable package generation; they are not authored from the
+local workflow-scaffold tree.
 
 ## Review fix prompt scope
 
@@ -88,4 +115,4 @@ All templates use `trim_mode: "-"` so `<%- … -%>` lines don't add stray newlin
 - [[modules/digest]]
 - [[architecture]]
 
-<!-- updated: 2026-06-18 -->
+<!-- updated: 2026-07-19 -->

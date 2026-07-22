@@ -1,4 +1,6 @@
 require "test_helper"
+require "open3"
+require "rbconfig"
 require "hive/commands/status"
 require "hive/task"
 require "hive/workflow_selection"
@@ -27,6 +29,20 @@ class WorkflowsProjectTest < Minitest::Test
       assert_includes Hive::Workflows::Registry.ids, :"my-flow"
       assert_includes Hive::Workflows.all_stage_dirs, "2-work"
     end
+  end
+
+  def test_standalone_command_require_order_can_load_a_project
+    script = <<~'RUBY'
+      require "tmpdir"
+      require "hive"
+      require "hive/commands/markers"
+
+      Dir.mktmpdir { |dir| Hive::Workflows::Project.load!(dir) }
+    RUBY
+
+    _out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", "-e", script)
+
+    assert status.success?, err
   end
 
   def test_load_reuses_a_resolved_project_config

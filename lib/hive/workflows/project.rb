@@ -68,7 +68,7 @@ module Hive
 
           begin
             Hive::Config.build_project_config(
-              project_root, source_path, data, stage_names: Hive::Workflows.all_stage_names
+              project_root, source_path, data, stage_names: registered_stage_names
             )
           rescue Hive::UnsupportedProjectConfigError
             raise
@@ -88,9 +88,19 @@ module Hive
           project_root = File.expand_path(project_root)
           workflow_dir = workflow_dir_for(project_root, hive_state_path: hive_state_path)
           load_overlay!(project_root, workflow_dir) unless active_overlay?(project_root, workflow_dir)
-          Hive::Workflows.all_stage_names
+          registered_stage_names
         end
       end
+
+      # This file is intentionally loadable without the aggregate
+      # `hive/workflows` entrypoint (for example, `hive markers clear` reaches
+      # it through Task). Read the registry directly so strict config
+      # validation cannot depend on `Workflows.all_stage_names` having been
+      # defined by a different command's require order.
+      def registered_stage_names
+        Hive::Workflows::Registry.all.flat_map(&:stage_names).uniq
+      end
+      private_class_method :registered_stage_names
 
       def load_overlay!(project_root, workflow_dir)
         # Include the resolved directory so changing hive_state_path cannot

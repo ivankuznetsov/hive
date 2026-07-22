@@ -192,7 +192,20 @@ so the login gate can run.
   `+ Add project` link navigates to Repos because adding a project is a real
   page change. The composer supports new ideas with image attach (clipboard
   paste AND upload button; images become `[imageN]` placeholders and land in
-  the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
+  the task's `assets/` dir — `Commands::New`'s TUI contract). It shares the
+  server's eight-image / 10 MB-per-image limits in rendered Stimulus values,
+  accepts the bounded prefix of a mixed batch with accessible rejection
+  feedback, and rebuilds the hidden multipart `FileList` once per batch rather
+  than once per file. At most 16 picker/clipboard entries are inspected, so a
+  forged enormous `FileList` cannot turn the bound into an unbounded main-thread
+  scan. Attachment chips deliberately use a constant-memory generic glyph
+  instead of decoding attacker-sized image dimensions on the status page. A
+  detached form clears its retained `FileList` after a cancellable permanent-
+  move window. Puma additionally rejects bodies over the complete valid
+  81 MiB idea envelope before Rack multipart parsing; chunked request bodies
+  are rejected at the parsed-header boundary because Puma cannot incrementally
+  enforce that limit while spooling them. The status view then renders
+  per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
   Streams**: `StatusBroadcaster` subscribes to `StatusFeed#each_snapshot`;
   a dedicated `StatusChannel` starts that shared subscription when the first
@@ -290,8 +303,9 @@ so the login gate can run.
   back to the top; the composer form is `data-turbo-permanent` because
   typed-but-unsent idea text and staged image chips live in browser state. Its
   Stimulus controller rehydrates the staged-file index if Turbo reconnects the
-  permanent node, revokes removed preview URLs, and clears the submitted text,
-  chips, and upload transport on a successful `turbo:before-fetch-response`
+  permanent node, clears a truly detached form's FileList after a cancellable
+  delay, and clears the submitted text, chips, and upload transport on a
+  successful `turbo:before-fetch-response`
   while the form is still connected (`turbo:submit-end` remains a fallback);
   `status_refresh_controller.js` owns submission-versus-refresh ordering for
   every form on the status surface, while refreshes on other clients continue
@@ -360,6 +374,8 @@ so the login gate can run.
   instead of replacing it on every poll. The poll controller gives the pane
   `tail -f` semantics: it pins to the bottom while following, pauses reloads
   while the operator scrolls up to read, and resumes when scrolled back down.
+  It also skips timer ticks while Turbo marks the frame busy, so a slow frame
+  request cannot be repeatedly cancelled and restarted by its own interval.
   Server-side, the polled controller delegates to `Task#latest_log`, which
   reads only a 256 KiB byte
   window and returns the last 200 lines with a torn leading line dropped, so a
@@ -583,7 +599,11 @@ composer text/chip/file reset before Turbo renders with project-context
 retention, failed-submit
 draft/file retention on a 422-shaped Turbo event, and attachment-index rebuild
 after a real Stimulus disconnect/reconnect before adding and submitting another
-image, both approve
+image, eight-image/10 MB browser enforcement with bounded batch transport,
+constant-memory non-decoding chips, staged-File cleanup after a true disconnect
+without cleanup during a permanent move, Puma pre-Rack declared-length and
+chunked-body rejection,
+non-overlapping busy-frame polling, both approve
 paths (typed refusal page + confirmed force), Q&A round replacement without a
 lingering old form, typed Q&A preservation across a pushed morph, log-tail
 follow/pause/resume with node-preserving frame morph reloads, artifact

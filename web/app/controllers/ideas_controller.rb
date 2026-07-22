@@ -1,6 +1,8 @@
+require "hive/web/request_limits"
+
 class IdeasController < ApplicationController
-  MAX_IMAGES = 8
-  MAX_IMAGE_BYTES = 10 * 1024 * 1024
+  MAX_IMAGES = Hive::Web::RequestLimits::IDEA_IMAGE_COUNT
+  MAX_IMAGE_BYTES = Hive::Web::RequestLimits::IDEA_IMAGE_BYTES
 
   # Creates a task in 1-inbox via the same Commands::New the CLI and TUI
   # use. Images arrive as multipart uploads named like the [imageN]

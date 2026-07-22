@@ -62,6 +62,33 @@ class IdeasTest < ActionDispatch::IntegrationTest
            "nothing may be written outside the task folder"
   end
 
+  test "image count and size limits reject invalid parsed uploads" do
+    inbox = stage_dir(@project, "1-inbox")
+    existing_entries = inbox.children.map { |entry| entry.basename.to_s }.sort
+    too_many = Array.new(IdeasController::MAX_IMAGES + 1) do |index|
+      Rack::Test::UploadedFile.new(
+        StringIO.new("x"), "image/png", original_filename: "image#{index + 1}.png"
+      )
+    end
+
+    post "/ideas", params: { project: @project, text: "Too many", images: too_many }
+    assert_response :unprocessable_entity
+    assert_match "too many images (max 8)", response.body
+
+    oversized_file = Tempfile.new([ "oversized", ".png" ])
+    oversized_file.truncate(IdeasController::MAX_IMAGE_BYTES + 1)
+    oversized = Rack::Test::UploadedFile.new(
+      oversized_file.path, "image/png", original_filename: "image1.png"
+    )
+    post "/ideas", params: { project: @project, text: "Too large", images: [ oversized ] }
+    assert_response :unprocessable_entity
+    assert_match "image 1 is too large (max 10 MB)", response.body
+    assert_equal existing_entries, inbox.children.map { |entry| entry.basename.to_s }.sort,
+                 "rejected multipart requests must not create a task"
+  ensure
+    oversized_file&.close!
+  end
+
   test "unknown project is a 404, empty text a 422" do
     post "/ideas", params: { project: "nope", text: "hi" }
     assert_response :not_found

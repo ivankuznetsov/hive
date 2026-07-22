@@ -26,12 +26,16 @@
     the server can't re-render). %>
 <%= form_with url: ideas_path, multipart: true, class: "composer", id: "composer",
               data: { controller: "composer", turbo_permanent: true,
+                      composer_max_files_value: IdeasController::MAX_IMAGES,
+                      composer_max_file_bytes_value: IdeasController::MAX_IMAGE_BYTES,
                       action: "turbo:before-stream-render@document->composer#beforeStreamRender turbo:before-fetch-response->composer#submitted turbo:submit-end->composer#submitted" } do |f| %>
   <div class="composer-box">
     <%= f.text_area :text, placeholder: "Drop a new idea — paste or attach screenshots…",
           required: true, data: { composer_target: "text", action: "paste->composer#paste" },
           aria: { label: "New idea" } %>
     <div class="attachment-chips" data-composer-target="chips"></div>
+    <p class="composer-feedback" data-composer-target="feedback"
+       role="status" aria-live="polite" aria-atomic="true"></p>
     <div class="composer-toolbar">
       <%# The placeholder is a disabled+hidden option: it reads as the closed
           value, but is not an entry in the open list (a selectable

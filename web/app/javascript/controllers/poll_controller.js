@@ -34,6 +34,7 @@ export default class extends Controller {
     // poll ran and chose not to touch the pane" is otherwise unobservable,
     // which made the reading-pause untestable without sleeps.
     this.element.dataset.pollTicks = String(Number(this.element.dataset.pollTicks || 0) + 1)
+    if (this.frameBusy()) return
     if (this.operatorBusy()) return
     if (this.readerBusy()) {
       const pane = this.tailPane()
@@ -42,6 +43,14 @@ export default class extends Controller {
     }
 
     this.element.reload()
+  }
+
+  // Turbo marks a frame busy for the full request/render lifecycle. A timer
+  // firing during that window must not restart the navigation: on a slow
+  // endpoint, repeated reloads would otherwise keep cancelling the response
+  // that could make the frame current.
+  frameBusy() {
+    return this.element.hasAttribute("busy") || this.element.getAttribute("aria-busy") === "true"
   }
 
   pinToBottom() {

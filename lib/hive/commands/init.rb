@@ -82,6 +82,7 @@ module Hive
 
       def initialize(project_path, force: false, json: false, prompts: nil,
                      workflow: nil, new_workflow: nil, refactor_patrol: nil,
+                     minimal: false, preview: false,
                      workflow_input: $stdin, workflow_output: $stderr,
                      provisioning_input: $stdin, provisioning_output: $stdout,
                      provisioning_error: $stderr, preflight_inspector: nil,
@@ -91,6 +92,11 @@ module Hive
         @json = json
         @workflow_name = workflow
         @new_workflow = new_workflow
+        @minimal = minimal
+        @preview = preview
+        unless [ true, false ].include?(@minimal) && [ true, false ].include?(@preview)
+          raise ArgumentError, "minimal and preview must be boolean"
+        end
         unless refactor_patrol.nil? || [ true, false ].include?(refactor_patrol)
           raise ArgumentError, "refactor_patrol must be true, false, or nil"
         end
@@ -130,9 +136,14 @@ module Hive
         if @workflow_name && @new_workflow
           raise Hive::Commands::Workflow::UsageError, "--workflow and --new-workflow are mutually exclusive"
         end
+        validate_minimal_arguments!
         validate_clean_tree! unless @force
 
         ops = Hive::GitOps.new(@project_path)
+        if @minimal
+          init_minimal(ops)
+          return
+        end
         reject_existing_refactor_patrol_selector!(ops)
         if @new_workflow
           init_with_new_workflow(ops)
@@ -192,6 +203,139 @@ module Hive
         raise
       rescue StandardError => e
         raise Hive::InternalError, "init failed: #{e.class}: #{e.message}"
+      end
+
+      def validate_minimal_arguments!
+        if @preview && !@minimal
+          raise Hive::Commands::Workflow::UsageError, "--preview requires --minimal"
+        end
+        return unless @minimal
+
+        raise Hive::Commands::Workflow::UsageError, "--minimal requires --new-workflow ID" unless @new_workflow
+        raise Hive::Commands::Workflow::UsageError, "--minimal never accepts --force" if @force
+        if @refactor_patrol
+          raise Hive::Commands::Workflow::UsageError,
+                "--minimal fixes refactor patrol off; do not pass --refactor-patrol"
+        end
+      end
+
+      def init_minimal(ops)
+        ensure_minimal_target_fresh!(ops)
+        id = Hive::Commands::Workflow.normalize_and_validate_id!(
+          @new_workflow, project_root: @project_path
+        )
+        if Hive::Commands::Workflow.scaffold_collision?(id, project_root: @project_path)
+          suggested = Hive::Commands::Workflow.available_id(id, project_root: @project_path)
+          raise Hive::Commands::Workflow::UsageError.new(
+            "workflow scaffold already exists for #{id.inspect}; try #{suggested.inspect}",
+            value: id, suggested_id: suggested
+          )
+        end
+
+        if @preview
+          emit_minimal_preview(ops, id)
+        else
+          scaffold_and_bind_fresh_minimal(ops, id)
+        end
+      end
+
+      def ensure_minimal_target_fresh!(ops)
+        if ops.hive_state_branch_exists? || File.exist?(ops.hive_state_path)
+          raise Hive::AlreadyInitialized,
+                "minimal initialization requires a fresh target with no hive/state branch or .hive-state path"
+        end
+      end
+
+      def scaffold_and_bind_fresh_minimal(ops, id)
+        answers = minimal_answers
+        project_config_content = render_project_config(ops, answers: answers, default_workflow: id)
+        scaffold = nil
+        entry = initialize_project_state(ops, content: project_config_content) do
+          scaffold = scaffold_descriptor_commit!(ops, id)
+        end
+        extra = scaffold_payload(scaffold.fetch(:paths)).merge("minimal" => true)
+        if @json
+          emit_json_summary(entry: entry, ops: ops, answers: answers, workflow: id, extra: extra)
+        else
+          print_summary(
+            entry: entry, ops: ops, answers: answers, workflow: id,
+            scaffold_paths: scaffold.fetch(:paths)
+          )
+        end
+        # Minimal initialization intentionally omits service installation,
+        # daemon-autostart persistence, optional agent provisioning, patrol,
+        # babysitting, and timers. Core project registration and wiki/context
+        # hooks were installed transactionally by initialize_project_state.
+      end
+
+      def emit_minimal_preview(ops, id)
+        payload = minimal_preview_payload(ops, id)
+        if @json
+          puts JSON.generate(payload)
+        else
+          puts "hive: minimal init preview for #{@project_path}"
+          puts "  workflow: #{id}"
+          puts "  creates: #{payload.fetch('project_files').length} project/context paths plus hive/state"
+          puts "  automation: disabled"
+        end
+        payload
+      rescue Errno::EPIPE
+        nil
+      end
+
+      def minimal_preview_payload(ops, id)
+        answers = minimal_answers
+        hive_state_path = ops.hive_state_path
+        workflows = File.join(hive_state_path, "workflows")
+        {
+          "schema" => "hive-init-preview",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-init-preview"),
+          "ok" => true,
+          "preview" => true,
+          "minimal" => true,
+          "project" => File.basename(@project_path),
+          "path" => @project_path,
+          "default_branch" => ops.default_branch,
+          "workflow" => id,
+          "profile" => "minimal",
+          "template" => "blank",
+          "project_files" => INIT_MAIN_CHECKOUT_PATHS.map { |path| File.join(@project_path, path) },
+          "state_worktree" => {
+            "branch" => Hive::GitOps::HIVE_BRANCH,
+            "path" => hive_state_path,
+            "config_path" => File.join(hive_state_path, "config.yml"),
+            "workflow_descriptor" => File.join(workflows, "#{id}.yml"),
+            "workflow_instruction" => File.join(workflows, id, "work.md")
+          },
+          "context_integration" => {
+            "llm_wiki" => true,
+            "agent_instructions" => true,
+            "post_commit_hook" => true,
+            "scheduler" => false
+          },
+          "global_registration" => {
+            "enabled" => true,
+            "config_path" => Hive::Config.global_config_path
+          },
+          "services" => {
+            "daemon_install" => false,
+            "daemon_autostart" => false,
+            "babysitter_timer" => false,
+            "llm_wiki_timer" => false
+          },
+          "background_automation" => {
+            "daemon_dispatch" => answers.fetch("daemon_enabled"),
+            "patrol" => answers.fetch("patrol_mode") != "off",
+            "refactor_patrol" => answers.fetch("refactor_patrol_enabled"),
+            "adhoc_auto_fix" => answers.fetch("adhoc_auto_fix"),
+            "babysitter" => answers.fetch("babysitter_enabled")
+          },
+          "task_creation" => false
+        }
+      end
+
+      def minimal_answers
+        Hive::Commands::Init::Prompts.minimal_defaults
       end
 
       def init_with_new_workflow(ops)

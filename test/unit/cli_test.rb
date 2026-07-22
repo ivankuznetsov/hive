@@ -93,7 +93,7 @@ class HiveCliTest < Minitest::Test
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
       assert_equal({
                      force: true, json: true, workflow: "content_fixture",
-                     new_workflow: nil, refactor_patrol: nil
+                     new_workflow: nil, refactor_patrol: nil, minimal: false, preview: false
                    },
                    calls.first.fetch(:kwargs))
       assert_equal :call, calls.last
@@ -104,9 +104,19 @@ class HiveCliTest < Minitest::Test
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
       assert_equal({
                      force: false, json: false, workflow: nil,
-                     new_workflow: "writing", refactor_patrol: nil
+                     new_workflow: "writing", refactor_patrol: nil, minimal: false, preview: false
                    },
                    calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::Init) do |calls|
+      Hive::CLI.start([
+        "init", "/tmp/project", "--new-workflow", "writing", "--minimal", "--preview", "--json"
+      ])
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:minimal)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:preview)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:json)
       assert_equal :call, calls.last
     end
 

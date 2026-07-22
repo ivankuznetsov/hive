@@ -208,6 +208,9 @@ review:
   # here; disabled reviewers are omitted from the array entirely. The
   # deep-merge replaces `review.reviewers` wholesale, so editing this
   # list later replaces it (no per-element merge).
+<% if enabled_reviewers.empty? -%>
+  reviewers: []
+<% else -%>
   reviewers:
 <% if enabled_reviewers.include?("claude-ce-code-review") -%>
     - name: claude-ce-code-review
@@ -238,6 +241,7 @@ review:
       prompt_template: reviewer_pr_review_toolkit.md.erb
       budget_usd: 50
       timeout_sec: 7200
+<% end -%>
 <% end -%>
 
 # Hive daemon (ADR-024): auto-advances tasks through the pipeline up to
@@ -330,6 +334,9 @@ patrol:
   review:
     max_context_files: 4
     max_owned_files: 4
+<% if patrol_reviewers.empty? -%>
+    reviewers: []
+<% else -%>
     reviewers:
 <% if patrol_reviewers.include?("codex-native-review") -%>
       # Native `codex review` — one cheap, tuned, read-only pass whose
@@ -360,6 +367,7 @@ patrol:
         prompt_template: reviewer_claude_ce_code_review.md.erb
         budget_usd: 50
         timeout_sec: 5400
+<% end -%>
 <% end -%>
 
 # Architecture patrol is independent from ordinary patrol. Fresh init

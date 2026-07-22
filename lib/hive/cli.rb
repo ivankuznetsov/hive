@@ -127,6 +127,19 @@ module Hive
       already-initialized project scaffolds the workflow and rebinds the
       default in one hive-state commit.
 
+      Workflow creators can inspect the neutral fresh-project plan without
+      writes, then execute that exact automation-disabled profile after an
+      explicit confirmation:
+
+        hive init --new-workflow editorial --minimal --preview --json
+        hive init --new-workflow editorial --minimal --json
+
+      Minimal init is fresh-target only, rejects --force, and disables patrol,
+      architecture patrol, ad-hoc auto-fix, daemon dispatch/autostart,
+      babysitting, optional reviewers, and service/timer installation. It
+      retains the core hive/state worktree, global project registration, and
+      required llm-wiki/context hooks.
+
       Headless callers can explicitly select architecture discovery before
       any state is written with --refactor-patrol or --no-refactor-patrol;
       omitting both keeps the fresh-project default enabled. Set other
@@ -150,6 +163,10 @@ module Hive
     option :workflow, type: :string, desc: workflow_option_desc
     option :new_workflow, type: :string,
                           desc: "scaffold custom workflow ID, bind it as this project's default, and print paths to edit"
+    option :minimal, type: :boolean, default: false,
+                     desc: "with --new-workflow on a fresh project: use the neutral automation-disabled profile"
+    option :preview, type: :boolean, default: false,
+                     desc: "with --minimal: report the resolved initialization plan without writing"
     option :refactor_patrol, type: :boolean, default: nil,
                              desc: "enable or disable post-merge architecture discovery before init writes state"
     def init(project_path = Dir.pwd)
@@ -160,7 +177,9 @@ module Hive
         json: options[:json],
         workflow: options[:workflow],
         new_workflow: options[:new_workflow],
-        refactor_patrol: options[:refactor_patrol]
+        refactor_patrol: options[:refactor_patrol],
+        minimal: options[:minimal],
+        preview: options[:preview]
       ).call
     end
 

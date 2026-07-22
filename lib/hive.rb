@@ -18,6 +18,7 @@ module Hive
       "hive-watch-event" => 1,
       "hive-act" => 1,
       "hive-init" => 2,
+      "hive-init-preview" => 1,
       "hive-setup-agents" => 1,
       "hive-setup" => 1,
       "hive-web-status" => 1,

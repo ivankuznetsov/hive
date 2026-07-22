@@ -11,3 +11,6 @@
 - Added focused receipt and real-worktree regressions covering every immutable
   identity mismatch plus authenticated resume from `push_intent` without
   resetting the receipt.
+- Restored and validated UTF-8 on byte-exact report recovery after removing a
+  controller marker, so the recovered report can be reparsed before push or PR
+  reconciliation continues.

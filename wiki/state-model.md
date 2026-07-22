@@ -479,6 +479,11 @@ continues from that saved phase without resetting it. This uses the explicit
 identity-only receipt comparison; ordinary expected-state reads still include
 the phase.
 
+When a recoverable controller marker follows the validated report, resume
+removes that marker only after matching the stored report digest, restores the
+original bytes as valid UTF-8, and reparses the report before remote
+reconciliation.
+
 An explicit `worktree.yml` pointer is visible to status and recovery at every
 workflow stage, including generic stage indexes below coding's `4-execute`;
 the stage-index guard now applies only to deriving an absent legacy coding

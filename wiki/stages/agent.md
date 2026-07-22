@@ -3,7 +3,7 @@ title: Generic Agent Stage Runner
 type: stage
 source: lib/hive/stages/agent.rb, lib/hive/stages/agent_worktree.rb, lib/hive/stages/agent_report.rb, lib/hive/managed_git.rb, templates/agent_prompt.md.erb, templates/agent_worktree_prompt.md.erb
 created: 2026-06-19
-updated: 2026-07-21
+updated: 2026-07-22
 tags: [stage, agent, workflow]
 ---
 
@@ -91,6 +91,12 @@ result and a bounded report with unique ordered fields: `Decision`,
 `Suggested PR title`. Optional `Compact plan` and `Debug trace` fields may
 follow. Hive markers, unknown/duplicate fields, symlinks, non-UTF-8 input, and
 reports above 24 KiB are rejected.
+
+Recoverable remote failures append a controller marker without changing the
+validated report digest. Resume removes only that trailing marker, restores
+the exact report bytes as validated UTF-8, and parses the same report before
+continuing reconciliation; byte identity alone is not sufficient if the
+returned string loses its text encoding.
 
 After the exit, Hive verifies the recorded task branch, base ancestry, clean
 state, and descendant commit count from Git itself. `ready` requires at least

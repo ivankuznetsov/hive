@@ -608,10 +608,17 @@ class ProcessKillTest < Minitest::Test
 
   def wait_for_pid_file(path, timeout: 5)
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
-    sleep 0.01 until File.exist?(path) || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
-    flunk "timed out waiting #{timeout}s for child pid file #{File.basename(path)}" unless File.exist?(path)
+    contents = ""
+    loop do
+      contents = File.read(path) if File.exist?(path)
+      break if contents.match?(/\A[0-9]+\z/)
+      break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
 
-    Integer(File.read(path))
+      sleep 0.01
+    end
+    flunk "timed out waiting #{timeout}s for child pid file #{File.basename(path)}" unless contents.match?(/\A[0-9]+\z/)
+
+    Integer(contents)
   end
 
   def process_alive?(pid)

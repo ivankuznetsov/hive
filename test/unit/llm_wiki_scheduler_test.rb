@@ -141,6 +141,48 @@ class LlmWikiSchedulerTest < Minitest::Test
     end
   end
 
+  def test_reconcile_skips_an_orphan_timer_that_becomes_unreadable_during_scan
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      user_dir = File.join(home, ".config", "systemd", "user")
+      timer = File.join(user_dir, "llm-wiki-raced.timer")
+      FileUtils.mkdir_p(user_dir)
+      File.write(timer, "[Unit]\nX-HiveManaged=yes\n")
+      original_read = File.method(:read)
+      raced_read = lambda do |path, *args, **kwargs|
+        raise Errno::EACCES, path if path == timer
+
+        original_read.call(path, *args, **kwargs)
+      end
+
+      with_env(
+        "HOME" => home,
+        "HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil,
+        "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1"
+      ) do
+        with_replaced_singleton_method(File, :read, raced_read) do
+          Hive::LlmWikiBootstrap::Scheduler.reconcile_existing!
+        end
+      end
+
+      assert_path_exists timer
+    end
+  end
+
+  def test_write_if_changed_repairs_only_the_mode_when_contents_match
+    with_tmp_dir do |root|
+      path = File.join(root, "runner")
+      File.write(path, "same\n")
+      File.chmod(0o644, path)
+
+      assert Hive::LlmWikiBootstrap::Scheduler.write_if_changed(
+        path, "same\n", mode: 0o755
+      )
+      assert_equal 0o755, File.stat(path).mode & 0o777
+      assert_equal "same\n", File.binread(path)
+    end
+  end
+
   def test_confirmed_hive_unit_with_broken_git_metadata_is_removed_fail_closed
     with_tmp_dir do |root|
       home = File.join(root, "home")

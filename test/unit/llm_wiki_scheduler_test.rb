@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/llm_wiki_bootstrap"
+require "socket"
 
 class LlmWikiSchedulerTest < Minitest::Test
   include HiveTestHelper
@@ -413,6 +414,36 @@ class LlmWikiSchedulerTest < Minitest::Test
     assert_equal path, scheduler.decode_systemd_path(scheduler.systemd_path(path))
     with_env("PATH" => "", "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => nil) do
       refute scheduler.run_systemctl("daemon-reload")
+    end
+  end
+
+  def test_systemctl_recovers_a_missing_headless_bus_address
+    with_tmp_dir do |root|
+      fake_bin = File.join(root, "bin")
+      runtime_dir = File.join(root, "runtime")
+      calls = File.join(root, "systemctl-calls")
+      FileUtils.mkdir_p(fake_bin)
+      FileUtils.mkdir_p(runtime_dir)
+      bus_path = File.join(runtime_dir, "bus")
+      bus = UNIXServer.new(bus_path)
+      File.write(File.join(fake_bin, "systemctl"), <<~SH)
+        #!/bin/sh
+        printf '%s|%s|%s\n' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" "$*" >>#{calls}
+      SH
+      FileUtils.chmod("+x", File.join(fake_bin, "systemctl"))
+
+      with_env(
+        "PATH" => fake_bin,
+        "XDG_RUNTIME_DIR" => runtime_dir,
+        "DBUS_SESSION_BUS_ADDRESS" => nil,
+        "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => nil
+      ) do
+        assert Hive::LlmWikiBootstrap::Scheduler.run_systemctl("daemon-reload")
+      end
+
+      assert_equal "#{runtime_dir}|unix:path=#{bus_path}|--user daemon-reload\n", File.read(calls)
+    ensure
+      bus&.close
     end
   end
 

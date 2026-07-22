@@ -17,8 +17,8 @@ metadata:
 platform: openclaw
 invocation: /hive
 skill-version: 0.1.3
-canonical-digest: b30e94110328026f370bde51d123a33dd0caa36739b11cb99627648cf2ed4d04
-hive-version: 0.6.7
+canonical-digest: 84dbc9fe96c34c4237a3fea86cddf274cf70f1d3e8df30aa4d230110364bc0b3
+hive-version: 0.6.8
 -->
 
 Invoke this projection as `/hive`.

@@ -103,6 +103,22 @@ run_with_timeout() {
   run_without_git_env "$timeout_bin" -k "$kill_after" "$seconds" "$@"
 }
 
+USER_SYSTEMCTL_COMMAND=(systemctl)
+configure_user_systemctl_command() {
+  local uid runtime_dir bus_address
+  uid="$(id -u)"
+  runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+  bus_address="${DBUS_SESSION_BUS_ADDRESS:-}"
+
+  USER_SYSTEMCTL_COMMAND=(systemctl)
+  if [ -S "$runtime_dir/bus" ]; then
+    bus_address="${bus_address:-unix:path=$runtime_dir/bus}"
+    USER_SYSTEMCTL_COMMAND=(
+      env "XDG_RUNTIME_DIR=$runtime_dir" "DBUS_SESSION_BUS_ADDRESS=$bus_address" systemctl
+    )
+  fi
+}
+
 clear_git_tool_environment() {
   local name
   for name in "${GIT_ENV_NAMES[@]}"; do
@@ -176,6 +192,12 @@ if [ "$drain_mode" -eq 0 ] && [ -z "$retry_selector" ]; then
   changed_files="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null || true)"
   [ -n "$changed_files" ] || exit 0
 
+  # wiki/log.md is compiled from wiki/log.d fragments. A commit that only
+  # rewrites the compiled projection contains no new source for the wiki agent.
+  if ! printf '%s\n' "$changed_files" | grep -Fqvx 'wiki/log.md'; then
+    exit 0
+  fi
+
   if ! printf '%s\n' "$changed_files" | grep -Eq \
     '(^|/)(schema\.rb|structure\.sql|db/migrate/|migrations/|models/|entities/|prisma/schema\.prisma|routes|controllers|handlers|resolvers|app/|src/|lib/|test/|tests/|spec/|templates/|config/|bin/|README\.md|Gemfile|Gemfile\.lock|package\.json|package-lock\.json|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|requirements\.txt|pyproject\.toml|poetry\.lock|composer\.json|composer\.lock|docs/|wiki/|raw/notes/|plans/|todos/|CHANGELOG\.md|AGENTS\.md|CLAUDE\.md)'; then
     exit 0
@@ -211,15 +233,15 @@ if [ "$drain_mode" -eq 0 ] && [ -z "$retry_selector" ]; then
   scheduler_service="$(sed -n '1p' "$state_dir/scheduler-service" 2>/dev/null || true)"
   if [ "${HIVE_SKIP_LLM_WIKI_SYSTEMCTL:-}" != "1" ] && \
      [[ "$scheduler_service" =~ ^llm-wiki-[A-Za-z0-9_.-]+\.service$ ]]; then
+    configure_user_systemctl_command
     if command -v systemctl >/dev/null 2>&1 && \
        run_with_timeout "${LLM_WIKI_SYSTEMCTL_TIMEOUT:-10}" \
-         systemctl --user start --no-block "$scheduler_service" \
+         "${USER_SYSTEMCTL_COMMAND[@]}" --user start --no-block "$scheduler_service" \
          >>"$log_file" 2>&1; then
       log_line "queued source $sha for memory-bounded systemd worker $scheduler_service"
       exit 0
     else
-      rm -f -- "$state_dir/scheduler-service"
-      log_line "WARN: memory-bounded systemd worker $scheduler_service could not be started; using machine-wide serialized fallback"
+      log_line "WARN: memory-bounded systemd worker $scheduler_service could not be signalled; keeping its configured marker and using machine-wide serialized fallback"
     fi
   fi
 fi

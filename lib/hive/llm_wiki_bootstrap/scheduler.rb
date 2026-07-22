@@ -364,10 +364,31 @@ module Hive
       def run_systemctl(*args)
         return true if ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"] == "1"
 
-        _out, _err, status = Open3.capture3("systemctl", "--user", *args)
+        _out, _err, status = Open3.capture3(
+          user_systemd_environment, "systemctl", "--user", *args
+        )
         status.success?
       rescue Errno::ENOENT
         false
+      end
+
+      # Git hooks and other headless callers often retain access to the user
+      # bus but not the interactive shell variables that identify it. Restore
+      # only the standard per-user socket environment; a missing socket keeps
+      # systemctl's normal failure semantics and the durable reconcile marker.
+      def user_systemd_environment
+        runtime_dir = ENV["XDG_RUNTIME_DIR"]
+        runtime_dir = "/run/user/#{Process.uid}" if runtime_dir.nil? || runtime_dir.empty?
+        bus_path = File.join(runtime_dir, "bus")
+        return {} unless File.socket?(bus_path)
+
+        bus_address = ENV["DBUS_SESSION_BUS_ADDRESS"]
+        bus_address = "unix:path=#{bus_path}" if bus_address.nil? || bus_address.empty?
+
+        {
+          "XDG_RUNTIME_DIR" => runtime_dir,
+          "DBUS_SESSION_BUS_ADDRESS" => bus_address
+        }
       end
 
       def run_systemctl!(*args)

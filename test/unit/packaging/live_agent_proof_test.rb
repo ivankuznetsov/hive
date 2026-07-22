@@ -42,6 +42,50 @@ class LiveAgentProofTest < Minitest::Test
     end
   end
 
+  def test_candidate_verifier_accepts_exact_offline_artifacts_and_four_projections
+    with_tmp_dir do |dir|
+      canonical = Hive::AgentSkills::CanonicalSkill.new
+      artifacts = prepare_release_artifacts(dir, canonical)
+
+      verified = verify_candidate(artifacts, canonical)
+
+      assert_equal File.join(artifacts, "hive-cli-#{Hive::VERSION}.gem"), verified.fetch("gem")
+      assert_equal File.join(artifacts, "hive-agent-skills-#{SHA}.tar.gz"), verified.fetch("skills")
+      assert_equal File.join(artifacts, "hive-source-#{SHA}.tar.gz"), verified.fetch("source")
+      assert_equal HiveLiveAgentProof::PLATFORMS, verified.fetch("platforms")
+    end
+  end
+
+  def test_candidate_verifier_rejects_manifest_and_projection_substitution
+    with_tmp_dir do |dir|
+      canonical = Hive::AgentSkills::CanonicalSkill.new
+      artifacts = prepare_release_artifacts(dir, canonical)
+      manifest_path = File.join(artifacts, "artifact-manifest.json")
+      manifest = JSON.parse(File.read(manifest_path))
+      manifest["hive_version"] = "0.0.0"
+      HiveLiveAgentProof.write_json(manifest_path, manifest)
+
+      error = assert_raises(HiveLiveAgentProof::Error) { verify_candidate(artifacts, canonical) }
+      assert_includes error.message, "Hive version"
+
+      artifacts = prepare_release_artifacts(File.join(dir, "projection"), canonical)
+      skill_path = File.join(artifacts, "hive-agent-skills-#{SHA}.tar.gz")
+      stage = File.join(dir, "stage")
+      FileUtils.mkdir_p(stage)
+      assert system("tar", "-xzf", skill_path, "-C", stage)
+      File.open(File.join(stage, "codex/hive/SKILL.md"), "a") { |file| file.write("\nsubstitution\n") }
+      assert system("tar", "-czf", skill_path, "-C", stage, ".")
+      manifest = JSON.parse(File.read(File.join(artifacts, "artifact-manifest.json")))
+      record = manifest.fetch("files").fetch(File.basename(skill_path))
+      record["sha256"] = HiveLiveAgentProof.sha256(skill_path)
+      record["size"] = File.size(skill_path)
+      HiveLiveAgentProof.write_json(File.join(artifacts, "artifact-manifest.json"), manifest)
+
+      error = assert_raises(HiveLiveAgentProof::Error) { verify_candidate(artifacts, canonical) }
+      assert_includes error.message, "projection"
+    end
+  end
+
   def test_attestor_and_verifier_accept_only_exact_proven_artifacts
     with_tmp_dir do |dir|
       artifacts = prepare_artifacts(dir)
@@ -147,6 +191,24 @@ class LiveAgentProofTest < Minitest::Test
     source = write_file(File.join(dir, "source.tar.gz"), "source-bytes")
     build(gem, source, artifacts, Hive::AgentSkills::CanonicalSkill.new)
     artifacts
+  end
+
+  def prepare_release_artifacts(dir, canonical)
+    FileUtils.mkdir_p(dir)
+    artifacts = File.join(dir, "release-candidate")
+    gem = write_file(File.join(dir, "hive-cli-#{Hive::VERSION}.gem"), "gem-bytes")
+    source = write_file(File.join(dir, "source.tar.gz"), "source-bytes")
+    build(gem, source, artifacts, canonical)
+    artifacts
+  end
+
+  def verify_candidate(artifacts, canonical)
+    HiveLiveAgentProof::CandidateVerifier.new(
+      candidate_dir: artifacts,
+      candidate_sha: SHA,
+      expected_hive_version: Hive::VERSION,
+      canonical: canonical
+    ).call
   end
 
   def prepare_evidence(dir, artifacts)

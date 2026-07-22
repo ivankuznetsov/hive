@@ -89,6 +89,44 @@ class PackagingVerifyReleaseTest < Minitest::Test
     assert_includes setup, 'SERVICE_MANAGER_BIN="$SANDBOX/service-manager-bin"'
   end
 
+  def test_managed_web_verifier_keeps_bundler_available_under_candidate_gem_isolation
+    setup = File.read(MANAGED_WEB_SETUP)
+
+    assert_includes setup, "BUNDLER_EXECUTABLE_SOURCE="
+    assert_includes setup, '"$SERVICE_MANAGER_BIN/bundle"'
+    assert_includes setup, '"$SERVICE_MANAGER_BIN/ruby"'
+    assert_includes setup, 'exec %q -I%q %q "$@"'
+    refute_includes setup, "BUNDLE_BIN_DIR="
+  end
+
+  def test_managed_web_verifier_allows_unavailable_agent_diagnostics_offline
+    Dir.mktmpdir("managed-web-agent-skills") do |dir|
+      archive = File.join(dir, "hive-web.tar.gz")
+      File.binwrite(archive, "exact-web-candidate")
+      hive = File.join(dir, "hive")
+      write_executable(hive, <<~'SH')
+        #!/bin/sh
+        mkdir -p "$HIVE_HOME/web/config" "$HOME/.config/systemd/user"
+        : > "$HIVE_HOME/web/config/application.rb"
+        printf 'candidate\n' > "$HIVE_HOME/web/.hive-web-version"
+        : > "$HOME/.config/systemd/user/hive-daemon.service"
+        : > "$HOME/.config/systemd/user/hive-web.service"
+        printf '%s\n' '{"schema":"hive-setup","mode":"managed_service","ok":false,"phases":[{"name":"agent_skills","ok":false,"classification":"residual_failure"},{"name":"web_bundle","ok":true},{"name":"daemon_service","ok":true},{"name":"web_service","ok":true},{"name":"web","ok":true}]}'
+        exit 1
+      SH
+
+      _out, err, status = Open3.capture3(
+        MANAGED_WEB_SETUP,
+        "--hive-bin=#{hive}",
+        "--archive=#{archive}",
+        "--sha256=#{Digest::SHA256.file(archive).hexdigest}",
+        "--prefix=#{File.join(dir, "prefix")}"
+      )
+
+      assert status.success?, err
+    end
+  end
+
   def test_verify_release_job_requires_the_managed_web_asset_on_the_pinned_release
     body = File.read(INSTALL_SMOKE_WORKFLOW)
 

@@ -201,9 +201,10 @@ overrides and instead routes repair through Hive-native diagnose/consent flows.
 OpenClaw does not introduce Ruby routes, HTTP handlers, controllers, resolvers,
 or new executable entrypoints. It is an agent-facing wrapper over the existing
 CLI. `hive doctor` checks OpenClaw inventory/provenance read-only; only
-OpenClaw/ClawHub installs or updates that projection. The protected
-live-agent-skills workflow proves all four native surfaces against one exact
-candidate before the tag workflow can consume its gem/skill archive.
+OpenClaw/ClawHub installs or updates that projection. The tag workflow's
+offline `candidate-gate` verifies the exact four-platform skill archive before
+publication without provider credentials. The protected live-agent-skills
+workflow remains an optional authenticated diagnostic of native discovery/use.
 
 ### Hive web
 

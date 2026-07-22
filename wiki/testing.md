@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release}.yml, packaging/live_agent_skills/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-21
+updated: 2026-07-22
 tags: [test, minitest, fixtures, honeycomb, agent-skills, release-proof]
 ---
 
@@ -12,10 +12,10 @@ e2e, eval, native package/bootstrap, authenticated agent skills, install
 verification, release proof, and Hivebox images. Offline tests pin the
 agent-first status/watch/action contracts, coherent daemon snapshots, canonical
 four-platform skill projections, safe consent-gated provisioning, native web
-service/readiness contracts, and the exact-artifact proof verifier. The
-protected live workflow is the only release-readiness proof for native
-OpenClaw, Claude, Codex, and Pi discovery/use; local credential skips are
-diagnostic, not green evidence.
+service/readiness contracts, and the exact-artifact proof verifier. The offline
+candidate gate owns release readiness without provider credentials; the live
+agent workflow is an optional diagnostic that directly exercises native
+OpenClaw, Claude, Codex, and Pi discovery/use when credentials are available.
 
 ## Run all
 
@@ -98,7 +98,7 @@ task default: :test
 | `commands/digest_test.rb` | `Hive::Commands::Digest` — strict `YYYY-MM-DD` parsing, default runner invocation, dry-run message output, `hive-digest` JSON/error envelopes, merged-PR source dispatch, `--repo` implying merged-PR mode, merged-PR human wording, and `hive-merged-pr-digest` schema validation for dry-run and real-send payloads. |
 | `commands/daemon_test.rb` | `Hive::Commands::Daemon` and `Hive::Daemon::StatusReport` — lifecycle command routing, PID-file ownership/status handling, detached start/re-exec behavior, service install/enable/disable output, daemon-status service/binary fields, `safe_payload` web degradation, `binary_drift` classification including `unreadable`, queue inspection, start-path wiring of daemon/update/digest config into the dispatcher, and `daemon.auto_retry.enabled` config threading into the dispatcher. Start tests stub all three global config blocks so operator-local Telegram digest defaults cannot change unit expectations. |
 | `commands/setup/*_test.rb` | `Hive::Commands::Setup` — agent-skills-first ordering, one consent boundary, `--yes`, JSON/non-TTY refusal before diagnostics or agent discovery, diagnose-only `--no-bootstrap`, nested-init preflight suppression, phase-success predicate and JSON/process-exit agreement, the shared `phase(name)` StandardError-to-`ok:false` wrapper for QMD bootstrap, web-bundle, daemon-service, enrollment, and optional web-service phases, and hard diagnostic failures. |
-| `packaging/live_agent_proof_test.rb`, `release_contract_test.rb` | Exact-SHA release proof — deterministic one-build candidate manifest/archive, four required evidence rows, command allowlist audit, platform-specific native-activation attestation, raw secret-pattern scan and cleanup proof, attestation digest/provenance verification, run-attempt-specific retained artifacts and Check Run binding, and executable selector fixtures that reject rebuilds, stale/wrong-SHA proof, untrusted Check Runs, wrong workflow attempts/jobs, expired or duplicate artifacts, and archive digest mismatch. |
+| `packaging/live_agent_proof_test.rb`, `release_contract_test.rb` | Exact-SHA release proof — deterministic one-build candidate manifest/archive, offline byte-for-byte verification of all four canonical projections, installed-version binding, web-bundle digest verification, and release-job dependency contracts. Optional authenticated proof coverage still pins four required evidence rows, command allowlists, native-activation attestation, secret scanning, Check Run binding, and selector rejection of stale or substituted proof. |
 | `commands/{bot,daemon}/service_installer_test.rb`, `commands/service_installer/base_test.rb` | Shared service installer behavior — systemd/launchd rendering, force-upgrade backups/restarts, unchanged already-loaded launchd idempotency, unsupported-platform service-state probes, Homebrew stable-binary selection, macOS launchd ProgramArguments `$0` parsing for the daemon binary, and shared launchd path substitution used by daemon/web plists. |
 | `commands/{bot,daemon}_test.rb`, `integration/daemon_command_test.rb`, `integration/bot/bot_lifecycle_test.rb` | Shared service-install result presentation — bot/daemon-specific text prefixes and schemas, every success/outcome mapping, drift exit 64, manager failure exit 70, force/backup guidance, hostile-installer fallback envelopes, and schema-valid subprocess behavior after both commands converge on `ServiceInstaller::ResultPresenter`. |
 | `digest/window_test.rb`, `digest/ship_times_test.rb`, `digest/collector_test.rb` | Digest collection primitives — local-date helpers, git-log ship-time preference (`pr_finalized`, `archived`, approval into `9-done`), registered-project grouping, missing artifact tolerance, and local timezone boundaries. |
@@ -257,8 +257,11 @@ Hive command can contact the host's live user service manager. It also pins the
 published-release path through `packaging/verify-managed-web-setup.sh`: after
 cosign identity and checksum validation, the installed binary must run managed
 `hive setup --no-init --yes --json` from the authenticated archive. The release
+verifier supplies sandbox-local Ruby/Bundler launchers so the exact candidate
+gem wrapper can keep its private `GEM_HOME`/`GEM_PATH` without hiding Bundler
+from managed web dependency installation or asset compilation. The release
 contract tests require `web-bundle` to build and digest that archive before
-`proof-gate`, require the proof gate to exercise it, and forbid
+`candidate-gate`, require the candidate gate to exercise it, and forbid
 `release-finalize` from rebuilding it. The packaged-bootstrap integration test
 uses a real `git archive HEAD:web`, checks its members against the tracked web
 tree, and verifies setup preserves every tracked file's bytes and executable
@@ -349,15 +352,24 @@ This older three-provider smoke proves package installation/resolution only. It
 does not prove the canonical Hive operating policy or satisfy the release
 gate.
 
-## Exact-artifact Hive operating-skill proof
+## Exact-artifact Hive operating-skill verification
+
+The release-readiness owner is the offline `candidate-gate` in `release.yml`.
+It requires no provider keys: the exact tag checkout runs the canonical skill,
+manifest, OpenClaw projection, candidate-builder, and gem-installer tests; builds
+one gem/source/four-platform skill candidate; verifies manifest digests and
+every archive projection byte against `skills/hive/`; and invokes the privately
+installed candidate binary. The same job then exercises the exact managed web
+archive. Later jobs consume those artifacts without rebuilding them.
 
 `test/smoke/live_hive_operating_skill_smoke_test.rb` is the four-platform
 OpenClaw/Claude/Codex/Pi harness. It is disabled by default and skips with a
 diagnostic unless `HIVE_LIVE_AGENT_SKILLS=1`, an exact candidate artifact
 bundle, the selected native CLI, and its provider credential are present. With
 `HIVE_RELEASE_GATE=1`, missing prerequisites are failures rather than skips.
+This is an optional authenticated diagnostic and is not a release prerequisite.
 
-The protected `live-agent-skills.yml` workflow is the release-readiness owner:
+The protected `live-agent-skills.yml` workflow can additionally:
 
 1. validate a full SHA reachable from protected `main` and the workflow
    revision loaded from `refs/heads/main`;
@@ -385,15 +397,10 @@ The protected `live-agent-skills.yml` workflow is the release-readiness owner:
 7. validate all four evidence rows, assemble the candidate/provenance-bound
    private proof, and create a `live-agent-skills` Check Run on the exact SHA.
 
-`release.yml` invokes the repository-owned selector to resolve that Check Run
-on the tag commit and verify the Actions workflow
-identity/event/branch/repository/run attempt. The same executable requires all
-four named matrix jobs plus attestation exactly once, selects one unexpired
-run-attempt-specific artifact, and verifies the downloaded archive bytes
-against the Actions API SHA-256 before safe extraction and candidate
-verification. Fixture tests execute this selector rather than matching YAML
-fragments. Release jobs consume the attested gem and skill archive; no release
-job rebuilds either artifact.
+The repository-owned selector and attestation verifier remain covered by
+executable fixtures for optional diagnostic runs. They validate workflow/run
+identity, all four matrix jobs, one unexpired artifact, and its downloaded
+archive digest, but `release.yml` does not query or require that Check Run.
 
 `bundle exec rake smoke` also contains older live Claude workflows and may
 incur provider cost. Normal `rake test` and `rake coverage` remain local and

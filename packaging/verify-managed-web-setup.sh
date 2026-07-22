@@ -32,15 +32,18 @@ done
 [[ -n "$PREFIX" ]] || { echo "verify-managed-web-setup: --prefix is required" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "verify-managed-web-setup: jq is required" >&2; exit 3; }
 command -v ruby >/dev/null 2>&1 || { echo "verify-managed-web-setup: ruby is required" >&2; exit 3; }
-BUNDLE_EXECUTABLE="$(command -v bundle || true)"
-if [[ -z "$BUNDLE_EXECUTABLE" ]]; then
-  BUNDLE_EXECUTABLE="$(ruby -rrubygems -e 'print Gem.bin_path("bundler", "bundle")' 2>/dev/null || true)"
-fi
-[[ -x "$BUNDLE_EXECUTABLE" ]] || { echo "verify-managed-web-setup: bundle is required" >&2; exit 3; }
 BUNDLER_RUBYLIB="$(ruby -rrubygems -e '
   print Gem::Specification.find_by_name("bundler").full_require_paths.join(File::PATH_SEPARATOR)
 ' 2>/dev/null || true)"
 [[ -n "$BUNDLER_RUBYLIB" ]] || { echo "verify-managed-web-setup: bundler library is required" >&2; exit 3; }
+BUNDLER_EXECUTABLE_SOURCE="$(ruby -rrubygems -e '
+  spec = Gem::Specification.find_by_name("bundler")
+  print File.join(spec.full_gem_path, "exe", "bundle")
+' 2>/dev/null || true)"
+[[ -f "$BUNDLER_EXECUTABLE_SOURCE" ]] || {
+  echo "verify-managed-web-setup: Bundler executable source is required" >&2
+  exit 3
+}
 
 HIVE_BIN="$(cd "$(dirname "$HIVE_BIN")" && pwd)/$(basename "$HIVE_BIN")"
 WEB_ARCHIVE="$(cd "$(dirname "$WEB_ARCHIVE")" && pwd)/$(basename "$WEB_ARCHIVE")"
@@ -98,9 +101,25 @@ for command_name in claude codex pi gh; do
   chmod 0755 "$SERVICE_MANAGER_BIN/$command_name"
 done
 
+# The candidate gem wrapper intentionally replaces GEM_HOME/GEM_PATH. A normal
+# RubyGems-generated `bundle` launcher would therefore lose the Bundler gem it
+# was generated for. Invoke Bundler's source through the already-resolved Ruby
+# and load path so the web install remains hermetic under candidate isolation.
+RUBY_EXECUTABLE="$(command -v ruby)"
+{
+  printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+  printf 'exec %q -I%q %q "$@"\n' \
+    "$RUBY_EXECUTABLE" "$BUNDLER_RUBYLIB" "$BUNDLER_EXECUTABLE_SOURCE"
+} > "$SERVICE_MANAGER_BIN/bundle"
+chmod 0755 "$SERVICE_MANAGER_BIN/bundle"
+{
+  printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+  printf 'exec %q -I%q "$@"\n' "$RUBY_EXECUTABLE" "$BUNDLER_RUBYLIB"
+} > "$SERVICE_MANAGER_BIN/ruby"
+chmod 0755 "$SERVICE_MANAGER_BIN/ruby"
+
 RUBY_BIN_DIR="$(dirname "$(command -v ruby)")"
-BUNDLE_BIN_DIR="$(dirname "$BUNDLE_EXECUTABLE")"
-SAFE_PATH="$SERVICE_MANAGER_BIN:$RUBY_BIN_DIR:$BUNDLE_BIN_DIR:/usr/local/bin:/usr/bin:/bin"
+SAFE_PATH="$SERVICE_MANAGER_BIN:$RUBY_BIN_DIR:/usr/local/bin:/usr/bin:/bin"
 RESOLVED_SERVICE_MANAGER="$(PATH="$SAFE_PATH" command -v "$SERVICE_MANAGER_COMMAND")"
 [[ "$RESOLVED_SERVICE_MANAGER" == "$SERVICE_MANAGER_BIN/$SERVICE_MANAGER_COMMAND" ]] || {
   echo "verify-managed-web-setup: failed to isolate $SERVICE_MANAGER_COMMAND" >&2

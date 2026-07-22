@@ -3,6 +3,36 @@
 Append-only log of all wiki operations.
 
 <!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
+## [2026-07-22T16:33:40Z] wiki — refresh queued patrol and dry-run hardening
+
+**Action:** Inspected queued commits `207a12be` and `391f130a` plus their exact
+source blobs. Documented the direct-Ruby babysitter dry-run launcher and shared
+startup/loader environment boundary, command-aware Git guard changes, patrol's
+durable finding registry and lifecycle fields, validator-key and exact-target
+binding, clean-base validation preflight, namespaced E2E retention settings,
+artifact cleanup confinement, and the cycle-free sample systemd dependency.
+Refreshed the corresponding command, module, prompt-template, operating, E2E,
+and testing pages.
+
+**Uncertainty:** Neither source commit is an ancestor of the refresh branch.
+The current default lacks both new registry/environment modules and retains the
+older launcher, E2E environment names, and systemd ordering line, so every new
+contract is branch-qualified and [[gaps]] records the required integration and
+live-smoke evidence. Compiled [[log]] was not edited. Page coverage remains 94,
+so [[index]] did not change.
+
+**Refreshed pages:**
+
+- [[commands/babysit]]
+- [[commands/patrol]]
+- [[e2e]]
+- [[gaps]]
+- [[modules/babysitter]]
+- [[modules/patrol]]
+- [[operating]]
+- [[templates]]
+- [[testing]]
+
 ## [2026-07-22T16:30:00Z] wiki — refresh queued strict-config propagation coverage
 
 **Action:** Inspected queued commits `1d8c4637`, `97259f74`, `a4df6cd8`,
@@ -56,6 +86,22 @@ tags: [wiki, attempts, conditions, operations, web, workflows, digest, patrol]
   provenance and the relevant live-proof uncertainties. No architecture,
   command/API, dependency, data-model, planning, gap, or index page required
   another edit; page coverage remains 94.
+
+---
+title: Release v0.6.7
+date: 2026-07-22
+tags: [release, llm-wiki, queue, recovery]
+---
+
+Prepared Hive v0.6.7 with synchronized gem and web lockfile versions, pinned
+installer URLs, canonical agent-skill projections, and user-facing release
+notes. This urgent patch makes large llm-wiki queues recoverable by batching
+source-ref transactions and reconstructing crash-left queue records when their
+source commits remain available.
+
+The release also makes the primary checkout authoritative for the
+repository-shared llm-wiki runner and headless-agent configuration, preventing
+an old linked checkout from replacing the fixed shared runtime.
 
 ---
 title: Audit queued 6x committed contracts against current wiki

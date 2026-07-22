@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-07-19
+updated: 2026-07-22
 tags: [command, patrol, review, pr, json]
 ---
 
@@ -75,6 +75,33 @@ reviewer/fixer agent is created.
 `--dry-run` bypasses the validation-command preflight because it cannot ship
 code, then stops after map + review + scored candidate selection. It updates
 scan/audit state but does not create fix worktrees, push branches, or open PRs.
+
+### Queued durable-finding projection
+
+Queued commit `391f130a` on `fix/all-worthy-patrol-findings` is not an
+ancestor of the refresh branch, but its committed command contract moves
+durability behind admission. The reviewer returns in-memory findings, the
+command stamps the exact review `target_sha` plus one operator-configured
+`validation_key` (an omitted key defaults only when exactly one command is
+configured), and `FindingRegistry` reconciles PR/dismissal ledgers before
+comparing the new records with every durable finding. A same-target match or a
+match already marked `resolved`/`rejected` is skipped as
+`semantic_duplicate` with `canonical_finding_id`; newer-target evidence
+supersedes matching active records before the replacement is persisted.
+
+The queued finding schema adds `validation_key`, `target_sha`,
+`lifecycle_state`, `lifecycle_reason`, `lifecycle_updated_at`, and
+`superseded_by`. Lifecycle states are `active`, `resolved`, `rejected`, and
+`superseded`, with legacy records loading as active. Selection can also close
+a candidate as `invalid_validation`. Before an agent starts, the queued fixer
+requires the freshly fetched default SHA to equal the finding target and runs
+the selected validation command on the clean base; target drift, baseline
+failure, or baseline mutation closes the attempt as `stale_target_sha`,
+`validation_preflight_failed`, or `validation_preflight_mutated_worktree`. A
+stale-target attempt supersedes the current finding, while other fixer
+rejection remains an attempt outcome rather than durable resolution. These
+fields and reasons extend the v2 schemas; they do not describe current-default
+behavior until the queued branch is integrated.
 
 ## Alpha calibration
 

@@ -93,6 +93,16 @@ tags: [gap, todo, release-proof, agent-skills]
   `schemas/hive-digest.v2.json`. The digest pages document the queued committed
   contract, but default-branch integration remains unverified until that
   source branch is reconciled.
+- Commits `207a12be` and `391f130a` on
+  `fix/all-worthy-patrol-findings` are not ancestors of the refresh branch.
+  The current default still packages the shell GitHub dry-run launcher, has no
+  `Hive::Babysitter::StubEnvironment` or `Hive::Patrol::FindingRegistry`, uses
+  the generic E2E retention variables, and keeps `After=default.target` in the
+  sample systemd unit. [[commands/babysit]], [[modules/babysitter]],
+  [[commands/patrol]], [[modules/patrol]], [[e2e]], and [[operating]] therefore
+  describe their new contracts as queued projections; [[templates]] records
+  the corresponding patrol prompt binding. Integration on current main and a
+  current-main test run remain unverified.
 - Commit `0624f58a` contains the initial strict project top-level-key admission
   and descriptor-stage allowlist discovery. The later queued sequence
   `c4068bf5`, `ae908e77`, `1d8c4637`, and `97259f74` documents and tests shared
@@ -722,3 +732,12 @@ teardown, a real GitHub fork PR, or a hosted hive-bench submission. Keep those
 as operational evidence gaps; the source and focused regression contracts are
 documented in [[operating]], [[commands/uninstall]], [[modules/config]],
 [[modules/babysitter]], [[commands/bench-submit]], and [[testing]].
+
+The later queued `207a12be`/`391f130a` hardening remains branch-only as well.
+Focused tests cover direct-Ruby dry-run launchers, loader-environment scrubbing,
+durable finding lifecycle/deduplication, stale-target and clean-base validation
+preflight, E2E artifact containment, and the cycle-free sample systemd unit.
+They do not prove an installed `hive babysit --once ... --dry-run` against real
+Git/gh binaries, an ordinary patrol cycle across a moving hosted default plus
+merged/dismissed ledger reconciliation, or a live `systemctl --user enable`
+transaction. Those operational smokes remain open after branch integration.

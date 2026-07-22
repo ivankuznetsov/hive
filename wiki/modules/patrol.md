@@ -32,6 +32,26 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Patrol::BaseStateStore` | `lib/hive/patrol/base_state_store.rb` | Shared JSON lifecycle for ordinary patrol and architecture patrol's legacy reporting state: directory creation, state/fingerprint/dismissal files, run artifacts, and tolerant reads. It delegates atomic replacement to `Hive::AtomicFile` while preserving the stores' prior no-fsync behavior. |
 | `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Defines the ordinary-patrol collections and records written under `.hive-state/patrol/`; architecture patrol retains its own subclass, namespace, and thesis records. |
 
+### Queued finding-registry boundary
+
+Queued commit `391f130a` adds `Hive::Patrol::FindingRegistry` between reviewer
+output and candidate selection. The reviewer no longer writes findings before
+admission; the registry loads all `findings/*.json`, reconciles merged/resolved
+fingerprint entries to `resolved` and dismissal entries to `rejected`, then
+admits, suppresses, or supersedes semantic matches before persistence.
+`Fingerprint.semantically_same?` accepts an exact fingerprint or a shared
+category with at least 60% normalized-token overlap in either title or root
+cause. `StateStore#transition_finding` owns validated, idempotent lifecycle
+updates and their timestamps.
+
+That queued snapshot also binds each admitted finding to its scan SHA and one
+configured validator key. `CandidateSelector` rejects unknown keys before a
+fix attempt, and `Fixer` refuses stale evidence or a validation command that
+already fails or dirties the clean base. The primary module map above remains
+the current-default contract because `391f130a` is not yet an ancestor of this
+refresh branch; see [[commands/patrol]] and [[gaps]] for the projected command
+surface and integration uncertainty.
+
 ## State
 
 Patrol state is deliberately inspectable and removable:

@@ -151,6 +151,20 @@ both dry-run stubs: pre-existing `0644` and `0666` audit logs are left unchanged
 the blocked invocation is not appended, and stderr reports both the permission
 refusal and normal skip marker.
 
+Queued branch-only regressions in `207a12be` additionally pin shared
+`StubEnvironment` scrubbing, the direct Ruby GitHub launcher, removal of the
+shell stub from gem executables, identical skip-log/stderr rendering,
+`rev-list --show-signature` denial, command-aware exact `--text` handling, and
+recording-real-binary acceptance proof that allowed reads pass while mutations
+do not. They also map the three babysitter security entrypoints to both unit
+and acceptance suites. Queued `391f130a` adds patrol coverage for
+reviewer-selected configured validation keys, pre-persistence registry
+admission, same-target/terminal suppression, newer-target supersession,
+merged/dismissed lifecycle reconciliation, stale-target refusal, clean-base
+validation failure/mutation before agent launch, and the corresponding v2
+schema reason enums. Its service-installer test requires
+`WantedBy=default.target` and rejects `After=default.target`.
+
 Implementation ownership has focused unit coverage in `implementation_identity/{resolver,store,reconstructor}_test.rb`, `task_journal_test.rb`, `task_projection_test.rb`, `attempts/generation_test.rb`, `protected_files_test.rb`, agent/profile argv tests, the three implementation-owning stage launch tests, status/schema correspondence, and the TUI detail view. These tests pin the shared identity event builder across capture and legacy reconstruction, durable-before-spawn ordering, journal/projection tamper detection, fail-closed downstream generation reads, project/task/generation-bound legacy reconstruction, persisted-provider failure attribution, generation idempotency/conflicts, raw partial overrides, legacy precedence, exact Claude/Codex argv, provider-default pi/grok behavior, and honest unsupported effort.
 
 `stringify_keys_test.rb` pins the shared recursive key transform's deep-copy
@@ -244,6 +258,13 @@ malformed JSON assignment rejection, last-JSON-boolean-wins usage-error mode,
 replay path safety, missing, non-executable, symlinked runs-root, and symlinked
 replay artifact validation, cleanup retention validation, and the single-dispatch invariant for
 successful JSON commands.
+
+The queued `391f130a` binary regression proves only the
+`HIVE_E2E_RUNS_RETAIN_DAYS` namespace controls passing-run retention when the
+old generic variable conflicts. Queued `207a12be` artifact tests prove nested
+`.git` paths stay out of `sandbox-tree.txt`, scenario-owned live diagnostics
+are removed after capture, and an external diagnostic directory is not
+deleted.
 
 The install-smoke workflow's `verify-release.sh (end-to-end behavior)` job
 runs `packaging/verify-release.sh --version=v0.1.0` against the published

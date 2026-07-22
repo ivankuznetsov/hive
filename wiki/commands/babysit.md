@@ -3,7 +3,7 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh
 created: 2026-05-26
-updated: 2026-07-16
+updated: 2026-07-22
 tags: [command, babysitter, daemon, github]
 ---
 
@@ -97,6 +97,23 @@ Existing skip logs must already be private: both the pre-open and post-open
 checks reject any file with group or world permission bits. The blocked command
 still returns synthetic success and emits the stderr marker plus an audit-write
 warning, but the permissive file is left untouched and receives no new argv.
+
+### Queued dry-run launcher consolidation
+
+Queued commit `207a12be` on `fix/all-worthy-patrol-findings` removes the
+separately packaged `bin/hive-babysitter-stub-gh` shell file. Its generated
+overlay invokes `bin/hive-babysitter-stub-gh.rb` directly through the resolved
+Ruby executable, while `Hive::Babysitter::StubEnvironment` supplies the shared
+Ruby/Bundler startup list and a catch-all `LD_*` / `DYLD_*` scrub to the parent,
+generated launchers, Ruby stubs, and real-command passthrough. The skip logger
+returns the single escaped message used for both audit output and stderr, and
+allowlisted git passthrough additionally clears `GIT_PROXY_COMMAND`.
+
+The queued git classifier also blocks `rev-list --show-signature`. Exact
+`--text` remains a read option for `diff`, `log`, and `show`, while textconv
+abbreviations and `cat-file`/`grep --text` stay denied at this boundary. The
+current default still packages the shell launcher, so this subsection is a
+branch projection rather than the installed command contract.
 
 ## Tests
 

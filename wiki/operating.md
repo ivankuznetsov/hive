@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-07-20
+updated: 2026-07-22
 tags: [operating, daemon, bot, systemd, launchd, install, skills]
 ---
 
@@ -429,6 +429,13 @@ systemctl --user daemon-reload
 systemctl --user enable --now hive-daemon
 journalctl --user -u hive-daemon -f
 ```
+
+Queued commit `391f130a` removes `After=default.target` from the sample user
+unit while retaining `WantedBy=default.target`. Enabling the unit creates the
+target dependency; ordering the wanted service after that same target forms a
+cycle, while `WantedBy` is sufficient to start it with the user default
+target. The refresh branch's current sample still has the `After` line, so this
+is pending integration rather than installed-unit guidance.
 
 If you log out and want the daemon to keep running:
 

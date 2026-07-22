@@ -132,6 +132,17 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 | `finalize_summary.md.erb` | `Stages::Finalize.run!` fallback summary renderer | `summary`, `pr_url`, `commits`, `review`, `open_escalations` |
 | `pr_body.md.erb` | legacy body-shape helper retained for compatibility | `summary`, `test_plan`, `task_folder` |
 
+### Queued patrol validation contract
+
+Queued commit `391f130a` extends the ordinary patrol prompts without accepting
+agent-authored command text. `patrol_review_prompt.md.erb` lists the configured
+validator keys and requires each finding to choose exactly one. The fix prompt
+then displays that finding's evidence target SHA and required key, instructs
+the agent to reuse the same key in `fix.json`, and leaves command resolution
+and execution to Hive. This prompt contract is branch-only until the queued
+commit is integrated; the current-default templates do not yet carry those
+fields.
+
 ## Review fix prompt scope
 
 `fix_prompt.md.erb` is still the Phase 4 review-fix prompt: it receives accepted `[x]` findings and answered escalation context through the nonce-wrapped `accepted_findings` block, tells the agent to edit only the worktree, forbids orchestrator-owned files (`task.md`, `plan.md`, `worktree.yml`, `reviews/*`), and requires rollback-rate trailers on every fix commit.

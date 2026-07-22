@@ -25,6 +25,23 @@ tags: [babysitter, module, daemon, github, agents]
 | `Hive::Babysitter::Events` | `lib/hive/babysitter/events.rb` | Append-only per-project JSONL events under `.hive-state/babysitter/events.jsonl`. |
 | `Hive::Babysitter::StatusWriter` | `lib/hive/babysitter/status_writer.rb` | Human-readable loop summary appended below the resolved project state root at `babysitter/status.md`. |
 
+### Queued stub-environment boundary
+
+Queued commit `207a12be` adds
+`lib/hive/babysitter/stub_environment.rb` as the shared inventory of
+Ruby/Bundler startup variables and dynamic-loader variables that cannot cross
+the dry-run overlay. Its prefix rule also removes newly encountered `LD_*` and
+`DYLD_*` names rather than relying only on the enumerated list. In that
+snapshot, `DryRunEnv` generates the GitHub launcher directly against the Ruby
+stub, and the gem packages the Ruby stub, git stub, and shared skip logger but
+not the former shell wrapper. `Mapper` explicitly associates those three
+security-boundary entrypoints with both the unit and acceptance dry-run suites
+so component patrol retains their cross-file tests.
+
+This is queued branch behavior: the current default still includes the
+separately packaged shell `bin/hive-babysitter-stub-gh` entrypoint for direct
+stub execution.
+
 ## Wiring
 
 Patrol consolidation note (2026-07-15): `gh` passthrough uses a per-invocation, hosts-only auth

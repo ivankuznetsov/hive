@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-07-16
+updated: 2026-07-22
 tags: [test, e2e, tui, incidents, artifacts]
 ---
 
@@ -77,6 +77,12 @@ normal `hive-e2e-error` envelope with `error_kind: "usage"`.
 one followed by another option such as `--json` or `--dry-run`, is a usage
 error (`64`) and never reaches artifact cleanup; Thor cannot silently reuse the
 configured retention default for a malformed destructive invocation.
+
+Queued commit `391f130a` namespaces the `clean` environment defaults as
+`HIVE_E2E_RUNS_RETAIN_DAYS` and `HIVE_E2E_RUNS_RETAIN_FAILED_DAYS`, retaining
+the 7-day passing and 14-day failing defaults. The generic
+`RUNS_RETAIN_DAYS` / `RUNS_RETAIN_FAILED_DAYS` names are deliberately ignored
+in that branch snapshot. This is not yet the current-default binary contract.
 
 ## Layout
 
@@ -198,6 +204,14 @@ On failure, the harness writes a scenario bundle containing:
 - `gh/script.json`, `gh/state.json`, and `gh/audit.jsonl` when GitHub scripting was installed or rejected
 - `manifest.json` with size and SHA-256 per artifact
 - TUI failures also include keystroke captures, run-scoped TUI subprocess marker/capture logs under `tui-subprocess/` (including the current shared marker log and its single `.log.1` rotation), plus `pane-before.txt` (snapshot taken just before the most recent `tui_keys`) and `pane-after.txt`. Cast recording is implemented by `AsciinemaDriver`, but depends on local `asciinema >= 2.4`.
+
+Queued commit `207a12be` centralizes the live diagnostic directory name as
+`ArtifactPaths::LIVE_TUI_LOG_DIRNAME`. Artifact cleanup removes that live
+directory only when its expanded path is contained by the scenario artifact
+root, leaving an externally supplied directory untouched. Its
+`sandbox-tree.txt` capture also omits nested `.git` directory entries as well
+as their descendants. These containment rules are branch-only until the
+queued commit is integrated.
 
 ## Current Scenarios
 

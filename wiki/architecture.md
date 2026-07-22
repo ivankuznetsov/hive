@@ -445,6 +445,17 @@ pairings. `TelegramController` now exposes only the settings resource's
 `Telegram::PairingApprovalsController#create`. The model wraps pending pairing
 rows before they reach ERB.
 
+Agent login is a dedicated `AgentLogin` resource around the process-wide PTY
+relay. Each lookup captures one immutable render snapshot and binds the URL's
+agent to the stored session; `Agents::LoginsController` owns create/show and
+`Agents::LoginCompletionsController` owns completion while preserving the
+existing public routes. The login status URL renders only that resource, so its
+two-second Turbo-frame refresh does not rerun account status checks, registered
+project loading, or managed-skill inventory from the Agents collection page.
+Frame requests omit the matching frame's self-referential `src`, and the poll
+controller lives on replaceable inner content: the final server-rendered
+snapshot disconnects the timer when the PTY finishes.
+
 A task page is a filesystem-backed `Task`, built from the matching status
 snapshot row and its `Project`. That model owns task reads and mutations:
 workflow-aware artifact ordering, brainstorm questions, original-idea/title

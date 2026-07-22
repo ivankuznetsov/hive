@@ -465,7 +465,15 @@ so the login gate can run.
   no keys and no agent for a headless daemon). The Docker image wires git's
   github.com https credential helper to `gh auth git-credential`.
 - **Agents** — PTY login relay (ADR-035) with a polled turbo-frame instead of
-  meta-refresh; pi token form. `gh` joins the relay (login supplies git push
+  meta-refresh; pi token form. Login create/show/completion enter the dedicated
+  `AgentLogin`, `Agents::LoginsController`, and
+  `Agents::LoginCompletionsController` resources while keeping the existing
+  URLs. The status URL renders only one immutable login snapshot; its
+  two-second refresh never rebuilds account statuses, registered projects, or
+  selected-project skill health from the Agents collection page. Turbo-frame
+  responses omit a self-referential `src`, and polling is attached to
+  replaceable inner content so the final completed snapshot disconnects the
+  timer. `gh` joins the relay (login supplies git push
   credentials via the image's credential helper); its `--web` flow blocks on
   a bare Enter rather than a paste-back code, which the relay auto-answers.
   Codex uses `codex login --device-auth` rather than the localhost-callback
@@ -571,8 +579,9 @@ empty-list pairing bootstrap, saved-token reuse, pending-code rendering,
 corrupt-store visibility, consent-gated approval, and the test-message
 resource's missing-token/success rendering, repo clone target refusal
 for non-directories,
-agent-login status rendering for
-binary PTY output, Grok route reachability, and operator-ward poll flows,
+agent-login resource lookup/route ownership, status-only rendering without
+Agents inventory work, self-reference-safe frame responses, binary PTY output,
+Grok route reachability, and operator-ward poll flows,
 managed-skill opt-in inspection and consent-gated repair, root favicon/icon
 assets, repair failure-cause rendering, successful repo-init preflight alerts,
 workflow list/scaffold delegation, signed preview tamper rejection,
@@ -603,7 +612,8 @@ image, eight-image/10 MB browser enforcement with bounded batch transport,
 constant-memory non-decoding chips, staged-File cleanup after a true disconnect
 without cleanup during a permanent move, Puma pre-Rack declared-length and
 chunked-body rejection,
-non-overlapping busy-frame polling, both approve
+non-overlapping busy-frame polling, dedicated agent-login polling that renders
+only its resource and disconnects after completion, both approve
 paths (typed refusal page + confirmed force), Q&A round replacement without a
 lingering old form, typed Q&A preservation across a pushed morph, log-tail
 follow/pause/resume with node-preserving frame morph reloads, artifact

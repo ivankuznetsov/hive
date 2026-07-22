@@ -18,15 +18,19 @@ export default class extends Controller {
   static values = { interval: { type: Number, default: 3000 } }
 
   connect() {
+    this.frame = this.frameElement()
+    if (!this.frame) return
+
     this.pinToBottom = this.pinToBottom.bind(this)
-    this.element.addEventListener("turbo:frame-load", this.pinToBottom)
+    this.frame.addEventListener("turbo:frame-load", this.pinToBottom)
     this.pinToBottom()
     this.timer = setInterval(() => this.reloadUnlessBusy(), this.intervalValue)
   }
 
   disconnect() {
     clearInterval(this.timer)
-    this.element.removeEventListener("turbo:frame-load", this.pinToBottom)
+    this.frame?.removeEventListener("turbo:frame-load", this.pinToBottom)
+    this.frame = null
   }
 
   reloadUnlessBusy() {
@@ -42,7 +46,7 @@ export default class extends Controller {
       return
     }
 
-    this.element.reload()
+    this.frame?.reload()
   }
 
   // Turbo marks a frame busy for the full request/render lifecycle. A timer
@@ -50,7 +54,15 @@ export default class extends Controller {
   // endpoint, repeated reloads would otherwise keep cancelling the response
   // that could make the frame current.
   frameBusy() {
-    return this.element.hasAttribute("busy") || this.element.getAttribute("aria-busy") === "true"
+    return !this.frame || this.frame.hasAttribute("busy") || this.frame.getAttribute("aria-busy") === "true"
+  }
+
+  // Most polls own the frame itself. A resource whose polling lifecycle can
+  // finish may instead put this controller on replaceable frame content: the
+  // final response then disconnects the timer without client-side state.
+  frameElement() {
+    if (this.element.localName === "turbo-frame") return this.element
+    return this.element.closest("turbo-frame")
   }
 
   pinToBottom() {

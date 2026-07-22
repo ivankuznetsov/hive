@@ -286,6 +286,28 @@ class AgentProfileTest < Minitest::Test
     assert profile.workspace_write_supported?
   end
 
+  def test_read_only_mode_uses_profile_flags_without_bypass
+    profile = make_profile(
+      read_only_flags: [ "--sandbox", "read-only", "-c", 'approval_policy="never"' ]
+    )
+
+    flags = profile.permission_flags(Hive::AgentProfile::READ_ONLY_PERMISSION_MODE)
+
+    assert_equal [ "--sandbox", "read-only", "-c", 'approval_policy="never"' ], flags
+    assert profile.read_only_supported?
+    refute_includes flags, "--dangerously-skip-permissions"
+  end
+
+  def test_read_only_mode_fails_closed_without_profile_capability
+    profile = make_profile(permission_skip_flag: "--dangerous")
+
+    error = assert_raises(ArgumentError) do
+      profile.permission_flags(Hive::AgentProfile::READ_ONLY_PERMISSION_MODE)
+    end
+
+    assert_includes error.message, "cannot enforce read-only"
+  end
+
   def test_cli_capability_must_be_declared
     error = assert_raises(Hive::AgentError) do
       make_profile.require_cli_capability!(:safe_mode)

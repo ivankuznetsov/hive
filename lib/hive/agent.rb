@@ -92,18 +92,18 @@ module Hive
           %i[input output cached].each { |key| counts[key] += @claude_turn[key] }
         end
         @usage.merge!(counts)
-        @total = counts.values.sum
+        @total = counts.values_at(:input, :output).sum
       end
 
       def add_usage(usage)
         counts = usage_counts(usage)
         %i[input output cached].each { |key| @usage[key] += counts[key] }
-        @total = @usage.values_at(:input, :output, :cached).sum
+        @total = @usage.values_at(:input, :output).sum
       end
 
       def replace_with_run_total(usage)
         counts = usage_counts(usage)
-        terminal_total = counts.values.sum
+        terminal_total = counts.values_at(:input, :output).sum
         return if terminal_total < @total
 
         @usage.merge!(counts)

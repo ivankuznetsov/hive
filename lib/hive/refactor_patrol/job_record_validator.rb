@@ -248,12 +248,18 @@ module Hive
         strict_hash!(
           action,
           required: constant(:POLICY_ACTION_KEYS),
-          allowed: constant(:POLICY_ACTION_KEYS),
+          allowed: constant(:POLICY_ACTION_KEYS) + constant(:POLICY_ACTION_OPTIONAL_KEYS),
           label: "policy action",
           path: path
         )
         %w[default_branch auto_fix_agent].each do |key|
           nonempty_string!(action.fetch(key), "policy action #{key}", path)
+        end
+        %w[auto_fix_model auto_fix_launcher_identity].each do |key|
+          nonempty_string!(action.fetch(key), "policy action #{key}", path) if action.key?(key)
+        end
+        if action.key?("auto_fix_effort") && !action["auto_fix_effort"].nil?
+          nonempty_string!(action.fetch("auto_fix_effort"), "policy action auto_fix_effort", path)
         end
         unless %w[low medium high].include?(action.fetch("min_confidence"))
           inconsistent!("policy action min_confidence is invalid", path)

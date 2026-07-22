@@ -176,6 +176,37 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
     end
   end
 
+  def test_read_only_call_inherits_execute_identity_for_codex
+    with_tmp_dir do |dir|
+      state = Hive::RefactorPatrol::StateStore.new(dir)
+      inherited_cfg = cfg.merge(
+        "refactor_patrol" => { "auto_fix" => {} }
+      )
+      runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
+        project_root: dir, cfg: inherited_cfg, state: state, read_only: true
+      )
+      captured = nil
+      output_path = File.join(dir, "out.json")
+      fake_agent = Object.new
+      fake_agent.define_singleton_method(:run!) do
+        { status: :ok, final_message: '{"theses":[]}' }
+      end
+
+      with_replaced_singleton_method(Hive::Agent, :new, lambda { |**kwargs|
+        captured = kwargs
+        fake_agent
+      }) do
+        runner.call(prompt: "p", output_path: output_path, run_dir: state.run_dir("review"))
+      end
+
+      assert_equal :codex, captured.fetch(:profile).name
+      assert_equal Hive::AgentProfile::READ_ONLY_PERMISSION_MODE,
+                   captured.fetch(:permission_mode)
+      assert_equal [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=high" ],
+                   captured.fetch(:identity_arguments)
+    end
+  end
+
   def test_read_only_launch_uses_safe_mode_before_project_customizations_can_run
     with_tmp_dir do |dir|
       state = Hive::RefactorPatrol::StateStore.new(dir)
@@ -543,7 +574,8 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
     {
       "budget_usd" => { "patrol" => 100 },
       "timeout_sec" => { "patrol" => 3600 },
-      "refactor_patrol" => { "agent" => "claude" }
+      "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" },
+      "refactor_patrol" => { "agent" => "claude", "model" => "claude-sonnet-4-6" }
     }
   end
 end

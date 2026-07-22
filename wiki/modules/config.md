@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-20
+updated: 2026-07-22
 tags: [config, yaml, validation]
 ---
 
@@ -248,6 +248,8 @@ scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher
 SIGHUP reconfigure) load through `load_global_digest_block`, so the derived
 value applies in both. The block has no `source` field: the sole digest mode is
 the registered-repository PR changelist, and CLI `--repo` is a runtime filter.
+Legacy `digest.source` is rejected even when set to `null`, so recursive config
+merging cannot silently preserve the removed shipped/merged selector.
 
 ## Screenote config
 

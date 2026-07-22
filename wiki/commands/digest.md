@@ -3,7 +3,7 @@ title: hive digest
 type: command
 source: lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, templates/digest_prompt.md.erb
 created: 2026-06-14
-updated: 2026-07-20
+updated: 2026-07-22
 tags: [command, digest, github, telegram, json]
 ---
 
@@ -64,13 +64,15 @@ falls back to its title.
 
 Raw body and diff evidence is written only to owner-only ephemeral scratch
 files. The collector enforces fixed 64 MiB per-PR, 256 MiB per-repository, and
-512 MiB per-digest safety ceilings while streaming `gh` output, before an
-oversized response is materialized. Crossing a ceiling fails the affected
-repository. Closed PR rows without a merge timestamp are skipped, and Git
-C-quoted or space-containing paths are decoded before exact file-identity
-validation. Recognized secrets are replaced with typed placeholders before
-agent-provider egress; raw files are removed after the redacted checksum is
-verified and are not retained as diagnostics.
+512 MiB per-digest safety ceilings while streaming `gh` diff output directly
+to disk. Redacted evidence remains file-backed through validation and generator
+chunking instead of being copied into aggregate strings or JSON. Crossing a
+ceiling fails the affected repository. Closed PR rows without a merge timestamp
+are skipped, live page-number discovery must produce consecutive identical
+snapshots, and independently quoted/unquoted Git rename paths are decoded before
+exact file-identity validation. Recognized secrets are replaced with typed
+placeholders before agent-provider egress; raw files are removed after the
+redacted checksum is verified and the whole evidence run is removed on exit.
 
 ## Changelist Generation
 
@@ -88,13 +90,18 @@ generation failure: the command exits nonzero and sends nothing. An honestly
 collected empty day skips the agent entirely and still renders/delivers the
 normal digest with `PRs 0`.
 
-Generated significance and bullet text is scanned and redacted again before
+Private manifest/fact/project identity is `host/owner/name`, avoiding collisions
+between GitHub.com and Enterprise repositories that share a slug; public output
+continues to display `owner/name`. Generated significance and bullet text is scanned and redacted again before
 the result leaves the agent boundary. Retained generation diagnostics contain
 only redacted evidence/fact/bullet ledgers and checksums, never the raw prompt,
 body, diff, agent stream, or recognized credential value. Production
 generation uses a fail-closed Claude runtime policy with only private-run
-Read/Write access, isolated settings/MCP/environment, and no shell or network;
-configured providers that cannot enforce that boundary are rejected.
+Read/Write access, isolated settings/MCP/environment, and no shell or network.
+Controller policy files live outside the writable agent root, that root is
+deleted wholesale after the invocation, and only a controller-written safe
+ledger may remain. Configured providers that cannot enforce that boundary are
+rejected. Real Telegram delivery applies and verifies one final redaction pass.
 
 ## Human Output And Statistics
 

@@ -1,4 +1,5 @@
 require "json"
+require "fileutils"
 require "time"
 require "timeout"
 require "uri"
@@ -13,6 +14,7 @@ module Hive
     NETWORK_TIMEOUT_SEC = 60
     POLL_INTERVAL_SEC = 0.05
     DIGEST_PR_DIFF_MAX_BYTES = 64 * 1024 * 1024
+    DIGEST_STABLE_SNAPSHOT_ATTEMPTS = 3
 
     # Leading YAML frontmatter block of a hive-authored pr.md. Capture group
     # 1 is the YAML body (used by #pr_frontmatter); #pr_body strips the whole
@@ -393,7 +395,26 @@ module Hive
       repo = RepositoryIdentity.validated_repository_slug(repository)
       github_host = RepositoryIdentity.validated_github_host(host)
       start_at = parse_digest_time(window_start, "window start")
-      pages = []
+      previous_snapshot = nil
+
+      DIGEST_STABLE_SNAPSHOT_ATTEMPTS.times do
+        snapshot = digest_merged_pr_snapshot(
+          repo, github_host: github_host, start_at: start_at, cfg: cfg, max_pages: max_pages
+        )
+        if snapshot == previous_snapshot
+          return snapshot.select { |row| !row.fetch("merged_at").nil? }
+                         .uniq { |row| row.fetch("number") }
+        end
+        previous_snapshot = snapshot
+      end
+
+      raise Hive::GhError, "GitHub pull-request pages changed during collection for #{repo}"
+    rescue ArgumentError, TypeError => e
+      raise Hive::GhError, "invalid merged-PR pagination input: #{e.message}"
+    end
+
+    def digest_merged_pr_snapshot(repo, github_host:, start_at:, cfg:, max_pages:)
+      rows = []
       page_number = 1
       previous_updated_at = nil
 
@@ -409,7 +430,8 @@ module Hive
         end
         break if page.empty?
 
-        updated_times = page.map do |row|
+        all_before_window = true
+        page.each do |row|
           number = row["number"]
           unless number.is_a?(Integer) && number.positive? && row.key?("updated_at") && row.key?("merged_at")
             raise Hive::GhError, "GitHub returned malformed pull-request metadata for #{repo}"
@@ -420,19 +442,17 @@ module Hive
             raise Hive::GhError, "GitHub returned pull requests out of updated_at order for #{repo}"
           end
           previous_updated_at = updated_at
-          updated_at
+          all_before_window = false unless updated_at < start_at
         end
-        pages << page
-        break if updated_times.all? { |updated_at| updated_at < start_at }
+        rows.concat(page)
+        break if all_before_window
 
         page_number += 1
       end
 
-      pages.flatten.select { |row| !row.fetch("merged_at").nil? }
-           .uniq { |row| row.fetch("number") }
-    rescue ArgumentError, TypeError => e
-      raise Hive::GhError, "invalid merged-PR pagination input: #{e.message}"
+      rows
     end
+    private_class_method :digest_merged_pr_snapshot
 
     def digest_repository_metadata(repository:, host:, cfg: nil)
       repo = RepositoryIdentity.validated_repository_slug(repository)
@@ -488,6 +508,22 @@ module Hive
       raise Hive::GhError, "invalid pull-request diff input: #{e.message}"
     end
 
+    def digest_pr_diff_to_file(repository:, host:, number:, path:, cfg: nil,
+                               max_bytes: DIGEST_PR_DIFF_MAX_BYTES)
+      repo = RepositoryIdentity.validated_repository_slug(repository)
+      github_host = RepositoryIdentity.validated_github_host(host)
+      pr_number = Integer(number)
+      raise Hive::GhError, "pull request number must be positive" unless pr_number.positive?
+
+      digest_api_file(
+        "repos/#{repo}/pulls/#{pr_number}", host: github_host, cfg: cfg,
+        context: "fetching the diff for #{repo}##{pr_number}", path: path,
+        accept: "application/vnd.github.diff", max_bytes: max_bytes
+      )
+    rescue ArgumentError, TypeError => e
+      raise Hive::GhError, "invalid pull-request diff input: #{e.message}"
+    end
+
     def digest_pr_files(repository:, host:, number:, cfg: nil)
       repo = RepositoryIdentity.validated_repository_slug(repository)
       github_host = RepositoryIdentity.validated_github_host(host)
@@ -531,9 +567,34 @@ module Hive
         raise Hive::GhError, "`gh api` failed while #{context}: #{digest_error_text(out, err)}"
       end
 
-      out
+      utf8 = out.dup.force_encoding(Encoding::UTF_8)
+      unless utf8.valid_encoding?
+        raise Hive::GhError, "GitHub returned invalid UTF-8 while #{context}"
+      end
+      utf8
     end
     private_class_method :digest_api_text
+
+    def digest_api_file(endpoint, host:, cfg:, context:, path:, accept: nil, max_bytes: nil)
+      args = [ "gh", "api", "--hostname", host ]
+      args.concat([ "-H", "Accept: #{accept}" ]) if accept
+      args << endpoint
+      out, err, status = capture3(
+        *args, cfg: cfg, max_stdout_bytes: max_bytes, stdout_path: path
+      )
+      unless status.success?
+        FileUtils.rm_f(path)
+        raise Hive::GhError, "`gh api` failed while #{context}: #{digest_error_text(out, err)}"
+      end
+
+      bytes = File.size(path)
+      File.chmod(0o600, path)
+      bytes
+    rescue SystemCallError
+      FileUtils.rm_f(path)
+      raise
+    end
+    private_class_method :digest_api_file
 
     def parse_digest_time(value, label)
       raise ArgumentError, "#{label} is missing" if value.nil? || value.to_s.empty?
@@ -785,7 +846,8 @@ module Hive
       value.is_a?(Integer) && value.positive? ? value : NETWORK_TIMEOUT_SEC
     end
 
-    def capture3(*cmd, chdir: nil, cfg: nil, timeout_sec: nil, max_stdout_bytes: nil)
+    def capture3(*cmd, chdir: nil, cfg: nil, timeout_sec: nil, max_stdout_bytes: nil,
+                 stdout_path: nil)
       timeout_sec = normalized_timeout(timeout_sec || network_timeout_sec(cfg))
       stdout_limit = max_stdout_bytes.nil? ? nil : Integer(max_stdout_bytes)
       if stdout_limit && stdout_limit.negative?
@@ -807,6 +869,7 @@ module Hive
         read_capture_stream(
           stdout_r,
           max_bytes: stdout_limit,
+          output_path: stdout_path,
           on_limit: lambda do
             signal_process_group("KILL", pid)
           rescue Errno::ESRCH
@@ -846,20 +909,27 @@ module Hive
       end
     end
 
-    def read_capture_stream(io, max_bytes: nil, on_limit: nil)
+    def read_capture_stream(io, max_bytes: nil, on_limit: nil, output_path: nil)
       output = String.new(encoding: Encoding::BINARY)
-      loop do
-        chunk = io.readpartial(16 * 1024)
-        if max_bytes && output.bytesize + chunk.bytesize > max_bytes
-          on_limit&.call
-          raise Hive::GhError, "command output exceeds the #{max_bytes}-byte safety ceiling"
-        end
-        output << chunk
+      bytes = 0
+      sink = if output_path
+        File.open(output_path, File::WRONLY | File::CREAT | File::TRUNC, 0o600)
       end
-    rescue EOFError
-      output
-    rescue IOError
-      output || ""
+      begin
+        loop do
+          chunk = io.readpartial(16 * 1024)
+          bytes += chunk.bytesize
+          if max_bytes && bytes > max_bytes
+            on_limit&.call
+            raise Hive::GhError, "command output exceeds the #{max_bytes}-byte safety ceiling"
+          end
+          sink ? sink.write(chunk) : output << chunk
+        end
+      rescue EOFError, IOError
+        sink ? "" : output
+      ensure
+        sink&.close
+      end
     end
 
     def terminate_process_group(pid)

@@ -82,6 +82,8 @@ module Hive
         message: message,
         delivery: delivery
       )
+    ensure
+      collection&.cleanup!
     end
   end
 end

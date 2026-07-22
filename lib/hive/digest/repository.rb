@@ -1,3 +1,5 @@
+require "digest"
+require "fileutils"
 require "time"
 require "hive/gh/repository_identity"
 
@@ -28,6 +30,29 @@ module Hive
 
         super(name: name.to_s.strip, description: description.to_s.strip, url: url.to_s.strip)
       end
+    end
+
+    EvidenceFile = Data.define(:path, :bytes, :sha256) do
+      def initialize(path:, bytes:, sha256:)
+        expanded = File.expand_path(path.to_s)
+        size = Integer(bytes)
+        checksum = sha256.to_s
+        raise ArgumentError, "digest evidence path must be absolute" unless expanded == path.to_s
+        raise ArgumentError, "digest evidence bytes must not be negative" if size.negative?
+        unless checksum.match?(/\A[0-9a-f]{64}\z/)
+          raise ArgumentError, "digest evidence checksum must be SHA-256"
+        end
+
+        super(path: expanded, bytes: size, sha256: checksum)
+      end
+
+      def each_line(&block)
+        return enum_for(__method__) unless block
+
+        File.foreach(path, mode: "rb", &block)
+      end
+
+      def empty? = bytes.zero?
     end
 
     PullRequestIdentity = Data.define(:repository, :number, :url, :merged_at) do
@@ -63,14 +88,16 @@ module Hive
 
           parsed
         end
+        body_evidence = evidence_value(body)
+        diff_evidence = evidence_value(diff)
         super(
           target: target,
           number: identity.number,
           title: title.to_s.strip,
           url: identity.url,
           merged_at: identity.merged_at,
-          body: body.to_s,
-          diff: diff.to_s,
+          body: body_evidence,
+          diff: diff_evidence,
           files: Array(files).map(&:to_s).freeze,
           **metrics
         )
@@ -91,6 +118,15 @@ module Hive
           "commits" => commits
         }.compact
       end
+
+
+      private
+
+      def evidence_value(value)
+        return value if value.is_a?(EvidenceFile)
+
+        value.to_s
+      end
     end
 
     RepositoryCollection = Data.define(:target, :metadata, :pull_requests) do
@@ -104,22 +140,31 @@ module Hive
       end
     end
 
-    CollectionReport = Data.define(:resolved_count, :repositories, :failures, :warnings) do
-      def initialize(resolved_count:, repositories:, failures:, warnings:)
+    CollectionReport = Data.define(:resolved_count, :repositories, :failures, :warnings, :evidence_root) do
+      def initialize(resolved_count:, repositories:, failures:, warnings:, evidence_root: nil)
         count = Integer(resolved_count)
         raise ArgumentError, "digest resolved repository count must not be negative" if count.negative?
+        root = evidence_root && File.expand_path(evidence_root.to_s)
+        if root && (!File.directory?(root) || !File.basename(root).start_with?("hive-digest-evidence-"))
+          raise ArgumentError, "digest evidence root must be a collector-owned scratch directory"
+        end
 
         super(
           resolved_count: count,
           repositories: Array(repositories).freeze,
           failures: Array(failures).freeze,
-          warnings: Array(warnings).freeze
+          warnings: Array(warnings).freeze,
+          evidence_root: root
         )
       end
 
       def collected_count = repositories.size
       def pull_requests = repositories.flat_map(&:pull_requests)
       def all_failed? = repositories.empty?
+
+      def cleanup!
+        FileUtils.rm_rf(evidence_root) if evidence_root
+      end
     end
 
     Warning = Data.define(:kind, :message, :repository, :pr_number, :metrics) do

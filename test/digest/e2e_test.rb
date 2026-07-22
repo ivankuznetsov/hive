@@ -52,11 +52,27 @@ class HiveDigestE2ETest < Minitest::Test
         row.bullets.each { |bullet| refute_empty bullet.fact_ids }
         assert_includes result.message, row.pull_request.url
       end
-
       ledger_files = Dir[File.join(Hive::Paths.state_home, "digest", "runs", "*", "ledger.json")]
       assert_equal 1, ledger_files.size, "the generator must retain exactly one safe ledger"
       ledger = JSON.parse(File.read(ledger_files.first))
       assert_operator ledger.fetch("evidence_checksums").size, :>=, 4
+      semantic_evidence = {
+        "-pr10-body-001" => /DigestEvidenceCollector|implementation/i,
+        "-pr10-body-002" => /verify_digest_release|release/i,
+        "-pr10-body-003" => /hive-digest v2|migration/i,
+        "-pr11-body-001" => /nil metrics remain unknown|incomplete statistics|fix/i
+      }
+      semantic_evidence.each do |suffix, semantic_pattern|
+        fact = ledger.dig("output", "facts").find do |row|
+          row.fetch("evidence_ids").any? { |evidence_id| evidence_id.end_with?(suffix) }
+        end
+        refute_nil fact, "live generation must account for #{suffix}"
+        assert_equal "material", fact.fetch("kind")
+        generated_pr = generated.pull_requests.find { |row| row.pull_request.number == fact.fetch("number") }
+        citing_bullets = generated_pr.bullets.select { |bullet| bullet.fact_ids.include?(fact.fetch("id")) }
+        refute_empty citing_bullets, "#{suffix} must reach a bullet for its PR"
+        assert_match semantic_pattern, ([ fact.fetch("text") ] + citing_bullets.map(&:text)).join(" ")
+      end
       assert_equal [ 10, 11 ],
                    ledger.dig("output", "projects", 0, "pull_requests").map { |row| row.fetch("number") }
     end
@@ -121,14 +137,15 @@ class HiveDigestE2ETest < Minitest::Test
     prs = [
       pull_request(
         target, number: 10, title: "Implement complete evidence",
-        body: "## Implementation\nCollect complete repository and PR evidence.\n\n" \
+        body: "## Implementation\nAdd DigestEvidenceCollector for complete repository and PR evidence.\n\n" \
+              "## Release\nAdd verify_digest_release to the release gate.\n\n" \
               "## Migration\nMove JSON consumers to hive-digest v2.",
         diff: "diff --git a/lib/evidence.rb b/lib/evidence.rb\n@@ -0,0 +1 @@\n+collect_complete_evidence\n",
         additions: 42, deletions: 0, commits: 2
       ),
       pull_request(
         target, number: 11, title: "Fix warning semantics",
-        body: "## Fix\nKeep incomplete statistics visible instead of coercing them to zero.",
+        body: "## Fix\nEnsure nil metrics remain unknown so incomplete statistics stay visible.",
         diff: "diff --git a/lib/stats.rb b/lib/stats.rb\n@@ -1 +1 @@\n-zero\n+unknown\n",
         additions: 1, deletions: nil, commits: 1
       )

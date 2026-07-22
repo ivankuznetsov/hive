@@ -16,7 +16,7 @@ module Hive
       def render(changelog:, date:, stats:, warnings: [])
         blocks = [ header(date), render_counts(changelog, stats) ]
         changelog.projects.each do |project|
-          blocks << render_project(project, stats.by_repository.fetch(project.repository.target.repository))
+          blocks << render_project(project, stats.by_repository.fetch(project.repository.target.key))
         end
         blocks << render_warnings(warnings) unless Array(warnings).empty?
         blocks << render_footer(stats.overall)

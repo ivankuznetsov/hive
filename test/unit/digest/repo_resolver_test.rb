@@ -1,7 +1,10 @@
 require "test_helper"
 require "hive/digest/repo_resolver"
+require "hive/task_meta"
+require "hive/bot/pairing_store"
 
 class HiveDigestRepoResolverTest < Minitest::Test
+  include HiveTestHelper
   FakeGh = Struct.new(:calls, :responses) do
     def repository_identity(path, cfg: nil)
       calls << [ path, cfg ]
@@ -81,18 +84,53 @@ class HiveDigestRepoResolverTest < Minitest::Test
   end
 
   def test_deduplicates_case_variants_without_reading_hive_state
+    with_tmp_dir do |dir|
+      first = File.join(dir, "first")
+      second = File.join(dir, "second")
+      state = File.join(first, ".hive-state")
+      task = File.join(state, "stages", "9-done", "seeded-task")
+      FileUtils.mkdir_p([ first, second, task ])
+      File.write(File.join(task, "task.md"), "# forbidden task evidence\n")
+      File.write(File.join(task, "meta.yml"), "slug: seeded-task\n")
+      File.write(File.join(state, ".bot.pairings.json"), "{}\n")
+      projects = [ { "name" => "First", "path" => first }, { "name" => "Second", "path" => second } ]
+      gh = FakeGh.new([], {
+        first => { "repository" => "Owner/Repo", "host" => "github.com" },
+        second => { "repository" => "owner/repo", "host" => "GITHUB.com" }
+      })
+      original_glob = Dir.method(:[])
+      glob_spy = lambda do |*patterns, **options|
+        if patterns.any? { |pattern| pattern.to_s.include?(File.join(".hive-state", "stages")) }
+          raise "digest must not traverse Hive stage folders"
+        end
+        original_glob.call(*patterns, **options)
+      end
+
+      with_replaced_singleton_method(Dir, :[], glob_spy) do
+        with_replaced_singleton_method(Hive::TaskMeta, :read, ->(*) { raise "digest must not read task metadata" }) do
+          with_replaced_singleton_method(Hive::Bot::PairingStore, :new, ->(*) { raise "digest must not read pairing state" }) do
+            result = Hive::Digest::RepoResolver.new(registry: -> { projects }, gh: gh, logger: nil).resolve
+            assert_equal [ "First" ], result.targets.map(&:project_name)
+          end
+        end
+      end
+    end
+  end
+
+  def test_same_slug_on_different_hosts_remains_two_targets
     projects = [
-      { "name" => "First", "path" => "/tmp/first" },
-      { "name" => "Second", "path" => "/tmp/second" }
+      { "name" => "Public", "path" => "/tmp/public" },
+      { "name" => "Enterprise", "path" => "/tmp/enterprise" }
     ]
     gh = FakeGh.new([], {
-      "/tmp/first" => { "repository" => "Owner/Repo", "host" => "github.com" },
-      "/tmp/second" => { "repository" => "owner/repo", "host" => "GITHUB.com" }
+      "/tmp/public" => { "repository" => "Owner/Repo", "host" => "github.com" },
+      "/tmp/enterprise" => { "repository" => "owner/repo", "host" => "github.example.com" }
     })
+    result = Hive::Digest::RepoResolver.new(registry: -> { projects }, gh: gh, logger: nil).resolve(
+      repos: [ "owner/repo" ]
+    )
 
-    result = Hive::Digest::RepoResolver.new(registry: -> { projects }, gh: gh, logger: nil).resolve
-
-    assert_equal [ "First" ], result.targets.map(&:project_name)
+    assert_equal %w[github.com github.example.com], result.targets.map(&:host)
   end
 
   def test_wraps_registry_failures_and_labels_malformed_entries

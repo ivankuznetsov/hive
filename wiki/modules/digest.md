@@ -3,7 +3,7 @@ title: Hive::Digest
 type: module
 source: lib/hive/digest.rb, lib/hive/digest/, templates/digest_prompt.md.erb
 created: 2026-06-14
-updated: 2026-07-20
+updated: 2026-07-22
 tags: [digest, github, telegram, module]
 ---
 
@@ -82,14 +82,18 @@ Telegram credential lookup entirely.
 `repos/{owner}/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100`
 through explicit-host `gh api` calls. It validates monotonic `updated_at`,
 de-duplicates repository/PR identity, and stops only after an empty page or a
-page whose remaining rows all predate the London window. Filtering by validated
-`merged_at` happens afterward; ordinary closed-but-unmerged rows are excluded.
+page whose remaining rows all predate the London window. Because live
+page-number traversal can shift while a PR is updated, Hive accepts only two
+consecutive identical complete snapshots and fails closed when bounded retries
+cannot reach stability. Filtering by validated `merged_at` happens afterward;
+ordinary closed-but-unmerged rows are excluded.
 
 Each qualifying PR is hydrated through:
 
 - `digest_pr_detail` for canonical body, merge identity, changed-file count,
   and optional metrics;
-- `digest_pr_diff` with `Accept: application/vnd.github.diff`;
+- `digest_pr_diff_to_file` with `Accept: application/vnd.github.diff`, streaming
+  stdout directly into a private file;
 - paginated `digest_pr_files` for authoritative file identities.
 
 The collector rejects transport/JSON errors, inconsistent identities or merge
@@ -102,13 +106,16 @@ terminated before full materialization. One bad qualifying PR fails its
 repository instead of disappearing from the changelist.
 
 Scratch directories and files use modes 0700/0600. Raw body/diff bytes exist
-only long enough to construct and verify redacted evidence, then are removed.
-The entire per-collection scratch run is removed on both success and failure.
+only long enough to construct and verify redacted file-backed evidence, then
+are removed. Redacted body/diff handles stream through validation and chunk
+materialization without aggregate JSON/string copies. `Digest.run` removes the
+entire per-collection scratch run on success and every failure path.
 
 ## Generation And Trust Boundaries
 
-The private manifest gives every body section and diff hunk/file marker a
-stable evidence ID outside nonce-fenced untrusted repository text. One agent
+The private manifest uses `host/owner/name` for internal repository identity
+and gives every body section and diff hunk/file marker a host-qualified stable
+evidence ID outside nonce-fenced untrusted repository text. One agent
 invocation must return:
 
 1. facts covering every evidence ID exactly once, each classified as material
@@ -122,17 +129,23 @@ Validation accepts model row reordering but rejects identity drift, duplicates,
 unknowns, omissions, blanks, title repetition, zero bullets, uncovered
 evidence, and uncovered material facts. Failures retain only safe run/log
 breadcrumbs. Successful diagnostics retain a redacted ledger and checksums,
-not raw evidence, prompt payloads, or provider stream output. The production
-agent runs under a private-directory-only Claude runtime policy with isolated
-settings, MCP, and child environment and without shell or network tools. A
-configured provider that cannot enforce this boundary fails closed.
+not raw evidence, prompt payloads, or provider stream output. Secret-shaped
+model fact IDs are replaced with local canonical IDs and all bullet references
+are rewritten before retention. The production agent runs under a
+private-directory-only Claude runtime policy with isolated settings, MCP, and
+child environment and without shell or network tools. Its policy/settings live
+in a controller-owned sibling outside the writable agent directory. After each
+run Hive deletes that writable directory in full, including unknown files the
+agent created; a successful run retains only controller-written `ledger.json`.
+A configured provider that cannot enforce this boundary fails closed.
 
 `Hive::SecretPatterns` scans repository metadata/body/diff before agent
 provider egress and scans generated significance/bullets before rendering.
 Recognized values become typed placeholders, and warnings contain pattern
 counts/kinds without snippets. Unsafe or unverifiable redaction fails the
-repository or generation. Real rendered text then crosses the Telegram
-boundary; dry-run keeps it local.
+repository or generation. Immediately before a real Telegram send, `Sender`
+runs and verifies a second `SecretPatterns` pass over rendered text; dry-run
+keeps its text local.
 
 ## Statistics And Rendering
 

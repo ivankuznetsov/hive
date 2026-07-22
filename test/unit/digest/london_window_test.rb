@@ -26,6 +26,17 @@ class HiveDigestLondonWindowTest < Minitest::Test
                  bounds_duration(Date.new(2026, 10, 25))
   end
 
+  def test_transition_day_membership_is_exact_before_at_and_after_london_midnight
+    assert_membership_boundaries(
+      Date.new(2026, 3, 29),
+      start_at: Time.utc(2026, 3, 29, 0), end_at: Time.utc(2026, 3, 29, 23)
+    )
+    assert_membership_boundaries(
+      Date.new(2026, 10, 25),
+      start_at: Time.utc(2026, 10, 24, 23), end_at: Time.utc(2026, 10, 26, 0)
+    )
+  end
+
   def test_previous_day_uses_london_date_not_host_date
     with_env("TZ" => "America/Los_Angeles") do
       now = Time.utc(2026, 6, 14, 0, 30)
@@ -45,5 +56,12 @@ class HiveDigestLondonWindowTest < Minitest::Test
   def bounds_duration(date)
     start_at, end_at = Hive::Digest::LondonWindow.utc_bounds(date)
     end_at - start_at
+  end
+
+  def assert_membership_boundaries(date, start_at:, end_at:)
+    refute Hive::Digest::LondonWindow.on_date?(start_at - 1, date)
+    assert Hive::Digest::LondonWindow.on_date?(start_at, date)
+    assert Hive::Digest::LondonWindow.on_date?(end_at - 1, date)
+    refute Hive::Digest::LondonWindow.on_date?(end_at, date)
   end
 end

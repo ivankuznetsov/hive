@@ -3993,7 +3993,7 @@ class ConfigTest < Minitest::Test
   def test_load_global_digest_block_stays_off_without_a_deliverable_bot
     with_tmp_global_config do |home|
       # Bot enabled but no chat to deliver to: auto-enabling would only
-      # dispatch a paid categorizer that then fails at send time.
+      # dispatch a paid changelog generator that then fails at send time.
       File.write(File.join(home, "config.yml"), <<~YAML)
         registered_projects: []
         bot:
@@ -4064,6 +4064,22 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_digest_loaders_reject_removed_source_selector_even_when_null
+    [ "shipped", nil ].each do |source|
+      with_tmp_global_config do |home|
+        File.write(File.join(home, "config.yml"), YAML.dump(
+          "registered_projects" => [],
+          "digest" => { "enabled" => true, "source" => source }
+        ))
+
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
+        assert_match(/digest\.source was removed/, error.message)
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
+        assert_match(/digest\.source was removed/, error.message)
+      end
+    end
+  end
+
   def test_load_global_digest_config_merges_bot_and_agent_limits
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)
@@ -4105,7 +4121,7 @@ class ConfigTest < Minitest::Test
 
         err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
         assert_match(/#{Regexp.escape(label)}.*positive number/, err.message,
-                     "a non-positive #{label} must be rejected at config load, not crash the categorizer")
+                     "a non-positive #{label} must be rejected at config load, not crash ChangelogGenerator")
       end
 
       with_tmp_global_config do |home|

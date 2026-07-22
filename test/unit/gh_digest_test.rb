@@ -9,6 +9,8 @@ class HiveGhDigestTest < Minitest::Test
     calls = []
     responses = [
       [ JSON.generate([ row(1, "2026-06-13T10:00:00Z"), row(2, "2026-06-13T09:00:00Z") ]), "", ok ],
+      [ JSON.generate([ row(2, "2026-06-12T22:00:00Z"), row(3, "2026-06-12T21:00:00Z") ]), "", ok ],
+      [ JSON.generate([ row(1, "2026-06-13T10:00:00Z"), row(2, "2026-06-13T09:00:00Z") ]), "", ok ],
       [ JSON.generate([ row(2, "2026-06-12T22:00:00Z"), row(3, "2026-06-12T21:00:00Z") ]), "", ok ]
     ]
 
@@ -23,7 +25,7 @@ class HiveGhDigestTest < Minitest::Test
 
       assert_equal [ 1, 2, 3 ], rows.map { |item| item.fetch("number") }
     end
-    assert_equal 2, calls.size
+    assert_equal 4, calls.size
     assert calls.all? { |args| args.include?("--hostname") && args.include?("github.example.com") }
     assert_includes calls.last.last, "page=2"
   end
@@ -56,6 +58,8 @@ class HiveGhDigestTest < Minitest::Test
     merged = row(2, "2026-06-12T22:00:00Z")
     responses = [
       [ JSON.generate([ closed, merged ]), "", ok ],
+      [ JSON.generate([]), "", ok ],
+      [ JSON.generate([ closed, merged ]), "", ok ],
       [ JSON.generate([]), "", ok ]
     ]
 
@@ -64,6 +68,26 @@ class HiveGhDigestTest < Minitest::Test
         repository: "owner/repo", host: "github.com", window_start: Time.utc(2026, 6, 13)
       )
       assert_equal [ 2 ], rows.map { |item| item.fetch("number") }
+    end
+  end
+
+  def test_merged_pr_candidates_retries_until_page_number_snapshot_is_stable
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    first_page = [ row(1, "2026-06-13T12:00:00Z"), row(2, "2026-06-13T11:00:00Z") ]
+    shifted_page = [ row(2, "2026-06-12T22:00:00Z"), row(3, "2026-06-12T21:00:00Z") ]
+    stable_page = [ row(3, "2026-06-13T13:00:00Z"), row(1, "2026-06-13T12:00:00Z") ]
+    stable_tail = [ row(2, "2026-06-12T22:00:00Z"), row(4, "2026-06-12T21:00:00Z") ]
+    responses = [
+      first_page, shifted_page,
+      stable_page, stable_tail,
+      stable_page, stable_tail
+    ].map { |page| [ JSON.generate(page), "", ok ] }
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { responses.shift }) do
+      rows = Hive::Gh.digest_merged_pr_candidates(
+        repository: "owner/repo", host: "github.com", window_start: Time.utc(2026, 6, 13)
+      )
+      assert_equal [ 3, 1, 2, 4 ], rows.map { |row| row.fetch("number") }
     end
   end
 
@@ -101,6 +125,23 @@ class HiveGhDigestTest < Minitest::Test
     assert calls.all? { |args| args.include?("--hostname") && args.include?("github.example.com") }
     assert calls[1].include?("Accept: application/vnd.github.diff")
     assert calls[2].include?("--paginate")
+  end
+
+  def test_digest_text_preserves_valid_non_ascii_binary_output_and_rejects_invalid_utf8
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    unicode = "日本語の変更".b
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { [ unicode, "", ok ] }) do
+      assert_equal "日本語の変更", Hive::Gh.digest_pr_diff(
+        repository: "owner/repo", host: "github.com", number: 7
+      )
+    end
+
+    invalid = "\xff".b
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { [ invalid, "", ok ] }) do
+      assert_match(/invalid UTF-8/, assert_raises(Hive::GhError) {
+        Hive::Gh.digest_pr_diff(repository: "owner/repo", host: "github.com", number: 7)
+      }.message)
+    end
   end
 
   def test_candidate_pagination_rejects_page_shape_order_and_invalid_limits

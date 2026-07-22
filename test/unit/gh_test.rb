@@ -64,6 +64,20 @@ class GhUnitTest < Minitest::Test
     assert_match(/1024-byte safety ceiling/, error.message)
   end
 
+  def test_capture3_can_stream_stdout_directly_to_private_file
+    with_tmp_dir do |dir|
+      path = File.join(dir, "stdout.txt")
+      out, _err, status = Hive::Gh.capture3(
+        RbConfig.ruby, "-e", "STDOUT.write('日本語')",
+        timeout_sec: 5, max_stdout_bytes: 1024, stdout_path: path
+      )
+      assert status.success?
+      assert_equal "", out
+      assert_equal "日本語", File.binread(path).force_encoding(Encoding::UTF_8)
+      assert_equal 0o600, File.stat(path).mode & 0o777
+    end
+  end
+
   # --- pr_frontmatter ---------------------------------------------------
 
   def test_pr_frontmatter_returns_empty_for_missing_file

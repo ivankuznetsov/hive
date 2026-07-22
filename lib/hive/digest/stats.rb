@@ -41,7 +41,7 @@ module Hive
       def for_repositories(repositories)
         rows = Array(repositories)
         by_repository = rows.to_h do |repository|
-          [ repository.target.repository, aggregate(repository.pull_requests) ]
+          [ repository.target.key, aggregate(repository.pull_requests) ]
         end
         pull_requests = rows.flat_map(&:pull_requests)
         warnings = pull_requests.filter_map do |pr|

@@ -19,6 +19,8 @@ module Hive
         per_repository: MAX_REPOSITORY_EVIDENCE_BYTES,
         per_digest: MAX_DIGEST_EVIDENCE_BYTES
       }.freeze
+      PEM_BEGIN = /-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY(?: BLOCK)?-----/
+      PEM_END = /-----END (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY(?: BLOCK)?-----/
 
       def initialize(gh: Hive::Gh, cfg: nil, logger: Logger.new($stderr), scratch_root: nil,
                      limits: LIMITS, redactor: Hive::SecretPatterns)
@@ -38,7 +40,8 @@ module Hive
         warnings = []
         @digest_bytes = 0
 
-        with_scratch_dir do |run_dir|
+        run_dir = create_scratch_dir
+        begin
           Array(targets).each do |target|
             successes << collect_repository(
               target, local_date: local_date, window_start: window_start,
@@ -50,14 +53,18 @@ module Hive
             warnings << failure
             @logger&.warn("digest collector: #{failure.message}")
           end
-        end
 
-        CollectionReport.new(
-          resolved_count: Array(targets).size,
-          repositories: successes,
-          failures: failures,
-          warnings: warnings
-        )
+          CollectionReport.new(
+            resolved_count: Array(targets).size,
+            repositories: successes,
+            failures: failures,
+            warnings: warnings,
+            evidence_root: run_dir
+          )
+        rescue Exception
+          FileUtils.rm_rf(run_dir)
+          raise
+        end
       end
 
       private
@@ -107,35 +114,48 @@ module Hive
         files = @gh.digest_pr_files(
           repository: target.repository, host: target.host, number: number, cfg: @cfg
         )
-        body = detail.fetch("body").to_s
-        diff = @gh.digest_pr_diff(
-          repository: target.repository, host: target.host, number: number, cfg: @cfg,
-          max_bytes: remaining_diff_bytes(body.bytesize, repository_bytes: repository_bytes)
-        )
-        validate_files_and_diff!(target, number, detail, files, diff)
-
-        consumed = body.bytesize + diff.bytesize
-        enforce_pr_limit!(consumed)
-        @digest_bytes += consumed
-        if @digest_bytes > @limits.fetch(:per_digest)
-          raise Hive::GhError,
-                "digest evidence exceeds the #{MAX_DIGEST_EVIDENCE_BYTES}-byte safety ceiling"
-        end
-
         pr_dir = File.join(repo_dir, "pr-#{number}")
         FileUtils.mkdir_p(pr_dir, mode: 0o700)
         File.chmod(0o700, pr_dir)
+        body = detail.fetch("body").to_s
         body_path = private_write(File.join(pr_dir, "body.raw"), body)
-        diff_path = private_write(File.join(pr_dir, "diff.raw"), diff)
+        diff_path = File.join(pr_dir, "diff.raw")
         begin
+          diff_bytes = collect_diff_to_file(
+            target, number, path: diff_path,
+            max_bytes: remaining_diff_bytes(body.bytesize, repository_bytes: repository_bytes)
+          )
+          consumed = body.bytesize + diff_bytes
+          enforce_pr_limit!(consumed)
+          @digest_bytes += consumed
+          if @digest_bytes > @limits.fetch(:per_digest)
+            raise Hive::GhError,
+                  "digest evidence exceeds the #{MAX_DIGEST_EVIDENCE_BYTES}-byte safety ceiling"
+          end
+
+          body_evidence = redact_evidence_file(
+            body_path, File.join(pr_dir, "body.redacted"),
+            target: target, number: number, warnings: warnings
+          )
+          diff_evidence = redact_evidence_file(
+            diff_path, File.join(pr_dir, "diff.redacted"),
+            target: target, number: number, warnings: warnings
+          )
+          validate_files_and_diff!(target, number, detail, files, diff_evidence)
           redacted = {
-            "body" => redact_evidence(body, target: target, number: number, warnings: warnings),
-            "diff" => redact_evidence(diff, target: target, number: number, warnings: warnings),
+            "body" => body_evidence,
+            "diff" => diff_evidence,
             "files" => files.map { |file| file.fetch("filename").to_s }
           }
-          manifest_path = private_write(File.join(pr_dir, "evidence.json"), JSON.generate(redacted))
+          evidence_metadata = {
+            "body" => evidence_metadata(body_evidence),
+            "diff" => evidence_metadata(diff_evidence),
+            "files" => redacted.fetch("files")
+          }
+          manifest_content = JSON.generate(evidence_metadata)
+          manifest_path = private_write(File.join(pr_dir, "evidence.json"), manifest_content)
           checksum = ::Digest::SHA256.file(manifest_path).hexdigest
-          unless checksum == ::Digest::SHA256.hexdigest(File.binread(manifest_path))
+          unless checksum == ::Digest::SHA256.hexdigest(manifest_content)
             raise Hive::GhError, "redacted evidence checksum mismatch for #{target.repository}##{number}"
           end
 
@@ -144,6 +164,22 @@ module Hive
           FileUtils.rm_f(body_path) if body_path
           FileUtils.rm_f(diff_path) if diff_path
         end
+      end
+
+      def collect_diff_to_file(target, number, path:, max_bytes:)
+        if @gh.respond_to?(:digest_pr_diff_to_file)
+          return @gh.digest_pr_diff_to_file(
+            repository: target.repository, host: target.host, number: number,
+            path: path, cfg: @cfg, max_bytes: max_bytes
+          )
+        end
+
+        diff = @gh.digest_pr_diff(
+          repository: target.repository, host: target.host, number: number,
+          cfg: @cfg, max_bytes: max_bytes
+        )
+        private_write(path, diff)
+        diff.bytesize
       end
 
       def build_metadata(target, doc, warnings)
@@ -192,7 +228,7 @@ module Hive
                 "changed-file count mismatch for #{target.repository}##{number}: " \
                 "detail=#{expected_count}, files=#{file_paths.uniq.size}"
         end
-        if expected_count.positive? && diff.to_s.empty?
+        if expected_count.positive? && diff.empty?
           raise Hive::GhError, "raw diff is empty for #{target.repository}##{number}"
         end
 
@@ -209,34 +245,57 @@ module Hive
           next unless line.start_with?("diff --git ")
 
           payload = line.delete_suffix("\n").delete_suffix("\r").delete_prefix("diff --git ")
-          path =
-            if payload.start_with?('"')
-              _old_path, offset = decode_git_quoted_path(payload, 0)
-              offset += 1 while payload.getbyte(offset) == 32
-              new_path, final_offset = decode_git_quoted_path(payload, offset)
-              unless payload.byteslice(final_offset..).to_s.strip.empty?
-                raise Hive::GhError, "raw diff contains an invalid quoted file header"
-              end
-              new_path
-            else
-              matches = expected_paths.select { |candidate| payload.end_with?(" b/#{candidate}") }
-              if matches.size > 1
-                raise Hive::GhError, "raw diff contains an ambiguous file header"
-              end
-              if matches.one?
-                "b/#{matches.first}"
-              else
-                parsed = payload.match(/\Aa\/(.+) b\/(.+)\z/)
-                raise Hive::GhError, "raw diff contains an invalid file header" unless parsed
-
-                "b/#{parsed[2]}"
-              end
-            end
+          path = parse_diff_header_paths(payload, expected_paths: expected_paths)
           unless path.start_with?("b/")
             raise Hive::GhError, "raw diff contains an invalid destination path"
           end
           path.delete_prefix("b/")
         end
+      end
+
+      def parse_diff_header_paths(payload, expected_paths:)
+        destination, destination_offset = quoted_destination(payload)
+        unless destination
+          matches = expected_paths.select { |candidate| payload.end_with?(" b/#{candidate}") }
+          raise Hive::GhError, "raw diff contains an ambiguous file header" if matches.size > 1
+          if matches.one?
+            destination = "b/#{matches.first}"
+            destination_offset = payload.bytesize - destination.bytesize
+          else
+            separator = payload.rindex(" b/")
+            raise Hive::GhError, "raw diff contains an invalid file header" unless separator
+
+            destination_offset = separator + 1
+            destination = payload.byteslice(destination_offset..)
+          end
+        end
+
+        source = payload.byteslice(0...destination_offset).to_s.rstrip
+        if source.start_with?('"')
+          decoded, final_offset = decode_git_quoted_path(source, 0)
+          unless final_offset == source.bytesize && decoded.start_with?("a/")
+            raise Hive::GhError, "raw diff contains an invalid source path"
+          end
+        elsif !source.start_with?("a/") || source == "a/"
+          raise Hive::GhError, "raw diff contains an invalid source path"
+        end
+        destination
+      end
+
+      def quoted_destination(payload)
+        offsets = []
+        payload.bytes.each_index do |index|
+          offsets << index if payload.getbyte(index) == 34 && index.positive? && payload.getbyte(index - 1) == 32
+        end
+        offsets.reverse_each do |offset|
+          destination, final_offset = decode_git_quoted_path(payload, offset)
+          next unless final_offset == payload.bytesize && destination.start_with?("b/")
+
+          return [ destination, offset ]
+        rescue Hive::GhError
+          next
+        end
+        nil
       end
 
       GIT_QUOTED_ESCAPES = {
@@ -299,11 +358,62 @@ module Hive
         raw = text.to_s
         hits = @redactor.scan(raw)
         redacted = @redactor.redact(raw)
-        unless @redactor.scan(redacted).empty?
+        verify_redaction!(redacted)
+        add_redaction_warning(target, number, hits.map { |hit| hit.fetch(:name).to_s }.tally, warnings)
+        redacted
+      rescue EncodingError, SystemCallError => e
+        raise Hive::GhError, "safe evidence redaction failed: #{e.class}"
+      end
+
+      def redact_evidence_file(source_path, destination_path, target:, number:, warnings:)
+        counts = Hash.new(0)
+        digest = ::Digest::SHA256.new
+        bytes = 0
+        in_private_key = false
+        File.open(destination_path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |output|
+          File.foreach(source_path, mode: "rb") do |raw_line|
+            line = raw_line.dup.force_encoding(Encoding::UTF_8)
+            raise EncodingError, "invalid UTF-8 evidence" unless line.valid_encoding?
+
+            if in_private_key
+              in_private_key = false if line.match?(PEM_END)
+              next
+            end
+            if line.match?(PEM_BEGIN)
+              replacement = "[REDACTED:pem_private_key]\n"
+              counts["pem_private_key"] += 1
+              in_private_key = true unless line.match?(PEM_END)
+            else
+              hits = @redactor.scan(line)
+              hits.each { |hit| counts[hit.fetch(:name).to_s] += 1 }
+              replacement = @redactor.redact(line)
+              verify_redaction!(replacement)
+            end
+            output.write(replacement)
+            digest.update(replacement)
+            bytes += replacement.bytesize
+          end
+        end
+        File.chmod(0o600, destination_path)
+        checksum = digest.hexdigest
+        unless ::Digest::SHA256.file(destination_path).hexdigest == checksum
+          raise Hive::GhError, "redacted evidence checksum mismatch for #{target.repository}##{number}"
+        end
+        add_redaction_warning(target, number, counts, warnings)
+        EvidenceFile.new(path: destination_path, bytes: bytes, sha256: checksum)
+      rescue EncodingError, SystemCallError => e
+        FileUtils.rm_f(destination_path)
+        raise Hive::GhError, "safe evidence redaction failed: #{e.class}"
+      end
+
+      def verify_redaction!(text)
+        unless @redactor.scan(text).empty?
           raise Hive::GhError, "safe evidence redaction could not be verified"
         end
-        unless hits.empty?
-          counts = hits.map { |hit| hit.fetch(:name).to_s }.tally
+      end
+
+      def add_redaction_warning(target, number, counts, warnings)
+        unless counts.empty?
           scope = number ? "#{target.repository}##{number}" : target.repository
           warnings << Warning.new(
             kind: "evidence_redacted",
@@ -313,9 +423,10 @@ module Hive
                      "#{counts.sort.map { |name, count| "#{name}=#{count}" }.join(', ')}"
           )
         end
-        redacted
-      rescue EncodingError, SystemCallError => e
-        raise Hive::GhError, "safe evidence redaction failed: #{e.class}"
+      end
+
+      def evidence_metadata(evidence)
+        evidence.to_h
       end
 
       def enforce_pr_limit!(bytes)
@@ -364,15 +475,14 @@ module Hive
         path
       end
 
-      def with_scratch_dir
+      def create_scratch_dir
         if @scratch_root
           FileUtils.mkdir_p(@scratch_root, mode: 0o700)
           File.chmod(0o700, @scratch_root)
         end
-        Dir.mktmpdir("hive-digest-evidence-", @scratch_root) do |dir|
-          File.chmod(0o700, dir)
-          yield dir
-        end
+        dir = Dir.mktmpdir("hive-digest-evidence-", @scratch_root)
+        File.chmod(0o700, dir)
+        dir
       end
 
       def safe_component(value)

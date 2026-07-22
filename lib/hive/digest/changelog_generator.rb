@@ -36,6 +36,10 @@ module Hive
       DEFAULT_TIMEOUT_SEC = 1800
       RUN_DIR_RETENTION = 20
       FACT_KINDS = %w[material no_user_facing_change].freeze
+      TITLE_DECORATION_TOKENS = %w[
+        change changed changes update updated updates implementation implement implemented
+        fix fixed fixes release released releases migration migrate migrated pr pull request
+      ].freeze
 
       RunnerTask = Data.define(:folder, :state_file, :log_dir, :slug, :stage_name)
       TemplateBindings = Struct.new(
@@ -43,6 +47,60 @@ module Hive
         keyword_init: true
       ) do
         def binding_for_erb = binding
+      end
+
+      class EvidenceChunkWriter
+        NON_CONTENT_BYTES = [ 0, 9, 10, 11, 12, 13, 32 ].freeze
+
+        def initialize(id:, kind:, path:, tag:)
+          @id = id
+          @kind = kind
+          @path = path
+          @closing = "</#{tag}>\n"
+          @digest = ::Digest::SHA256.new
+          @bytes = 0
+          @nonblank = false
+          @ends_with_newline = true
+          @file = File.open(path, File::WRONLY | File::CREAT | File::TRUNC, 0o600)
+          append("<#{tag}>\n")
+        end
+
+        def write(line)
+          value = line.to_s
+          @nonblank ||= value.each_byte.any? { |byte| !NON_CONTENT_BYTES.include?(byte) }
+          @ends_with_newline = value.end_with?("\n")
+          append(value)
+        end
+
+        def finish
+          unless @nonblank
+            @file.close
+            FileUtils.rm_f(@path)
+            return nil
+          end
+
+          append("\n") unless @ends_with_newline
+          append(@closing)
+          @file.close
+          File.chmod(0o600, @path)
+          {
+            "id" => @id,
+            "kind" => @kind,
+            "path" => @path,
+            "bytes" => @bytes,
+            "sha256" => @digest.hexdigest
+          }
+        ensure
+          @file.close unless @file.closed?
+        end
+
+        private
+
+        def append(value)
+          @file.write(value)
+          @digest.update(value)
+          @bytes += value.bytesize
+        end
       end
 
       def initialize(cfg:, run_root: nil, logger: Logger.new($stderr), agent_factory: nil,
@@ -60,25 +118,30 @@ module Hive
 
         local_date = LondonWindow.parse_date(date)
         dir = run_dir(local_date)
-        output_path = File.join(dir, "changelog.json")
+        agent_dir = File.join(dir, "agent")
+        policy_dir = File.join(dir, "control")
+        FileUtils.mkdir_p(agent_dir, mode: 0o700)
+        File.chmod(0o700, agent_dir)
+        output_path = File.join(agent_dir, "changelog.json")
         tag = Hive::Stages::Base.user_supplied_tag
-        manifest, manifest_path, chunk_dir = materialize_manifest(rows, dir: dir, tag: tag)
+        manifest, manifest_path, = materialize_manifest(rows, dir: agent_dir, tag: tag)
         prompt = render_prompt(
           local_date, manifest_path: manifest_path, output_path: output_path, user_supplied_tag: tag
         )
-        task = runner_task(dir: dir, output_path: output_path, date: local_date)
-        result = agent_for(task, prompt, output_path).run!
+        task = runner_task(dir: agent_dir, output_path: output_path, date: local_date)
+        result = agent_for(task, prompt, output_path, policy_dir: policy_dir).run!
         unless result.is_a?(Hash) && result[:status] == :ok
           raise_generation_error(
-            "digest changelog agent failed: #{agent_error_message(result)}", output_path: output_path
+            "digest changelog agent failed: #{safe_agent_error(result)}", output_path: output_path
           )
         end
 
         changelog = self.class.parse_output!(
-          output_path, repositories: rows, manifest: manifest, logger: @logger
+          output_path, repositories: rows, manifest: manifest, logger: @logger, redactor: @redactor
         )
         changelog = sanitize_changelog(changelog)
         retain_ledger(changelog, manifest, dir: dir)
+        retained = true
         changelog
       rescue GenerationError
         raise
@@ -88,9 +151,7 @@ module Hive
           output_path: defined?(output_path) ? output_path : nil
         )
       ensure
-        FileUtils.rm_f(manifest_path) if defined?(manifest_path) && manifest_path
-        FileUtils.rm_rf(chunk_dir) if defined?(chunk_dir) && chunk_dir
-        FileUtils.rm_f(output_path) if defined?(output_path) && output_path
+        cleanup_run_dir(dir, retain_ledger: defined?(retained) && retained) if defined?(dir) && dir
       end
 
       def render_prompt(date, manifest_path:, output_path:, user_supplied_tag: Hive::Stages::Base.user_supplied_tag)
@@ -106,15 +167,20 @@ module Hive
       end
 
       class << self
-        def parse_output!(output_path, repositories:, manifest:, logger: Logger.new($stderr))
+        def parse_output!(output_path, repositories:, manifest:, logger: Logger.new($stderr),
+                          redactor: Hive::SecretPatterns)
           unless File.file?(output_path) && File.size(output_path).positive?
             raise GenerationError, "digest changelog output is missing or empty: #{output_path}"
           end
           document = JSON.parse(File.read(output_path))
           validate_document!(document, repositories: repositories, manifest: manifest)
-        rescue JSON::ParserError => e
-          logger&.error("digest changelog output was not valid JSON: #{e.message}")
-          raise GenerationError, "digest changelog output was not valid JSON: #{e.message}"
+        rescue JSON::ParserError
+          logger&.error("digest changelog output was not valid JSON")
+          raise GenerationError, "digest changelog output was not valid JSON"
+        rescue GenerationError => e
+          message = safe_validation_message(e.message, redactor: redactor)
+          logger&.error(message)
+          raise GenerationError, message
         end
 
         def validate_document!(document, repositories:, manifest:)
@@ -184,7 +250,7 @@ module Hive
         def validate_projects!(rows, repositories:, facts:)
           raise GenerationError, "digest changelog projects must be an array" unless rows.is_a?(Array)
 
-          expected_repositories = repositories.map { |repo| repo.target.repository }
+          expected_repositories = repositories.map { |repo| repo.target.key }
           by_repository = {}
           rows.each do |row|
             require_keys!(row, %w[repository significance pull_requests], "project")
@@ -198,7 +264,7 @@ module Hive
 
           covered_material = {}
           projects = repositories.map do |repository|
-            name = repository.target.repository
+            name = repository.target.key
             row = by_repository.fetch(name)
             significance = one_line!(row.fetch("significance"), "project significance for #{name}")
             generated_prs = validate_project_prs!(
@@ -234,14 +300,14 @@ module Hive
             bullets = bullet_rows.map do |bullet|
               require_keys!(bullet, %w[text fact_ids], "bullet")
               text = nonblank!(bullet.fetch("text"), "bullet text")
-              if normalize_text(text) == normalize_text(pr.title)
+              if title_only_bullet?(text, pr.title)
                 raise GenerationError, "digest changelog repeated the raw title for #{pr.repository}##{pr.number}"
               end
               fact_ids = string_array!(bullet.fetch("fact_ids"), "bullet fact_ids")
               fact_ids.each do |fact_id|
                 fact = facts[fact_id]
                 raise GenerationError, "digest changelog cited unknown fact #{fact_id.inspect}" unless fact
-                unless pr_key(fact.repository, fact.pr_number) == pr_key(pr.repository, pr.number)
+                unless pr_key(fact.repository, fact.pr_number) == pr_key(pr.target.key, pr.number)
                   raise GenerationError, "digest changelog cited fact #{fact_id.inspect} from the wrong PR"
                 end
                 covered_material[fact_id] = true if fact.kind == "material"
@@ -254,7 +320,7 @@ module Hive
 
         def pr_index(repositories)
           Array(repositories).flat_map(&:pull_requests).to_h do |pr|
-            [ pr_key(pr.repository, pr.number), pr ]
+            [ pr_key(pr.target.key, pr.number), pr ]
           end
         end
 
@@ -314,6 +380,30 @@ module Hive
           value.to_s.unicode_normalize(:nfkc).downcase.gsub(/[^\p{L}\p{N}]+/u, " ").strip
         end
 
+        def title_only_bullet?(text, title)
+          bullet_tokens = normalize_text(text).split
+          title_tokens = normalize_text(title).split
+          return true if bullet_tokens == title_tokens
+          return false if title_tokens.empty? || bullet_tokens.length < title_tokens.length
+
+          last_start = bullet_tokens.length - title_tokens.length
+          (0..last_start).any? do |offset|
+            next false unless bullet_tokens.slice(offset, title_tokens.length) == title_tokens
+
+            residual = bullet_tokens.take(offset) + bullet_tokens.drop(offset + title_tokens.length)
+            residual.empty? || residual.all? { |token| TITLE_DECORATION_TOKENS.include?(token) }
+          end
+        end
+
+        def safe_validation_message(message, redactor:)
+          redacted = redactor.redact(message.to_s)
+          return "digest changelog output failed validation" unless redactor.scan(redacted).empty?
+
+          redacted
+        rescue EncodingError, SystemCallError
+          "digest changelog output failed validation"
+        end
+
         def pr_key(repository, number)
           "#{repository}##{Integer(number)}"
         rescue ArgumentError, TypeError
@@ -329,13 +419,11 @@ module Hive
         File.chmod(0o700, chunk_dir)
         projects = repositories.map do |repository|
           {
-            "repository" => repository.target.repository,
+            "repository" => repository.target.key,
             "project_name" => fenced(repository.target.project_name, tag),
             "description" => fenced(repository.metadata.description, tag),
             "pull_requests" => repository.pull_requests.map do |pr|
-              evidence = evidence_chunks(pr).map do |chunk|
-                write_chunk(chunk, chunk_dir: chunk_dir, tag: tag)
-              end
+              evidence = write_evidence_chunks(pr, chunk_dir: chunk_dir, tag: tag)
               {
                 "number" => pr.number,
                 "title" => fenced(pr.title, tag),
@@ -350,87 +438,83 @@ module Hive
         [ manifest, manifest_path, chunk_dir ]
       end
 
-      def evidence_chunks(pr)
-        prefix = "#{::Digest::SHA256.hexdigest(pr.repository.downcase)[0, 12]}-pr#{pr.number}"
-        body_chunks(pr.body).each_with_index.map do |text, index|
-          { id: "#{prefix}-body-#{format('%03d', index + 1)}", kind: "body_section", text: text }
-        end + diff_chunks(pr.diff, prefix: prefix)
+      def write_evidence_chunks(pr, chunk_dir:, tag:)
+        prefix = "#{::Digest::SHA256.hexdigest(pr.target.key)[0, 12]}-pr#{pr.number}"
+        write_body_chunks(pr.body, prefix: prefix, chunk_dir: chunk_dir, tag: tag) +
+          write_diff_chunks(pr.diff, prefix: prefix, chunk_dir: chunk_dir, tag: tag)
       end
 
-      def body_chunks(body)
-        text = body.to_s.strip
-        return [] if text.empty?
-
-        sections = []
-        current = []
-        text.each_line do |line|
-          if line.match?(/\A\s{0,3}\#{1,6}\s+\S/) && !current.empty?
-            sections << current.join.rstrip
-            current = []
+      def write_body_chunks(body, prefix:, chunk_dir:, tag:)
+        chunks = []
+        writer = nil
+        index = 0
+        each_evidence_line(body) do |line|
+          if line.match?(/\A\s{0,3}\#{1,6}\s+\S/) && writer
+            chunks << writer.finish
+            writer = nil
           end
-          current << line
+          unless writer
+            index += 1
+            writer = chunk_writer(
+              id: "#{prefix}-body-#{format('%03d', index)}", kind: "body_section",
+              chunk_dir: chunk_dir, tag: tag
+            )
+          end
+          writer.write(line)
         end
-        sections << current.join.rstrip unless current.empty?
-        sections.reject(&:empty?)
+        chunks << writer.finish if writer
+        chunks.compact
       end
 
-      def diff_chunks(diff, prefix:)
+      def write_diff_chunks(diff, prefix:, chunk_dir:, tag:)
         chunks = []
         file_index = 0
         hunk_index = 0
-        file_lines = []
-        hunk_lines = nil
-        flush_hunk = lambda do
-          next unless hunk_lines
-
-          hunk_index += 1
-          chunks << {
-            id: "#{prefix}-hunk-#{format('%03d', file_index)}-#{format('%03d', hunk_index)}",
-            kind: "diff_hunk", text: hunk_lines.join.rstrip
-          }
-          hunk_lines = nil
-        end
-        flush_file = lambda do
-          flush_hunk.call
-          unless file_lines.empty?
-            chunks << {
-              id: "#{prefix}-file-#{format('%03d', file_index)}",
-              kind: "diff_file", text: file_lines.join.rstrip
-            }
-          end
-          file_lines = []
-        end
-
-        diff.to_s.each_line do |line|
+        file_writer = nil
+        hunk_writer = nil
+        each_evidence_line(diff) do |line|
           if line.start_with?("diff --git ")
-            flush_file.call if file_index.positive?
+            chunks << hunk_writer.finish if hunk_writer
+            chunks << file_writer.finish if file_writer
             file_index += 1
             hunk_index = 0
-            file_lines << line
+            hunk_writer = nil
+            file_writer = chunk_writer(
+              id: "#{prefix}-file-#{format('%03d', file_index)}", kind: "diff_file",
+              chunk_dir: chunk_dir, tag: tag
+            )
+            file_writer.write(line)
           elsif line.start_with?("@@")
-            flush_hunk.call
-            hunk_lines = [ line ]
-          elsif hunk_lines
-            hunk_lines << line
+            chunks << hunk_writer.finish if hunk_writer
+            hunk_index += 1
+            hunk_writer = chunk_writer(
+              id: "#{prefix}-hunk-#{format('%03d', file_index)}-#{format('%03d', hunk_index)}",
+              kind: "diff_hunk", chunk_dir: chunk_dir, tag: tag
+            )
+            hunk_writer.write(line)
+          elsif hunk_writer
+            hunk_writer.write(line)
+          elsif file_writer
+            file_writer.write(line)
           else
-            file_lines << line
+            next unless line.each_byte.any? { |byte| !EvidenceChunkWriter::NON_CONTENT_BYTES.include?(byte) }
+
+            raise GenerationError, "digest raw diff did not start with a file header"
           end
         end
-        flush_file.call if file_index.positive?
-        chunks
+        chunks << hunk_writer.finish if hunk_writer
+        chunks << file_writer.finish if file_writer
+        chunks.compact
       end
 
-      def write_chunk(chunk, chunk_dir:, tag:)
-        path = File.join(chunk_dir, "#{chunk.fetch(:id)}.txt")
-        content = "<#{tag}>\n#{chunk.fetch(:text)}\n</#{tag}>\n"
-        private_write(path, content)
-        {
-          "id" => chunk.fetch(:id),
-          "kind" => chunk.fetch(:kind),
-          "path" => path,
-          "bytes" => content.bytesize,
-          "sha256" => ::Digest::SHA256.hexdigest(content)
-        }
+      def each_evidence_line(evidence, &block)
+        return evidence.each_line(&block) if evidence.is_a?(EvidenceFile)
+
+        evidence.to_s.each_line(&block)
+      end
+
+      def chunk_writer(id:, kind:, chunk_dir:, tag:)
+        EvidenceChunkWriter.new(id: id, kind: kind, path: File.join(chunk_dir, "#{id}.txt"), tag: tag)
       end
 
       def fenced(text, tag)
@@ -451,14 +535,19 @@ module Hive
 
       def sanitize_changelog(changelog)
         warnings = []
+        display_repository = changelog.projects.to_h do |project|
+          [ project.repository.target.key, project.repository.target.repository ]
+        end
+        fact_ids = sanitize_fact_ids(changelog.facts, warnings: warnings, display_repository: display_repository)
         facts = changelog.facts.map do |fact|
+          repository = display_repository.fetch(fact.repository)
           GeneratedFact.new(
-            id: fact.id,
+            id: fact_ids.fetch(fact.id),
             repository: fact.repository,
             pr_number: fact.pr_number,
             kind: fact.kind,
             text: sanitize_text(
-              fact.text, repository: fact.repository, pr_number: fact.pr_number, warnings: warnings
+              fact.text, repository: repository, pr_number: fact.pr_number, warnings: warnings
             ),
             evidence_ids: fact.evidence_ids
           )
@@ -472,7 +561,7 @@ module Hive
                 text: sanitize_text(
                   bullet.text, repository: repository, pr_number: number, warnings: warnings
                 ),
-                fact_ids: bullet.fact_ids
+                fact_ids: bullet.fact_ids.map { |fact_id| fact_ids.fetch(fact_id) }.freeze
               )
             end
             GeneratedPullRequest.new(pull_request: generated_pr.pull_request, bullets: bullets.freeze)
@@ -486,6 +575,36 @@ module Hive
           )
         end
         Changelog.new(projects: projects.freeze, facts: facts.freeze, warnings: warnings.freeze)
+      end
+
+      def sanitize_fact_ids(facts, warnings:, display_repository:)
+        scanned_facts = facts.map { |fact| [ fact, @redactor.scan(fact.id.to_s) ] }
+        reserved = scanned_facts.filter_map do |fact, hits|
+          fact.id if hits.empty?
+        end.to_h { |id| [ id, true ] }
+        sequence = 0
+        scanned_facts.to_h do |fact, hits|
+          if hits.empty?
+            [ fact.id, fact.id ]
+          else
+            begin
+              sequence += 1
+              replacement = format("redacted-fact-%04d", sequence)
+            end while reserved.key?(replacement)
+            reserved[replacement] = true
+            repository = display_repository.fetch(fact.repository)
+            warnings << Warning.new(
+              kind: "generated_identifier_redacted",
+              repository: repository,
+              pr_number: fact.pr_number,
+              message: "Redacted a recognized secret pattern from a generated fact identifier for " \
+                       "#{repository}##{fact.pr_number}"
+            )
+            [ fact.id, replacement ]
+          end
+        end
+      rescue EncodingError, SystemCallError => e
+        raise GenerationError, "digest generated-identifier redaction failed: #{e.class}"
       end
 
       def sanitize_text(text, repository:, pr_number:, warnings:)
@@ -572,7 +691,7 @@ module Hive
         )
       end
 
-      def agent_for(task, prompt, output_path)
+      def agent_for(task, prompt, output_path, policy_dir: nil)
         return @agent_factory.call(task: task, prompt: prompt, output_path: output_path) if @agent_factory
 
         profile = Hive::AgentProfiles.lookup(agent_name, cfg: @cfg)
@@ -580,6 +699,7 @@ module Hive
           raise Hive::ConfigError,
                 "hive digest: agent #{profile.name.inspect} cannot enforce the confidential evidence runtime policy"
         end
+        policy_dir ||= File.join(File.dirname(task.folder), ".#{File.basename(task.folder)}-control")
         runtime_policy = Hive::WorkflowPackage::RuntimePolicy.compile(
           {
             "tools" => %w[Read Write],
@@ -591,7 +711,7 @@ module Hive
           },
           task_folder: task.folder,
           profile: profile,
-          policy_dir: File.join(task.folder, "policy")
+          policy_dir: policy_dir
         )
         Hive::Agent.new(
           task: task,
@@ -616,10 +736,18 @@ module Hive
       def budget_usd = @cfg.dig("budget_usd", "digest") || DEFAULT_BUDGET_USD
       def timeout_sec = @cfg.dig("timeout_sec", "digest") || DEFAULT_TIMEOUT_SEC
 
-      def agent_error_message(result)
-        return result.inspect unless result.is_a?(Hash)
+      def safe_agent_error(result)
+        value = if result.is_a?(Hash)
+          result[:error_message] || result[:status] || "unknown failure"
+        else
+          "unknown failure"
+        end
+        redacted = @redactor.redact(value.to_s)
+        return "unknown failure" unless @redactor.scan(redacted).empty?
 
-        result[:error_message] || result[:status] || result.inspect
+        redacted.lines.first.to_s.strip
+      rescue EncodingError, SystemCallError
+        "unknown failure"
       end
 
       def raise_generation_error(message, output_path:)
@@ -633,6 +761,18 @@ module Hive
         File.open(path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) { |file| file.write(content) }
         File.chmod(0o600, path)
         path
+      end
+
+      def cleanup_run_dir(dir, retain_ledger:)
+        retained = retain_ledger ? [ "ledger.json" ] : []
+        Dir.children(dir).each do |name|
+          next if retained.include?(name)
+
+          FileUtils.rm_rf(File.join(dir, name))
+        end
+      rescue SystemCallError => e
+        @logger&.warn("digest: run cleanup failed under #{dir}: #{e.class}")
+        raise GenerationError, "digest changelog private-run cleanup failed: #{e.class}"
       end
     end
   end

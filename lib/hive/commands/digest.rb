@@ -74,7 +74,7 @@ module Hive
 
       def project_payload(project, stats)
         repository = project.repository.target.repository
-        aggregate = stats.by_repository.fetch(repository)
+        aggregate = stats.by_repository.fetch(project.repository.target.key)
         payload = {
           "repository" => repository,
           "description" => project.significance,

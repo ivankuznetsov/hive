@@ -66,6 +66,7 @@ module Hive
     def scan(text)
       return [] if text.nil? || text.empty?
 
+      text = normalized_utf8(text)
       matches = []
       PATTERNS.each do |name, regex|
         text.scan(regex) do |_capture|
@@ -91,12 +92,16 @@ module Hive
     def redact(text)
       return "" if text.nil?
 
-      output = text.to_s.dup
-      output = output.encode("UTF-8", invalid: :replace, undef: :replace, replace: "?") unless output.encoding == Encoding::UTF_8
+      output = normalized_utf8(text)
       PATTERNS.each do |name, regex|
         output.gsub!(regex, "[REDACTED:#{name}]")
       end
       output
     end
+
+    def normalized_utf8(text)
+      text.to_s.dup.force_encoding(Encoding::UTF_8).scrub("?")
+    end
+    private_class_method :normalized_utf8
   end
 end

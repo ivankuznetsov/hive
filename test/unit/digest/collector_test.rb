@@ -28,6 +28,15 @@ class HiveDigestCollectorTest < Minitest::Test
       )
     end
 
+    def digest_pr_diff_to_file(repository:, host:, number:, path:, cfg: nil, max_bytes: nil)
+      value = digest_pr_diff(
+        repository: repository, host: host, number: number, cfg: cfg, max_bytes: max_bytes
+      )
+      File.binwrite(path, value)
+      File.chmod(0o600, path)
+      value.bytesize
+    end
+
     private
 
     def fetch(kind, key, call)
@@ -53,16 +62,19 @@ class HiveDigestCollectorTest < Minitest::Test
       assert_equal 1, report.collected_count
       assert_equal 1, report.pull_requests.size
       pr = report.pull_requests.first
-      assert_includes pr.body, "[REDACTED:github_token]"
-      assert_includes pr.diff, "[REDACTED:github_token]"
-      refute_includes pr.body, secret
+      assert_instance_of Hive::Digest::EvidenceFile, pr.body
+      assert_instance_of Hive::Digest::EvidenceFile, pr.diff
+      assert_includes File.binread(pr.body.path), "[REDACTED:github_token]"
+      assert_includes File.binread(pr.diff.path), "[REDACTED:github_token]"
+      refute_includes File.binread(pr.body.path), secret
       assert_equal [ "lib/change.rb" ], pr.files
       assert_equal 4, pr.additions
       assert_equal 2, pr.deletions
       assert_equal 3, pr.commits
       assert report.warnings.any? { |warning| warning.kind == "evidence_redacted" }
-      assert_empty Dir.children(scratch), "raw and redacted per-run scratch must be ephemeral"
       assert gh.calls.all? { |call| call.fetch(:host) == "github.example.com" }
+      report.cleanup!
+      assert_empty Dir.children(scratch), "raw and redacted per-run scratch must be ephemeral"
     end
   end
 
@@ -189,6 +201,7 @@ class HiveDigestCollectorTest < Minitest::Test
         )
         assert report.all_failed?
         assert_match(/checksum mismatch/, report.failures.first.message)
+        report.cleanup!
       end
       assert_empty Dir.children(scratch)
     end
@@ -232,7 +245,7 @@ class HiveDigestCollectorTest < Minitest::Test
       Date.new(2026, 6, 13), targets: [ target ]
     )
     assert report.all_failed?
-    assert_match(/unterminated quoted file path/, report.failures.first.message)
+    assert_match(/invalid file header/, report.failures.first.message)
   end
 
   def test_raw_diff_identity_accepts_spaces_and_git_c_quoted_unicode_paths
@@ -258,6 +271,38 @@ class HiveDigestCollectorTest < Minitest::Test
       Date.new(2026, 6, 13), targets: [ target ]
     )
     assert_equal [ unicode_path ], unicode_report.pull_requests.first.files
+  end
+
+  def test_raw_diff_identity_accepts_asymmetrically_quoted_renames
+    unicode_path = "lib/日本語.rb"
+    quoted_unicode_a = '"a/lib/\346\227\245\346\234\254\350\252\236.rb"'
+    quoted_unicode_b = '"b/lib/\346\227\245\346\234\254\350\252\236.rb"'
+
+    to_ascii = fake_gh(diff: <<~DIFF)
+      diff --git #{quoted_unicode_a} b/lib/ascii.rb
+      similarity index 100%
+      rename from lib/日本語.rb
+      rename to lib/ascii.rb
+    DIFF
+    to_ascii.data[:files]["owner/repo#7"] = [ { "filename" => "lib/ascii.rb" } ]
+    report = Hive::Digest::Collector.new(gh: to_ascii, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+    assert_equal [ "lib/ascii.rb" ], report.pull_requests.first.files
+    report.cleanup!
+
+    to_unicode = fake_gh(diff: <<~DIFF)
+      diff --git a/lib/ascii.rb #{quoted_unicode_b}
+      similarity index 100%
+      rename from lib/ascii.rb
+      rename to #{unicode_path}
+    DIFF
+    to_unicode.data[:files]["owner/repo#7"] = [ { "filename" => unicode_path } ]
+    report = Hive::Digest::Collector.new(gh: to_unicode, logger: nil).for_date(
+      Date.new(2026, 6, 13), targets: [ target ]
+    )
+    assert_equal [ unicode_path ], report.pull_requests.first.files
+    report.cleanup!
   end
 
   def test_redaction_verification_and_runtime_errors_fail_the_repository

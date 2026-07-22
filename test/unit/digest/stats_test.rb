@@ -49,6 +49,20 @@ class HiveDigestStatsTest < Minitest::Test
     assert_empty report.warnings
   end
 
+  def test_same_slug_on_different_hosts_keeps_distinct_repository_totals
+    public_target = target_for("github.com")
+    enterprise_target = target_for("github.example.com")
+    repositories = [
+      repository_for(public_target, [ pr_for(public_target, additions: 2) ]),
+      repository_for(enterprise_target, [ pr_for(enterprise_target, additions: 7) ])
+    ]
+
+    report = Hive::Digest::Stats.new.for_repositories(repositories)
+
+    assert_equal 2, report.by_repository.fetch(public_target.key).metric(:additions).value
+    assert_equal 7, report.by_repository.fetch(enterprise_target.key).metric(:additions).value
+  end
+
   def test_metric_guards_reject_impossible_coverage_and_values
     assert_raises(ArgumentError) do
       Hive::Digest::MetricTotal.new(value: 1, known_count: 2, contributor_count: 1)
@@ -86,6 +100,30 @@ class HiveDigestStatsTest < Minitest::Test
   def canonical_target
     @canonical_target ||= Hive::Digest::RepositoryTarget.new(
       project_name: "Project", path: "/tmp/project", repository: "owner/repo", host: "github.com"
+    )
+  end
+
+  def target_for(host)
+    Hive::Digest::RepositoryTarget.new(
+      project_name: host, path: "/tmp/#{host}", repository: "owner/repo", host: host
+    )
+  end
+
+  def repository_for(target, prs)
+    Hive::Digest::RepositoryCollection.new(
+      target: target,
+      metadata: Hive::Digest::RepositoryMetadata.new(
+        name: "owner/repo", description: target.host, url: "https://#{target.host}/owner/repo"
+      ),
+      pull_requests: prs
+    )
+  end
+
+  def pr_for(target, additions:)
+    Hive::Digest::PullRequest.new(
+      target: target, number: 7, title: "PR 7", url: "https://#{target.host}/owner/repo/pull/7",
+      merged_at: Time.utc(2026, 6, 13, 12), body: "Body", diff: "diff --git a/a b/a",
+      files: [ "a" ], additions: additions, deletions: 0, commits: 1
     )
   end
 end

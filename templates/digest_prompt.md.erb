@@ -31,7 +31,7 @@ Do not write anywhere else. The JSON must contain exactly these shapes:
   "facts": [
     {
       "id": "globally unique stable fact id",
-      "repository": "exact owner/name from the manifest",
+      "repository": "exact host/owner/name identity from the manifest",
       "number": 123,
       "kind": "material|no_user_facing_change",
       "text": "concrete fact or concrete no-change rationale",
@@ -40,7 +40,7 @@ Do not write anywhere else. The JSON must contain exactly these shapes:
   ],
   "projects": [
     {
-      "repository": "exact owner/name from the manifest",
+      "repository": "exact host/owner/name identity from the manifest",
       "significance": "One short plain-language sentence explaining why this project's changes matter.",
       "pull_requests": [
         {

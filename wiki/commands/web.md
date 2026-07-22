@@ -201,7 +201,12 @@ so the login gate can run.
   mutation at the native submit-bubble boundary and defers one refresh while
   the composer or a card action is in flight. It replays after a
   non-redirecting response; a successful redirect's fresh GET already
-  reconciles without racing the operator back to the old URL. This prevents a
+  reconciles without racing the operator back to the old URL. The final
+  submission admission stays at document scope across Stimulus morph
+  reconnects, the final redirect URL is guarded on the document root across
+  Turbo's body replacement, and both late refresh streams and their old-URL
+  replace visits remain suppressed until that URL is active.
+  This prevents a
   filesystem broadcast from aborting the mutation. The same guard keeps the
   Action Cable source permanent across morphs, remembers its first connection
   on a source-owned DOM attribute across Stimulus lifecycles and Turbo

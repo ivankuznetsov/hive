@@ -25,20 +25,23 @@ class KanbanBoardTest < ApplicationSystemTestCase
         document.documentElement.appendChild(stream)
       }, { once: true })
       document.addEventListener("turbo:submit-end", () => {
-        const stream = document.createElement("turbo-stream")
-        stream.setAttribute("action", "refresh")
-        document.documentElement.appendChild(stream)
+        setTimeout(() => {
+          const stream = document.createElement("turbo-stream")
+          stream.setAttribute("action", "refresh")
+          document.documentElement.appendChild(stream)
+        }, 0)
       }, { once: true })
     JS
-    click_button "Grid"
-    assert_current_path grid_path
+    click_status_view("Grid")
+    assert_current_path grid_path, wait: 10
     assert_selector "#status-grid .task-row", text: slug
+    assert_status_redirect_guard_cleared
 
     visit root_path
     assert_selector "#status-grid", wait: 5
 
-    click_button "Board"
-    assert_current_path board_path
+    click_status_view("Board")
+    assert_current_path board_path, wait: 10
     assert_selector "#status-board .kanban-card", text: slug
   end
 
@@ -77,13 +80,13 @@ class KanbanBoardTest < ApplicationSystemTestCase
     create_task!(hidden_project, "Hide this other project")
     visit dev_login_path(as: "alice")
 
-    click_button selected_project
+    click_project_filter(selected_project)
     assert_selector ".kanban-band[data-project-name='#{selected_project}']"
     assert_selector ".kanban-band[data-project-name='#{hidden_project}']", visible: :hidden
 
-    click_button "Grid"
+    click_status_view("Grid")
 
-    assert_current_path grid_path(project: selected_project)
+    assert_current_path grid_path(project: selected_project), wait: 10
     assert_selector "#status-grid .project-section[data-project-name='#{selected_project}']"
     assert_selector "#status-grid .project-section[data-project-name='#{hidden_project}']", visible: :hidden
   end
@@ -241,6 +244,26 @@ class KanbanBoardTest < ApplicationSystemTestCase
 
   private
 
+  def click_project_filter(name)
+    execute_script(<<~JS, name)
+      const name = arguments[0]
+      const button = Array.from(document.querySelectorAll("[data-project-filter-name-param]"))
+        .find((candidate) => candidate.dataset.projectFilterNameParam === name)
+      if (!button) throw new Error(`project filter not found: ${name}`)
+      button.click()
+    JS
+  end
+
+  def click_status_view(name)
+    execute_script(<<~JS, name)
+      const name = arguments[0]
+      const button = Array.from(document.querySelectorAll(".status-view-switch button"))
+        .find((candidate) => candidate.textContent.trim() === name)
+      if (!button) throw new Error(`status view not found: ${name}`)
+      button.click()
+    JS
+  end
+
   def assert_status_refresh_ready
     page.document.synchronize(10) do
       ready = evaluate_script(<<~JS)
@@ -250,6 +273,21 @@ class KanbanBoardTest < ApplicationSystemTestCase
         })()
       JS
       raise Capybara::ElementNotFound, "status-refresh controller did not connect" unless ready
+    end
+  end
+
+  def assert_status_redirect_guard_cleared
+    page.document.synchronize(10) do
+      guarded = evaluate_script(
+        'document.documentElement.hasAttribute("status-refresh-redirect-destination")'
+      )
+      if guarded
+        destination = evaluate_script(
+          'document.documentElement.getAttribute("status-refresh-redirect-destination") || ""'
+        )
+        raise Capybara::ElementNotFound,
+              "status redirect guard did not clear (destination=#{destination.inspect}, current=#{page.current_url.inspect})"
+      end
     end
   end
 

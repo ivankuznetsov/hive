@@ -11,9 +11,7 @@
     not links — a navigation would discard the permanent composer's typed
     text). The controller wraps the rail and selected view; it re-applies the
     filter after every broadcast morph. %>
-<div class="status-layout"
-     data-controller="project-filter status-refresh"
-     data-action="submit->status-refresh#submitting turbo:submit-start@document->status-refresh#submitting turbo:submit-end@document->status-refresh#submitted turbo:before-stream-render@document->status-refresh#beforeStreamRender">
+<div class="status-layout" data-controller="project-filter status-refresh">
   <%# Keep the source inside status-refresh so it can distinguish the first
       Cable connection from a later reconnect and catch up after missed work. %>
   <%= turbo_stream_from StatusBroadcaster::CHANNEL, id: "status-stream-source",

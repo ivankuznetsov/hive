@@ -401,13 +401,21 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     Process.kill("TERM", holder)
     Process.wait(holder)
     holder = nil
-    recovery = run_refresh_from(
-      @wt,
-      "XDG_RUNTIME_DIR" => runtime_dir,
-      "LLM_WIKI_DISABLE_FLOCK" => "1"
-    )
+    pending = File.join(common, "llm-wiki", "pending", source_sha)
+    recovery = nil
+    3.times do
+      recovery = run_refresh_from(
+        @wt,
+        "XDG_RUNTIME_DIR" => runtime_dir,
+        "LLM_WIKI_DISABLE_FLOCK" => "1"
+      )
+      break unless File.exist?(pending)
+
+      sleep 0.05
+    end
     assert_equal 0, recovery.fetch(:status), recovery.fetch(:out)
-    refute_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+    log = File.read(File.join(common, "llm-wiki", "post-commit-refresh.log"))
+    refute_path_exists pending, "queue did not recover after lock release:\n#{recovery.fetch(:out)}\n#{log}"
   ensure
     Process.kill("KILL", holder) rescue nil if holder
     Process.wait(holder) rescue nil if holder

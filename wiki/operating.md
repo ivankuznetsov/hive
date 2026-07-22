@@ -97,12 +97,15 @@ Fresh installs use XDG locations:
 
 On a repeat `install.sh` run, RubyGems must replace the installer-generated
 GEM_HOME-aware `hive` wrapper with a fresh binstub before Hive wraps it again.
-The installer temporarily removes only a wrapper carrying the current
-`hive-managed: install-wrapper/v1` marker or the recognizable legacy
-`HIVE_INVOKED_BIN` plus `/shims/hive` shape. If gem installation fails or does
-not produce an executable binstub, it restores the previous working wrapper;
-unrecognized files at that path are left for RubyGems to reject rather than
-being overwritten by Hive.
+The exact three-launcher transaction below is queued at `05784893`.
+The installer recognizes only Hive-managed launchers and snapshots the
+existing `hive`, `hv`, and RubyGems shim paths before installation. It stages
+the new shim and wrappers beside their final paths, verifies modes, wrapper
+marker, and shell syntax, then activates them with same-filesystem renames.
+Recovery remains armed through activation and final verification, so gem,
+missing-binstub, write, chmod, or partial-swap failures restore the prior
+bytes, executable modes, and symlink shape. Unrecognized files at the install
+path are left for RubyGems to reject rather than being overwritten by Hive.
 
 `HIVE_HOME` remains a legacy/test override. Project state stays at
 `<project>/.hive-state/`; install and uninstall do not move completed pipeline
@@ -430,7 +433,7 @@ systemctl --user enable --now hive-daemon
 journalctl --user -u hive-daemon -f
 ```
 
-Queued commit `391f130a` removes `After=default.target` from the sample user
+Queued head `05784893` removes `After=default.target` from the sample user
 unit while retaining `WantedBy=default.target`. Enabling the unit creates the
 target dependency; ordering the wanted service after that same target forms a
 cycle, while `WantedBy` is sufficient to start it with the user default

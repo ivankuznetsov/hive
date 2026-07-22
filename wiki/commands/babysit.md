@@ -100,7 +100,7 @@ warning, but the permissive file is left untouched and receives no new argv.
 
 ### Queued dry-run launcher consolidation
 
-Queued commit `207a12be` on `fix/all-worthy-patrol-findings` removes the
+Queued commit `9c4b4d69` on `fix/all-worthy-patrol-findings` removes the
 separately packaged `bin/hive-babysitter-stub-gh` shell file. Its generated
 overlay invokes `bin/hive-babysitter-stub-gh.rb` directly through the resolved
 Ruby executable, while `Hive::Babysitter::StubEnvironment` supplies the shared

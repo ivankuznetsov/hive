@@ -122,7 +122,10 @@ a bare Enter before polling, so the relay auto-answers that prompt.
 Grok follows the same operator-ward shape via `grok login --device-auth` and
 also supports non-interactive `XAI_API_KEY` authentication.
 For Pi, Hive web validates that the submitted token JSON is a non-empty object
-and writes it to `~/.pi/agent/auth.json` with mode `0600`. The container sets
+and writes it to `auth.json` under `PI_CODING_AGENT_DIR`, falling back to
+`~/.pi/agent`, with mode `0600`. `Hive::SkillCheck` owns that resolution;
+queued commit `5c1a20e9` aligns runtime profile preflight to the same directory.
+The container sets
 `HOME=/data/home`, so `~/.claude`, `~/.codex`, `~/.pi`, `~/.grok`, and `~/.config/gh`
 survive image upgrades via the `/data` bind mount.
 

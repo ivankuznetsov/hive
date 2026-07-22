@@ -4,6 +4,60 @@ Append-only log of all wiki operations.
 
 <!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
 ---
+title: Refresh queued runtime, patrol, web, scheduler, and CI-plan contracts
+date: 2026-07-22
+tags: [runtime, patrol, web, llm-wiki, installer, ci]
+---
+
+Coalesced ten queued source commits from four branch lines. Runtime handoff
+hardening (`5c1a20e9`) drains final attempt frames after terminal
+state observation, keeps still-launching reservations live, preserves complete
+predecessor outputs for successors, bounds structured agent messages without
+presenting a truncated prefix as complete, shares Pi's configured agent home,
+and carries exact Codex config snapshots between package operations.
+
+Operational changes (`01e85c89`, finalized by `05784893`) declare the Base64
+runtime dependency, normalize custom
+project state roots for babysitter artifacts, short-circuit already-green fork
+PRs before the mutation-only fork boundary, restore caller branch or detached
+HEAD around bench submissions, report repository-relative entry/ref/SHA
+metadata, remove daemon/bot/web services independently during uninstall, and
+keep installer rollback armed through staged wrapper/shim activation so exact
+prior bytes, modes, and symlink shape survive partial failures.
+
+The latest `fix/all-worthy-patrol-findings` head (`05784893`, incorporating
+`9c4b4d69`; `2f25207c` is an earlier simplification snapshot) uses one shared
+dry-run startup/loader environment boundary and a direct Ruby GitHub stub.
+Patrol now admits findings against exact target SHAs and configured validation
+keys, reuses same-target active records for shipping retries, permits
+newer-target recurrence without rewriting terminal history, binds ledger
+outcomes to their target, and publishes v3 patrol/finding schemas while
+retaining the original v2 compatibility shapes. Generic usage errors no longer
+masquerade as invalid task paths. E2E cleanup prefers namespaced retention
+variables while warning on legacy fallbacks, and missing asciinema degrades
+capture rather than failing scenario preflight.
+
+Rails branch commits `96b06792` and `4455fc06` remove the web dispatcher:
+filesystem-backed `Task`, `Project`, and `Daemon` resources own mutations while
+controllers remain HTTP boundaries. Status scanning is acquired and released
+by confirmed Cable subscribers, with per-channel race fencing, one shared
+five-second poller, canonical semantic snapshot tokens for cross-worker
+catch-up, and one fully rendered Turbo Stream message per broadcast. An idle
+server with no subscribed pages performs no fleet scan.
+
+Headless wiki fix `8944dfba` (the newer-base equivalent of `aae95f78`)
+reconstructs user-systemd bus variables from the standard socket, retains the
+installer-owned scheduler marker when signaling falls back to host-wide
+serialization, and ignores compiled-`wiki/log.md`-only commits before queueing.
+It prepares v0.6.8 metadata but does not prove a public release.
+
+Finally, `ae2c5d2d` is plan-only: it requires exact covered/total equality
+before optimizing strict CI, then proposes measured, isolated candidates for
+Git fixtures, coverage injection, local/hosted workers, and later web/E2E
+parallelism with exact-head hosted evidence. No CI optimization is implemented
+by that commit.
+
+---
 title: Audit queued compiled-log cleanup
 date: 2026-07-22T16:47:13Z
 tags: [wiki, config, provenance]
@@ -146,6 +200,22 @@ source commits remain available.
 The release also makes the primary checkout authoritative for the
 repository-shared llm-wiki runner and headless-agent configuration, preventing
 an old linked checkout from replacing the fixed shared runtime.
+
+# Config validation no longer depends on command require order
+
+**Action:** `Hive::Workflows::Project` now derives the registered stage-name
+union directly from `Registry.all` while validating strict project root keys.
+This preserves the standalone loader contract used by command paths such as
+`hive markers clear`, which load `Project` through `Task` without first loading
+the aggregate `hive/workflows` entrypoint.
+
+**Validation:** Added a clean Ruby subprocess regression for the markers-command
+require order. Added explicit coverage for unsupported-config propagation and
+invalid workflow-path guards, including the exact status boundaries that must
+not degrade an unsupported root key. The `stale_lock_recovery` E2E scenario
+remains the CLI-level contract that exposed the failure.
+
+Did not edit compiled [[log]].
 
 ---
 title: Audit queued 6x committed contracts against current wiki
@@ -307,6 +377,24 @@ tags: [wiki, attempts, conditions, web, workflows, digest, patrol, e2e]
   provenance boundary and relevant live-proof uncertainties. No architecture,
   command/API, dependency, data-model, planning, gap, or index page required
   another edit; page coverage remains 94.
+
+---
+title: Require complete benchmark deliberation verdicts
+date: 2026-07-22
+updated: 2026-07-22T14:17:51Z
+tags: [bench, workflow, deliberation, validation, recovery]
+---
+
+The built-in benchmark judge stage now refuses `COMPLETE` when any configured
+judge's preserved round-two deliberation record has a missing or invalid
+`final` score. It reports `INCOMPLETE_DELIBERATION` with the exact candidate,
+task, and judge instead of letting a fail-soft `final: null` flow into publish.
+
+The retry skip-set is now derived from fully completed transcripts rather than
+mere cell presence. A provider failure therefore remains visible in
+`deliberation.json` but the affected cell is eligible for a later judge-stage
+retry; already complete cells remain skipped. The focused workflow regression
+executes both embedded Ruby guards against valid and null-final fixtures.
 
 ---
 title: Audit queued completion retention and cross-cutting contracts
@@ -590,6 +678,26 @@ refresh-branch publication that does not dirty protected checkouts.
 The release also packages the managed agent draft-PR handoff, native Hive web
 and workflow-derived Kanban defaults, current multi-agent operating skill, and
 the latest workflow, patrol, mobile, and stage-approval fixes.
+
+## [2026-07-21T22:25:58Z] fix — complete strict project config propagation
+
+**Action:** Preserved `UnsupportedProjectConfigError` through both `hive new`
+config readers, managed task resolution, and every status presentation. Strict
+root-key failures now remain exit 78 instead of becoming exit 1, exit 64, or an
+`ok: true` degraded status payload. Root-key validation also runs before an
+invalid workflow-path expansion can hide the `reviewers` migration guidance.
+
+Project workflow loading now resolves the raw config once, installs one
+fingerprinted overlay, and validates against that active stage vocabulary
+without a `Config.load` reverse cycle. Subsequent config reads reuse the active
+overlay rather than rescanning descriptors.
+
+**Docs:** Corrected custom-stage override guidance: `agent` and `permissions`
+belong in the stage block, resource limits use `budget_usd.<stage>` and
+`timeout_sec.<stage>`, and descriptor stages own `model` / `effort`.
+
+**Coverage:** Added focused regressions for new, status, managed tasks,
+invalid-path ordering, and workflow fingerprint reuse.
 
 # Bound scheduled LLM-wiki refreshes
 
@@ -2158,6 +2266,37 @@ tags: [release, packaging, refactor-patrol, github]
 - Publication remains unproven until the release branch merges and the
   protected tag workflow publishes signed artifacts, downstream channels, and
   both hivebox architectures.
+
+## [2026-07-18T19:50:56Z] fix — preserve strict config failures at task boundaries
+
+**Action:** Classified unsupported project root keys as
+`UnsupportedProjectConfigError`, preserving the `ConfigError`/exit-78 contract
+while preventing workflow-directory and task default-workflow fallback paths
+from converting the shared validation failure into the built-in `coding`
+workflow. Recoverable malformed or unreadable config fallback behavior remains
+unchanged.
+
+**Coverage:** Added focused workflow-loader and task regressions plus a real
+`approve` mutation-boundary check that leaves the task in its original stage.
+Updated [[modules/config]] and [[modules/task]].
+
+## [2026-07-18T17:25:55Z] config — strict project top-level keys
+
+**Action:** `Hive::Config.load` now validates raw project configuration root
+keys before defaults or synthetic values are merged. Supported keys come from
+`Config::DEFAULTS`, explicit no-default sections such as `gh`, and exact stage
+names from built-in and active project workflow descriptors. Unsupported keys
+are aggregated into one deterministic, source-path-bearing `ConfigError`.
+
+A literal top-level `reviewers` key always fails, regardless of its value, with
+guidance to move the list under `review.reviewers`. The project allowlist does
+not apply to global Hive config. Because the boundary is shared, review runs
+stop before reviewer side effects and `hive doctor` exits 78 before running
+probes or emitting a successful report.
+
+**Coverage:** Updated [[modules/config]], [[commands/doctor]], and
+`docs/workflows.md`. Added focused config/workflow tests plus init, review, and
+real doctor subprocess regressions. Did not edit compiled [[log]].
 
 ## Fix architecture-patrol merged-PR range filtering
 

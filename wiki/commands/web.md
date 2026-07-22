@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-21
+updated: 2026-07-22
 tags: [command, web, rails, turbo, hivebox-container]
 ---
 
@@ -16,8 +16,8 @@ of the same app at `/app/web`. The web tier adds no
 pipeline logic: status reads call `Hive::Commands::Status#json_payload` (via
 `Hive::Web::StatusFeed`), gate approval calls `Hive::Commands::Approve`
 in-process, task Drop calls `Hive::Commands::Drop` in-process, stage runs go
-through the daemon dispatch queue (`Hive::Web::Dispatcher`), daemon status
-renders the shared `Hive::Daemon::StatusReport.safe_payload` producer used by
+through the daemon dispatch queue from the filesystem-backed Rails `Task`;
+daemon status renders the shared `Hive::Daemon::StatusReport.safe_payload` producer used by
 `hive daemon status --json`, and setup flows
 reuse `Hive::Web::GithubAuth`, `AgentsAuth`, `WorkflowLifecycle`, and the
 Telegram validators from the gem. Red task recovery uses the bot's
@@ -25,6 +25,10 @@ Telegram validators from the gem. Red task recovery uses the bot's
 Retry button and Telegram Autofix share the same guarded clear plus rerun
 contract; the TUI's Recover has its own subprocess-based clear + `hive run`
 path with separate gates.
+
+The Rails resource-ownership and subscriber-owned status lifecycle described
+below are queued on `refactor/dhh-web-architecture-v2` (`96b06792` →
+`4455fc06`); they are not yet ancestors of this refresh branch's default.
 
 ## CLI
 
@@ -182,38 +186,55 @@ so the login gate can run.
   page change; choice mirrored to `?project=` via replaceState; explicit
   project clicks sync the composer project select so new ideas land in that
   context, while filtered deep-links preselect the composer only when it is
-  unset; a MutationObserver re-applies the filter after every broadcast
-  morph), composer (new idea with image attach: clipboard
+  unset; the filter is re-applied after server reconciliation without moving
+  or rebuilding server-rendered project navigation), composer (new idea with image attach: clipboard
   paste AND upload button; images become `[imageN]` placeholders and land in
   the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
   Streams**: `StatusBroadcaster` subscribes to `StatusFeed#each_snapshot`;
+  `StatusChannel` starts that shared subscription when the first live page
+  connects and stops it when the last page disconnects, so an idle Rails
+  server performs no fleet scans. Per-channel pending/active/closed ownership
+  makes acquisition and teardown exact even when verification, deferred
+  adapter registration, disconnect, or a failed first poller start race.
+  A request-time snapshot primes the feed before Cable connects; only the first
+  idle request can claim that baseline. Each render carries a canonical
+  SHA-256 token of its semantic snapshot. After confirmation the channel
+  compares the page token with the current feed, doing no work for a fresh
+  navigation and sending one targeted refresh for stale markup. The token is
+  stable across Puma workers and process restarts.
   `StatusFeed` suppresses unchanged snapshots by comparing with only
   `generated_at` and `age_seconds` removed while keeping `mtime` /
-  `folder_mtime` as liveness signals. The broadcaster sends the status-channel
-  refresh first, then uses one server-sorted snapshot to replace the project
-  rail and morph the composer project selector over solid_cable. The refresh
-  re-renders the current URL (or `/`'s saved preference), so Board and Grid
+  `folder_mtime` as liveness signals, and reuses the existing token when the
+  comparable key is unchanged. Connected pages share one five-second poller.
+  The broadcaster renders one complete Turbo Stream message containing the
+  refresh plus server-sorted project rail and composer selector, then sends it
+  once over solid_cable. A partial render failure therefore sends nothing. The
+  refresh re-renders the current URL (or `/`'s saved preference), so Board and Grid
   cannot be cross-patched with markup for the other view; task pages without
   the dashboard targets still receive the same morph signal. Stable digest IDs
   keep project/workflow bands, columns, and task cards attached to the same DOM
   identity across reorder morphs. A status-level submission guard marks the
-  mutation at the native submit-bubble boundary and defers one refresh while
-  the composer or a card action is in flight. It replays after a
+  mutation at Turbo's confirmed `submit-start` boundary and defers one refresh
+  while the composer or a card action is in flight. It replays after a
   non-redirecting response; a successful redirect's fresh GET already
   reconciles without racing the operator back to the old URL. The final
   submission admission stays at document scope across Stimulus morph
   reconnects, the final redirect URL is guarded on the document root across
   Turbo's body replacement, and both late refresh streams and their old-URL
-  replace visits remain suppressed until that URL is active.
-  This prevents a
-  filesystem broadcast from aborting the mutation. The same guard keeps the
-  Action Cable source permanent across morphs, remembers its first connection
-  on a source-owned DOM attribute across Stimulus lifecycles and Turbo
-  history-cache clones, and requests one full catch-up refresh on a later
-  reconnect so an update broadcast during the disconnected window is not
-  stranded. The initial
-  connection does not duplicate the fresh page GET. The composer's stream hook keeps the
+  replace visits remain suppressed until that URL is active. Declining a
+  confirmation does not arm the guard.
+  This prevents a filesystem broadcast from aborting the mutation. The app-owned permanent
+  Cable source performs freshness comparison only from its confirmed callback;
+  there is no reconnect MutationObserver, timer, or fresh-navigation refresh.
+  Same-URL token handoff lives on the active element/connection rather than
+  cloneable DOM state, bounding a lagging worker to one reconciliation GET and
+  preventing Turbo history from reviving an old latch. Generation-guarded
+  setup, rejected-consumer cache eviction, bounded retry, partial-registration
+  cleanup, and a five-second never-confirmed transport close ensure an
+  abandoned page cannot retain the server poller lease. The task-page owner
+  encloses every mutation form, so those submissions use the same guard. The
+  composer's stream hook keeps the
   browser's current project selection when that project still exists; ordering
   belongs to the server while unfinished form state remains local. A successful
   idea POST returns to the same-origin Board/Grid URL that submitted it, so an
@@ -433,17 +454,17 @@ so the login gate can run.
   on named resources.
 
 Task Drop is routed as `POST /tasks/:project/:slug/drop` →
-`Tasks::DropsController#create` → `Hive::Web::Dispatcher#drop` →
-`Hive::Commands::Drop`. It is intentionally in-process, not a daemon dispatch:
+`Tasks::DropsController#create` → `Task#drop!` → `Hive::Commands::Drop`. It is
+intentionally in-process, not a daemon dispatch:
 the task is gone after success, so the controller redirects to the grid. The
 form posts the row's rendered `stage` as `from`; if the task moved after the
 page rendered, `Commands::Drop` raises `Hive::WrongStage`, Rails renders the
 typed 422 error page, and the moved task folder is left intact.
 
 Task recovery is routed as `POST /tasks/:project/:slug/recover` →
-`Tasks::RecoveriesController#create` → `Hive::Web::Dispatcher#recover`. The controller
-re-reads the current status row rather than trusting form-posted stage/marker
-state. The dispatcher refuses manual-only states with
+`Tasks::RecoveriesController#create` → `Task#recover!`. The shared base
+controller re-reads the current status row rather than trusting form-posted
+stage/marker state. The task refuses manual-only states with
 `RecoverySequence.manual_only_text`, derives the most discriminating
 `--match-attr` through `NotificationBuilders.recovery_match_attr`, then writes
 the first command (`hive markers clear ... --json`) to the daemon dispatch
@@ -453,10 +474,15 @@ not promoted.
 
 Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
 404) — never a blank 500. Stage-run posts validate the action map before
-writing a daemon request, and `Hive::Web::Dispatcher#dispatch` wraps queue
-writer `ArgumentError`s (for example the queue's stricter slug grammar) as
-typed 422s instead of surfacing an opaque 500. CSRF is Rails-default (per-form
-tokens). In Hivebox mode every route except `/health`, `/up`, `/login`,
+writing a daemon request. `Task#run!` compares submitted action and stage with
+the freshly loaded row, refuses stale forms, and wraps queue-writer
+`ArgumentError`s (for example the queue's stricter slug grammar) as typed 422s
+instead of surfacing an opaque 500. Idea creation enters `Project#add_idea!`,
+and `POST /daemon/repair` is a conventional create action backed by
+`Daemon#repair!`. `Task.find!` turns a status row with
+`error=project_load_failed` into the underlying project/config failure instead
+of a false missing-task 404. CSRF is Rails-default (per-form tokens). In
+Hivebox mode every route except `/health`, `/up`, `/login`,
 `/logout`, `/auth/github*`, and the dev/test-only `/dev_login` is behind the
 owner gate; a verified local loopback request bypasses that gate for the
 complete local UI.

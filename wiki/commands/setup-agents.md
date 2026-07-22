@@ -3,7 +3,7 @@ title: hive setup-agents
 type: command
 source: skills/hive/, config/agent-skills.yml, lib/hive/agent_skills/, lib/hive/commands/setup_agents.rb
 created: 2026-07-10
-updated: 2026-07-20
+updated: 2026-07-22
 tags: [command, agents, skills, hive, canonical, provisioning, consent]
 ---
 
@@ -116,7 +116,10 @@ resolver, not merely on a directory name.
 Codex package operations parse only managed ownership keys, snapshot config bytes,
 digest, and mode, then call the supported CLI. A different source/plugin owner
 is `conflicting` and schedules no write. Successful changes must preserve
-comments, unrelated TOML keys, and mode. A known torn CLI write can be restored
+comments, unrelated TOML keys, and mode. Queued commit `5c1a20e9` makes each
+successful operation carry its exact post-operation snapshot into the next
+plan step instead of rereading or reusing a stale pre-change snapshot. A known
+torn CLI write can be restored
 only if no concurrent user edit occurred; Hive never restores over a changed
 digest.
 

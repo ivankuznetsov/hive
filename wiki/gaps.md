@@ -93,16 +93,34 @@ tags: [gap, todo, release-proof, agent-skills]
   `schemas/hive-digest.v2.json`. The digest pages document the queued committed
   contract, but default-branch integration remains unverified until that
   source branch is reconciled.
-- Commits `207a12be` and `391f130a` on
-  `fix/all-worthy-patrol-findings` are not ancestors of the refresh branch.
-  The current default still packages the shell GitHub dry-run launcher, has no
-  `Hive::Babysitter::StubEnvironment` or `Hive::Patrol::FindingRegistry`, uses
-  the generic E2E retention variables, and keeps `After=default.target` in the
-  sample systemd unit. [[commands/babysit]], [[modules/babysitter]],
-  [[commands/patrol]], [[modules/patrol]], [[e2e]], and [[operating]] therefore
-  describe their new contracts as queued projections; [[templates]] records
-  the corresponding patrol prompt binding. Integration on current main and a
-  current-main test run remain unverified.
+- The live `fix/all-worthy-patrol-findings` line now runs `5c1a20e9` →
+  `01e85c89` → `9c4b4d69` → `05784893`; `2f25207c` is an older immutable
+  simplification snapshot from that work. None is an ancestor of the refresh
+  branch. The current default still packages the shell GitHub dry-run launcher,
+  lacks `StubEnvironment` and `FindingRegistry`, and produces patrol v2.
+  [[commands/babysit]], [[modules/babysitter]], [[commands/patrol]],
+  [[modules/patrol]], [[e2e]], [[operating]], and the attempt/agent pages
+  therefore describe the latest branch head as a queued projection. A
+  current-main integration run, hosted patrol recurrence/retry exercise, and
+  installed dry-run smoke remain unverified.
+- Commits `96b06792` and `4455fc06` are consecutive snapshots on
+  `refactor/dhh-web-architecture-v2`, not ancestors of the refresh branch.
+  They remove `Hive::Web::Dispatcher`, move mutations onto Rails
+  `Task`/`Project`/`Daemon` resources, and make status scans
+  confirmed-subscriber-owned. Source/Rails/browser tests pin the contracts,
+  but current-main integration and a long-running multi-worker/multi-client
+  deployed smoke remain open.
+- Commits `aae95f78` and `8944dfba` carry the same headless wiki signal fix
+  from different parents; the latter is the newer-base authority. All queued
+  source blobs match except pre-existing wiki testing context. The v0.6.8
+  metadata, user-bus recovery, marker retention, and compiled-log-only no-op
+  are branch-only here. No public v0.6.8 tag/release or installed headless
+  service exercise is inferred from release-prep metadata or focused tests.
+- Commit `ae2c5d2d` is documentation-only. It proposes exact numerator equality
+  for the 100% coverage gate before measuring CI optimizations; no coverage
+  correction, fixture optimization, worker split, or hosted speedup is
+  implemented by that commit. Baseline and candidate thresholds require fresh
+  exact-head hosted evidence when implementation begins.
 - Commit `0624f58a` contains the initial strict project top-level-key admission
   and descriptor-stage allowlist discovery. The later queued sequence
   `c4068bf5`, `ae908e77`, `1d8c4637`, and `97259f74` documents and tests shared
@@ -333,7 +351,8 @@ evidence closing the following June 16 gaps.
 ## Release install follow-ups
 
 Latest refresh (2026-07-22): the source version and installer references are
-prepared as v0.6.7. This release-prep branch does not itself prove a public tag,
+prepared as v0.6.8 by queued commit `8944dfba`. This release-prep branch does
+not itself prove a public tag,
 signed assets, Homebrew/AUR updates, ClawHub publication, or
 multi-architecture hivebox images. The release boundary uses an exact-tag
 offline candidate gate and does not require provider credentials. The live
@@ -737,11 +756,37 @@ as operational evidence gaps; the source and focused regression contracts are
 documented in [[operating]], [[commands/uninstall]], [[modules/config]],
 [[modules/babysitter]], [[commands/bench-submit]], and [[testing]].
 
-The later queued `207a12be`/`391f130a` hardening remains branch-only as well.
+The later queued `9c4b4d69`/`05784893` hardening remains branch-only as well;
+the earlier `207a12be`/`391f130a` pair is superseded by that branch head.
 Focused tests cover direct-Ruby dry-run launchers, loader-environment scrubbing,
-durable finding lifecycle/deduplication, stale-target and clean-base validation
-preflight, E2E artifact containment, and the cycle-free sample systemd unit.
+durable target-bound finding lifecycle/deduplication, same-target retry reuse,
+newer-target recurrence, stale-target and clean-base validation preflight, E2E
+artifact containment, and the cycle-free sample systemd unit.
 They do not prove an installed `hive babysit --once ... --dry-run` against real
 Git/gh binaries, an ordinary patrol cycle across a moving hosted default plus
 merged/dismissed ledger reconciliation, or a live `systemctl --user enable`
 transaction. Those operational smokes remain open after branch integration.
+
+## Queued Rails resource/status delivery needs deployed smoke (2026-07-22)
+
+Commits `96b06792` and `4455fc06` replace the former
+`Hive::Web::Dispatcher` references retained in older historical gap entries:
+filesystem-backed `Task` now owns task mutations, `Project` owns idea capture,
+and `Daemon` owns repair. Status polling starts only for confirmed Cable
+subscribers and uses canonical semantic tokens for one-shot catch-up. Focused
+model/channel/integration/E2E tests cover ownership, deferred registration,
+reconnect, cancellation, and idle-browser behavior. No checked-in deployed
+artifact yet proves zero fleet scans for a long idle period followed by many
+simultaneous Board/Grid/task clients across multiple Puma workers, continued
+mutation safety during real daemon changes, and complete lease release after
+disconnect storms.
+
+## Headless wiki signal recovery needs installed-service smoke (2026-07-22)
+
+Queued commit `8944dfba` reconstructs the standard user-systemd bus environment
+for hooks/reconciliation, preserves `scheduler-service` when signaling falls
+back to host-wide serialization, and ignores compiled-`wiki/log.md`-only
+commits before queueing. Tests cover these paths and template parity, but this
+refresh found no installed-service artifact showing a real headless hook with
+missing bus variables starting the bounded oneshot, nor a real signal failure
+falling back once and then succeeding through the retained service marker.

@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-07-21
+updated: 2026-07-22
 tags: [architecture, overview]
 ---
 
@@ -309,6 +309,10 @@ buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
 ## Hive Web and Hivebox pipeline
 
+Queued commits `96b06792` and `4455fc06` supply the Rails mutation ownership
+and subscriber-owned status-delivery clauses in this section. Current-default
+integration remains open in [[gaps]].
+
 `hive web` serves the shared vanilla Rails 8 + Turbo app from `web/` (ADR-037;
 the original Sinatra/Puma + SSE tier is gone). Native Hive web is the default
 browser control plane over the same registry and workflow state as the CLI/TUI;
@@ -332,23 +336,33 @@ Streams, with production Action Cable accepting same-origin-as-host and
 `StatusBroadcaster` (self-healing subscriber loop) bridges
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
 broadcast morph refresh plus targeted project-rail/composer updates over
-solid_cable. The current route renders either the Rails-native workflow Board
+solid_cable. Polling is subscriber-owned: each accepted `StatusChannel`
+acquires one lease and releases it exactly once, while synchronized
+pending/active/closed transitions fence teardown against deferred Action Cable
+registration. With no confirmed pages, the Rails process performs no fleet
+scan. A request primes the feed, and rendered pages carry canonical SHA-256
+semantic snapshot tokens rather than process-local counters; HTTP and Cable
+workers can therefore compare freshness across Puma processes without a
+refresh loop. Unchanged five-second polls reuse their comparable key and token.
+The broadcaster renders the complete multi-action Turbo Stream before one
+Cable send, so a partial render failure delivers nothing and remains
+retryable. The current route renders either the Rails-native workflow Board
 or compact Grid, so live reconciliation does not maintain a second board patch
 protocol. Digest-based DOM identities preserve the owning band/card across
 reorder morphs, and the status-level refresh guard defers background refreshes
-from the native submit-bubble boundary while status forms submit, using a
+from Turbo's confirmed `submit-start` boundary while status forms submit, using a
 successful redirect's fresh GET as the reconciliation instead of racing a
 replay against the old URL. Document-level submission admission survives the
 Stimulus disconnect/reconnect gap during a morph, and the redirect destination
 is kept on the document root across the Turbo body swap, so late refresh
 signals and their same-URL replace visits remain suppressed until the browser
-reaches that destination. It also
-keeps first-connection history on the permanent status Action Cable source as
-a clone-stable DOM attribute, surviving both Stimulus disconnects and Turbo
-history restoration without leaking across fresh sources, and issues one
-catch-up refresh on later reconnects. That closes the window in
-which the only filesystem broadcast could be missed without duplicating the
-fresh initial page load. The
+reaches that destination; declining confirmation never arms the guard. The
+permanent app-owned Cable source compares the page token only after confirmed
+subscription. A stale reconnect receives one targeted refresh; same-URL token
+handoff is connection-local and non-cloneable, so Turbo history cannot revive
+an old latch. Generation guards, bounded retry, and a five-second
+never-confirmed transport close keep abandoned or rejected subscriptions from
+leaking a server-side poller lease. The
 request-local Rails `Project` wrapper
 reuses one parsed config for Board defaults, daemon state, and workflow-overlay
 loading. `Hive::StageLabel` gives web and bot surfaces one acronym-aware stage
@@ -411,7 +425,10 @@ same behavior rather than helper-owned filesystem reads or action tables.
 `TasksController` renders that resource. Namespaced task-resource
 controllers expose diff, log, media, approval, rejection, drop, run, recovery,
 answer, and intervention through standard `show`/`create` actions; each remains
-a thin HTTP boundary over `Task` or `Hive::Web::Dispatcher`.
+a thin HTTP boundary over `Task`. Task owns the mutation invariants and delegates
+mechanics to canonical Hive commands/queue writers; `Project` owns idea
+capture, and `Daemon` owns liveness and queued repair. The former
+`Hive::Web::Dispatcher` compatibility layer is removed.
 
 ## Dispatch flow (durable generation ownership)
 

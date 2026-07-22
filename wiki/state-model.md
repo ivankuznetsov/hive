@@ -272,19 +272,22 @@ Hivebox `recover` writes the sequence sidecar first, then the guarded
 `hive markers clear ... --json` request, and discards the sidecar if the
 request write fails so no orphaned continuation remains.
 
-Hivebox's `web/app/models/status_broadcaster.rb` is a Rails model class, but it
+On queued web head `4455fc06`, Hivebox's
+`web/app/models/status_broadcaster.rb` is a Rails model class, but it
 is not an ActiveRecord workflow entity. It bridges `Hive::Web::StatusFeed` to
-Turbo Streams. `StatusFeed#snapshot` computes a fresh
-`Hive::Commands::Status#json_payload(Hive::Config.registered_projects)` for
-request-time reads; `StatusFeed#each_snapshot` runs one shared poller per
-process and compares snapshots with only volatile `generated_at` /
-`age_seconds` fields removed. `mtime` and `folder_mtime` deliberately remain
-part of the comparison key because task pages use those changes as the liveness
-signal for artifact/log refreshes while agents write. `StatusBroadcaster`
-publishes a status-channel refresh before rendering and replacing the
-dashboard's `projects` frame, so task pages that do not contain that frame
-still receive a morph signal even if a bad project row makes the grid partial
-raise.
+Turbo Streams. Request-time reads compute and prime a
+`Hive::Commands::Status#json_payload(Hive::Config.registered_projects)`
+snapshot. Confirmed `StatusChannel` subscribers acquire shared feed leases;
+the first starts the process-local poller and the last release stops it, so no
+subscriber means no fleet scan. Semantic SHA-256 tokens are derived from a
+canonical comparable snapshot with volatile `generated_at` / `age_seconds`
+removed; `mtime` and `folder_mtime` remain because task pages use them as
+liveness signals while agents write. Unchanged polls reuse the comparable key
+and token. `StatusBroadcaster` renders the complete refresh, project rail, and
+composer replacement into one message before a single Cable send; a partial
+render failure publishes nothing and is retryable. Channel state separately
+tracks pending/active/closed ownership so disconnect and deferred adapter
+registration cannot leak or double-release a feed lease.
 
 ## Architecture-patrol v2 state
 

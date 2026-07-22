@@ -17,12 +17,13 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Patrol::SourceReader` | `lib/hive/patrol/source_reader.rb` | Shared root-confined, regular-file-only, 256 KiB bounded reader used by architecture mapping and leverage measurement. It resolves tracked symlinks beneath the canonical project root and skips external/device targets before reading. |
 | `Hive::Patrol::Feature` | `lib/hive/patrol/feature.rb` | Durable feature record: `id`, `kind`, `entrypoints`, `owned_files`, `context_files`, and `tests`. |
 | `Hive::Patrol::FeatureBatch` | `lib/hive/patrol/feature_batch.rb` | Selects the deterministic SHA-bound rotating component batch and returns the next persistent cursor. `Commands::Patrol` strictly fetches the explicit remote head for each new sweep, fails closed rather than scanning stale local main when that fetch fails, and records an explicit active snapshot so an in-progress sweep can finish its pinned SHA even when default advances or the first batch errors at cursor zero. If that commit becomes unmaterializable, the command starts from the current default and `FeatureBatch` resets the cursor. |
-| `Hive::Patrol::Reviewer` | `lib/hive/patrol/reviewer.rb` | Requests zero-to-three evidence-backed production defects per feature from an initial view capped at four owned files and 32 KiB; bounded output must match the exact JSON envelope and is accepted atomically only when every admitted item has complete contract/impact/root-cause/scope/reproduction/validation fields and its confined evidence line contains the supplied snippet. Finding ids include the unique review-run id so audit records are immutable. |
-| `Hive::Patrol::Finding` | `lib/hive/patrol/finding.rb` | Durable finding record with delivery metadata (`scope`, contract, impact, root cause, reproduction, validation, computed alpha score) while retaining backward-compatible v1 loading. |
-| `Hive::Patrol::Fingerprint` | `lib/hive/patrol/fingerprint.rb` | Structured findings use a feature-independent semantic SHA over category, primary evidence path, contract, and root cause. Historical v1 findings retain the legacy identity fallback. Stored title/root-cause tokens provide cross-wording similarity, while feature metadata supports outcome calibration. |
+| `Hive::Patrol::Reviewer` | `lib/hive/patrol/reviewer.rb` | Requests zero-to-three evidence-backed production defects per feature from an initial view capped at four owned files and 32 KiB; bounded output must match the exact JSON envelope and is accepted atomically only when every admitted item has complete contract/impact/root-cause/scope/reproduction fields, selects an operator-configured validation key, and its confined evidence line contains the supplied snippet. Finding ids include the unique review-run id so audit records are immutable. |
+| `Hive::Patrol::Finding` | `lib/hive/patrol/finding.rb` | Durable finding record with delivery metadata, exact target SHA, selected validation key, and explicit active/resolved/rejected/superseded lifecycle while retaining backward-compatible v1 loading. |
+| `Hive::Patrol::FindingRegistry` | `lib/hive/patrol/finding_registry.rb` | Reconciles findings with target-bound PR/dismissal ledgers, suppresses same-target terminal duplicates, reuses same-target active records for shipping retries, and admits newer-target recurrence while preserving terminal history. Exact and category/token indexes restrict semantic comparison to relevant buckets; transitions persist the already-loaded record with one timestamp. |
+| `Hive::Patrol::Fingerprint` | `lib/hive/patrol/fingerprint.rb` | Structured findings use a feature-independent semantic SHA over category, primary evidence path, contract, and root cause. Historical v1 findings retain the legacy identity fallback. Stored title/root-cause tokens and reusable semantic signatures provide cross-wording similarity across durable history. |
 | `Hive::Patrol::CandidateSelector` | `lib/hive/patrol/candidate_selector.rb` | Applies production/history/active-feature hard gates, computes deterministic 0–100 alpha from validated proof fields, clusters semantic duplicates even within one feature, maps legacy slice IDs narrowly to current components, enforces per-feature diversity, and returns a globally ranked portfolio. Successful merged history is not treated as negative alpha. |
 | `Hive::Patrol::Fixer` | `lib/hive/patrol/fixer.rb` | Strictly fetches an exact base and directs the agent through four bounded inspect/reproduce/edit/proof responses without post-edit self-validation. A completed `fix.json` ends the agent phase, but only asks Hive to continue: the proof reader rejects unsafe files and caps bytes before parsing, then Hive applies the changed-path guardrail, overlays declared regressions onto an isolated base, requires a normal regression-identified failure and patched pass, and runs broader validation under `timeout_sec.patrol`. An errored or timed-out run without a completed proof fails closed as `fix_agent_failed`; half-finished changes are never shipped. Agent rejection is an attempt outcome, not durable resolution; reconciliation and failed handoff states reuse the exact validated patch. |
-| `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Identifies and runs operator-configured validation commands in the fix worktree. A normal patrol command rejects an empty command set before state mutation or agent work; direct fixer callers still fail closed. |
+| `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Owns configured validation-name/command selection and runs those commands in the fix worktree. Reviewer, selector, command stamping, and fixer share this key discovery. A normal patrol command rejects an empty command set before state mutation or agent work; direct fixer callers still fail closed. |
 | `Hive::Patrol::PrOpener` | `lib/hive/patrol/pr_opener.rb` | Fail-closed secret-scans the title, body, and exact validated diff; verifies a clean exact local head, remote base, leased push, remote head, and created/existing PR identity; records fingerprint-to-PR state; and invokes `ReviewHandoff`. After `gh pr create`, `reconciliation_pending` stores the exact URL and patch/base/head/worktree receipt while retaining the validated worktree. New and retried handoffs require the hosted base OID and perform a final live remote base/head check immediately before task publication. Retries reconcile only the receipted URL/base/head and mark the ledger `open` only after review handoff settles, so lookup lag cannot orphan a PR or suppress/rerun the finding. Dynamic publication diagnostics are separate from closed reason codes. |
 | `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree and observed proof so the standard review daemon can run reviewers/triage/fix/browser flow. Mandatory and optional calls use the same fingerprint-locked exact reconciliation, so a retry after rename/fsync ambiguity reuses the matching task and rejects PR/head identity conflicts. Staging/quarantine renames use the shared best-effort directory-fsync policy. |
 | `Hive::Patrol::AgentLaunch` | `lib/hive/patrol/agent_launch.rb` | Builds the provider-specific patrol launch envelope. Claude reserves 20,000 tokens for provider-owned initial context plus one conservative token per prompt byte, uses a verified minimal review/fix tool set, and caps reviews at four completed turns; the fourth is emergency JSON finalization only. |
@@ -34,23 +35,18 @@ tags: [module, patrol, review, worktree, pr, codex]
 
 ### Queued finding-registry boundary
 
-Queued commit `391f130a` adds `Hive::Patrol::FindingRegistry` between reviewer
-output and candidate selection. The reviewer no longer writes findings before
-admission; the registry loads all `findings/*.json`, reconciles merged/resolved
-fingerprint entries to `resolved` and dismissal entries to `rejected`, then
-admits, suppresses, or supersedes semantic matches before persistence.
-`Fingerprint.semantically_same?` accepts an exact fingerprint or a shared
-category with at least 60% normalized-token overlap in either title or root
-cause. `StateStore#transition_finding` owns validated, idempotent lifecycle
-updates and their timestamps.
+Queued head `05784893` contains this registry boundary; earlier queued commits
+`391f130a` and `2f25207c` are intermediate snapshots. The reviewer no longer
+writes findings before admission. The registry loads durable history, applies
+target-bound ledger outcomes, then admits, retries, suppresses, or supersedes
+semantic matches before persistence. `StateStore#transition_finding` owns
+validated idempotent lifecycle changes, while exact/category indexes avoid a
+full-history scan for each result. The fixer refuses stale evidence or a
+validation command that already fails or dirties the clean base.
 
-That queued snapshot also binds each admitted finding to its scan SHA and one
-configured validator key. `CandidateSelector` rejects unknown keys before a
-fix attempt, and `Fixer` refuses stale evidence or a validation command that
-already fails or dirties the clean base. The primary module map above remains
-the current-default contract because `391f130a` is not yet an ancestor of this
-refresh branch; see [[commands/patrol]] and [[gaps]] for the projected command
-surface and integration uncertainty.
+The primary module map describes the latest queued branch contract, including
+v3 finding/patrol schemas; current-default integration remains unverified. See
+[[commands/patrol]] and [[gaps]].
 
 ## State
 
@@ -157,10 +153,16 @@ suffix stay pinned for retry.
 - A new sweep scans the exact freshly fetched remote default without moving the operator's local branch; configured-remote fetch failure stops before mapper/reviewer work. PR creation separately re-fetches the default for structured fresh-base reproduction/root-cause proof, configured validation, and secret scanning, so an older pinned review snapshot cannot become an old-base patch.
 - Synthetic `6-review` handoff requires exact hosted base/head identity plus a final live remote base/head check for both first attempts and retries; a stale-base or raced-base PR cannot create a patrol review task.
 - A non-dry-run cycle requires at least one configured validation command before mapping, review, or state mutation. `--dry-run` remains review-only and bypasses that preflight.
-- Each semantic root maps to at most one active or merged PR, an open PR blocks additional variants from the same feature, and one feature normally supplies at most one fix per cycle.
+- Each semantic root maps to at most one active lineage per target. Same-target
+  active records are reused by shipping cycles, same-target terminal duplicates
+  remain suppressed, and newer-target evidence may start a recurrence while
+  superseding older active evidence. An open PR blocks additional variants from
+  the same feature, and one feature normally supplies at most one fix per cycle.
 - A failed patrol-to-review handoff is not treated as an active fingerprint state, so later patrol cycles can retry instead of losing the opened PR from the review queue; an exact existing synthetic task is reconciled instead of duplicated.
 - Closed-unmerged patrol PRs become dismissals and are skipped on future cycles.
-- Agent prompts treat findings and recommendations as data; validation commands come only from project config.
+- Agent prompts treat findings and recommendations as data; validation commands
+  come only from project config. Each finding is bound to one configured key
+  and exact reviewed SHA, and clean-base preflight runs before agent launch.
 - Review launches are admitted only with conservative initial-context headroom,
   use a bounded provider tool context, and stop after the completed artifact or
   four Claude turns; the structured parser still fails closed on malformed or

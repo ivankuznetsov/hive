@@ -27,7 +27,7 @@ tags: [babysitter, module, daemon, github, agents]
 
 ### Queued stub-environment boundary
 
-Queued commit `207a12be` adds
+Queued commit `9c4b4d69` adds
 `lib/hive/babysitter/stub_environment.rb` as the shared inventory of
 Ruby/Bundler startup variables and dynamic-loader variables that cannot cross
 the dry-run overlay. Its prefix rule also removes newly encountered `LD_*` and
@@ -38,9 +38,10 @@ not the former shell wrapper. `Mapper` explicitly associates those three
 security-boundary entrypoints with both the unit and acceptance dry-run suites
 so component patrol retains their cross-file tests.
 
-This is queued branch behavior: the current default still includes the
-separately packaged shell `bin/hive-babysitter-stub-gh` entrypoint for direct
-stub execution.
+This is queued branch behavior: the Ruby GitHub stub becomes the direct
+launcher and the former shell entrypoint is removed from the branch. The
+refresh branch's default source still carries the older shell launcher until
+integration.
 
 ## Wiring
 

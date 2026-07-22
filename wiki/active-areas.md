@@ -3,13 +3,30 @@ title: Active Areas
 type: active-areas
 source: git log + working tree
 created: 2026-04-25
-updated: 2026-07-18
+updated: 2026-07-22
 tags: [roadmap, status]
 ---
 
 **TLDR**: Phase 1 MVP shipped Apr-25 and the active surface is now wider than the original loop: PR-first review, `7-artifacts`, daemon auto-advance/archive, descriptor-backed custom workflows with resource controls, Claude/Codex/Pi/Grok agent profiles, `hive refactor-patrol`, TUI dashboard, Telegram bot, managed llm-wiki bootstrap, release/install verification, eval harness, token usage accounting, and project-global Claude tmux/headless routing are all implemented. Current deferred work is mostly depth/scale: parallel reviewers, observability exports, richer PR-comment ingestion, daemon/bot operational polish, and live-provider smoke depth.
 
 ## Status
+
+### Queued 2026-07-22 work
+
+The refresh queue spans independent branch heads rather than one integrated
+default-branch state:
+
+| Commit(s) | Area | Queued contract |
+|-----------|------|-----------------|
+| `5c1a20e9` → `01e85c89` → `9c4b4d69` → `05784893` | Runtime, operations, ordinary patrol | Preserves attempt/agent handoffs, makes installer and lifecycle cleanup recoverable, unifies babysitter dry-run environment scrubbing, and publishes target-aware patrol lifecycle v3 on `fix/all-worthy-patrol-findings`. `2f25207c` is an earlier simplification snapshot of the same line. |
+| `96b06792` → `4455fc06` | Rails web architecture | Moves task/project/daemon mutations onto Rails resources, removes `Hive::Web::Dispatcher`, and makes status polling exist only while confirmed Cable subscribers hold leases, with canonical snapshot-token catch-up. |
+| `8944dfba` (`aae95f78` is the older-base duplicate) | Headless wiki scheduling / v0.6.8 prep | Reconstructs the user bus in headless contexts, retains the scheduler marker across signal fallback, ignores compiled-log-only commits before queueing, and prepares v0.6.8 metadata. |
+| `ae2c5d2d` | Strict-CI performance plan | Planning only: first replace rounded `100.00%` acceptance with exact covered/total equality, then measure fixture copying, coverage injection, local workers, optional hosted sharding, and later web/E2E parallelism one isolated change at a time. |
+
+The CI plan keeps all gates, requires an isolated worktree and draft PR,
+accepts candidates only when they beat noise by `max(5%, 30s)` without more
+than 2x runner-seconds, and requires exact-head hosted evidence after each
+candidate. None of those optimizations is implemented by the plan commit.
 
 Daemon autostart hardening landed on `main` via #189 (2026-05-26): autostart is now install-time/global infrastructure. A Linux host without systemd-user writes the unit and reports the `unsupported` success outcome (exit 0) instead of a spurious failure; `install.sh` captures the real install exit code and carries the verified `hive`/`hv` wrapper through daemon install + `hive init`; `Hive::InvokedBinary` owns both stable-wrapper resolution and the shared PATH-only executable lookup used by doctor, update, and service installation. See log entries 2026-05-26 (21:22Z / 22:55Z / 23:30Z) and ADR-024.
 

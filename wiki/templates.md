@@ -39,9 +39,14 @@ source commit's changed paths also retains the original temp for a later retry.
 
 Hive-installed runtimes record a `scheduler-service` in the shared state. A
 commit-triggered runner queues its source and dispatches that memory-bounded
-oneshot service. If the user systemd manager is unavailable, it removes the
-unusable marker and falls back to the machine-wide provider lock. Systems
-without the `flock` executable use Ruby's native OS file lock held by a small
+oneshot service. Queued commit `8944dfba` makes headless hooks reconstruct a
+missing user-bus environment from the standard runtime socket. If signaling
+still fails, the runner retains the
+installer-owned marker and falls back to the machine-wide provider lock, so a
+transient headless failure cannot disable bounded dispatch for later commits.
+Commits whose only changed path is compiled `wiki/log.md` exit before queueing;
+source fragments under `wiki/log.d/` and other relevant changes still refresh.
+Systems without the `flock` executable use Ruby's native OS file lock held by a small
 keeper process for the runner's lifetime, preserving the same crash-safe kernel
 release semantics without a stale directory protocol. Scheduled workers consume up
 to `LLM_WIKI_MAX_DRAIN_BATCHES` (3) with
@@ -134,7 +139,7 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 
 ### Queued patrol validation contract
 
-Queued commit `391f130a` extends the ordinary patrol prompts without accepting
+Queued head `05784893` extends the ordinary patrol prompts without accepting
 agent-authored command text. `patrol_review_prompt.md.erb` lists the configured
 validator keys and requires each finding to choose exactly one. The fix prompt
 then displays that finding's evidence target SHA and required key, instructs
@@ -188,4 +193,4 @@ All templates use `trim_mode: "-"` so `<%- … -%>` lines don't add stray newlin
 - [[modules/digest]]
 - [[architecture]]
 
-<!-- updated: 2026-07-21 -->
+<!-- updated: 2026-07-22 -->

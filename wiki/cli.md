@@ -155,12 +155,15 @@ contracts retain their established unversioned or schema-less shapes.
 | 2 | `ALREADY_INITIALIZED` | idempotent reject of `hive init` on existing project | `Hive::AlreadyInitialized` |
 | 3 | `TASK_IN_ERROR` | a stage agent recorded `:error` (runner itself succeeded) | `Hive::TaskInErrorState` |
 | 4 | `WRONG_STAGE` | `hive run` invoked on an inert stage (e.g. `1-inbox`) | `Hive::WrongStage` |
-| 64 | `USAGE` | EX_USAGE — bad arguments, or setup-agents consent declined/missing without TTY/`--yes` | `Hive::InvalidTaskPath`, `SetupAgents` |
+| 64 | `USAGE` | EX_USAGE — bad arguments, or setup-agents consent declined/missing without TTY/`--yes` | `Hive::UsageError`; `Hive::InvalidTaskPath` for task/path failures and preserved `invalid_task_path` contracts; `SetupAgents` |
 | 70 | `SOFTWARE` | EX_SOFTWARE — git, worktree, agent, or stage-runner failure | `GitError`, `WorktreeError`, `AgentError`, `StageError` |
 | 75 | `TEMPFAIL` | EX_TEMPFAIL — retryable lock contention | `Hive::ConcurrentRunError` |
 | 78 | `CONFIG` | EX_CONFIG — bad project/global config or invalid agent-skills manifest/filter | `Hive::ConfigError`, `SetupAgents` |
 
 Codes are stable; bumping a code requires updating `test/unit/exit_codes_test.rb`. See [CONTRIBUTING.md](../CONTRIBUTING.md) "CLI contract for agent callers".
+
+Queued head `05784893` introduces the generic `Hive::UsageError` ownership
+shown here; current-default integration remains pending.
 
 ## Authentication / preconditions
 
@@ -177,6 +180,7 @@ The CLI itself has no auth. Preconditions checked at runtime by individual stage
 
 | Class | Raised by |
 |-------|-----------|
+| `Hive::UsageError` | Generic command-line argument/usage failures that do not imply an invalid task path |
 | `Hive::InvalidTaskPath` | `Task#initialize` for paths not matching the regex |
 | `Hive::ConcurrentRunError` | `Lock.acquire_task_lock` when another live PID owns `.lock` |
 | `Hive::GitError` | `GitOps#run_git!` on non-zero git exit |
@@ -188,9 +192,18 @@ The CLI itself has no auth. Preconditions checked at runtime by individual stage
 | `Hive::WrongStage` | `Stages::Inbox#run!` (running an agent on an inert stage) |
 | `Hive::AlreadyInitialized` | `Commands::Init#call` when `hive/state` branch already exists |
 
+`Hive::UsageError` is the canonical generic usage exception.
+`Hive::InvalidTaskPath` remains for actual task/path resolution failures and
+established structured surfaces whose public `error_kind` is
+`invalid_task_path`; callers must not infer that every exit 64 denotes an
+invalid task path.
+
 A few stage runners still call `warn`/`exit N` directly for non-bug user errors that don't yet have a typed class — most notably `Init#validate_git_repo!` / `validate_clean_tree!` (exit 1), `Execute#run!` for `plan.md missing` (exit 1), and the `OpenPr` / `Finalize` network/auth abort paths. Migrating these to typed exceptions is tracked as Phase 2 follow-up work.
 
 **Error envelopes.** Every full-envelope `--json` command (`status`, `run`, `approve`, `findings`, `accept-finding`, `reject-finding`, `markers clear`, `metrics rollback-rate`, `forget`, `prune`, and the workflow verbs `brainstorm` / `plan` / `develop` / `open-pr` / `review` / `artifacts` / `finalize` / `archive`) emits a `Hive::Schemas::ErrorEnvelope` document on stdout when an error is raised. Detect failure by `payload.ok == false`. The envelope carries `schema`, `schema_version`, `ok=false`, `error_class`, `error_kind` (a closed enum per command — see `Hive::Schemas::RunErrorKind` / `StatusErrorKind` / etc.), `exit_code` (matches the raised `Hive::Error`'s `exit_code` per `Hive::ExitCodes`), and `message`. Per-error structured extras (`candidates` for `AmbiguousSlug`, `id` for `UnknownFinding`, `path` for `DestinationCollision`, `stage` for `FinalStageReached`) appear automatically when the command's closed schema permits them; `hive-markers-clear.v1` intentionally retains its narrower key set and does not expose commit-lock holder/path metadata. If encoding the error payload itself raises `JSON::GeneratorError`, `run` and `status` preserve their original silent fallback to the typed exit code; `approve`, findings/toggles, markers, and workflow stage actions preserve their original raised generator error; and the emitter's earlier consumers (`daemon`, `adhoc-review`, `drop`, `forget`, and `prune`) preserve the shared default that warns and then re-raises the original typed failure. The wrapper also emits command-shaped JSON for the pre-dispatch missing-argument cases named in `JSON_USAGE_ERROR_CONTRACTS`, so agent callers do not lose the JSON contract just because Thor rejects argv before a handler is instantiated; that includes the unversioned `hive-setup` usage payload and Screenote's schema-less `ok:false`, `service:"screenote"` usage payloads. `hive daemon queue --json` uses its own `hive-daemon-queue.v1` `ErrorPayload` arm for queue-command failures (`unknown_action`, `missing_request_id`, `internal`) so queue inspectors still receive one schema-specific document. `hive run --json` additionally preserves the existing dual-signal contract on `:error` / `:review_error` markers — the SuccessPayload is emitted to stdout BEFORE the `TaskInErrorState` raise, so the rescue's ErrorPayload is suppressed (one document, exit 3). `hive bench submit --json` is success-only today, so a raised `BenchSubmit::UsageError` still renders as `hive: ...` on stderr with exit 64. Errors that fire before the wrapper can load Hive or inspect argv (gem-load failures, shebang errors) cannot emit JSON — those remain stderr-text + exit-code only.
+
+For queued head `05784893`, the bench-submit usage exception named above is
+the generic `Hive::UsageError`; `BenchSubmit::UsageError` is the older shape.
 
 ## Backlinks
 

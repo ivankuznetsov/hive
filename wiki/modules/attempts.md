@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-07-18
+updated: 2026-07-22
 tags: [attempts, ownership, leases, daemon, recovery]
 ---
 
@@ -12,6 +12,10 @@ one versioned JSON lease/receipt under `$HIVE_HOME/attempts/v1/`. A detached
 supervisor wrapper—not the CLI, bot, web process, or daemon—owns the worker
 group, heartbeat, framed output, exit status, and terminal receipt. The daemon
 reconciles and applies policy; it does not own or reap task agents.
+
+Queued commit `5c1a20e9` adds the launching-handoff, final-frame, and successor
+output clauses documented below. They remain branch projections until
+current-default integration.
 
 ## Module map
 
@@ -95,10 +99,13 @@ session. The dispatcher gives the wrapper a one-time random capability through
 an inherited pipe; the private `__attempt-supervise` route accepts no worker
 command argv and can claim only by proving that capability against the
 immutable record digest. The supervisor then executes the record's exact argv.
-Admission is reported accepted only after the launcher confirms that claim. A
-false/malformed handoff or launcher exception marks the unclaimed reservation
-`lost` and returns a retryable deferral; if the wrapper won the claim race, the
-dispatcher re-reads and adopts it instead of creating an overlapping owner.
+Admission is reported accepted after a confirmed claim or when the launcher's
+bounded handoff reports that the reservation is still `launching`; the latter
+remains live for normal reconciliation instead of being falsely marked lost on
+a handoff timeout. A false/malformed handoff or launcher exception marks the
+unclaimed reservation `lost` and returns a retryable deferral; if the wrapper
+won the claim race, the dispatcher re-reads and adopts it instead of creating
+an overlapping owner.
 Capacity scan and reservation creation take the shared admission lock before
 the generation lock. That fixed order makes the limit decision atomic across
 different tasks and projects, rather than only among duplicates of one
@@ -118,7 +125,10 @@ dependency changes. It immediately deletes every inherited
 the admission bypass. The attempt transport cannot supply a dedicated store
 override, and production exposes neither public context construction nor a
 `Context.with` override. The authenticated context remains only in the worker
-process. An attached client records whether any stdout frame was replayed.
+process. An attached client drains frames once more after observing `terminal`
+or `lost`, closing the receipt-fetch race in which the supervisor published
+final output between the prior read and state observation. It records whether
+any stdout frame was replayed.
 `Hive::Attempts::CommandDispatch` applies that result identically for `hive
 run` and workflow verbs: a non-zero terminal result with no worker stdout is
 routed through the owning command's normal versioned JSON error envelope
@@ -167,8 +177,10 @@ One `ERROR reason=attempt_lost` compatibility marker is projected. Only the
 lease loss healer consumes it; legacy and recoverable-error discovery skip it.
 Retry budget is durable `retry_charge` (maximum three), so restart or a new ID
 cannot reset it. A successor replays the immutable admitted workflow argv and
-flags; if the command already moved the task, only its locator is retargeted
-and a satisfied `--from` assertion is removed. Queue claims follow an admitted
+flags and inherits the predecessor's inherited plus current outputs when the
+caller omits that list or supplies an empty list. If the command already moved
+the task, only its locator is retargeted and a satisfied `--from` assertion is
+removed. Queue claims follow an admitted
 successor and later complete from its receipt. If the daemon crashes after
 admission but before stamping the queue claim, restart repairs correlation by
 the immutable request ID before deciding whether the claim is live.

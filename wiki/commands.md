@@ -219,9 +219,10 @@ CLI/bot/daemon stack; it does not introduce a separate workflow engine. GitHub
 device-flow auth can either use a pre-pinned `web.github.owner` or first-login
 claim on an ownerless box. Production Action Cable accepts same-origin-as-host,
 with `web.origin` / `HIVE_WEB_ORIGIN` only as an extra allow for split-origin
-deploys. Task Drop is deliberately not daemon-queued: the web handler calls
-`Hive::Web::Dispatcher#drop`, which runs `Commands::Drop` in-process with the
-rendered `from` stage as a stale-page guard. Repo setup clones through `gh`,
+deploys. On queued Rails resource commit `96b06792`, Task Drop is deliberately
+not daemon-queued: the web handler calls filesystem-backed `Task#drop!`, which
+runs `Commands::Drop` in-process with the rendered `from` stage as a stale-page
+guard. Repo setup clones through `gh`,
 normalizes GitHub SSH origins to https, and relies on the Docker image's
 `gh auth git-credential` helper for GitHub push auth; the Agents page now starts
 the `gh auth login` PTY relay for that credential. Docker packaging adds the

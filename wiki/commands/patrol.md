@@ -61,11 +61,27 @@ Before a normal run, Hive requires at least one configured `docs`, `format`,
 fails as a configuration error before patrol state, repository mapping, or any
 reviewer/fixer agent is created.
 
-1. Reconcile dismissal memory for existing patrol branches and PRs.
+The target-bound lifecycle, retry, recurrence, and v3 clauses below describe
+queued head `05784893`; the refresh branch's current-default source retains the
+older producer until that branch is integrated.
+
+1. Reconcile every durable finding with merged/open fingerprint state and
+   closed-unmerged dismissals. Legacy records load as active. Resolved and
+   rejected roots remain terminal for the SHA where they were dispositioned;
+   matching evidence on a newer target may begin a new active recurrence.
 2. For a new sweep, strictly fetch the explicit remote head `refs/heads/<default_branch>` into `origin/<default_branch>` and materialize its exact commit as a clean detached scan checkout. A same-named tag cannot shadow this branch, and the fetch has a bounded process-group deadline. A configured remote that cannot be fetched fails the cycle before mapper or reviewer work instead of falling back to stale local main; repositories without an `origin` use their local default branch. The registered checkout's current branch, dirty files, local-default position, and concurrent edits cannot contaminate or be moved by the scan. Map that snapshot's tracked source into non-overlapping language-neutral component/manifest features, subsystem tests, and separate command-contract slices. Each command path is a primary evidence anchor only in its command slice and remains supporting context in its component; all scripts in one manifest share one contract review, and that manifest is not reviewed again as a generic component. Generic text source under common code roots remains mappable without a language adapter; the old overlapping route/package/monolithic-test slices are not emitted in this mode.
 3. Select a deterministic batch of at most `max_features_per_cycle` features, further bounded by the tighter remaining ordinary cycle or shared UTC-day launch headroom. A shipping run reserves as many available launches as possible up to `max_fix_attempts_per_cycle`, while still reviewing at least one feature; `--dry-run` may use the whole remaining envelope because it cannot fix. An explicit active marker, cursor, and exact snapshot SHA persist across daemon cycles, including a failed first batch whose cursor is still zero. A later feature error advances the cursor past the batch's proven-clean prefix and pins the first failed feature; an unattributable error still fails closed at the batch start. If the remote default advances during an incomplete or errored sweep, Hive finishes the stored review snapshot before starting the newer one, bounding reviewer cost without permanently restarting at the first component. If the saved commit is no longer materializable, Hive fetches the current default and restarts the feature cursor instead of retrying a dead snapshot forever. A stored review pin cannot produce an old-base branch or task: step 6 independently re-fetches immediately before every fix, and steps 8–9 require exact base/head identity before handoff.
 4. Ask the configured agent for at most three production findings per feature. Its initial source view contains at most four owned paths selected under a 32 KiB budget; context and test paths require the single hypothesis-driven follow-up. The third response must write JSON, with a fourth turn available only for emergency finalization. The bounded response is accepted all-or-nothing: every admitted record requires a current-checkout contract, consequence, root cause, reproduction/static trace, targeted validation, and repository-confined production evidence whose cited line contains the supplied snippet. The trigger/root-cause anchor must belong to the mapped slice. Zero findings is explicitly preferred to speculation. Documentation, test-gap, and maintainability belong outside ordinary auto-fix patrol.
-5. Compute a 0–100 alpha score from production category, grounded scope, complete defect proof, evidence breadth, and prior dismissal outcomes. Severity and confidence remain admission gates and small tie-breakers because the historical corpus showed their model-authored labels did not predict delivery. Skip dismissed, already-PR'd, similar-known, low-confidence/severity, non-production, low-alpha, already-active-feature, same-run semantic duplicate, and over-feature-budget findings. Historical aliases map legacy command/route/package slice IDs to their equivalent current component without treating unrelated old surfaces as active. Rank the survivors globally; mapper order no longer decides the PR budget.
+5. Bind each reviewed finding to the exact target SHA before durable admission.
+   Same-target terminal duplicates stay suppressed. A shipping cycle reuses a
+   same-target active record as retryable work without writing the reviewer's
+   duplicate, so dry-run discovery or a transient fixer failure is not lost.
+   Matching evidence on a newer target creates a recurrence lineage and
+   supersedes any older active match while preserving terminal history. PR and
+   dismissal ledgers carry their target SHA so an older outcome cannot
+   redisposition the recurrence. Compute the 0–100 alpha score only for
+   admitted or retried records, then apply production/history/diversity gates
+   and rank survivors globally; mapper order does not decide the PR budget.
 6. For each ranked survivor, strictly fetch the default branch (no stale-local fallback) and create `hive-patrol/...` from its exact commit. The fixer prompt directs four bounded inspect/reproduce/edit/proof responses and tells the agent to leave post-edit validation to Hive. It selects an operator-configured validation key and declares bounded, confined sibling-audit and regression paths, which may use any language or project-specific directory. A completed `fix.json` ends the agent phase even when a later provider token/turn boundary fires, but it does not validate or publish the edits. Hive reads that proof as a nonblocking, no-follow, regular file capped at 64 KiB, overlays only those changed regression files onto an isolated base, requires a normal nonzero failure that identifies one of them, then requires the same configured command to pass on the patched tree. Both the base proof and patched validation honor `timeout_sec.patrol`, so a project suite is not cut off by the validator's fallback default. Agent-authored root-cause/audit prose remains explicitly reported context, not machine proof; rejection does not permanently suppress the finding.
 7. Run the broader operator-configured validation commands only after the reproduction gate. `max_prs_per_cycle` caps PRs **opened**, while `max_fix_attempts_per_cycle` independently bounds expensive fixer calls when candidates are stale, rejected, or fail validation. A structured cycle/day quota exhaustion stops the remaining attempts immediately.
 8. Open a PR only when validation passed, the changed paths pass the review fix guardrail, and title, body, and the exact validated base-to-head diff pass secret scanning. The local head/cleanliness, remote base, leased branch push, remote head, and created PR identity are checked fail-closed. Immediately after creation Hive records `reconciliation_pending` with the exact PR URL and patch/base/head/worktree receipt; lookup lag, authentication failure, or restart reuses only that validated patch. The fingerprint becomes `open` only after exact URL/base/head reconciliation and review handoff settle.
@@ -78,30 +94,23 @@ scan/audit state but does not create fix worktrees, push branches, or open PRs.
 
 ### Queued durable-finding projection
 
-Queued commit `391f130a` on `fix/all-worthy-patrol-findings` is not an
-ancestor of the refresh branch, but its committed command contract moves
-durability behind admission. The reviewer returns in-memory findings, the
-command stamps the exact review `target_sha` plus one operator-configured
-`validation_key` (an omitted key defaults only when exactly one command is
-configured), and `FindingRegistry` reconciles PR/dismissal ledgers before
-comparing the new records with every durable finding. A same-target match or a
-match already marked `resolved`/`rejected` is skipped as
-`semantic_duplicate` with `canonical_finding_id`; newer-target evidence
-supersedes matching active records before the replacement is persisted.
+Queued head `05784893` on `fix/all-worthy-patrol-findings` is not an ancestor
+of the refresh branch. It moves durability behind admission: the reviewer
+returns in-memory findings; the command stamps the exact `target_sha` and one
+operator-configured `validation_key`; and `FindingRegistry` reconciles
+target-bound PR/dismissal ledgers before comparing new evidence with indexed
+exact and category-semantic history. Its lifecycle is
+`active`/`resolved`/`rejected`/`superseded`, with same-target active retry reuse
+and newer-target recurrence as described above. Before an agent starts, the
+fixer requires the freshly fetched default SHA to equal the finding target and
+runs the selected validation command on a clean base. Target drift, baseline
+failure, or baseline mutation fail before launch; non-stale rejection remains
+an attempt outcome rather than durable resolution.
 
-The queued finding schema adds `validation_key`, `target_sha`,
-`lifecycle_state`, `lifecycle_reason`, `lifecycle_updated_at`, and
-`superseded_by`. Lifecycle states are `active`, `resolved`, `rejected`, and
-`superseded`, with legacy records loading as active. Selection can also close
-a candidate as `invalid_validation`. Before an agent starts, the queued fixer
-requires the freshly fetched default SHA to equal the finding target and runs
-the selected validation command on the clean base; target drift, baseline
-failure, or baseline mutation closes the attempt as `stale_target_sha`,
-`validation_preflight_failed`, or `validation_preflight_mutated_worktree`. A
-stale-target attempt supersedes the current finding, while other fixer
-rejection remains an attempt outcome rather than durable resolution. These
-fields and reasons extend the v2 schemas; they do not describe current-default
-behavior until the queued branch is integrated.
+That head advances current producer contracts to `hive-patrol.v3` and
+`hive-patrol-finding.v3`. The retained v2 files are restored to their earlier
+published shape rather than silently gaining lifecycle fields or newer reason
+enums. This remains queued branch behavior until integration.
 
 ## Alpha calibration
 
@@ -111,12 +120,13 @@ That evidence drives the current policy: component ownership instead of overlapp
 
 ## JSON
 
-With `--json`, the command emits a single `hive-patrol.v2` envelope (`hive-patrol.v1` remains pinned for older consumers):
+With the queued branch, `--json` emits a single `hive-patrol.v3` envelope;
+`hive-patrol.v1` and `.v2` remain pinned for older consumers:
 
 ```json
 {
   "schema": "hive-patrol",
-  "schema_version": 2,
+  "schema_version": 3,
   "ok": true,
   "project": "my-project",
   "project_root": "/home/me/Dev/my-project",

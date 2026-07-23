@@ -15,7 +15,9 @@ For security issues, see [SECURITY.md](SECURITY.md) — please do not open a pub
 ## Proposing changes
 
 1. Fork and create a branch from `main`. Use a meaningful name (`feat/...`, `fix/...`, `docs/...`).
-2. Match the existing style — the codebase is small and consistent. Run the quality gate locally before pushing:
+2. Match the existing style — the codebase is small and consistent. While
+   editing, run the focused test files for the behavior you changed. Run the
+   broad local checkpoint before pushing when the change warrants it:
    ```bash
    bundle install
    bundle exec rake test
@@ -23,9 +25,13 @@ For security issues, see [SECURITY.md](SECURITY.md) — please do not open a pub
    bundle exec brakeman --no-pager
    bundle exec bundler-audit check --update
    ```
+   CI additionally owns the exhaustive coverage run, packaged Hive web
+   bootstrap, TUI reactivity scale, platform, browser, and release-adjacent
+   gates; these should not slow every local commit.
 3. Add or update tests for any behavioral change. Unit tests live in `test/unit/`, integration tests in `test/integration/`.
 4. Keep commits focused. Conventional commit prefixes are appreciated (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`).
-5. Open a pull request. CI runs the quality gate above; please make sure it's green before requesting review.
+5. Open a pull request. CI runs the local checkpoint plus its exhaustive merge
+   gates; please make sure they're green before requesting review.
 
 ## Coding conventions
 

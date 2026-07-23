@@ -3,12 +3,23 @@ require "fileutils"
 require "securerandom"
 require_relative "test/support/coverage"
 
-# Default suite — everything under test/{unit,integration}. Self-contained,
-# uses fake-claude / fake-gh, no network or paid API calls.
+# These release/performance proofs are intentionally separate from the normal
+# local suite. CI runs them as named merge gates.
+HIVE_CI_GATE_TESTS = {
+  "test:packaged_web_bootstrap" => "test/integration/web_packaged_bootstrap_test.rb",
+  "test:tui_reactivity_perf" => "test/integration/tui_reactivity_perf_test.rb"
+}.freeze
+HIVE_DEFAULT_TEST_FILES = FileList[
+  "test/{unit,integration,babysitter}/**/*_test.rb"
+].exclude(*HIVE_CI_GATE_TESTS.values).to_a.freeze
+
+# Default local suite. Self-contained, uses fake-claude / fake-gh, and makes no
+# network or paid API calls. Expensive release/performance proofs run only
+# through their explicit CI-gate tasks below.
 Rake::TestTask.new do |t|
   t.libs << "test"
   t.libs << "lib"
-  t.test_files = FileList["test/{unit,integration,babysitter}/**/*_test.rb"]
+  t.test_files = HIVE_DEFAULT_TEST_FILES
   t.warning = false
 end
 
@@ -78,6 +89,16 @@ namespace :e2e do
 end
 
 namespace :test do
+  HIVE_CI_GATE_TESTS.each do |qualified_name, test_file|
+    Rake::TestTask.new(qualified_name.delete_prefix("test:")) do |t|
+      t.libs << "test"
+      t.libs << "lib"
+      t.test_files = FileList[test_file]
+      t.warning = false
+      t.description = "Run the #{qualified_name.delete_prefix("test:").tr("_", " ")} merge gate"
+    end
+  end
+
   Rake::TestTask.new(:eval) do |t|
     t.libs << "test"
     t.libs << "lib"

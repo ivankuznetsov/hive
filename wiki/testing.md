@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release}.yml, packaging/live_agent_skills/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-22
+updated: 2026-07-23
 tags: [test, minitest, fixtures, honeycomb, agent-skills, release-proof]
 ---
 
@@ -17,11 +17,34 @@ candidate gate owns release readiness without provider credentials; the live
 agent workflow is an optional diagnostic that directly exercises native
 OpenClaw, Claude, Codex, and Pi discovery/use when credentials are available.
 
-## Run all
+## Local feedback loop
+
+During implementation, run the smallest relevant test files directly:
+
+```bash
+bundle exec ruby -Itest test/unit/example_test.rb
+bundle exec ruby -Itest test/integration/example_test.rb
+```
+
+Do not run the full suite after every commit. Use the default suite as a broad
+local checkpoint, normally once before handoff:
 
 ```bash
 bundle exec rake test
 ```
+
+The default suite excludes two expensive outer proofs. CI runs each as a named
+merge gate; contributors do not normally need them locally. When diagnosing a
+corresponding CI failure, use:
+
+```bash
+bundle exec rake test:packaged_web_bootstrap
+bundle exec rake test:tui_reactivity_perf
+```
+
+The packaged-web gate is commit-bound: it archives `HEAD:web` to reproduce the
+release artifact. Commit relevant web changes before using that task locally;
+otherwise it deliberately tests the previously committed tree.
 
 ## Coverage
 
@@ -31,7 +54,20 @@ bundle exec rake coverage
 
 The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch coverage in the parent test process and prepends `RUBYOPT=-Itest -rhive_coverage_boot` so Ruby subprocess tests dump their own result files under a per-run `coverage/.resultset/<run-id>/` directory. The final merged report is written to `coverage/coverage.json` and prints the lowest-covered source files plus uncovered line numbers.
 
-`bundle exec rake coverage` is the CI coverage-report path. It fails when an executable source file was never loaded, when a subprocess result file cannot be read, or when line coverage drops below the default 100% threshold. At a 100% minimum, the gate compares the exact covered and executable line counts; the displayed two-decimal percentage is informational and cannot hide one uncovered line that rounds to `100.00%`. Set `HIVE_COVERAGE_MIN_LINE` to a different numeric percentage only when intentionally loosening or tightening that gate; lower configured thresholds retain percentage comparison semantics. Visual-artifact and Screenote code paths are part of that 100% gate, including error/default branches such as invalid Screenote JSON, default Net::HTTP transport, manifest upload exceptions, missing media directories, screenote config type errors, and dry-run digest completion failures.
+`bundle exec rake coverage` is the exhaustive CI coverage-report path, not an
+after-every-commit agent loop. It instruments the default suite; the packaged
+web and TUI scale proofs run in their dedicated CI jobs instead. Coverage fails
+when an executable source file was never loaded, when a subprocess result file
+cannot be read, or when line coverage drops below the default 100% threshold.
+At a 100% minimum, the gate compares the exact covered and executable line
+counts; the displayed two-decimal percentage is informational and cannot hide
+one uncovered line that rounds to `100.00%`. Set `HIVE_COVERAGE_MIN_LINE` to a
+different numeric percentage only when intentionally loosening or tightening
+that gate; lower configured thresholds retain percentage comparison semantics.
+Visual-artifact and Screenote code paths are part of that 100% gate, including
+error/default branches such as invalid Screenote JSON, default Net::HTTP
+transport, manifest upload exceptions, missing media directories, screenote
+config type errors, and dry-run digest completion failures.
 
 Coverage-included tests that only need a generic stdout/stderr subprocess should avoid `RbConfig.ruby` children unless they are explicitly testing Ruby coverage propagation. Those nested Ruby processes inherit the coverage `RUBYOPT`, which can make startup latency part of otherwise unrelated timeout assertions; use a tiny executable fixture script for generic capture/timeout seams.
 
@@ -39,10 +75,18 @@ In CI (`CI=true`), tests that exercise backgrounding commands must force a foreg
 
 `Rakefile`:
 ```ruby
+HIVE_CI_GATE_TESTS = {
+  "test:packaged_web_bootstrap" => "test/integration/web_packaged_bootstrap_test.rb",
+  "test:tui_reactivity_perf" => "test/integration/tui_reactivity_perf_test.rb"
+}.freeze
+HIVE_DEFAULT_TEST_FILES = FileList[
+  "test/{unit,integration,babysitter}/**/*_test.rb"
+].exclude(*HIVE_CI_GATE_TESTS.values).to_a.freeze
+
 Rake::TestTask.new do |t|
   t.libs << "test"
   t.libs << "lib"
-  t.test_files = FileList["test/{unit,integration}/**/*_test.rb"]
+  t.test_files = HIVE_DEFAULT_TEST_FILES
   t.warning = false
 end
 task default: :test
@@ -423,8 +467,9 @@ identity, all four matrix jobs, one unexpired artifact, and its downloaded
 archive digest, but `release.yml` does not query or require that Check Run.
 
 `bundle exec rake smoke` also contains older live Claude workflows and may
-incur provider cost. Normal `rake test` and `rake coverage` remain local and
-network-free.
+incur provider cost. Normal `rake test` remains local and network-free.
+`bundle exec rake coverage` uses the same network-free machinery but is
+normally owned by hosted CI.
 
 ## Live Claude tmux dogfood
 

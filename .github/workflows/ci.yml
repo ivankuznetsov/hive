@@ -33,6 +33,28 @@ jobs:
           HIVE_COVERAGE_MIN_LINE: "100"
         run: bundle exec rake coverage
 
+  expensive-test-gates:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: packaged Hive web bootstrap
+            task: test:packaged_web_bootstrap
+          - name: TUI reactivity performance
+            task: test:tui_reactivity_perf
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Run merge gate
+        env:
+          HIVE_CI_GATE_TASK: ${{ matrix.task }}
+        run: bundle exec rake "$HIVE_CI_GATE_TASK"
+
   e2e:
     name: real CLI scenario harness
     runs-on: ubuntu-latest

@@ -598,6 +598,28 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
+  def test_available_unmanaged_native_reviewer_is_non_blocking
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "claude")
+      executable(bin)
+      reviewer = {
+        "name" => "lint", "kind" => "linter",
+        "agent" => "claude", "skill" => "rubocop"
+      }
+      cfg = config(reviewers: [ reviewer ], bin: bin)
+
+      row = Hive::AgentSkills::Inspector.new(
+        config: cfg, project_root: dir, runner: FakeRunner.new,
+        environment: { "HOME" => dir, "PATH" => "" }
+      ).inspect(skills: [ "rubocop" ]).first
+
+      refute row.managed
+      assert_equal "healthy", row.health
+      assert_equal "info", row.severity
+      assert_includes row.remediation, "native reviewer"
+    end
+  end
+
   def test_version_probe_failure_old_cli_disabled_package_and_invalid_package_version
     with_tmp_dir do |dir|
       bin = File.join(dir, "bin", "claude")

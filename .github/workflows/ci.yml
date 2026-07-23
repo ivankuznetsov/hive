@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   test:
-    name: rake test (Ruby ${{ matrix.ruby }})
+    name: coverage (Ruby ${{ matrix.ruby }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -54,6 +54,23 @@ jobs:
         env:
           HIVE_CI_GATE_TASK: ${{ matrix.task }}
         run: bundle exec rake "$HIVE_CI_GATE_TASK"
+
+  required-test-gate:
+    name: rake test (Ruby 3.4)
+    if: ${{ always() }}
+    needs:
+      - test
+      - expensive-test-gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require coverage and expensive proof gates
+        shell: bash
+        env:
+          HIVE_COVERAGE_RESULT: ${{ needs.test.result }}
+          HIVE_EXPENSIVE_GATES_RESULT: ${{ needs.expensive-test-gates.result }}
+        run: |
+          test "$HIVE_COVERAGE_RESULT" = "success"
+          test "$HIVE_EXPENSIVE_GATES_RESULT" = "success"
 
   e2e:
     name: real CLI scenario harness

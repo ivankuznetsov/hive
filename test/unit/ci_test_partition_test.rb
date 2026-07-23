@@ -46,6 +46,23 @@ class CiTestPartitionTest < Minitest::Test
       run_step = gate_job.fetch("steps").find { |step| step["name"] == "Run merge gate" }
       assert_equal 'bundle exec rake "$HIVE_CI_GATE_TASK"', run_step.fetch("run")
       assert_equal "${{ matrix.task }}", run_step.fetch("env").fetch("HIVE_CI_GATE_TASK")
+
+      assert_equal "coverage (Ruby ${{ matrix.ruby }})", workflow.fetch("jobs").fetch("test").fetch("name")
+      required_gate = workflow.fetch("jobs").fetch("required-test-gate")
+      assert_equal "rake test (Ruby 3.4)", required_gate.fetch("name")
+      assert_equal "${{ always() }}", required_gate.fetch("if")
+      assert_equal %w[test expensive-test-gates], required_gate.fetch("needs")
+
+      required_step = required_gate.fetch("steps").fetch(0)
+      assert_equal "${{ needs.test.result }}",
+                   required_step.fetch("env").fetch("HIVE_COVERAGE_RESULT")
+      assert_equal "${{ needs.expensive-test-gates.result }}",
+                   required_step.fetch("env").fetch("HIVE_EXPENSIVE_GATES_RESULT")
+      assert_equal "bash", required_step.fetch("shell")
+      assert_equal <<~SHELL, required_step.fetch("run")
+        test "$HIVE_COVERAGE_RESULT" = "success"
+        test "$HIVE_EXPENSIVE_GATES_RESULT" = "success"
+      SHELL
     end
   end
 

@@ -34,8 +34,12 @@ bundle exec rake test
 ```
 
 The default suite excludes two expensive outer proofs. CI runs each as a named
-merge gate; contributors do not normally need them locally. When diagnosing a
-corresponding CI failure, use:
+gate and feeds both results, together with exhaustive coverage, into the
+already-required `rake test (Ruby 3.4)` check. The aggregator uses `always()` and
+fails unless both dependencies succeeded, preserving one fail-closed merge
+contract for branches created before and after this workflow change.
+Contributors do not normally need the dedicated tasks locally. When diagnosing
+a corresponding CI failure, use:
 
 ```bash
 bundle exec rake test:packaged_web_bootstrap

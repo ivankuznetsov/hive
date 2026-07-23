@@ -415,7 +415,7 @@ module HiveTestCoverage
   end
 
   def coverage_ok?(report)
-    line_percent_for(report) >= minimum_line_percent &&
+    line_coverage_ok?(report, minimum_line_percent) &&
       Array(value(report, :unloaded_files)).empty? &&
       Array(value(report, :result_errors)).empty?
   end
@@ -432,7 +432,7 @@ module HiveTestCoverage
     line_total = numeric_value(report, :line_total)
     minimum = minimum_line_percent
     line_percent = line_percent_for(report)
-    if line_percent < minimum
+    unless line_coverage_ok?(report, minimum)
       lines << format(
         "line coverage %.2f%% (%d/%d) below minimum %.2f%%",
         line_percent,
@@ -528,6 +528,14 @@ module HiveTestCoverage
 
   def numeric_value(hash, key)
     value(hash, key).to_f
+  end
+
+  def line_coverage_ok?(report, minimum)
+    if minimum == 100.0
+      numeric_value(report, :line_covered) == numeric_value(report, :line_total)
+    else
+      line_percent_for(report) >= minimum
+    end
   end
 
   def line_percent_for(report)

@@ -101,7 +101,7 @@ returns every flat patch and supersession receipt.
 | `hive markers clear FOLDER --name NAME` | Clear a recovery marker through the allowlisted path. |
 | `hive rebase-status TARGET` | Inspect whether the next run would auto-rebase. |
 | `hive refactor-patrol PROJECT --list\|--show JOB_ID [--limit N]` | Inspect durable architecture-patrol jobs without mutation; list pages use `--cursor`, while show accepts explicit `--full` history. |
-| `hive migrate [PROJECT_PATH]` | Rename in-flight task folders from older stage layouts and backfill legacy task metadata. |
+| `hive migrate [PROJECT_PATH]` | Rewrite legacy project config, rename in-flight task folders from older stage layouts, and backfill legacy task metadata. |
 | `hive workflow new ID` | Scaffold a blank project workflow descriptor under `<hive_state_path>/workflows/`. |
 | `hive workflow install honeycomb/NAME[@REF]` | Verify and atomically select a reviewed package. |
 | `hive workflow list` | Show built-in, authored, selected, and retained workflows with integrity/provenance; JSON v2 includes the active managed configuration and redacted input availability. |

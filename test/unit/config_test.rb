@@ -49,26 +49,79 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_rejects_top_level_reviewers_for_every_yaml_value_with_migration_guidance
-    values = [
-      [ { "name" => "legacy" } ],
-      [],
-      nil,
-      {},
-      "",
-      7
-    ]
+  def test_load_promotes_top_level_reviewers_for_upgrade_compatibility_and_warns_once
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      reviewer = {
+        "name" => "legacy",
+        "kind" => "agent",
+        "agent" => "codex",
+        "skill" => "ce-code-review",
+        "output_basename" => "legacy",
+        "prompt_template" => "reviewer_codex_ce_code_review.md.erb"
+      }
+      File.write(config_path, { "reviewers" => [ reviewer ] }.to_yaml)
 
-    values.each do |value|
+      cfg = nil
+      _out, err = capture_io do
+        cfg = Hive::Config.load(dir)
+        Hive::Config.load(dir)
+      end
+
+      assert_equal [ reviewer ], cfg.dig("review", "reviewers")
+      refute cfg.key?("reviewers")
+      assert_equal 1, err.scan(/top-level `reviewers`/).length
+      assert_includes err, "run `hive migrate`"
+      assert_includes err, config_path
+    end
+  end
+
+  def test_load_rejects_conflicting_legacy_and_canonical_reviewers
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, {
+        "review" => { "reviewers" => [] },
+        "reviewers" => []
+      }.to_yaml)
+
+      error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, "both top-level `reviewers` and `review.reviewers`"
+      assert_includes error.message, "choose which value to keep"
+      assert_includes error.message, config_path
+    end
+  end
+
+  def test_load_rejects_legacy_reviewers_when_review_is_not_a_mapping
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, {
+        "review" => "invalid",
+        "reviewers" => []
+      }.to_yaml)
+
+      error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, "cannot be migrated because `review` is String"
+      assert_includes error.message, "make `review` a mapping"
+    end
+  end
+
+  def test_load_validates_reviewers_after_promoting_the_legacy_key
+    [ nil, {}, "", 7 ].each do |value|
       with_tmp_dir do |dir|
         config_path = File.join(dir, ".hive-state", "config.yml")
         FileUtils.mkdir_p(File.dirname(config_path))
         File.write(config_path, { "reviewers" => value }.to_yaml)
 
-        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        error = assert_raises(Hive::ConfigError) do
+          capture_io { Hive::Config.load(dir) }
+        end
 
-        assert_includes error.message,
-                        "Unknown top-level key `reviewers`; move it to `review.reviewers`."
+        assert_includes error.message, "review.reviewers"
         assert_includes error.message, config_path
       end
     end
@@ -85,10 +138,11 @@ class ConfigTest < Minitest::Test
           "unknown_stage_typo" => {}
         }.to_yaml)
 
-        error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
+        error = nil
+        capture_io do
+          error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
+        end
 
-        assert_includes error.message, "Unknown top-level key `reviewers`"
-        assert_includes error.message, "move it to `review.reviewers`"
         assert_includes error.message, "Unknown top-level key `unknown_stage_typo`"
       end
     end
@@ -100,7 +154,6 @@ class ConfigTest < Minitest::Test
       FileUtils.mkdir_p(File.dirname(config_path))
       File.write(config_path, <<~YAML)
         zeta_typo: true
-        reviewers:
         17: numeric
         alpha_typo: true
       YAML
@@ -109,7 +162,6 @@ class ConfigTest < Minitest::Test
 
       expected_findings = [
         "Unknown top-level key `alpha_typo`.",
-        "Unknown top-level key `reviewers`; move it to `review.reviewers`.",
         "Unknown top-level key `zeta_typo`.",
         "Unknown top-level key 17."
       ]

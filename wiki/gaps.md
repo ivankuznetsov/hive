@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-22
+updated: 2026-07-23
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -652,3 +652,12 @@ primary worktree whenever its managed files exist, with regression coverage
 for a deliberately stale linked copy. The bootstrap-only fallback remains for
 repositories whose primary worktree does not yet contain managed wiki files.
 No unresolved recovery gap remains for this incident.
+
+## Legacy root reviewers compatibility removal is not scheduled (2026-07-23)
+
+The project-config loader temporarily promotes a root-level `reviewers` key to
+`review.reviewers` so an installed Hive update does not strand older projects;
+`hive migrate` persists the canonical form. The release that removes this
+read-through alias has not been selected. Remove it only after warned projects
+have had a migration window and release notes make the strict boundary
+explicit; no version or publication decision is implied by the source change.

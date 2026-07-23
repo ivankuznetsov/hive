@@ -29,7 +29,7 @@ class TaskTest < Minitest::Test
     with_tmp_dir do |dir|
       hive_state = File.join(dir, ".hive-state")
       FileUtils.mkdir_p(hive_state)
-      File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
+      File.write(File.join(hive_state, "config.yml"), "reviewres: []\n")
       task = Hive::Task.allocate
       task.instance_variable_set(:@project_root, dir)
       task.instance_variable_set(:@hive_state_path, hive_state)
@@ -44,7 +44,7 @@ class TaskTest < Minitest::Test
 
       with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
         error = assert_raises(Hive::UnsupportedProjectConfigError) { task.send(:resolve_workflow) }
-        assert_includes error.message, "move it to `review.reviewers`"
+        assert_includes error.message, "Unknown top-level key `reviewres`"
       end
     end
   end

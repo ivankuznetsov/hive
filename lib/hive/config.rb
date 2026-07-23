@@ -721,6 +721,8 @@ module Hive
     # DEFAULTS. Keep this list explicit so a newly rendered section cannot
     # silently become an unvalidated extension namespace.
     PROJECT_KEYS_WITHOUT_DEFAULTS = Set.new(%w[gh]).freeze
+    @legacy_project_config_warning_lock = Mutex.new
+    @legacy_project_config_warned_paths = Set.new
 
     module_function
 
@@ -812,6 +814,7 @@ module Hive
 
     def build_project_config(project_root, source_path, data, stage_names: nil)
       project_root = File.expand_path(project_root)
+      data = normalize_legacy_project_config(data, source_path)
       validate_project_top_level_keys!(data, source_path, project_root, stage_names: stage_names)
       resolve_patrol_mode!(data)
       merged = merge_defaults(data).merge("project_root" => project_root)
@@ -824,25 +827,60 @@ module Hive
       merged
     end
 
+    # `reviewers` was never a supported project-root key, but older Hive
+    # versions silently deep-merged and ignored it. The strict root-key
+    # boundary therefore turned an existing typo into an upgrade outage.
+    # Keep one narrow read-through compatibility window while `hive migrate`
+    # provides the durable rewrite; do not extend this to arbitrary typos.
+    def normalize_legacy_project_config(data, source_path, emit_warning: true)
+      return data unless data.key?("reviewers")
+
+      review_present = data.key?("review")
+      review = data["review"]
+      if review_present && !review.is_a?(Hash)
+        raise UnsupportedProjectConfigError,
+              "Unsupported top-level project configuration in #{describe_source(source_path)}:\n" \
+              "- Top-level `reviewers` cannot be migrated because `review` is #{review.class}; " \
+              "make `review` a mapping and move the value to `review.reviewers`."
+      end
+      if review&.key?("reviewers")
+        raise UnsupportedProjectConfigError,
+              "Unsupported top-level project configuration in #{describe_source(source_path)}:\n" \
+              "- The config defines both top-level `reviewers` and `review.reviewers`; " \
+              "choose which value to keep, then remove the top-level key."
+      end
+
+      normalized = deep_dup(data)
+      normalized_review = review_present ? deep_dup(review) : {}
+      normalized_review["reviewers"] = normalized.delete("reviewers")
+      normalized["review"] = normalized_review
+      warn_legacy_root_reviewers_once!(source_path) if emit_warning
+      normalized
+    end
+
+    def warn_legacy_root_reviewers_once!(source_path)
+      should_warn = @legacy_project_config_warning_lock.synchronize do
+        @legacy_project_config_warned_paths.add?(source_path.to_s)
+      end
+      return unless should_warn
+
+      warn "hive: top-level `reviewers` in #{describe_source(source_path)} is deprecated; " \
+           "using it as `review.reviewers` for upgrade compatibility; run `hive migrate` " \
+           "in the project to rewrite the config"
+    end
+
     def validate_project_top_level_keys!(data, source_path, project_root, stage_names: nil)
       supported = DEFAULTS.keys.to_set | PROJECT_KEYS_WITHOUT_DEFAULTS
-      candidates = data.keys.select { |key| key == "reviewers" || !supported.include?(key) }
+      candidates = data.keys.reject { |key| supported.include?(key) }
       return if candidates.empty?
 
-      dynamic_candidates = candidates.reject { |key| key == "reviewers" }
-      unless dynamic_candidates.empty?
-        stage_names ||= supported_project_stage_names(data, project_root)
-        supported |= stage_names.to_set
-      end
-      unknown = data.keys.select { |key| key == "reviewers" || !supported.include?(key) }
+      stage_names ||= supported_project_stage_names(data, project_root)
+      supported |= stage_names.to_set
+      unknown = data.keys.reject { |key| supported.include?(key) }
       return if unknown.empty?
 
       findings = unknown.sort_by { |key| project_key_sort_key(key) }.map do |key|
-        if key == "reviewers"
-          "Unknown top-level key `reviewers`; move it to `review.reviewers`."
-        else
-          "Unknown top-level key #{render_project_key(key)}."
-        end
+        "Unknown top-level key #{render_project_key(key)}."
       end
       raise UnsupportedProjectConfigError,
             "Unsupported top-level project configuration in #{describe_source(source_path)}:\n" \

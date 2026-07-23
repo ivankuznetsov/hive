@@ -278,6 +278,118 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_migrate_moves_top_level_reviewers_under_review_without_losing_comments
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        File.write(cfg_path, <<~YAML)
+          review:
+            # Keep the existing review settings.
+            require_ci: false
+          # Reviewers: Codex routing.
+          # Keep this leading explanation with the reviewer block.
+          reviewers:
+            # Keep the legacy reviewer explanation.
+            - name: legacy
+              kind: agent
+              agent: codex
+              skill: ce-code-review
+              output_basename: legacy
+              prompt_template: reviewer_codex_ce_code_review.md.erb
+
+          digest:
+            enabled: false
+        YAML
+
+        out, _err = capture_io { migrate_command(dir).call }
+
+        migrated = File.read(cfg_path)
+        cfg_after = YAML.safe_load(migrated)
+        refute cfg_after.key?("reviewers")
+        assert_equal [ "legacy" ], cfg_after.dig("review", "reviewers").map { |entry| entry.fetch("name") }
+        assert_includes migrated, "  # Reviewers: Codex routing."
+        assert_includes migrated, "  # Keep this leading explanation with the reviewer block."
+        refute_match(/^# Reviewers: Codex routing\.$/, migrated)
+        assert_includes migrated, "  # Keep the legacy reviewer explanation."
+        assert_includes migrated, "  # Keep the existing review settings."
+        assert_includes out, "rewrote legacy config keys"
+        assert_equal [ "legacy" ], Hive::Config.load(dir).dig("review", "reviewers").map { |entry| entry.fetch("name") }
+      end
+    end
+  end
+
+  def test_migrate_creates_review_mapping_when_legacy_reviewers_are_the_only_key
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        File.write(cfg_path, "reviewers: []\n")
+
+        capture_io { migrate_command(dir).call }
+
+        assert_equal({ "review" => { "reviewers" => [] } }, YAML.safe_load(File.read(cfg_path)))
+      end
+    end
+  end
+
+  def test_migrate_rejects_flow_style_review_mapping_without_reformatting_the_file
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        File.write(cfg_path, "review: { require_ci: false }\nreviewers: []\n")
+        before = File.read(cfg_path)
+
+        error = assert_raises(Hive::ConfigError) do
+          capture_io { migrate_command(dir).call }
+        end
+
+        assert_includes error.message, "`review` is not written as a block mapping"
+        assert_equal before, File.read(cfg_path)
+      end
+    end
+  end
+
+  def test_migrate_reports_invalid_yaml_before_rewriting_legacy_reviewers
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        File.write(cfg_path, "reviewers: [\n")
+
+        error = assert_raises(Hive::ConfigError) do
+          capture_io { migrate_command(dir).call }
+        end
+
+        assert_includes error.message, "config.yml at #{cfg_path} is not valid YAML"
+      end
+    end
+  end
+
+  def test_migrate_refuses_to_choose_between_legacy_and_canonical_reviewers
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        File.write(cfg_path, <<~YAML)
+          review:
+            reviewers: []
+          reviewers:
+            - name: legacy
+        YAML
+        before = File.read(cfg_path)
+
+        error = assert_raises(Hive::ConfigError) do
+          capture_io { migrate_command(dir).call }
+        end
+
+        assert_includes error.message, "both top-level `reviewers` and `review.reviewers`"
+        assert_equal before, File.read(cfg_path)
+      end
+    end
+  end
+
   # When legacy config keys are rewritten AND task ids are backfilled in the
   # same run (with no stage folders to move), the no-move message reports both.
   def test_migrate_no_move_message_reports_config_rewrite_and_backfill

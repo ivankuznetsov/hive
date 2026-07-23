@@ -39,6 +39,8 @@ module Hive
         %w[budget_usd pr] => %w[budget_usd finalize],
         %w[timeout_sec pr] => %w[timeout_sec finalize]
       }.freeze
+      ROOT_REVIEWERS_LINE = /\A(?:reviewers|["']reviewers["'])\s*:/.freeze
+      REVIEW_BLOCK_LINE = /\A(?:review|["']review["'])\s*:\s*(?:#.*)?(?:\r?\n)?\z/.freeze
 
       # Task-folder names follow this slug pattern (see Task::PATH_RE).
       # Any entry under a legacy stage directory that doesn't look like a
@@ -325,6 +327,8 @@ module Hive
 
         content = File.read(path)
         changed = false
+        content, rewritten = rewrite_legacy_root_reviewers(content, path)
+        changed ||= rewritten
         CONFIG_KEY_RENAMES.each do |from, to|
           section, key = from
           dst_section, dst_key = to
@@ -335,6 +339,47 @@ module Hive
         end
         File.write(path, content) if changed
         changed
+      end
+
+      def rewrite_legacy_root_reviewers(content, path)
+        lines = content.lines
+        root_idx = lines.index { |line| ROOT_REVIEWERS_LINE.match?(line) }
+        return [ content, false ] unless root_idx
+
+        parsed = YAML.safe_load(content) || {}
+        review_present = parsed.key?("review")
+        normalized = Hive::Config.normalize_legacy_project_config(parsed, path, emit_warning: false)
+        Hive::Config.build_project_config(@project_path, path, normalized)
+
+        root_start_idx = root_idx
+        while root_start_idx.positive? && lines[root_start_idx - 1].match?(/\A#/)
+          root_start_idx -= 1
+        end
+        end_idx = ((root_idx + 1)...lines.length).find do |idx|
+          line = lines[idx]
+          !line.strip.empty? && line.match?(/\A\S/)
+        end || lines.length
+        root_block = lines.slice!(root_start_idx...end_idx)
+        indented_root_block = root_block.map do |line|
+          line.strip.empty? ? line : "  #{line}"
+        end
+
+        if review_present
+          review_idx = lines.index { |line| REVIEW_BLOCK_LINE.match?(line) }
+          unless review_idx
+            raise Hive::ConfigError,
+                  "cannot automatically migrate top-level `reviewers` in #{path} because " \
+                  "`review` is not written as a block mapping; move the value to " \
+                  "`review.reviewers` manually"
+          end
+          lines.insert(review_idx + 1, *indented_root_block)
+        else
+          lines.insert(root_start_idx, "review:\n", *indented_root_block)
+        end
+
+        [ lines.join, true ]
+      rescue Psych::Exception => e
+        raise Hive::ConfigError, "config.yml at #{path} is not valid YAML: #{e.message}"
       end
 
       def rewrite_section_key(content, section, legacy_key, canonical_key)

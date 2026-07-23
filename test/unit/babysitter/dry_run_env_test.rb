@@ -827,6 +827,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path
       }
 
+      defer_stub_calls
       assert_stubbed env, "gh", "-R", "owner/repo", "pr", "ready", "42"
       assert_stubbed env, "gh", "--repo=owner/repo", "pr", "close", "42"
       assert_stubbed env, "gh", "--repo=owner/repo", "pr", "reopen", "42"
@@ -1165,6 +1166,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # Empty / zero env-config vars inject nothing, so the env guard must not over-block the
       # read: GIT_CONFIG_COUNT=0 resolves to no config, and an unset external-diff is harmless.
       assert_passes env.merge("GIT_CONFIG_COUNT" => "0", "GIT_EXTERNAL_DIFF" => ""), "git", "status", "--short"
+      flush_deferred_stub_calls
 
       skipped = File.read(log_path)
       assert_includes skipped, "gh -R owner/repo pr ready 42 skipped"
@@ -2185,6 +2187,69 @@ class BabysitterDryRunEnvTest < Minitest::Test
   private
 
   STUB_HANG_TIMEOUT_SEC = 10
+  STUB_MATRIX_WORKERS = 12
+
+  def defer_stub_calls
+    raise "stub calls are already deferred" if @deferred_stub_calls
+
+    @deferred_stub_calls = []
+  end
+
+  def flush_deferred_stub_calls
+    calls = @deferred_stub_calls || raise("stub calls are not deferred")
+    results = Array.new(calls.length)
+    queue = Queue.new
+    calls.each_with_index { |call, index| queue << [ index, call ] }
+    worker_count = [ STUB_MATRIX_WORKERS, calls.length ].min
+    worker_count.times { queue << nil }
+    workers = worker_count.times.map do
+      Thread.new do
+        while (entry = queue.pop)
+          index, call = entry
+          begin
+            results[index] = Open3.capture3(
+              call.fetch(:env), stub_path(call.fetch(:binary)), *call.fetch(:args)
+            )
+          rescue StandardError => e
+            results[index] = e
+          end
+        end
+      end
+    end
+    workers.each(&:join)
+
+    real_invocations = @real_log && File.exist?(@real_log) ? File.readlines(@real_log, chomp: true) : []
+    calls.zip(results).each do |call, result|
+      raise result if result.is_a?(Exception)
+
+      _out, err, status = result
+      binary = call.fetch(:binary)
+      args = call.fetch(:args)
+      assert status.success?, err
+      if call.fetch(:expectation) == :stubbed
+        assert_includes err, "[dry-run] #{binary} #{args.join(' ')} skipped"
+        [ "real-#{binary} #{args.join(' ')}", expected_real_invocation(binary, *args) ].uniq.each do |invocation|
+          refute_includes real_invocations, invocation,
+                          "#{binary} #{args.join(' ')} was skipped but still reached real #{binary}"
+        end
+      else
+        assert_includes real_invocations, expected_real_invocation(binary, *args),
+                        "#{binary} #{args.join(' ')} passed (exit 0) but never reached real #{binary}"
+      end
+    end
+  ensure
+    @deferred_stub_calls = nil
+  end
+
+  def defer_stub_call(expectation, env, binary, args)
+    @deferred_stub_calls << {
+      expectation: expectation,
+      env: env.dup,
+      binary: binary,
+      args: args.dup
+    }
+    nil
+  end
 
   def capture_stub_with_timeout(env, binary, *args)
     Open3.popen3(env, stub_path(binary), *args) do |stdin, stdout, stderr, wait_thread|
@@ -2203,6 +2268,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
   end
 
   def assert_stubbed(env, binary, *args)
+    return defer_stub_call(:stubbed, env, binary, args) if @deferred_stub_calls
+
     _out, err, status = Open3.capture3(env, stub_path(binary), *args)
     assert status.success?, err
     assert_includes err, "[dry-run] #{binary} #{args.join(' ')} skipped"
@@ -2217,6 +2284,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
   end
 
   def assert_passes(env, binary, *args)
+    return defer_stub_call(:passes, env, binary, args) if @deferred_stub_calls
+
     _out, err, status = Open3.capture3(env, stub_path(binary), *args)
     assert status.success?, err
     # Load-bearing, mirroring assert_stubbed's refute: exit 0 alone does not prove passthrough

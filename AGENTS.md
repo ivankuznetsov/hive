@@ -40,7 +40,8 @@ Headless wiki refresh is managed by `.llm-wiki/refresh-wiki.sh` and
 - `bundle exec rake coverage` is the exhaustive CI coverage gate. Agents should
   run it locally only when changing coverage machinery or when explicitly
   requested.
-- Packaged Hive web bootstrap and TUI reactivity scale are CI merge gates, not
-  default local tests. Agents do not need to run them locally unless diagnosing
-  their CI checks. The packaged-web task archives `HEAD:web`, so run it only
-  after committing the relevant web changes.
+- Packaged Hive web bootstrap, TUI reactivity scale, multi-agent setup
+  integration, and the babysitter dry-run security matrix are CI merge gates,
+  not default local tests. Agents do not need to run them locally unless
+  diagnosing their CI checks. The packaged-web task archives `HEAD:web`, so run
+  it only after committing the relevant web changes.

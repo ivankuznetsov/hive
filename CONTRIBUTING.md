@@ -26,8 +26,9 @@ For security issues, see [SECURITY.md](SECURITY.md) — please do not open a pub
    bundle exec bundler-audit check --update
    ```
    CI additionally owns the exhaustive coverage run, packaged Hive web
-   bootstrap, TUI reactivity scale, platform, browser, and release-adjacent
-   gates; these should not slow every local commit.
+   bootstrap, TUI reactivity scale, multi-agent setup integration, babysitter
+   dry-run security, platform, browser, and release-adjacent gates; these
+   should not slow every local commit.
 3. Add or update tests for any behavioral change. Unit tests live in `test/unit/`, integration tests in `test/integration/`.
 4. Keep commits focused. Conventional commit prefixes are appreciated (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`).
 5. Open a pull request. CI runs the local checkpoint plus its exhaustive merge

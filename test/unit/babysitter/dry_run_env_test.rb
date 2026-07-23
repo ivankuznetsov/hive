@@ -77,6 +77,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_which_returns_nil_when_path_has_no_match
+    with_env("PATH" => "") do
+      assert_nil Hive::Babysitter::DryRunEnv.which("git")
+    end
+  end
+
   def test_prepare_skip_log_rejects_path_replacement_after_creation
     with_tmp_dir do |dir|
       log_path = File.join(dir, "skipped.log")
@@ -816,6 +822,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
   end
 
   def test_stubs_skip_unknown_and_mutating_commands_but_allow_read_only_commands
+    skip "runs as the babysitter dry-run security-matrix CI gate" unless
+      ENV["HIVE_RUN_BABYSITTER_SECURITY_MATRIX"] == "1"
+
     with_tmp_dir do |dir|
       real_gh = recording_binary(dir, "real-gh")
       real_git = recording_binary(dir, "real-git")

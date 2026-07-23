@@ -33,17 +33,25 @@ local checkpoint, normally once before handoff:
 bundle exec rake test
 ```
 
-The default suite excludes two expensive outer proofs. CI runs each as a named
-gate and feeds both results, together with exhaustive coverage, into the
-already-required `rake test (Ruby 3.4)` check. The aggregator uses `always()` and
-fails unless both dependencies succeeded, preserving one fail-closed merge
-contract for branches created before and after this workflow change.
+The default suite excludes three expensive outer-proof files and skips the
+single large babysitter command-classification matrix. CI runs all four proofs
+as named gates and feeds their matrix result, together with exhaustive coverage,
+into the already-required `rake test (Ruby 3.4)` check. The aggregator uses
+`always()` and fails unless coverage and the complete matrix succeeded,
+preserving one fail-closed merge contract for branches created before and after
+this workflow change. The remaining babysitter dry-run tests stay in the normal
+suite because they are the fast/core coverage for `DryRunEnv`. Every generated
+gate also enables a test-helper guard that requires at least one non-skipped
+test with an assertion, preventing an emptied file or stale filter from passing
+with zero useful work.
 Contributors do not normally need the dedicated tasks locally. When diagnosing
 a corresponding CI failure, use:
 
 ```bash
 bundle exec rake test:packaged_web_bootstrap
 bundle exec rake test:tui_reactivity_perf
+bundle exec rake test:setup_agents_integration
+bundle exec rake test:babysitter_dry_run_security_matrix
 ```
 
 The packaged-web gate is commit-bound: it archives `HEAD:web` to reproduce the
@@ -59,10 +67,11 @@ bundle exec rake coverage
 The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch coverage in the parent test process and prepends `RUBYOPT=-Itest -rhive_coverage_boot` so Ruby subprocess tests dump their own result files under a per-run `coverage/.resultset/<run-id>/` directory. The final merged report is written to `coverage/coverage.json` and prints the lowest-covered source files plus uncovered line numbers.
 
 `bundle exec rake coverage` is the exhaustive CI coverage-report path, not an
-after-every-commit agent loop. It instruments the default suite; the packaged
-web and TUI scale proofs run in their dedicated CI jobs instead. Coverage fails
-when an executable source file was never loaded, when a subprocess result file
-cannot be read, or when line coverage drops below the default 100% threshold.
+after-every-commit agent loop. It instruments the default suite; three
+outer-proof files and the large babysitter command-classification matrix run in
+their dedicated CI jobs instead. Coverage fails when an executable source file
+was never loaded, when a subprocess result file cannot be read, or when line
+coverage drops below the default 100% threshold.
 At a 100% minimum, the gate compares the exact covered and executable line
 counts; the displayed two-decimal percentage is informational and cannot hide
 one uncovered line that rounds to `100.00%`. Set `HIVE_COVERAGE_MIN_LINE` to a
@@ -81,7 +90,14 @@ In CI (`CI=true`), tests that exercise backgrounding commands must force a foreg
 ```ruby
 HIVE_CI_GATE_TESTS = {
   "test:packaged_web_bootstrap" => "test/integration/web_packaged_bootstrap_test.rb",
-  "test:tui_reactivity_perf" => "test/integration/tui_reactivity_perf_test.rb"
+  "test:tui_reactivity_perf" => "test/integration/tui_reactivity_perf_test.rb",
+  "test:setup_agents_integration" => "test/integration/setup_agents_test.rb",
+  "test:babysitter_dry_run_security_matrix" =>
+    "test/unit/babysitter/dry_run_security_matrix_test.rb"
+}.freeze
+HIVE_CI_GATE_TEST_OPTIONS = {
+  "test:babysitter_dry_run_security_matrix" =>
+    "--include=test_stubs_skip_unknown_and_mutating_commands_but_allow_read_only_commands"
 }.freeze
 HIVE_DEFAULT_TEST_FILES = FileList[
   "test/{unit,integration,babysitter}/**/*_test.rb"

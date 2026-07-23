@@ -44,6 +44,10 @@ jobs:
             task: test:packaged_web_bootstrap
           - name: TUI reactivity performance
             task: test:tui_reactivity_perf
+          - name: multi-agent setup integration
+            task: test:setup_agents_integration
+          - name: babysitter dry-run security matrix
+            task: test:babysitter_dry_run_security_matrix
     steps:
       - uses: actions/checkout@v7
       - uses: ruby/setup-ruby@v1

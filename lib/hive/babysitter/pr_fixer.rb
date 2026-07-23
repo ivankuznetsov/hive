@@ -34,17 +34,19 @@ module Hive
         @inflight.add(key)
         started = Time.now
 
-        if fork_pr?
-          skip_fork_pr(started)
-          return :fork_pr
-        end
-
         # The early-green precheck runs `pr_status_rollup` against the project
         # root, not the worktree, because no PR worktree exists yet (materialize
         # happens below). gh resolves the same repo from either cwd's git
         # config, and the result is threaded into ContextBuilder so the second
         # call reuses this rollup rather than re-fetching.
         status = Hive::Gh.pr_status_rollup(@project.fetch("path"), number, cfg: @cfg)
+        return handle_green(status, started) if already_green?(status) && !behind?(status)
+
+        if fork_pr?
+          skip_fork_pr(started)
+          return :fork_pr
+        end
+
         return handle_green(status, started) if already_green?(status)
 
         worktree = Hive::Babysitter::Worktree.materialize(@project, @pr)

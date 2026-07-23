@@ -42,6 +42,9 @@ class DaemonServiceInstallerTest < Minitest::Test
 
       assert_includes unit, "KillMode=process"
       refute_includes unit, "KillMode=mixed"
+      assert_includes unit, "WantedBy=default.target"
+      refute_includes unit, "After=default.target",
+                      "a unit wanted by default.target must not order itself after that target"
     end
   end
 

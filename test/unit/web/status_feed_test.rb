@@ -1,4 +1,6 @@
 require "test_helper"
+require "open3"
+require "rbconfig"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/web/status_feed"
@@ -30,6 +32,55 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  # Holds each scan behind an explicit barrier so concurrency assertions do
+  # not depend on scheduler timing. `calls` counts completed scans only;
+  # `max_active` detects a second poller even if both eventually dedupe to the
+  # same published value.
+  class ControlledStatus
+    def initialize
+      @started = Queue.new
+      @releases = Queue.new
+      @mutex = Mutex.new
+      @active = 0
+      @calls = 0
+      @max_active = 0
+    end
+
+    def json_payload(_projects)
+      @mutex.synchronize do
+        @active += 1
+        @max_active = [ @max_active, @active ].max
+      end
+      @started << true
+      payload = @releases.pop
+      @mutex.synchronize { @calls += 1 }
+      payload
+    ensure
+      @mutex.synchronize { @active -= 1 }
+    end
+
+    def wait_until_started = Timeout.timeout(2) { @started.pop }
+    def release(payload) = @releases << payload
+    def calls = @mutex.synchronize { @calls }
+    def max_active = @mutex.synchronize { @max_active }
+  end
+
+  class CountingTokenFeed < Hive::Web::StatusFeed
+    attr_reader :token_calls
+
+    def initialize(...)
+      @token_calls = 0
+      super
+    end
+
+    private
+
+    def token_for(key)
+      @token_calls += 1
+      super
+    end
+  end
+
   def test_snapshot_uses_registered_projects
     with_tmp_global_config do
       feed = Hive::Web::StatusFeed.new
@@ -37,6 +88,52 @@ class StatusFeedTest < Minitest::Test
 
       assert_equal "hive-status", payload["schema"]
       assert_equal [], payload["projects"]
+    end
+  end
+
+  def test_default_scan_interval_is_five_seconds
+    assert_equal 5.0, Hive::Web::StatusFeed::DEFAULT_INTERVAL
+  end
+
+  def test_unchanged_semantic_snapshots_reuse_the_existing_token
+    feed = CountingTokenFeed.new
+    initial = { "projects" => [ { "name" => "demo", "generated_at" => "first" } ] }
+    token = feed.prime(initial)
+
+    feed.send(:publish, { "projects" => [ { "name" => "demo", "generated_at" => "later" } ] })
+
+    assert_equal 1, feed.token_calls,
+                 "an unchanged poll tick must not canonicalize and hash the payload again"
+    assert feed.current_version?(token)
+
+    feed.send(:publish, { "projects" => [ { "name" => "changed" } ] })
+    assert_equal 2, feed.token_calls
+  ensure
+    feed&.stop
+  end
+
+  def test_token_digest_is_not_shadowed_by_a_hive_namespace_constant
+    hive_digest = Hive.const_defined?(:Digest, false) ? Hive.const_get(:Digest) : nil
+    Hive.const_set(:Digest, Module.new) unless hive_digest
+    feed = Hive::Web::StatusFeed.new
+
+    assert_match(/\Asha256:[0-9a-f]{64}\z/, feed.prime({ "projects" => [] }))
+  ensure
+    feed&.stop
+    Hive.send(:remove_const, :Digest) unless hive_digest
+  end
+
+  def test_idle_feed_does_not_scan_without_a_subscriber
+    with_tmp_global_config do
+      status = CountingStatus.new([ { "projects" => [] } ])
+      feed = Hive::Web::StatusFeed.new(interval: 0.01, status_command: status)
+
+      sleep 0.05
+
+      assert_equal 0, status.calls,
+                   "constructing an idle feed must not start filesystem scans"
+    ensure
+      feed&.stop
     end
   end
 
@@ -64,29 +161,53 @@ class StatusFeedTest < Minitest::Test
   # the scan; every subscriber reads the published value.
   def test_many_subscribers_share_one_scan_per_tick
     with_tmp_global_config do
-      payloads = (0..50).map { |i| { "tick" => i } }
-      status = CountingStatus.new(payloads)
-      feed = Hive::Web::StatusFeed.new(interval: 0.02, status_command: status)
-
+      status = ControlledStatus.new
+      feed = Hive::Web::StatusFeed.new(interval: 0.01, status_command: status)
+      ticks = (0..2).map { |tick| { "tick" => tick } }
+      feed.prime(ticks.first)
+      deliveries = Queue.new
       received = Array.new(5) { [] }
-      threads = received.map do |sink|
+      threads = received.each_index.map do |index|
         Thread.new do
+          count = 0
           feed.each_snapshot do |payload|
-            sink << payload
-            break if sink.size >= 3
+            deliveries << [ index, payload ]
+            count += 1
+            break if count == ticks.size
           end
         end
       end
-      threads.each(&:join)
+
+      receive_round = lambda do
+        received.size.times do
+          index, payload = Timeout.timeout(2) { deliveries.pop }
+          received.fetch(index) << payload
+        end
+      end
+
+      receive_round.call
+      status.wait_until_started
+      status.release(ticks.fetch(1))
+      receive_round.call
+      status.wait_until_started
+      status.release(ticks.fetch(2))
+      receive_round.call
+
+      threads.each do |thread|
+        thread.join(2)
+        refute thread.alive?, "every subscriber must finish after the third shared snapshot"
+      end
       feed.stop
 
-      # Each subscriber saw 3 distinct ticks → at most ~3 scans were needed.
-      # With a per-connection scan the count would be ~5x higher. Assert the
-      # scan count stays close to the number of distinct ticks, proving the
-      # scan is shared, not multiplied by subscriber count.
-      received.each { |sink| assert_equal 3, sink.size, "each subscriber should receive 3 snapshots" }
-      assert_operator status.calls, :<=, 6,
-                      "5 subscribers over 3 ticks must not multiply the scan count (got #{status.calls})"
+      received.each { |snapshots| assert_equal ticks, snapshots }
+      assert_equal 2, status.calls,
+                   "two changed poll ticks must perform exactly two shared scans"
+      assert_equal 1, status.max_active,
+                   "subscriber fan-out must never create overlapping pollers"
+    ensure
+      threads&.each(&:kill)
+      threads&.each { |thread| thread.join(2) }
+      feed&.stop
     end
   end
 
@@ -109,6 +230,79 @@ class StatusFeedTest < Minitest::Test
 
       refute thread.alive?, "emit-on-connect must yield without waiting a full interval"
       assert_equal({ "tick" => "first" }, first)
+    end
+  end
+
+  def test_first_primed_page_snapshot_becomes_the_poller_baseline_without_a_second_scan
+    with_tmp_global_config do
+      payload = { "projects" => [ { "name" => "demo", "tasks" => [] } ] }
+      status = CountingStatus.new([ payload ])
+      feed = Hive::Web::StatusFeed.new(interval: 5.0, status_command: status)
+      page_snapshot = feed.snapshot
+
+      page_token = feed.prime(page_snapshot)
+      assert feed.current_version?(page_token)
+      replacement = { "projects" => [ { "name" => "newer", "tasks" => [] } ] }
+      replacement_token = feed.prime(replacement)
+      refute_equal page_token, replacement_token,
+                   "each page must be stamped with the token for what it rendered"
+      refute feed.current_version?(replacement_token),
+             "a competing render must not inherit the active baseline's identity"
+
+      seen = nil
+      subscriber = Thread.new do
+        feed.each_snapshot do |snapshot|
+          seen = snapshot
+          break
+        end
+      end
+      subscriber.join(2)
+
+      refute subscriber.alive?
+      assert_equal page_snapshot, seen
+      assert_equal 1, status.calls,
+                   "starting the poller must reuse the page render instead of scanning the fleet again"
+      assert_equal page_token, feed.prime(payload),
+                   "a request must not replace the running poller's value"
+    ensure
+      subscriber&.kill
+      subscriber&.join
+      feed&.stop
+    end
+  end
+
+  def test_competing_idle_prime_arrives_as_a_changed_tick_for_the_earlier_page
+    with_tmp_global_config do
+      earlier = { "projects" => [ { "name" => "earlier", "tasks" => [] } ] }
+      newer = { "projects" => [ { "name" => "newer", "tasks" => [] } ] }
+      feed = Hive::Web::StatusFeed.new(
+        interval: 0.02,
+        status_command: CountingStatus.new([ newer ])
+      )
+
+      earlier_token = feed.prime(earlier)
+      newer_token = feed.prime(newer)
+      refute_equal earlier_token, newer_token,
+                   "different rendered content must never share one freshness token"
+      seen = []
+      subscriber = Thread.new do
+        feed.each_snapshot do |snapshot|
+          seen << snapshot
+          break if seen.size == 2
+        end
+      end
+      subscriber.join(2)
+
+      refute subscriber.alive?
+      assert_equal [ earlier, newer ], seen,
+                   "the first poll must broadcast the snapshot rejected as a competing prime"
+      refute feed.current_version?(earlier_token),
+             "a page that connects after this tick must be recognized as stale"
+      assert feed.current_version?(newer_token)
+    ensure
+      subscriber&.kill
+      subscriber&.join
+      feed&.stop
     end
   end
 
@@ -173,6 +367,87 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  def test_stop_without_a_poller_releases_the_idle_page_claim
+    with_tmp_global_config do
+      feed = Hive::Web::StatusFeed.new
+      first = feed.prime({ "projects" => [ { "name" => "first" } ] })
+
+      feed.stop
+      second = feed.prime({ "projects" => [ { "name" => "second" } ] })
+
+      refute_equal first, second,
+                   "an abandoned pre-Cable page must not strand the next lifecycle's baseline"
+      assert feed.current_version?(second)
+    ensure
+      feed&.stop
+    end
+  end
+
+  def test_stopping_poller_does_not_clear_a_new_claim_accepted_while_joining
+    with_tmp_global_config do
+      feed = Hive::Web::StatusFeed.new(
+        interval: 5.0,
+        status_command: CountingStatus.new([ { "projects" => [] } ])
+      )
+      feed.each_snapshot { break }
+      poller = feed.instance_variable_get(:@poller)
+      kill_requested = Queue.new
+      release_kill = Queue.new
+      original_kill = poller.method(:kill)
+      poller.define_singleton_method(:kill) do
+        kill_requested << true
+        release_kill.pop
+        original_kill.call
+      end
+
+      stopper = Thread.new { feed.stop }
+      Timeout.timeout(2) { kill_requested.pop }
+      claimed_token = feed.prime({ "projects" => [ { "name" => "new lifecycle" } ] })
+      release_kill << true
+      stopper.join(2)
+
+      refute stopper.alive?
+      competing_token = feed.prime({ "projects" => [ { "name" => "must not overwrite" } ] })
+      assert feed.current_version?(claimed_token),
+             "the old stop must not clear the new lifecycle's claim"
+      refute feed.current_version?(competing_token),
+             "a competing render must not replace that preserved claim"
+    ensure
+      release_kill << true if release_kill&.empty?
+      stopper&.join(2)
+      feed&.stop
+    end
+  end
+
+  def test_semantic_tokens_are_stable_across_processes_and_hash_key_order
+    with_tmp_global_config do
+      same_feed = Hive::Web::StatusFeed.new
+      changed_feed = Hive::Web::StatusFeed.new
+      first = { "schema" => "hive-status", "projects" => [ { "name" => "demo", "tasks" => [] } ] }
+      reordered = { "projects" => [ { "tasks" => [], "name" => "demo" } ], "schema" => "hive-status" }
+      changed = { "schema" => "hive-status", "projects" => [ { "name" => "other", "tasks" => [] } ] }
+
+      first_token = status_token_in_fresh_process(first)
+      same_token = status_token_in_fresh_process(reordered)
+      changed_token = status_token_in_fresh_process(changed)
+      same_feed.prime(reordered)
+      changed_feed.prime(changed)
+
+      assert_match(/\Asha256:[0-9a-f]{64}\z/, first_token)
+      assert_equal first_token, same_token,
+                   "equal semantic snapshots must agree across independent Puma workers"
+      refute_equal first_token, changed_token,
+                   "different first snapshots must not collide after a process restart"
+      assert same_feed.current_version?(first_token)
+      refute changed_feed.current_version?(first_token)
+      refute changed_feed.current_version?(1),
+             "untrusted numeric counters from older pages must fail closed"
+    ensure
+      same_feed&.stop
+      changed_feed&.stop
+    end
+  end
+
   # A status command whose payloads differ ONLY in the volatile fields
   # json_payload regenerates every scan (generated_at, per-task age_seconds).
   # Byte-comparing payloads made the documented dedup dead in production:
@@ -185,6 +460,7 @@ class StatusFeedTest < Minitest::Test
                             "tasks" => [ { "slug" => "t", "age_seconds" => n * 10 } ] } ] }
       end
       feed = Hive::Web::StatusFeed.new(interval: 0.02, status_command: CountingStatus.new(payloads))
+      page_version = feed.prime(feed.snapshot)
       yields = 0
       idles = 0
       idle_mutex = Mutex.new
@@ -201,6 +477,8 @@ class StatusFeedTest < Minitest::Test
                       "unchanged-but-for-timestamps ticks must fire on_idle (dedup dead otherwise)"
       assert_equal 1, yields,
                    "payloads differing only in generated_at/age_seconds must dedup to the connect emit"
+      assert feed.current_version?(page_version),
+             "volatile-only ticks must not make a current page look stale on reconnect"
     ensure
       subscriber&.kill
       subscriber&.join
@@ -265,15 +543,56 @@ class StatusFeedTest < Minitest::Test
     end
 
     feed = Hive::Web::StatusFeed.new(interval: 0.02, status_command: status)
+    snapshots = Queue.new
+    subscriber = nil
     _out, err = capture_io do
-      first = nil
-      feed.each_snapshot { |snap, _json| first = snap; break }
-      assert_equal [], first.fetch("projects"),
-                   "a failing FIRST snapshot must degrade to an empty grid, not crash the poller"
+      subscriber = Thread.new do
+        count = 0
+        feed.each_snapshot do |snapshot|
+          snapshots << snapshot
+          count += 1
+          break if count == 2
+        end
+      end
+      Timeout.timeout(2) { subscriber.value }
     end
+    first = snapshots.pop(true)
+    recovered = snapshots.pop(true)
+
+    assert_equal [], first.fetch("projects"),
+                 "a failing FIRST snapshot must degrade to an empty grid, not crash the poller"
+    assert_equal [ { "name" => "p", "tasks" => [] } ], recovered.fetch("projects"),
+                 "the next successful scan must replace the empty fallback"
     assert_match(/initial status snapshot failed/, err,
                  "the degradation must be observable")
   ensure
+    subscriber&.kill
+    subscriber&.join(2)
     feed&.stop
+  end
+
+  private
+
+  def status_token_in_fresh_process(payload)
+    lib = File.expand_path("../../../lib", __dir__)
+    script = <<~'RUBY'
+      require "json"
+      require "hive/web/status_feed"
+
+      feed = nil
+      begin
+        feed = Hive::Web::StatusFeed.new
+        puts feed.prime(JSON.parse($stdin.read))
+      ensure
+        feed&.stop
+      end
+    RUBY
+    out, err, status = Open3.capture3(
+      RbConfig.ruby, "-I", lib, "-e", script,
+      stdin_data: JSON.generate(payload)
+    )
+
+    assert status.success?, "fresh status-token process failed: #{err}"
+    out.strip
   end
 end

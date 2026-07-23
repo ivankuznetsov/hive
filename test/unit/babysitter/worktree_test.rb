@@ -26,4 +26,14 @@ class BabysitterWorktreeTest < Minitest::Test
       assert calls.any? { |cmd| cmd.include?("worktree") && cmd.include?("-B") && cmd.include?("hive-babysitter/pr-42") }
     end
   end
+
+  def test_path_resolves_relative_state_path_from_project_root
+    with_tmp_dir do |dir|
+      project = { "name" => "demo", "path" => dir, "hive_state_path" => "state" }
+      pr = { "number" => 42 }
+
+      assert_equal File.join(dir, "state", "babysitter", "worktrees", "42"),
+                   Hive::Babysitter::Worktree.new(project, pr).path
+    end
+  end
 end

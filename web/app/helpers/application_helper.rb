@@ -21,6 +21,17 @@ module ApplicationHelper
     "#{prefix}-#{digest}"
   end
 
+  # Hive owns the status subscription lifecycle because an accepted channel
+  # also owns the shared fleet poller. turbo-rails 2.0.23 can finish its async
+  # subscription after its element has disconnected; this app-owned source
+  # closes that race while retaining Turbo's signed stream-name contract.
+  def status_stream_source(**attributes)
+    attributes[:channel] = StatusChannel.to_s
+    attributes[:"signed-stream-name"] =
+      Turbo::StreamsChannel.signed_stream_name([ StatusBroadcaster::CHANNEL ])
+    tag.hive_status_stream_source(**attributes)
+  end
+
   # Stage dir ("3-plan") → its short name and a stable color class used by
   # the badge styles (stage-1 … stage-9).
   def stage_badge(stage_dir)

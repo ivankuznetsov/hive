@@ -238,6 +238,13 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 }
 .composer textarea:focus { outline: none; }
 
+.composer-feedback {
+  color: var(--danger);
+  font-size: 0.84rem;
+  margin: 0 12px;
+}
+.composer-feedback:not(:empty) { margin-bottom: 6px; }
+
 .composer-toolbar {
   display: flex;
   align-items: center;
@@ -300,7 +307,16 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
   padding: 3px 6px 3px 4px;
   font-size: 0.84rem;
 }
-.chip img { width: 26px; height: 26px; object-fit: cover; border-radius: 999px; }
+.chip-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--accent);
+  font-size: 1rem;
+}
 .chip button {
   background: transparent;
   color: var(--ink-muted);

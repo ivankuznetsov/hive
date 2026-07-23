@@ -47,6 +47,25 @@ class E2ERunnerTest < Minitest::Test
     end
   end
 
+  def test_run_all_accepts_preselected_scenarios_without_selecting_again
+    with_isolated_dirs do |scenarios_dir, runs_dir|
+      write_scenario(scenarios_dir, "preselected", <<~YAML)
+        name: preselected
+        steps:
+          - kind: cli
+            args: [version]
+      YAML
+
+      runner = Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir)
+      scenarios = runner.select_scenarios
+      runner.define_singleton_method(:select_scenarios) { |**| raise "selected twice" }
+
+      report = runner.run_all(scenarios: scenarios)
+
+      assert_equal 1, report.dig("summary", "passed")
+    end
+  end
+
   def test_duplicate_scenario_names_fail_preflight
     with_isolated_dirs do |scenarios_dir, runs_dir|
       %w[first second].each do |file|

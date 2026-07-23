@@ -21,26 +21,26 @@ module Hive
         @scenario_metadata = []
       end
 
-      def run_all(pattern: nil, tag: nil, keep_artifacts: false)
+      def run_all(pattern: nil, tag: nil, scenarios: nil, keep_artifacts: false)
         @run_id = generate_run_id
         @run_dir = File.join(@runs_dir, @run_id)
         FileUtils.mkdir_p(File.join(@run_dir, "scenarios"))
         @started_at = Time.now.utc
         @harness_errors = []
-        selected_scenarios = select_scenarios(pattern: pattern, tag: tag)
+        selected_scenarios = scenarios || select_scenarios(pattern: pattern, tag: tag)
         raise "no scenarios match #{pattern || tag || 'all'}" if selected_scenarios.empty?
 
         @scenario_metadata = selected_scenarios.map { |scenario| scenario_metadata(scenario) }
-        scenarios = selected_scenarios.reject(&:pending)
+        runnable_scenarios = selected_scenarios.reject(&:pending)
 
         # Capture total once so signal handlers and the rescue branch can write
         # a coherent report regardless of how many scenarios actually ran.
-        @total = scenarios.size
+        @total = runnable_scenarios.size
         prev_int = Signal.trap("INT") { handle_signal!("INT") }
         prev_term = Signal.trap("TERM") { handle_signal!("TERM") }
         begin
           write_report(status: "partial", total: @total)
-          scenarios.each do |scenario|
+          runnable_scenarios.each do |scenario|
             run_one(scenario, keep_artifacts: keep_artifacts)
             write_report(status: "partial", total: @total)
           end

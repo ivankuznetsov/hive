@@ -17,6 +17,38 @@ module Hive
         write_record("findings", finding)
       end
 
+      def findings
+        Dir.glob(File.join(root, "findings", "*.json")).sort.filter_map do |path|
+          data = read_json(path)
+          Finding.from_h(data) unless data.empty?
+        rescue KeyError, ArgumentError
+          nil
+        end
+      end
+
+      def transition_finding(finding_or_id, state:, reason:, now: Time.now, superseded_by: nil)
+        unless Finding::LIFECYCLE_STATES.include?(state.to_s)
+          raise ArgumentError, "unsupported patrol finding lifecycle state #{state.inspect}"
+        end
+
+        finding = if finding_or_id.is_a?(Finding)
+          finding_or_id
+        else
+          findings.find { |candidate| candidate.id.to_s == finding_or_id.to_s }
+        end
+        return unless finding
+        return finding if finding.lifecycle_state == state.to_s &&
+                          finding.lifecycle_reason == reason.to_s &&
+                          finding.superseded_by.to_s == superseded_by.to_s
+
+        finding.lifecycle_state = state.to_s
+        finding.lifecycle_reason = reason.to_s
+        finding.lifecycle_updated_at = now.utc.iso8601
+        finding.superseded_by = superseded_by unless superseded_by.to_s.empty?
+        finding.superseded_by = nil unless state.to_s == "superseded"
+        write_finding(finding)
+      end
+
       def write_patch(id, data)
         write_json(File.join(root, "patches", "#{id}.json"), data)
       end

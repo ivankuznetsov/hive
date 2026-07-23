@@ -23,6 +23,7 @@ module Hive
         start_releases_stub spawn_background stop_process
         script_gh
       ].freeze
+      TMUX_STEP_KINDS = %w[tui_keys tui_expect tui_refute wait_subprocess].freeze
 
       REQUIRED_KEYS = {
         "cli" => %w[args],

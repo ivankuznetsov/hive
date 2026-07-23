@@ -4,11 +4,13 @@ require_relative "../test_helper"
 require "tmpdir"
 require "fileutils"
 require "open3"
+require "socket"
 
 # Guards the transactional contract of .llm-wiki/post-commit-refresh.sh: a
 # commit in any checkout queues one refresh into a dedicated managed worktree.
 # Neither the committing checkout nor the user's main checkout may be mutated.
-# The headless agent is replaced via LLM_WIKI_REFRESH_CMD so no model runs.
+# Tests inject a command seam only into their disposable worker copy, so the
+# shipped worker remains limited to configured provider binaries.
 class LlmWikiPostCommitRefreshTest < Minitest::Test
   include HiveTestHelper
 
@@ -40,7 +42,9 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     FileUtils.mkdir_p(File.join(@main, ".llm-wiki"))
     FileUtils.mkdir_p(File.join(@main, "wiki", "log.d"))
     FileUtils.mkdir_p(File.join(@main, "bin"))
-    FileUtils.cp(SCRIPT, File.join(@main, ".llm-wiki", "post-commit-refresh.sh"))
+    test_runner = File.join(@main, ".llm-wiki", "post-commit-refresh.sh")
+    File.write(test_runner, refresh_test_script)
+    FileUtils.chmod("+x", test_runner)
     File.write(File.join(@main, "wiki", "index.md"), "# wiki\n")
     File.write(File.join(@main, "bin", "tool.sh"), "echo hi\n")
     git(@main, "add -A")
@@ -73,6 +77,23 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     assert_includes git(@main, "show --stat --pretty=format: llm-wiki/refresh"),
                     "wiki/log.d/stub-entry.md"
     assert_match(/stub refresh/, git(@main, "show llm-wiki/refresh:wiki/log.d/stub-entry.md"))
+  end
+
+  def test_compiled_log_only_commit_does_not_queue_or_launch_refresh
+    File.write(File.join(@wt, "wiki", "log.md"), "# compiled projection\n")
+    git(@wt, "add wiki/log.md")
+    git(@wt, "commit -qm 'docs(wiki): compile log projection'")
+    source_sha = git(@wt, "rev-parse HEAD")
+
+    result = run_refresh_from(@wt)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    refute_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                  "refs/llm-wiki/sources/#{source_sha}")
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                  "refs/heads/llm-wiki/refresh")
   end
 
   def test_refresh_branch_is_pushed_without_touching_main
@@ -322,12 +343,16 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     state_dir = File.join(common, "llm-wiki")
     fake_bin = File.join(@dir, "systemctl-bin")
     calls = File.join(@dir, "systemctl-calls")
+    runtime_dir = File.join(@dir, "headless-runtime")
     FileUtils.mkdir_p(state_dir)
     FileUtils.mkdir_p(fake_bin)
+    FileUtils.mkdir_p(runtime_dir)
+    bus_path = File.join(runtime_dir, "bus")
+    bus = UNIXServer.new(bus_path)
     File.write(File.join(state_dir, "scheduler-service"), "llm-wiki-project-deadbeef.service\n")
     File.write(File.join(fake_bin, "systemctl"), <<~SH)
       #!/bin/sh
-      printf '%s\n' "$*" >>#{q(calls)}
+      printf '%s|%s|%s\n' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" "$*" >>#{q(calls)}
     SH
     FileUtils.chmod("+x", File.join(fake_bin, "systemctl"))
     File.write(File.join(@wt, "bin", "tool.sh"), "echo scheduled source\n")
@@ -338,16 +363,21 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     result = run_refresh_from(
       @wt,
       "PATH" => "#{fake_bin}:/usr/bin:/bin",
-      "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "0"
+      "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "0",
+      "XDG_RUNTIME_DIR" => runtime_dir,
+      "DBUS_SESSION_BUS_ADDRESS" => ""
     )
 
     assert_equal 0, result.fetch(:status), result.fetch(:out)
-    assert_equal "--user start --no-block llm-wiki-project-deadbeef.service\n", File.read(calls)
+    assert_equal "#{runtime_dir}|unix:path=#{bus_path}|--user start --no-block llm-wiki-project-deadbeef.service\n",
+                 File.read(calls)
     assert_path_exists File.join(state_dir, "pending", source_sha)
     refute system("git", "-C", @main, "show-ref", "--verify", "--quiet", "refs/heads/llm-wiki/refresh")
+  ensure
+    bus&.close
   end
 
-  def test_failed_systemd_dispatch_removes_marker_and_uses_serialized_fallback
+  def test_failed_systemd_dispatch_keeps_marker_and_uses_serialized_fallback
     common = git(@wt, "rev-parse --path-format=absolute --git-common-dir")
     state_dir = File.join(common, "llm-wiki")
     fake_bin = File.join(@dir, "failing-systemctl-bin")
@@ -368,7 +398,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     )
 
     assert_equal 0, result.fetch(:status), result.fetch(:out)
-    refute_path_exists marker
+    assert_equal "llm-wiki-project-deadbeef.service\n", File.read(marker)
     assert_match(/stub refresh/, git(@main, "show llm-wiki/refresh:wiki/log.d/stub-entry.md"))
   end
 
@@ -398,7 +428,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
 
   def test_ruby_portable_global_lock_respects_an_existing_os_lock
     runtime_dir = File.join(@dir, "runtime")
-    lock_file = File.join(runtime_dir, "hive-llm-wiki-refresh.lock")
+    lock_file = File.join(runtime_dir, "llm-wiki-refresh.lock")
     ready = File.join(runtime_dir, "holder-ready")
     forbidden_setup = File.join(runtime_dir, "forbidden-bundler-setup.rb")
     FileUtils.mkdir_p(runtime_dir)
@@ -503,7 +533,8 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
       "LLM_WIKI_GLOBAL_LOCK_HELD" => "1",
       "LLM_WIKI_DRAIN_SETTLE_SECONDS" => "0"
     }
-    out, err, status = Open3.capture3(env, "bash", SCRIPT, "--project", @main, "--drain", chdir: @main)
+    test_runner = File.join(@main, ".llm-wiki", "post-commit-refresh.sh")
+    out, err, status = Open3.capture3(env, "bash", test_runner, "--project", @main, "--drain", chdir: @main)
 
     assert status.success?, "#{out}\n#{err}"
     assert_equal 2, File.readlines(agent_calls).length
@@ -949,6 +980,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     assert_match(/HIVE_SKIP_LLM_WIKI_POST_COMMIT=1 \\\n+\s*git -C "\$refresh_root"/, script)
     assert_match(/push "\$refresh_remote" "HEAD:refs\/heads\/\$refresh_branch"/, script)
     refute_match(/wiki_root="\$main_checkout"/, script)
+    refute_includes script, "LLM_WIKI_REFRESH_CMD"
   end
 
   def test_scheduled_wrapper_delegates_to_shared_drain_runner_without_touching_dirty_checkout
@@ -1081,6 +1113,23 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
   end
 
   private
+
+  def refresh_test_script
+    source = File.read(SCRIPT)
+    needle = %(  local prompt="$1"\n)
+    unless source.scan(needle).one?
+      raise "could not inject the disposable refresh-command test seam"
+    end
+
+    override = <<~'SH'
+        if [ -n "${LLM_WIKI_REFRESH_CMD:-}" ]; then
+          run_with_timeout "${LLM_WIKI_REFRESH_TIMEOUT:-1800}" \
+            "$LLM_WIKI_REFRESH_CMD" "$refresh_root" "$prompt" >>"$log_file" 2>&1
+          return $?
+        fi
+    SH
+    source.sub(needle, needle + override)
+  end
 
   def run_refresh_from(tree, overrides = nil, arguments: [], **keyword_overrides)
     script = File.join(tree, ".llm-wiki", "post-commit-refresh.sh")

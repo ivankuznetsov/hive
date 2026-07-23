@@ -248,15 +248,78 @@ Hivebox's `web/app/models/status_broadcaster.rb` is a Rails model class, but it
 is not an ActiveRecord workflow entity. It bridges `Hive::Web::StatusFeed` to
 Turbo Streams. `StatusFeed#snapshot` computes a fresh
 `Hive::Commands::Status#json_payload(Hive::Config.registered_projects)` for
-request-time reads; `StatusFeed#each_snapshot` runs one shared poller per
-process and compares snapshots with only volatile `generated_at` /
+request-time reads. That page-render snapshot primes the live feed, avoiding a
+second full-registry scan when the page's Cable connection arrives. The first
+idle request owns that baseline until the poller starts; competing page renders
+cannot replace it. Each rendered status/task page carries a canonical SHA-256
+token for the exact semantic payload it saw, even when that payload did not win
+the baseline claim. The token ignores `generated_at` / `age_seconds`, sorts hash
+keys canonically, and is therefore comparable across Puma workers and process
+restarts rather than being a process-local event counter.
+After its stream is confirmed, `StatusChannel#catch_up` sends one targeted
+refresh only when that token is stale; a normal fresh Turbo navigation sends
+no second request, and unchanged timestamp-only ticks do not advance the
+semantic identity. A competing render or an HTTP snapshot/poller interleaving
+cannot borrow the current feed token and strand stale markup.
+The targeted stream carries the page token. The permanent browser source
+records the token and URL in a live-element property only for the same-URL
+Turbo permanent handoff. The first successful catch-up consumes that property
+by URL into connection-local state even if the reconciliation response carries
+a different token; later confirmations on that connection include
+`refresh_attempted: true`, so a Cable worker whose feed remains behind cannot
+create a refresh loop. Turbo snapshot clones do not retain the property, so
+navigation through a source-less page cannot restore an older attempt, and a
+genuine socket disconnect clears the connection-local attempt so a later
+missed update can recover.
+`StatusChannel` owns the broadcaster lifecycle: the first accepted page
+subscription starts one process-wide poller, the last disconnect stops it, and
+an idle web server performs no status scans. Its per-channel synchronized
+pending/active/closed state makes lease acquisition and release exactly once:
+teardown can close a subscription while stream verification is pending without
+allowing a later acquire, and duplicate cleanup cannot release another page's
+lease or serialize unrelated connections. A failed first-poller start restores
+the previous shared lease count, rejects that channel, and leaves the client to
+retry a fresh subscription. The signed name is verified and the lease acquired
+before stream registration is queued, so rejection cannot race a late pub/sub
+handler into the adapter. While pages are connected,
+`StatusFeed#each_snapshot` polls at a five-second interval and compares
+snapshots with only volatile `generated_at` /
 `age_seconds` fields removed. `mtime` and `folder_mtime` deliberately remain
 part of the comparison key because task pages use those changes as the liveness
-signal for artifact/log refreshes while agents write. `StatusBroadcaster`
-publishes a status-channel refresh before rendering and replacing the
-dashboard's `projects` frame, so task pages that do not contain that frame
-still receive a morph signal even if a bad project row makes the grid partial
-raise.
+signal for artifact/log refreshes while agents write. The key is published
+beside the payload and an unchanged key reuses the existing SHA-256 token,
+avoiding a second normalization plus canonical serialization/hash each tick.
+`StatusBroadcaster`
+renders the refresh and composer-selector morph as one Turbo Stream message
+before one Action Cable send. The refresh GET re-renders the project rail and
+the project subset selected by the current URL; there is no separate broadcast
+copy of filter state. A bad partial therefore
+delivers no refresh-only prefix; the self-healing retry cannot turn that
+failure into a periodic full-page request loop. Failed delivery remains
+pending across last-subscriber shutdown, and a
+replacement broadcaster retries the retained feed value before resuming normal
+deduplication. Status and task pages use Hive's cancellation-safe custom Turbo
+stream source: a subscription that finishes connecting after its DOM owner has
+left is unsubscribed from its confirmed callback, preserving server command
+order while still releasing the abandoned owner. Confirmation is scoped to the
+current transport; disconnect clears it so teardown during reconnect again
+waits for confirmation, rejection, or disconnect. If none arrives within five
+seconds, Hive closes an otherwise-unowned Cable transport to make server cleanup
+authoritative before local release. `StatusChannel` fences the deferred adapter
+subscribe before it begins and in its completion callback, removing a handler
+that finishes after teardown. An adapter exception after deferral releases the
+lease and reconnects the transport instead of stranding an active unconfirmed
+channel. A rejected server subscription is forgotten
+and retried. A rejected asynchronous consumer setup
+clears turbo-rails' rejected cached consumer promise before retrying at a
+bounded five-second cadence. A synchronous subscription-creation failure drops
+the partial registration and failed consumer before retrying; DOM disconnect
+cancels that retry. The task-page
+owner includes all mutation forms, keeping their native submit events inside
+the same refresh-suppression boundary as the stream source; admission begins
+only after Turbo accepts any confirmation.
+Reconnect freshness is an Action Cable token handshake, not a browser
+MutationObserver.
 
 ## Architecture-patrol v2 state
 

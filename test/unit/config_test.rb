@@ -1738,6 +1738,28 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_registered_projects_normalizes_relative_and_empty_state_paths
+    with_tmp_global_config do |home|
+      relative_root = File.join(home, "relative-project")
+      default_root = File.join(home, "default-project")
+      FileUtils.mkdir_p([ relative_root, default_root ])
+      File.write(
+        Hive::Config.global_config_path,
+        {
+          "registered_projects" => [
+            { "name" => "relative", "path" => relative_root, "hive_state_path" => "state" },
+            { "name" => "default", "path" => default_root, "hive_state_path" => "" }
+          ]
+        }.to_yaml
+      )
+
+      projects = Hive::Config.registered_projects.to_h { |project| [ project.fetch("name"), project ] }
+
+      assert_equal File.join(relative_root, "state"), projects.fetch("relative").fetch("hive_state_path")
+      assert_equal File.join(default_root, ".hive-state"), projects.fetch("default").fetch("hive_state_path")
+    end
+  end
+
   def test_project_for_path_resolves_registered_repo_from_cwd
     with_tmp_global_config do
       with_tmp_dir do |repo|

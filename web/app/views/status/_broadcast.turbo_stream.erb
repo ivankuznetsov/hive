@@ -1,0 +1,5 @@
+<%= turbo_stream.refresh %>
+<%= turbo_stream.replace "composer-project",
+      method: :morph,
+      partial: "status/composer_project",
+      locals: { projects: projects } %>

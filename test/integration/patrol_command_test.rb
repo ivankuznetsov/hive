@@ -118,6 +118,12 @@ class PatrolCommandTest < Minitest::Test
       assert_equal [ "https://example.com/pull/7" ], payload.fetch("pr_urls")
       assert_equal [], payload.fetch("review_handoff_errors")
       assert_equal "opened", payload.dig("fix_results", 0, "publication_status")
+      record_path = Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].first
+      record = JSON.parse(File.read(record_path))
+      assert_equal run!("git", "-C", repo, "rev-parse", "HEAD").strip,
+                   record.fetch("target_sha")
+      assert_equal "test", record.fetch("validation_key")
+      assert_equal "active", record.fetch("lifecycle_state")
 
       state = JSON.parse(File.read(File.join(repo, ".hive-state", "patrol", "state.json")))
       assert_equal payload.fetch("last_scanned_sha"), state.fetch("last_scanned_sha")
@@ -128,6 +134,95 @@ class PatrolCommandTest < Minitest::Test
       assert_equal "hive-patrol-selection", selection.fetch("schema")
       assert_equal [ finding.id ], selection.fetch("ranked_candidates").map { |item| item.fetch("finding_id") }
       assert_operator selection.dig("ranked_candidates", 0, "alpha_score"), :>=, 70
+    end
+  end
+
+  def test_semantic_duplicate_on_the_same_target_is_filtered_before_persistence
+    with_patrol_project do |repo|
+      first = sample_finding
+      second = sample_finding
+      second.id = "finding-2"
+      first_out, = with_captured_exit do
+        command_for(
+          dry_run: true, mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ first ])
+        ).call
+      end
+      second_out, = with_captured_exit do
+        command_for(
+          dry_run: true, mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ second ])
+        ).call
+      end
+
+      assert_equal 1, JSON.parse(first_out).fetch("findings")
+      second_payload = JSON.parse(second_out)
+      assert_equal 0, second_payload.fetch("findings")
+      duplicate = second_payload.fetch("skipped_findings").first
+      assert_equal "semantic_duplicate", duplicate.fetch("reason")
+      assert_equal "finding-1", duplicate.fetch("canonical_finding_id")
+      assert_equal 1, Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].size
+    end
+  end
+
+  def test_shipping_cycle_retries_the_active_finding_persisted_by_a_dry_run
+    with_patrol_project do |repo|
+      dry_run_finding = sample_finding
+      shipping_duplicate = sample_finding
+      shipping_duplicate.id = "finding-shipping"
+
+      with_captured_exit do
+        command_for(
+          dry_run: true, mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ dry_run_finding ])
+        ).call
+      end
+      fixer = FakeFixer.new(failing_patch(dry_run_finding))
+      shipping_out, = with_captured_exit do
+        command_for(
+          mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ shipping_duplicate ]),
+          fixer: fixer
+        ).call
+      end
+
+      payload = JSON.parse(shipping_out)
+      assert_equal 1, payload.fetch("findings")
+      assert_equal 1, payload.fetch("fix_candidates")
+      assert_equal 1, payload.fetch("fixes_attempted")
+      assert_equal [ dry_run_finding.id ], fixer.attempted,
+                   "the shipping cycle must retry the canonical durable finding"
+      assert_empty payload.fetch("skipped_findings")
+      assert_equal 1, Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].size
+    end
+  end
+
+  def test_transient_fix_failure_retries_the_same_active_finding_on_the_next_cycle
+    with_patrol_project do |repo|
+      first = sample_finding
+      duplicate = sample_finding
+      duplicate.id = "finding-next-cycle"
+      first_fixer = FakeFixer.new(failing_patch(first))
+      second_fixer = FakeFixer.new(failing_patch(first))
+
+      first_out, = with_captured_exit do
+        command_for(
+          mapper: FakeMapper.new([ sample_feature ]), reviewer: FakeReviewer.new([ first ]),
+          fixer: first_fixer
+        ).call
+      end
+      second_out, = with_captured_exit do
+        command_for(
+          mapper: FakeMapper.new([ sample_feature ]), reviewer: FakeReviewer.new([ duplicate ]),
+          fixer: second_fixer
+        ).call
+      end
+
+      assert_equal 1, JSON.parse(first_out).fetch("fixes_attempted")
+      assert_equal 1, JSON.parse(second_out).fetch("fixes_attempted")
+      assert_equal [ first.id ], first_fixer.attempted
+      assert_equal [ first.id ], second_fixer.attempted
+      assert_equal 1, Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].size
     end
   end
 
@@ -1020,7 +1115,7 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_fixer_rejection_remains_an_attempt_outcome_without_durable_suppression
+  def test_fixer_rejection_remains_active_until_operator_or_pr_disposition
     with_patrol_project do |repo|
       finding = sample_finding
       finding.fingerprint = "resolved-fp"
@@ -1044,6 +1139,34 @@ class PatrolCommandTest < Minitest::Test
       fingerprint_path = File.join(repo, ".hive-state", "patrol", "fingerprints.json")
       fingerprints = File.exist?(fingerprint_path) ? JSON.parse(File.read(fingerprint_path)) : {}
       refute fingerprints.key?("resolved-fp"), "a fixer rejection must not permanently suppress the finding"
+      path = Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].first
+      record = JSON.parse(File.read(path))
+      assert_equal "active", record.fetch("lifecycle_state")
+    end
+  end
+
+  def test_stale_target_attempt_transitions_the_finding_out_of_active_work
+    with_patrol_project do |repo|
+      finding = sample_finding
+      patch = Hive::Patrol::Fixer::PatchAttempt.new(
+        id: "patch-stale", finding: finding, branch: "hive-patrol/stale",
+        worktree_path: nil,
+        validation: { "passed" => false, "reason" => "stale_target_sha" },
+        passed: false, diffstat: "", head_sha: nil
+      )
+
+      out, = with_captured_exit do
+        command_for(
+          mapper: FakeMapper.new([ sample_feature ]), reviewer: FakeReviewer.new([ finding ]),
+          fixer: FakeFixer.new(patch)
+        ).call
+      end
+
+      assert_equal "stale_target_sha", JSON.parse(out).dig("fix_results", 0, "reason")
+      record_path = Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].first
+      record = JSON.parse(File.read(record_path))
+      assert_equal "superseded", record.fetch("lifecycle_state")
+      assert_equal "stale_target_sha", record.fetch("lifecycle_reason")
     end
   end
 

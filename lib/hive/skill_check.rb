@@ -289,9 +289,7 @@ module Hive
         end
 
         home = environment["HOME"] || Dir.home
-        agent_dir = environment["PI_CODING_AGENT_DIR"].to_s
-        agent_dir = File.join(home, ".pi", "agent") if agent_dir.empty?
-        agent_dir = File.expand_path(agent_dir)
+        agent_dir = resolve_agent_dir(environment)
         parse_errors = []
         candidates = build_candidates(inv, home: home, agent_dir: agent_dir,
                                       project_root: project_root, parse_errors: parse_errors)
@@ -306,6 +304,12 @@ module Hive
         message = "pi: #{e.message}"
         Resolution.new(status: :missing, path: nil, message: message,
                        candidates: [].freeze, parse_errors: [].freeze)
+      end
+
+      def resolve_agent_dir(environment = ENV)
+        home = environment["HOME"] || Dir.home
+        configured = environment["PI_CODING_AGENT_DIR"].to_s
+        File.expand_path(configured.empty? ? File.join(home, ".pi", "agent") : configured)
       end
 
       def build_candidates(inv, home:, agent_dir: File.join(home, ".pi", "agent"), project_root:, parse_errors: [])

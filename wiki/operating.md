@@ -77,6 +77,15 @@ bash "$tmpdir/hive-install.sh"
 | `HIVE_QMD_NPM_PACKAGE` | Override the npm package spec used for QMD install; defaults to `@tobilu/qmd`. |
 | `HIVE_QMD_BIN` | Runtime override read by generated wiki scripts and `hive doctor`; points at an executable `qmd` when PATH or the managed install path is not enough. |
 
+On upgrade, the installer recognizes only Hive-managed wrappers and snapshots
+the existing `hive`, `hv`, and RubyGems shim launchers before RubyGems writes a
+new executable. It stages the replacement shim and wrappers beside their final
+paths, verifies their modes, wrapper marker, and shell syntax, then activates
+them with same-filesystem renames. Recovery stays armed through activation and
+verification, so a gem failure, missing binstub, write/chmod error, or partial
+launcher swap restores the previous bytes and executable modes. Unrecognized
+files at the install path are not treated as managed wrappers.
+
 For an agent-assisted install, paste the repository-root `install.md` into
 Claude Code, Codex, or Pi. It detects the host platform, chooses the channel,
 installs or repairs the QMD wiki indexer when npm is available, verifies
@@ -431,7 +440,9 @@ The unit declares `Type=simple` and runs `hive daemon start` in the
 foreground — systemd is the supervisor. `Restart=on-failure` brings
 the daemon back after a crash; the daemon's own SIGTERM handler does
 the graceful drain (`daemon.shutdown_grace_sec`, default 600 s). The shipped
-unit uses `KillMode=process`, so a service stop or restart signals only the
+unit is wanted by `default.target` but does not order itself after that same
+target; adding `After=default.target` would create an ordering cycle when the
+target pulls the service in. It uses `KillMode=process`, so a service stop or restart signals only the
 daemon process. Durable attempt wrapper/worker processes survive daemon
 replacement and remain lease-owned until the new daemon adopts or reconciles
 them. Existing installs whose unit still says `KillMode=mixed` should run

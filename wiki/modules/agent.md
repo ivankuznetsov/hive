@@ -35,6 +35,12 @@ Hive::Agent.new(
 ## Constants
 
 - `FINAL_MESSAGE_TAIL_BYTES = 64 * 1024` caps the plain stdout/stderr tail retained in `result[:final_message]` when no structured final agent message was parsed.
+- Structured final messages use the same bound without masquerading a prefix
+  as a complete provider result. If streamed chunks or one complete result
+  exceed the cap, `final_message` is `nil`, `final_message_source` is
+  `structured_truncated`, and `final_message_truncated` is true. A later
+  coherent complete result within the bound replaces the stream and clears
+  truncation.
 - `TERMINATION_GRACE_SECONDS = 3` bounds graceful shutdown after a streamed token ceiling, completed-turn ceiling, or completed expected output before Hive escalates the process group to KILL.
 - `COMPLETION_EVENT_GRACE_SECONDS = 3` lets an already-generated Claude `Write`
   and its usage-bearing turn delta settle in either event order; expiry or a
@@ -160,7 +166,7 @@ launches send the prompt through stdin with `-` in argv.
    uses the PID for liveness, and drop cleanup uses the start time to reject a
    reused PID before signalling the recorded child.
 6. Trap `INT`/`TERM` to forward `kill -TERM -<pgid>`. Old handlers are restored in `ensure`.
-7. Reader thread: the shared stdout/stderr pipe is line-buffered before persistence, so credentials split across provider writes or the two streams are reassembled before `Hive::SecretPatterns.redact` runs. Structured message-bearing JSON events are stricter: their payload is omitted from the durable log and replaced with event-type metadata because one logical credential can span multiple newline-delimited events. Raw in-memory lines still feed structured final-message parsing, provider-limit detection, and usage metering. Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`; non-JSON output is retained as a bounded plain tail with `:plain` source. When `max_tokens` is set, `StreamTokenMeter` also converts usage events into one monotonic count. Claude message-start/delta events sum completed turns while maxing cumulative current-turn fields; terminal run totals replace the aggregate only when they are not smaller than already observed usage.
+7. Reader thread: the shared stdout/stderr pipe is line-buffered before persistence, so credentials split across provider writes or the two streams are reassembled before `Hive::SecretPatterns.redact` runs. Structured message-bearing JSON events are stricter: their payload is omitted from the durable log and replaced with event-type metadata because one logical credential can span multiple newline-delimited events. Raw in-memory lines still feed structured final-message parsing, provider-limit detection, and usage metering. A shared `MessageExtractor::Accumulator` keeps both streaming structured messages and the plain fallback within 64 KiB; Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`, while non-JSON output uses the bounded plain tail with `:plain` source. Display-name generation uses the same protocol accumulator. When `max_tokens` is set, `StreamTokenMeter` also converts usage events into one monotonic count. Claude message-start/delta events sum completed turns while maxing cumulative current-turn fields; terminal run totals replace the aggregate only when they are not smaller than already observed usage.
 8. Polling loop: `Process.wait(pid, WNOHANG)` every `[remaining, 0.2].min` seconds until the deadline. Reaching `max_tokens`, reaching the Claude `max_turns` ceiling, or observing a non-empty expected output begins termination. Claude can emit its local `Write` result before or after the same turn's usage-bearing `message_delta`, so Hive waits at most the completion-event grace for the missing half, captures the delta when available, and sends TERM before a next model turn. A process group still alive after the termination grace receives KILL independently of the longer wall-clock timeout.
 9. On timeout: `kill_group(pgid)` (TERM), then `sleep_grace_then_kill` (3s grace, then KILL).
 10. Reap with `Process.wait(pid)` (rescuing `Errno::ECHILD`).

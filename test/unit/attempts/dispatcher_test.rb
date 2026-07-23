@@ -201,6 +201,20 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_launching_handoff_timeout_keeps_the_accepted_reservation_live
+    with_dispatcher do |dispatcher, launcher, task, store|
+      launcher.instance_variable_set(
+        :@result, { "claimed" => false, "state" => "launching", "attempt_id" => "attempt-one" }
+      )
+
+      result = dispatch(dispatcher, task, request_id: "request-one", interactive: true)
+
+      assert_equal :accepted, result.status
+      assert_equal "launching", store.fetch(result.attempt.attempt_id).state
+      assert_equal({ "attempt_id" => result.attempt.attempt_id }, result.attach_descriptor)
+    end
+  end
+
   def test_launcher_exception_marks_reservation_lost_and_defers
     with_dispatcher do |dispatcher, launcher, task, store|
       launcher.instance_variable_set(:@error, Errno::EIO.new("handoff pipe failed"))
@@ -296,6 +310,24 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal [ capture ], successor.attempt["inherited_outputs"]
       assert_equal 2, successor.attempt["retry_charge"]
       assert_equal 2, launcher.launched.size
+    end
+  end
+
+  def test_empty_successor_outputs_fall_back_to_all_predecessor_outputs
+    with_dispatcher do |dispatcher, _launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      inherited = { "path" => "outputs/inherited.json", "size" => 2, "sha256" => "1" * 64 }
+      current = { "path" => "outputs/current.json", "size" => 3, "sha256" => "2" * 64 }
+      lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1).with(
+        "inherited_outputs" => [ inherited ], "current_outputs" => [ current ]
+      )
+
+      successor = dispatcher.dispatch_successor(
+        predecessor: lost, task: task, project: "demo", argv: [ "hive", "run", task.slug ],
+        request_id: "request-two", provider: "codex", inherited_outputs: [], now: NOW + 2
+      )
+
+      assert_equal [ inherited, current ], successor.attempt["inherited_outputs"]
     end
   end
 

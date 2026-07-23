@@ -61,19 +61,14 @@ module Hive
         pid = Process.spawn(*cmd, **spawn_opts)
         w.close
         pgid = process_group(pid)
-        final_message = nil
-        plain_tail = +""
+        messages = Hive::Agent::MessageExtractor::Accumulator.new(max_bytes: TAIL_BYTES)
         reader = Thread.new do
           File.open(log_path, "a") do |log|
             r.each_line do |line|
               log.write(line)
               log.write("\n") unless line.end_with?("\n")
-              if (message = Hive::Agent::MessageExtractor.extract(line))
-                final_message = message
-              elsif Hive::Agent::MessageExtractor.parse_json_line(line).nil?
-                plain_tail << line
-                plain_tail = plain_tail.byteslice(-TAIL_BYTES, TAIL_BYTES) || plain_tail
-              end
+              json = Hive::Agent::MessageExtractor.parse_json_line(line)
+              messages.observe(json, raw_line: line)
             end
           end
         ensure
@@ -87,7 +82,8 @@ module Hive
 
         {
           exit_code: exit_code(status),
-          final_message: final_message || plain_tail.strip
+          final_message: messages.value,
+          final_message_truncated: messages.truncated?
         }
       ensure
         stdin_file&.close

@@ -2,6 +2,44 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.6.9
+
+- Fixed managed llm-wiki services timing out during a valid multi-batch drain.
+  The outer systemd limit now covers the worker's bounded worst case of three
+  agent and indexing batches, while retaining the 4 GiB memory limit, no-swap
+  policy, and machine-wide provider lock.
+- Removed the undocumented `LLM_WIKI_REFRESH_CMD` arbitrary executable
+  override from shipped wiki workers. Headless refreshes now dispatch only to
+  the explicitly configured Codex, Claude Code, or Pi provider through fixed,
+  bounded command shapes.
+- Unified Hive's scheduled and fallback provider lock with standalone llm-wiki
+  and the marketplace plugin, preventing mixed installations from launching
+  concurrent refresh agents.
+
+## 0.6.8
+
+- Fixed headless llm-wiki hooks losing their memory-bounded scheduler after a
+  missing user-systemd bus environment. Hive now reconstructs the standard bus
+  variables, preserves the installed service marker when signaling fails, and
+  safely falls back through the host-wide provider lock.
+- Fixed generated `wiki/log.md`-only commits recursively entering the wiki
+  queue and launching an agent despite containing no new source material.
+  Source fragments and other project/wiki changes continue to refresh.
+- Fixed project configuration accepting unsupported root keys at some command
+  boundaries; Hive now rejects them consistently before task work begins.
+  (#790)
+
+## 0.6.7
+
+- Fixed large llm-wiki backlogs opening a source-pin circuit before any bounded
+  recovery could run. Source refs are now pinned in configurable batches, and
+  crash-left queue records are reconstructed when their commit and diff remain
+  available instead of silently stranding recoverable work. (#836)
+- Fixed an older linked checkout overwriting the repository-shared llm-wiki
+  runner and headless-agent configuration. Hive now keeps the primary checkout
+  authoritative for the shared runtime, preventing a stale worker from
+  restoring unsafe pre-fix behavior. (#836)
+
 ## 0.6.6
 
 - Fixed scheduled llm-wiki refreshes multiplying into thousands of host timers

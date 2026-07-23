@@ -45,6 +45,7 @@ class HivePatrolDismissalsTest < Minitest::Test
         "fp1" => { "branch" => "hive-patrol/x", "pr_url" => "https://example.com/pr/1",
                    "state" => "open", "category" => "security",
                    "feature_id" => "command-bin-x",
+                   "target_sha" => "a" * 40,
                    "title_tokens" => %w[implicit post mutations],
                    "root_cause_tokens" => %w[payload changes method] }
       })
@@ -54,6 +55,7 @@ class HivePatrolDismissalsTest < Minitest::Test
 
       assert_equal "security", dismissed["fp1"]["category"]
       assert_equal "command-bin-x", dismissed["fp1"]["feature_id"]
+      assert_equal "a" * 40, dismissed["fp1"]["target_sha"]
       assert_equal %w[implicit post mutations], dismissed["fp1"]["title_tokens"]
       assert_equal %w[payload changes method], dismissed["fp1"]["root_cause_tokens"]
     end

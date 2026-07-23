@@ -35,7 +35,8 @@ class CliUsageErrorJsonTest < Minitest::Test
     if schema == "hive-metrics-rollback-rate"
       refute payload.key?("error_class"), "the metrics v1 error schema has no error_class field"
     else
-      assert_equal "InvalidTaskPath", payload["error_class"]
+      expected_class = error_kind == "invalid_task_path" ? "InvalidTaskPath" : "UsageError"
+      assert_equal expected_class, payload["error_class"]
     end
     assert_equal error_kind, payload["error_kind"]
     assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
@@ -158,7 +159,7 @@ class CliUsageErrorJsonTest < Minitest::Test
         payload = JSON.parse(out)
         assert_equal false, payload["ok"]
         assert_equal "screenote", payload["service"]
-        assert_equal "InvalidTaskPath", payload["error_class"]
+        assert_equal "UsageError", payload["error_class"]
         assert_equal "usage", payload["error_kind"]
         assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
         assert_match message_pattern, payload["message"]
@@ -185,7 +186,7 @@ class CliUsageErrorJsonTest < Minitest::Test
         assert_equal "hive-digest", payload["schema"]
         assert_equal 2, payload["schema_version"]
         assert_equal false, payload["ok"]
-        assert_equal "InvalidTaskPath", payload["error_class"]
+        assert_equal "UsageError", payload["error_class"]
         assert_equal "usage", payload["error_kind"]
         assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
         assert_empty schemer.validate(payload).map { |e| e["error"] },
@@ -204,7 +205,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "hive-setup", payload["schema"]
       assert_equal 1, payload["schema_version"]
       assert_equal false, payload["ok"]
-      assert_equal "InvalidTaskPath", payload["error_class"]
+      assert_equal "UsageError", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
       assert_match(/Usage: "hive setup"/, payload["message"])
@@ -256,7 +257,7 @@ class CliUsageErrorJsonTest < Minitest::Test
   # command dispatch, so it never reaches the command's own UsageError. With
   # --json it must still ride the hive-workflow-new envelope via the bin/hive
   # "workflow" usage-error contract (error_kind "usage", exit 64,
-  # error_class "InvalidTaskPath") — not plain Thor arity prose on stderr.
+  # error_class "UsageError") — not plain Thor arity prose on stderr.
   # This is the sole reason the "workflow" entry exists in
   # JSON_USAGE_ERROR_CONTRACTS; without this assertion a regression dropping
   # the contract entry would silently revert to bare stderr with no failing test.
@@ -270,7 +271,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "hive-workflow-new", payload["schema"]
       assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-workflow-new"), payload["schema_version"]
       assert_equal false, payload["ok"]
-      assert_equal "InvalidTaskPath", payload["error_class"]
+      assert_equal "UsageError", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
       assert_equal THOR_WORKFLOW_ARITY_PROSE.chomp, payload["message"]
@@ -299,6 +300,30 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_json_generator_failure_falls_back_to_human_usage_error
+    with_tmp_global_config do |home|
+      with_tmp_dir do |dir|
+        patch = File.join(dir, "break-json-generate.rb")
+        File.write(patch, <<~RUBY)
+          require "json"
+          def JSON.generate(*)
+            raise JSON::GeneratorError, "forced generator failure"
+          end
+        RUBY
+
+        out, err, status = Open3.capture3(
+          { "HIVE_HOME" => home, "RUBYOPT" => "-r#{patch}" },
+          RbConfig.ruby, "-Ilib", HIVE_BIN, "connect", "--json"
+        )
+
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        assert_empty out, "a failed serializer must not claim that a JSON envelope was emitted"
+        assert_match(/Usage: "hive connect SERVICE"/, err)
+        refute_match(/forced generator failure/, err)
+      end
+    end
+  end
+
   def test_patrol_missing_project_json_usage_error_uses_patrol_envelope
     with_tmp_global_config do |home|
       out, _err, status = run_hive(home, "patrol", "--json")
@@ -309,7 +334,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "hive-patrol", payload["schema"]
       assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-patrol"), payload["schema_version"]
       assert_equal false, payload["ok"]
-      assert_equal "InvalidTaskPath", payload["error_class"]
+      assert_equal "UsageError", payload["error_class"]
       assert_equal "error", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
     end
@@ -373,7 +398,7 @@ class CliUsageErrorJsonTest < Minitest::Test
   # rejected by Thor *before* `Hive::Commands::Bot#call` runs — bypassing the
   # command-level usage-error emitters. With --json it must still ride the
   # hive-bot-status envelope via the bin/hive "bot" usage-error contract
-  # (error_kind "extra_arguments", error_class "InvalidTaskPath", exit 64), not
+  # (error_kind "extra_arguments", error_class "UsageError", exit 64), not
   # bare Thor arity prose on stderr. This is the sole reason the resolver has a
   # dedicated `bot` branch in json_usage_error_contract.
   def test_bot_extra_positional_json_usage_error_rides_bot_status_envelope
@@ -388,7 +413,7 @@ class CliUsageErrorJsonTest < Minitest::Test
         assert_equal "hive-bot-status", payload["schema"]
         assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-status"), payload["schema_version"]
         assert_equal false, payload["ok"]
-        assert_equal "InvalidTaskPath", payload["error_class"]
+        assert_equal "UsageError", payload["error_class"]
         assert_equal "extra_arguments", payload["error_kind"]
         assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
         assert_match(/was called with arguments/, payload["message"])

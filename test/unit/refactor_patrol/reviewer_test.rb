@@ -395,7 +395,7 @@ class RefactorPatrolReviewerTest < Minitest::Test
       assert_includes captured, '"claim"'
       assert_includes captured, '"drivers"'
       assert_includes captured, "Never copy feature-wide totals into file or line evidence"
-      assert_includes captured, "leverage floor is 0.2500"
+      assert_includes captured, "leverage floor is 0.1000"
       assert_includes captured, "current consequence evidence"
       assert_includes captured, "added indirection, not leverage"
       assert_match(/fourth\s+response as an emergency finalization turn/, captured)
@@ -407,8 +407,10 @@ class RefactorPatrolReviewerTest < Minitest::Test
   def test_feature_below_maximum_possible_leverage_is_completed_without_an_agent_launch
     with_tmp_dir do |dir|
       runner = ->(**) { flunk "unactionable feature must not launch an agent" }
+      strict_cfg = cfg
+      strict_cfg.fetch("refactor_patrol")["min_leverage_score"] = 0.25
       reviewer = Hive::RefactorPatrol::Reviewer.new(
-        dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
+        dir, cfg: strict_cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
         agent_runner: runner
       )
       leverage = feature_leverage.merge(

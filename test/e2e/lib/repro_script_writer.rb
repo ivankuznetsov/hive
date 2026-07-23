@@ -5,12 +5,13 @@ require "shellwords"
 require_relative "paths"
 require_relative "path_safety"
 require_relative "sandbox_env"
+require_relative "scenario_parser"
 require_relative "string_expander"
 
 module Hive
   module E2E
     class ReproScriptWriter
-      LIVE_TMUX_KINDS = %w[tui_keys tui_expect tui_refute wait_subprocess].freeze
+      LIVE_TMUX_KINDS = ScenarioParser::TMUX_STEP_KINDS
 
       def initialize(scenario_dir:, sandbox_dir:, run_home:, steps:, failed_index:, scenario_name: nil, expander_context: nil)
         @scenario_dir = scenario_dir

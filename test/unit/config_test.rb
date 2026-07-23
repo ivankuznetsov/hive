@@ -49,6 +49,144 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_rejects_top_level_reviewers_for_every_yaml_value_with_migration_guidance
+    values = [
+      [ { "name" => "legacy" } ],
+      [],
+      nil,
+      {},
+      "",
+      7
+    ]
+
+    values.each do |value|
+      with_tmp_dir do |dir|
+        config_path = File.join(dir, ".hive-state", "config.yml")
+        FileUtils.mkdir_p(File.dirname(config_path))
+        File.write(config_path, { "reviewers" => value }.to_yaml)
+
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+        assert_includes error.message,
+                        "Unknown top-level key `reviewers`; move it to `review.reviewers`."
+        assert_includes error.message, config_path
+      end
+    end
+  end
+
+  def test_load_reports_unsupported_keys_before_expanding_an_invalid_hive_state_path
+    [ "bad\0state", "~hive-user-that-does-not-exist/.hive-state" ].each do |hive_state_path|
+      with_tmp_dir do |dir|
+        config_path = File.join(dir, ".hive-state", "config.yml")
+        FileUtils.mkdir_p(File.dirname(config_path))
+        File.write(config_path, {
+          "hive_state_path" => hive_state_path,
+          "reviewers" => [],
+          "unknown_stage_typo" => {}
+        }.to_yaml)
+
+        error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
+
+        assert_includes error.message, "Unknown top-level key `reviewers`"
+        assert_includes error.message, "move it to `review.reviewers`"
+        assert_includes error.message, "Unknown top-level key `unknown_stage_typo`"
+      end
+    end
+  end
+
+  def test_load_aggregates_unknown_top_level_keys_in_deterministic_order
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        zeta_typo: true
+        reviewers:
+        17: numeric
+        alpha_typo: true
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      expected_findings = [
+        "Unknown top-level key `alpha_typo`.",
+        "Unknown top-level key `reviewers`; move it to `review.reviewers`.",
+        "Unknown top-level key `zeta_typo`.",
+        "Unknown top-level key 17."
+      ]
+      expected_findings.each { |finding| assert_equal 1, error.message.scan(finding).length }
+      positions = expected_findings.map { |finding| error.message.index(finding) }
+      assert_equal positions.sort, positions
+      assert_includes error.message, config_path
+    end
+  end
+
+  def test_project_key_rendering_survives_an_inspect_failure
+    key = Object.new
+    key.define_singleton_method(:inspect) { raise "broken inspect" }
+
+    assert_equal "<Object>", Hive::Config.send(:safe_project_key_inspect, key)
+  end
+
+  def test_load_accepts_all_static_project_keys_plus_gh
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      raw = Hive::Config.deep_dup(Hive::Config::DEFAULTS)
+      raw["gh"] = { "network_timeout_sec" => 60 }
+      raw["conditions"] = { "authority" => "markers", "stages" => { "4-execute" => "shadow" } }
+      raw["attempt_heartbeat_sec"] = 2
+      raw["attempt_stale_sec"] = 3
+      raw["attempt_launch_timeout_sec"] = 4
+      raw["attempt_first_heartbeat_timeout_sec"] = 5
+      File.write(config_path, raw.to_yaml)
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal raw.keys.sort, (cfg.keys.grep(String) - [ "project_root" ]).sort
+      assert_equal 60, cfg.dig("gh", "network_timeout_sec")
+      assert_equal "shadow", cfg.dig("conditions", "stages", "4-execute")
+    end
+  end
+
+  def test_load_accepts_builtin_workflow_stage_override
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, { "inbox" => { "timeout_sec" => 12 } }.to_yaml)
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal({ "timeout_sec" => 12 }, cfg.fetch("inbox"))
+    end
+  end
+
+  def test_load_preserves_exact_nested_reviewer_entry
+    reviewer = {
+      "name" => "codex-native-review",
+      "kind" => "codex_review",
+      "agent" => "codex",
+      "output_basename" => "codex-native-review",
+      "prompt_template" => "reviewer_codex_native_review.md.erb",
+      "timeout_sec" => 5400
+    }
+
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, { "review" => { "reviewers" => [ reviewer ] } }.to_yaml)
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal reviewer, cfg.dig("review", "reviewers", 0)
+    end
+  end
+
+  def test_shared_value_validation_still_accepts_global_only_keys
+    global = Hive::Config.merge_defaults("registered_projects" => [])
+
+    assert_nil Hive::Config.send(:validate!, global, "global config")
+  end
+
   def test_load_records_frozen_field_level_implementation_identity_provenance
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -355,10 +493,11 @@ class ConfigTest < Minitest::Test
 
       assert_equal false, cfg.dig("refactor_patrol", "enabled")
       assert_equal false, cfg.dig("refactor_patrol", "auto_fix", "enabled")
-      assert_equal "codex", cfg.dig("refactor_patrol", "auto_fix", "agent")
+      refute cfg.dig("refactor_patrol", "auto_fix").key?("agent")
       assert_equal false, cfg.dig("refactor_patrol", "issue_filing", "enabled")
       assert_equal 0.25, cfg.dig("refactor_patrol", "issue_filing", "min_leverage_score")
-      assert_equal "claude", cfg.dig("refactor_patrol", "agent")
+      refute cfg.fetch("refactor_patrol").key?("agent")
+      assert_equal 0.10, cfg.dig("refactor_patrol", "min_leverage_score")
       assert_equal "medium", cfg.dig("refactor_patrol", "min_confidence")
       assert_equal 1, cfg.dig("refactor_patrol", "max_theses_per_feature")
       assert_equal 10, cfg.dig("refactor_patrol", "max_theses_per_run")
@@ -465,6 +604,19 @@ class ConfigTest < Minitest::Test
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_includes err.message, "refactor_patrol.min_leverage_score"
       assert_includes err.message, "between 0 and 1"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          model: gpt-5.6-sol
+          effort: HIGH
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol identity"
+      assert_includes err.message, "effort"
     end
 
     with_tmp_dir do |dir|
@@ -843,6 +995,7 @@ class ConfigTest < Minitest::Test
         assert_equal cycle_spawns, cfg.dig("patrol", "max_agent_spawns_per_cycle")
         assert_equal daily_spawns, cfg.dig("patrol", "max_agent_spawns_per_day")
         assert_equal 96, cfg.dig("patrol", "max_architecture_unmetered_spawns_per_day")
+        assert_equal 8, cfg.dig("patrol", "max_architecture_review_spawns_per_day")
         assert_equal agent_budget, cfg.dig("patrol", "max_budget_usd_per_agent")
         assert_equal 2, cfg.dig("patrol", "architecture_budget_multiplier")
         assert_equal 2, cfg.dig("patrol", "fix_budget_multiplier")
@@ -961,6 +1114,7 @@ class ConfigTest < Minitest::Test
       "max_tokens_per_agent: 0",
       "max_agent_spawns_per_cycle: 0",
       "max_agent_spawns_per_day: 1.5",
+      "max_architecture_review_spawns_per_day: 0",
       "max_architecture_unmetered_spawns_per_day: 0",
       "architecture_budget_multiplier: 0",
       "fix_budget_multiplier: 0",
@@ -1015,13 +1169,14 @@ class ConfigTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
         default_branch: main
-        max_review_passes: 6
+        review:
+          max_passes: 6
         budget_usd:
           brainstorm: 20
       YAML
       cfg = Hive::Config.load(dir)
       assert_equal "main", cfg["default_branch"]
-      assert_equal 6, cfg["max_review_passes"]
+      assert_equal 6, cfg.dig("review", "max_passes")
       assert_equal 20, cfg["budget_usd"]["brainstorm"], "explicit override must win"
       assert_equal 100, cfg["budget_usd"]["plan"], "plan budget should fall back to bumped default"
     end
@@ -1252,7 +1407,7 @@ class ConfigTest < Minitest::Test
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        max_passes: 4
+        default_branch: main
       YAML
 
       cfg = Hive::Config.load(dir)
@@ -1580,6 +1735,28 @@ class ConfigTest < Minitest::Test
       assert Hive::Config.find_project("bar"), "find_project should locate registered project by name"
       refute Hive::Config.find_project("missing"), "find_project should return nil for unknown project"
       assert File.exist?(File.join(home, "config.yml"))
+    end
+  end
+
+  def test_registered_projects_normalizes_relative_and_empty_state_paths
+    with_tmp_global_config do |home|
+      relative_root = File.join(home, "relative-project")
+      default_root = File.join(home, "default-project")
+      FileUtils.mkdir_p([ relative_root, default_root ])
+      File.write(
+        Hive::Config.global_config_path,
+        {
+          "registered_projects" => [
+            { "name" => "relative", "path" => relative_root, "hive_state_path" => "state" },
+            { "name" => "default", "path" => default_root, "hive_state_path" => "" }
+          ]
+        }.to_yaml
+      )
+
+      projects = Hive::Config.registered_projects.to_h { |project| [ project.fetch("name"), project ] }
+
+      assert_equal File.join(relative_root, "state"), projects.fetch("relative").fetch("hive_state_path")
+      assert_equal File.join(default_root, ".hive-state"), projects.fetch("default").fetch("hive_state_path")
     end
   end
 

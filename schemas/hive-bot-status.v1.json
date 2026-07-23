@@ -80,7 +80,7 @@
         "ok": { "const": false },
         "error_class": {
           "type": "string",
-          "description": "Short name (no module prefix) of the Hive::Error subclass that was raised. Always \"InvalidTaskPath\" for the current usage-error paths. Matches every other hive-* error envelope."
+          "description": "Short name (no module prefix) of the Hive::Error subclass that was raised. Command validation uses \"InvalidTaskPath\"; pre-dispatch argument-shape failures use \"UsageError\"."
         },
         "error_kind": {
           "type": "string",
@@ -95,7 +95,7 @@
         "exit_code": {
           "type": "integer",
           "enum": [64],
-          "description": "Hive::ExitCodes. 64=USAGE — every bot usage error rides InvalidTaskPath (exit 64)."
+          "description": "Hive::ExitCodes. Every bot usage error exits with 64 (USAGE)."
         },
         "message": { "type": "string" }
       }

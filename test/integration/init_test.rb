@@ -129,6 +129,8 @@ class InitTest < Minitest::Test
         assert File.directory?(File.join(dir, ".hive-state", "stages", "1-inbox"))
         assert File.exist?(File.join(dir, ".hive-state", "config.yml"))
         refute_includes File.read(File.join(dir, ".hive-state", "config.yml")), "default_workflow:"
+        assert_equal 60, Hive::Config.load(dir).dig("gh", "network_timeout_sec"),
+                     "fresh generated config, including its no-default gh section, must load immediately"
 
         log = `git -C #{dir} log --format=%s hive/state`.strip
         assert_includes log, "hive: bootstrap"
@@ -1760,6 +1762,47 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_llm_wiki_bootstrap_replaces_stale_main_wiki_path_when_fallback_exists
+    with_tmp_home do |global_home|
+      with_tmp_git_repo do |dir|
+        config_dir = File.join(dir, ".llm-wiki")
+        fallback = File.join(global_home, "wikis", "master", "wiki")
+        FileUtils.mkdir_p(config_dir)
+        FileUtils.mkdir_p(fallback)
+        File.write(
+          File.join(config_dir, "config.json"),
+          JSON.pretty_generate("main_wiki_path" => File.join(global_home, "missing", "wiki"))
+        )
+
+        Hive::LlmWikiBootstrap.ensure_config(dir)
+
+        cfg = JSON.parse(File.read(File.join(config_dir, "config.json")))
+        assert_equal fallback, cfg.fetch("main_wiki_path")
+      end
+    end
+  end
+
+  def test_llm_wiki_bootstrap_preserves_existing_custom_main_wiki_path
+    with_tmp_home do |global_home|
+      with_tmp_git_repo do |dir|
+        config_dir = File.join(dir, ".llm-wiki")
+        custom = File.join(global_home, "custom-wiki")
+        FileUtils.mkdir_p(config_dir)
+        FileUtils.mkdir_p(custom)
+        FileUtils.mkdir_p(File.join(global_home, "wikis", "master", "wiki"))
+        File.write(
+          File.join(config_dir, "config.json"),
+          JSON.pretty_generate("main_wiki_path" => custom)
+        )
+
+        Hive::LlmWikiBootstrap.ensure_config(dir)
+
+        cfg = JSON.parse(File.read(File.join(config_dir, "config.json")))
+        assert_equal custom, cfg.fetch("main_wiki_path")
+      end
+    end
+  end
+
   def test_llm_wiki_shared_runtime_copy_is_safe_with_utf8_default_internal_encoding
     with_tmp_git_repo do |dir|
       original_internal = Encoding.default_internal
@@ -1775,6 +1818,36 @@ class InitTest < Minitest::Test
       assert_equal File.binread(local_compile_log), File.binread(shared_compile_log)
     ensure
       Encoding.default_internal = original_internal
+    end
+  end
+
+  def test_llm_wiki_shared_runtime_uses_primary_worktree_instead_of_stale_linked_copy
+    with_tmp_git_repo do |dir|
+      linked_dir = "#{dir}-linked-runtime"
+      Hive::LlmWikiBootstrap.ensure_config(dir)
+      Hive::LlmWikiBootstrap.ensure_refresh_scripts(dir)
+      run!("git", "-C", dir, "add", ".llm-wiki")
+      run!("git", "-C", dir, "commit", "-m", "add managed wiki runtime", "--quiet")
+      run!("git", "-C", dir, "worktree", "add", "-b", "linked-runtime-test", linked_dir, "HEAD", "--quiet")
+
+      linked_config = File.join(linked_dir, ".llm-wiki", "config.json")
+      linked_runner = File.join(linked_dir, ".llm-wiki", "post-commit-refresh.sh")
+      File.binwrite(linked_config, "{\"stale_linked_copy\":true}\n")
+      File.binwrite(linked_runner, "#!/usr/bin/env bash\n# stale linked runner\n")
+
+      Hive::LlmWikiBootstrap.ensure_shared_runtime(linked_dir)
+
+      shared_dir = File.join(Hive::LlmWikiBootstrap.git_common_dir(dir), "llm-wiki")
+      assert_equal File.binread(File.join(dir, ".llm-wiki", "config.json")),
+                   File.binread(File.join(shared_dir, "config.json"))
+      assert_equal File.binread(File.join(dir, ".llm-wiki", "post-commit-refresh.sh")),
+                   File.binread(File.join(shared_dir, "post-commit-refresh.sh"))
+      refute_includes File.binread(File.join(shared_dir, "config.json")), "stale_linked_copy"
+      refute_includes File.binread(File.join(shared_dir, "post-commit-refresh.sh")), "stale linked runner"
+    ensure
+      if linked_dir && File.directory?(linked_dir)
+        Open3.capture3("git", "-C", dir, "worktree", "remove", "--force", linked_dir)
+      end
     end
   end
 
@@ -1853,8 +1926,8 @@ class InitTest < Minitest::Test
     flock_path = Hive::LlmWikiBootstrap::Scheduler.executable_path("flock")
     assert_includes service_contents,
                     "ExecStart=#{flock_path} --nonblock --conflict-exit-code 0 " \
-                    "%t/hive-llm-wiki-refresh.lock #{shared_runner} --project #{project_dir} --drain"
-    assert_includes service_contents, "TimeoutStartSec=45min"
+                    "%t/llm-wiki-refresh.lock #{shared_runner} --project #{project_dir} --drain"
+    assert_includes service_contents, "TimeoutStartSec=4h"
     assert_includes service_contents, "MemoryMax=4G"
     assert_includes service_contents, "MemorySwapMax=0"
     assert_includes service_contents, "Environment=LLM_WIKI_GLOBAL_LOCK_HELD=1"
@@ -2034,6 +2107,41 @@ class InitTest < Minitest::Test
         refute raw.dig("review", "fix").key?("agent")
         assert_equal "claude", raw.dig("review", "triage", "agent")
         assert_equal "claude", raw.dig("review", "browser_test", "agent")
+      end
+    end
+  end
+
+  def test_generated_config_loads_with_project_workflow_stage_override
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        workflows_dir = File.join(dir, ".hive-state", "workflows")
+        instruction_dir = File.join(workflows_dir, "delivery")
+        FileUtils.mkdir_p(instruction_dir)
+        File.write(File.join(instruction_dir, "assemble.md"), "Assemble the delivery.\n")
+        File.write(File.join(workflows_dir, "delivery.yml"), <<~YAML)
+          id: delivery
+          stages:
+            - name: inbox
+              kind: terminal
+              state_file: idea.md
+            - name: assemble
+              kind: agent
+              state_file: assemble.md
+              instruction: ./delivery/assemble.md
+            - name: done
+              kind: terminal
+              state_file: task.md
+        YAML
+
+        config_path = File.join(dir, ".hive-state", "config.yml")
+        raw = YAML.safe_load(File.read(config_path))
+        raw["assemble"] = { "agent" => "codex", "timeout_sec" => 75 }
+        File.write(config_path, raw.to_yaml)
+
+        cfg = Hive::Config.load(dir)
+
+        assert_equal({ "agent" => "codex", "timeout_sec" => 75 }, cfg.fetch("assemble"))
       end
     end
   end

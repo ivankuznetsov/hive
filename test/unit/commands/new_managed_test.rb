@@ -106,6 +106,20 @@ class NewManagedWorkflowTest < Minitest::Test
     end
   end
 
+  def test_managed_task_creation_preserves_unsupported_project_config
+    with_tmp_dir do |project|
+      hive_state = File.join(project, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
+      command = Hive::Commands::New.new("project", "idea")
+
+      error = assert_raises(Hive::UnsupportedProjectConfigError) do
+        command.send(:managed_project_config, { "path" => project, "hive_state_path" => hive_state })
+      end
+      assert_includes error.message, "move it to `review.reviewers`"
+    end
+  end
+
   private
 
   def write_package(root, commit)

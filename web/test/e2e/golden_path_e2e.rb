@@ -40,7 +40,6 @@ class GoldenPathE2E < ApplicationSystemTestCase
     speed_up_daemon!
     @project = create_hive_project!("golden-app")
     force_headless_claude!(@project)
-    StatusBroadcaster.start!
     install_github_stub(login: "goldenpath")
     spawn_daemon!
   end
@@ -143,9 +142,9 @@ class GoldenPathE2E < ApplicationSystemTestCase
     wait_for_answer_persisted!(slug, "Yes — ship it.")
 
     # --- The daemon drives brainstorm→plan→execute on its own --------------
-    # Each hop is a real dispatch + real fake-agent run + real stage logic;
-    # the page is push-morphed, so these waits ride live updates, no reloads.
-    assert_selector ".stage-badge", text: "execute", wait: 90
+    # Each hop is a real dispatch + real fake-agent run + real stage logic.
+    # Wait for the durable PR-gate result rather than the transient execute
+    # badge: a fast daemon can complete execute between two browser renders.
     assert_selector ".task-meta", text: "Ready to open PR", wait: 90
 
     # The implementation commit is real and lives in a real worktree.

@@ -1,6 +1,7 @@
 require "json"
 require "digest"
 require "time"
+require "hive/refactor_patrol/agent_identity"
 
 module Hive
   module RefactorPatrol
@@ -25,9 +26,13 @@ module Hive
 
       def capture(cfg, now: Time.now)
         refactor = cfg.fetch("refactor_patrol")
+        fix_identity = Hive::RefactorPatrol::AgentIdentity.new(cfg: cfg).fix
         action = {
           "default_branch" => cfg.fetch("default_branch").to_s,
-          "auto_fix_agent" => refactor.dig("auto_fix", "agent").to_s,
+          "auto_fix_agent" => fix_identity.provider.to_s,
+          "auto_fix_model" => fix_identity.model.to_s,
+          "auto_fix_effort" => fix_identity.requested_effort,
+          "auto_fix_launcher_identity" => fix_identity.launcher_identity.to_s,
           "min_confidence" => refactor.fetch("min_confidence").to_s,
           "commands" => json_copy(refactor.fetch("commands")),
           "caps" => CAP_BOOLEANS.to_h do |key|
@@ -84,19 +89,33 @@ module Hive
           target.fetch("commands"), action.fetch("commands"), current.fetch("commands")
         )
         snapshot_agent = action.fetch("auto_fix_agent").to_s
-        current_agent = current.dig("auto_fix", "agent").to_s
-        agent_match = !snapshot_agent.empty? && snapshot_agent == current_agent
+        current_identity = Hive::RefactorPatrol::AgentIdentity.new(cfg: current_cfg).fix
+        agent_match = !snapshot_agent.empty? && snapshot_agent == current_identity.provider.to_s
+        full_identity_snapshot = action.key?("auto_fix_model") ||
+                                 action.key?("auto_fix_launcher_identity")
+        identity_match = if full_identity_snapshot
+          action.fetch("auto_fix_model").to_s == current_identity.model.to_s &&
+            action["auto_fix_effort"].to_s == current_identity.requested_effort.to_s &&
+            action.fetch("auto_fix_launcher_identity").to_s == current_identity.launcher_identity.to_s
+        else
+          true
+        end
         branch_match = action.fetch("default_branch").to_s == current_cfg.fetch("default_branch").to_s
         target.fetch("auto_fix")["agent"] = snapshot_agent
+        if full_identity_snapshot
+          target.fetch("auto_fix")["model"] = action.fetch("auto_fix_model").to_s
+          target.fetch("auto_fix")["effort"] = action["auto_fix_effort"]
+        end
 
         reasons.fetch("fix") << "validation_commands_changed" unless commands_match
         reasons.fetch("fix") << "auto_fix_agent_changed" unless agent_match
+        reasons.fetch("fix") << "auto_fix_identity_changed" unless identity_match
         reasons.fetch("fix") << "default_branch_changed" unless branch_match
-        authority["fix"] = fix_enabled && commands_match && agent_match && branch_match
+        authority["fix"] = fix_enabled && commands_match && agent_match && identity_match && branch_match
         authority["issue"] = issue_enabled
 
         Result.new(config: effective, authority: authority, reasons: reasons, error: nil)
-      rescue KeyError, TypeError, ArgumentError
+      rescue KeyError, TypeError, ArgumentError, Hive::ImplementationIdentity::Error
         Result.new(
           config: effective || json_copy(current_cfg),
           authority: { "fix" => false, "issue" => false },

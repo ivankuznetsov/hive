@@ -32,7 +32,9 @@ class RepoSetupFlowTest < ApplicationSystemTestCase
       select "content", from: "Workflow"
       click_button "Clone and init"
 
-      assert_current_path "/repos", wait: 10
+      # This drives the real init path (git/config/service checks), which can
+      # exceed the generic 10-second UI wait under a loaded full-suite runner.
+      assert_current_path "/repos", wait: 30
       assert_text "#{name} is registered", wait: 5
     end
 

@@ -195,7 +195,7 @@ class HiveDigestE2ETest < Minitest::Test
       "registered_projects" => [ { "name" => target.project_name, "path" => target.path } ],
       "digest" => {
         "enabled" => true,
-        "agent" => ENV["HIVE_DIGEST_TEST_AGENT"],
+        "agent" => live_agent_name,
         "max_catchup_days" => 7
       },
       "bot" => {

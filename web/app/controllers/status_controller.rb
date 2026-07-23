@@ -1,18 +1,32 @@
 class StatusController < ApplicationController
   VIEWS = %w[board grid].freeze
   VIEW_COOKIE = :hive_status_view
+  helper_method :status_project_filter_path
 
   def index
     explicit_view = params[:view].to_s.presence_in(VIEWS)
     saved_view = cookies.signed[VIEW_COOKIE].to_s.presence_in(VIEWS)
     @status_view = explicit_view || saved_view || "board"
-    @payload = StatusBroadcaster.snapshot
+    page_snapshot = StatusBroadcaster.snapshot_with_version
+    @payload = page_snapshot.payload
+    @status_version = page_snapshot.version
     @projects = StatusBroadcaster.projects(@payload)
-    @board = Board.new(@projects) if @status_view == "board"
+    requested_project = params[:project].to_s.presence
+    @selected_project = @projects.find { |project| project.name == requested_project }
+    return redirect_to status_project_filter_path(nil) if requested_project && !@selected_project
+
+    @visible_projects = @selected_project ? [ @selected_project ] : @projects
+    @board = Board.new(@visible_projects) if @status_view == "board"
     @daemon_status = daemon_status
   end
 
   private
+
+  def status_project_filter_path(project)
+    query = request.query_parameters.except("project")
+    query["project"] = project if project.present?
+    query.empty? ? request.path : "#{request.path}?#{query.to_query}"
+  end
 
   # Build the daemon-status envelope in-process. StatusReport is the same
   # producer behind `hive daemon status --json`, returning the envelope as a

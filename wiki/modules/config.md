@@ -7,7 +7,50 @@ updated: 2026-07-22
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+
+## Strict project root keys
+
+After YAML parsing confirms that `.hive-state/config.yml` is a mapping,
+`Config.load` validates its raw top-level keys before patrol mode expansion,
+default merging, provenance fields, or other synthetic values are added. The
+supported static vocabulary is `Config::DEFAULTS.keys` plus explicitly
+supported no-default sections such as `gh`. Hive also loads the built-in and
+active project workflow descriptors and accepts their exact stage names as
+top-level per-stage override keys. Arbitrary lookalikes are not extension
+namespaces. Static-only configs do not scan workflow descriptors; when a
+dynamic candidate is present, validation reuses the active project overlay or
+loads it once from the already-parsed `hive_state_path`. Project loading reads
+the same raw config data and validates it after installing the overlay, so it
+does not call back through `Config.load` or perform a duplicate fingerprint
+scan.
+
+All unsupported root keys are reported together in deterministic order and the
+error names the source config path. The loader raises
+`UnsupportedProjectConfigError` (a `ConfigError`, exit 78) so task/workflow
+discovery cannot mistake this shared validation result for a recoverable config
+read failure and fall back to the built-in `coding` workflow. A literal
+root-level `reviewers` key is
+always invalid, including `reviewers: null`, `reviewers: []`, or a populated
+list. Move reviewer entries under `review.reviewers`:
+
+```yaml
+review:
+  reviewers:
+    - name: codex-native-review
+      kind: codex_review
+      agent: codex
+      output_basename: codex-native-review
+      prompt_template: reviewer_codex_native_review.md.erb
+```
+
+This root allowlist applies only to project config loaded through
+`Config.load`; global Hive config retains its separate vocabulary, including
+`registered_projects`. Because every project command shares this boundary, the
+same malformed project config fails consistently in `hive run`, `hive doctor`,
+`hive new`, text/JSON `hive status`, and other consumers instead of reaching
+command-specific fallback behavior. An invalid workflow path cannot pre-empt
+the targeted root-level `reviewers` migration diagnostic.
 
 ## Condition authority
 
@@ -125,6 +168,7 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
     "max_tokens_per_agent" => 50_000,
     "max_agent_spawns_per_cycle" => 3,
     "max_agent_spawns_per_day" => 8,
+    "max_architecture_review_spawns_per_day" => 8,
     "max_architecture_unmetered_spawns_per_day" => 96,
     "max_budget_usd_per_agent" => 25,
     "architecture_budget_multiplier" => 2,
@@ -174,7 +218,7 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
 
 `worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `permissions: "yolo"` preserves existing launch behavior unless a project or stage opts into a narrower Claude tool scope; `Config.permission_spec(cfg, stage)` returns the exact stage spec (`plan.permissions`, `review.ci.permissions`, reviewer-entry `permissions`, etc.) when present, otherwise the project default, with no field merge. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `review.adhoc.reviewers: nil` inherits `review.reviewers`, while an explicit `[]` means zero ad-hoc reviewers, and `review.adhoc.fix: false` keeps ad-hoc PR reviews review-only unless an operator opts into local fix commits with `true`. `daemon.auto_retry.enabled` defaults to `true` and can be set to `false` to disable the recoverable terminal-error healer while leaving ordinary daemon dispatch enabled. `patrol.review.reviewers` defaults to the single native Codex reviewer (`name: codex-native-review`, `kind: codex_review`), which runs Codex's built-in `review` subcommand and needs no CE skill; fresh init can optionally add Codex or Claude CE `ce-code-review` entries for patrol PRs. `daemon.max_concurrent_patrol_scans` (default `1`, validated `>= 1`) is a **per-project** cap bounding daemon-scheduled `hive patrol PROJECT` scans on a **separate** in-flight budget from task dispatch: a long codex-backed scan never consumes a `daemon.max_concurrent_runs` task slot — scans are tagged `kind: :patrol_scan` in the dispatcher and excluded from the per-project/global task caps, counted only against this independent cap. `ConcurrencyController#can_dispatch_patrol_scan?` counts only the **given project's** running scans (`entry[:kind] == :patrol_scan && entry[:project] == project`), so the default `1` means one scan per project at a time and **different projects patrol in parallel** rather than being serialized/starved by a global count (see `→ :patrol_scan_cap`).
 
-**Patrol is opt-in.** `resolve_patrol_mode!` runs on the raw YAML before `merge_defaults` and only derives/injects mode knobs when `mode:` is **explicitly present** in the raw config (`return unless nested_key?(data, "patrol", "mode")`). A config with **no patrol section** — or a patrol section that omits `mode:` — injects nothing and falls through to `DEFAULTS["patrol"]["enabled"] = false`, so patrol stays **disabled**. `medium` is the default offered by the `hive init` *prompt*, never a config-resolution default. The explicit modes are `ultrapatrol` (`timer`/30m, 800k tokens and 10 launches per cycle, 2.4m/36 per UTC day, 100k tokens and 100 budget-equivalent units per agent), `high` (`timer`/2h, 400k/6 per cycle, 1.2m/18 per day, 75k/50 per agent), `medium` (`timer`/4h, 200k/3 per cycle, 600k/8 per day, 50k/25 per agent), `low` (`new_commits`, 100k/1 per cycle, 200k/2 per day, 40k/10 per agent), and `off` (`enabled: false`). `fix_budget_multiplier` defaults to `2` and widens only an ordinary fix agent's streamed per-agent limit; cycle/day token and launch totals stay shared. `architecture_budget_multiplier` defaults to `2`, widening architecture stages' per-cycle token/launch limits and per-agent token limit while leaving the native budget-equivalent guard and shared project/day token ceiling unchanged; architecture fixes do not compound both multipliers. Metered architecture launches are accounted separately and never consume the mode's ordinary daily launch quota. `max_architecture_unmetered_spawns_per_day` defaults to `96` and is the independent durable backstop when an architecture provider repeatedly omits token counts. The `max_budget_usd_per_agent` name follows agent CLI terminology; with subscription-backed agents it is not a separate payment. The mode never changes finding/PR caps, per-feature diversity, confidence, or alpha gates. Explicit granular knobs always win over a set mode and survive the deep-merge.
+**Patrol is opt-in.** `resolve_patrol_mode!` runs on the raw YAML before `merge_defaults` and only derives/injects mode knobs when `mode:` is **explicitly present** in the raw config (`return unless nested_key?(data, "patrol", "mode")`). A config with **no patrol section** — or a patrol section that omits `mode:` — injects nothing and falls through to `DEFAULTS["patrol"]["enabled"] = false`, so patrol stays **disabled**. `medium` is the default offered by the `hive init` *prompt*, never a config-resolution default. The explicit modes are `ultrapatrol` (`timer`/30m, 800k tokens and 10 launches per cycle, 2.4m/36 per UTC day, 100k tokens and 100 budget-equivalent units per agent), `high` (`timer`/2h, 400k/6 per cycle, 1.2m/18 per day, 75k/50 per agent), `medium` (`timer`/4h, 200k/3 per cycle, 600k/8 per day, 50k/25 per agent), `low` (`new_commits`, 100k/1 per cycle, 200k/2 per day, 40k/10 per agent), and `off` (`enabled: false`). `fix_budget_multiplier` defaults to `2` and widens only an ordinary fix agent's streamed per-agent limit; cycle/day token and launch totals stay shared. `architecture_budget_multiplier` defaults to `2`, widening architecture stages' per-cycle token/launch limits and per-agent token limit while leaving the native budget-equivalent guard and shared project/day token ceiling unchanged; architecture fixes do not compound both multipliers. Input and output consume token ceilings, while cached tokens remain visible telemetry without being charged again. Metered architecture launches are accounted separately and never consume the mode's ordinary daily launch quota. Architecture reviews use the independent `max_architecture_review_spawns_per_day` ceiling (default `8`) without consuming fix capacity. `max_architecture_unmetered_spawns_per_day` defaults to `96` and is the independent durable backstop when an architecture provider repeatedly omits token counts. The `max_budget_usd_per_agent` name follows agent CLI terminology; with subscription-backed agents it is not a separate payment. The mode never changes finding/PR caps, per-feature diversity, confidence, or alpha gates. Explicit granular knobs always win over a set mode and survive the deep-merge.
 
 `patrol.max_features_per_cycle` defaults to 12, is validated as an integer at
 least one, bounds each ordinary-patrol reviewer batch, and is likewise not
@@ -196,11 +240,13 @@ new discovery, mutation, or remote-write authority. Fresh init recommends the
 full workflow, writes that answer explicitly to discovery, auto-fix, and issue
 filing, and uses issues as the fallback review surface. Existing projects opt
 in explicitly.
-The block also owns the
-review agent, confidence/run caps, language-neutral include/exclude rules,
+The block also owns an optional refactor identity (`agent`, `model`, `effort`)
+that inherits the resolved execute identity field by field, plus optional
+auto-fix identity overrides that inherit the resolved refactor identity. It
+also owns confidence/run caps, language-neutral include/exclude rules,
 `docs|format|lint|public_contract|typecheck|test` commands, actual patch
 caps, leverage weights, the proposal-wide `min_leverage_score` floor
-(default `0.25`), and the separate issue threshold. The default
+(default `0.10`), and the separate issue threshold. The default
 `max_theses_per_feature: 1` treats a finding as an exception, not a quota; a
 complete slice whose maximum possible leverage is below the floor skips its
 agent launch. `max_theses_per_run` is
@@ -275,7 +321,7 @@ expiry, client id, issuer, MCP resource URL, base URL, and default
 | `hive_home` | `ENV["HIVE_HOME"] || Hive::Paths.config_home` (XDG default `~/.config/hive`; legacy `~/Dev/hive/config.yml` is migrated) |
 | `global_config_path` | `<hive_home>/config.yml` |
 | `hive_state_dir(project_root, name = ".hive-state")` | `<project_root>/<name>` |
-| `load(project_root)` | Reads `<project_root>/.hive-state/config.yml`, treating only an initial `ENOENT` as absent and rewrapping traversal, symlink-loop, read, and YAML parse failures as path-bearing `ConfigError`s; then recursively deep-merges onto DEFAULTS, validates, and returns a Hash with `"project_root"` injected. |
+| `load(project_root)` | Reads `<project_root>/.hive-state/config.yml`, treating only an initial `ENOENT` as absent and rewrapping traversal, symlink-loop, read, and YAML parse failures as path-bearing `ConfigError`s; validates raw project root keys against static keys plus registered workflow stage names; then recursively deep-merges onto DEFAULTS, validates values, and returns a Hash with `"project_root"` injected. |
 | `registered_projects` | Reads global config; returns `[{name, path, hive_state_path, repository_identity}, …]` (paths `expand_path`-ed). The identity is a normalized canonical `origin` captured at enrollment when available. |
 | `find_project(name)` | First entry from `registered_projects` matching `name` (or `nil`). |
 | `register_project(name:, path:, repository_identity: :detect)` | Adds or replaces an entry under `config.yml.lock`; stores private `real_path` for relink detection and the transport-independent canonical `origin` identity when detectable. Enrollment still succeeds without an origin, but an explicit cross-project dependency targeting that project later fails closed until identity is configured and re-enrolled. |
@@ -315,7 +361,13 @@ key → descriptor default → merged Hive default/fallback.
 
 ## Validation (`Config.validate!`)
 
-Runs after merge so a default value can never trigger a failure — only user input does. Raises `Hive::ConfigError` (single class for all "config is bad" cases). Key checks include:
+Project root-key validation is deliberately performed only in `Config.load`
+against the raw project mapping. `Config.validate!` remains the shared
+post-merge value validator because global config paths also call it with keys
+such as `registered_projects`. It runs after merge so a default value can never
+trigger a failure — only user input does. Both boundaries raise
+`Hive::ConfigError` (the single class for all "config is bad" cases). Key checks
+include:
 
 1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `web`, `babysitter`, `patrol`, `digest`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
 2. **`validate_reviewers!` / `validate_review_adhoc!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`. `review.adhoc.reviewers` is either nil or the same reviewer-entry Array shape, and `review.adhoc.fix` is boolean.

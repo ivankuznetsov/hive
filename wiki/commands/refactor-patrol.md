@@ -3,7 +3,7 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-07-20
+updated: 2026-07-22
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
@@ -55,11 +55,11 @@ refactor_patrol:
   enabled: true
   # Proposal-specific leverage below this floor is retained as an audited
   # suppression, not ranked or acted on.
-  min_leverage_score: 0.25
+  min_leverage_score: 0.10
   max_theses_per_feature: 1
   auto_fix:
     enabled: true
-    agent: codex
+    # agent/model/effort inherit the resolved refactor identity unless overridden.
   issue_filing:
     enabled: true
     min_leverage_score: 0.25
@@ -104,10 +104,14 @@ remove a same-job daemon worker's tree. If an interrupted removal leaves only
 stale Git worktree administration, the next materialization prunes that orphan
 record and retries without operator repair.
 
-Discovery requires Claude's read-only tool scope plus its verified
-`--safe-mode` capability, so project customizations cannot run before the
-read-only boundary is established; an older or overridden Claude binary that
-does not advertise the flag fails closed. Hive validates the analysis worktree
+Discovery inherits the resolved execute provider, concrete model, and effort by
+default. `refactor_patrol.agent`, `.model`, and `.effort` may independently
+override that identity; omitted fields inherit, and a provider change without a
+model resolves that provider's concrete native default. Claude discovery uses
+its read-only tool scope plus verified `--safe-mode`; Codex discovery uses its
+native read-only sandbox with approvals disabled, ephemeral execution, and
+user config/rules suppressed. Other providers fail closed unless their profile
+can enforce read-only execution. Hive validates the analysis worktree
 before each feature checkpoint and again before completion. A reviewer that
 dirties the detached source tree makes the command fail, removes the ephemeral
 tree, and releases its discovery claim as `command_error`. Every thesis appears exactly once
@@ -158,8 +162,12 @@ like a single ordinary slice. Post-merge architecture launch count does not use
 the ordinary `max_agent_spawns_per_day` ceiling: every merged occurrence stays
 eligible even after ordinary patrol reaches, for example, 8/8 launches, and
 architecture launches cannot consume that ordinary quota. The shared daily
-token pool, architecture per-cycle launch bound, per-agent token cap,
+input-plus-output token pool, architecture per-cycle launch bound, per-agent token cap,
 one-agent-at-a-time lock, and native budget-equivalent guard remain in force.
+Cached token counts remain visible telemetry but do not consume those token
+ceilings. Architecture discovery is bounded separately by
+`max_architecture_review_spawns_per_day` (default `8`); fixes remain eligible
+after discovery reaches that cap.
 The ordinary `fix_budget_multiplier` does not compound architecture fix
 headroom. A separate `max_architecture_unmetered_spawns_per_day` backstop
 (default `96`) applies only after architecture providers omit usable token
@@ -198,7 +206,7 @@ makes the thesis inadmissible. Proposal
 leverage is derived from measured hotspot signals and model-explained relief.
 The reviewer requires evidence of a current consequence rather than hypothetical
 drift and rejects extra helpers/taxonomies that do not delete an ownership
-decision or dependency direction. The default `min_leverage_score: 0.25`
+decision or dependency direction. The default `min_leverage_score: 0.10`
 classifies any residual low-value proposal as a persisted suppression: it stays
 auditable but is absent from ranked/flagged findings and cannot trigger action.
 If architecture mapping fails, leverage
@@ -361,12 +369,18 @@ Current accepted, unflagged theses can reach `Fixer`. For upgrade recovery,
 an admissible persisted row whose complete reason set contains only the retired
 `exceeds_max_files` / `exceeds_max_diff_lines` flags receives the same current
 action authority while its stored historical disposition remains immutable.
-The job's enqueue-time policy must have allowed auto-fix. The current config may revoke or narrow that
+The job's enqueue-time policy must have allowed auto-fix. New policy snapshots
+pin the resolved auto-fix provider, concrete model, effort, and launcher
+identity; legacy provider-only snapshots retain provider-only comparison. The
+current config may revoke or narrow that
 snapshot; it cannot relax captured contract/dependency guards, lower
-confidence/leverage thresholds, add a validation command, switch agents, or
+confidence/leverage thresholds, add a validation command, switch identities, or
 otherwise broaden an old job.
 
-Fixes run with the Codex workspace-write profile in a deterministic isolated
+Fixes inherit the resolved refactor identity by default and may independently
+override `refactor_patrol.auto_fix.agent`, `.model`, and `.effort`. The selected
+profile must enforce workspace-write confinement, and Hive passes the pinned
+model/effort arguments into the agent. Fixes run in a deterministic isolated
 worktree on `hive-refactor/<canonical-action-id>`. The repository-global branch
 keeps the same action on one branch across jobs, replays, and registration
 handoffs. Hive fetches and validates the committed default-branch ref before

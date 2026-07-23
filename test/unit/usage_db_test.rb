@@ -183,6 +183,7 @@ class UsageDbTest < Minitest::Test
     with_usage_db do
       now = Time.utc(2026, 5, 24, 12)
       record(stage: "patrol-review", input: 10, output: 5, cached: 1, started_at: now - 60)
+      record(stage: "refactor-patrol-review", input: 0, output: 0, cached: 7, started_at: now - 45)
       record(stage: "refactor-patrol-fix-unmetered", input: 0, output: 0, cached: 0, started_at: now - 30)
       record(stage: "2-brainstorm", input: 999, output: 999, cached: 999, started_at: now - 30)
 
@@ -193,12 +194,13 @@ class UsageDbTest < Minitest::Test
       assert_equal 10, activity.fetch(:input)
       assert_equal true, activity.fetch(:available)
       assert_equal 5, activity.fetch(:output)
-      assert_equal 1, activity.fetch(:cached)
-      assert_equal 16, activity.fetch(:tokens)
-      assert_equal 2, activity.fetch(:agent_spawns)
+      assert_equal 8, activity.fetch(:cached)
+      assert_equal 15, activity.fetch(:tokens)
+      assert_equal 3, activity.fetch(:agent_spawns)
       assert_equal 1, activity.fetch(:unmetered_spawns)
       assert_equal 1, activity.fetch(:ordinary_agent_spawns)
-      assert_equal 1, activity.fetch(:architecture_agent_spawns)
+      assert_equal 2, activity.fetch(:architecture_agent_spawns)
+      assert_equal 1, activity.fetch(:architecture_review_spawns)
       assert_equal 0, activity.fetch(:ordinary_unmetered_spawns)
       assert_equal 1, activity.fetch(:architecture_unmetered_spawns)
     end

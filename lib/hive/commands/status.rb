@@ -165,6 +165,8 @@ module Hive
         admission_context = build_admission_context(projects)
         projects.each do |project|
           render_project(project, project_count: projects.size, admission_context: admission_context)
+        rescue Hive::UnsupportedProjectConfigError
+          raise
         rescue StandardError => e
           # Symmetry with the JSON path's project_payload_or_degraded: isolate
           # per-project failures so one project (e.g. a malformed workflow
@@ -280,6 +282,8 @@ module Hive
         projects.to_h do |project|
           enabled = begin
             Hive::Config.load(project.fetch("path")).dig("daemon", "enabled") == true
+          rescue Hive::UnsupportedProjectConfigError
+            raise
           rescue Hive::Error, SystemCallError
             false
           end
@@ -329,6 +333,8 @@ module Hive
           exclude_archived: exclude_archived,
           admission_context: admission_context
         )
+      rescue Hive::UnsupportedProjectConfigError
+        raise
       rescue StandardError => e
         warn "hive: status: project #{project['name'].inspect} payload failed " \
              "(#{e.class}: #{e.message}); reporting it with no tasks so other projects still advance"
@@ -969,6 +975,8 @@ module Hive
               worktree_path =
                 begin
                   task.worktree_path
+                rescue Hive::UnsupportedProjectConfigError
+                  raise
                 rescue StandardError
                   nil
                 end
@@ -1078,6 +1086,8 @@ module Hive
         Hive::DependencySnapshot.admission_context(
           projects, exclude_archived: exclude_archived
         )
+      rescue Hive::UnsupportedProjectConfigError
+        raise
       rescue StandardError => e
         warn "hive: status: dependency admission snapshot failed " \
              "(#{e.class}: #{e.message}); holding every affected row"
@@ -1349,6 +1359,8 @@ module Hive
       # marker authority until the configuration is repaired.
       def task_action_config(project_root)
         Hive::Config.load(project_root)
+      rescue Hive::UnsupportedProjectConfigError
+        raise
       rescue Hive::ConfigError
         nil
       end

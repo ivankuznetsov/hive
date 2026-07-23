@@ -25,6 +25,7 @@ if ENV["HIVE_ATTEMPT_INTERNAL"] == "1"
 end
 
 require "hive/cli"
+require "hive/cli_json_options"
 require "hive/refactor_patrol/reporter"
 require "json"
 
@@ -46,9 +47,7 @@ if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   exit 0
 end
 
-JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
-JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
-JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
+JSON_BOOLEAN_OPTIONS = Hive::CliJsonOptions::BOOLEAN_OPTIONS
 STAGE_ACTION_USAGE_COMMANDS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
 NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow].freeze
 JSON_USAGE_ERROR_CONTRACTS = {
@@ -99,7 +98,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
 ).freeze
 
 def wrapper_option_argv(argv)
-  argv.take(argv.index("--") || argv.length)
+  Hive::CliJsonOptions.option_argv(argv)
 end
 
 # Thor treats a class option before the subcommand as input to its help path.
@@ -237,8 +236,7 @@ def lift_new_options!(argv)
 end
 
 def json_requested?(argv)
-  options = wrapper_option_argv(argv)
-  JSON_TRUE_OPTIONS.include?(options.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
+  Hive::CliJsonOptions.requested?(argv)
 end
 
 def reject_invalid_argv_encoding!(argv)
@@ -250,11 +248,7 @@ end
 
 def reject_unsupported_json_assignments!(argv)
   text_start_idx = new_text_start_index(argv)
-  arg = wrapper_option_argv(argv).each_with_index.find do |candidate, idx|
-    next false if text_start_idx && idx >= text_start_idx
-
-    candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate)
-  end&.first
+  arg = Hive::CliJsonOptions.unsupported_assignment(argv, before_index: text_start_idx)
   return unless arg
 
   raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
@@ -513,8 +507,20 @@ def emit_json_usage_error(argv, error)
 
   puts JSON.generate(json_usage_error_payload(contract, error, argv: argv))
   true
-rescue Errno::EPIPE, JSON::GeneratorError
+rescue Errno::EPIPE
   true
+rescue JSON::GeneratorError
+  false
+end
+
+def thor_usage_error(argv, error)
+  contract = json_usage_error_contract(argv)
+  klass = if contract&.fetch(:error_kind, nil) == "invalid_task_path"
+    Hive::InvalidTaskPath
+  else
+    Hive::UsageError
+  end
+  klass.new(error.message)
 end
 
 original_argv = ARGV.dup
@@ -527,7 +533,7 @@ begin
   lift_new_options!(ARGV)
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
-  error = Hive::InvalidTaskPath.new(e.message)
+  error = thor_usage_error(original_argv, e)
   emitted_json = emit_json_usage_error(original_argv, error)
   warn(emitted_json ? "hive: #{error.message}" : error.message)
   exit(error.exit_code)

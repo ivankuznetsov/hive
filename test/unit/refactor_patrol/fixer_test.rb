@@ -207,7 +207,11 @@ class RefactorPatrolFixerTest < Minitest::Test
     with_repo do |repo, _analysis_sha|
       subject = fixer(
         repo, agent: ->(**) { flunk "injected runner is not used by profile lookup" },
-        cfg_overrides: { "refactor_patrol" => { "auto_fix" => { "agent" => "claude" } } }
+        cfg_overrides: {
+          "refactor_patrol" => {
+            "auto_fix" => { "agent" => "claude", "model" => "claude-sonnet-4-6" }
+          }
+        }
       )
 
       error = assert_raises(Hive::ConfigError) { subject.send(:fix_profile) }
@@ -1337,6 +1341,8 @@ class RefactorPatrolFixerTest < Minitest::Test
                    captured.fetch(:permission_mode)
       assert_equal dir, captured.fetch(:cwd)
       assert_equal 100_000, captured.fetch(:max_tokens)
+      assert_equal [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=high" ],
+                   captured.fetch(:identity_arguments)
       assert File.directory?(File.join(dir, "runs", "fix"))
     end
   end
@@ -1390,7 +1396,9 @@ class RefactorPatrolFixerTest < Minitest::Test
       {
         "default_branch" => "master",
         "worktree_root" => "#{repo}-worktrees",
+        "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" },
         "refactor_patrol" => {
+          "auto_fix" => {},
           "commands" => { "test" => "ruby -c lib/checkout.rb" },
           "caps" => {}
         }

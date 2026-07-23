@@ -10,6 +10,7 @@ require "hive/patrol/agent_launch"
 require "hive/patrol/validator"
 require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/checkout_guard"
+require "hive/refactor_patrol/agent_identity"
 require "hive/secret_patterns"
 require "hive/stages/base"
 require "hive/stages/review/fix_guardrail"
@@ -59,6 +60,9 @@ module Hive
         end
         @public_contract_guard = public_contract_guard
         @token_budget = token_budget || Hive::Patrol::TokenBudget.new(@project_root, cfg: cfg)
+        @fix_identity = Hive::RefactorPatrol::AgentIdentity.new(
+          cfg: cfg, project_root: @project_root
+        ).fix unless agent_runner
       end
 
       def attempt(thesis:, job_id:, analysis_sha:, canonical_action_id: nil,
@@ -545,6 +549,7 @@ module Hive
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
             log_label: STAGE, profile: profile, status_mode: :exit_code_only,
             cli_flags: launch.fetch(:cli_flags),
+            identity_arguments: @fix_identity.native_arguments,
             permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE
           ).run!
         ensure
@@ -556,12 +561,14 @@ module Hive
       end
 
       def fix_profile
-        name = @cfg.dig("refactor_patrol", "auto_fix", "agent") || "codex"
-        profile = Hive::AgentProfiles.lookup(name, cfg: @cfg)
+        @fix_identity ||= Hive::RefactorPatrol::AgentIdentity.new(
+          cfg: @cfg, project_root: @project_root
+        ).fix
+        profile = Hive::AgentProfiles.lookup(@fix_identity.provider, cfg: @cfg)
         unless profile.workspace_write_supported?
           raise Hive::ConfigError,
                 "refactor patrol auto-fix provider #{profile.name.inspect} cannot enforce " \
-                "workspace-write isolation; configure refactor_patrol.auto_fix.agent: codex"
+                "workspace-write isolation; override refactor_patrol.auto_fix.agent"
         end
 
         profile

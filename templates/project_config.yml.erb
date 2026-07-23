@@ -304,6 +304,8 @@ patrol:
   # daily launch count. This higher, separate ceiling only stops repeated
   # architecture launches whose provider omits all token accounting.
   # max_architecture_unmetered_spawns_per_day: 96
+  # Bound architecture discovery fan-out independently from auto-fix work.
+  # max_architecture_review_spawns_per_day: 8
   # Open ready (non-draft) PRs by default so the babysitter — which skips
   # draft PRs — picks them up. Set true to open draft PRs instead.
   draft_prs: false
@@ -366,14 +368,14 @@ patrol:
 # disabled discovery policy.
 refactor_patrol:
   enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
-  # Low-leverage proposals remain visible but report-only.
-  min_leverage_score: 0.25
+  # Admit small but repeated ownership costs; evidence and safety gates still apply.
+  min_leverage_score: 0.10
   # Absolute wall-clock budget shared by every feature review in one child.
   # Unfinished features remain durable and resume in a later patrol run.
   max_review_seconds_per_run: 3600
   auto_fix:
     enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
-    agent: codex
+    # agent/model/effort inherit the resolved refactor identity unless overridden.
   commands:
     # Optional project-owned API/contract check for ecosystems without a
     # built-in declaration adapter. It is consulted only when auto-fix is on.

@@ -4,11 +4,13 @@ require_relative "../test_helper"
 require "tmpdir"
 require "fileutils"
 require "open3"
+require "socket"
 
 # Guards the transactional contract of .llm-wiki/post-commit-refresh.sh: a
 # commit in any checkout queues one refresh into a dedicated managed worktree.
 # Neither the committing checkout nor the user's main checkout may be mutated.
-# The headless agent is replaced via LLM_WIKI_REFRESH_CMD so no model runs.
+# Tests inject a command seam only into their disposable worker copy, so the
+# shipped worker remains limited to configured provider binaries.
 class LlmWikiPostCommitRefreshTest < Minitest::Test
   include HiveTestHelper
 
@@ -38,7 +40,9 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     FileUtils.mkdir_p(File.join(@main, ".llm-wiki"))
     FileUtils.mkdir_p(File.join(@main, "wiki", "log.d"))
     FileUtils.mkdir_p(File.join(@main, "bin"))
-    FileUtils.cp(SCRIPT, File.join(@main, ".llm-wiki", "post-commit-refresh.sh"))
+    test_runner = File.join(@main, ".llm-wiki", "post-commit-refresh.sh")
+    File.write(test_runner, refresh_test_script)
+    FileUtils.chmod("+x", test_runner)
     File.write(File.join(@main, "wiki", "index.md"), "# wiki\n")
     File.write(File.join(@main, "bin", "tool.sh"), "echo hi\n")
     git(@main, "add -A")
@@ -71,6 +75,23 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     assert_includes git(@main, "show --stat --pretty=format: llm-wiki/refresh"),
                     "wiki/log.d/stub-entry.md"
     assert_match(/stub refresh/, git(@main, "show llm-wiki/refresh:wiki/log.d/stub-entry.md"))
+  end
+
+  def test_compiled_log_only_commit_does_not_queue_or_launch_refresh
+    File.write(File.join(@wt, "wiki", "log.md"), "# compiled projection\n")
+    git(@wt, "add wiki/log.md")
+    git(@wt, "commit -qm 'docs(wiki): compile log projection'")
+    source_sha = git(@wt, "rev-parse HEAD")
+
+    result = run_refresh_from(@wt)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    refute_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                  "refs/llm-wiki/sources/#{source_sha}")
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                  "refs/heads/llm-wiki/refresh")
   end
 
   def test_refresh_branch_is_pushed_without_touching_main
@@ -320,12 +341,16 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     state_dir = File.join(common, "llm-wiki")
     fake_bin = File.join(@dir, "systemctl-bin")
     calls = File.join(@dir, "systemctl-calls")
+    runtime_dir = File.join(@dir, "headless-runtime")
     FileUtils.mkdir_p(state_dir)
     FileUtils.mkdir_p(fake_bin)
+    FileUtils.mkdir_p(runtime_dir)
+    bus_path = File.join(runtime_dir, "bus")
+    bus = UNIXServer.new(bus_path)
     File.write(File.join(state_dir, "scheduler-service"), "llm-wiki-project-deadbeef.service\n")
     File.write(File.join(fake_bin, "systemctl"), <<~SH)
       #!/bin/sh
-      printf '%s\n' "$*" >>#{q(calls)}
+      printf '%s|%s|%s\n' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" "$*" >>#{q(calls)}
     SH
     FileUtils.chmod("+x", File.join(fake_bin, "systemctl"))
     File.write(File.join(@wt, "bin", "tool.sh"), "echo scheduled source\n")
@@ -336,16 +361,21 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     result = run_refresh_from(
       @wt,
       "PATH" => "#{fake_bin}:/usr/bin:/bin",
-      "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "0"
+      "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "0",
+      "XDG_RUNTIME_DIR" => runtime_dir,
+      "DBUS_SESSION_BUS_ADDRESS" => ""
     )
 
     assert_equal 0, result.fetch(:status), result.fetch(:out)
-    assert_equal "--user start --no-block llm-wiki-project-deadbeef.service\n", File.read(calls)
+    assert_equal "#{runtime_dir}|unix:path=#{bus_path}|--user start --no-block llm-wiki-project-deadbeef.service\n",
+                 File.read(calls)
     assert_path_exists File.join(state_dir, "pending", source_sha)
     refute system("git", "-C", @main, "show-ref", "--verify", "--quiet", "refs/heads/llm-wiki/refresh")
+  ensure
+    bus&.close
   end
 
-  def test_failed_systemd_dispatch_removes_marker_and_uses_serialized_fallback
+  def test_failed_systemd_dispatch_keeps_marker_and_uses_serialized_fallback
     common = git(@wt, "rev-parse --path-format=absolute --git-common-dir")
     state_dir = File.join(common, "llm-wiki")
     fake_bin = File.join(@dir, "failing-systemctl-bin")
@@ -366,13 +396,13 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     )
 
     assert_equal 0, result.fetch(:status), result.fetch(:out)
-    refute_path_exists marker
+    assert_equal "llm-wiki-project-deadbeef.service\n", File.read(marker)
     assert_match(/stub refresh/, git(@main, "show llm-wiki/refresh:wiki/log.d/stub-entry.md"))
   end
 
   def test_ruby_portable_global_lock_respects_an_existing_os_lock
     runtime_dir = File.join(@dir, "runtime")
-    lock_file = File.join(runtime_dir, "hive-llm-wiki-refresh.lock")
+    lock_file = File.join(runtime_dir, "llm-wiki-refresh.lock")
     ready = File.join(runtime_dir, "holder-ready")
     forbidden_setup = File.join(runtime_dir, "forbidden-bundler-setup.rb")
     FileUtils.mkdir_p(runtime_dir)
@@ -477,12 +507,228 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
       "LLM_WIKI_GLOBAL_LOCK_HELD" => "1",
       "LLM_WIKI_DRAIN_SETTLE_SECONDS" => "0"
     }
-    out, err, status = Open3.capture3(env, "bash", SCRIPT, "--project", @main, "--drain", chdir: @main)
+    test_runner = File.join(@main, ".llm-wiki", "post-commit-refresh.sh")
+    out, err, status = Open3.capture3(env, "bash", test_runner, "--project", @main, "--drain", chdir: @main)
 
     assert status.success?, "#{out}\n#{err}"
     assert_equal 2, File.readlines(agent_calls).length
     assert_empty Dir.glob(File.join(state_dir, "pending", "*"))
     refute_path_exists File.join(state_dir, "refresh-disabled")
+  end
+
+  def test_large_queue_pins_sources_in_bounded_git_transactions
+    common = git(@wt, "rev-parse --path-format=absolute --git-common-dir")
+    pending = File.join(common, "llm-wiki", "pending")
+    fake_bin = File.join(@dir, "bounded-git-bin")
+    transaction_log = File.join(@dir, "source-pin-transactions")
+    FileUtils.mkdir_p(pending)
+    FileUtils.mkdir_p(fake_bin)
+
+    source_shas = 5.times.map do |index|
+      File.write(File.join(@wt, "bin", "tool.sh"), "echo queued source #{index}\n")
+      git(@wt, "add bin/tool.sh")
+      git(@wt, "commit -qm 'feat: queued source #{index}'")
+      source_sha = git(@wt, "rev-parse HEAD")
+      File.write(File.join(pending, source_sha), "#{source_sha}\tfeat\nbin/tool.sh\n")
+      source_sha
+    end
+
+    File.write(File.join(fake_bin, "git"), <<~SH)
+      #!/usr/bin/env bash
+      if [ "$1" = update-ref ] && [ "${2:-}" = --stdin ]; then
+        payload="$(mktemp)"
+        trap 'rm -f "$payload"' EXIT
+        cat >"$payload"
+        count="$(grep -c '^update refs/llm-wiki/sources/' "$payload" || true)"
+        if [ "$count" -gt 0 ]; then
+          printf '%s\n' "$count" >>#{q(transaction_log)}
+        fi
+        [ "$count" -le 2 ] || exit 81
+        /usr/bin/git "$@" <"$payload"
+        exit $?
+      fi
+      exec /usr/bin/git "$@"
+    SH
+    FileUtils.chmod("+x", File.join(fake_bin, "git"))
+
+    result = run_refresh_from(
+      @wt,
+      "PATH" => "#{fake_bin}:/usr/bin:/bin",
+      "LLM_WIKI_MAX_BATCH_SOURCES" => "2",
+      "LLM_WIKI_MAX_SOURCE_PIN_BATCH" => "2"
+    )
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    transactions = File.readlines(transaction_log, chomp: true).map(&:to_i)
+    assert_equal [ 2, 2, 1 ], transactions
+    source_shas.each do |source_sha|
+      source_ref = "refs/llm-wiki/sources/#{source_sha}"
+      receipt_ref = "refs/llm-wiki/receipts/#{source_sha}"
+      assert system("git", "-C", @main, "show-ref", "--verify", "--quiet", source_ref) ||
+             system("git", "-C", @main, "show-ref", "--verify", "--quiet", receipt_ref),
+             "source #{source_sha} must remain pinned or receipted"
+    end
+    assert_equal "deferred:3", File.read(File.join(common, "llm-wiki", "refresh-disabled")).strip
+  end
+
+  def test_later_source_pin_batch_failure_keeps_the_queue_and_retry_converges
+    common = git(@wt, "rev-parse --path-format=absolute --git-common-dir")
+    pending = File.join(common, "llm-wiki", "pending")
+    fake_bin = File.join(@dir, "failing-bounded-git-bin")
+    transaction_log = File.join(@dir, "failing-source-pin-transactions")
+    FileUtils.mkdir_p(pending)
+    FileUtils.mkdir_p(fake_bin)
+
+    source_shas = 5.times.map do |index|
+      File.write(File.join(@wt, "bin", "tool.sh"), "echo retry source #{index}\n")
+      git(@wt, "add bin/tool.sh")
+      git(@wt, "commit -qm 'feat: retry source #{index}'")
+      source_sha = git(@wt, "rev-parse HEAD")
+      File.write(File.join(pending, source_sha), "#{source_sha}\tfeat\nbin/tool.sh\n")
+      source_sha
+    end
+
+    File.write(File.join(fake_bin, "git"), <<~SH)
+      #!/usr/bin/env bash
+      if [ "$1" = update-ref ] && [ "${2:-}" = --stdin ]; then
+        payload="$(mktemp)"
+        trap 'rm -f "$payload"' EXIT
+        cat >"$payload"
+        count="$(grep -c '^update refs/llm-wiki/sources/' "$payload" || true)"
+        if [ "$count" -gt 0 ]; then
+          printf '%s\n' "$count" >>#{q(transaction_log)}
+          transaction="$(wc -l <#{q(transaction_log)})"
+          if [ "${FAIL_SOURCE_PIN_TRANSACTION:-0}" -eq "$transaction" ]; then
+            exit 81
+          fi
+        fi
+        /usr/bin/git "$@" <"$payload"
+        exit $?
+      fi
+      exec /usr/bin/git "$@"
+    SH
+    FileUtils.chmod("+x", File.join(fake_bin, "git"))
+
+    failed = run_refresh_from(
+      @wt,
+      "PATH" => "#{fake_bin}:/usr/bin:/bin",
+      "FAIL_SOURCE_PIN_TRANSACTION" => "2",
+      "LLM_WIKI_MAX_BATCH_SOURCES" => "5",
+      "LLM_WIKI_MAX_SOURCE_PIN_BATCH" => "2",
+      arguments: [ "--retry-failed", "all" ]
+    )
+
+    assert_equal 1, failed.fetch(:status), failed.fetch(:out)
+    assert_equal [ 2, 2 ], File.readlines(transaction_log, chomp: true).map(&:to_i)
+    assert_equal "source-pin:batch", File.read(File.join(common, "llm-wiki", "refresh-disabled")).strip
+    source_shas.each { |source_sha| assert_path_exists File.join(pending, source_sha) }
+    pinned_shas = git(@main, "for-each-ref --format='%(refname:strip=3)' refs/llm-wiki/sources").lines.map(&:strip)
+    assert_equal 2, pinned_shas.length
+    assert_empty pinned_shas - source_shas
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet", "refs/heads/llm-wiki/refresh")
+
+    recovered = run_refresh_from(
+      @wt,
+      "PATH" => "#{fake_bin}:/usr/bin:/bin",
+      "LLM_WIKI_MAX_BATCH_SOURCES" => "5",
+      "LLM_WIKI_MAX_SOURCE_PIN_BATCH" => "2",
+      arguments: [ "--retry-failed", "all" ]
+    )
+
+    assert_equal 0, recovered.fetch(:status), recovered.fetch(:out)
+    assert_empty Dir.glob(File.join(pending, "*"))
+    refute_path_exists File.join(common, "llm-wiki", "refresh-disabled")
+    source_shas.each do |source_sha|
+      assert system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                    "refs/llm-wiki/receipts/#{source_sha}")
+    end
+  end
+
+  def test_empty_interrupted_queue_write_is_reconstructed_when_source_commit_exists
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo interrupted queue source\n")
+    git(@wt, "add bin/tool.sh")
+    git(@wt, "commit -qm 'feat: interrupted queue source'")
+    source_sha = git(@wt, "rev-parse HEAD")
+    common = git(@wt, "rev-parse --path-format=absolute --git-common-dir")
+    pending = File.join(common, "llm-wiki", "pending")
+    interrupted = File.join(pending, ".#{source_sha}.12345")
+    captured_prompt = File.join(@dir, "interrupted-queue-prompt")
+    capturing_stub = File.join(@dir, "stub bin", "capture-interrupted-refresh.sh")
+    FileUtils.mkdir_p(pending)
+    FileUtils.touch(interrupted)
+    File.write(capturing_stub, <<~STUB)
+      #!/usr/bin/env bash
+      root="$1"
+      printf '%s' "$2" >#{q(captured_prompt)}
+      mkdir -p "$root/wiki/log.d"
+      printf 'recovered interrupted write\n' >"$root/wiki/log.d/interrupted.md"
+    STUB
+    FileUtils.chmod("+x", capturing_stub)
+
+    result = run_refresh_from(
+      @wt,
+      "LLM_WIKI_REFRESH_CMD" => capturing_stub,
+      arguments: [ "--drain" ]
+    )
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    refute_path_exists interrupted
+    refute_path_exists File.join(pending, source_sha)
+    prompt = File.read(captured_prompt)
+    assert_includes prompt, source_sha
+    assert_includes prompt, "bin/tool.sh"
+    assert_includes git(@main, "log -1 --pretty=%B llm-wiki/refresh"),
+                    "LLM-Wiki-Source: #{source_sha}"
+    assert_equal "", git(@main, "status --porcelain")
+  end
+
+  def test_interrupted_queue_write_is_retained_when_source_commit_is_unavailable
+    unavailable_sha = "f" * 40
+    common = git(@wt, "rev-parse --path-format=absolute --git-common-dir")
+    pending = File.join(common, "llm-wiki", "pending")
+    interrupted = File.join(pending, ".#{unavailable_sha}.12345")
+    FileUtils.mkdir_p(pending)
+    FileUtils.touch(interrupted)
+
+    result = run_refresh_from(@wt, arguments: [ "--drain" ])
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    assert_path_exists interrupted
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet", "refs/heads/llm-wiki/refresh")
+    assert_equal "", git(@main, "status --porcelain")
+  end
+
+  def test_interrupted_queue_write_is_retained_when_source_paths_cannot_be_read
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo unreadable interrupted source\n")
+    git(@wt, "add bin/tool.sh")
+    git(@wt, "commit -qm 'feat: unreadable interrupted source'")
+    source_sha = git(@wt, "rev-parse HEAD")
+    common = git(@wt, "rev-parse --path-format=absolute --git-common-dir")
+    pending = File.join(common, "llm-wiki", "pending")
+    interrupted = File.join(pending, ".#{source_sha}.12345")
+    fake_bin = File.join(@dir, "unreadable-diff-tree-bin")
+    FileUtils.mkdir_p(pending)
+    FileUtils.mkdir_p(fake_bin)
+    FileUtils.touch(interrupted)
+    File.write(File.join(fake_bin, "git"), <<~SH)
+      #!/usr/bin/env bash
+      [ "$1" != diff-tree ] || exit 82
+      exec /usr/bin/git "$@"
+    SH
+    FileUtils.chmod("+x", File.join(fake_bin, "git"))
+
+    result = run_refresh_from(
+      @wt,
+      "PATH" => "#{fake_bin}:/usr/bin:/bin",
+      arguments: [ "--drain" ]
+    )
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    assert_path_exists interrupted
+    refute_path_exists File.join(pending, source_sha)
+    assert_empty Dir.glob(File.join(common, "llm-wiki", ".queue-recovery.*"))
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet", "refs/heads/llm-wiki/refresh")
+    assert_equal "", git(@main, "status --porcelain")
   end
 
   def test_remote_refresh_advanced_by_another_clone_is_merged_not_overwritten
@@ -707,6 +953,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     assert_match(/HIVE_SKIP_LLM_WIKI_POST_COMMIT=1 \\\n+\s*git -C "\$refresh_root"/, script)
     assert_match(/push "\$refresh_remote" "HEAD:refs\/heads\/\$refresh_branch"/, script)
     refute_match(/wiki_root="\$main_checkout"/, script)
+    refute_includes script, "LLM_WIKI_REFRESH_CMD"
   end
 
   def test_scheduled_wrapper_delegates_to_shared_drain_runner_without_touching_dirty_checkout
@@ -840,15 +1087,34 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
 
   private
 
-  def run_refresh_from(tree, overrides = {})
+  def refresh_test_script
+    source = File.read(SCRIPT)
+    needle = %(  local prompt="$1"\n)
+    unless source.scan(needle).one?
+      raise "could not inject the disposable refresh-command test seam"
+    end
+
+    override = <<~'SH'
+        if [ -n "${LLM_WIKI_REFRESH_CMD:-}" ]; then
+          run_with_timeout "${LLM_WIKI_REFRESH_TIMEOUT:-1800}" \
+            "$LLM_WIKI_REFRESH_CMD" "$refresh_root" "$prompt" >>"$log_file" 2>&1
+          return $?
+        fi
+    SH
+    source.sub(needle, needle + override)
+  end
+
+  def run_refresh_from(tree, overrides = nil, arguments: [], **keyword_overrides)
     script = File.join(tree, ".llm-wiki", "post-commit-refresh.sh")
+    overrides = (overrides || {}).merge(keyword_overrides)
     env = {
       "LLM_WIKI_REFRESH_CMD" => @stub,
       "PATH" => "/usr/bin:/bin",
       "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => "",
       "LLM_WIKI_LOCK_WAIT_SECONDS" => "5"
     }.merge(overrides)
-    out = `cd #{q(tree)} && #{env.map { |k, v| "#{k}=#{q(v)}" }.join(" ")} bash #{q(script)} 2>&1`
+    args = Shellwords.join(arguments)
+    out = `cd #{q(tree)} && #{env.map { |k, v| "#{k}=#{q(v)}" }.join(" ")} bash #{q(script)} #{args} 2>&1`
     { out: out, status: $?.exitstatus }
   end
 

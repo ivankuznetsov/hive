@@ -124,6 +124,7 @@ module Hive
                "SUM(CASE WHEN stage LIKE '%-unmetered' THEN 1 ELSE 0 END), " \
                "SUM(CASE WHEN stage LIKE 'patrol%' THEN 1 ELSE 0 END), " \
                "SUM(CASE WHEN stage LIKE 'refactor-patrol%' THEN 1 ELSE 0 END), " \
+               "SUM(CASE WHEN stage LIKE 'refactor-patrol-review%' THEN 1 ELSE 0 END), " \
                "SUM(CASE WHEN stage LIKE 'patrol%-unmetered' THEN 1 ELSE 0 END), " \
                "SUM(CASE WHEN stage LIKE 'refactor-patrol%-unmetered' THEN 1 ELSE 0 END) " \
                "FROM token_usage"
@@ -131,15 +132,17 @@ module Hive
         append_patrol_clause!(clauses, binds)
         sql << " WHERE #{clauses.join(' AND ')}"
         input, output, cached, spawns, unmetered, ordinary_spawns, architecture_spawns,
+          architecture_review_spawns,
           ordinary_unmetered, architecture_unmetered = db.execute(sql, binds).first
         usage = { input: integer(input), output: integer(output), cached: integer(cached) }
         usage.merge(
           available: true,
-          tokens: usage.values.sum,
+          tokens: usage.values_at(:input, :output).sum,
           agent_spawns: integer(spawns),
           unmetered_spawns: integer(unmetered),
           ordinary_agent_spawns: integer(ordinary_spawns),
           architecture_agent_spawns: integer(architecture_spawns),
+          architecture_review_spawns: integer(architecture_review_spawns),
           ordinary_unmetered_spawns: integer(ordinary_unmetered),
           architecture_unmetered_spawns: integer(architecture_unmetered)
         )
@@ -173,6 +176,7 @@ module Hive
       zero_usage.merge(
         available: available, tokens: 0, agent_spawns: 0, unmetered_spawns: 0,
         ordinary_agent_spawns: 0, architecture_agent_spawns: 0,
+        architecture_review_spawns: 0,
         ordinary_unmetered_spawns: 0, architecture_unmetered_spawns: 0
       )
     end

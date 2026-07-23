@@ -1142,6 +1142,9 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       Hive::Config.deep_dup(Hive::Config::DEFAULTS),
       {
         "default_branch" => "main",
+        "execute" => {
+          "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high"
+        },
         "daemon" => { "enabled" => true },
         "refactor_patrol" => {
           "enabled" => true,

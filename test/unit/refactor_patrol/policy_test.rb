@@ -12,6 +12,9 @@ class RefactorPatrolPolicyTest < Minitest::Test
     assert_equal true, policy.fetch("issue_filing")
     assert_equal "main", policy.dig("action", "default_branch")
     assert_equal "codex", policy.dig("action", "auto_fix_agent")
+    assert_equal "gpt-5.6-sol", policy.dig("action", "auto_fix_model")
+    assert_equal "high", policy.dig("action", "auto_fix_effort")
+    assert_equal "codex-cli/v1", policy.dig("action", "auto_fix_launcher_identity")
     assert_equal "medium", policy.dig("action", "min_confidence")
     assert_equal "bin/test", policy.dig("action", "commands", "test")
     refute policy.dig("action", "caps").key?("max_files")
@@ -77,7 +80,9 @@ class RefactorPatrolPolicyTest < Minitest::Test
   def test_changed_agent_or_validation_command_revokes_new_fix_effects
     snapshot = Hive::RefactorPatrol::Policy.capture(config, now: T0)
     current = config
-    current["refactor_patrol"]["auto_fix"]["agent"] = "claude"
+    current["refactor_patrol"]["auto_fix"].merge!(
+      "agent" => "claude", "model" => "claude-sonnet-4-6"
+    )
     current["refactor_patrol"]["commands"]["test"] = "bin/test --changed"
 
     result = Hive::RefactorPatrol::Policy.intersect(snapshot, current)
@@ -87,6 +92,32 @@ class RefactorPatrolPolicyTest < Minitest::Test
     assert_nil result.config.dig("refactor_patrol", "commands", "test")
     assert_includes result.reasons.fetch("fix"), "auto_fix_agent_changed"
     assert_includes result.reasons.fetch("fix"), "validation_commands_changed"
+  end
+
+  def test_changed_model_or_effort_revokes_new_fix_effects
+    snapshot = Hive::RefactorPatrol::Policy.capture(config, now: T0)
+    current = config
+    current["refactor_patrol"]["auto_fix"].merge!(
+      "model" => "gpt-5.6-terra", "effort" => "medium"
+    )
+
+    result = Hive::RefactorPatrol::Policy.intersect(snapshot, current)
+
+    refute result.authorized?("fix")
+    assert_includes result.reasons.fetch("fix"), "auto_fix_identity_changed"
+  end
+
+  def test_legacy_agent_only_snapshot_retains_provider_only_matching
+    snapshot = Hive::RefactorPatrol::Policy.capture(config, now: T0)
+    action = snapshot.fetch("action")
+    action.delete("auto_fix_model")
+    action.delete("auto_fix_effort")
+    action.delete("auto_fix_launcher_identity")
+
+    result = Hive::RefactorPatrol::Policy.intersect(snapshot, config)
+
+    assert result.authorized?("fix")
+    assert_empty result.reasons.fetch("fix")
   end
 
   def test_current_enablement_never_broadens_a_disabled_snapshot
@@ -130,6 +161,7 @@ class RefactorPatrolPolicyTest < Minitest::Test
   def config
     Marshal.load(Marshal.dump(
       "default_branch" => "main",
+      "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" },
       "refactor_patrol" => {
         "enabled" => true,
         "auto_fix" => { "enabled" => true, "agent" => "codex" },

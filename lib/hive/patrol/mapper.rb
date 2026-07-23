@@ -22,6 +22,20 @@ module Hive
         %r{(?:\A|/)(?:\.cache|cache|caches)(?:/|\z)}i,
         %r{(?:\A|/)\.hive-state(?:/|\z)}i
       ].freeze
+      EXPLICIT_TEST_ASSOCIATIONS = {
+        "bin/hive-babysitter-skip-log.rb" => %w[
+          test/unit/babysitter/dry_run_env_test.rb
+          test/babysitter/acceptance/dry_run_test.rb
+        ],
+        "bin/hive-babysitter-stub-git" => %w[
+          test/unit/babysitter/dry_run_env_test.rb
+          test/babysitter/acceptance/dry_run_test.rb
+        ],
+        "bin/hive-babysitter-stub-gh.rb" => %w[
+          test/unit/babysitter/dry_run_env_test.rb
+          test/babysitter/acceptance/dry_run_test.rb
+        ]
+      }.freeze
 
       def initialize(project_root, cfg:, state: StateStore.new(project_root), dry_run: false,
                      capabilities: [], documentation_changes: [])
@@ -374,10 +388,12 @@ module Hive
 
       def associated_tests(entrypoint, files)
         stem = File.basename(entrypoint, File.extname(entrypoint))
-        files.select do |path|
+        inferred = files.select do |path|
           path.match?(%r{\A(test|tests|spec)/}) &&
             (path.include?(stem) || path.include?(File.dirname(entrypoint)))
         end
+        explicit = EXPLICIT_TEST_ASSOCIATIONS.fetch(entrypoint, []).select { |path| files.include?(path) }
+        (explicit + inferred).uniq
       end
 
       def stable_id(kind, seed)

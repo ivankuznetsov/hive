@@ -2073,7 +2073,7 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-patrol",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 2,
+    assert_equal 3,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
@@ -2088,14 +2088,14 @@ class SchemaFilesTest < Minitest::Test
     ].sort
 
     assert_equal producer_required, schema_required,
-                 "schema/producer required-key drift in hive-patrol.v1.json"
+                 "schema/producer required-key drift in current hive-patrol schema"
   end
 
   def test_hive_patrol_success_payload_validates
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol"))))
     payload = {
       "schema" => "hive-patrol",
-      "schema_version" => 2,
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-patrol"),
       "ok" => true,
       "project" => "demo",
       "project_root" => "/tmp/demo",
@@ -2133,7 +2133,7 @@ class SchemaFilesTest < Minitest::Test
     assert_empty errors, "hive-patrol success payload must validate"
   end
 
-  def test_hive_patrol_v2_accepts_every_candidate_selector_skip_reason
+  def test_hive_patrol_v3_accepts_every_candidate_selector_skip_reason
     document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
     allowed = document.dig("$defs", "SuccessPayload", "properties", "skipped_findings",
                            "items", "properties", "reason", "enum")
@@ -2142,7 +2142,7 @@ class SchemaFilesTest < Minitest::Test
     assert_equal produced.sort, allowed.sort
   end
 
-  def test_hive_patrol_v2_review_error_kinds_match_reviewer
+  def test_hive_patrol_v3_review_error_kinds_match_reviewer
     document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
     allowed = document.dig("$defs", "SuccessPayload", "properties", "review_errors",
                            "items", "properties", "error", "enum")
@@ -2150,7 +2150,7 @@ class SchemaFilesTest < Minitest::Test
     assert_equal Hive::Patrol::Reviewer::REVIEW_ERROR_KINDS.sort, allowed.sort
   end
 
-  def test_hive_patrol_v2_fix_and_publication_reasons_match_producers
+  def test_hive_patrol_v3_fix_and_publication_reasons_match_producers
     document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
     properties = document.dig("$defs", "SuccessPayload", "properties", "fix_results",
                               "items", "properties")
@@ -2187,6 +2187,11 @@ class SchemaFilesTest < Minitest::Test
       "validation" => "Run the focused request regression and full request suite.",
       "alpha_score" => 84,
       "fingerprint" => "fp1",
+      "validation_key" => "test",
+      "target_sha" => "a" * 40,
+      "lifecycle_state" => "active",
+      "lifecycle_reason" => "admitted",
+      "lifecycle_updated_at" => "2026-07-22T12:00:00Z",
       "evidence" => [
         { "file" => "app.rb", "line" => 12, "snippet" => "user.name" }
       ]
@@ -2195,10 +2200,52 @@ class SchemaFilesTest < Minitest::Test
     assert_empty errors, "durable patrol finding record must validate"
 
     legacy = payload.reject do |key, _value|
-      %w[scope contract impact root_cause reproduction validation alpha_score].include?(key)
+      %w[
+        scope contract impact root_cause reproduction validation alpha_score
+        validation_key target_sha lifecycle_state lifecycle_reason lifecycle_updated_at
+      ].include?(key)
     end
     legacy_errors = JSONSchemer.schema(doc).validate(legacy).map { |e| e["error"] }
-    assert_empty legacy_errors, "v2 must continue accepting durable records written before alpha scoring"
+    assert_empty legacy_errors, "v3 must continue accepting durable records written before alpha scoring"
+  end
+
+  def test_hive_patrol_v2_remains_pinned_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol", version: 2)))
+    properties = doc.dig("$defs", "SuccessPayload", "properties")
+
+    assert_equal "hive patrol output (v2)", doc.fetch("title")
+    assert_equal 2, properties.dig("schema_version", "const")
+    assert_equal %w[
+      validated validation_failed fix_agent_failed fix_agent_rejected
+      missing_fix_proof no_validation_commands invalid_validation_key
+      missing_regression regression_not_reproduced targeted_validation_failed
+      fix_guardrail validation_mutated_worktree fix_error
+    ], properties.dig("fix_results", "items", "properties", "reason", "enum")
+    assert_equal %w[
+      dismissed existing_pr similar_to_existing low_confidence low_severity
+      non_production low_alpha active_feature duplicate_in_run feature_limit
+    ], properties.dig("skipped_findings", "items", "properties", "reason", "enum")
+    refute properties.dig("skipped_findings", "items", "properties").key?("canonical_finding_id")
+  end
+
+  def test_hive_patrol_finding_v2_remains_pinned_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol-finding", version: 2)))
+    properties = doc.fetch("properties")
+
+    assert_equal "hive patrol finding record (v2)", doc.fetch("title")
+    %w[
+      validation_key target_sha lifecycle_state lifecycle_reason
+      lifecycle_updated_at superseded_by
+    ].each do |field|
+      refute properties.key?(field), "v2 must not be rewritten with #{field}"
+    end
+
+    payload = {
+      "id" => "finding-v2", "feature_id" => "route-home", "category" => "bug",
+      "severity" => "high", "confidence" => "medium", "fingerprint" => "fp-v2",
+      "evidence" => [ { "file" => "app.rb", "line" => 12, "snippet" => "user.name" } ]
+    }
+    assert JSONSchemer.schema(doc).valid?(payload), "the historical v2 finding shape must stay valid"
   end
 
   def test_hive_patrol_finding_v1_remains_pinned_for_back_compat

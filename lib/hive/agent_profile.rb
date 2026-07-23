@@ -15,6 +15,7 @@ module Hive
   class AgentProfile
     PROMPT_STYLES = %i[positional headless_flag_value stdin].freeze
     WORKSPACE_WRITE_PERMISSION_MODE = "workspace-write".freeze
+    READ_ONLY_PERMISSION_MODE = "read-only".freeze
     # Status-detection modes. handle_exit branches on these:
     #
     # - :state_file_marker -- read the marker on task.state_file (today's
@@ -41,7 +42,7 @@ module Hive
                 :budget_flag, :output_format_flags, :version_flag,
                 :skill_syntax_format, :headless_supported, :min_version,
                 :status_detection_mode, :usage_extractor,
-                :workspace_write_flags, :cli_capabilities,
+                :workspace_write_flags, :read_only_flags, :cli_capabilities,
                 :initial_context_tokens, :default_model_resolver,
                 :model_argument_builder, :effort_argument_builder,
                 :launcher_identity, :policy_capabilities
@@ -77,6 +78,8 @@ module Hive
     #   usage_extractor:       default nil (no token-usage extraction)
     #   workspace_write_flags: default nil (profile cannot guarantee a
     #                          root-confined writable workspace)
+    #   read_only_flags:       default nil (profile cannot guarantee a
+    #                          read-only workspace)
     #   cli_capabilities:      default {}. Maps a named, opt-in capability to
     #                          the CLI flags that implement it. Capability
     #                          users must call require_cli_capability!, which
@@ -112,6 +115,7 @@ module Hive
                    usage_extractor: nil,
                    skill_verifier: nil,
                    workspace_write_flags: nil,
+                   read_only_flags: nil,
                    cli_capabilities: {},
                    initial_context_tokens: 0,
                    prompt_style: nil,
@@ -153,6 +157,7 @@ module Hive
       @usage_extractor = usage_extractor || ->(_event) { nil }
       @skill_verifier = skill_verifier
       @workspace_write_flags = Array(workspace_write_flags).freeze
+      @read_only_flags = Array(read_only_flags).freeze
       @cli_capabilities = normalize_cli_capabilities(cli_capabilities)
       @initial_context_tokens = initial_context_tokens
       @prompt_style = prompt_style
@@ -229,6 +234,13 @@ module Hive
 
         return @workspace_write_flags.dup
       end
+      if permission_mode == READ_ONLY_PERMISSION_MODE
+        unless read_only_supported?
+          raise ArgumentError, "agent profile #{@name.inspect} cannot enforce read-only sandboxing"
+        end
+
+        return @read_only_flags.dup
+      end
       return [] unless @permission_skip_flag
       return [ @permission_skip_flag ] unless @name == :claude && permission_mode
       return [ @permission_skip_flag ] if permission_mode == "bypassPermissions"
@@ -238,6 +250,10 @@ module Hive
 
     def workspace_write_supported?
       !@workspace_write_flags.empty?
+    end
+
+    def read_only_supported?
+      !@read_only_flags.empty?
     end
 
     def concrete_default_model(cfg: nil, project_root: nil, home: nil)
@@ -560,6 +576,7 @@ module Hive
         usage_extractor: @usage_extractor,
         skill_verifier: @skill_verifier,
         workspace_write_flags: @workspace_write_flags.dup,
+        read_only_flags: @read_only_flags.dup,
         cli_capabilities: @cli_capabilities.transform_values(&:dup),
         initial_context_tokens: @initial_context_tokens,
         prompt_style: @prompt_style,

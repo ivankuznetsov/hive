@@ -54,6 +54,18 @@ class AgentProfilesTest < Minitest::Test
     end
   end
 
+  def test_pi_preflight_honors_pi_coding_agent_dir
+    with_tmp_dir do |home|
+      agent_dir = File.join(home, "custom-pi")
+      FileUtils.mkdir_p(agent_dir)
+      File.write(File.join(agent_dir, "auth.json"), JSON.generate("provider" => "configured"))
+
+      with_env("HOME" => home, "PI_CODING_AGENT_DIR" => agent_dir) do
+        assert_nil Hive::AgentProfiles::PI.preflight!
+      end
+    end
+  end
+
   def test_logged_in_swallows_path_errors_and_returns_false
     # A NUL byte in the home makes File.file?/File.read raise ArgumentError
     # ("string contains null byte"); the rescue must absorb it and report

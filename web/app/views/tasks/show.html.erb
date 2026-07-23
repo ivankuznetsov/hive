@@ -1,5 +1,7 @@
 <% content_for(:title, "#{web_product_name} — #{@task.title}") %>
 
+<div id="status-stream-owner" data-controller="status-refresh"
+     data-status-version="<%= @status_version %>">
 <div class="task-header">
   <h1><%= @task.title %></h1>
 </div>
@@ -14,7 +16,8 @@
   <meta name="turbo-refresh-method" content="morph">
   <meta name="turbo-refresh-scroll" content="preserve">
 <% end %>
-<%= turbo_stream_from StatusBroadcaster::CHANNEL %>
+  <%= status_stream_source id: "status-stream-source",
+        hidden: true, data: { turbo_permanent: true } %>
 <%= render "tasks/state" %>
 
 <%= render "tasks/media", media: @media, project: @project, task: @task %>
@@ -90,3 +93,4 @@
           data: { turbo_confirm: "Permanently delete #{@task["slug"]}? This cannot be undone." } %>
   </div>
 </details>
+</div>

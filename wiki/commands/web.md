@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-21
+updated: 2026-07-22
 tags: [command, web, rails, turbo, hivebox-container]
 ---
 
@@ -16,7 +16,7 @@ of the same app at `/app/web`. The web tier adds no
 pipeline logic: status reads call `Hive::Commands::Status#json_payload` (via
 `Hive::Web::StatusFeed`), gate approval calls `Hive::Commands::Approve`
 in-process, task Drop calls `Hive::Commands::Drop` in-process, stage runs go
-through the daemon dispatch queue (`Hive::Web::Dispatcher`), daemon status
+through the daemon dispatch queue from the filesystem-backed Rails `Task`, daemon status
 renders the shared `Hive::Daemon::StatusReport.safe_payload` producer used by
 `hive daemon status --json`, and setup flows
 reuse `Hive::Web::GithubAuth`, `AgentsAuth`, `WorkflowLifecycle`, and the
@@ -172,48 +172,128 @@ so the login gate can run.
   drawer, cursor, transition, or audit subsystem: workflow mutation continues
   through the existing task controllers. Each band scrolls horizontally
   inside the page at narrow widths. `Grid` retains the compact per-project task
-  rows. A TUI-left-pane-parity project rail filters either view client-side
-  ("All projects" + one button per registered project;
+  rows. A TUI-left-pane-parity project rail filters either view through
+  ordinary GET links ("All projects" + one link per registered project;
   projects are ordered by descending in-flight task count, preserving registry
   order for ties, and the grid plus permanent composer selector stay in that
-  same order across live updates without losing the current selection;
-  buttons not links so the permanent composer's typed text survives; a
+  same order across live updates without losing the current selection). Rails
+  reads `?project=`, renders only that project's Board/Grid markup, and
+  redirects unknown project names to the same canonical route without the
+  stale filter. Unrelated project markup never enters a filtered document. A
+  small Stimulus click enhancement selects the explicit project in the
+  permanent composer before Turbo follows an unmodified in-tab link, so its
+  typed text and staged files survive while new ideas retain the selected
+  context. It reads the raw data attribute so JSON-looking project names stay
+  identifiers, and modified/new-tab clicks do not mutate the current tab.
+  Choosing
+  All projects deliberately keeps that composer choice. There is no filter
+  observer, animation-frame reconciliation, DOM hiding, or History API state
+  mirror. A
   `+ Add project` link navigates to Repos because adding a project is a real
-  page change; choice mirrored to `?project=` via replaceState; explicit
-  project clicks sync the composer project select so new ideas land in that
-  context, while filtered deep-links preselect the composer only when it is
-  unset; a MutationObserver re-applies the filter after every broadcast
-  morph), composer (new idea with image attach: clipboard
+  page change. The composer supports new ideas with image attach (clipboard
   paste AND upload button; images become `[imageN]` placeholders and land in
-  the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
+  the task's `assets/` dir — `Commands::New`'s TUI contract). It shares the
+  server's eight-image / 10 MB-per-image limits in rendered Stimulus values,
+  accepts the bounded prefix of a mixed batch with accessible rejection
+  feedback, and rebuilds the hidden multipart `FileList` once per batch rather
+  than once per file. At most 16 picker/clipboard entries are inspected, so a
+  forged enormous `FileList` cannot turn the bound into an unbounded main-thread
+  scan. Attachment chips deliberately use a constant-memory generic glyph
+  instead of decoding attacker-sized image dimensions on the status page. A
+  detached form clears its retained `FileList` after a cancellable permanent-
+  move window. Puma additionally rejects bodies over the complete valid
+  81 MiB idea envelope before Rack multipart parsing; chunked request bodies
+  are rejected at the parsed-header boundary because Puma cannot incrementally
+  enforce that limit while spooling them. The status view then renders
+  per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
   Streams**: `StatusBroadcaster` subscribes to `StatusFeed#each_snapshot`;
+  a dedicated `StatusChannel` starts that shared subscription when the first
+  live page connects and stops it when the last page disconnects, so booting
+  or leaving the server idle performs no fleet scans. Pending, active, and
+  closed ownership is synchronized per channel: teardown during stream
+  verification prevents later acquisition, and repeated cleanup releases an
+  accepted channel at most once without blocking unrelated connections. Failed
+  first-poller startup rolls the shared subscriber count back, rejects that
+  channel, and lets the browser retry. Validation and lease acquisition happen
+  before `stream_from` queues adapter registration, preventing a rejected
+  startup from landing a late pub/sub handler. A request-time snapshot
+  primes the feed before Cable connects, avoiding an immediate duplicate scan.
+  Only the first idle request can claim that baseline; a later competing render
+  cannot replace the value the first page actually rendered. Each render
+  carries a SHA-256 token derived from its exact semantic snapshot (canonical
+  key order, with volatile timestamps removed), rather than a process-local
+  counter. After Action Cable confirms the subscription,
+  `StatusChannel#catch_up` compares that page token with the current feed:
+  a current fresh navigation performs no HTTP work, while a genuinely stale
+  or competing render receives one targeted Turbo refresh. The token remains
+  valid across Puma workers and process restarts, so a worker mismatch cannot
+  certify stale markup. The targeted stream echoes the page token; its
+  permanent source carries that token and URL only through the same-URL Turbo
+  move, then consumes the live-element handoff by URL into connection-local
+  state, even if the reconciliation GET renders a different token. A lagging
+  Cable worker can therefore cause at most one reconciliation GET on that
+  connection rather than a refresh loop. The handoff is a live-element
+  property rather than cloneable DOM state, so navigation—including history
+  restoration after a page without the status source—cannot revive an older
+  URL's attempt. A genuine socket disconnect releases it for later recovery.
+  Connected
+  pages share one five-second polling cadence regardless of their count. The
+  subscribing page already rendered the primed snapshot, so the broadcaster
+  does not send a duplicate first refresh.
   `StatusFeed` suppresses unchanged snapshots by comparing with only
   `generated_at` and `age_seconds` removed while keeping `mtime` /
-  `folder_mtime` as liveness signals. The broadcaster sends the status-channel
-  refresh first, then uses one server-sorted snapshot to replace the project
-  rail and morph the composer project selector over solid_cable. The refresh
+  `folder_mtime` as liveness signals. The poller publishes its comparable key
+  with the payload and reuses the existing semantic token when that key is
+  unchanged, so volatile-only ticks do not repeat canonical JSON hashing.
+  The broadcaster first renders one Turbo Stream
+  message containing the refresh plus the server-sorted composer selector,
+  then sends that complete message once over solid_cable. The refresh GET
+  renders the project rail and the selected Board/Grid subset from the current
+  URL, keeping HTTP as the filter authority.
+  A partial render failure therefore delivers nothing and can be retried
+  without creating a refresh-only request loop. The refresh
   re-renders the current URL (or `/`'s saved preference), so Board and Grid
   cannot be cross-patched with markup for the other view; task pages without
   the dashboard targets still receive the same morph signal. Stable digest IDs
   keep project/workflow bands, columns, and task cards attached to the same DOM
   identity across reorder morphs. A status-level submission guard marks the
-  mutation at the native submit-bubble boundary and defers one refresh while
+  mutation at Turbo's confirmed `submit-start` boundary and defers one refresh while
   the composer or a card action is in flight. It replays after a
   non-redirecting response; a successful redirect's fresh GET already
   reconciles without racing the operator back to the old URL. The final
   submission admission stays at document scope across Stimulus morph
   reconnects, the final redirect URL is guarded on the document root across
   Turbo's body replacement, and both late refresh streams and their old-URL
-  replace visits remain suppressed until that URL is active.
+  replace visits remain suppressed until that URL is active. Declining a
+  confirmation does not start submission admission.
   This prevents a
-  filesystem broadcast from aborting the mutation. The same guard keeps the
-  Action Cable source permanent across morphs, remembers its first connection
-  on a source-owned DOM attribute across Stimulus lifecycles and Turbo
-  history-cache clones, and requests one full catch-up refresh on a later
-  reconnect so an update broadcast during the disconnected window is not
-  stranded. The initial
-  connection does not duplicate the fresh page GET. The composer's stream hook keeps the
+  filesystem broadcast from aborting the mutation. The app-owned Action Cable
+  source stays permanent across morphs and performs the version comparison
+  only from its confirmed subscription callback; there is no reconnect DOM
+  observer, timer, or fresh-navigation refresh. Async Cable setup is
+  generation-guarded: a handle whose DOM owner disconnects before confirmation
+  waits for the current transport's confirmation, rejection, or disconnect
+  before release, so an abandoned page cannot keep the server poller alive or
+  race unsubscribe ahead of subscribe—even during reconnect. If no callback
+  arrives within five seconds, Hive closes the otherwise-unowned Cable transport
+  to force server cleanup before dropping the local handle. The server checks
+  teardown before deferred adapter registration and again when registration
+  completes, immediately removing any handler that landed after the first
+  cleanup. A deferred adapter exception releases the shared lease and closes
+  the socket with reconnect enabled. If turbo-rails' lazy
+  consumer promise rejects, Hive clears the
+  poisoned cached promise before retrying at a bounded five-second cadence;
+  if subscription creation throws after Action Cable registration, Hive removes
+  the partial registration, disconnects that failed consumer, and creates a
+  fresh one. A server-side poller startup failure rejects the subscription, and
+  the rejected callback schedules the same bounded retry. Detaching the source
+  cancels the retry. The task-page owner encloses every
+  mutation form, so those submissions cross the same refresh guard as Board
+  actions. A
+  failed Turbo broadcast also remains pending across last-subscriber shutdown
+  and is retried by the replacement broadcaster. The initial connection does
+  not duplicate the fresh page GET. The composer's stream hook keeps the
   browser's current project selection when that project still exists; ordering
   belongs to the server while unfinished form state remains local. A successful
   idea POST returns to the same-origin Board/Grid URL that submitted it, so an
@@ -223,8 +303,9 @@ so the login gate can run.
   back to the top; the composer form is `data-turbo-permanent` because
   typed-but-unsent idea text and staged image chips live in browser state. Its
   Stimulus controller rehydrates the staged-file index if Turbo reconnects the
-  permanent node, revokes removed preview URLs, and clears the submitted text,
-  chips, and upload transport on a successful `turbo:before-fetch-response`
+  permanent node, clears a truly detached form's FileList after a cancellable
+  delay, and clears the submitted text, chips, and upload transport on a
+  successful `turbo:before-fetch-response`
   while the form is still connected (`turbo:submit-end` remains a fallback);
   `status_refresh_controller.js` owns submission-versus-refresh ordering for
   every form on the status surface, while refreshes on other clients continue
@@ -293,6 +374,8 @@ so the login gate can run.
   instead of replacing it on every poll. The poll controller gives the pane
   `tail -f` semantics: it pins to the bottom while following, pauses reloads
   while the operator scrolls up to read, and resumes when scrolled back down.
+  It also skips timer ticks while Turbo marks the frame busy, so a slow frame
+  request cannot be repeatedly cancelled and restarted by its own interval.
   Server-side, the polled controller delegates to `Task#latest_log`, which
   reads only a 256 KiB byte
   window and returns the last 200 lines with a torn leading line dropped, so a
@@ -382,7 +465,15 @@ so the login gate can run.
   no keys and no agent for a headless daemon). The Docker image wires git's
   github.com https credential helper to `gh auth git-credential`.
 - **Agents** — PTY login relay (ADR-035) with a polled turbo-frame instead of
-  meta-refresh; pi token form. `gh` joins the relay (login supplies git push
+  meta-refresh; pi token form. Login create/show/completion enter the dedicated
+  `AgentLogin`, `Agents::LoginsController`, and
+  `Agents::LoginCompletionsController` resources while keeping the existing
+  URLs. The status URL renders only one immutable login snapshot; its
+  two-second refresh never rebuilds account statuses, registered projects, or
+  selected-project skill health from the Agents collection page. Turbo-frame
+  responses omit a self-referential `src`, and polling is attached to
+  replaceable inner content so the final completed snapshot disconnects the
+  timer. `gh` joins the relay (login supplies git push
   credentials via the image's credential helper); its `--web` flow blocks on
   a bare Enter rather than a paste-back code, which the relay auto-answers.
   Codex uses `codex login --device-auth` rather than the localhost-callback
@@ -433,17 +524,17 @@ so the login gate can run.
   on named resources.
 
 Task Drop is routed as `POST /tasks/:project/:slug/drop` →
-`Tasks::DropsController#create` → `Hive::Web::Dispatcher#drop` →
-`Hive::Commands::Drop`. It is intentionally in-process, not a daemon dispatch:
+`Tasks::DropsController#create` → `Task#drop!` → `Hive::Commands::Drop`. It is
+intentionally in-process, not a daemon dispatch:
 the task is gone after success, so the controller redirects to the grid. The
 form posts the row's rendered `stage` as `from`; if the task moved after the
 page rendered, `Commands::Drop` raises `Hive::WrongStage`, Rails renders the
 typed 422 error page, and the moved task folder is left intact.
 
 Task recovery is routed as `POST /tasks/:project/:slug/recover` →
-`Tasks::RecoveriesController#create` → `Hive::Web::Dispatcher#recover`. The controller
-re-reads the current status row rather than trusting form-posted stage/marker
-state. The dispatcher refuses manual-only states with
+`Tasks::RecoveriesController#create` → `Task#recover!`. The shared base
+controller re-reads the current status row rather than trusting form-posted
+stage/marker state. The task refuses manual-only states with
 `RecoverySequence.manual_only_text`, derives the most discriminating
 `--match-attr` through `NotificationBuilders.recovery_match_attr`, then writes
 the first command (`hive markers clear ... --json`) to the daemon dispatch
@@ -453,9 +544,12 @@ not promoted.
 
 Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
 404) — never a blank 500. Stage-run posts validate the action map before
-writing a daemon request, and `Hive::Web::Dispatcher#dispatch` wraps queue
-writer `ArgumentError`s (for example the queue's stricter slug grammar) as
-typed 422s instead of surfacing an opaque 500. CSRF is Rails-default (per-form
+writing a daemon request. `Task#run!` compares the submitted action and stage
+with the freshly loaded row, refuses stale forms, and wraps queue-writer
+`ArgumentError`s (for example the queue's stricter slug grammar) as typed 422s
+instead of surfacing an opaque 500. Idea creation likewise enters
+`Project#add_idea!`, and `POST /daemon/repair` is the conventional create action
+on `DaemonRepairsController`, backed by `Daemon#repair!`. CSRF is Rails-default (per-form
 tokens). In Hivebox mode every route except `/health`, `/up`, `/login`,
 `/logout`, `/auth/github*`, and the dev/test-only `/dev_login` is behind the
 owner gate; a verified local loopback request bypasses that gate for the
@@ -485,8 +579,9 @@ empty-list pairing bootstrap, saved-token reuse, pending-code rendering,
 corrupt-store visibility, consent-gated approval, and the test-message
 resource's missing-token/success rendering, repo clone target refusal
 for non-directories,
-agent-login status rendering for
-binary PTY output, Grok route reachability, and operator-ward poll flows,
+agent-login resource lookup/route ownership, status-only rendering without
+Agents inventory work, self-reference-safe frame responses, binary PTY output,
+Grok route reachability, and operator-ward poll flows,
 managed-skill opt-in inspection and consent-gated repair, root favicon/icon
 assets, repair failure-cause rendering, successful repo-init preflight alerts,
 workflow list/scaffold delegation, signed preview tamper rejection,
@@ -513,7 +608,12 @@ composer text/chip/file reset before Turbo renders with project-context
 retention, failed-submit
 draft/file retention on a 422-shaped Turbo event, and attachment-index rebuild
 after a real Stimulus disconnect/reconnect before adding and submitting another
-image, both approve
+image, eight-image/10 MB browser enforcement with bounded batch transport,
+constant-memory non-decoding chips, staged-File cleanup after a true disconnect
+without cleanup during a permanent move, Puma pre-Rack declared-length and
+chunked-body rejection,
+non-overlapping busy-frame polling, dedicated agent-login polling that renders
+only its resource and disconnects after completion, both approve
 paths (typed refusal page + confirmed force), Q&A round replacement without a
 lingering old form, typed Q&A preservation across a pushed morph, log-tail
 follow/pause/resume with node-preserving frame morph reloads, artifact

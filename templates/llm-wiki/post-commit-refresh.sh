@@ -103,6 +103,22 @@ run_with_timeout() {
   run_without_git_env "$timeout_bin" -k "$kill_after" "$seconds" "$@"
 }
 
+USER_SYSTEMCTL_COMMAND=(systemctl)
+configure_user_systemctl_command() {
+  local uid runtime_dir bus_address
+  uid="$(id -u)"
+  runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+  bus_address="${DBUS_SESSION_BUS_ADDRESS:-}"
+
+  USER_SYSTEMCTL_COMMAND=(systemctl)
+  if [ -S "$runtime_dir/bus" ]; then
+    bus_address="${bus_address:-unix:path=$runtime_dir/bus}"
+    USER_SYSTEMCTL_COMMAND=(
+      env "XDG_RUNTIME_DIR=$runtime_dir" "DBUS_SESSION_BUS_ADDRESS=$bus_address" systemctl
+    )
+  fi
+}
+
 clear_git_tool_environment() {
   local name
   for name in "${GIT_ENV_NAMES[@]}"; do
@@ -145,6 +161,7 @@ positive_integer_or_default() {
 
 max_auto_pending="$(positive_integer_or_default "${LLM_WIKI_MAX_AUTO_PENDING:-25}" 25)"
 max_batch_sources="$(positive_integer_or_default "${LLM_WIKI_MAX_BATCH_SOURCES:-10}" 10)"
+max_source_pin_batch="$(positive_integer_or_default "${LLM_WIKI_MAX_SOURCE_PIN_BATCH:-64}" 64)"
 max_paths_per_source="$(positive_integer_or_default "${LLM_WIKI_MAX_PATHS_PER_SOURCE:-20}" 20)"
 max_path_bytes="$(positive_integer_or_default "${LLM_WIKI_MAX_PATH_BYTES:-200}" 200)"
 
@@ -174,6 +191,12 @@ sha="$(git rev-parse HEAD 2>/dev/null || true)"
 if [ "$drain_mode" -eq 0 ] && [ -z "$retry_selector" ]; then
   changed_files="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null || true)"
   [ -n "$changed_files" ] || exit 0
+
+  # wiki/log.md is compiled from wiki/log.d fragments. A commit that only
+  # rewrites the compiled projection contains no new source for the wiki agent.
+  if ! printf '%s\n' "$changed_files" | grep -Fqvx 'wiki/log.md'; then
+    exit 0
+  fi
 
   if ! printf '%s\n' "$changed_files" | grep -Eq \
     '(^|/)(schema\.rb|structure\.sql|db/migrate/|migrations/|models/|entities/|prisma/schema\.prisma|routes|controllers|handlers|resolvers|app/|src/|lib/|test/|tests/|spec/|templates/|config/|bin/|README\.md|Gemfile|Gemfile\.lock|package\.json|package-lock\.json|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|requirements\.txt|pyproject\.toml|poetry\.lock|composer\.json|composer\.lock|docs/|wiki/|raw/notes/|plans/|todos/|CHANGELOG\.md|AGENTS\.md|CLAUDE\.md)'; then
@@ -210,15 +233,15 @@ if [ "$drain_mode" -eq 0 ] && [ -z "$retry_selector" ]; then
   scheduler_service="$(sed -n '1p' "$state_dir/scheduler-service" 2>/dev/null || true)"
   if [ "${HIVE_SKIP_LLM_WIKI_SYSTEMCTL:-}" != "1" ] && \
      [[ "$scheduler_service" =~ ^llm-wiki-[A-Za-z0-9_.-]+\.service$ ]]; then
+    configure_user_systemctl_command
     if command -v systemctl >/dev/null 2>&1 && \
        run_with_timeout "${LLM_WIKI_SYSTEMCTL_TIMEOUT:-10}" \
-         systemctl --user start --no-block "$scheduler_service" \
+         "${USER_SYSTEMCTL_COMMAND[@]}" --user start --no-block "$scheduler_service" \
          >>"$log_file" 2>&1; then
       log_line "queued source $sha for memory-bounded systemd worker $scheduler_service"
       exit 0
     else
-      rm -f -- "$state_dir/scheduler-service"
-      log_line "WARN: memory-bounded systemd worker $scheduler_service could not be started; using machine-wide serialized fallback"
+      log_line "WARN: memory-bounded systemd worker $scheduler_service could not be signalled; keeping its configured marker and using machine-wide serialized fallback"
     fi
   fi
 fi
@@ -246,7 +269,7 @@ acquire_global_provider_lock() {
     runtime_dir="/run/user/$uid"
   fi
   runtime_dir="${runtime_dir:-${TMPDIR:-/tmp}}"
-  lock_file="$runtime_dir/hive-llm-wiki-refresh.lock"
+  lock_file="$runtime_dir/llm-wiki-refresh.lock"
 
   if [ "${LLM_WIKI_DISABLE_FLOCK:-}" != "1" ] && command -v flock >/dev/null 2>&1; then
     exec {global_lock_fd}>"$lock_file"
@@ -335,17 +358,23 @@ pending_sources_present() {
   [ "$(pending_source_count)" -gt 0 ]
 }
 
+queue_temp_source_sha() {
+  local name
+  name="$(basename "$1")"
+  [[ "$name" =~ ^\.([0-9a-fA-F]{40,64})\.[0-9]+$ ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
 recover_queue_temps() {
-  local path name queued_sha queued_sha_in_file queued_branch target
+  local path name queued_sha queued_sha_in_file queued_branch target recovery_tmp
   shopt -s nullglob
   for path in "$pending_dir"/.[0-9a-fA-F]*.*; do
     [ -f "$path" ] || continue
     name="$(basename "$path")"
-    if [[ ! "$name" =~ ^\.([0-9a-fA-F]{40,64})\.[0-9]+$ ]]; then
+    queued_sha="$(queue_temp_source_sha "$path")" || {
       log_line "WARN: unrecognized queue temp retained: $name"
       continue
-    fi
-    queued_sha="${BASH_REMATCH[1]}"
+    }
     target="$pending_dir/$queued_sha"
     if [ -f "$target" ]; then
       rm -f -- "$path"
@@ -354,7 +383,21 @@ recover_queue_temps() {
     fi
     IFS=$'\t' read -r queued_sha_in_file queued_branch <"$path" || true
     if [ "$queued_sha_in_file" != "$queued_sha" ]; then
-      log_line "WARN: incomplete queue temp retained: $name"
+      if ! git cat-file -e "${queued_sha}^{commit}" 2>/dev/null; then
+        log_line "WARN: incomplete queue temp retained because its source commit is unavailable: $name"
+        continue
+      fi
+      recovery_tmp="$state_dir/.queue-recovery.${queued_sha}.$$"
+      printf '%s\tinterrupted-write\n' "$queued_sha" >"$recovery_tmp"
+      if ! git diff-tree --no-commit-id --name-only -r "$queued_sha" \
+           >>"$recovery_tmp" 2>/dev/null; then
+        rm -f -- "$recovery_tmp"
+        log_line "WARN: incomplete queue temp retained because its source paths could not be read: $name"
+        continue
+      fi
+      mv -f -- "$recovery_tmp" "$target"
+      rm -f -- "$path"
+      log_line "reconstructed interrupted queue write for source $queued_sha"
       continue
     fi
     mv -f -- "$path" "$target"
@@ -374,27 +417,50 @@ open_backlog_circuit_if_needed() {
   return 0
 }
 
-pin_queued_sources() {
-  local path queued_sha queued_branch
+run_update_ref_transaction() {
+  [ "$#" -gt 0 ] || return 0
   {
     printf 'start\n'
-    shopt -s nullglob
-    for path in "$pending_dir"/* "$failed_dir"/*; do
-      [ -f "$path" ] || continue
-      queued_sha=""
-      queued_branch=""
-      IFS=$'\t' read -r queued_sha queued_branch <"$path" || true
-      if [[ "$queued_sha" =~ ^[0-9a-fA-F]{40,64}$ ]] && \
-         git cat-file -e "${queued_sha}^{commit}" 2>/dev/null; then
-        printf 'update %s/%s %s\n' "$source_ref_prefix" "$queued_sha" "$queued_sha"
-      else
-        log_line "ERROR: queued source is not an available commit: $queued_sha"
-      fi
-    done
-    shopt -u nullglob
+    printf '%s\n' "$@"
     printf 'commit\n'
   } | run_with_timeout "${LLM_WIKI_GIT_REF_TIMEOUT:-5}" \
     git update-ref --stdin >>"$log_file" 2>&1
+}
+
+pin_source_ref_batch() {
+  local queued_sha
+  local commands=()
+  for queued_sha in "$@"; do
+    commands+=("update $source_ref_prefix/$queued_sha $queued_sha")
+  done
+  run_update_ref_transaction "${commands[@]}"
+}
+
+pin_queued_sources() {
+  local path queued_sha queued_branch
+  local source_shas=()
+  shopt -s nullglob
+  for path in "$pending_dir"/* "$failed_dir"/*; do
+    [ -f "$path" ] || continue
+    queued_sha=""
+    queued_branch=""
+    IFS=$'\t' read -r queued_sha queued_branch <"$path" || true
+    if [[ "$queued_sha" =~ ^[0-9a-fA-F]{40,64}$ ]] && \
+       git cat-file -e "${queued_sha}^{commit}" 2>/dev/null; then
+      source_shas+=("$queued_sha")
+      if [ "${#source_shas[@]}" -ge "$max_source_pin_batch" ]; then
+        pin_source_ref_batch "${source_shas[@]}" || {
+          shopt -u nullglob
+          return 1
+        }
+        source_shas=()
+      fi
+    else
+      log_line "ERROR: queued source is not an available commit: $queued_sha"
+    fi
+  done
+  shopt -u nullglob
+  pin_source_ref_batch "${source_shas[@]}"
 }
 
 open_source_pin_circuit() {
@@ -482,19 +548,17 @@ failed_source_count() {
 }
 
 recoverable_queue_temps_present() {
-  local path name queued_sha queued_sha_in_file
+  local path queued_sha queued_sha_in_file
   shopt -s nullglob
   for path in "$pending_dir"/.[0-9a-fA-F]*.*; do
     [ -f "$path" ] || continue
-    name="$(basename "$path")"
-    if [[ "$name" =~ ^\.([0-9a-fA-F]{40,64})\.[0-9]+$ ]]; then
-      queued_sha="${BASH_REMATCH[1]}"
-      queued_sha_in_file=""
-      IFS=$'\t' read -r queued_sha_in_file _ <"$path" || true
-      if [ "$queued_sha_in_file" = "$queued_sha" ]; then
-        shopt -u nullglob
-        return 0
-      fi
+    queued_sha="$(queue_temp_source_sha "$path")" || continue
+    queued_sha_in_file=""
+    IFS=$'\t' read -r queued_sha_in_file _ <"$path" || true
+    if [ "$queued_sha_in_file" = "$queued_sha" ] || \
+       git cat-file -e "${queued_sha}^{commit}" 2>/dev/null; then
+      shopt -u nullglob
+      return 0
     fi
   done
   shopt -u nullglob
@@ -728,12 +792,6 @@ wiki_only_changes() {
 
 run_refresh_agent() {
   local prompt="$1"
-  if [ -n "${LLM_WIKI_REFRESH_CMD:-}" ]; then
-    run_with_timeout "${LLM_WIKI_REFRESH_TIMEOUT:-1800}" \
-      "$LLM_WIKI_REFRESH_CMD" "$refresh_root" "$prompt" >>"$log_file" 2>&1
-    return $?
-  fi
-
   local headless_agent timeout_seconds owner_config
   owner_config="$canonical_config"
   [ -f "$owner_config" ] || owner_config="$committing_tree/.llm-wiki/config.json"
@@ -842,17 +900,14 @@ publish_retained_sources() {
 
 write_source_receipts() {
   local refresh_head file queued_sha queued_branch
+  local commands=()
   refresh_head="$(git -C "$refresh_root" rev-parse HEAD)"
-  {
-    printf 'start\n'
-    for file in "${QUEUE_FILES[@]}"; do
-      IFS=$'\t' read -r queued_sha queued_branch <"$file"
-      printf 'update refs/llm-wiki/receipts/%s %s\n' "$queued_sha" "$refresh_head"
-      printf 'delete %s/%s\n' "$source_ref_prefix" "$queued_sha"
-    done
-    printf 'commit\n'
-  } | run_with_timeout "${LLM_WIKI_GIT_REF_TIMEOUT:-5}" \
-    git update-ref --stdin >>"$log_file" 2>&1
+  for file in "${QUEUE_FILES[@]}"; do
+    IFS=$'\t' read -r queued_sha queued_branch <"$file"
+    commands+=("update refs/llm-wiki/receipts/$queued_sha $refresh_head")
+    commands+=("delete $source_ref_prefix/$queued_sha")
+  done
+  run_update_ref_transaction "${commands[@]}"
 }
 
 prune_receipted_queue_files() {

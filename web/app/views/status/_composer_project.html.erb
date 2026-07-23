@@ -1,4 +1,5 @@
 <% names = projects.map(&:name) %>
-<% placeholder = names.size == 1 ? "".html_safe : tag.option("Project…", value: "", selected: true, disabled: true, hidden: true) %>
-<%= select_tag "project", placeholder + options_for_select(names, names.size == 1 ? names.first : nil),
+<% selection = local_assigns[:selected_project].presence || (names.first if names.size == 1) %>
+<% placeholder = selection ? "".html_safe : tag.option("Project…", value: "", selected: true, disabled: true, hidden: true) %>
+<%= select_tag "project", placeholder + options_for_select(names, selection),
       id: "composer-project", required: true, aria: { label: "Project" } %>

@@ -46,6 +46,15 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
                     "local Hive Web must not present itself as the separate hivebox appliance"
   end
 
+  test "IPv6 loopback peer and Host skip login" do
+    ENV["HIVE_WEB_LOCAL_LOOPBACK"] = "1"
+
+    get "/", headers: { "Host" => "[::1]:4567", "REMOTE_ADDR" => "::1" }
+
+    assert_response :success
+    assert_select ".session-login", text: "Local"
+  end
+
   test "loopback proxy remains local when it forwards the Tailscale client IP" do
     ENV["HIVEBOX_LOCAL_LOOPBACK"] = "1"
 
@@ -84,34 +93,42 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
     get "/"
     assert_redirected_to "/login", "without HIVE_WEB_LOCAL_LOOPBACK every request must authenticate"
   end
-  test "loopback peer with an attacker controlled Host is rejected" do
+  test "loopback proxy with a non-loopback Host requires login" do
     ENV["HIVE_WEB_LOCAL_LOOPBACK"] = "1"
 
-    get "/", headers: { "Host" => "attacker.example" }
+    get "/", headers: {
+      "Host" => "hivebox.any-tailnet-name.ts.net",
+      "REMOTE_ADDR" => "127.0.0.1",
+      "HTTP_X_FORWARDED_HOST" => "localhost"
+    }
 
-    assert_response :forbidden
+    assert_redirected_to "/login"
   end
 
-  test "attacker controlled Host cannot create an idea" do
+  test "unauthenticated proxy Host cannot create an idea" do
     ENV["HIVE_WEB_LOCAL_LOOPBACK"] = "1"
     project = create_hive_project!("host-authorization-mutation")
     inbox = stage_dir(project, "1-inbox")
     before = inbox.children.map { |child| child.basename.to_s }
 
     post "/ideas", params: { project: project, text: "must not be created" },
-                   headers: { "Host" => "attacker.example", "REMOTE_ADDR" => "127.0.0.1" }
+                   headers: {
+                     "Host" => "attacker.example",
+                     "REMOTE_ADDR" => "127.0.0.1",
+                     "HTTP_X_FORWARDED_HOST" => "localhost"
+                   }
 
-    assert_response :forbidden
+    assert_redirected_to "/login"
     assert_equal before, inbox.children.map { |child| child.basename.to_s },
-                 "Host authorization must reject the mutation before the controller has a side effect"
+                 "the login gate must reject the mutation before the controller has a side effect"
   end
 
-  test "loopback peer accepts the explicitly configured origin host" do
+  test "configured origin does not grant local no-auth access" do
     ENV["HIVE_WEB_LOCAL_LOOPBACK"] = "1"
     ENV["HIVE_WEB_ORIGIN"] = "https://hive.internal.example"
 
     get "/", headers: { "Host" => "hive.internal.example" }
 
-    assert_response :success
+    assert_redirected_to "/login"
   end
 end

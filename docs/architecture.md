@@ -76,13 +76,17 @@ storage directory remains under
 `${XDG_STATE_HOME}/hive/web-storage`, so the TUI, daemon, and web UI operate
 on the same local registry, project `.hive-state/` directories, and task
 folders. Local loopback requests use the `hive` identity and do not require
-GitHub; connecting GitHub only enables repository listing and cloning. Because
-the trust check uses the actual socket peer, a reverse proxy that connects over
-localhost (including Tailscale Serve) retains local mode even when it forwards
-the remote client's address. That proxy becomes part of the access boundary
-and must authenticate or restrict its clients; an unrestricted localhost
-forwarder exposes the no-auth UI. Hivebox is the separate owner-gated container
-deployment of the same Rails application.
+GitHub; connecting GitHub only enables repository listing and cloning. The
+trust check requires both the actual socket peer and the normalized Host to be
+loopback. Rails accepts any other hostname so a reverse proxy or tunnel needs
+no provider-specific Hive configuration, but those requests use the GitHub
+device-flow owner gate even when the proxy connects over localhost. The Host
+decision uses the literal `HTTP_HOST` authority and ignores
+`X-Forwarded-Host`. A proxy or TCP forwarder that lets an untrusted client send
+`Host: localhost` enters the local trust boundary and must authenticate or
+restrict its clients. An ownerless instance reached through an owner-gated
+hostname is claimed by its first successful GitHub login. Hivebox is the
+separate container deployment of the same Rails application.
 
 Normal `hive setup` installs, enables, starts, and probes the per-user service
 on supported Linux/macOS while preserving drifted units. Bare `hive web` is the

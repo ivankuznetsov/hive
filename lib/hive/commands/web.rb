@@ -219,16 +219,16 @@ module Hive
         bootstrap ? Hive::Web::AppBundle.ensure! : nil
       end
 
-      # Rails' production host authorization is inactive by default — the box
-      # assumes a trusted reverse proxy validates Host, exactly like the
-      # pre-Rails posture. Binding a public interface without that proxy
-      # exposes the app to DNS-rebinding / Host-injection, so make it loud.
+      # Rails accepts arbitrary Host values so tunnels and reverse proxies do
+      # not need hostname-specific Hive configuration. Binding a public
+      # interface still needs TLS and a deliberate exposure boundary, so make
+      # the missing HTTPS origin loud.
       def warn_on_public_bind(bind, cfg)
         return unless bind.to_s == "0.0.0.0"
         return if cfg["origin"].to_s.start_with?("https://")
 
         warn "hive web: WARNING binding 0.0.0.0 without an https origin — " \
-             "ensure a trusted reverse proxy validates the Host header."
+             "terminate TLS at a trusted reverse proxy and limit exposure."
       end
 
       def enforce_bind_policy!(bind, cfg)
@@ -236,7 +236,7 @@ module Hive
 
         # Non-loopback bind. Allowed only with --unsafe or a configured owner
         # gate. In BOTH allowed paths re-issue the 0.0.0.0-without-https
-        # DNS-rebinding warning — previously lost when an owner was configured.
+        # Public-exposure warning — previously lost when an owner was configured.
         if @unsafe || cfg.dig("github", "owner").to_s != ""
           # Make the security decision explicit: a configured owner (set for
           # OAuth) doubles as the gate that authorizes a non-loopback bind, so

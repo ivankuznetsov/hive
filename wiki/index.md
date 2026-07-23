@@ -3,7 +3,7 @@ title: hive Wiki
 type: index
 source: wiki/**/*.md
 created: 2026-05-14
-updated: 2026-07-22
+updated: 2026-07-23
 tags: [index, wiki]
 ---
 

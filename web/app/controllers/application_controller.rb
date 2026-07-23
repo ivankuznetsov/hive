@@ -1,4 +1,3 @@
-require "uri"
 require "hive/web/environment"
 
 class ApplicationController < ActionController::Base
@@ -12,11 +11,10 @@ class ApplicationController < ActionController::Base
   # Changes to the importmap will invalidate the etag for HTML responses
   stale_when_importmap_changes
 
-  before_action :authorize_local_host!
   before_action :require_login
 
   helper_method :current_login, :operator_access?, :operator_label,
-                :local_web_mode?, :web_product_name
+                :local_web_mode?, :local_loopback_request?, :web_product_name
 
   # Hive's typed errors are operator-readable by design ("task not in stage",
   # "invalid clone URL"). Render them on an error page instead of a blank
@@ -96,33 +94,27 @@ class ApplicationController < ActionController::Base
 
   # Hive::Web::Loopback is the same test the CLI bind policy uses, so the
   # "which addresses count as loopback" rule can't drift between the tier
-  # that sets HIVE_WEB_LOCAL_LOOPBACK and the tier that honors it.
+  # that sets HIVE_WEB_LOCAL_LOOPBACK and the tier that honors it. Both the
+  # socket peer and Host must be loopback: a localhost proxy may connect from
+  # loopback for an arbitrary public hostname, but that request belongs behind
+  # the GitHub owner gate rather than the local no-auth boundary.
   def local_loopback_request?
     return false unless local_web_mode?
 
-    # Trust the socket peer, not ActionDispatch's proxy-expanded remote_ip.
-    # Tailscale Serve connects from localhost but forwards the tailnet client's
-    # address; treating that forwarded address as the peer wrongly turns the
-    # local control plane into hivebox's GitHub owner gate.
-    Hive::Web::Loopback.address?(request.get_header("REMOTE_ADDR"))
+    # Trust the socket peer and literal Host, not ActionDispatch's
+    # proxy-expanded remote_ip/request.host values. request.host prefers
+    # X-Forwarded-Host, which is client-spoofable when a proxy preserves it.
+    Hive::Web::Loopback.address?(request.get_header("REMOTE_ADDR")) &&
+      Hive::Web::Loopback.address?(literal_request_host)
   end
 
-  # A loopback socket peer is necessary but not sufficient for the no-auth
-  # operator mode: browsers can be induced to send local requests with an
-  # attacker-controlled Host through DNS rebinding. Admit normalized loopback
-  # hosts plus the host from the explicitly configured origin, before any
-  # controller can read or mutate operator state.
-  def authorize_local_host!
-    return unless Hive::Web::Environment.boolean("HIVE_WEB_LOCAL_LOOPBACK")
-    return if Hive::Web::Loopback.address?(request.host)
-
-    origin = Hive::Web::Environment.value("HIVE_WEB_ORIGIN")
-    allowed_host = URI.parse(origin).host if origin
-    return if allowed_host && request.host.casecmp?(allowed_host)
-
-    head :forbidden
-  rescue URI::InvalidURIError
-    head :forbidden
+  # Extract only the authority sent in the actual Host header. The strict
+  # shape rejects userinfo and other URI syntax while normalizing the optional
+  # port and brackets that HTTP requires around an IPv6 literal.
+  def literal_request_host
+    authority = request.get_header("HTTP_HOST").to_s
+    match = authority.match(/\A(?:\[([^\]]+)\]|([^:]+))(?::\d+)?\z/)
+    match && (match[1] || match[2])
   end
 
   def registered_projects

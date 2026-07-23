@@ -227,6 +227,17 @@ class SecretPatternsTest < Minitest::Test
     assert_includes redacted, "[REDACTED:aws_access_key]"
   end
 
+  def test_redact_preserves_valid_utf8_bytes_tagged_as_binary
+    token = "ghp_#{'u' * 36}"
+    binary = "日本語 #{token}".b
+    redacted = Hive::SecretPatterns.redact(binary)
+
+    assert_equal Encoding::UTF_8, redacted.encoding
+    assert_includes redacted, "日本語"
+    assert_includes redacted, "[REDACTED:github_token]"
+    refute_includes redacted, "???"
+  end
+
   def test_long_secret_is_truncated_in_snippet_per_eighty_char_rule
     # Long generic API key value (well over 80 chars) must be
     # truncated in `snippet` so callers can include the snippet in

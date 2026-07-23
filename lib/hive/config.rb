@@ -358,16 +358,16 @@ module Hive
         # The `digest` and `answer-digest` verbs ship a non-zero DEFAULT cap
         # (every other verb stays at `child_timeout_sec`=0/disabled) because
         # each holds the single global digest slot (can_dispatch_digest?): a
-        # child that wedges on an unbounded leg — a hung `ship_times` `git
-        # log`, or a black-holed Telegram socket — would otherwise pin that
+        # child that wedges on an unbounded leg — a hung GitHub collection
+        # request, or a black-holed Telegram socket — would otherwise pin that
         # slot forever, leave the scheduler's in-memory `@pending` marker set,
         # and silently disable ALL future digests/answer-digests until a
         # daemon restart. A reaped child exits non-zero, so the scheduler
-        # retries the date on backoff. 3600s sits well above the categorizer's
+        # retries the date on backoff. 3600s sits well above the changelog generator's
         # own agent cap (timeout_sec.digest, default 1800) so it never kills a
         # healthy run; raise it alongside a raised timeout_sec.digest, or set
         # it to 0 to disable. `answer-digest` shares the same cap: it spawns
-        # no categorizer agent (it only fetches status + sends Telegram), so
+        # no changelog-generator agent (it only fetches status + sends Telegram), so
         # 3600s is a generous ceiling that still bounds a wedged socket.
         "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
@@ -566,9 +566,10 @@ module Hive
           "max_owned_files" => 6
         }
       },
-      # Daily shipped digest. The daemon schedules one global `hive digest`
-      # subprocess after each local midnight; the subprocess sends a single
-      # Telegram message across all registered projects.
+      # Daily merged-PR changelist. The daemon schedules one global
+      # `hive digest` subprocess for each completed Europe/London day; the
+      # subprocess sends one chunk-safe Telegram changelist across registered
+      # GitHub projects.
       "digest" => {
         "enabled" => false,
         "agent" => nil,
@@ -1111,6 +1112,19 @@ module Hive
     end
 
     def registered_projects
+      registered_project_entries(preserve_invalid: false)
+    end
+
+    # Digest discovery must account for every persisted registry row. Other
+    # commands retain the tolerant loader contract above, while the digest
+    # receives malformed rows so RepoResolver can emit repository-scoped
+    # partial-discovery warnings instead of silently publishing an incomplete
+    # changelist.
+    def digest_registered_projects
+      registered_project_entries(preserve_invalid: true)
+    end
+
+    def registered_project_entries(preserve_invalid:)
       Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
@@ -1127,7 +1141,10 @@ module Hive
       # surface stays usable; `hive prune` operates on the raw entries
       # below the loader and is the cleanup verb for this case.
       Array(data["registered_projects"]).each_with_object([]) do |entry, out|
-        next unless valid_registry_entry?(entry)
+        unless valid_registry_entry?(entry)
+          out << entry if preserve_invalid
+          next
+        end
 
         abs_path = File.expand_path(entry["path"])
         project = {
@@ -3158,13 +3175,18 @@ module Hive
 
     def validate_digest!(cfg, source_path)
       # budget_usd.digest / timeout_sec.digest feed straight into the
-      # categorizer's Hive::Agent. Validate them even when the `digest` block
+      # ChangelogGenerator's Hive::Agent. Validate them even when the `digest` block
       # is absent (they are independent top-level keys).
       validate_digest_resource!(cfg, "budget_usd", source_path)
       validate_digest_resource!(cfg, "timeout_sec", source_path)
 
       digest = cfg["digest"]
       return if digest.nil?
+
+      if digest.key?("source")
+        raise ConfigError,
+              "digest.source was removed in hive-digest v2; remove it from #{describe_source(source_path)}"
+      end
 
       enabled = digest["enabled"]
       unless enabled.nil? || enabled == true || enabled == false
@@ -3186,11 +3208,11 @@ module Hive
             "(0 = unbounded); got #{max_catchup_days.inspect} (#{max_catchup_days.class})"
     end
 
-    # The categorizer reads cfg.dig("budget_usd"|"timeout_sec", "digest") and
+    # ChangelogGenerator reads cfg.dig("budget_usd"|"timeout_sec", "digest") and
     # passes the value straight to Hive::Agent (max_budget_usd / timeout_sec).
     # A non-numeric or non-positive value would otherwise pass config load and
-    # crash the categorizer mid-run instead of producing a handled config error
-    # up front. Both keys are optional — the categorizer falls back to its
+    # crash ChangelogGenerator mid-run instead of producing a handled config error
+    # up front. Both keys are optional — ChangelogGenerator falls back to its
     # DEFAULT_* constants when absent (a 0 is rejected, not treated as a
     # fallback, since `value || DEFAULT` keeps 0).
     def validate_digest_resource!(cfg, group, source_path)

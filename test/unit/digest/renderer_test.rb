@@ -1,204 +1,181 @@
 require "test_helper"
+require "hive/bot/telegram"
+require "hive/digest/changelog_generator"
 require "hive/digest/renderer"
-require "hive/digest/shipped_item"
-require "hive/digest/categorizer"
 require "hive/digest/stats"
 
 class HiveDigestRendererTest < Minitest::Test
-  DATE = Date.new(2026, 6, 19)
+  DATE = Date.new(2026, 6, 13)
 
-  def test_renders_projects_and_categories_in_fixed_order
-    grouped = {
-      "alpha" => [
-        categorized("fix", "Fixes a crash.", display_name: "fix(api): Repair crash", pr_number: 20),
-        categorized("feature", "Adds the digest.", display_name: "feat: Add digest", pr_number: 21),
-        categorized("patrol", "Runs maintenance.", display_name: "patrol: Refresh docs", pr_number: 22)
-      ],
-      "beta" => [
-        categorized("feature", "Adds beta support.", display_name: "Beta support", pr_number: 23)
-      ]
-    }
+  def test_renders_project_context_every_pr_bullet_link_counts_and_footer
+    repos = [
+      repository("a/repo", 1, bullets: [ "Adds implementation.", "Ships migration." ]),
+      repository("b/repo", 2, bullets: [ "Fixes release behavior." ])
+    ]
+    changelog = changelog_for(repos)
+    stats = Hive::Digest::Stats.new.for_repositories(repos)
 
-    message = Hive::Digest::Renderer.render(grouped, date: DATE, summary: "A busy day.")
+    message = Hive::Digest::Renderer.render(changelog: changelog, date: DATE, stats: stats)
 
-    # The brand header leads, then the per-project sections (capitalized).
-    assert_match(/\A\*Hive\* \\#Digest\n/, message)
-    assert message.index("*Alpha*") < message.index("*Beta*")
-    assert message.index("_Features_") < message.index("_Fixes_")
-    assert message.index("_Fixes_") < message.index("_Patrol_")
-    assert_includes message, "• Adds the digest\\. — [feat: Add digest](https://example.test/pulls/21)"
-    assert_includes message, "• Fixes a crash\\. — [fix\\(api\\): Repair crash](https://example.test/pulls/20)"
-    assert_includes message, "*Beta*"
+    assert_match(/\A\*Hive\* \\#Digest\nSat, 13 June 2026/, message)
+    assert_includes message, "Projects 2 · PRs 2"
+    assert_operator message.index("*a/repo*"), :<, message.index("*b/repo*")
+    assert_includes message, "This makes a/repo useful\\."
+    assert_includes message, "[PR \\#1](https://github.com/a/repo/pull/1)"
+    assert_includes message, "[PR \\#2](https://github.com/b/repo/pull/2)"
+    assert_includes message, "• Adds implementation\\."
+    assert_includes message, "• Ships migration\\."
+    assert_includes message, "• Fixes release behavior\\."
+    assert_includes message, Hive::Digest::Renderer::FOOTER_DIVIDER
+    assert_includes message, "Lines \\+3/\\-6 · PRs 2 · Commits 2"
   end
 
-  def test_omits_empty_categories_and_projects
-    grouped = {
-      "alpha" => [],
-      "beta" => [ categorized("fix", "Fixes it.", pr_number: 24) ]
-    }
-
-    message = Hive::Digest::Renderer.render(grouped, date: DATE)
-
-    refute_includes message, "*Alpha*"
-    refute_includes message, "_Features_"
-    assert_includes message, "*Beta*"
-    assert_includes message, "_Fixes_"
-  end
-
-  def test_header_carries_brand_hashtag_and_human_date
-    message = Hive::Digest::Renderer.render(
-      { "alpha" => [ categorized("fix", "Fixes it.", pr_number: 24) ] }, date: DATE
+  def test_partial_and_wholly_unavailable_metrics_are_honest
+    repo = repository(
+      "a/repo", 1,
+      metrics: { additions: 5, deletions: nil, commits: nil }
     )
-
-    # "*Hive* \#Digest" then a human date — the hashtag's # is MarkdownV2-escaped
-    # but left outside the bold span so Telegram still tags it.
-    assert_match(/\A\*Hive\* \\#Digest\nFri, 19 June 2026/, message)
-  end
-
-  def test_summary_block_rendered_when_present_and_omitted_when_blank
-    grouped = { "alpha" => [ categorized("fix", "Fixes it.", pr_number: 24) ] }
-
-    with_summary = Hive::Digest::Renderer.render(grouped, date: DATE, summary: "A calm day.")
-    assert_includes with_summary, "_Summary_\nA calm day\\."
-
-    without_summary = Hive::Digest::Renderer.render(grouped, date: DATE, summary: "  ")
-    refute_includes without_summary, "_Summary_"
-  end
-
-  def test_footer_shows_lines_prs_and_commits_when_measured
-    totals = Hive::Digest::Totals.new(prs: 5, commits: 22, additions: 2111, deletions: 1102, measured_prs: 5)
+    second = pull_request(
+      repo.target, 2, metrics: { additions: nil, deletions: nil, commits: nil }
+    )
+    repo = Hive::Digest::RepositoryCollection.new(
+      target: repo.target, metadata: repo.metadata, pull_requests: repo.pull_requests + [ second ]
+    )
+    stats = Hive::Digest::Stats.new.for_repositories([ repo ])
 
     message = Hive::Digest::Renderer.render(
-      { "alpha" => [ categorized("fix", "Fixes it.", pr_number: 24) ] }, date: DATE, totals: totals
+      changelog: changelog_for([ repo ]), date: DATE, stats: stats, warnings: stats.warnings
     )
 
-    assert_includes message, "Lines \\+2111/\\-1102 · PRs 5 · Commits 22"
+    assert_includes message, "Additions \\+5 \\(partial\\) · PRs 2"
+    refute_includes message, "Deletions"
+    refute_includes message, "Commits"
+    assert_includes message, "*Warnings*"
+    assert_includes message, "Statistics unavailable for a/repo\\#1"
+    assert_includes message, "Statistics unavailable for a/repo\\#2"
   end
 
-  def test_footer_omits_lines_and_commits_when_nothing_measured
-    # gh was unavailable: no PR stats fetched. Show only the PR count rather
-    # than a misleading "Lines +0/-0".
-    totals = Hive::Digest::Totals.new(prs: 3, commits: 0, additions: 0, deletions: 0, measured_prs: 0)
+  def test_true_zero_metrics_remain_visible
+    repo = repository("a/repo", 1, metrics: { additions: 0, deletions: 0, commits: 0 })
+    stats = Hive::Digest::Stats.new.for_repositories([ repo ])
 
     message = Hive::Digest::Renderer.render(
-      { "alpha" => [ categorized("fix", "Fixes it.", pr_number: 24) ] }, date: DATE, totals: totals
+      changelog: changelog_for([ repo ]), date: DATE, stats: stats
     )
 
-    assert_includes message, "PRs 3"
-    refute_includes message, "Lines "
-    refute_includes message, "Commits "
+    assert_includes message, "Lines \\+0/\\-0 · PRs 1 · Commits 0"
   end
 
-  def test_empty_input_renders_nothing_shipped_message
-    assert_equal "Nothing shipped today 🌙", Hive::Digest::Renderer.render({}, date: DATE)
-    assert_equal "Nothing shipped today 🌙", Hive::Digest::Renderer.empty
+  def test_empty_digest_uses_normal_counts_and_footer_without_invented_metrics
+    stats = Hive::Digest::Stats.new.for_repositories([])
+    changelog = Hive::Digest::Changelog.new(projects: [], facts: [], warnings: [])
+
+    message = Hive::Digest::Renderer.render(changelog: changelog, date: DATE, stats: stats)
+
+    assert_includes message, "Projects 0 · PRs 0"
+    assert message.end_with?("#{Hive::Digest::Renderer::FOOTER_DIVIDER}\nPRs 0")
+    refute_includes message, "Lines"
+    refute_includes message, "Commits"
   end
 
-  def test_failed_notice_renders_date
-    assert_equal "⚠️ Shipped digest for 2026\\-06\\-13 failed to generate\\.",
-                 Hive::Digest::Renderer.failed(Date.new(2026, 6, 13))
+  def test_markdown_metacharacters_and_link_targets_are_escaped
+    repo = repository(
+      "a/repo", 1,
+      title: "Fix (docs) *now*",
+      url: "https://github.com/a/repo/pull/1(foo)\\bar",
+      bullets: [ "Escapes _all_ [text]!" ]
+    )
+    message = Hive::Digest::Renderer.render(
+      changelog: changelog_for([ repo ]), date: DATE,
+      stats: Hive::Digest::Stats.new.for_repositories([ repo ])
+    )
+
+    assert_includes message, "Fix \\(docs\\) \\*now\\*"
+    assert_includes message, "1(foo\\)\\\\bar"
+    assert_includes message, "Escapes \\_all\\_ \\[text\\]\\!"
   end
 
-  def test_escape_mdv2_escapes_reserved_dynamic_text
+  def test_pathological_long_multibyte_bullet_splits_only_at_safe_escaped_lines
+    bullet = ("é_*" * 3_000) + " END"
+    repo = repository("a/repo", 1, bullets: [ bullet ])
+    message = Hive::Digest::Renderer.render(
+      changelog: changelog_for([ repo ]), date: DATE,
+      stats: Hive::Digest::Stats.new.for_repositories([ repo ])
+    )
+    chunks = Hive::Bot::Telegram.allocate.send(:split_message, message)
+
+    assert_operator chunks.size, :>, 1
+    assert chunks.all? { |chunk| chunk.length <= Hive::Bot::Telegram::MAX_MESSAGE_CHARS }
+    assert chunks.none? { |chunk| chunk.match?(/(?<!\\)(?:\\\\)*\\\z/) }, "no chunk may end on an escape prefix"
+    assert_equal 1, chunks.join("\n").scan("https://github.com/a/repo/pull/1").size
+    assert_equal 3_000, chunks.join.scan("é").size
+    assert_equal 3_000, chunks.join.scan("\\_").size
+    assert_equal 3_000, chunks.join.scan("\\*").size
+    assert_includes chunks.join, "END"
+  end
+
+  def test_escape_helpers_match_telegram_markdown_v2_contract
     raw = "_*[]()~`>#+-=|{}.!"
-
     assert_equal "\\_\\*\\[\\]\\(\\)\\~\\`\\>\\#\\+\\-\\=\\|\\{\\}\\.\\!",
                  Hive::Digest::Renderer.escape_mdv2(raw)
-  end
-
-  def test_line_with_missing_url_keeps_display_name_without_link
-    line = Hive::Digest::Renderer.render_line(
-      categorized("feature", "Adds digest.", display_name: "Digest item", pr_url: "")
-    )
-
-    assert_equal "• Adds digest\\. — Digest item", line
-  end
-
-  def test_render_line_escapes_link_breaking_chars_in_url
-    line = Hive::Digest::Renderer.render_line(
-      categorized("feature", "Adds digest.", display_name: "Digest item",
-                  pr_url: "https://example.test/foo(bar)\\baz")
-    )
-
-    # Inside the link destination, ')' and '\' must be escaped; '(' is left
-    # alone. One un-escaped ')' would otherwise close the link early and
-    # fail the whole day's MarkdownV2 send.
-    assert_includes line, "bar\\)"
-    assert_includes line, "\\\\baz"
-  end
-
-  def test_category_order_matches_shared_constant
-    assert_equal Hive::Digest::Categories::ORDERED, Hive::Digest::Renderer::CATEGORY_ORDER
-    assert_equal Hive::Digest::Categories::VALID,
-                 Hive::Digest::Renderer::CATEGORY_ORDER.map(&:first)
-  end
-
-  def test_truncate_summary_is_a_noop_within_the_cap
-    text = "a" * Hive::Digest::Renderer::MAX_SUMMARY_LENGTH
-
-    assert_equal text, Hive::Digest::Renderer.truncate_summary(text)
-  end
-
-  def test_truncate_summary_caps_an_overlong_summary_with_an_ellipsis
-    over = "b" * (Hive::Digest::Renderer::MAX_SUMMARY_LENGTH + 50)
-
-    truncated = Hive::Digest::Renderer.truncate_summary(over)
-
-    assert_equal Hive::Digest::Renderer::MAX_SUMMARY_LENGTH, truncated.length,
-                 "an overlong model summary must be capped so the escaped line stays under the chunk boundary"
-    assert truncated.end_with?("…"), "the cap must mark the truncation with an ellipsis"
-  end
-
-  def test_truncate_overall_summary_caps_an_overlong_summary_with_an_ellipsis
-    # The model's overall summary is untrusted, length-unbounded text; it must be
-    # bounded before escaping (its own constant, independent of the per-item cap)
-    # so the rendered Summary block can't approach Telegram's 4096 chunk limit.
-    over = "y" * (Hive::Digest::Renderer::MAX_OVERALL_SUMMARY_LENGTH + 50)
-
-    truncated = Hive::Digest::Renderer.truncate_overall_summary(over)
-
-    assert_equal Hive::Digest::Renderer::MAX_OVERALL_SUMMARY_LENGTH, truncated.length,
-                 "an overlong overall summary must be capped"
-    assert truncated.end_with?("…"), "the cap must mark the truncation with an ellipsis"
-  end
-
-  def test_truncate_label_caps_an_overlong_label_with_an_ellipsis
-    over = "c" * (Hive::Digest::Renderer::MAX_LABEL_LENGTH + 50)
-
-    truncated = Hive::Digest::Renderer.truncate_label(over)
-
-    assert_equal Hive::Digest::Renderer::MAX_LABEL_LENGTH, truncated.length,
-                 "an overlong display label must be capped so the escaped link line stays under the boundary"
-    assert truncated.end_with?("…"), "the cap must mark the truncation with an ellipsis"
-  end
-
-  def test_render_line_bounds_an_overlong_label
-    over = "d" * (Hive::Digest::Renderer::MAX_LABEL_LENGTH + 500)
-    rendered = Hive::Digest::Renderer.render(
-      { "alpha" => [ categorized("feature", "Adds digest.", display_name: over) ] }, date: DATE
-    )
-
-    # The label inside the link must be bounded (≤ cap, plus MarkdownV2 escapes
-    # which at most double it) so the whole line can't approach 4096.
-    label_in_link = rendered[/\[([^\]]*)\]/, 1]
-    refute_nil label_in_link
-    assert_operator label_in_link.length, :<=, Hive::Digest::Renderer::MAX_LABEL_LENGTH * 2,
-                    "an overlong label must be truncated before escaping into the link"
+    assert_equal "foo(bar\\)\\\\baz",
+                 Hive::Digest::Renderer.escape_link_target("foo(bar)\\baz")
+    assert_equal "code\\`\\\\tail",
+                 Hive::Digest::Renderer.escape_code_span("code`\\tail")
   end
 
   private
 
-  def categorized(category, summary, display_name: "Task", pr_number: 10, pr_url: nil)
-    item = Hive::Digest::ShippedItem.new(
-      project_name: "alpha",
-      slug: "slug-#{pr_number}",
-      display_name: display_name,
-      pr_url: pr_url.nil? ? "https://example.test/pulls/#{pr_number}" : pr_url,
-      pr_number: pr_number,
-      pr_title: display_name,
-      pr_body: "body",
-      shipped_at: Time.utc(2026, 6, 13, 12)
+  def repository(slug, number, title: "PR title", url: nil, bullets: [ "Concrete change." ], metrics: {})
+    target = Hive::Digest::RepositoryTarget.new(
+      project_name: slug.split("/").last,
+      path: "/tmp/#{slug.tr('/', '-')}", repository: slug, host: "github.com"
     )
-    Hive::Digest::CategorizedItem.new(item: item, category: category, summary: summary)
+    pr = pull_request(target, number, title: title, url: url, metrics: metrics)
+    repo = Hive::Digest::RepositoryCollection.new(
+      target: target,
+      metadata: Hive::Digest::RepositoryMetadata.new(
+        name: slug, description: "Description", url: "https://github.com/#{slug}"
+      ),
+      pull_requests: [ pr ]
+    )
+    @test_bullets ||= {}
+    @test_bullets[[ slug, number ]] = bullets
+    repo
+  end
+
+  def pull_request(target, number, title: "PR title", url: nil, metrics: {})
+    Hive::Digest::PullRequest.new(
+      target: target,
+      number: number,
+      title: title,
+      url: url || "https://github.com/#{target.repository}/pull/#{number}",
+      merged_at: Time.utc(2026, 6, 13, 12, number),
+      body: "Body", diff: "diff --git a/a b/a", files: [ "a" ],
+      additions: metrics.fetch(:additions, number),
+      deletions: metrics.fetch(:deletions, number * 2),
+      commits: metrics.fetch(:commits, 1)
+    )
+  end
+
+  def changelog_for(repositories)
+    projects = repositories.map do |repository|
+      generated_prs = repository.pull_requests.map do |pr|
+        bullets = @test_bullets&.fetch([ repository.target.repository, pr.number ], nil) ||
+                  [ "Concrete change #{pr.number}." ]
+        Hive::Digest::GeneratedPullRequest.new(
+          pull_request: pr,
+          bullets: bullets.map.with_index do |text, index|
+            Hive::Digest::ChangeBullet.new(text: text, fact_ids: [ "fact-#{pr.number}-#{index}" ])
+          end
+        )
+      end
+      Hive::Digest::GeneratedProject.new(
+        repository: repository,
+        significance: "This makes #{repository.target.repository} useful.",
+        pull_requests: generated_prs
+      )
+    end
+    Hive::Digest::Changelog.new(projects: projects, facts: [], warnings: [])
   end
 end

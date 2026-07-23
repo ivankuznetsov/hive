@@ -2,6 +2,7 @@ require "hive/bot/logger"
 require "hive/bot/telegram"
 require "hive/config"
 require "hive/paths"
+require "hive/secret_patterns"
 
 module Hive
   module Digest
@@ -23,14 +24,15 @@ module Hive
         end
       end
 
-      def initialize(cfg:, telegram_factory: nil, logger: nil)
+      def initialize(cfg:, telegram_factory: nil, logger: nil, redactor: Hive::SecretPatterns)
         @cfg = cfg || {}
         @telegram_factory = telegram_factory || method(:build_telegram)
         @logger = logger
+        @redactor = redactor
       end
 
       # Resolve the recipient + token without sending, so callers can fail
-      # fast before an expensive categorizer run. Raises Hive::ConfigError
+      # fast before an expensive changelog-generator run. Raises Hive::ConfigError
       # when either is missing.
       def preflight!
         self.class.resolve_chat_id(@cfg)
@@ -41,6 +43,7 @@ module Hive
       def deliver(text, dry_run: false)
         return SendResult.new(chat_id: nil, responses: [], dry_run: true, text: text) if dry_run
 
+        text = safe_delivery_text(text)
         chat_id = self.class.resolve_chat_id(@cfg)
         client = @telegram_factory.call(token: Hive::Config.telegram_bot_token!, logger: logger)
         responses = send_in_chunks(client, chat_id, text)
@@ -64,6 +67,16 @@ module Hive
       private_class_method :blank?
 
       private
+
+      def safe_delivery_text(text)
+        redacted = @redactor.redact(text.to_s)
+        unless @redactor.scan(redacted).empty?
+          raise Hive::ConfigError, "digest delivery redaction could not be verified"
+        end
+        redacted.gsub(/(?<!\\)\[REDACTED:([a-z0-9_]+)(?<!\\)\]/i, '\\\\[REDACTED:\1\\\\]')
+      rescue EncodingError, SystemCallError
+        raise Hive::ConfigError, "digest delivery redaction failed"
+      end
 
       # Send the digest one Telegram chunk at a time so a mid-stream
       # failure logs exactly how many chunks Telegram already accepted.

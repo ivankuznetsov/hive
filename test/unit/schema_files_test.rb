@@ -5,6 +5,7 @@ require "hive/commands/answer_digest"
 require "hive/commands/approve"
 require "hive/commands/bot"
 require "hive/commands/daemon"
+require "hive/commands/digest"
 require "hive/commands/drop"
 require "hive/commands/doctor"
 require "hive/commands/forget"
@@ -2254,6 +2255,47 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "hive patrol finding record (v1)", doc.fetch("title")
     refute properties.key?("root_cause"), "v1 must not be rewritten with v2 fields"
     refute properties.key?("alpha_score"), "v1 must remain the original closed contract"
+  end
+
+  # ── hive-digest ──────────────────────────────────────────────────────────
+
+  def test_hive_digest_v2_is_the_only_live_digest_schema
+    path = Hive::Schemas.schema_path("hive-digest")
+    doc = JSON.parse(File.read(path))
+
+    assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-digest")
+    assert_equal "hive-digest",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 2,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    assert_includes doc.dig("$defs", "Warning", "required"), "repository"
+    refute Hive::Schemas::SCHEMA_VERSIONS.key?("hive-merged-pr-digest")
+    refute File.exist?(File.join(Hive::Schemas.schema_dir, "hive-merged-pr-digest.v1.json"))
+  end
+
+  def test_hive_digest_v1_remains_byte_pinned_as_historical_documentation
+    path = Hive::Schemas.schema_path("hive-digest", version: 1)
+
+    assert_equal "f16dece6f108cfe11c3e825fb239dfc58aa8e288173c1ea1107ce018af52ea1a",
+                 ::Digest::SHA256.file(path).hexdigest
+  end
+
+  def test_hive_digest_v2_empty_success_payload_matches_producer
+    stats = Hive::Digest::Stats.new.for_repositories([])
+    result = Hive::Digest::Result.new(
+      status: :empty, date: Date.new(2026, 7, 20), dry_run: true,
+      resolved_repository_count: 1, collected_repository_count: 1,
+      projects: [], pr_count: 0, stats: stats, warnings: [],
+      message: "empty digest", delivery: nil
+    )
+    command = Hive::Commands::Digest.new(json: true, output: StringIO.new)
+    payload = command.send(:json_payload, result)
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-digest")))
+    errors = JSONSchemer.schema(doc).validate(payload).map { |error| error.fetch("error") }
+
+    assert_equal doc.dig("$defs", "SuccessPayload", "required").sort, payload.keys.sort
+    assert_empty errors
+    Hive::Digest::PR_METRICS.each { |metric| refute payload.key?(metric.to_s) }
   end
 
   # ── hive-answer-digest ───────────────────────────────────────────────────

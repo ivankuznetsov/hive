@@ -1,4 +1,5 @@
 require "hive/daemon/digest_scheduler_base"
+require "hive/digest/london_window"
 require "hive/paths"
 
 module Hive
@@ -42,7 +43,7 @@ module Hive
         return [] if @pending.any?
         return [] if backed_off?(now)
 
-        today = Hive::Digest::Window.local_today(now: now)
+        today = Hive::Digest::LondonWindow.local_today(now: now)
         completed_day = today - 1
         state = read_state
         last = parse_date(state["last_digested_date"])
@@ -66,7 +67,7 @@ module Hive
       end
 
       def complete(date:, exit_code:, now: @clock.call)
-        local_date = Hive::Digest::Window.parse_date(date)
+        local_date = Hive::Digest::LondonWindow.parse_date(date)
         @pending.delete(local_date.iso8601)
         # ChildSupervisor reports a nil exit status for a signalled child
         # (killed by SIGTERM/SIGKILL on shutdown or timeout). `nil.to_i` is

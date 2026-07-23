@@ -1,187 +1,144 @@
-require "date"
-require "hive/digest/categories"
-require "hive/digest/window"
+require "hive/digest/london_window"
 
 module Hive
   module Digest
     module Renderer
-      # Shares the single ordered category set with the categorizer
-      # (see Hive::Digest::Categories) so an accepted category can never
-      # be silently dropped here for want of a render section.
-      CATEGORY_ORDER = Categories::ORDERED
-
-      # Telegram hard-caps a message at 4096 chars; the chunker
-      # (Telegram#split_message) prefers to cut on the last newline inside that
-      # window and only hard-cuts mid-text as a fallback. A hard cut landing
-      # between a MarkdownV2 `\` and the char it escapes produces an invalid
-      # escape → a 400 that fails the whole send. Model summaries and the
-      # (attacker-influenceable) display label are not length-bounded, so cap
-      # each well under the limit (MarkdownV2 escaping at most doubles the
-      # length) BEFORE escaping, so a single rendered line can never approach
-      # the chunk boundary in the first place.
-      MAX_SUMMARY_LENGTH = 600
-      # The label is a short title, so a much tighter cap is plenty; together
-      # with the summary cap it keeps the whole "• summary — [label](url)" line
-      # well under 4096 even after MarkdownV2 escaping.
-      MAX_LABEL_LENGTH = 200
-
-      # The digest's brand title and its Telegram hashtag, rendered as
-      # "*Hive* #Digest" above the date. The hashtag is left outside the bold
-      # span so Telegram still parses it as a tappable tag.
       BRAND = "Hive".freeze
       HASHTAG = "#Digest".freeze
-      # Thin divider above the global stats footer.
       FOOTER_DIVIDER = "──────────".freeze
-      # Cap the model's one-line overall summary the same way as per-item
-      # summaries so the rendered Summary block can't approach the chunk limit.
-      MAX_OVERALL_SUMMARY_LENGTH = 600
-
+      MAX_ESCAPED_LINE_LENGTH = 2_800
       RESERVED_MDV2 = /([\\_*\[\]()~`>#+\-=|{}.!])/
-
-      # Inside a MarkdownV2 inline link destination only ')' and '\'
-      # are special and must be escaped; every other URL character is
-      # passed through untouched (Telegram MarkdownV2 spec). One
-      # malformed URL would otherwise fail the whole day's send_message.
       RESERVED_LINK_TARGET = /([\\)])/
-
-      # Inside a MarkdownV2 code entity (`` `…` ``) Telegram treats only '`'
-      # and '\' as special; every other char (including the general reserved
-      # set `-`/`.`/`_` etc.) is literal. Escaping with the full escape_mdv2
-      # set would render stray backslashes and can even 400 the send, so a
-      # code span must use this reduced set — mirrors RESERVED_LINK_TARGET.
       RESERVED_CODE_SPAN = /([\\`])/
 
       module_function
 
-      def render(grouped, date:, summary: nil, totals: nil)
-        projects = Array(grouped).filter_map do |project_name, items|
-          render_project(project_name, Array(items))
+      def render(changelog:, date:, stats:, warnings: [])
+        blocks = [ header(date), render_counts(changelog, stats) ]
+        changelog.projects.each do |project|
+          blocks << render_project(project, stats.by_repository.fetch(project.repository.target.key))
         end
-
-        return empty if projects.empty?
-
-        blocks = [ header(date) ]
-        blocks << render_summary(summary) unless blank?(summary)
-        blocks.concat(projects)
-        footer = render_footer(totals)
-        blocks << footer if footer
+        blocks << render_warnings(warnings) unless Array(warnings).empty?
+        blocks << render_footer(stats.overall)
         blocks.join("\n\n")
-      end
-
-      def empty
-        "Nothing shipped today 🌙"
-      end
-
-      def failed(date)
-        "⚠️ Shipped digest for #{escape_mdv2(Window.parse_date(date).iso8601)} failed to generate\\."
       end
 
       def escape_mdv2(text)
         text.to_s.gsub(RESERVED_MDV2) { "\\#{$1}" }
       end
 
-      # "*Hive* #Digest" then a human date line, e.g. "Fri, 19 June 2026".
+      def escape_link_target(url)
+        url.to_s.gsub(RESERVED_LINK_TARGET) { "\\#{$1}" }
+      end
+
+      def escape_code_span(text)
+        text.to_s.gsub(RESERVED_CODE_SPAN) { "\\#{$1}" }
+      end
+
       def header(date)
         "*#{escape_mdv2(BRAND)}* #{escape_mdv2(HASHTAG)}\n#{escape_mdv2(format_date(date))}"
       end
 
       def format_date(date)
-        Window.parse_date(date).strftime("%a, %-d %B %Y")
+        LondonWindow.parse_date(date).strftime("%a, %-d %B %Y")
       end
 
-      # The model's one friendly sentence overview, under an italic heading.
-      # Bounded + escaped because it is untrusted, length-unbounded model text.
-      def render_summary(summary)
-        "_Summary_\n#{escape_mdv2(truncate_overall_summary(summary))}"
+      def render_counts(changelog, stats)
+        escape_mdv2("Projects #{changelog.projects.size} · PRs #{stats.overall.pr_count}")
       end
 
-      # Global totals across every shipped project, on one line under a thin
-      # divider. PRs is always known from the collected items; Lines/Commits
-      # come from a per-PR `gh` lookup, so they appear only when at least one
-      # PR's stats were fetched — the digest never fails for want of them.
-      def render_footer(totals)
-        return nil unless totals
-
-        measured = totals.measured_prs.to_i.positive?
-        parts = []
-        parts << "Lines +#{totals.additions.to_i}/-#{totals.deletions.to_i}" if measured
-        parts << "PRs #{totals.prs.to_i}"
-        parts << "Commits #{totals.commits.to_i}" if measured
-        return nil if parts.empty?
-
-        "#{FOOTER_DIVIDER}\n#{escape_mdv2(parts.join(' · '))}"
+      def render_project(project, aggregate)
+        repository = project.repository.target.repository
+        blocks = [ "*#{escape_mdv2(repository)}*" ]
+        blocks << wrap_plain(project.significance).join("\n")
+        blocks << escape_mdv2(metric_line(aggregate))
+        project.pull_requests.each { |generated_pr| blocks << render_pr(generated_pr) }
+        blocks.join("\n")
       end
 
-      def render_project(project_name, items)
-        category_sections = CATEGORY_ORDER.filter_map do |category, label|
-          category_items = items.select { |entry| entry.category == category }
-          next if category_items.empty?
-
-          ([ "_#{label}_" ] + category_items.map { |entry| render_line(entry) }).join("\n")
+      def render_pr(generated_pr)
+        pr = generated_pr.pull_request
+        link = "[PR #{escape_mdv2("##{pr.number}")}](#{escape_link_target(pr.url)})"
+        title_lines = wrap_plain(pr.title, first_prefix: "", continuation_prefix: "  ")
+        bullet_lines = generated_pr.bullets.flat_map do |bullet|
+          wrap_plain(bullet.text, first_prefix: "• ", continuation_prefix: "  ")
         end
-        return nil if category_sections.empty?
-
-        ([ "*#{escape_mdv2(display_project(project_name))}*" ] + category_sections).join("\n")
+        ([ link ] + title_lines + bullet_lines).join("\n")
       end
 
-      # Title-case only the first letter so registered names like
-      # "hive"/"screenote" read as "Hive"/"Screenote" in the section header
-      # without mangling the rest of a multi-word slug.
-      def display_project(project_name)
-        project_name.to_s.sub(/\A./, &:upcase)
+      def render_warnings(warnings)
+        lines = [ "*#{escape_mdv2('Warnings')}*" ]
+        Array(warnings).each do |warning|
+          lines.concat(wrap_plain(warning.message, first_prefix: "⚠️ ", continuation_prefix: "  "))
+        end
+        lines.join("\n")
       end
 
-      def blank?(value)
-        value.to_s.strip.empty?
+      def render_footer(aggregate)
+        "#{FOOTER_DIVIDER}\n#{escape_mdv2(metric_line(aggregate))}"
       end
 
-      # Bound the model's overall summary on the raw text (before escaping) so
-      # a cut can never split a MarkdownV2 `\x` escape pair.
-      def truncate_overall_summary(text)
-        truncate(text, MAX_OVERALL_SUMMARY_LENGTH)
+      def metric_line(aggregate)
+        metrics = aggregate.metrics
+        additions = metrics.fetch(:additions)
+        deletions = metrics.fetch(:deletions)
+        commits = metrics.fetch(:commits)
+        parts = line_metric_parts(additions, deletions)
+        parts << "PRs #{aggregate.pr_count}"
+        parts << "Commits #{commits.value}#{partial_label(commits)}" unless commits.value.nil?
+        parts.join(" · ")
       end
 
-      def render_line(entry)
-        item = entry.item
-        summary = escape_mdv2(truncate_summary(entry.summary))
-        label = escape_mdv2(truncate_label(item.display_label))
-        target = item.pr_url.to_s
-        link = target.empty? ? label : "[#{label}](#{escape_link_target(target)})"
-        "• #{summary} — #{link}"
+      def line_metric_parts(additions, deletions)
+        if !additions.value.nil? && !deletions.value.nil?
+          partial = additions.partial? || deletions.partial?
+          [ "Lines +#{additions.value}/-#{deletions.value}#{partial ? ' (partial)' : ''}" ]
+        else
+          parts = []
+          parts << "Additions +#{additions.value}#{partial_label(additions)}" unless additions.value.nil?
+          parts << "Deletions -#{deletions.value}#{partial_label(deletions)}" unless deletions.value.nil?
+          parts
+        end
       end
 
-      # Bound an untrusted, length-unbounded model summary so the escaped
-      # line stays well under Telegram's 4096-char chunk boundary. Truncate
-      # on the raw text (before escaping) so a cut can never split a `\x`
-      # MarkdownV2 escape pair.
-      def truncate_summary(text)
-        truncate(text, MAX_SUMMARY_LENGTH)
+      def partial_label(metric)
+        metric.partial? ? " (partial)" : ""
       end
 
-      # Bound the (attacker-influenceable) display label the same way as the
-      # summary, on the raw text before escaping, so an overlong label can't
-      # push the rendered link line past Telegram's chunk boundary.
-      def truncate_label(text)
-        truncate(text, MAX_LABEL_LENGTH)
+      def wrap_plain(text, first_prefix: "", continuation_prefix: "")
+        raw_lines = text.to_s.split("\n", -1)
+        segments = raw_lines.flat_map { |line| escaped_segments(line) }
+        segments = [ "" ] if segments.empty?
+        segments.each_with_index.map do |segment, index|
+          prefix = index.zero? ? first_prefix : continuation_prefix
+          "#{escape_mdv2(prefix)}#{escape_mdv2(segment)}"
+        end
       end
 
-      def truncate(text, max_length)
-        text = text.to_s
-        return text if text.length <= max_length
+      def escaped_segments(text)
+        return [ "" ] if text.empty?
 
-        "#{text[0, max_length - 1].rstrip}…"
+        segments = []
+        current = +""
+        escaped_length = 0
+        graphemes(text).each do |grapheme|
+          cost = escape_mdv2(grapheme).length
+          if escaped_length.positive? && escaped_length + cost > MAX_ESCAPED_LINE_LENGTH
+            segments << current
+            current = +""
+            escaped_length = 0
+          end
+          current << grapheme
+          escaped_length += cost
+        end
+        segments << current unless current.empty?
+        segments
       end
-      private_class_method :truncate
 
-      def escape_link_target(url)
-        url.to_s.gsub(RESERVED_LINK_TARGET) { "\\#{$1}" }
+      def graphemes(text)
+        text.scan(/\X/)
       end
-
-      # Escape text destined for the inside of a MarkdownV2 code entity: only
-      # '`' and '\' may be escaped there (see RESERVED_CODE_SPAN).
-      def escape_code_span(text)
-        text.to_s.gsub(RESERVED_CODE_SPAN) { "\\#{$1}" }
-      end
+      private_class_method :graphemes
     end
   end
 end

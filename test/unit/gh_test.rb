@@ -53,6 +53,53 @@ class GhUnitTest < Minitest::Test
     assert_match(/network operation exceeded/, err.message)
   end
 
+  def test_capture3_enforces_stdout_limit_while_streaming
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.capture3(
+        RbConfig.ruby, "-e", "STDOUT.write('x' * 65536)",
+        timeout_sec: 5, max_stdout_bytes: 1024
+      )
+    end
+
+    assert_match(/1024-byte safety ceiling/, error.message)
+  end
+
+  def test_capture3_stdout_limit_handles_an_already_missing_process_group
+    with_replaced_singleton_method(Hive::Gh, :signal_process_group, lambda { |*|
+      raise Errno::ESRCH, "missing"
+    }) do
+      error = assert_raises(Hive::GhError) do
+        Hive::Gh.capture3(
+          RbConfig.ruby, "-e", "STDOUT.write('x' * 65536)",
+          timeout_sec: 5, max_stdout_bytes: 1024
+        )
+      end
+      assert_match(/1024-byte safety ceiling/, error.message)
+    end
+  end
+
+  def test_capture3_rejects_a_negative_stdout_limit_before_spawn
+    error = assert_raises(ArgumentError) do
+      Hive::Gh.capture3(RbConfig.ruby, "-e", "exit 0", max_stdout_bytes: -1)
+    end
+
+    assert_match(/max_stdout_bytes must be non-negative/, error.message)
+  end
+
+  def test_capture3_can_stream_stdout_directly_to_private_file
+    with_tmp_dir do |dir|
+      path = File.join(dir, "stdout.txt")
+      out, _err, status = Hive::Gh.capture3(
+        RbConfig.ruby, "-e", "STDOUT.write('日本語')",
+        timeout_sec: 5, max_stdout_bytes: 1024, stdout_path: path
+      )
+      assert status.success?
+      assert_equal "", out
+      assert_equal "日本語", File.binread(path).force_encoding(Encoding::UTF_8)
+      assert_equal 0o600, File.stat(path).mode & 0o777
+    end
+  end
+
   # --- pr_frontmatter ---------------------------------------------------
 
   def test_pr_frontmatter_returns_empty_for_missing_file
@@ -1233,88 +1280,6 @@ def test_merged_prs_page_fails_closed_above_graphql_search_traversal_cap
       )
     end
     assert_match(/1,000-result traversal cap/, error.message)
-  end
-end
-
-def test_list_merged_prs_uses_repo_search_window
-  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  captured = nil
-  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
-    captured = [ cmd, kwargs ]
-    [ '[{"number":1,"mergedAt":"2026-06-13T12:00:00Z"}]', "", status ]
-  }) do
-    prs = Hive::Gh.list_merged_prs("owner/repo", since: "2026-06-12", until_date: "2026-06-14")
-    assert_equal 1, prs.first.fetch("number")
-  end
-
-  assert_includes captured.first, "--repo"
-  assert_includes captured.first, "owner/repo"
-  assert_includes captured.first, "merged:2026-06-12..2026-06-14"
-  assert_match(/mergedAt/, captured.first.fetch(captured.first.index("--json") + 1))
-end
-
-def test_list_merged_prs_raises_on_gh_error
-  status = Hive::Gh::CommandStatus.new(exitstatus: 1)
-  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "", "api unavailable", status ] }) do
-    err = assert_raises(Hive::GhError) do
-      Hive::Gh.list_merged_prs("owner/repo", since: "2026-06-12", until_date: "2026-06-14")
-    end
-    assert_match(/gh pr list.*failed for owner\/repo/, err.message)
-    assert_match(/api unavailable/, err.message)
-  end
-end
-
-def test_list_merged_prs_raises_on_unparseable_json
-  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "not json", "", status ] }) do
-    err = assert_raises(Hive::GhError) do
-      Hive::Gh.list_merged_prs("owner/repo", since: "2026-06-12", until_date: "2026-06-14")
-    end
-    assert_match(/unparseable JSON/, err.message)
-  end
-end
-
-def test_pr_stats_returns_line_and_commit_counts_keyed_off_the_url
-  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  json = '{"additions":2111,"deletions":1102,"commits":[{"oid":"a"},{"oid":"b"}]}'
-  captured = nil
-  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
-    captured = cmd
-    [ json, "", status ]
-  }) do
-    stats = Hive::Gh.pr_stats("https://github.com/o/r/pull/7")
-    assert_equal 2111, stats[:additions]
-    assert_equal 1102, stats[:deletions]
-    assert_equal 2, stats[:commits], "commits must be the commit count, not the raw array"
-  end
-  assert_includes captured, "https://github.com/o/r/pull/7"
-  assert_match(/(^|,)commits(,|$)/, captured[captured.index("--json") + 1])
-end
-
-def test_pr_stats_raises_on_failed_lookup
-  status = Hive::Gh::CommandStatus.new(exitstatus: 1)
-  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "", "no pull requests found", status ] }) do
-    err = assert_raises(Hive::GhError) { Hive::Gh.pr_stats("https://github.com/o/r/pull/7") }
-    assert_match(/gh pr view.*failed/, err.message)
-  end
-end
-
-# These two raise-paths are exactly what Digest::Stats relies on to DROP a PR
-# gracefully (rescue Hive::Error); if a refactor turned either into a silent
-# nil/crash, "one bad PR never fails the digest" would break unnoticed.
-def test_pr_stats_raises_on_unparseable_json
-  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "not json", "", status ] }) do
-    err = assert_raises(Hive::GhError) { Hive::Gh.pr_stats("https://github.com/o/r/pull/7") }
-    assert_match(/unparseable JSON/, err.message)
-  end
-end
-
-def test_pr_stats_raises_when_json_is_not_a_hash
-  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "[]", "", status ] }) do
-    err = assert_raises(Hive::GhError) { Hive::Gh.pr_stats("https://github.com/o/r/pull/7") }
-    assert_match(/expected Hash/, err.message)
   end
 end
 

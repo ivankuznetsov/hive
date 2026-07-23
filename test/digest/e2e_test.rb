@@ -4,125 +4,106 @@ require "hive/digest"
 class HiveDigestE2ETest < Minitest::Test
   include HiveTestHelper
 
-  FakeShipTimes = Struct.new(:times) do
-    def shipped_at(hive_state_path:, slug:)
-      times.fetch([ hive_state_path, slug ])
+  FakeResolver = Struct.new(:resolution) do
+    def resolve(repos:)
+      raise "unexpected repository filter: #{repos.inspect}" unless repos.empty?
+
+      resolution
+    end
+  end
+
+  FakeCollector = Struct.new(:report) do
+    def for_date(_date, targets:)
+      raise "unexpected digest targets" unless targets == report.repositories.map(&:target)
+
+      report
     end
   end
 
   def setup
-    missing = %w[HOME HIVE_TELEGRAM_BOT_TOKEN HIVE_DIGEST_TEST_CHAT_ID].select { |key| ENV[key].to_s.strip.empty? }
+    missing = %w[HOME HIVE_TELEGRAM_BOT_TOKEN HIVE_DIGEST_TEST_CHAT_ID].select do |key|
+      ENV[key].to_s.strip.empty?
+    end
     flunk "missing required live digest env vars: #{missing.join(', ')}" unless missing.empty?
-    preflight_live_agent! if name == "test_live_agent_and_telegram_digest_over_fixture_tasks"
+    preflight_live_agent! if name == "test_live_agent_and_telegram_digest_over_fixture_prs"
   end
 
-  def test_live_agent_and_telegram_digest_over_fixture_tasks
+  def test_live_agent_and_telegram_digest_over_fixture_prs
     with_tmp_global_config(home: ENV.fetch("HOME")) do |home|
-      project = create_project(home, "alpha")
-      first = create_done_task(project, "feature-260613-abcd", display_name: "Feature: Digest command", pr_number: 10)
-      second = create_done_task(project, "fix-260613-abcd", display_name: "Fix: Escaping", pr_number: 11)
-      write_global_config(home, [ project ])
-      collector = Hive::Digest::Collector.new(
-        registry: -> { [ project ] },
-        ship_times: FakeShipTimes.new({
-          [ project.fetch("hive_state_path"), first ] => Time.utc(2026, 6, 13, 12),
-          [ project.fetch("hive_state_path"), second ] => Time.utc(2026, 6, 13, 13)
-        })
-      )
+      target = target_for(home)
+      repository = repository_collection(target)
+      write_global_config(home, target)
 
       result = Hive::Digest.run(
-        date: Date.new(2026, 6, 13),
-        collector: collector,
+        date: Date.new(2026, 7, 19),
+        resolver: FakeResolver.new(resolution_for(target)),
+        collector: FakeCollector.new(report_for(repository)),
         cfg: Hive::Config.load_global_digest_config
       )
 
       assert_equal :sent, result.status
-      assert_message_id result.delivery.responses.first
+      assert_equal 2, result.pr_count
+      result.delivery.responses.each { |response| assert_message_id(response) }
 
-      # IU6: the live model's categorized output must cover EVERY fixture item.
-      # The display_name substring checks below render as the link LABEL
-      # regardless of model output, and an empty {"items":[]} still yields
-      # status: :sent with fallback summaries — so neither proves the model
-      # ran. Inspect the categorizer's raw items.json to prove it did.
-      items_files = Dir[File.join(Hive::Paths.state_home, "digest", "runs", "*", "items.json")]
-      assert_equal 1, items_files.size, "the categorizer must write exactly one items.json"
-      rows = JSON.parse(File.read(items_files.first)).fetch("items")
-      ids = rows.map { |row| row["id"] }
-      assert_includes ids, "alpha/10", "the model output must cover the first fixture item"
-      assert_includes ids, "alpha/11", "the model output must cover the second fixture item"
-      rows.each do |row|
-        assert Hive::Digest::Categories.valid?(row["category"].to_s),
-               "the live model must assign a valid category to #{row['id']}"
-        refute row["summary"].to_s.strip.empty?,
-               "the live model must write a non-empty summary for #{row['id']}"
+      generated = result.projects.fetch(0)
+      assert_equal [ 10, 11 ], generated.pull_requests.map { |row| row.pull_request.number }
+      generated.pull_requests.each do |row|
+        refute_empty row.bullets
+        row.bullets.each { |bullet| refute_empty bullet.fact_ids }
+        assert_includes result.message, row.pull_request.url
       end
-
-      # Prove the rendered digest used the MODEL's summary, not the pr_title
-      # fallback, for at least one item — an empty model response would
-      # otherwise pass via the default (fallback) summaries.
-      fallbacks = collector.for_date(Date.new(2026, 6, 13)).values.flatten.map { |item| item.pr_title.to_s.strip }
-      model_summaries = rows.map { |row| row["summary"].to_s.strip }
-      assert(model_summaries.any? { |summary| !fallbacks.include?(summary) },
-             "at least one rendered summary must be the model's own, not a pr_title fallback")
-
-      assert_includes result.message, "Feature: Digest command"
-      assert_includes result.message, "Fix: Escaping"
-    end
-  end
-
-  # The failed-notice MarkdownV2 path is the exact class of bug the escaping
-  # exists to prevent, so exercise it against the REAL Telegram API: force a
-  # ModelError (the only realistic trigger we can't summon from a live model
-  # deterministically) but let the real Sender render + deliver the notice.
-  def test_live_telegram_failed_notice_when_categorizer_raises
-    with_tmp_global_config(home: ENV.fetch("HOME")) do |home|
-      project = create_project(home, "alpha")
-      slug = create_done_task(project, "feature-260613-abcd",
-                              display_name: "Feature: Digest command", pr_number: 10)
-      write_global_config(home, [ project ])
-      collector = Hive::Digest::Collector.new(
-        registry: -> { [ project ] },
-        ship_times: FakeShipTimes.new(
-          { [ project.fetch("hive_state_path"), slug ] => Time.utc(2026, 6, 13, 12) }
-        )
-      )
-      failing_categorizer = Object.new
-      def failing_categorizer.categorize(_grouped, date:)
-        raise Hive::Digest::ModelError, "categorizer unavailable (live failed-notice test)"
+      ledger_files = Dir[File.join(Hive::Paths.state_home, "digest", "runs", "*", "ledger.json")]
+      assert_equal 1, ledger_files.size, "the generator must retain exactly one safe ledger"
+      ledger = JSON.parse(File.read(ledger_files.first))
+      assert_operator ledger.fetch("evidence_checksums").size, :>=, 4
+      semantic_evidence = {
+        "-pr10-body-001" => /DigestEvidenceCollector|implementation/i,
+        "-pr10-body-002" => /verify_digest_release|release/i,
+        "-pr10-body-003" => /hive-digest v2|migration/i,
+        "-pr11-body-001" => /nil metrics remain unknown|incomplete statistics|fix/i
+      }
+      semantic_evidence.each do |suffix, semantic_pattern|
+        fact = ledger.dig("output", "facts").find do |row|
+          row.fetch("evidence_ids").any? { |evidence_id| evidence_id.end_with?(suffix) }
+        end
+        refute_nil fact, "live generation must account for #{suffix}"
+        assert_equal "material", fact.fetch("kind")
+        generated_pr = generated.pull_requests.find { |row| row.pull_request.number == fact.fetch("number") }
+        citing_bullets = generated_pr.bullets.select { |bullet| bullet.fact_ids.include?(fact.fetch("id")) }
+        refute_empty citing_bullets, "#{suffix} must reach a bullet for its PR"
+        assert_match semantic_pattern, ([ fact.fetch("text") ] + citing_bullets.map(&:text)).join(" ")
       end
-
-      result = Hive::Digest.run(
-        date: Date.new(2026, 6, 13),
-        collector: collector,
-        categorizer: failing_categorizer,
-        cfg: Hive::Config.load_global_digest_config
-      )
-
-      assert_equal :failed_notice, result.status
-      assert_includes result.message, "failed"
-      # Telegram accepted the MarkdownV2-escaped failure notice for real.
-      assert_message_id result.delivery.responses.first
+      assert_equal [ 10, 11 ],
+                   ledger.dig("output", "projects", 0, "pull_requests").map { |row| row.fetch("number") }
     end
   end
 
   def test_live_telegram_empty_digest
     with_tmp_global_config(home: ENV.fetch("HOME")) do |home|
-      project = create_project(home, "alpha")
-      write_global_config(home, [ project ])
-      collector = Hive::Digest::Collector.new(
-        registry: -> { [ project ] },
-        ship_times: FakeShipTimes.new({})
+      target = target_for(home)
+      repository = Hive::Digest::RepositoryCollection.new(
+        target: target,
+        metadata: Hive::Digest::RepositoryMetadata.new(
+          name: target.repository,
+          description: "Digest fixture repository",
+          url: "https://github.com/#{target.repository}"
+        ),
+        pull_requests: []
       )
+      write_global_config(home, target)
 
       result = Hive::Digest.run(
-        date: Date.new(2026, 6, 13),
-        collector: collector,
+        date: Date.new(2026, 7, 19),
+        resolver: FakeResolver.new(resolution_for(target)),
+        collector: FakeCollector.new(report_for(repository)),
         cfg: Hive::Config.load_global_digest_config
       )
 
       assert_equal :empty, result.status
-      assert_equal "Nothing shipped today 🌙", result.message
-      assert_message_id result.delivery.responses.first
+      assert_includes result.message, "PRs 0"
+      refute_includes result.message, "Lines"
+      refute_includes result.message, "Commits"
+      result.delivery.responses.each { |response| assert_message_id(response) }
     end
   end
 
@@ -141,9 +122,77 @@ class HiveDigestE2ETest < Minitest::Test
     agent.empty? ? "claude" : agent
   end
 
-  def write_global_config(home, projects)
+  def target_for(home)
+    path = File.join(home, "digest-e2e-project")
+    FileUtils.mkdir_p(path)
+    Hive::Digest::RepositoryTarget.new(
+      project_name: "Digest E2E",
+      path: path,
+      repository: "ivankuznetsov/hive",
+      host: "github.com"
+    )
+  end
+
+  def repository_collection(target)
+    prs = [
+      pull_request(
+        target, number: 10, title: "Implement complete evidence",
+        body: "## Implementation\nAdd DigestEvidenceCollector for complete repository and PR evidence.\n\n" \
+              "## Release\nAdd verify_digest_release to the release gate.\n\n" \
+              "## Migration\nMove JSON consumers to hive-digest v2.",
+        diff: "diff --git a/lib/evidence.rb b/lib/evidence.rb\n@@ -0,0 +1 @@\n+collect_complete_evidence\n",
+        additions: 42, deletions: 0, commits: 2
+      ),
+      pull_request(
+        target, number: 11, title: "Fix warning semantics",
+        body: "## Fix\nEnsure nil metrics remain unknown so incomplete statistics stay visible.",
+        diff: "diff --git a/lib/stats.rb b/lib/stats.rb\n@@ -1 +1 @@\n-zero\n+unknown\n",
+        additions: 1, deletions: nil, commits: 1
+      )
+    ]
+    Hive::Digest::RepositoryCollection.new(
+      target: target,
+      metadata: Hive::Digest::RepositoryMetadata.new(
+        name: target.repository,
+        description: "Hive coordinates durable engineering workflows.",
+        url: "https://github.com/#{target.repository}"
+      ),
+      pull_requests: prs
+    )
+  end
+
+  def pull_request(target, number:, title:, body:, diff:, additions:, deletions:, commits:)
+    Hive::Digest::PullRequest.new(
+      target: target,
+      number: number,
+      title: title,
+      url: "https://github.com/#{target.repository}/pull/#{number}",
+      merged_at: Time.utc(2026, 7, 19, 12, number),
+      body: body,
+      diff: diff,
+      files: [ number == 10 ? "lib/evidence.rb" : "lib/stats.rb" ],
+      additions: additions,
+      deletions: deletions,
+      commits: commits
+    )
+  end
+
+  def resolution_for(target)
+    Hive::Digest::Resolution.new(targets: [ target ], warnings: [])
+  end
+
+  def report_for(repository)
+    Hive::Digest::CollectionReport.new(
+      resolved_count: 1,
+      repositories: [ repository ],
+      failures: [],
+      warnings: []
+    )
+  end
+
+  def write_global_config(home, target)
     File.write(File.join(home, "config.yml"), {
-      "registered_projects" => projects,
+      "registered_projects" => [ { "name" => target.project_name, "path" => target.path } ],
       "digest" => {
         "enabled" => true,
         "agent" => live_agent_name,
@@ -153,35 +202,6 @@ class HiveDigestE2ETest < Minitest::Test
         "chat_id_allowlist" => [ Integer(ENV.fetch("HIVE_DIGEST_TEST_CHAT_ID")) ]
       }
     }.to_yaml)
-  end
-
-  def create_project(root, name)
-    path = File.join(root, name)
-    hive_state_path = File.join(path, ".hive-state")
-    FileUtils.mkdir_p(File.join(hive_state_path, "stages", "9-done"))
-    { "name" => name, "path" => path, "hive_state_path" => hive_state_path }
-  end
-
-  def create_done_task(entry, slug, display_name:, pr_number:)
-    folder = File.join(entry.fetch("hive_state_path"), "stages", "9-done", slug)
-    FileUtils.mkdir_p(folder)
-    Hive::TaskMeta.write(folder, id: pr_number, slug: slug, display_name: display_name)
-    File.write(File.join(folder, "pr.md"), <<~MD)
-      ---
-      pr_url: https://example.test/pulls/#{pr_number}
-      pr_number: #{pr_number}
-      ---
-
-      ## Summary
-
-      #{display_name} ships as part of the daily digest live test.
-
-      ## Details
-
-      This body is intentionally short but complete enough for a real model
-      to classify and summarize.
-    MD
-    slug
   end
 
   def assert_message_id(response)

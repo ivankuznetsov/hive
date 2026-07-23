@@ -173,4 +173,58 @@ class HiveDigestSenderTest < Minitest::Test
     assert_equal "token", factory_calls.first.fetch(:token)
     assert_equal({ chat_id: 123, text: "hello", parse_mode: :markdown_v2 }, sends.last)
   end
+
+  def test_real_send_redacts_again_at_the_telegram_boundary
+    sends = []
+    client = Object.new
+    client.define_singleton_method(:send_message) do |chat_id:, text:, parse_mode:|
+      sends << { chat_id: chat_id, text: text, parse_mode: parse_mode }
+      [ { "message_id" => 1 } ]
+    end
+    token = "ghp_#{'t' * 36}"
+    with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") do
+      sender = Hive::Digest::Sender.new(
+        cfg: { "bot" => { "chat_id_allowlist" => [ 123 ] } },
+        telegram_factory: ->(**) { client }, logger: Object.new
+      )
+      result = sender.deliver("Rendered #{token}", dry_run: false)
+
+      refute_includes result.text, token
+      assert_includes result.text, "\\[REDACTED:github_token\\]"
+      assert_equal result.text, sends.first.fetch(:text)
+    end
+  end
+
+  def test_unverifiable_delivery_redaction_fails_before_telegram_send
+    redactor = Object.new
+    redactor.define_singleton_method(:redact) { |text| text }
+    redactor.define_singleton_method(:scan) { |_text| [ { name: :github_token } ] }
+    calls = []
+    sender = Hive::Digest::Sender.new(
+      cfg: { "bot" => { "chat_id_allowlist" => [ 123 ] } },
+      telegram_factory: ->(**) { calls << :client; Object.new },
+      logger: Object.new,
+      redactor: redactor
+    )
+
+    assert_raises(Hive::ConfigError) { sender.deliver("unsafe", dry_run: false) }
+    assert_empty calls
+  end
+
+  def test_delivery_redaction_runtime_errors_fail_before_telegram_send
+    broken = Object.new
+    broken.define_singleton_method(:redact) { |_text| raise EncodingError, "invalid" }
+    broken.define_singleton_method(:scan) { |_text| [] }
+    calls = []
+    sender = Hive::Digest::Sender.new(
+      cfg: { "bot" => { "chat_id_allowlist" => [ 123 ] } },
+      telegram_factory: ->(**) { calls << :client; Object.new },
+      logger: Object.new,
+      redactor: broken
+    )
+
+    error = assert_raises(Hive::ConfigError) { sender.deliver("unsafe", dry_run: false) }
+    assert_match(/delivery redaction failed/, error.message)
+    assert_empty calls
+  end
 end

@@ -167,6 +167,25 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_can_disable_raw_stream_retention_for_confidential_agent_runs
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      secret = "ghp_#{'s' * 36}"
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate("type" => "result", "result" => secret)
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+        log_stream: false
+      ).run!
+
+      refute_includes File.read(result.fetch(:log_file)), secret
+      refute_includes File.read(result.fetch(:log_file)), "[stream]"
+    end
+  end
+
   def test_run_emits_agent_start_and_end_events
     with_tmp_dir do |dir|
       task = make_task(dir)

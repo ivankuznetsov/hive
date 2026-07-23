@@ -598,6 +598,28 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
+  def test_available_unmanaged_native_reviewer_is_non_blocking
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "claude")
+      executable(bin)
+      reviewer = {
+        "name" => "lint", "kind" => "linter",
+        "agent" => "claude", "skill" => "rubocop"
+      }
+      cfg = config(reviewers: [ reviewer ], bin: bin)
+
+      row = Hive::AgentSkills::Inspector.new(
+        config: cfg, project_root: dir, runner: FakeRunner.new,
+        environment: { "HOME" => dir, "PATH" => "" }
+      ).inspect(skills: [ "rubocop" ]).first
+
+      refute row.managed
+      assert_equal "healthy", row.health
+      assert_equal "info", row.severity
+      assert_includes row.remediation, "native reviewer"
+    end
+  end
+
   def test_version_probe_failure_old_cli_disabled_package_and_invalid_package_version
     with_tmp_dir do |dir|
       bin = File.join(dir, "bin", "claude")
@@ -633,6 +655,82 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
+  def test_native_codex_and_pi_inventory_contracts
+    with_tmp_dir do |dir|
+      manifest = Hive::AgentSkills::Manifest.load
+      package = manifest.package("compound-engineering")
+
+      codex_bin = File.join(dir, "bin", "codex")
+      executable(codex_bin)
+      codex_native = package.native_for("codex")
+      codex_runner = FakeRunner.new(
+        [ codex_bin, "--version" ] => result(stdout: "codex-cli 0.144.0"),
+        [ codex_bin, "plugin", "list", "--available", "--json" ] => result(
+          status: 1,
+          stdout: JSON.generate("installed" => [
+            {
+              "pluginId" => codex_native.package,
+              "version" => "3.19.0",
+              "source" => { "url" => codex_native.source }
+            }
+          ])
+        ),
+        [ codex_bin, "plugin", "marketplace", "list", "--json" ] => result(
+          status: 1,
+          stdout: JSON.generate("marketplaces" => [
+            {
+              "name" => codex_native.marketplace,
+              "marketplaceSource" => { "source" => codex_native.source }
+            }
+          ])
+        )
+      )
+      codex = Hive::AgentSkills::Inspector.new(
+        config: config(agent: "codex", bin: codex_bin),
+        project_root: dir,
+        runner: codex_runner,
+        environment: { "HOME" => dir, "PATH" => "", "CODEX_HOME" => File.join(dir, "codex") }
+      ).send(
+        :inspect_native,
+        profile: Hive::AgentProfiles.lookup("codex", cfg: config(agent: "codex", bin: codex_bin)),
+        bin: codex_bin,
+        native_spec: codex_native
+      )
+
+      assert_equal codex_native.package, codex.dig("package", "id")
+      assert_equal codex_native.source, codex.dig("marketplace", "source")
+      assert_equal 2, codex.fetch("issues").size
+
+      pi_bin = File.join(dir, "bin", "pi")
+      executable(pi_bin)
+      pi_native = package.native_for("pi")
+      pi_install = File.join(dir, "pi", "git", "compound-engineering")
+      write(File.join(pi_install, "package.json"), JSON.generate("version" => "3.19.0"))
+      pi_runner = FakeRunner.new(
+        [ pi_bin, "--version" ] => result(stdout: "0.80.6"),
+        [ pi_bin, "list" ] => result(
+          status: 1,
+          stdout: "User packages:\n  #{pi_native.source}\n    #{pi_install}\n"
+        )
+      )
+      pi = Hive::AgentSkills::Inspector.new(
+        config: config(agent: "pi", bin: pi_bin),
+        project_root: dir,
+        runner: pi_runner,
+        environment: { "HOME" => dir, "PATH" => "", "PI_CODING_AGENT_DIR" => File.join(dir, "pi") }
+      ).send(
+        :inspect_native,
+        profile: Hive::AgentProfiles.lookup("pi", cfg: config(agent: "pi", bin: pi_bin)),
+        bin: pi_bin,
+        native_spec: pi_native
+      )
+
+      assert_equal pi_native.package, pi.dig("package", "id")
+      assert_equal "3.19.0", pi.dig("package", "version")
+      assert_equal 1, pi.fetch("issues").size
+    end
+  end
+
   def test_inspector_defensive_provider_alias_source_and_path_helpers
     with_tmp_dir do |dir|
       bin = File.join(dir, "bin", "claude")
@@ -653,10 +751,12 @@ class AgentSkillsInspectorTest < Minitest::Test
       assert_raises(Hive::ConfigError) { inspector.send(:skill_module, "future") }
       source_issues = inspector.send(
         :source_issues, package.native_for("claude"),
-        { "marketplace" => { "source" => "EveryInc/compound-engineering-plugin" },
+        { "marketplace" => { "source" => "someone/private-marketplace" },
           "package" => { "source" => "someone/private" } }
       )
-      assert_match(/installed package source/, source_issues.first.last)
+      assert_equal 2, source_issues.size
+      assert_match(/marketplace .* is owned by/, source_issues.first.last)
+      assert_match(/installed package source/, source_issues.last.last)
 
       empty_package = File.join(dir, "empty-package")
       FileUtils.mkdir_p(empty_package)

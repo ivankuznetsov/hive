@@ -311,6 +311,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  class FakeDisplayNameBackfiller
+    def backfill(_rows, now:)
+    end
+  end
+
   # ── construction helpers ───────────────────────────────────────────────
 
   def make_dispatcher(rows: [], dry_run: false, with_merge_watcher: false,
@@ -374,6 +379,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
       attempt_reconciler: attempt_reconciler,
       operational_snapshot: operational_snapshot
     )
+    # Generic dispatcher tests exercise routing, not the detached production
+    # name generator. Rows intentionally omit display names in many fixtures;
+    # leaving the real collaborator installed launches `hive generate-name`
+    # subprocesses that are unrelated to those assertions. Dedicated
+    # DisplayNameBackfiller tests cover its implementation, while the wiring
+    # and defensive-rescue tests below replace this fake explicitly.
+    dispatcher.instance_variable_set(:@display_name_backfiller, FakeDisplayNameBackfiller.new)
     # Bypass the Hive::Config.find_project / Config.load lookup chain
     # for unit tests — stub the predicate directly.
     dispatcher.define_singleton_method(:project_enabled?) { |_| project_enabled }

@@ -21,8 +21,10 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     @dir = Dir.mktmpdir("llmwiki-hook-")
     @main = File.join(@dir, "main")
     @wt = File.join(@dir, "wt")
+    @runtime_dir = File.join(@dir, "runtime")
     @stub = File.join(@dir, "stub bin", "stub-refresh.sh")
 
+    FileUtils.mkdir_p(@runtime_dir)
     FileUtils.mkdir_p(File.dirname(@stub))
     File.write(@stub, <<~STUB)
       #!/usr/bin/env bash
@@ -398,6 +400,30 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     assert_equal 0, result.fetch(:status), result.fetch(:out)
     assert_equal "llm-wiki-project-deadbeef.service\n", File.read(marker)
     assert_match(/stub refresh/, git(@main, "show llm-wiki/refresh:wiki/log.d/stub-entry.md"))
+  end
+
+  def test_refresh_fixture_does_not_share_an_inherited_runtime_lock
+    inherited_runtime = File.join(@dir, "inherited-runtime")
+    FileUtils.mkdir_p(inherited_runtime)
+    lock = File.open(
+      File.join(inherited_runtime, "hive-llm-wiki-refresh.lock"),
+      File::RDWR | File::CREAT,
+      0o600
+    )
+    assert lock.flock(File::LOCK_EX | File::LOCK_NB)
+
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo isolated fixture source\n")
+    git(@wt, "add -A")
+    git(@wt, "commit -qm 'feat: isolate fixture refresh lock'")
+
+    result = with_env("XDG_RUNTIME_DIR" => inherited_runtime) do
+      run_refresh_from(@wt)
+    end
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    assert_match(/stub refresh/, git(@main, "show llm-wiki/refresh:wiki/log.d/stub-entry.md"))
+  ensure
+    lock&.close
   end
 
   def test_ruby_portable_global_lock_respects_an_existing_os_lock
@@ -831,6 +857,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     env = {
       "LLM_WIKI_REFRESH_CMD" => concurrent_stub,
       "LLM_WIKI_LOCK_WAIT_SECONDS" => "5",
+      "XDG_RUNTIME_DIR" => @runtime_dir,
       "PATH" => "/usr/bin:/bin"
     }
 
@@ -1111,7 +1138,8 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
       "LLM_WIKI_REFRESH_CMD" => @stub,
       "PATH" => "/usr/bin:/bin",
       "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => "",
-      "LLM_WIKI_LOCK_WAIT_SECONDS" => "5"
+      "LLM_WIKI_LOCK_WAIT_SECONDS" => "5",
+      "XDG_RUNTIME_DIR" => @runtime_dir
     }.merge(overrides)
     args = Shellwords.join(arguments)
     out = `cd #{q(tree)} && #{env.map { |k, v| "#{k}=#{q(v)}" }.join(" ")} bash #{q(script)} #{args} 2>&1`

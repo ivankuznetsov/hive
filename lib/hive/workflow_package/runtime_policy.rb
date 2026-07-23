@@ -186,7 +186,7 @@ module Hive
           }
         end
         write_json(settings_path, settings)
-        write_json(mcp_path, {})
+        write_json(mcp_path, { "mcpServers" => {} })
 
         Policy.new(
           permission_mode: "dontAsk",

@@ -98,7 +98,9 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   descriptor `permissions:` independently. Explicit `yolo` works on any
   profile; bounded mappings fail closed unless the profile enforces them.
   Managed launches isolate the environment, add the immutable package root,
-  and inject only values authorized for the executing stable slot.
+  and inject only values authorized for the executing stable slot. Their strict
+  Claude MCP isolation file carries an explicit empty `mcpServers` object so
+  current Claude Code releases accept the schema while exposing no servers.
 
 ## Managed skill inspection and provisioning
 

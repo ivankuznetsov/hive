@@ -760,7 +760,7 @@ class HiveDigestChangelogGeneratorTest < Minitest::Test
       refute policy.policy_path.start_with?("#{File.realpath(dir)}/"),
              "the writable agent directory must not contain its own runtime policy"
       assert_equal [], policy.domains
-      assert_equal({}, JSON.parse(File.read(policy.mcp_config_path)))
+      assert_equal({ "mcpServers" => {} }, JSON.parse(File.read(policy.mcp_config_path)))
       assert_equal false, created.fetch(:log_stream)
     end
   end

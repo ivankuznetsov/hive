@@ -1,31 +1,31 @@
-require "date"
 require "hive/config"
 require "hive/env_file"
-require "hive/digest/errors"
-require "hive/digest/window"
-require "hive/digest/shipped_item"
-require "hive/digest/ship_times"
+require "hive/digest/changelog_generator"
 require "hive/digest/collector"
-require "hive/digest/categorizer"
+require "hive/digest/errors"
+require "hive/digest/london_window"
 require "hive/digest/renderer"
+require "hive/digest/repo_resolver"
 require "hive/digest/sender"
 require "hive/digest/stats"
-require "hive/bot/pairing_store"
 
 module Hive
   module Digest
-    # `delivery` (a Sender::SendResult) exists for test/observability — the
-    # e2e asserts a real Telegram message_id off `delivery.responses`. It is
-    # not part of the `hive digest --json` envelope, so its absence from
-    # Commands::Digest#json_payload is intentional, not a bug.
-    Result = Data.define(:status, :date, :message, :delivery) do
-      STATUSES = %i[empty sent failed_notice].freeze
+    class CollectionError < Hive::GhError; end
 
-      # Guard the status invariant at the boundary: only the three known
-      # outcomes are constructible, so a typo'd symbol can't slip through.
-      def initialize(status:, date:, message:, delivery:)
-        raise ArgumentError, "digest status must be one of #{STATUSES.inspect}; got #{status.inspect}" \
-          unless STATUSES.include?(status)
+    Result = Data.define(
+      :status, :date, :dry_run, :resolved_repository_count,
+      :collected_repository_count, :projects, :pr_count, :stats,
+      :warnings, :message, :delivery
+    ) do
+      STATUSES = %i[empty sent].freeze
+
+      def initialize(status:, date:, dry_run:, resolved_repository_count:,
+                     collected_repository_count:, projects:, pr_count:, stats:,
+                     warnings:, message:, delivery:)
+        raise ArgumentError, "digest status must be empty or sent" unless STATUSES.include?(status)
+        raise ArgumentError, "empty digest must have zero PRs" if status == :empty && !pr_count.to_i.zero?
+        raise ArgumentError, "sent digest must have at least one PR" if status == :sent && pr_count.to_i.zero?
 
         super
       end
@@ -33,79 +33,57 @@ module Hive
 
     module_function
 
-    def run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now },
-            collector: nil, categorizer: nil, sender: nil, stats: nil,
-            pairing_store: Hive::Bot::PairingStore.new)
-      local_date = date ? Window.parse_date(date) : Window.previous_local_day(now: clock.call)
+    def run(date: nil, dry_run: false, repos: [], cfg: nil, clock: -> { Time.now },
+            resolver: nil, collector: nil, generator: nil, stats: nil,
+            renderer: Renderer, sender: nil)
+      local_date = date ? LondonWindow.parse_date(date) : LondonWindow.previous_day(now: clock.call)
       cfg ||= Hive::Config.load_global_digest_config
-      # Load ~/.config/hive/.env (if present) so a real send can authenticate
-      # even when the surrounding environment carries no HIVE_TELEGRAM_BOT_TOKEN
-      # — most importantly the daemon-dispatched `hive digest`, whose
-      # systemd/detached launch environment does not inherit the token (until
-      # now only `hive bot start` loaded it, via lib/hive/commands/bot.rb, so a
-      # daemon-scheduled digest failed preflight with exit 78 every tick). An
-      # existing exported env var always wins. A dry-run never sends, so it
-      # skips this entirely — matching the dry-run "no token/chat lookup"
-      # contract.
       Hive::EnvFile.load! unless dry_run
-      collector ||= Collector.new
+      resolver ||= RepoResolver.new(cfg: cfg)
+      resolution = resolver.resolve(repos: repos)
+      collector ||= Collector.new(cfg: cfg)
+      collection = collector.for_date(local_date, targets: resolution.targets)
+      if collection.all_failed?
+        repositories = resolution.targets.map(&:repository).join(", ")
+        raise CollectionError, "hive digest: GitHub collection failed for every resolved repository: #{repositories}"
+      end
+
       sender ||= Sender.new(cfg: cfg)
+      sender.preflight! unless dry_run
       stats ||= Stats.new
-
-      grouped = collector.for_date(local_date)
-      # `PairingStore#pending` prunes-on-read and opens a `.lock` file, so an
-      # I/O-faulted state dir (read-only/full: EROFS/ENOSPC/EACCES) can make it
-      # raise SystemCallError/IOError. The pairing count is purely
-      # informational — never let it abort the whole digest. The only rescue
-      # below (ModelError) would not catch it, `Commands::Digest#call` only
-      # rescues Hive::Error, and the daemon would then hot-loop the crash.
-      pending_pairings =
-        begin
-          pairing_store.pending.size
-        rescue SystemCallError, IOError
-          0
-        end
-      message, status =
-        if empty_grouped?(grouped)
-          [ Renderer.empty, :empty ]
-        else
-          # Resolve the recipient + token BEFORE the paid categorizer
-          # run so a missing chat_id / unset token fails fast instead of
-          # wasting a full LLM run (and, with the scheduler's backoff,
-          # hot-looping it). Skipped for dry-run, which never sends.
-          sender.preflight! unless dry_run
-          render_digest(grouped, local_date, cfg, categorizer, stats)
-        end
-      message = append_pairing_notice(message, pending_pairings)
-
+      stats_report = stats.for_repositories(collection.repositories)
+      represented = collection.repositories.reject { |repository| repository.pull_requests.empty? }
+      changelog = if represented.empty?
+        Changelog.new(projects: [].freeze, facts: [].freeze, warnings: [].freeze)
+      else
+        generator ||= ChangelogGenerator.new(cfg: cfg)
+        generator.generate(represented, date: local_date)
+      end
+      warnings = (
+        resolution.warnings + collection.warnings + stats_report.warnings + changelog.warnings
+      ).freeze
+      message = renderer.render(
+        changelog: changelog, date: local_date, stats: stats_report, warnings: warnings
+      )
       delivery = sender.deliver(message, dry_run: dry_run)
-      Result.new(status: status, date: local_date, message: message, delivery: delivery)
-    rescue ModelError
-      # `local_date` and `sender` are always assigned above before any
-      # categorization can raise ModelError, so no nil-fallbacks needed.
-      message = Renderer.failed(local_date)
-      delivery = sender.deliver(message, dry_run: dry_run)
-      Result.new(status: :failed_notice, date: local_date, message: message, delivery: delivery)
-    end
+      pr_count = stats_report.overall.pr_count
+      status = pr_count.zero? ? :empty : :sent
 
-    def append_pairing_notice(message, count)
-      count = count.to_i
-      return message if count <= 0
-
-      noun = count == 1 ? "request" : "requests"
-      "#{message}\n\n🔑 #{count} pairing #{noun} waiting — run `hive pairing list`"
-    end
-
-    def empty_grouped?(grouped)
-      grouped.empty? || grouped.values.all? { |items| Array(items).empty? }
-    end
-
-    def render_digest(grouped, date, cfg, categorizer, stats)
-      categorizer ||= Categorizer.new(cfg: cfg)
-      output = categorizer.categorize(grouped, date: date)
-      totals = stats.for_items(grouped.values.flatten)
-      message = Renderer.render(output.by_project, date: date, summary: output.summary, totals: totals)
-      [ message, :sent ]
+      Result.new(
+        status: status,
+        date: local_date,
+        dry_run: dry_run,
+        resolved_repository_count: resolution.targets.size,
+        collected_repository_count: collection.collected_count,
+        projects: changelog.projects,
+        pr_count: pr_count,
+        stats: stats_report,
+        warnings: warnings,
+        message: message,
+        delivery: delivery
+      )
+    ensure
+      collection&.cleanup!
     end
   end
 end

@@ -254,35 +254,8 @@ def reject_unsupported_json_assignments!(argv)
   raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
 end
 
-DIGEST_MERGED_PRS_SOURCE = "merged-prs".freeze
-
 def json_usage_option_region(argv, command_index)
   argv.drop(command_index + 1).take_while { |arg| arg != "--" }
-end
-
-# Mirror Commands::Digest#normalized_source at the argv level: the merged-PR
-# path is selected by `--source merged-prs` or by any `--repo` with no other
-# --source. A Thor usage error there (e.g. `hive digest --source merged-prs
-# --bad --json`) is raised before the command runs, so the resolver must select
-# `hive-merged-pr-digest` instead of the shipped-digest `hive-digest` schema.
-def digest_merged_pr_argv?(argv)
-  source = nil
-  repo = false
-  argv.each_with_index do |arg, idx|
-    next unless arg.valid_encoding?
-
-    if arg == "--source"
-      value = argv[idx + 1]
-      source = value.to_s if value&.valid_encoding?
-    elsif arg.start_with?("--source=")
-      source = arg.split("=", 2).last
-    elsif arg == "--repo" || arg.start_with?("--repo=")
-      repo = true
-    end
-  end
-  return true if source && source.strip == DIGEST_MERGED_PRS_SOURCE
-
-  source.to_s.strip.empty? && repo
 end
 
 def json_usage_subcommand(argv, command_index, value_options: [])
@@ -378,8 +351,7 @@ def json_usage_error_contract(argv)
     schema = subcommand == "approve" ? "hive-pairing-approve" : "hive-pairing-list"
     return { schema: schema, error_kind: "invalid_arguments" }
   when "digest"
-    schema = digest_merged_pr_argv?(option_argv) ? "hive-merged-pr-digest" : "hive-digest"
-    return { schema: schema, error_kind: "usage" }
+    return { schema: "hive-digest", error_kind: "usage" }
   when "refactor-patrol"
     if (jobs = refactor_patrol_jobs_argv(option_argv))
       return {

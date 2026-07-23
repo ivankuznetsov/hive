@@ -138,7 +138,8 @@ module Hive
                    profile: nil, expected_output: nil, status_mode: nil,
                    permission_mode: nil, allowed_tools: nil,
                    disallowed_tools: nil, cli_flags: [], max_tokens: nil,
-                   max_turns: nil, identity_arguments: [], runtime_policy: nil)
+                   max_turns: nil, identity_arguments: [], runtime_policy: nil,
+                   log_stream: true)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -148,6 +149,7 @@ module Hive
       @max_turns = normalize_max_turns(max_turns)
       @timeout_sec = timeout_sec
       @log_label = log_label || task.stage_name
+      @log_stream = log_stream
       @profile = profile || Hive::AgentProfiles.lookup(:claude)
       @runtime_policy = runtime_policy
       @expected_output = expected_output
@@ -300,14 +302,16 @@ module Hive
             # so per-line regex redaction cannot safely retain their payloads.
             json = parse_json_line(line)
             message = messages.observe(json, raw_line: line)
-            safe_line = if message
-              "[structured message omitted type=#{json.fetch('type', 'unknown')}]\n"
-            else
-              Hive::SecretPatterns.redact(line)
+            if @log_stream
+              safe_line = if message
+                "[structured message omitted type=#{json.fetch('type', 'unknown')}]\n"
+              else
+                Hive::SecretPatterns.redact(line)
+              end
+              log.write("[stream] #{Time.now.utc.iso8601} #{safe_line}")
+              log.write("\n") unless safe_line.end_with?("\n")
+              log.flush
             end
-            log.write("[stream] #{Time.now.utc.iso8601} #{safe_line}")
-            log.write("\n") unless safe_line.end_with?("\n")
-            log.flush
             # Capture a usage/credit-limit signal straight from the raw stream.
             # Some CLIs (notably codex) report "you've hit your usage limit" as a
             # structured {"type":"error",...} / turn.failed JSON event that

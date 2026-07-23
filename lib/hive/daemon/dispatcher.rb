@@ -266,7 +266,7 @@ module Hive
         # 1d. Bound the dispatch-result notice dir (ADV-1 #6).
         prune_dispatch_results(now: now)
 
-        # 1e. Global daily shipped digest. This is not project-scoped and
+        # 1e. Global daily merged-PR digest. This is not project-scoped and
         # does not depend on the status snapshot, so it runs before status
         # fetch and bypasses per-project daemon gates. Wrapped like the
         # sibling self-heal ops below: `tick` does disk I/O (first-run seed

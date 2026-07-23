@@ -169,8 +169,8 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
-  def test_merged_pr_digest_json_usage_errors_use_merged_pr_schema
-    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-merged-pr-digest"))))
+  def test_digest_json_usage_errors_use_the_canonical_v2_schema
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-digest"))))
     cases = [
       %w[digest --source merged-prs --bad --json],
       %w[digest --repo owner/repo --bad --json]
@@ -183,14 +183,14 @@ class CliUsageErrorJsonTest < Minitest::Test
         refute status.success?, "#{argv.join(' ')} should fail"
         assert_equal Hive::ExitCodes::USAGE, status.exitstatus
         payload = JSON.parse(out)
-        assert_equal "hive-merged-pr-digest", payload["schema"]
-        assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-merged-pr-digest"), payload["schema_version"]
+        assert_equal "hive-digest", payload["schema"]
+        assert_equal 2, payload["schema_version"]
         assert_equal false, payload["ok"]
         assert_equal "UsageError", payload["error_class"]
         assert_equal "usage", payload["error_kind"]
         assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
         assert_empty schemer.validate(payload).map { |e| e["error"] },
-                     "#{argv.join(' ')} envelope must validate against hive-merged-pr-digest schema"
+                     "#{argv.join(' ')} envelope must validate against hive-digest v2"
       end
     end
   end
@@ -451,7 +451,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       [ %w[web --bind install status extra --json], "hive-web-status", "invalid_task_path" ],
       [ %w[digest extra --json], "hive-digest", "usage" ],
       [ %w[digest --json -- extra --source merged-prs], "hive-digest", "usage" ],
-      [ %w[digest --source merged-prs extra --json], "hive-merged-pr-digest", "usage" ]
+      [ %w[digest --source merged-prs extra --json], "hive-digest", "usage" ]
     ]
 
     with_tmp_global_config do |home|
@@ -523,7 +523,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       [ [ "digest", "--json", invalid ], "hive-digest", "usage" ],
       [ [ "digest", "--source", invalid, "--json" ], "hive-digest", "usage" ],
       [ [ "digest", "--source", "merged-prs", "--json", invalid ],
-        "hive-merged-pr-digest", "usage" ]
+        "hive-digest", "usage" ]
     ]
 
     with_tmp_global_config do |home|

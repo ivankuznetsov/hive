@@ -283,13 +283,13 @@ class HiveCliTest < Minitest::Test
                     "init help must derive its JSON contract version from SCHEMA_VERSIONS"
   end
 
-  def test_digest_help_exposes_merged_pr_source
+  def test_digest_help_describes_the_pr_only_london_contract
     out, _err = capture_io { Hive::CLI.start([ "help", "digest" ]) }
 
-    assert_includes out, "--source"
-    assert_includes out, "merged-prs"
+    refute_includes out, "--source"
     assert_includes out, "--repo"
-    assert_includes out, "never mutates Hive state"
+    assert_includes out, "Europe/London"
+    assert_includes out, "Hive tasks and stage folders never affect inclusion"
   end
 
   def test_workflow_option_help_does_not_enumerate_project_workflows
@@ -618,13 +618,12 @@ class HiveCliTest < Minitest::Test
 
     with_command_new_stub(Hive::Commands::Digest) do |calls|
       Hive::CLI.start([ "digest", "--date", "2026-06-13", "--dry-run", "--json",
-                        "--source", "merged-prs", "--repo", "owner/repo" ])
+                        "--repo", "owner/repo" ])
       assert_equal [], calls.first.fetch(:args)
       assert_equal({
         date: "2026-06-13",
         json: true,
         dry_run: true,
-        source: "merged-prs",
         repos: [ "owner/repo" ]
       }, calls.first.fetch(:kwargs))
     end
@@ -632,8 +631,7 @@ class HiveCliTest < Minitest::Test
     # Repeated `--repo` must accumulate, not silently keep only the last repo —
     # the documented multi-repo form (`--repo a/b --repo c/d`).
     with_command_new_stub(Hive::Commands::Digest) do |calls|
-      Hive::CLI.start([ "digest", "--source", "merged-prs",
-                        "--repo", "owner/repo", "--repo", "other/repo" ])
+      Hive::CLI.start([ "digest", "--repo", "owner/repo", "--repo", "other/repo" ])
       assert_equal [ "owner/repo", "other/repo" ], calls.first.fetch(:kwargs).fetch(:repos),
                    "repeated --repo flags must accumulate every repo, not overwrite"
     end
@@ -641,8 +639,7 @@ class HiveCliTest < Minitest::Test
     # The undocumented space-listed form (`--repo a/b c/d`) must also flatten
     # to the same list of slugs.
     with_command_new_stub(Hive::Commands::Digest) do |calls|
-      Hive::CLI.start([ "digest", "--source", "merged-prs",
-                        "--repo", "owner/repo", "other/repo" ])
+      Hive::CLI.start([ "digest", "--repo", "owner/repo", "other/repo" ])
       assert_equal [ "owner/repo", "other/repo" ], calls.first.fetch(:kwargs).fetch(:repos)
     end
 

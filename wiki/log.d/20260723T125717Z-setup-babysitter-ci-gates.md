@@ -29,3 +29,9 @@ the isolated before/after file timings removes about 111 seconds from the normal
 suite. A focused coverage run keeps all 108 executable
 `lib/hive/babysitter/dry_run_env.rb` lines covered; hosted exhaustive coverage
 remains authoritative for the whole repository.
+
+**Hosted coverage follow-up:** The first exact-head coverage run identified 25
+`AgentSkills::Inspector` lines that had been covered only incidentally by the
+setup integration file. Fast unit coverage now owns the native Codex/Pi
+inventory, marketplace-source conflict, and package-version paths explicitly;
+the setup integration proof remains isolated in its named gate.

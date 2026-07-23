@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release}.yml, packaging/live_agent_skills/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-22
+updated: 2026-07-23
 tags: [test, minitest, fixtures, honeycomb, agent-skills, release-proof]
 ---
 
@@ -17,11 +17,46 @@ candidate gate owns release readiness without provider credentials; the live
 agent workflow is an optional diagnostic that directly exercises native
 OpenClaw, Claude, Codex, and Pi discovery/use when credentials are available.
 
-## Run all
+## Local feedback loop
+
+During implementation, run the smallest relevant test files directly:
+
+```bash
+bundle exec ruby -Itest test/unit/example_test.rb
+bundle exec ruby -Itest test/integration/example_test.rb
+```
+
+Do not run the full suite after every commit. Use the default suite as a broad
+local checkpoint, normally once before handoff:
 
 ```bash
 bundle exec rake test
 ```
+
+The default suite excludes three expensive outer-proof files and skips the
+single large babysitter command-classification matrix. CI runs all four proofs
+as named gates and feeds their matrix result, together with exhaustive coverage,
+into the already-required `rake test (Ruby 3.4)` check. The aggregator uses
+`always()` and fails unless coverage and the complete matrix succeeded,
+preserving one fail-closed merge contract for branches created before and after
+this workflow change. The remaining babysitter dry-run tests stay in the normal
+suite because they are the fast/core coverage for `DryRunEnv`. Every generated
+gate also enables a test-helper guard that requires at least one non-skipped
+test with an assertion, preventing an emptied file or stale filter from passing
+with zero useful work.
+Contributors do not normally need the dedicated tasks locally. When diagnosing
+a corresponding CI failure, use:
+
+```bash
+bundle exec rake test:packaged_web_bootstrap
+bundle exec rake test:tui_reactivity_perf
+bundle exec rake test:setup_agents_integration
+bundle exec rake test:babysitter_dry_run_security_matrix
+```
+
+The packaged-web gate is commit-bound: it archives `HEAD:web` to reproduce the
+release artifact. Commit relevant web changes before using that task locally;
+otherwise it deliberately tests the previously committed tree.
 
 ## Coverage
 
@@ -31,7 +66,21 @@ bundle exec rake coverage
 
 The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch coverage in the parent test process and prepends `RUBYOPT=-Itest -rhive_coverage_boot` so Ruby subprocess tests dump their own result files under a per-run `coverage/.resultset/<run-id>/` directory. The final merged report is written to `coverage/coverage.json` and prints the lowest-covered source files plus uncovered line numbers.
 
-`bundle exec rake coverage` is the CI coverage-report path. It fails when an executable source file was never loaded, when a subprocess result file cannot be read, or when line coverage drops below the default 100% threshold. Set `HIVE_COVERAGE_MIN_LINE` to a different numeric percentage only when intentionally loosening or tightening that gate. Visual-artifact and Screenote code paths are part of that 100% gate, including error/default branches such as invalid Screenote JSON, default Net::HTTP transport, manifest upload exceptions, missing media directories, screenote config type errors, and dry-run digest completion failures.
+`bundle exec rake coverage` is the exhaustive CI coverage-report path, not an
+after-every-commit agent loop. It instruments the default suite; three
+outer-proof files and the large babysitter command-classification matrix run in
+their dedicated CI jobs instead. Coverage fails when an executable source file
+was never loaded, when a subprocess result file cannot be read, or when line
+coverage drops below the default 100% threshold.
+At a 100% minimum, the gate compares the exact covered and executable line
+counts; the displayed two-decimal percentage is informational and cannot hide
+one uncovered line that rounds to `100.00%`. Set `HIVE_COVERAGE_MIN_LINE` to a
+different numeric percentage only when intentionally loosening or tightening
+that gate; lower configured thresholds retain percentage comparison semantics.
+Visual-artifact and Screenote code paths are part of that 100% gate, including
+error/default branches such as invalid Screenote JSON, default Net::HTTP
+transport, manifest upload exceptions, missing media directories, screenote
+config type errors, and dry-run digest completion failures.
 
 Coverage-included tests that only need a generic stdout/stderr subprocess should avoid `RbConfig.ruby` children unless they are explicitly testing Ruby coverage propagation. Those nested Ruby processes inherit the coverage `RUBYOPT`, which can make startup latency part of otherwise unrelated timeout assertions; use a tiny executable fixture script for generic capture/timeout seams.
 
@@ -39,10 +88,25 @@ In CI (`CI=true`), tests that exercise backgrounding commands must force a foreg
 
 `Rakefile`:
 ```ruby
+HIVE_CI_GATE_TESTS = {
+  "test:packaged_web_bootstrap" => "test/integration/web_packaged_bootstrap_test.rb",
+  "test:tui_reactivity_perf" => "test/integration/tui_reactivity_perf_test.rb",
+  "test:setup_agents_integration" => "test/integration/setup_agents_test.rb",
+  "test:babysitter_dry_run_security_matrix" =>
+    "test/unit/babysitter/dry_run_security_matrix_test.rb"
+}.freeze
+HIVE_CI_GATE_TEST_OPTIONS = {
+  "test:babysitter_dry_run_security_matrix" =>
+    "--include=test_stubs_skip_unknown_and_mutating_commands_but_allow_read_only_commands"
+}.freeze
+HIVE_DEFAULT_TEST_FILES = FileList[
+  "test/{unit,integration,babysitter}/**/*_test.rb"
+].exclude(*HIVE_CI_GATE_TESTS.values).to_a.freeze
+
 Rake::TestTask.new do |t|
   t.libs << "test"
   t.libs << "lib"
-  t.test_files = FileList["test/{unit,integration}/**/*_test.rb"]
+  t.test_files = HIVE_DEFAULT_TEST_FILES
   t.warning = false
 end
 task default: :test
@@ -112,7 +176,7 @@ task default: :test
 | `stages/brainstorm_tmux_sentinel_test.rb` | Claude/tmux sentinel and cleanup behavior — readiness/sentinel delegation, pgrep pattern shape, missing/failing pgrep logging, oversized orphan-sweep log rotation, and the v0.2.3 invariant that a task cleanup kills matched Claude PIDs individually while skipping a matched tmux server. |
 | `display_name/generator_test.rb` | `Hive::DisplayName::Generator` — timeout handling, process groups, agent output sanitization, best-effort sidecar updates/commits, and Codex stdin prompt delivery. |
 | `tmux_runner_test.rb` | `Hive::TmuxRunner` — detached session startup, environment propagation, prompt injection via tmux buffers, typed tmux failure/timeout classes, prompt-buffer cleanup, paste-settle polling before Enter submit, bounded pane-tail capture, PID lookup, idempotent teardown including tmux's `no current target` race after a short-lived child exits, and a lightweight fake-tmux timeout harness so setup commands cannot consume the timeout budget before the intentionally hanging `send-keys` call. |
-| `daemon/pr_merge_watcher_test.rb`, `daemon/dispatcher_test.rb` | Finalize merge watcher routing — `MERGED` PR polling returns archive dispatches, carries the internal `--recover-merged-error-reason` flag for whitelisted finalize errors, ignores unknown error reasons, and the dispatcher hands `8-finalize ERROR reason=git_status_failed` rows to the watcher instead of skipping them as generic errors. Dispatcher coverage also pins digest scheduler dispatch/completion, dry-run digest pseudo-child reaping, and fatal-log isolation when `DigestScheduler#complete` raises. |
+| `daemon/pr_merge_watcher_test.rb`, `daemon/dispatcher_test.rb` | Finalize merge watcher routing — `MERGED` PR polling returns archive dispatches, carries the internal `--recover-merged-error-reason` flag for whitelisted finalize errors, ignores unknown error reasons, and the dispatcher hands `8-finalize ERROR reason=git_status_failed` rows to the watcher instead of skipping them as generic errors. Dispatcher coverage also pins digest scheduler dispatch/completion, dry-run digest pseudo-child reaping, and fatal-log isolation when `DigestScheduler#complete` raises. The generic dispatcher factory installs an inert display-name backfiller so unrelated missing-name fixtures cannot launch detached `hive generate-name` processes; the dedicated backfiller suite plus explicit dispatcher wiring/error cases retain that contract coverage. |
 | `screenote/{credential_store,oauth_client,loopback_server,pkce,mcp_client,mcp_config}_test.rb`, `commands/{connect,disconnect}_test.rb` | Screenote OAuth/MCP support — mode-0600 credential storage, expiry boundaries, OAuth discovery/DCR/auth-code exchange/revoke with injectable HTTP, loopback callback state validation, PKCE S256 vectors, authenticated MCP `list_projects`, ephemeral MCP config shape/cleanup, connect project selection/client reuse, and disconnect revoke/clear behavior. |
 | `stages/artifacts_test.rb` | `Hive::Stages::Artifacts` — marker/idempotent behavior, Screenote connected/disconnected context resolution, Claude-only MCP config injection/removal, strict allowed-tools behavior, and preserving the agent-written `media/manifest.json` without Ruby-side post-upload mutation. |
 | `screenote_oauth_live_test.rb`, `screenote_capture_live_test.rb` | Opt-in live Screenote tests — real OAuth discovery, rate-limited dynamic registration when enabled, auth-code token exchange when preseeded, and the blocked real `create_screenshot_upload` round-trip through Screenote's non-interactive test-token endpoint once that endpoint ships. |
@@ -164,7 +228,8 @@ exercise every migrated consumer. The follow-up attempt/projection slice runs
 | File | Covers |
 |------|--------|
 | `init_test.rb`, `llm_wiki_scheduler_test.rb` | `hive init` plus Linux LLM-wiki scheduling — stale `main_wiki_path` removal and rediscovery, primary-owned shared-runtime reconciliation that rejects stale linked-worktree copies, activation-relative timers with randomized starts, one repository timer across linked worktrees, the canonical cross-package global lock, executable shared-runner guard, a four-hour outer timeout covering three bounded agent/index batches, cgroup memory limits, headless user-bus environment recovery, marked and exact E2E debris cleanup, service-only partial cleanup, ambiguous-unit and disabled-schedule preservation, timer-only cleanup, non-fatal init activation, and durable stop/reload retry state. |
-| `llm_wiki_post_commit_refresh_test.rb` | Transactional wiki refresh plus the scheduled compatibility wrapper — shared-runner preference, bounded-systemd commit dispatch with headless bus recovery and durable marker retention on signal failure, compiled-log-only no-op filtering, machine-wide fallback admission, project-local fallback, configured-provider-only production dispatch with a disposable test-copy seam, exact `--project <root> --drain` delegation, committed/template/generated copy parity, source-ref transaction chunking for large queues, reconstruction of interrupted queue writes, fast-forward publication to `llm-wiki/refresh`, freshly fetched remote-default reconciliation, crash-safe receipt revalidation after remote deletion, mixed retained/new and no-diff publication without duplicate agent runs, durable merge-conflict blocking, and dirty primary-checkout preservation. |
+| `init_doctor_preflight_test.rb`, `commands/init_agent_skills_test.rb` | Optional post-init agent-skill diagnosis and consented repair — healthy/missing/config-error/inspector-error reporting, non-TTY and JSON non-mutation, interactive consent provenance, setup failure containment, and EPIPE handling. Generic direct Minitest construction defaults this optional preflight off so disposable-project fixtures do not repeat native/filesystem discovery; these focused tests opt in explicitly, and a clean Ruby subprocess proves the production default remains enabled when Minitest is absent. |
+| `llm_wiki_post_commit_refresh_test.rb` | Transactional wiki refresh plus the scheduled compatibility wrapper — shared-runner preference, bounded-systemd commit dispatch with headless bus recovery and durable marker retention on signal failure, compiled-log-only no-op filtering, machine-wide fallback admission, project-local fallback, configured-provider-only production dispatch with a disposable test-copy seam, exact `--project <root> --drain` delegation, committed/template/generated copy parity, source-ref transaction chunking for large queues, reconstruction of interrupted queue writes, fast-forward publication to `llm-wiki/refresh`, freshly fetched remote-default reconciliation, crash-safe receipt revalidation after remote deletion, mixed retained/new and no-diff publication without duplicate agent runs, durable merge-conflict blocking, and dirty primary-checkout preservation. Each fixture uses a private `XDG_RUNTIME_DIR`, so a real operator refresh cannot consume its stub-agent work; explicit lock tests override that directory to retain machine-wide serialization coverage. |
 | `bench_workflow_install_test.rb` / `workflows/bench_test.rb` | Fresh `hive init --workflow bench` installs and commits the packaged runtime under `.hive-state/bench-runtime`, creates a bench-pinned task without copying a project descriptor, and resolves the built-in stage/state contract. Legacy-upgrade coverage pins one-commit archive/runtime/config rebinding, same-process descriptor cache reset, tracked instruction archives, safe retry after a rejected commit, Ctrl-C cleanup at archive and both runtime-move boundaries, preservation after a post-commit interrupt, symlink-root and raced-target refusal, descriptor/child-name/parent-directory replacement rejection at classification, quarantine, and post-staging boundaries, dirty-config isolation, staged-index preflight, and previous-runtime retention when rollback deletion fails. The descriptor test pins Codex as the shell-control agent, campaign-sized one-hour/seven-day stage timeouts, provider-only pending generation as cooldown-aware `limits_reached` rather than manual `WAITING`, GPT-5.6 stage-profile selection to the combined `hive-bench-runner:sol` image, and the judge-stage invariant that a null round-two final is rejected while the incomplete cell remains eligible for retry. |
 | `agent_skill_adapters_test.rb`, `setup_agents_test.rb` | Process-level fake Claude/Codex/Pi contracts — bundled Hive projection plus native package argv/JSON, fresh convergence and second-run no-op, unattended refusal with a per-invocation tripwire proving zero native discovery calls and byte-for-byte home stability, unavailable skips, independent offline failure, cache/resolution/provenance verification, filtered prerequisite retention/fail-closed blocking, timed-out descendant process-group cleanup, and conflict byte preservation. |
 | `new_test.rb` | `hive new` — slug derivation, reserved rejection, `--workflow` task overrides, non-coding project-default pinning, coding override in non-coding projects, unknown-workflow fail-fast, marker handling for non-coding inert versus agent entries, captured commit, and per-project commit-lock serialization around the `hive/state` write. |
@@ -422,8 +487,9 @@ identity, all four matrix jobs, one unexpired artifact, and its downloaded
 archive digest, but `release.yml` does not query or require that Check Run.
 
 `bundle exec rake smoke` also contains older live Claude workflows and may
-incur provider cost. Normal `rake test` and `rake coverage` remain local and
-network-free.
+incur provider cost. Normal `rake test` remains local and network-free.
+`bundle exec rake coverage` uses the same network-free machinery but is
+normally owned by hosted CI.
 
 ## Live Claude tmux dogfood
 

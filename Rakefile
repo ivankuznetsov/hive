@@ -3,12 +3,30 @@ require "fileutils"
 require "securerandom"
 require_relative "test/support/coverage"
 
-# Default suite — everything under test/{unit,integration}. Self-contained,
-# uses fake-claude / fake-gh, no network or paid API calls.
+# These expensive outer proofs are intentionally separate from the normal local
+# suite. CI runs them as named merge gates.
+HIVE_CI_GATE_TESTS = {
+  "test:packaged_web_bootstrap" => "test/integration/web_packaged_bootstrap_test.rb",
+  "test:tui_reactivity_perf" => "test/integration/tui_reactivity_perf_test.rb",
+  "test:setup_agents_integration" => "test/integration/setup_agents_test.rb",
+  "test:babysitter_dry_run_security_matrix" =>
+    "test/unit/babysitter/dry_run_security_matrix_test.rb"
+}.freeze
+HIVE_CI_GATE_TEST_OPTIONS = {
+  "test:babysitter_dry_run_security_matrix" =>
+    "--include=test_stubs_skip_unknown_and_mutating_commands_but_allow_read_only_commands"
+}.freeze
+HIVE_DEFAULT_TEST_FILES = FileList[
+  "test/{unit,integration,babysitter}/**/*_test.rb"
+].exclude(*HIVE_CI_GATE_TESTS.values).to_a.freeze
+
+# Default local suite. Self-contained, uses fake-claude / fake-gh, and makes no
+# network or paid API calls. Expensive outer proofs run only through their
+# explicit CI-gate tasks below.
 Rake::TestTask.new do |t|
   t.libs << "test"
   t.libs << "lib"
-  t.test_files = FileList["test/{unit,integration,babysitter}/**/*_test.rb"]
+  t.test_files = HIVE_DEFAULT_TEST_FILES
   t.warning = false
 end
 
@@ -74,6 +92,21 @@ namespace :e2e do
   desc "Remove old e2e run artifacts"
   task :clean do
     ruby "bin/hive-e2e", "clean"
+  end
+end
+
+task "test:require_nonempty_ci_gate" do
+  ENV["HIVE_REQUIRE_TEST_RUNS"] = "1"
+end
+
+HIVE_CI_GATE_TESTS.each do |qualified_name, test_file|
+  Rake::TestTask.new(qualified_name => "test:require_nonempty_ci_gate") do |t|
+    t.libs << "test"
+    t.libs << "lib"
+    t.test_files = FileList[test_file]
+    t.options = HIVE_CI_GATE_TEST_OPTIONS[qualified_name]
+    t.warning = false
+    t.description = "Run the #{qualified_name.delete_prefix("test:").tr("_", " ")} merge gate"
   end
 end
 

@@ -14,9 +14,9 @@ class TuiReactivityPerfTest < Minitest::Test
   # the correctness fallback path, while archive-size independence is
   # the primary regression signal this test enforces.
   ACTIVE_REPARSE_BUDGET_MS = 100.0
-  # Coverage instrumentation materially changes wall-clock parse cost, so when
-  # the opt-in absolute budget is run together with coverage
-  # (HIVE_TUI_PERF_ABSOLUTE under `rake coverage`) it widens to this.
+  # Coverage instrumentation materially changes wall-clock parse cost, so a
+  # manually instrumented run that also opts into absolute budgets widens to
+  # this. The normal CI merge gate uses the machine-independent scaling proof.
   COVERAGE_ACTIVE_REPARSE_BUDGET_MS = 150.0
   IDLE_SCALING_TOLERANCE = 3.0
   IDLE_SCALING_ADD_MS = 1.0
@@ -37,12 +37,11 @@ class TuiReactivityPerfTest < Minitest::Test
     # Absolute wall-clock budgets are host-dependent and PROVEN flaky on
     # slow/loaded machines (a reviewer's run measured the active parse at
     # 118ms > the 100ms budget). They are therefore opt-in
-    # (HIVE_TUI_PERF_ABSOLUTE) so neither the default `rake test` gate nor the
-    # `rake coverage` gate can go spuriously red on a busy CI host — the
-    # project's "no flaky tests" rule. The machine-independent SCALING
-    # assertions below stay the always-on regression gate (plan Risk #2): they
-    # pin that idle ticks and active reparses do not grow with archive size
-    # regardless of absolute speed.
+    # (HIVE_TUI_PERF_ABSOLUTE) so the dedicated CI merge gate cannot go
+    # spuriously red on a busy host — the project's "no flaky tests" rule.
+    # The machine-independent SCALING assertions below stay the always-on
+    # regression gate (plan Risk #2): they pin that idle ticks and active
+    # reparses do not grow with archive size regardless of absolute speed.
     if absolute_budgets_enabled?
       assert_operator large.fetch(:idle_tick_ms), :<, IDLE_TICK_BUDGET_MS,
                       "idle tick should stay below #{IDLE_TICK_BUDGET_MS}ms at 8x200"
@@ -68,9 +67,8 @@ class TuiReactivityPerfTest < Minitest::Test
   private
 
   # The absolute wall-clock budgets run only when explicitly opted in
-  # (HIVE_TUI_PERF_ABSOLUTE). Both the default `rake test` gate and the
-  # `rake coverage` gate rely on the scaling assertions, which are
-  # machine-independent and never breach on a slow/loaded host.
+  # (HIVE_TUI_PERF_ABSOLUTE). The CI merge gate relies on the scaling
+  # assertions, which are machine-independent on a slow/loaded host.
   def absolute_budgets_enabled?
     ENV["HIVE_TUI_PERF_ABSOLUTE"]
   end

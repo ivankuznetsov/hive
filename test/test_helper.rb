@@ -23,6 +23,40 @@ require "English"
 require "hive"
 require_relative "support/workflow_helpers"
 
+if ENV.delete("HIVE_REQUIRE_TEST_RUNS") == "1"
+  module HiveCiGateRunGuard
+    class Reporter < Minitest::StatisticsReporter
+      def record(result)
+        return if result.skipped?
+
+        synchronize { super }
+      end
+
+      def valid?
+        count.positive? && assertions.positive?
+      end
+    end
+
+    class << self
+      attr_accessor :reporter
+    end
+
+    def self.minitest_plugin_init(options)
+      self.reporter = Reporter.new(options.fetch(:io), options)
+      Minitest.reporter << reporter
+    end
+  end
+
+  Minitest.extensions << HiveCiGateRunGuard
+  Minitest.after_run do
+    reporter = HiveCiGateRunGuard.reporter
+    next if reporter&.valid?
+
+    abort "CI gate selected zero non-skipped tests with assertions " \
+          "(runs=#{reporter&.count || 0}, assertions=#{reporter&.assertions || 0})"
+  end
+end
+
 # Route the default worktree base (`<base>/<project>.worktrees`) into a
 # tmp sandbox so tests that exercise worktree creation never seed the
 # developer's real ~/Dev. `||=` lets an explicit outer override win, and

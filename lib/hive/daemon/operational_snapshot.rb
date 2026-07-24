@@ -143,9 +143,18 @@ module Hive
           )
         end
 
-        def complete(initial_rows:, final_rows:, controller:, queue:, recoveries:, now: Time.now.utc)
+        def complete(initial_rows:, final_rows:, controller:, queue:, recoveries:,
+                     initial_hidden_archived_task_count: 0,
+                     final_hidden_archived_task_count: 0,
+                     now: Time.now.utc)
           initial_rows = Array(initial_rows)
           final_rows = Array(final_rows)
+          validate_hidden_count!(
+            initial_hidden_archived_task_count, label: "initial_hidden_archived_task_count"
+          )
+          validate_hidden_count!(
+            final_hidden_archived_task_count, label: "final_hidden_archived_task_count"
+          )
           duplicate_keys = duplicate_row_keys(initial_rows) | duplicate_row_keys(final_rows)
           unless duplicate_keys.empty?
             identities = duplicate_keys.sort.map { |project, slug| "#{project}:#{slug}" }
@@ -162,6 +171,7 @@ module Hive
           @store.write(
             base_record(phase: "complete", now: now).merge(
               "reason" => nil,
+              "hidden_archived_task_count" => final_hidden_archived_task_count,
               "capacity" => controller || {},
               "queue" => queue || {},
               "provider_holds" => holds,
@@ -186,8 +196,15 @@ module Hive
             "source_window" => {
               "started_at" => (@started_at || instant).utc.iso8601(6),
               "completed_at" => phase == "started" ? nil : instant.iso8601(6)
-            }
+            },
+            "hidden_archived_task_count" => nil
           }
+        end
+
+        def validate_hidden_count!(value, label:)
+          return if value.is_a?(Integer) && value >= 0
+
+          raise ArgumentError, "#{label} must be a non-negative integer"
         end
 
         def revalidated_tasks(initial_rows, final_rows)

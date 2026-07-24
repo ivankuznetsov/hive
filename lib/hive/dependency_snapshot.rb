@@ -8,6 +8,9 @@ require "hive/config"
 require "hive/dependency_admission"
 require "hive/plan_frontmatter"
 require "hive/repository_identity"
+require "hive/markers"
+require "hive/task"
+require "hive/task_action"
 require "hive/workflows/project"
 require "hive/workflows/registry"
 
@@ -250,16 +253,36 @@ module Hive
       folders = Dir.glob(File.join(root, ".hive-state", "stages", "*-*", "*"))
         .select { |folder| File.directory?(folder) }
         .sort
-      if exclude_archived
-        folders.reject! { |folder| File.basename(File.dirname(folder)) == Hive::ArchiveFilter::ARCHIVE_STAGE_DIR }
-      end
 
       Hive::Workflows::Project.synchronize do
         Hive::Workflows::Project.load!(root)
+        if exclude_archived
+          folders.reject! do |folder|
+            archived_folder?(
+              folder, config: config, project_name: project_name
+            )
+          end
+        end
         folders.map do |folder|
           admission_task(root, folder, config, project_name: project_name)
         end
       end
+    end
+
+    # Presentation-only active snapshots may omit archived rows for cost, but
+    # the omission must follow the task's resolved workflow/action. A terminal
+    # directory in one workflow can be an ordinary running stage in another.
+    # Any classification failure fails open so malformed dependency metadata
+    # remains available to the admission layer as an explicit error.
+    def archived_folder?(folder, config:, project_name:)
+      task = Hive::Task.new(folder)
+      marker = Hive::Markers.current(task.state_file)
+      Hive::TaskAction.for(
+        task, marker, config: config,
+        project_name: project_name, project_count: 1
+      ).key == Hive::Schemas::TaskActionKind::ARCHIVED
+    rescue StandardError
+      false
     end
 
     def admission_task(root, folder, config, project_name: File.basename(root))

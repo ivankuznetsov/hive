@@ -427,7 +427,11 @@ module Hive
         )
         refresh_tracked_state_file_mtimes(result.rows)
 
-        publish_complete_operational_snapshot(initial_rows: result.rows, now: now)
+        publish_complete_operational_snapshot(
+          initial_rows: result.rows,
+          initial_hidden_archived_task_count: result.hidden_archived_task_count,
+          now: now
+        )
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)
@@ -1393,7 +1397,7 @@ module Hive
         log_operational_snapshot_failure(phase: "observe", error: e)
       end
 
-      def publish_complete_operational_snapshot(initial_rows:, now:)
+      def publish_complete_operational_snapshot(initial_rows:, initial_hidden_archived_task_count: 0, now:)
         return unless @operational_snapshot
 
         verification = @status_consumer.fetch
@@ -1411,6 +1415,8 @@ module Hive
           phase: "complete",
           initial_rows: initial_rows,
           final_rows: verification.rows,
+          initial_hidden_archived_task_count: initial_hidden_archived_task_count,
+          final_hidden_archived_task_count: verification.hidden_archived_task_count,
           controller: @controller.operational_snapshot(now: completed_at),
           queue: operational_queue_snapshot(now: completed_at, queue_state: queue_state),
           recoveries: operational_recovery_snapshot(queue_state: queue_state),

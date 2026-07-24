@@ -52,11 +52,15 @@
     "summary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["overall_state", "active", "archived", "projects_total", "projects_healthy", "states"],
+      "required": [
+        "overall_state", "active", "archived", "hidden_archived_task_count",
+        "projects_total", "projects_healthy", "states"
+      ],
       "properties": {
         "overall_state": { "$ref": "#/$defs/State" },
         "active": { "type": "integer", "minimum": 0 },
         "archived": { "type": "integer", "minimum": 0 },
+        "hidden_archived_task_count": { "type": "integer", "minimum": 0 },
         "projects_total": { "type": "integer", "minimum": 0 },
         "projects_healthy": { "type": "integer", "minimum": 0 },
         "states": {

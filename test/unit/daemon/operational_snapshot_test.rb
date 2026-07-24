@@ -66,6 +66,8 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       )
       assembler.complete(
         initial_rows: [ observed ], final_rows: [ observed ],
+        initial_hidden_archived_task_count: 2,
+        final_hidden_archived_task_count: 2,
         controller: { "limits" => { "global" => 2 }, "in_flight" => 2 },
         queue: { "pending" => 1 }, recoveries: {}, now: T0 + 1
       )
@@ -79,9 +81,30 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
                    snapshot.dig("tasks", 0, "disposition", "retry_at")
       assert_equal false, snapshot.dig("tasks", 0, "disposition", "retry_due")
       assert_equal true, snapshot.dig("tasks", 0, "disposition", "retry_safe")
+      assert_equal 2, snapshot.fetch("hidden_archived_task_count")
       assert_equal 0o700, File.stat(File.dirname(path)).mode & 0o777
       assert_equal 0o600, File.stat(path).mode & 0o777
       assert_empty Dir.glob(File.join(File.dirname(path), ".*tmp*"))
+    end
+  end
+
+  def test_hidden_archive_count_change_is_published_from_revalidated_snapshot
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      observed = row
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        initial_rows: [ observed ], final_rows: [ observed ],
+        initial_hidden_archived_task_count: 1,
+        final_hidden_archived_task_count: 2,
+        controller: {}, queue: {}, recoveries: {}, now: T0 + 1
+      )
+
+      snapshot = reader.read(now: T0 + 2)
+      assert_equal "current", snapshot.fetch("status")
+      assert_equal 2, snapshot.fetch("hidden_archived_task_count")
     end
   end
 

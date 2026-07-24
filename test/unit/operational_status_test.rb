@@ -18,7 +18,8 @@ class OperationalStatusTest < Minitest::Test
       task(action: "error", slug: "repair", marker: "error", attrs: { "reason" => "agent_died" }),
       task(action: "ready_to_archive", slug: "complete", stage: "8-finalize", marker: "complete"),
       task(action: "ready_to_plan", slug: "idle", stage: "2-brainstorm", marker: "complete"),
-      task(action: "archived", slug: "archived", stage: "9-done", marker: "complete")
+      task(action: "archived", slug: "archived", stage: "9-done", marker: "complete"),
+      hidden_count: 4
     )
 
     result = project(payload)
@@ -29,6 +30,7 @@ class OperationalStatusTest < Minitest::Test
     assert_equal true, result.fetch("ok")
     assert_equal 6, result.dig("summary", "active")
     assert_equal 1, result.dig("archive", "count")
+    assert_equal 4, result.dig("summary", "hidden_archived_task_count")
     assert_equal STATES, result.dig("summary", "states").keys
     assert_equal %w[
       running waiting_on_you waiting_on_provider_or_scheduler needs_repair completion_ready idle
@@ -845,13 +847,14 @@ class OperationalStatusTest < Minitest::Test
     }
   end
 
-  def status_payload(*tasks)
+  def status_payload(*tasks, hidden_count: 0)
     projects = if tasks.empty?
       []
     else
       [ {
         "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state",
-        "tasks" => tasks, "legacy_stage_dirs" => [], "legacy_migrate_command" => nil
+        "tasks" => tasks, "legacy_stage_dirs" => [], "legacy_migrate_command" => nil,
+        "hidden_archived_task_count" => hidden_count
       } ]
     end
     {

@@ -354,6 +354,24 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "Task", "properties", "action", "enum").sort
   end
 
+  def test_archive_visibility_counts_are_additive_aggregate_schema_fields
+    status = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    project = status.dig("$defs", "Project")
+    count = project.dig("properties", "hidden_archived_task_count")
+    assert_equal "integer", count.fetch("type")
+    assert_equal 0, count.fetch("minimum")
+    refute_includes project.fetch("required"), "hidden_archived_task_count",
+                    "dedicated archive payloads intentionally omit the ordinary-view count"
+
+    operational = JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
+    summary = operational.dig("$defs", "SuccessPayload", "properties", "summary")
+    assert_includes summary.fetch("required"), "hidden_archived_task_count"
+    assert_equal(
+      { "type" => "integer", "minimum" => 0 },
+      summary.dig("properties", "hidden_archived_task_count")
+    )
+  end
+
   def test_hive_status_admission_error_is_closed_and_matches_reason_codes
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
     definition = doc.dig("$defs", "AdmissionError")

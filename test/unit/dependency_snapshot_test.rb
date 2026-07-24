@@ -212,6 +212,40 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_active_admission_snapshot_excludes_only_rows_whose_resolved_action_is_archived
+    terminal = shared_stage_terminal_workflow
+    active = shared_stage_active_workflow
+    Hive::Workflows::Registry.register!(terminal)
+    Hive::Workflows::Registry.register!(active)
+    reset_workflow_union_cache!
+
+    with_tmp_dir do |root|
+      archived = write_task_meta(root, "2-shared", "archived-shared", id: 1)
+      Hive::TaskMeta.write(
+        archived, id: 1, slug: "archived-shared", display_name: nil,
+        workflow: terminal.id.to_s
+      )
+      File.write(File.join(archived, "shared.md"), "<!-- COMPLETE -->\n")
+
+      still_active = write_task_meta(root, "2-shared", "active-shared", id: 2)
+      Hive::TaskMeta.write(
+        still_active, id: 2, slug: "active-shared", display_name: nil,
+        workflow: active.id.to_s
+      )
+      File.write(File.join(still_active, "shared.md"), "<!-- COMPLETE -->\n")
+
+      rows = Hive::DependencySnapshot.admission_tasks(
+        root, {}, exclude_archived: true
+      )
+
+      assert_equal [ "active-shared" ], rows.map(&:slug)
+    end
+  ensure
+    Hive::Workflows::Registry.reset_runtime_registrations!
+    reset_workflow_union_cache!
+    Hive::Workflows::Project.reset!
+  end
+
   def test_admission_snapshot_fails_closed_when_prerequisite_moves_after_enumeration
     with_tmp_dir do |root|
       dependent = write_task_meta(root, "4-execute", "dependent-task", id: 2)
@@ -402,5 +436,39 @@ class DependencySnapshotTest < Minitest::Test
 
   def execute_folder(root, slug)
     File.join(root, ".hive-state", "stages", "4-execute", slug)
+  end
+
+  def shared_stage_terminal_workflow
+    Hive::Workflow.new(
+      id: :terminal_shared,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "start", index: 1, state_file: "start.md", kind: :inert
+        ),
+        Hive::Workflow::Stage.new(
+          name: "shared", index: 2, state_file: "shared.md", kind: :inert,
+          advance_verb: Hive::Workflow::AdvanceVerb.new(name: "shared")
+        )
+      ]
+    )
+  end
+
+  def shared_stage_active_workflow
+    Hive::Workflow.new(
+      id: :active_shared,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "start", index: 1, state_file: "start.md", kind: :inert
+        ),
+        Hive::Workflow::Stage.new(
+          name: "shared", index: 2, state_file: "shared.md", kind: :agent,
+          advance_verb: Hive::Workflow::AdvanceVerb.new(name: "shared")
+        ),
+        Hive::Workflow::Stage.new(
+          name: "done", index: 3, state_file: "done.md", kind: :inert,
+          advance_verb: Hive::Workflow::AdvanceVerb.new(name: "done")
+        )
+      ]
+    )
   end
 end

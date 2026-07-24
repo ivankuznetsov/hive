@@ -3,7 +3,7 @@ title: hive doctor
 type: command
 source: skills/hive/, lib/hive/commands/doctor.rb, lib/hive/agent_skills/{inspector,filesystem_inventory}.rb, lib/hive/agent_skills/adapters/openclaw.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-07-20
+updated: 2026-07-23
 tags: [command, preflight, skills, hive, openclaw, tmux, provisioning]
 ---
 
@@ -35,9 +35,12 @@ The CLI loads the project through the shared `Hive::Config.load` boundary
 before constructing the doctor inspector. Unsupported project root keys
 therefore stop the command with exit 78 before any tmux, QMD, agent, or skill
 probe runs and before a success table/JSON report is emitted. The error names
-the config path and every unsupported key; a root-level `reviewers` key gives
-the direct correction to move it under `review.reviewers`. This is the same
-configuration failure other project commands receive, not a doctor-only check.
+the config path and every unsupported key. During the reviewers migration
+window, a valid root-level `reviewers` value is promoted to
+`review.reviewers` with a `hive migrate` warning; an invalid promoted value or
+a conflict with an already-authored `review.reviewers` still exits 78 before
+probes. This is the same configuration boundary other project commands
+receive, not a doctor-only check.
 
 ## Managed target and health model
 

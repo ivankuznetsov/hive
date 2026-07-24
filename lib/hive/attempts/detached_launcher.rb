@@ -1,11 +1,10 @@
 require "json"
 require "rbconfig"
+require "hive/attempts/contracts"
 require "hive/attempts/store"
 
 module Hive
   module Attempts
-    class UnsupportedDetachment < Hive::Error; end
-
     # POSIX double-fork adapter. The short-lived launcher creates a new
     # session, forks the authoritative wrapper into it, then exits so neither
     # the foreground caller nor daemon remains the wrapper's lifecycle parent.

@@ -129,7 +129,7 @@ class CommandsStageActionTest < Minitest::Test
     end
   end
 
-  def test_durable_call_dispatches_stage_worker_without_promoting_in_caller
+  def test_durable_call_uses_attempts_api_without_promoting_in_caller
     task = Struct.new(:folder).new("/tmp/task-folder")
     result = Hive::Attempts::ClientResult.new(
       status: :terminal, exit_status: 0, outcome: "succeeded",
@@ -139,13 +139,14 @@ class CommandsStageActionTest < Minitest::Test
     entrypoint = Object.new
     entrypoint.define_singleton_method(:dispatch) { |**kwargs| calls << kwargs; result }
     command = Hive::Commands::StageAction.new(
-      "plan", "some-slug", from: "2-brainstorm", json: true,
-      durable: true, attempt_entrypoint: entrypoint
+      "plan", "some-slug", from: "2-brainstorm", json: true, durable: true
     )
     command.define_singleton_method(:resolve_task) { task }
     command.define_singleton_method(:do_call) { flunk "durable caller promoted task" }
 
-    assert_same result, command.call
+    with_replaced_singleton_method(Hive::Attempts::API, :new, -> { entrypoint }) do
+      assert_same result, command.call
+    end
     assert_equal "3-plan", calls.first.fetch(:intended_stage)
     assert_equal [ "hive", "plan", "/tmp/task-folder", "--from", "2-brainstorm", "--json" ],
                  calls.first.fetch(:argv)

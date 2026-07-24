@@ -427,12 +427,14 @@ class CommandsRunTest < Minitest::Test
     entrypoint = Object.new
     calls = []
     entrypoint.define_singleton_method(:dispatch) { |**kwargs| calls << kwargs; result }
-    run = command(durable: true, json: true, no_rebase: true, attempt_entrypoint: entrypoint)
+    run = command(durable: true, json: true, no_rebase: true)
     resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
     run.define_singleton_method(:resolve_task) { resolved }
     run.define_singleton_method(:do_call) { flunk "durable caller executed worker body" }
 
-    assert_same result, run.call
+    with_replaced_singleton_method(Hive::Attempts::API, :new, -> { entrypoint }) do
+      assert_same result, run.call
+    end
     assert_equal 1, calls.length
     assert_equal "4-execute", calls.first.fetch(:intended_stage)
     assert_equal [ "hive", "run", "/tmp/task-folder", "--json", "--no-rebase" ],

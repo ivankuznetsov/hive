@@ -17,6 +17,8 @@ reconciles and applies policy; it does not own or reap task agents.
 
 | Module | Responsibility |
 |--------|----------------|
+| `API` | Provide Hive commands, bot delivery, and daemon recovery with the stable admission operations `dispatch`, `dispatch_request`, and `dispatch_successor`, while keeping one injected store shared by its foreground and daemon adapters. |
+| `Contracts` | Define the public `ClientResult`, `DispatchResult`, and `UnsupportedDetachment` values independently of the internal client, dispatcher, and launcher implementations. |
 | `Record`, `Store` | Write v2 records, ingest v1/v2, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, and expose process-local compatibility projections after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
@@ -28,6 +30,27 @@ reconciles and applies policy; it does not own or reap task agents.
 | `Reconciler`, `ProcessIdentity` | Adopt without `wait2`, detect PID/start/session/group mismatch, preserve suspects, expire launches, and normalize loss. |
 | `DirtyStateCapture`, `LostOutcomeStore` | Inventory partial git/untracked/binary work without mutation and make cleanup/successor policy restart-idempotent. |
 | `LegacyBackfiller` | Create a compatibility lease only when legacy task/PID/start identity is trustworthy. |
+
+## Admission API boundary
+
+`Hive::Attempts::API` is the consumer-facing boundary for admission. Hive is
+its first and primary consumer: durable CLI commands call `dispatch`, bot and
+other local producers call the same operation non-interactively, and daemon
+queue delivery or loss recovery call `dispatch_request` and
+`dispatch_successor`. An injected `Store` is shared by both adapter paths.
+
+`Entrypoint` and `ConfiguredDispatcher` are internal adapters behind that
+boundary. `Dispatcher`, `DetachedLauncher`, `Client`, and the persistence
+classes remain implementation collaborators rather than construction points
+for new admission consumers. `Contracts` owns the returned `DispatchResult`
+and `ClientResult` values plus the public `UnsupportedDetachment` admission
+error, so consumers do not load those internal adapters merely to interpret an
+outcome.
+
+This boundary does not split Attempts into another repository, process, or gem.
+It creates an in-monorepo seam that Hive can exercise first; a separately
+published package remains a later response to demonstrated non-Hive demand,
+not a requirement of the module design.
 
 ## Storage and identity
 
@@ -96,13 +119,14 @@ worker.
 
 ## Admission and execution
 
-Public `hive run` and workflow verbs enter `Attempts::Entrypoint`. Bot/web v3
-requests, daemon queue/auto-advance, and recovery use the same dispatcher;
-pending v2 requests remain readable. The launcher double-forks into a distinct
-session. The dispatcher gives the wrapper a one-time random capability through
-an inherited pipe; the private `__attempt-supervise` route accepts no worker
-command argv and can claim only by proving that capability against the
-immutable record digest. The supervisor then executes the record's exact argv.
+Public `hive run` and workflow verbs enter `Attempts::API`, which delegates to
+its foreground adapter. Bot/web v3 requests, daemon queue/auto-advance, and
+recovery use the same API boundary; pending v2 requests remain readable. The
+launcher double-forks into a distinct session. The dispatcher gives the wrapper
+a one-time random capability through an inherited pipe; the private
+`__attempt-supervise` route accepts no worker command argv and can claim only
+by proving that capability against the immutable record digest. The supervisor
+then executes the record's exact argv.
 Admission is reported accepted after the launcher confirms the claim or
 reports the authenticated wrapper in its durable `launching` state. A
 false/malformed handoff or launcher exception marks the unclaimed reservation

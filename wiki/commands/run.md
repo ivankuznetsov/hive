@@ -30,7 +30,7 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json] [--no-rebase]
 ## Steps performed (`Commands::Run#call`)
 
 1. The public route resolves `TARGET`, derives stage/progress identity, and
-   calls `Attempts::Entrypoint`.
+   calls `Attempts::API#dispatch`.
 2. Under the generation lock, admission replays a receipt, attaches to a live
    duplicate, defers a lost owner to healer policy, or creates one `launching`
    record after capacity checks.

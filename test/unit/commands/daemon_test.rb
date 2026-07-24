@@ -137,6 +137,7 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_equal true, captured.fetch(:dry_run)
     assert_instance_of Hive::Daemon::DigestScheduler, captured.fetch(:digest_scheduler)
     assert_instance_of Hive::Daemon::AnswerDigestScheduler, captured.fetch(:answer_digest_scheduler)
+    assert_instance_of Hive::Attempts::API, captured.fetch(:attempt_dispatcher)
     reconciler = captured.fetch(:refactor_patrol_merge_reconciler)
     assert_instance_of Hive::Daemon::RefactorPatrolMergeReconciler, reconciler
     assert_same reconciler, captured.fetch(:merge_watcher).instance_variable_get(:@merge_intake),

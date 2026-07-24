@@ -1,4 +1,5 @@
 require "securerandom"
+require "hive/attempts/contracts"
 require "hive/attempts/capability"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/generation"
@@ -7,13 +8,6 @@ require "hive/workflows"
 
 module Hive
   module Attempts
-    # Result of semantic admission. Live duplicates are ordinary successful
-    # resolutions, not errors; only a fresh :accepted result invokes launcher.
-    DispatchResult = Data.define(:status, :attempt, :receipt, :attach_descriptor, :reason) do
-      def accepted? = status == :accepted
-      def live? = %i[accepted existing_live].include?(status)
-    end
-
     class Dispatcher
       DEFAULT_LIMITS = { max_global: 3, max_per_project: 3, max_daily: 50 }.freeze
 

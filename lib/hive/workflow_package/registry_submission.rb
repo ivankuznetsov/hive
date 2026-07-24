@@ -5,11 +5,17 @@ require "hive/workflow_package/registry_gateway"
 
 module Hive
   module WorkflowPackage
+    class PublishPolicyBlocked < Hive::Error
+      def exit_code = Hive::ExitCodes::USAGE
+    end
+
     class RegistrySubmission
       Result = Data.define(:receipt, :pull_request)
+      VerifiedCandidate = Data.define(:pull_request, :base_oid)
       METADATA = /<!-- hive-workflow-publish:v1 (\{[^\n]+\}) -->/
 
-      def initialize(registry:, base_branch:, gateway: RegistryGateway.new, store: PublishStore.new)
+      def initialize(registry:, base_branch:, gateway: RegistryGateway.new, store: PublishStore.new,
+                     clock: nil)
         unless PublishReceipt::REPOSITORY.match?(registry.to_s)
           raise Hive::ConfigError, "Honeycomb registry repository must be owner/name"
         end
@@ -20,18 +26,30 @@ module Hive
         @base_branch = base_branch
         @gateway = gateway
         @store = store
+        @clock = clock || -> { Time.now.utc }
       end
 
-      def submit(package)
+      def submit(package, allow_mutation: true)
         receipt = @store.create_or_load(package, registry: @registry)
         @store.verify_bundle(receipt)
         login = @gateway.authenticate!
         branch = "honeycomb-#{package.name}-#{package.version}-#{package.release_digest[0, 12]}"
-        candidate = reconcile_candidates!(@gateway.pull_requests(@registry), package, branch)
-        return Result.new(receipt: adopt(receipt, candidate, package), pull_request: candidate) if candidate
+        candidate = reconcile_candidates!(
+          @gateway.pull_requests(@registry), package, receipt: receipt, login: login
+        )
+        if candidate
+          return Result.new(
+            receipt: adopt(receipt, candidate, package, login: login),
+            pull_request: candidate.pull_request
+          )
+        end
 
         base_identity = @gateway.version_present?(@registry, @base_branch, package)
         raise_immutable_version!(base_identity, package) if base_identity
+        unless allow_mutation
+          raise PublishPolicyBlocked,
+                "current Honeycomb lint policy blocks any new fork, branch, or pull-request mutation"
+        end
 
         if receipt.last_completed_step == "validated"
           mode = @gateway.direct_permission?(@registry, login) ? "direct" : "fork"
@@ -40,7 +58,7 @@ module Hive
           receipt = prepare(receipt, login, branch, head_repository, mode, base_oid)
         else
           validate_retained_destination!(receipt, login, branch)
-          mode = receipt.data["submission_mode"] || "fork"
+          mode = receipt.data.fetch("submission_mode")
           head_repository = receipt.data.fetch("head_repository")
           base_oid = receipt.data.fetch("base_sha")
         end
@@ -73,6 +91,8 @@ module Hive
           unless at_least?(receipt, "push_intent")
             receipt = save(receipt.advance("push_intent", commit_oid: commit_oid))
           end
+          current_identity = @gateway.version_present?(@registry, @base_branch, package)
+          raise_immutable_version!(current_identity, package) if current_identity
           @gateway.push_expected_absent(checkout, branch, commit_oid)
           remote_oid = @gateway.branch_oid(head_repository, branch)
           verify_branch!(remote_oid, commit_oid, head_repository, branch, package)
@@ -84,10 +104,15 @@ module Hive
           repository: @registry, base_branch: @base_branch,
           head_repository: head_repository, branch: branch, package: package
         )
-        candidate = reconcile_candidates!(@gateway.pull_requests(@registry), package, branch)
+        candidate = reconcile_candidates!(
+          @gateway.pull_requests(@registry), package, receipt: receipt, login: login
+        )
         raise PublishAmbiguousError, "registry pull-request outcome is unknown" unless candidate
 
-        Result.new(receipt: adopt(receipt, candidate, package), pull_request: candidate)
+        Result.new(
+          receipt: adopt(receipt, candidate, package, login: login),
+          pull_request: candidate.pull_request
+        )
       end
 
       private
@@ -106,15 +131,16 @@ module Hive
 
       def prepare(receipt, login, branch, head_repository, mode, base_oid)
         attributes = {
+          submission_mode: mode,
           destination_repository: @registry, base_branch: @base_branch,
           base_sha: base_oid, head_repository: head_repository,
           head_branch: branch, owner: login
         }
-        attributes[:submission_mode] = "direct" if mode == "direct"
+        attributes.merge!(fork_parent: @registry, fork_owner: login) if mode == "fork"
         save(receipt.advance("prepared", attributes))
       end
 
-      def reconcile_candidates!(pull_requests, package, branch)
+      def reconcile_candidates!(pull_requests, package, receipt:, login:)
         same_version = pull_requests.filter_map do |pr|
           metadata = parse_metadata(pr.body)
           next unless metadata && metadata["name"] == package.name && metadata["version"] == package.version
@@ -125,7 +151,7 @@ module Hive
         end
         raise PublishConflict, "workflow version already has a different immutable submission" unless conflicts.empty?
         matches = same_version.select do |pr, metadata|
-          pr.head_branch == branch && metadata["release_digest"] == package.release_digest &&
+          metadata["release_digest"] == package.release_digest &&
             metadata["package_digest"] == package.package_digest
         end
         raise PublishConflict, "multiple pull requests claim the same immutable submission" if matches.length > 1
@@ -133,28 +159,55 @@ module Hive
 
         pr = matches.first.first
         raise PublishConflict, "registry pull request is draft or targets the wrong base" if pr.draft || pr.base_branch != @base_branch
+        base_oid = @gateway.commit_parent_oid(pr.head_repository, pr.head_oid)
+        verify_candidate_authority!(pr, base_oid, receipt, login)
         @gateway.verify_remote_package!(pr.head_repository, pr.head_oid, package)
         remote_oid = @gateway.branch_oid(pr.head_repository, pr.head_branch)
         raise PublishConflict, "registry pull request head no longer matches its branch" unless remote_oid == pr.head_oid
-        pr
+        VerifiedCandidate.new(pull_request: pr, base_oid: base_oid).freeze
       end
 
-      def adopt(receipt, pr, _package)
-        owner = receipt.data["owner"] || pr.head_repository.split("/", 2).first
+      def verify_candidate_authority!(pr, base_oid, receipt, login)
+        mode = pr.head_repository == @registry ? "direct" : "fork"
+        head_owner = pr.head_repository.split("/", 2).first
+        if mode == "fork"
+          @gateway.verify_fork!(pr.head_repository, parent: @registry, owner: head_owner)
+        end
+        expected = {
+          "submission_mode" => mode, "destination_repository" => @registry,
+          "base_branch" => @base_branch, "base_sha" => base_oid,
+          "head_repository" => pr.head_repository, "head_branch" => pr.head_branch,
+          "commit_oid" => pr.head_oid, "owner" => login
+        }
+        expected["fork_parent"] = @registry if mode == "fork"
+        expected["fork_owner"] = head_owner if mode == "fork"
+        expected.each do |key, value|
+          next unless receipt.data.key?(key)
+          raise PublishConflict, "remote pull request conflicts with retained publication authority" unless receipt.data[key] == value
+        end
+      end
+
+      def adopt(receipt, candidate, _package, login:)
+        pr = candidate.pull_request
         mode = receipt.data["submission_mode"] || (pr.head_repository == @registry ? "direct" : "fork")
+        head_owner = pr.head_repository.split("/", 2).first
         attributes = {
           submission_mode: mode, destination_repository: @registry, base_branch: @base_branch,
-          head_repository: pr.head_repository, head_branch: pr.head_branch, owner: owner,
+          base_sha: candidate.base_oid, head_repository: pr.head_repository,
+          head_branch: pr.head_branch, owner: receipt.data["owner"] || login,
           commit_oid: pr.head_oid, pr_number: pr.number, pr_url: pr.url
         }
-        attributes.merge!(fork_parent: @registry, fork_owner: owner) if mode == "fork"
+        attributes.merge!(fork_parent: @registry, fork_owner: head_owner) if mode == "fork"
         receipt = save(receipt.advance("pr_verified", attributes))
         state = case pr.state
         when "OPEN" then "pending_review"
         when "MERGED" then "merged_pending_listing"
         else "closed_unmerged"
         end
-        save(receipt.observe(state: state, observed_at: Time.now.utc.iso8601, pr_url: pr.url, pr_number: pr.number))
+        save(receipt.observe(
+          state: state, observed_at: @clock.call.utc.iso8601,
+          pr_url: pr.url, pr_number: pr.number
+        ))
       rescue PublishRecoveryError
         raise PublishConflict, "remote pull request identity conflicts with retained publication state"
       end

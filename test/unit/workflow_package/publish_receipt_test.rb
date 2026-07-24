@@ -6,13 +6,8 @@ class WorkflowPackagePublishReceiptTest < Minitest::Test
 
   def test_identity_is_immutable_and_progress_is_monotonic
     receipt = Receipt.build(**identity)
-    receipt = receipt.advance("prepared", "base_sha" => "b" * 40)
-    receipt = receipt.advance(
-      "push_intent", "submission_mode" => "direct",
-      "destination_repository" => "owner/registry", "base_branch" => "main",
-      "head_repository" => "owner/registry", "head_branch" => "honeycomb-demo",
-      "owner" => "owner", "commit_oid" => "c" * 40
-    )
+    receipt = receipt.advance("prepared", direct_submission_fields)
+    receipt = receipt.advance("push_intent", "commit_oid" => "c" * 40)
 
     assert_equal "push_intent", receipt.last_completed_step
     assert_equal "c" * 40, receipt.data.fetch("commit_oid")
@@ -26,7 +21,7 @@ class WorkflowPackagePublishReceiptTest < Minitest::Test
   end
 
   def test_current_observation_is_separate_from_identity_and_preserves_timestamp
-    receipt = Receipt.build(**identity).observe(
+    receipt = submitted_receipt.observe(
       state: "pending_review", observed_at: "2026-07-21T12:00:00Z",
       pr_url: "https://github.com/owner/registry/pull/1", pr_number: 1
     )
@@ -36,6 +31,26 @@ class WorkflowPackagePublishReceiptTest < Minitest::Test
     cached = receipt.cached_observation
     assert_equal "cached", cached.fetch("freshness")
     assert_equal receipt.observation.fetch("observed_at"), cached.fetch("observed_at")
+  end
+
+  def test_continuations_cannot_erase_write_once_fields_or_regress_observations
+    submitted = submitted_receipt
+    pending = submitted.observe(
+      state: "pending_review", observed_at: "2026-07-21T12:00:00Z",
+      pr_url: "https://github.com/owner/registry/pull/1", pr_number: 1
+    )
+    listed = pending.observe(
+      state: "listed", observed_at: "2026-07-21T13:00:00Z",
+      pr_url: "https://github.com/owner/registry/pull/1", pr_number: 1
+    )
+
+    assert_same listed, pending.assert_continuation!(listed)
+    assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+      listed.assert_continuation!(pending)
+    end
+    assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+      listed.assert_continuation!(submitted)
+    end
   end
 
   def test_receipt_parser_rejects_unknown_versions_and_malformed_mode_fields
@@ -54,6 +69,25 @@ class WorkflowPackagePublishReceiptTest < Minitest::Test
   end
 
   private
+
+  def submitted_receipt
+    Receipt.build(**identity).advance(
+      "pr_verified",
+      direct_submission_fields.merge(
+        "commit_oid" => "c" * 40, "pr_number" => 1,
+        "pr_url" => "https://github.com/owner/registry/pull/1"
+      )
+    )
+  end
+
+  def direct_submission_fields
+    {
+      "submission_mode" => "direct", "destination_repository" => "owner/registry",
+      "base_branch" => "main", "base_sha" => "b" * 40,
+      "head_repository" => "owner/registry", "head_branch" => "honeycomb-demo",
+      "owner" => "owner"
+    }
+  end
 
   def identity
     {

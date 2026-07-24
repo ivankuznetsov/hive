@@ -26,6 +26,7 @@ module Hive
         submission_mode destination_repository base_branch base_sha head_repository
         head_branch owner fork_parent fork_owner commit_oid pr_number pr_url observation
       ].freeze
+      WRITE_ONCE_KEYS = (OPTIONAL_KEYS - [ "observation" ]).freeze
       KEYS = ([ "schema", *IDENTITY_KEYS, "last_completed_step", *OPTIONAL_KEYS ]).freeze
 
       attr_reader :data
@@ -73,13 +74,46 @@ module Hive
               "immutable workflow publication conflict for #{registry}/#{name}@#{version}"
       end
 
+      def assert_continuation!(candidate)
+        unless candidate.is_a?(PublishReceipt)
+          raise PublishRecoveryError, "publication receipt continuation is invalid"
+        end
+        assert_identity!(
+          registry: candidate.registry, name: candidate.name, version: candidate.version,
+          package_digest: candidate.package_digest, release_digest: candidate.release_digest,
+          lint_contract: candidate.lint_contract
+        )
+        current_index = STEPS.index(last_completed_step)
+        candidate_index = STEPS.index(candidate.last_completed_step)
+        if candidate_index < current_index
+          raise PublishRecoveryError, "publication receipt update moves backwards"
+        end
+        WRITE_ONCE_KEYS.each do |key|
+          next unless data.key?(key)
+          unless candidate.data.key?(key) && candidate.data[key] == data[key]
+            raise PublishRecoveryError, "publication receipt update changed write-once field #{key}"
+          end
+        end
+        if observation
+          unless candidate.observation
+            raise PublishRecoveryError, "publication receipt update erased lifecycle evidence"
+          end
+          validate_transition!(observation.fetch("state"), candidate.observation.fetch("state"))
+          if Time.iso8601(candidate.observation.fetch("observed_at")) <
+             Time.iso8601(observation.fetch("observed_at"))
+            raise PublishRecoveryError, "publication receipt observation time moved backwards"
+          end
+        end
+        candidate
+      end
+
       def advance(step, attributes = {})
         target = STEPS.index(step.to_s)
         current = STEPS.index(last_completed_step)
         raise PublishRecoveryError, "publication receipt step is unknown" unless target && current
         raise PublishRecoveryError, "publication receipt progress cannot move backwards" if target < current
         normalized = stringify(attributes)
-        unknown = normalized.keys - OPTIONAL_KEYS
+        unknown = normalized.keys - WRITE_ONCE_KEYS
         raise PublishRecoveryError, "publication receipt update contains unsupported fields" unless unknown.empty?
 
         copy = deep_copy(data)
@@ -127,6 +161,7 @@ module Hive
         validate_lint_contract!
         fail!("last completed step is malformed") unless STEPS.include?(data["last_completed_step"])
         validate_optional_fields!
+        validate_step_fields!
         deep_freeze(data)
         true
       end
@@ -139,7 +174,7 @@ module Hive
           "pending_review" => %w[pending_review merged_pending_listing listed closed_unmerged],
           "merged_pending_listing" => %w[merged_pending_listing listed],
           "listed" => %w[listed],
-          "closed_unmerged" => %w[closed_unmerged]
+          "closed_unmerged" => %w[closed_unmerged listed]
         }
         fail!("lifecycle observation cannot move backwards") unless allowed.fetch(from, []).include?(to)
       end
@@ -186,11 +221,45 @@ module Hive
             fail!("direct submission head must be the destination") unless data["head_repository"] == data["destination_repository"]
             fail!("direct submission cannot carry fork identity") if data["fork_parent"] || data["fork_owner"]
           else
-            fail!("fork submission identity is incomplete") unless data["fork_parent"] == data["destination_repository"] && data["fork_owner"] == data["owner"]
+            head_owner = data["head_repository"].to_s.split("/", 2).first
+            fail!("fork submission identity is incomplete") unless data["fork_parent"] == data["destination_repository"] && data["fork_owner"] == head_owner
             fail!("fork submission head must differ from destination") if data["head_repository"] == data["destination_repository"]
           end
         end
         validate_observation! if data["observation"]
+      end
+
+      def validate_step_fields!
+        step_index = STEPS.index(last_completed_step)
+        prepared_index = STEPS.index("prepared")
+        submission_fields = WRITE_ONCE_KEYS - %w[pr_number pr_url commit_oid]
+        if step_index < prepared_index
+          fail!("validated receipt contains premature submission identity") if submission_fields.any? { |key| data.key?(key) }
+        else
+          required = %w[
+            submission_mode destination_repository base_branch base_sha head_repository
+            head_branch owner
+          ]
+          fail!("prepared submission identity is incomplete") unless required.all? { |key| data.key?(key) }
+        end
+        mode = data["submission_mode"]
+        if mode == "fork" && step_index >= prepared_index
+          fail!("prepared fork identity is incomplete") unless %w[fork_parent fork_owner].all? { |key| data.key?(key) }
+        end
+        if %w[fork_create_intent fork_verified].include?(last_completed_step) && mode != "fork"
+          fail!("fork progress requires fork submission mode")
+        end
+        if step_index >= STEPS.index("push_intent")
+          fail!("push progress requires a retained commit") unless data.key?("commit_oid")
+        end
+        if step_index >= STEPS.index("pr_verified")
+          fail!("verified PR identity is incomplete") unless %w[pr_number pr_url].all? { |key| data.key?(key) }
+        elsif data["pr_number"] || data["pr_url"]
+          fail!("PR identity cannot precede verification")
+        end
+        if data["observation"] && step_index < STEPS.index("pr_verified")
+          fail!("lifecycle observation requires a verified PR")
+        end
       end
 
       def validate_observation!

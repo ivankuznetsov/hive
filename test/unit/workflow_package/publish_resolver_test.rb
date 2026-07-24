@@ -10,8 +10,12 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
 
     def verify_bundle(_receipt) = "/retained/package"
 
-    def save(receipt)
-      @saved = receipt
+    def update(_registry, _name, _version)
+      @saved = yield(@receipt)
+    end
+
+    def receipt=(receipt)
+      @receipt = receipt
     end
   end
 
@@ -39,6 +43,7 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
     end
 
     def branch_oid(_repository, _branch) = @pr.head_oid
+    def commit_parent_oid(_repository, _oid) = "b" * 40
     def verify_remote_package!(_repository, _ref, _package) = true
   end
 
@@ -58,6 +63,20 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
     result = resolver(receipt, catalogue: Catalogue.new(listed: true), gateway: gateway).resolve(receipt)
     assert_equal "listed", result.state
     assert_equal "current", result.freshness
+  end
+
+  def test_exact_catalogue_advances_even_a_prior_closed_observation
+    receipt = receipt_for("CLOSED").observe(
+      state: "closed_unmerged", observed_at: "2026-07-21T11:00:00Z",
+      pr_url: pr("CLOSED").url, pr_number: 42
+    )
+
+    result = resolver(
+      receipt, catalogue: Catalogue.new(listed: true),
+      gateway: Gateway.new(pr: pr("CLOSED"), error: RuntimeError.new("must not read GitHub"))
+    ).resolve(receipt)
+
+    assert_equal "listed", result.state
   end
 
   def test_offline_uses_original_cached_observation_time
@@ -89,12 +108,28 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
     end
   end
 
+  def test_concurrent_stale_observation_cannot_regress_a_newer_lifecycle
+    receipt = receipt_for("OPEN").observe(
+      state: "merged_pending_listing", observed_at: "2026-07-21T11:30:00Z",
+      pr_url: pr("OPEN").url, pr_number: 42
+    )
+
+    result = resolver(
+      receipt, catalogue: Catalogue.new, gateway: Gateway.new(pr: pr("OPEN"))
+    ).resolve(receipt)
+
+    assert_equal "merged_pending_listing", result.state
+    assert_equal "2026-07-21T11:30:00Z", result.observed_at
+  end
+
   private
 
   def resolver(_receipt, catalogue:, gateway:)
+    store = Store.new
+    store.receipt = _receipt
     Hive::WorkflowPackage::PublishResolver.new(
       registry: "ivankuznetsov/honeycomb", gateway: gateway, catalogue: catalogue,
-      store: Store.new, clock: -> { Time.iso8601("2026-07-21T12:00:00Z") }
+      store: store, clock: -> { Time.iso8601("2026-07-21T12:00:00Z") }
     )
   end
 
@@ -111,7 +146,7 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
       }
     ).advance(
       "pr_verified", submission_mode: "direct", destination_repository: "ivankuznetsov/honeycomb",
-      base_branch: "main", head_repository: "ivankuznetsov/honeycomb",
+      base_branch: "main", base_sha: "b" * 40, head_repository: "ivankuznetsov/honeycomb",
       head_branch: "honeycomb-demo-1.0.0-#{'b' * 12}", owner: "alice", commit_oid: "c" * 40,
       pr_number: 42, pr_url: pr(remote_state).url
     )

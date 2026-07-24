@@ -58,10 +58,7 @@ module Hive
         path = receipt_path(receipt.registry, receipt.name, receipt.version)
         PublishLock.with_lock(root, identity_key(receipt.registry, receipt.name, receipt.version)) do
           current = read_receipt(path)
-          current.assert_identity!(**symbol_identity(receipt))
-          current_index = PublishReceipt::STEPS.index(current.last_completed_step)
-          next_index = PublishReceipt::STEPS.index(receipt.last_completed_step)
-          raise PublishRecoveryError, "publication receipt update moves backwards" if next_index < current_index
+          current.assert_continuation!(receipt)
           write_receipt(path, receipt)
         end
         receipt
@@ -73,7 +70,7 @@ module Hive
           current = read_receipt(path)
           updated = yield current
           raise PublishRecoveryError, "publication receipt update returned an invalid value" unless updated.is_a?(PublishReceipt)
-          current.assert_identity!(**symbol_identity(updated))
+          current.assert_continuation!(updated)
           write_receipt(path, updated)
           updated
         end

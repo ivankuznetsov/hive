@@ -43,6 +43,21 @@ class WorkflowPackagePublisherTest < Minitest::Test
     end
   end
 
+  def test_reviewable_high_risk_permissions_are_not_rejected_by_runtime_admission
+    with_authored_workflow do |project, authored_dir|
+      descriptor = File.join(File.dirname(authored_dir), "demo.yml")
+      File.write(descriptor, File.read(descriptor).sub("permissions: read-only", "permissions: yolo"))
+
+      package = Dir.mktmpdir("publisher-test-") do |destination|
+        publisher(project).package(destination: destination)
+      end
+
+      assert_includes package.warnings.map { |warning| warning.fetch("rule_id") },
+                      "permission.broad-declaration"
+      assert_equal false, package.mutation_blocked?
+    end
+  end
+
   def test_missing_or_placeholder_metadata_stops_before_submission
     with_authored_workflow do |project, authored_dir|
       File.write(File.join(authored_dir, "honeycomb.yml"), "summary: Describe what this workflow does\nauthor:\n  name: Your name\n")
@@ -54,9 +69,14 @@ class WorkflowPackagePublisherTest < Minitest::Test
 
   def test_publish_delegates_to_the_registry_submission
     submitted = nil
+    allowed = nil
     submission = Object.new
     receipt = Object.new
-    submission.define_singleton_method(:submit) { |package| submitted = package; Struct.new(:receipt).new(receipt) }
+    submission.define_singleton_method(:submit) do |package, allow_mutation:|
+      submitted = package
+      allowed = allow_mutation
+      Struct.new(:receipt).new(receipt)
+    end
     resolver = Object.new
     resolver.define_singleton_method(:resolve) { |value| value.equal?(receipt) ? "submitted" : raise("wrong receipt") }
     store = Object.new
@@ -70,6 +90,7 @@ class WorkflowPackagePublisherTest < Minitest::Test
 
     assert_equal "submitted", instance.publish(package)
     assert_same package, submitted
+    assert_equal true, allowed
   end
 
   def test_publish_reconciles_a_verified_receipt_before_any_new_submission
@@ -88,6 +109,33 @@ class WorkflowPackagePublisherTest < Minitest::Test
     )
 
     assert_equal "current", instance.publish(package)
+  end
+
+  def test_current_policy_findings_allow_observation_but_not_new_mutation
+    finding = {
+      "rule_id" => "deny.pipe-to-shell", "severity" => "error",
+      "path" => "instructions/work.md", "message" => "blocked"
+    }
+    package = Package.new(
+      name: "demo", version: "1.2.3", root: Dir.pwd,
+      manifest_digest: "a" * 64, warnings: [ finding ], findings: [ finding ]
+    )
+    store = Object.new
+    store.define_singleton_method(:load) { |_registry, _name, _version| nil }
+    submission = Object.new
+    submission.define_singleton_method(:submit) do |_package, allow_mutation:|
+      raise "mutation was allowed" if allow_mutation
+      Struct.new(:receipt).new(:discovered)
+    end
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { |receipt| receipt == :discovered ? "observed" : raise }
+    instance = Hive::WorkflowPackage::Publisher.new(
+      "demo", project_root: Dir.pwd, version: "1.2.3",
+      submission: submission, resolver: resolver, store: store
+    )
+
+    assert package.mutation_blocked?
+    assert_equal "observed", instance.publish(package)
   end
 
   def test_package_rejects_invalid_identity_and_nonempty_destination

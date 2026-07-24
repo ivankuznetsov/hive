@@ -147,7 +147,8 @@ module Hive
 
         def error_kind(error)
           case error
-          when ValidationError, Hive::WorkflowPackage::PackageError then "validation"
+          when ValidationError, Hive::WorkflowPackage::PackageError,
+               Hive::WorkflowPackage::PublishPolicyBlocked then "validation"
           when Hive::WorkflowPackage::PublishAuthenticationError then "authentication"
           when Hive::WorkflowPackage::PublishOfflineError, Hive::WorkflowPackage::CatalogueUnavailable then "offline"
           when Hive::WorkflowPackage::PublishConflict then "immutable_conflict"

@@ -30,6 +30,13 @@ class WorkflowPublishSubmissionIntegrationTest < Minitest::Test
       "#{login}/#{repository.split('/').last}"
     end
 
+    def verify_fork!(_repository, parent:, owner:)
+      raise "wrong fork parent" unless parent == "ivankuznetsov/honeycomb" && owner == "alice"
+      true
+    end
+
+    def commit_parent_oid(_repository, _oid) = "b" * 40
+
     def prepare_commit(*_args, **_kwargs) = [ "/retained/commit", "c" * 40 ]
     def branch_oid(_repository, _branch) = @branch_oid
 
@@ -84,7 +91,8 @@ class WorkflowPublishSubmissionIntegrationTest < Minitest::Test
           remote = Remote.new(package)
           submission = Hive::WorkflowPackage::RegistrySubmission.new(
             registry: "ivankuznetsov/honeycomb", base_branch: "main",
-            gateway: remote, store: store
+            gateway: remote, store: store,
+            clock: -> { Time.iso8601("2026-07-21T11:00:00Z") }
           )
           receipt = submission.submit(package).receipt
           catalogue = Catalogue.new

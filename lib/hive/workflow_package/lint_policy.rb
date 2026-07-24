@@ -60,6 +60,13 @@ module Hive
         raise Hive::ConfigError, "Honeycomb lint policy is missing, unreadable, or malformed"
       end
 
+      def self.load_version(version)
+        unless version.to_s == VERSION
+          raise Hive::ConfigError, "recorded Honeycomb lint policy version is unavailable"
+        end
+        load
+      end
+
       def self.validate!(data)
         unless data.is_a?(Hash) && data.keys.sort == KEYS.sort &&
                data["schema"] == "hive.honeycomb-security-lint-contract/v1" &&

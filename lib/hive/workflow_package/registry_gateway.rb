@@ -73,16 +73,24 @@ module Hive
         10.times do |attempt|
           data = json_optional([ "gh", "repo", "view", fork, "--json", "nameWithOwner,parent" ])
           if data
-            parent = data.dig("parent", "nameWithOwner")
-            unless data["nameWithOwner"] == fork && parent == repository
-              raise PublishConflict, "configured fork identity does not match the registry"
-            end
+            validate_fork_data!(data, fork, repository, login)
             return fork
           end
           run!([ "gh", "repo", "fork", repository, "--clone=false", "--remote=false" ], "registry fork creation") if attempt.zero?
           @sleeper.call(1) unless attempt == 9
         end
         raise PublishAmbiguousError, "registry fork outcome is unknown"
+      end
+
+      def verify_fork!(repository, parent:, owner:)
+        validate_repository!(repository)
+        validate_repository!(parent)
+        data = json!(
+          [ "gh", "repo", "view", repository, "--json", "nameWithOwner,parent" ],
+          "registry fork lookup"
+        )
+        validate_fork_data!(data, repository, parent, owner)
+        true
       end
 
       def pull_requests(repository)
@@ -94,6 +102,22 @@ module Hive
         raise PublishOfflineError, "registry pull-request lookup returned invalid data" unless data.is_a?(Array)
 
         data.map { |entry| pull_request(entry) }
+      end
+
+      def commit_parent_oid(repository, oid)
+        validate_repository!(repository)
+        raise PublishRecoveryError, "publication commit identity is malformed" unless SHA.match?(oid.to_s)
+
+        data = json!(
+          [ "gh", "api", "repos/#{repository}/git/commits/#{oid}" ],
+          "registry commit lookup"
+        )
+        parents = data.is_a?(Hash) ? data["parents"] : nil
+        parent = parents.one? && parents.first.is_a?(Hash) ? parents.first["sha"].to_s.downcase : ""
+        unless SHA.match?(parent)
+          raise PublishRecoveryError, "registry publication commit must have one verified parent"
+        end
+        parent
       end
 
       def version_present?(repository, ref, package)
@@ -146,15 +170,18 @@ module Hive
         if File.directory?(File.join(checkout, ".git"))
           oid = git!(checkout, "rev-parse", "HEAD").strip
           retained_branch = git!(checkout, "rev-parse", branch).strip
-          return [ checkout, oid ] if SHA.match?(oid) && oid == retained_branch
+          parent = git!(checkout, "rev-parse", "#{oid}^").strip
+          return [ checkout, oid ] if SHA.match?(oid) && oid == retained_branch && parent == base_oid
           raise PublishRecoveryError, "retained publication commit is inconsistent"
         end
 
         raise PublishRecoveryError, "retained publication object path is not a repository" if File.exist?(checkout)
-        run!([ "git", "clone", "--quiet", "--no-tags", "--branch", base_branch, "--single-branch",
+        run!([ "git", "clone", "--quiet", "--no-checkout", "--no-tags", "--branch", base_branch, "--single-branch",
                "--", "https://github.com/#{repository}.git", checkout ], "registry clone")
+        git!(checkout, "cat-file", "-e", "#{base_oid}^{commit}")
+        git!(checkout, "checkout", "--quiet", "--detach", base_oid)
         actual_base = git!(checkout, "rev-parse", "HEAD").strip
-        raise PublishConflict, "registry base moved during package preparation" unless actual_base == base_oid
+        raise PublishRecoveryError, "recorded registry base is unavailable" unless actual_base == base_oid
 
         target = File.join(checkout, package.registry_path)
         raise PublishConflict, "immutable package version already exists" if File.exist?(target)
@@ -231,7 +258,10 @@ module Hive
         repository = entry.dig("headRepository", "nameWithOwner").to_s
         oid = entry["headRefOid"].to_s.downcase
         unless entry.is_a?(Hash) && entry["number"].is_a?(Integer) && PR_URL.match?(entry["url"].to_s) &&
-               %w[OPEN CLOSED MERGED].include?(entry["state"]) && REPOSITORY.match?(repository) && SHA.match?(oid)
+               %w[OPEN CLOSED MERGED].include?(entry["state"]) && REPOSITORY.match?(repository) &&
+               SHA.match?(oid) &&
+               PublishReceipt::BRANCH.match?(entry["headRefName"].to_s) &&
+               PublishReceipt::BRANCH.match?(entry["baseRefName"].to_s)
           raise PublishOfflineError, "registry pull-request lookup returned malformed evidence"
         end
         PullRequest.new(
@@ -239,6 +269,14 @@ module Hive
           merged_at: entry["mergedAt"], head_repository: repository, head_branch: entry["headRefName"].to_s,
           head_oid: oid, base_branch: entry["baseRefName"].to_s, body: entry["body"].to_s
         ).freeze
+      end
+
+      def validate_fork_data!(data, repository, parent, owner)
+        expected_owner = repository.split("/", 2).first
+        unless data.is_a?(Hash) && data["nameWithOwner"] == repository &&
+               data.dig("parent", "nameWithOwner") == parent && expected_owner == owner
+          raise PublishConflict, "configured fork identity does not match the registry"
+        end
       end
 
       def content_optional(repository, ref, path)

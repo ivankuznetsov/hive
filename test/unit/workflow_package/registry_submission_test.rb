@@ -9,20 +9,28 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
   PullRequest = Hive::WorkflowPackage::RegistryGateway::PullRequest
 
   class FakeGateway
-    attr_reader :mutations
+    attr_reader :mutations, :verified_forks, :version_checks
 
-    def initialize(package, direct: false, fail_push: false)
+    def initialize(package, direct: false, fail_push: false, version_after_prepare: nil)
       @package = package
       @direct = direct
       @fail_push = fail_push
+      @version_after_prepare = version_after_prepare
       @mutations = []
+      @verified_forks = []
+      @version_checks = 0
       @pushed = false
       @pr = nil
     end
 
     def authenticate! = "alice"
     def pull_requests(_repository) = @pr ? [ @pr ] : []
-    def version_present?(_repository, _ref, _package) = nil
+
+    def version_present?(_repository, _ref, _package)
+      @version_checks += 1
+      @version_after_prepare if @version_checks > 1
+    end
+
     def direct_permission?(_repository, _login) = @direct
     def base_oid(_repository, _branch) = "b" * 40
 
@@ -30,6 +38,13 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
       @mutations << :fork
       "#{login}/#{repository.split('/').last}"
     end
+
+    def verify_fork!(repository, parent:, owner:)
+      @verified_forks << [ repository, parent, owner ]
+      true
+    end
+
+    def commit_parent_oid(_repository, _oid) = "b" * 40
 
     def prepare_commit(*_args, **_kwargs) = [ "/retained/objects", "c" * 40 ]
 
@@ -59,6 +74,17 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
         base_branch: base_branch, body: Hive::WorkflowPackage::RegistryGateway.pr_body(package)
       )
       @pr.url
+    end
+
+    def seed_pull_request(package, owner: "bob", branch: "contribution/demo")
+      @pushed = true
+      @pr = PullRequest.new(
+        number: 41, url: "https://github.com/ivankuznetsov/honeycomb/pull/41",
+        state: "OPEN", draft: false, merged_at: nil,
+        head_repository: "#{owner}/honeycomb", head_branch: branch,
+        head_oid: "c" * 40, base_branch: "main",
+        body: Hive::WorkflowPackage::RegistryGateway.pr_body(package)
+      )
     end
   end
 
@@ -143,6 +169,56 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
       assert_includes body, package.release_digest
       assert_includes body, "asterio/hive#705"
       refute_match(/force-push|automatically merge|catalogue edit/i, body)
+    end
+  end
+
+  def test_matching_external_pr_is_adopted_by_verified_identity_not_branch_name
+    with_package do |package|
+      with_tmp_dir do |state|
+        gateway = FakeGateway.new(package)
+        gateway.seed_pull_request(package)
+
+        result = submission_for(state, gateway).submit(package)
+
+        assert_equal "https://github.com/ivankuznetsov/honeycomb/pull/41", result.pull_request.url
+        assert_equal "contribution/demo", result.receipt.data.fetch("head_branch")
+        assert_equal "alice", result.receipt.data.fetch("owner")
+        assert_equal "bob", result.receipt.data.fetch("fork_owner")
+        assert_equal(
+          [ [ "bob/honeycomb", "ivankuznetsov/honeycomb", "bob" ] ],
+          gateway.verified_forks
+        )
+        assert_empty gateway.mutations
+      end
+    end
+  end
+
+  def test_policy_block_allows_discovery_but_stops_new_remote_mutations
+    with_package do |package|
+      with_tmp_dir do |state|
+        gateway = FakeGateway.new(package)
+        error = assert_raises(Hive::WorkflowPackage::PublishPolicyBlocked) do
+          submission_for(state, gateway).submit(package, allow_mutation: false)
+        end
+
+        assert_match(/current Honeycomb lint policy/, error.message)
+        assert_empty gateway.mutations
+      end
+    end
+  end
+
+  def test_target_version_is_rechecked_immediately_before_first_push
+    with_package do |package|
+      with_tmp_dir do |state|
+        identity = { package_digest: "d" * 64, release_digest: "e" * 64 }
+        gateway = FakeGateway.new(package, direct: true, version_after_prepare: identity)
+
+        assert_raises(Hive::WorkflowPackage::PublishConflict) do
+          submission_for(state, gateway).submit(package)
+        end
+        assert_operator gateway.version_checks, :>=, 2
+        refute_includes gateway.mutations, :push
+      end
     end
   end
 

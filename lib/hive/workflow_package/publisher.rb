@@ -1,6 +1,5 @@
 require "fileutils"
 require "digest"
-require "tmpdir"
 require "hive/config"
 require "hive/workflow_package/authoring_metadata"
 require "hive/workflow_package/authoring_lint"
@@ -10,7 +9,6 @@ require "hive/workflow_package/publish_resolver"
 require "hive/workflow_package/publish_store"
 require "hive/workflow_package/registry_client"
 require "hive/workflow_package/registry_submission"
-require "hive/workflow_package/runtime_policy"
 require "hive/workflow_package/source_snapshot"
 require "hive/workflow_package/validator"
 require "hive/workflows/loader"
@@ -39,6 +37,7 @@ module Hive
 
         def manifest_digest = release_digest
         def registry_path = "packages/#{name}/#{version}"
+        def mutation_blocked? = findings.any? { |finding| finding["severity"] == "error" }
       end
 
       def initialize(name, project_root:, version:, submission: nil, resolver: nil, store: nil, config: nil)
@@ -52,34 +51,7 @@ module Hive
       end
 
       def package(destination:)
-        validate_identity!
-        destination = File.expand_path(destination)
-        ensure_empty_destination!(destination)
-        metadata = load_metadata
-        snapshot = SourceSnapshot.capture(
-          name: @name, workflows_dir: workflows_dir, descriptor_path: descriptor_path,
-          authored_dir: authored_dir, metadata: metadata
-        )
-        AuthoringMetadata.validate_readme!(snapshot.files.fetch(README_FILE).bytes, path: README_FILE)
-        build = RegistryManifestBuilder.build!(
-          destination: destination, name: @name, version: @version,
-          metadata: metadata, snapshot: snapshot
-        )
-        result = Validator.validate!(
-          destination, expected_name: @name,
-          expected_manifest_digest: build.release_digest
-        )
-        lint = AuthoringLint.verify!(destination, manifest: build.manifest)
-        admit_runtime!(result.workflow, build.manifest.data.fetch("permissions"), package_root: destination)
-        warnings = result.warnings.map { |warning| publication_finding(warning) } + lint.warnings.map(&:to_h)
-        Package.new(
-          name: @name, version: @version, root: destination,
-          package_digest: build.package_digest,
-          release_digest: build.release_digest,
-          warnings: warnings.freeze,
-          lint_contract: lint.contract,
-          findings: (result.diagnostics.map { |finding| publication_finding(finding) } + lint.findings.map(&:to_h)).freeze
-        ).freeze
+        build_validated_package(destination: destination, lint_policy: LintPolicy.load)
       end
 
       def publish(package)
@@ -88,7 +60,9 @@ module Hive
         if receipt&.last_completed_step == "pr_verified"
           return components.fetch(:resolver).resolve(receipt)
         end
-        submitted = components.fetch(:submission).submit(package)
+        submitted = components.fetch(:submission).submit(
+          package, allow_mutation: !package.mutation_blocked?
+        )
         components.fetch(:resolver).resolve(submitted.receipt)
       end
 
@@ -107,9 +81,17 @@ module Hive
 
         root = components.fetch(:store).verify_bundle(receipt)
         manifest = RegistryManifest.load(File.join(root, RegistryManifest::FILE_NAME))
-        current_lint = AuthoringLint.verify!(root, manifest: manifest)
+        recorded_policy = LintPolicy.load_version(receipt.lint_contract.fetch("version"))
+        unless recorded_policy.identity == receipt.lint_contract
+          raise PublishRecoveryError, "recorded Honeycomb lint policy evidence is unavailable or changed"
+        end
+        recorded_lint = AuthoringLint.verify(root, manifest: manifest, policy: recorded_policy)
+        unless recorded_lint.valid?
+          raise PublishRecoveryError, "retained publication bundle no longer matches its recorded lint evidence"
+        end
+        current_lint = AuthoringLint.verify(root, manifest: manifest, policy: LintPolicy.load)
         if authored_inputs_available?
-          rebuilt = package(destination: destination)
+          rebuilt = build_validated_package(destination: destination, lint_policy: recorded_policy)
           unless rebuilt.package_digest == receipt.package_digest && rebuilt.release_digest == receipt.release_digest
             raise PublishConflict, "authored workflow bytes conflict with the retained immutable submission"
           end
@@ -117,7 +99,7 @@ module Hive
         Package.new(
           name: receipt.name, version: receipt.version, root: root,
           package_digest: receipt.package_digest, release_digest: receipt.release_digest,
-          warnings: current_lint.warnings.map(&:to_h), findings: current_lint.findings.map(&:to_h),
+          warnings: current_lint.findings.map(&:to_h), findings: current_lint.findings.map(&:to_h),
           lint_contract: receipt.lint_contract
         ).freeze
       end
@@ -128,6 +110,36 @@ module Hive
       end
 
       private
+
+      def build_validated_package(destination:, lint_policy:)
+        validate_identity!
+        destination = File.expand_path(destination)
+        ensure_empty_destination!(destination)
+        metadata = load_metadata
+        snapshot = SourceSnapshot.capture(
+          name: @name, workflows_dir: workflows_dir, descriptor_path: descriptor_path,
+          authored_dir: authored_dir, metadata: metadata
+        )
+        AuthoringMetadata.validate_readme!(snapshot.files.fetch(README_FILE).bytes, path: README_FILE)
+        build = RegistryManifestBuilder.build!(
+          destination: destination, name: @name, version: @version,
+          metadata: metadata, snapshot: snapshot
+        )
+        result = Validator.validate!(
+          destination, expected_name: @name,
+          expected_manifest_digest: build.release_digest
+        )
+        lint = AuthoringLint.verify!(destination, manifest: build.manifest, policy: lint_policy)
+        warnings = result.warnings.map { |warning| publication_finding(warning) } + lint.warnings.map(&:to_h)
+        Package.new(
+          name: @name, version: @version, root: destination,
+          package_digest: build.package_digest,
+          release_digest: build.release_digest,
+          warnings: warnings.freeze,
+          lint_contract: lint.contract,
+          findings: (result.diagnostics.map { |finding| publication_finding(finding) } + lint.findings.map(&:to_h)).freeze
+        ).freeze
+      end
 
       def publication_finding(diagnostic)
         {
@@ -199,17 +211,6 @@ module Hive
 
       def load_metadata
         AuthoringMetadata.load(metadata_path)
-      end
-
-      def admit_runtime!(workflow, permissions, package_root:)
-        Dir.mktmpdir("hive-workflow-publish-admission-") do |root|
-          task_folder = File.join(root, "task")
-          FileUtils.mkdir_p(task_folder)
-          RuntimePolicy.admit_workflow!(
-            workflow, permissions, task_folder: task_folder,
-            policy_dir: File.join(root, "policy"), package_root: package_root
-          )
-        end
       end
     end
   end

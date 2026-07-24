@@ -57,6 +57,40 @@ class WorkflowPackagePublishStoreTest < Minitest::Test
     end
   end
 
+  def test_stale_writers_cannot_replace_newer_progress_or_lifecycle_evidence
+    with_package do |package|
+      with_tmp_dir do |state|
+        store = Hive::WorkflowPackage::PublishStore.new(root: File.join(state, "publish"))
+        receipt = store.create_or_load(package, registry: "owner/registry").advance(
+          "pr_verified",
+          submission_mode: "direct", destination_repository: "owner/registry",
+          base_branch: "main", base_sha: "b" * 40,
+          head_repository: "owner/registry", head_branch: "honeycomb-demo",
+          owner: "owner", commit_oid: "c" * 40, pr_number: 1,
+          pr_url: "https://github.com/owner/registry/pull/1"
+        )
+        store.save(receipt)
+        stale = receipt.observe(
+          state: "pending_review", observed_at: "2026-07-21T12:00:00Z",
+          pr_url: receipt.data.fetch("pr_url"), pr_number: 1
+        )
+        listed = receipt.observe(
+          state: "listed", observed_at: "2026-07-21T13:00:00Z",
+          pr_url: receipt.data.fetch("pr_url"), pr_number: 1
+        )
+        store.save(listed)
+
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) { store.save(stale) }
+        loaded = store.load("owner/registry", "demo", "1.2.3")
+        assert_equal "listed", loaded.observation.fetch("state")
+        assert_equal "2026-07-21T13:00:00Z", loaded.observation.fetch("observed_at")
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          store.update("owner/registry", "demo", "1.2.3") { receipt }
+        end
+      end
+    end
+  end
+
   private
 
   def with_package

@@ -65,6 +65,16 @@ module Hive
                pr.base_branch == receipt.data["base_branch"] && !pr.draft
           raise PublishRecoveryError, "registry pull request identity drifted from its receipt"
         end
+        parent_oid = @gateway.commit_parent_oid(pr.head_repository, pr.head_oid)
+        unless parent_oid == receipt.data["base_sha"]
+          raise PublishRecoveryError, "registry publication commit parent drifted from its receipt"
+        end
+        if receipt.data.fetch("submission_mode") == "fork"
+          @gateway.verify_fork!(
+            pr.head_repository, parent: receipt.data.fetch("fork_parent"),
+            owner: receipt.data.fetch("fork_owner")
+          )
+        end
         branch_oid = @gateway.branch_oid(pr.head_repository, pr.head_branch)
         raise PublishRecoveryError, "registry pull request branch identity drifted" unless branch_oid == pr.head_oid
         @gateway.verify_remote_package!(pr.head_repository, pr.head_oid, package)
@@ -73,13 +83,31 @@ module Hive
 
       def persist(receipt, state, pr_url:, pr_number:)
         observed_at = @clock.call.utc.iso8601
-        updated = @store.save(
-          receipt.observe(state: state, observed_at: observed_at, pr_url: pr_url, pr_number: pr_number)
-        )
+        updated = @store.update(receipt.registry, receipt.name, receipt.version) do |current|
+          if observation_dominates?(current.observation, state)
+            current
+          else
+            current.observe(
+              state: state, observed_at: observed_at, pr_url: pr_url, pr_number: pr_number
+            )
+          end
+        end
+        observation = updated.observation
         Result.new(
-          state: state, freshness: "current", observed_at: observed_at,
-          pr_url: pr_url, warnings: [], receipt: updated
+          state: observation.fetch("state"), freshness: "current",
+          observed_at: observation.fetch("observed_at"),
+          pr_url: observation["pr_url"], warnings: [], receipt: updated
         ).freeze
+      end
+
+      def observation_dominates?(observation, proposed)
+        return false unless observation
+        current = observation.fetch("state")
+        return true if current == proposed || current == "listed"
+        return false if proposed == "listed"
+        return true if current == "closed_unmerged"
+
+        current == "merged_pending_listing" && proposed == "pending_review"
       end
 
       def cached(receipt, error)

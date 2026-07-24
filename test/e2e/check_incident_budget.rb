@@ -3,9 +3,18 @@
 require "json"
 require_relative "lib/incident_budget"
 
-input = ARGV.fetch(0) do
-  abort "usage: #{$PROGRAM_NAME} REPORT_JSON_OR_RUNS_DIR"
+usage = "usage: #{$PROGRAM_NAME} REPORT_JSON_OR_RUNS_DIR " \
+        "[--all|--integrity-only|--timing-only]"
+input = ARGV.shift
+abort usage unless input
+
+kind = case ARGV.shift || "--all"
+when "--all" then :all
+when "--integrity-only" then :integrity
+when "--timing-only" then :timing
+else abort usage
 end
+abort usage unless ARGV.empty?
 
 report_path = if File.file?(input)
   input
@@ -20,7 +29,7 @@ checked.durations.sort.each do |name, duration|
 end
 puts format("incident total: %.3fs", checked.total_seconds)
 
-unless checked.ok?
-  checked.violations.each { |violation| warn "incident budget: #{violation}" }
+unless checked.ok?(kind)
+  checked.violations_for(kind).each { |violation| warn "incident budget: #{violation}" }
   exit 1
 end

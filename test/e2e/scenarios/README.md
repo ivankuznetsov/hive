@@ -23,7 +23,10 @@ unavailable contracts visible without calling the fixture passed. To activate
 one, consume the sibling implementation's exact persisted state and reason
 code, replace the activation guard with terminal-state assertions, and only
 then remove `pending: true`. Enabled incident scenarios must finish below ten
-seconds; their combined duration must remain below thirty seconds.
+seconds; their combined duration must remain below thirty seconds. CI keeps
+missing, duplicate, and invalid incident evidence in the functional E2E gate,
+then reports only those timing targets in a separate advisory job so
+hosted-runner variance cannot block an otherwise functional change.
 
 ## Incident index
 

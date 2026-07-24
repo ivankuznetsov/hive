@@ -75,19 +75,93 @@ class CiTestPartitionTest < Minitest::Test
       required_gate = workflow.fetch("jobs").fetch("required-test-gate")
       assert_equal "rake test (Ruby 3.4)", required_gate.fetch("name")
       assert_equal "${{ always() }}", required_gate.fetch("if")
-      assert_equal %w[test expensive-test-gates], required_gate.fetch("needs")
+      assert_equal %w[test expensive-test-gates e2e], required_gate.fetch("needs")
 
       required_step = required_gate.fetch("steps").fetch(0)
+      assert_equal "Require coverage, functional e2e, and expensive proof gates",
+                   required_step.fetch("name")
       assert_equal "${{ needs.test.result }}",
                    required_step.fetch("env").fetch("HIVE_COVERAGE_RESULT")
       assert_equal "${{ needs.expensive-test-gates.result }}",
                    required_step.fetch("env").fetch("HIVE_EXPENSIVE_GATES_RESULT")
+      assert_equal "${{ needs.e2e.result }}",
+                   required_step.fetch("env").fetch("HIVE_E2E_RESULT")
       assert_equal "bash", required_step.fetch("shell")
       assert_equal <<~SHELL, required_step.fetch("run")
         test "$HIVE_COVERAGE_RESULT" = "success"
         test "$HIVE_EXPENSIVE_GATES_RESULT" = "success"
+        test "$HIVE_E2E_RESULT" = "success"
       SHELL
     end
+  end
+
+  def test_incident_duration_budget_is_advisory_and_separate_from_functional_e2e
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+    jobs = workflow.fetch("jobs")
+    e2e = jobs.fetch("e2e")
+    advisory = jobs.fetch("incident-duration-budget")
+    incident_budget_script = "test/e2e/check_incident_budget.rb"
+
+    e2e_steps = e2e.fetch("steps")
+    integrity_steps = e2e_steps.select do |step|
+      step.fetch("run", "").include?(incident_budget_script)
+    end
+    assert_equal 1, integrity_steps.length
+    integrity = integrity_steps.fetch(0)
+    assert_equal(
+      'ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --integrity-only',
+      integrity.fetch("run")
+    )
+    refute_includes integrity.fetch("run"), "--timing-only"
+    assert_equal "incident duration budget (advisory)", advisory.fetch("name")
+    assert_equal "e2e", advisory.fetch("needs")
+    assert_equal true, advisory.fetch("continue-on-error")
+
+    ruby_setup = advisory.fetch("steps").find { |step| step["uses"] == "ruby/setup-ruby@v1" }
+    assert_equal({ "ruby-version" => "3.4" }, ruby_setup.fetch("with"))
+    refute advisory.fetch("steps").any? { |step| step.fetch("run", "").include?("bundle") }
+
+    download = advisory.fetch("steps").find { |step| step["name"] == "Download e2e report" }
+    assert_equal "actions/download-artifact@v8", download.fetch("uses")
+    assert_equal "hive-e2e-report", download.fetch("with").fetch("name")
+    assert_equal "${{ runner.temp }}/hive-e2e-runs", download.fetch("with").fetch("path")
+
+    enforce_steps = advisory.fetch("steps").select do |step|
+      step.fetch("run", "").include?(incident_budget_script)
+    end
+    assert_equal 1, enforce_steps.length
+    enforce = enforce_steps.fetch(0)
+    assert_equal(
+      'ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --timing-only',
+      enforce.fetch("run")
+    )
+    refute_includes enforce.fetch("run"), "--integrity-only"
+    assert_equal(
+      "${{ runner.temp }}/hive-e2e-runs",
+      enforce.fetch("env").fetch("HIVE_E2E_RUNS_DIR")
+    )
+
+    scenario = e2e_steps.find { |step| step["name"] == "Run real-subprocess scenarios" }
+    upload = e2e_steps.find { |step| step["uses"] == "actions/upload-artifact@v7" }
+    assert_equal download.fetch("with").fetch("name"), upload.fetch("with").fetch("name")
+    assert_equal(
+      scenario.fetch("env").fetch("HIVE_E2E_RUNS_DIR"),
+      upload.fetch("with").fetch("path")
+    )
+    assert_equal(
+      integrity.fetch("env").fetch("HIVE_E2E_RUNS_DIR"),
+      upload.fetch("with").fetch("path")
+    )
+    assert_equal(
+      enforce.fetch("env").fetch("HIVE_E2E_RUNS_DIR"),
+      download.fetch("with").fetch("path")
+    )
+    assert_operator e2e_steps.index(upload), :>, e2e_steps.index(scenario)
+    assert_operator e2e_steps.index(upload), :>, e2e_steps.index(integrity)
+
+    required_needs = jobs.fetch("required-test-gate").fetch("needs")
+    assert_includes required_needs, "e2e"
+    refute_includes required_needs, "incident-duration-budget"
   end
 
   def test_ci_gate_tasks_fail_when_no_non_skipped_asserting_test_runs

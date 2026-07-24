@@ -409,7 +409,8 @@ module Hive
                 attrs[:message] = "all reviewers hit a usage/credit limit"
                 # Stamp the cooldown so the daemon healer can self-heal once
                 # the usage window has plausibly reset (see AgentLimit). Only
-                # the limit marker gets a retry_after — `all_failed` stays manual.
+                # the limit marker gets a retry_after for display; both errors
+                # follow the daemon's shared cooldown retry policy.
                 attrs[:retry_after] = Hive::AgentLimit.retry_after_for(reviewer_limit_texts)
               end
               Hive::Markers.set(task.state_file, :review_error, attrs)

@@ -48,6 +48,14 @@ Explicit human input still has higher precedence, so a row that is both
 dependency-blocked and waiting for answers remains `waiting_on_you` while the
 dependency reason stays secondary.
 
+For a daemon-enrolled project with global automatic retry enabled, a real
+`ERROR` or `REVIEW_ERROR` is `waiting_on_provider_or_scheduler` with
+`blocker_owner: scheduler`, not `needs_repair`: Hive owns the next guarded
+retry after its shared cooldown and temporary safety checks. Disabling either
+the project daemon or global automatic retry restores the operator-owned
+`needs_repair` classification. A current daemon snapshot records the same
+ownership as the `retry_cooldown` disposition.
+
 Completeness is explicit: `complete`, `partial`, or `unknown`. Missing project
 roots, legacy stage directories, invalid task metadata, unavailable/stale
 scheduler evidence, or a failed scheduler join cannot silently collapse into

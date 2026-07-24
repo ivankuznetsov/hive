@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-07-20
+updated: 2026-07-24
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots]
 ---
 
@@ -11,7 +11,7 @@ tags: [daemon, module, automation, dispatcher, operational-status, snapshots]
 the auto-advancing dispatcher (ADR-024). Pure logic (`Policy`,
 `ConcurrencyController`) is separated from I/O (`StatusConsumer`,
 `ChildSupervisor`, `Logger`, `PrMergeWatcher`, `DigestScheduler`,
-`StaleAgentHealer`, `RecoverableErrorHealer`, `DisplayNameBackfiller`) so
+`StaleAgentHealer`, `DisplayNameBackfiller`) so
 the safety-relevant decisions are unit-testable without forking. Task-stage
 agents are detached durable attempts observed by the daemon;
 `ChildSupervisor` owns ancillary work only. The daemon also owns merge intake,
@@ -43,8 +43,7 @@ writes. See [[modules/conditions]].
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Safely turns daemon-enabled `3-plan` approval pauses into `hive develop ... --from 3-plan` dispatches by validating command shape and flipping `WAITING` to `COMPLETE`. |
-| `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Rewrites stale `AGENT_WORKING` markers to `ERROR reason=agent_died` or `ERROR reason=agent_orphaned`, while skipping live controller slots and half-migrated projects. It also repairs wedged `REVIEW_WORKING` rows when the recorded Claude child is dead, the review lock holder is still alive, and child-process inspection proves that holder has no remaining children: it logs `reason=review_agent_died` with the original phase/pass, clears the stale marker, terminates the stuck holder, and removes `.lock` so the daemon can retry review normally. Retryable terminal markers such as `8-finalize` `ERROR reason=unpushed_commits` plus non-review terminal agent-loss `ERROR reason=tmux_session_terminated` / `reason=agent_orphaned` are cleared with a bounded per-process retry budget so interrupted sessions can rerun. A narrower timeout path clears `ERROR reason=timeout` exactly once, only on `5-open-pr` and `7-artifacts`, because those re-entries are side-effect-safe (`open_pr_already_open` / idempotent `artifact.md` recollection). `limits_reached` markers (review `REVIEW_ERROR` from reviewers/triage/fix, or single-agent `ERROR` in any stage) use a distinct unbounded readiness policy: the provider reset estimate remains visible in `retry_after`, while the daemon retries one interval after the latest quota marker mtime (default 1h, env `HIVE_LIMITS_RETRY_COOLDOWN_SEC`). Each repeated wall writes a fresh marker and starts the next interval; a successful top-up/reset/account-switch attempt stops producing the marker and resumes normally. Non-limit operational failures also auto-retry under the bounded budget so the daemon advances them instead of parking for a human: `ERROR reason=ensure_clean_on_exit_failed` (any worktree-owning stage — the rerun re-applies the scope-checked auto-commit rather than bypassing it, so genuinely out-of-scope residue still re-fails and parks), `REVIEW_ERROR phase=reviewers reason=all_failed` (every reviewer crashed for a non-limit reason; a total usage-limit instead sets `reason=limits_reached` and takes the periodic readiness path), `REVIEW_ERROR phase=fix reason=fix_failed message="claude stop hook did not signal completion"` for the legacy Claude stop-hook completion bug, and `REVIEW_ERROR phase=fix` auto-commit failures (`fix_auto_commit_scope_failed` / `fix_auto_commit_sign_policy_failed` / `fix_auto_commit_signing_failed`). The integrity/operator reasons `fix_status_check_failed`, `fix_tampered`, generic `fix_failed`, and `dirty_worktree` stay manual. The operator-facing bot/TUI still routes `ensure_clean_on_exit_failed` through `ERROR_MANUAL_ONLY_REASONS` as the post-exhaustion "inspect manually" backstop — the daemon retries first, a human sees it only after the budget is spent. `3-plan` is the special terminal-error case: after any successful terminal `ERROR` clear there, including terminal agent-loss or an eligible `limits_reached` probe, it queues `hive plan <slug> --from 3-plan` through `DispatchRequestQueue` and logs `heal_requeued`, because an empty markerless `plan.md` otherwise classifies straight back to `:error`. |
-| `Hive::Daemon::RecoverableErrorHealer` | `lib/hive/daemon/recoverable_error_healer.rb` | Runs after `StaleAgentHealer` and before normal dispatch. It auto-clears only the fixed v1 recoverable terminal-error allowlist (`implementer_failed` with a Codex 401 missing bearer/basic-auth signature, and `claude_launch_failed`) after the work area is safe, the dependency health signal changed or the fallback window elapsed, backoff/budget allow it, and health probes pass. Clears are equivalent to manual `hive markers clear`; `3-plan` clears also enqueue `hive plan --from 3-plan`. The global kill-switch is `daemon.auto_retry.enabled: false`. Audit routing is asymmetric: only `auto_retry` and `auto_retry_skipped` are in `Hive::Events::EVENT_TYPES`, so only those two reach the task `events.jsonl` channel; the exhausted path emits its task event as `auto_retry_skipped` (not `auto_retry_exhausted`), and a non-allowlisted/unknown reason is suppressed from the task channel entirely (daemon-log audit only, to avoid a "not retried" line on every unrelated domain failure). All four event names — `auto_retry`, `auto_retry_skipped`, `auto_retry_exhausted`, `auto_retry_failed` — reach the daemon log. |
+| `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership and treats every persisted `ERROR` / `REVIEW_ERROR` as retryable. Every reason uses the same shared marker-age cooldown. Clears require no live controller/lock owner and match the observed marker generation. Failed reruns write a fresh marker and restart the cooldown; retries never exhaust because files, config, credentials, providers, and agent binaries can change outside Hive. `3-plan` clears enqueue the explicit plan rerun required for markerless empty `plan.md`. |
 | `Hive::Daemon::DisplayNameBackfiller` | `lib/hive/daemon/display_name_backfiller.rb` | Tick-time self-heal for tasks whose one-shot name generation at `hive new` never landed (agent/codex outage). It skips admission-error rows and uses `TaskMeta.read_for_admission`, so corrupt metadata is never treated as a blank name. For a healthy row whose `display_name` is nil/blank, it re-spawns fire-and-forget `hive generate-name <folder>`, mirroring `Hive::Commands::New#spawn_name_generator` (detached, pgroup, logged to `<state_home>/logs/display-name.log`, fully rescued). Anti-churn: an `@inflight` map stores `{pid, at}` per folder, uses the shared `Hive::ProcessKill.pid_alive?` `kill(0)` probe plus `MAX_INFLIGHT_AGE_SEC = 120` to avoid both double-spawns and reused-pid/EPERM pinning, `max_per_tick` (default 2) bounds spawns, and a set name is a natural fixed point. Unexpected row/reap/spawn errors degrade through `:fatal` logging while preserving the no-raise tick contract. Purely additive — never touches markers or dispatch. Logs `display_name_backfill`. |
 | `Hive::Daemon::TaskIdBackfiller` | `lib/hive/daemon/task_id_backfiller.rb` | Tick-time self-heal for tasks created outside `hive new` (hand-made folder, one `mv`-ed in) whose `meta.yml` has no `id` — `hive new` allocates ids from `Hive::TaskCounter`, so a task that skipped it shows a blank id in TUI, status, and dependency refs. It skips admission-error rows and corrupt strict metadata reads, so allocating an id cannot replace damaged dependency evidence. For a healthy row whose `Hive::TaskMeta` `id` is nil it allocates `TaskCounter.next!`, writes it via `TaskMeta.update_id` (every other meta field preserved), and commits the meta on `hive/state` under the per-project commit lock (`Hive::Lock.with_commit_lock`, as every durable committer does) with the per-task `hive_commit(stage_name:, slug:, action: "id-assigned")` call. The `task_id_backfill` event carries `committed:` so a swallowed commit (lock timeout / git error) is visible rather than masquerading as fully durable. Synchronous (no spawn/inflight — assignment is instant), `max_per_tick` (default 5) bounds the per-tick commits, and an assigned id is a natural fixed point. Guards `File.directory?(folder)` first so a row that outlived its folder (e.g. `hive drop` between snapshot and tick) is NOT resurrected by `TaskMeta.write`'s `mkdir_p`. Row/commit errors degrade through `:fatal` / `task_id_backfill_commit_skipped` logging while preserving the no-raise tick contract. Purely additive — never touches markers or dispatch. Logs `task_id_backfill`. |
 | `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Polls `gh pr view --json state` for tasks at 8-finalize/`:complete` and for a narrow set of finalize `ERROR` rows whose PR can still be retired after merge (`git_status_failed`, `claude_launch_failed`). Poll subprocesses use the bounded `Hive::Gh` transport; architecture-enabled projects take that poll timeout from the same absolute reconciler deadline as catch-up and exact-PR hydration. On `MERGED`, durable architecture intake must succeed before it returns an archive dispatch. Deadline deferral leaves the current/later entries for the next tick without burning retry budget; real poll/intake failures retain their consecutive counter until the whole merged-intake step succeeds, then back off and eventually drop visibly. |
@@ -83,17 +82,17 @@ hive daemon start
             ├─ Hive::Daemon::RefactorPatrolScheduler (durable jobs/actions)
             ├─ Hive::Daemon::DigestScheduler     (<state_home>/digest_state.json)
             ├─ Hive::Daemon::StaleAgentHealer    (AGENT_WORKING repair)
-            ├─ Hive::Daemon::RecoverableErrorHealer (probe-gated ERROR retry)
             ├─ Hive::Daemon::DisplayNameBackfiller (missing display_name retry)
             ├─ Hive::Daemon::TaskIdBackfiller    (missing meta id assign)
             └─ Hive::Daemon::Policy              (pure decisions)
 ```
 
-Lease-backed `attempt_lost` outcomes bypass legacy stale-marker discovery and
-`RecoverableErrorHealer`. `StaleAgentHealer#heal_attempt_losses` alone applies
-the persisted generation retry budget, after verified orphan cleanup and dirty
-capture, and dispatches a same-generation successor through the shared attempt
-dispatcher.
+Lease-backed `attempt_lost` outcomes bypass legacy stale-marker discovery.
+`StaleAgentHealer#heal_attempt_losses` applies
+verified orphan cleanup and dirty capture, then dispatches a same-generation
+successor through the shared attempt dispatcher. `retry_charge` is retained as
+lineage/audit evidence, not an exhaustion budget; lost-attempt successors keep
+retrying until one is durably dispatched.
 
 `run_forever` wakes at `daemon.fast_poll_sec` (default 1s) for a cheap
 probe: non-blocking child reap plus mtime stats of state files and stage
@@ -106,7 +105,7 @@ Each full tick first publishes a `started` record, then reconciles durable
 attempts, processes normalized loss, and publishes lease-first capacity. It
 then runs: reap ancillary children -> enforce child
 timeouts -> prune dispatch-result notices -> **tick the digest scheduler** ->
-fetch status -> heal stale agent markers -> heal recoverable terminal errors -> backfill missing display names ->
+fetch status -> heal stale ownership and cooled durable errors -> backfill missing display names ->
 backfill missing meta ids -> drop merge watches for every held row -> tick the PR-merge watcher -> **process dispatch requests** -> patrol dispatches
 -> per-row dispatch -> prune baselines -> refresh cheap-probe mtime
 fingerprints. During per-row dispatch, whitelisted `8-finalize` `ERROR`
@@ -134,7 +133,7 @@ The status-side join rechecks the same fields, so a decision cannot remain
 authoritative after a change between the completed daemon tick and a later
 status read. The record also carries daemon generation/PID/start identity,
 sequence and validity window, capacity, queue counters, provider holds,
-recovery exhaustion, and per-task owner/reason. Failed reconciliation/status
+legacy recovery-exhaustion compatibility fields, and per-task owner/reason. Failed reconciliation/status
 or failed revalidation publishes `failed`. Snapshot age starts at the actual
 completion sample rather than the tick-start sample, and a SIGHUP poll-interval
 reload immediately reconfigures the assembler's next validity window.
@@ -143,9 +142,9 @@ Durable admission results retain their real scheduler meaning in this record:
 only an accepted attempt is `dispatched`; an already-live attempt is
 `in_flight`, while capacity deferral, terminal replay, lost attempts, invalid
 predecessors, and launch handoff failures keep distinct owner/reason evidence.
-Recovery-exhaustion evidence is joined only to the same project, slug, stage,
-and marker reason, so a task that advances cannot inherit an older recovery
-blocker.
+Historical recovery-exhaustion evidence is still understood only when it
+matches the same project, slug, stage, and marker reason. Current runtime
+healers never emit it because durable-error retries do not exhaust.
 
 Operational task capacity uses the same accounting as dispatch admission:
 task-kind internal runs plus reconciled external task runs. Patrol scans and
@@ -345,31 +344,30 @@ stage does not move; the only same-stage workflow enqueue is the
    claim; a replacement holder or failed claim leaves the marker untouched.
    It then logs `reason=review_agent_died` with the prior `phase`/`pass`, so the
    daemon can retry the interrupted phase. If child inspection fails, or
-   children still exist, it leaves the row alone. It also auto-clears retryable
-   review errors with no live task lock: `REVIEW_ERROR reason=review_agent_died`,
-   and `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure` when the
-   pass-specific `reviews/errors-NN.md` contains only
-   `tmux_session_terminated before writing expected output file` reviewer
-   failures. It also auto-clears `8-finalize` `ERROR reason=unpushed_commits`
-   with no live task lock, and treats terminal
-   `ERROR reason=tmux_session_terminated` or `reason=agent_orphaned` as
-   retryable agent-loss markers in every non-review stage
-   (`2-brainstorm`, `3-plan`, `4-execute`, `7-artifacts`, `8-finalize`). For
-   `3-plan`, clearing alone is insufficient: the owning run's artifact can be
-   an empty `plan.md`, which `TaskAction#incomplete_plan_artifact?` classifies
-   as markerless `:error`, a row the daemon policy skips. After any successful
-   terminal `ERROR` clear on `3-plan` (currently terminal agent-loss and
-   elapsed `limits_reached`), the healer therefore writes a dispatch request
-   for `hive plan <slug> --project <project> --from 3-plan` with
-   `requestor=healer` / `trigger=terminal_agent_loss` and logs
-   `heal_requeued`. The trigger name is inherited from the original requeue
-   path, but the behavior is now intentionally broader. That request still
-   goes through the normal dispatch queue gates: allowlist, expiry,
-   per-slug in-flight, capacity, cooldown, and quarantine. If the marker clear
-   succeeds but the request write raises, the healer logs
-   `heal_requeue_failed` with the manual `hive plan ... --from 3-plan`
-   remediation instead of `marker_heal_failed`, because the marker is already
-   gone and a later healer tick cannot retry that same match. **Usage/credit limits self-heal through
+   children still exist, it leaves the row alone.
+
+   Every `ERROR` and `REVIEW_ERROR` is a durable retry state, never a permanent
+   workflow terminal. Every reason—including lost sessions,
+   `unpushed_commits`, reviewer crashes, `agent_preflight_failed`,
+   tampering/integrity classifications, dirty-worktree failures, unknown
+   failures, and timeouts—re-enters after the same shared marker-age
+   cooldown. The daemon cannot infer whether files,
+   configuration, credentials, provider state, or the configured agent binary
+   changed, so the rerun itself is the universal health probe. A repeated
+   failure writes a fresh marker and restarts the cooldown; no error retry
+   budget can exhaust.
+
+   All clears still fail closed on ownership: the task must have no live
+   controller slot or verified task lock, and `Markers.clear_current` must
+   match the observed marker generation. Operator Autofix follows the same
+   guarded clear-and-rerun path for formerly manual-only error reasons. For
+   `3-plan`, clearing alone is insufficient because an empty markerless
+   `plan.md` classifies back to `:error`; every successful error clear there
+   enqueues `hive plan <slug> --project <project> --from 3-plan` with
+   `requestor=healer` / `trigger=error_retry` and logs `heal_requeued`.
+   Queue admission, capacity, cooldown, and quarantine gates still apply.
+
+   **Usage/credit limits self-heal through
    periodic readiness attempts:** any `limits_reached` marker — review `REVIEW_ERROR`
    markers written by `Stages::Review` when all reviewers, triage, or fix hit
    provider usage/credit limits, and the
@@ -384,57 +382,32 @@ stage does not move; the only same-stage workflow enqueue is the
    advertises a later reset or the stamp is missing/malformed. A repeated wall
    writes a fresh marker and therefore starts the next interval; successful
    usage resets, top-ups, or account switches stop producing the marker. These
-   readiness attempts are unbounded and do not consume the bounded recovery
-   budget used by task failures. Limit heals log `reason=limits_reached`
-   (terminal path) / `reason=reviewer_limits_reached` (review path) to
+   readiness attempts use the same unbounded policy as every other error.
+   Limit heals log `reason=limits_reached` / `reason=reviewer_limits_reached` to
    distinguish them from tmux-death retries. The clear matches the observed marker's
    `marker_id` when present, falling back to the legacy `reason` guard only for
    old markers without ids. Once that guard succeeds, healer-managed clears
    purge shadowed marker history atomically; generic state-file agents append
    terminal markers after Hive's working marker, so removing only the current
    error could otherwise reveal a dead marker from an earlier attempt and
-   strand redispatch behind another grace cycle. Retry accounting is keyed by project, slug, stage,
-   and marker reason, not by marker id, because retryable terminal failures can
-   mint a fresh `marker_id` for the same task. After a successful clear,
+   strand redispatch behind another grace cycle. Retry observation is keyed by
+   project, slug, stage, and marker reason, not by marker id, because repeated
+   failures mint a fresh `marker_id` for the same task. After a successful clear,
    it records the pre-clear state-file mtime in the dispatch baseline map so the
    marker-clear rewrite looks like a settled edit-resume change on the next
    status read rather than a first-sight row to strand via `record_baseline`.
 
-   `ERROR reason=timeout` has a narrower rule than the other terminal-error
-   paths: only `5-open-pr` and `7-artifacts` are auto-cleared, and only once
-   (`TIMEOUT_RECOVERY_LIMIT = 1`). The premise is marker-skip stranding in tmux
-   mode, where the agent finished the externally visible work but returned to
-   idle before writing the terminal marker. Open-pr re-entry observes the
-   already-open PR and returns through the idempotent `open_pr_already_open`
-   arm; artifacts re-runs its summary collection into `artifact.md`. Other stage
-   timeouts stay manual because their side effects are not proven safe to replay.
-   Exhaustion logs `reason=stage_timeout` with manual rerun / marker-clear
-   remediation.
-
-   Clearing the marker lets the daemon rerun the owning stage; finalize still
-   performs its existing auth check, clean-exit scope check, optional residue
-   commit, and push (in that order). Manual-only errors such as
-   `reason=ensure_clean_on_exit_failed` and repository-state failures such as
-   `reason=git_status_failed` are left red because they need operator
-   inspection while the PR is still open. If GitHub later reports the
+   Clearing an error marker reruns the owning stage through its normal checks;
+   it does not bypass tamper detection, clean-exit scope, branch identity,
+   repository status, authentication, or publication guards. If GitHub later reports the
    task's PR as `MERGED`, `PrMergeWatcher` may archive a whitelisted
    finalize error by dispatching `hive archive` with
    `--recover-merged-error-reason <reason>`; the archive command accepts
    only a matching current `ERROR reason=<reason>` marker after confirming
    the `pr.md` URL still reports `MERGED`, so the stale local worktree does
-   not have to be healthy merely to retire an already merged PR. Except for
-   periodic `limits_reached` readiness attempts, auto-clears are bounded per
-   daemon process by failure signature (default 3 clears); repeated identical
-   failures stay red after the budget is exhausted so a persistent
-   infrastructure break cannot churn forever. The budget is in-memory only: a
-   daemon restart or SIGHUP config reload rebuilds the healer (`dispatcher.rb`
-   reconstructs `StaleAgentHealer` on reload without a persisted limit),
-   dropping the accumulated counts so an exhausted row becomes eligible again.
-   The healer logs `marker_healed`, `marker_heal_failed`, and a one-shot
-   `marker_heal_exhausted` event when a bounded recovery path gives up; the
-   exhausted event carries `budget_scope=per_process` and
-   `suggested_next_action=manual_fix` so operators do not mistake it for a
-   persisted terminal state.
+   not have to be healthy merely to retire an already merged PR. Heals log
+   `marker_healed` / `marker_heal_failed`; operational snapshot `limits` are
+   `null`, and legacy exhaustion arrays remain empty.
 
 ## External liveness and capacity
 
@@ -601,7 +574,7 @@ The fix collapses the two dispatchers into one. The bot and hivebox web are
 producer-only for state-mutating stage runs: they write JSON request files via
 `Hive::Bot::DispatchRequestWriter.write!` into
 `<state_home>/dispatch_requests/`. The same queue is also reused internally by
-`StaleAgentHealer` for the `3-plan` terminal-error rerun described above.
+`StaleAgentHealer` for the `3-plan` error rerun described above.
 The daemon tick consumes `DispatchRequestQueue.pending`, validates the argv
 allowlist, and resolves task verbs through durable admission. Request IDs stay
 on the delivery while attempt IDs own execution; receipt reconciliation

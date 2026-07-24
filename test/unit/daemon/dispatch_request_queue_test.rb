@@ -348,6 +348,20 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     refute Q.expired?(request, now: later, expiry_sec: 7200)
   end
 
+  def test_healer_plan_retry_does_not_expire_before_admission
+    request = Q::Request.new(
+      request_id: "H", created_at: Time.utc(2026, 5, 28, 18, 0, 0),
+      project: "p", slug: "s", argv: [ "hive", "plan", "s" ],
+      requestor: "healer", trigger: "error_retry"
+    )
+
+    refute Q.expired?(
+      request,
+      now: Time.utc(2026, 5, 29, 18, 0, 0),
+      expiry_sec: 600
+    )
+  end
+
   # ── C3: atomic claim + restart recovery ───────────────────────────────
 
   def test_claim_renames_to_claimed_and_hides_from_pending

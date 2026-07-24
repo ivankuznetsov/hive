@@ -450,6 +450,15 @@ module Hive
 
       def expired?(request, now: Time.now, expiry_sec: EXPIRY_SEC)
         return false unless request.respond_to?(:created_at)
+        # A healer's 3-plan request is the durable continuation of a marker
+        # clear. Expiring it could leave an empty markerless plan permanently
+        # undispatchable, so it remains pending until admitted. A temporarily
+        # missing or disabled project blocks in the dispatcher and can recover
+        # after config reload.
+        return false if request.respond_to?(:requestor) &&
+                        request.requestor.to_s == "healer" &&
+                        request.respond_to?(:trigger) &&
+                        request.trigger.to_s == "error_retry"
 
         created = request.created_at
         return false unless created.is_a?(Time)

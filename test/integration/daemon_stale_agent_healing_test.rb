@@ -99,7 +99,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
     rows
   end
 
-  def test_full_pipeline_requeues_a_3_plan_terminal_loss_through_the_real_queue
+  def test_full_pipeline_requeues_a_3_plan_error_through_the_real_queue
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
@@ -108,7 +108,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
         FileUtils.mkdir_p(folder)
         state_file = File.join(folder, "plan.md")
         File.write(state_file, "# plan\n\n<!-- ERROR reason=tmux_session_terminated marker_id=it1 -->\n")
-        backdated = Time.now - 600
+        backdated = Time.now - Hive::AgentLimit.retry_cooldown_sec - 60
         File.utime(backdated, backdated, state_file)
 
         rows = status_rows_via_consumer(dir)
@@ -289,7 +289,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
         state_file = File.join(folder, "pr.md")
         File.write(state_file, "---\nslug: #{slug}\n---\n\n# #{slug}\n\n" \
                                "<!-- ERROR reason=unpushed_commits marker_id=err-a -->\n")
-        pre_clear_mtime = Time.now - 1000
+        pre_clear_mtime = Time.now - Hive::AgentLimit.retry_cooldown_sec - 60
         File.utime(pre_clear_mtime, pre_clear_mtime, state_file)
 
         rows = status_rows_via_consumer(dir)
@@ -360,7 +360,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
           state_file = File.join(folder, state_basename)
           File.write(state_file, "---\nslug: #{slug}\n---\n\n# #{slug}\n\n" \
                                  "<!-- ERROR reason=timeout marker_id=to-1 timeout_sec=1800 -->\n")
-          pre_clear_mtime = Time.now - 1000
+          pre_clear_mtime = Time.now - Hive::AgentLimit.retry_cooldown_sec - 60
           File.utime(pre_clear_mtime, pre_clear_mtime, state_file)
 
           row = status_rows_via_consumer(dir).find { |candidate| candidate.slug == slug }

@@ -103,6 +103,28 @@ module Hive
       new_marker
     end
 
+    # Restore a retry marker only while the file is still markerless. Used
+    # after a post-clear durable-enqueue failure: if another writer already
+    # published a newer state, leave it untouched instead of replacing it.
+    def set_if_none(state_file_path, name, attrs = {})
+      marker_name = name.to_s.upcase
+      raise ArgumentError, "unknown marker #{marker_name}" unless KNOWN_NAMES.include?(marker_name)
+
+      attrs = attrs_with_recovery_marker_id(marker_name, attrs)
+              .to_h
+              .merge(Hive::Attempts::Context.projection)
+      new_marker = build_marker(marker_name, attrs)
+      ensure_dir(state_file_path)
+      with_markers_lock(state_file_path) do
+        return false unless current(state_file_path).none?
+
+        body = File.exist?(state_file_path) ? File.read(state_file_path, encoding: "UTF-8") : ""
+        separator = body.empty? || body.end_with?("\n") ? "" : "\n"
+        write_atomic(state_file_path, "#{body}#{separator}#{new_marker}\n")
+      end
+      new_marker
+    end
+
     def clear_current(state_file_path, expected_name:, match_attrs: {}, purge_history: false)
       with_markers_lock(state_file_path) do
         marker = current(state_file_path)
@@ -195,14 +217,9 @@ module Hive
       reason = attrs["reason"].to_s
       # When a `marker_id` is present, callers want it as the primary
       # `--match-attr` guard so race-y recoveries can't clear a newer
-      # marker by accident. But the inline-button callback path needs
-      # the `reason` too — `manual_only?` checks `attrs["reason"]` on
-      # the reconstructed attrs hash to route
-      # `ensure_clean_on_exit_failed` / `dirty_worktree` into the
-      # operator-only reply. Encode both as a comma-separated pair so
-      # `RecoverySequence.attrs_from_match_attr` reconstructs both
-      # keys, and `Hive::Bot::AlertStore.parse_match_attr` keeps using
-      # the leading `marker_id=...` token as the canonical guard.
+      # marker by accident. Keep `reason` as a secondary assertion and audit
+      # breadcrumb. `AlertStore.parse_match_attr` continues to use the leading
+      # marker_id token as its canonical alert-generation guard.
       if !marker_id.empty?
         return "marker_id=#{marker_id}" if reason.empty?
 
@@ -213,6 +230,23 @@ module Hive
       %w[reason exit_code].each do |key|
         value = attrs[key].to_s
         parts << "#{key}=#{value}" unless value.empty?
+      end
+      parts.empty? ? nil : parts.join(",")
+    end
+
+    def review_error_recovery_match_attr(attrs)
+      attrs = attrs ? attrs.to_h.transform_keys(&:to_s) : {}
+      marker_id = attrs["marker_id"].to_s
+      reason = attrs["reason"].to_s
+      unless marker_id.empty?
+        return "marker_id=#{marker_id}" if reason.empty?
+
+        return "marker_id=#{marker_id},reason=#{reason}"
+      end
+
+      parts = %w[pass phase reason].filter_map do |key|
+        value = attrs[key].to_s
+        "#{key}=#{value}" unless value.empty?
       end
       parts.empty? ? nil : parts.join(",")
     end

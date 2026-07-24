@@ -91,14 +91,8 @@ module Hive
         "review_stale" => "REVIEW_STALE",
         "review_ci_stale" => "REVIEW_CI_STALE"
       }.freeze
-      # Priority-ordered candidate keys for `hive markers clear
-      # --match-attr KEY=VALUE`. The first non-empty attr on the
-      # snapshot row wins — so `pass` (most discriminating across
-      # review-stage retries) is checked before `reason` (groups
-      # adjacent failures), which is checked before `attempts` and
-      # `phase` (coarsest). Re-sorting alphabetically would silently
-      # change which marker the clear targets and reintroduce the
-      # concurrent-writer race the guard exists to prevent.
+      # Legacy review-stale candidate keys. REVIEW_ERROR uses its generated
+      # marker_id through Hive::Markers.review_error_recovery_match_attr.
       REVIEW_RECOVERY_MATCH_ATTRS = %w[pass reason attempts phase].freeze
       # Display-priority order for the success flash detail. Known
       # keys render in this order; unknown keys append after, sorted
@@ -887,15 +881,7 @@ module Hive
       end
 
       def manual_only_red_status_recovery?(row)
-        attrs = row.attrs.to_h.transform_keys(&:to_s)
-        marker = row.marker.to_s.downcase
-
-        if marker == "review_error"
-          return attrs["phase"] == "fix" &&
-            %w[fix_status_check_failed fix_tampered].include?(attrs["reason"].to_s)
-        end
-
-        marker == "error" && %w[dirty_worktree ensure_clean_on_exit_failed].include?(attrs["reason"].to_s)
+        row.marker.to_s.downcase == "execute_stale"
       end
 
       # Wrap red_status_autofix so the detail screen closes after the
@@ -1144,6 +1130,8 @@ module Hive
 
       def review_recovery_match_attr(row)
         attrs = row.attrs || {}
+        return Hive::Markers.review_error_recovery_match_attr(attrs) if row.marker.to_s == "review_error"
+
         key = REVIEW_RECOVERY_MATCH_ATTRS.find { |candidate| !attrs[candidate].to_s.empty? }
         key ? "#{key}=#{attrs[key]}" : nil
       end

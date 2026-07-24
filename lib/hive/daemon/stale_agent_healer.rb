@@ -1,4 +1,3 @@
-require "digest"
 require "open3"
 require "time"
 require "yaml"
@@ -9,6 +8,7 @@ require "hive/process_kill"
 require "hive/workflows"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/healer_support"
+require "hive/daemon/auto_retry_safety"
 require "hive/attempts/lost_outcome"
 
 module Hive
@@ -56,31 +56,12 @@ module Hive
     #                        on a kill. Clear the marker + drop any stale
     #                        lock so review re-dispatches.
     #
-    # Some terminal ERROR markers are also auto-retryable. `8-finalize`
-    # `reason=unpushed_commits` can fail during ordinary interruptions
-    # (sleep/network) even though the task state remains recoverable by
-    # rerunning finalize. `reason=tmux_session_terminated` and
-    # `reason=agent_orphaned` markers describe a lost agent session in ANY
-    # stage — not a task-domain failure — and stage reruns resume from the
-    # on-disk artifacts. A `reason=timeout` on `5-open-pr` or `7-artifacts`
-    # (TIMEOUT_RECOVERABLE_STAGES) is the narrow case where the agent finished
-    # its work but returned to idle without stamping the terminal marker, so the
-    # wait timed out; it recovers EXACTLY ONCE (TIMEOUT_RECOVERY_LIMIT) because
-    # re-running those two stages is side-effect-safe — 5-open-pr re-enters its
-    # already-open arm (returns :complete without a second PR) and 7-artifacts
-    # idempotently re-collects into artifact.md.
-    # Clearing those specific markers lets the normal daemon dispatch
-    # rerun the stage up to the configured limit (default 3, or 1 for timeout)
-    # before leaving the marker red for manual recovery. There is no healer-side
-    # backoff between those retries — the only thing spacing them is the
-    # stage's own re-dispatch runtime, not any delay enforced here.
-    #
-    # Unlike the review path (`review_error_signature`), the terminal
-    # ERROR recovery key (`HealerSupport#error_recovery_key`) deliberately omits a
-    # failure signature: repeated failures for the same task/stage/reason
-    # share one retry budget by design, so a fresh marker id does not
-    # silently earn a fresh budget. This asymmetry is intentional, not an
-    # oversight.
+    # ERROR and REVIEW_ERROR are durable observations, not permanent workflow
+    # terminals. Every reason uses the same shared cooldown, then clears with
+    # a marker-id guard and re-enters the ordinary stage. A failed rerun writes
+    # a fresh error marker and restarts the cooldown; retries never exhaust.
+    # This is intentionally reason-agnostic because files, configuration,
+    # credentials, agent binaries, and provider state can change outside Hive.
     #
     # Skip cases:
     #   - controller.running_task? returns true (an in-process dispatch
@@ -96,23 +77,18 @@ module Hive
     class StaleAgentHealer
       include HealerSupport
 
-      REVIEW_ERROR_AUTO_RECOVERY_LIMIT = 3
-      ERROR_AUTO_RECOVERY_LIMIT = 3
-      ATTEMPT_LOSS_RECOVERY_LIMIT = 3
+      # Retained as initializer compatibility defaults. Persisted ERROR and
+      # REVIEW_ERROR markers no longer exhaust these budgets: Hive cannot know
+      # whether a file, configuration value, credential, agent binary, or
+      # provider state changed after the last attempt, so every cooled-down
+      # error remains eligible for another guarded retry.
+      REVIEW_ERROR_AUTO_RECOVERY_LIMIT = nil
+      ERROR_AUTO_RECOVERY_LIMIT = nil
+      ATTEMPT_LOSS_RECOVERY_LIMIT = nil
       CODING_REVIEW_STAGE = Hive::Workflows::Registry.default.stage_named("review").dir.freeze
-      # `reason=timeout` recovers EXACTLY ONCE, and only on the two stages whose
-      # re-entry is provably idempotent — far lower than the agent-loss budget
-      # because a timeout means "I ran and didn't finish", not "I was interrupted".
-      TIMEOUT_RECOVERY_LIMIT = 1
-      TIMEOUT_RECOVERABLE_STAGES = %w[5-open-pr 7-artifacts].freeze # coding-scoped: coding stages whose timeout re-entry is idempotent
 
-      # Review fix-phase auto-commit failures that a bounded rerun can clear:
-      # the fix agent left residue the scope check rejected, or a transient
-      # signing/sign-policy hiccup blocked the commit. A rerun re-attempts the
-      # SAME scope-checked auto-commit (it never bypasses the check), so a
-      # genuinely out-of-scope change just re-fails and parks after the budget.
-      # `fix_status_check_failed` / `fix_tampered` are excluded on purpose —
-      # those are git-level / integrity signals that warrant a human.
+      # These reasons retain a more specific audit label. Eligibility is still
+      # governed exclusively by the shared cooldown.
       FIX_AUTO_COMMIT_RETRYABLE_REASONS = %w[
         fix_auto_commit_scope_failed
         fix_auto_commit_sign_policy_failed
@@ -126,22 +102,24 @@ module Hive
                      request_queue: Hive::Daemon::DispatchRequestQueue,
                      attempt_store: nil, attempt_dispatcher: nil,
                      lost_outcome_store: nil, lost_outcome_processor: nil,
-                     attempt_loss_recovery_limit: ATTEMPT_LOSS_RECOVERY_LIMIT)
+                     attempt_loss_recovery_limit: ATTEMPT_LOSS_RECOVERY_LIMIT,
+                     auto_retry_enabled: true,
+                     safety: Hive::Daemon::AutoRetrySafety)
         @controller = controller
         @logger = logger
         @request_queue = request_queue
         @grace_sec = grace_sec
-        @review_error_auto_recovery_limit = review_error_auto_recovery_limit
-        @error_auto_recovery_limit = error_auto_recovery_limit
+        @review_error_auto_recovery_limit = nil
+        @error_auto_recovery_limit = nil
         @review_error_auto_recoveries = Hash.new(0)
         @error_auto_recoveries = Hash.new(0)
-        @review_error_recovery_exhausted = {}
-        @error_recovery_exhausted = {}
         @attempt_store = attempt_store
         @attempt_dispatcher = attempt_dispatcher
         @lost_outcome_store = lost_outcome_store
         @lost_outcome_processor = lost_outcome_processor
-        @attempt_loss_recovery_limit = attempt_loss_recovery_limit
+        @attempt_loss_recovery_limit = nil
+        @auto_retry_enabled = auto_retry_enabled == true
+        @safety = safety
       end
 
       # Lease-backed loss is processed independently of legacy marker rows.
@@ -151,46 +129,51 @@ module Hive
         return unless @attempt_store && @attempt_dispatcher &&
                       @lost_outcome_store && @lost_outcome_processor
 
-        Array(attempts).each do |attempt|
+        attempts = Array(attempts)
+        return if attempts.empty?
+
+        successors = @attempt_store.scan.records.each_with_object({}) do |candidate, index|
+          predecessor_id = candidate["predecessor_attempt_id"]
+          index[predecessor_id] ||= candidate if predecessor_id
+        end
+
+        attempts.each do |attempt|
           next if attempt.compatibility?
 
           outcome = @lost_outcome_processor.process(attempt, now: now)
           next unless outcome["status"] == "ready"
 
-          existing = @attempt_store.scan.records.find do |candidate|
-            candidate["predecessor_attempt_id"] == attempt.attempt_id
-          end
+          existing = successors[attempt.attempt_id]
           if existing
             @lost_outcome_store.update(
               attempt, now: now, status: "successor_dispatched",
-              successor_attempt_id: existing.attempt_id
-            )
-            next
-          end
-
-          if attempt["retry_charge"] >= @attempt_loss_recovery_limit
-            @lost_outcome_store.update(
-              attempt, now: now, status: "exhausted",
-              diagnostic: "attempt loss retry budget exhausted"
-            )
-            @logger.event(
-              :marker_heal_exhausted,
-              project: attempt["project"], slug: attempt["task_slug"],
-              stage: attempt["intended_stage"], reason: "attempt_lost",
-              attempts: attempt["retry_charge"], max_attempts: @attempt_loss_recovery_limit
+              successor_attempt_id: existing.attempt_id,
+              diagnostic: nil
             )
             next
           end
 
           task = task_for_attempt(attempt, outcome)
           unless task
+            diagnostic = "task could not be located for successor yet; retrying"
+            next if outcome["diagnostic"] == diagnostic
+
             @lost_outcome_store.update(
-              attempt, now: now, status: "manual",
-              diagnostic: "task could not be located for successor"
+              attempt, now: now, status: "ready",
+              diagnostic: diagnostic
             )
             next
           end
 
+          next unless attempt_loss_retry_due?(attempt, outcome, now: now)
+
+          outcome = @lost_outcome_store.update(
+            attempt,
+            now: now,
+            status: "ready",
+            last_retry_at: now.utc.iso8601(6),
+            diagnostic: nil
+          )
           result = @attempt_dispatcher.dispatch_successor(
             predecessor: attempt,
             task: task,
@@ -203,12 +186,22 @@ module Hive
             interactive: false,
             now: now
           )
-          next if result.status == :deferred
+          if result.status == :deferred
+            @lost_outcome_store.update(
+              attempt,
+              now: now,
+              status: "ready",
+              diagnostic: "successor dispatch deferred#{": #{result.reason}" if result.reason}; retrying after cooldown"
+            )
+            next
+          end
 
           @lost_outcome_store.update(
             attempt, now: now, status: "successor_dispatched",
-            successor_attempt_id: result.attempt&.attempt_id
+            successor_attempt_id: result.attempt&.attempt_id,
+            diagnostic: nil
           )
+          successors[attempt.attempt_id] = result.attempt if result.attempt
           @logger.event(
             :marker_healed,
             project: attempt["project"], slug: attempt["task_slug"],
@@ -242,18 +235,24 @@ module Hive
       # suspenders) which would otherwise hide them from this heal pass
       # via `row.action == "error"`. The on-disk marker is unchanged
       # until *we* rewrite it, so it's the authoritative signal here.
-      def heal(rows, now: Time.now, legacy_layout_projects: {})
+      def heal(rows, now: Time.now, legacy_layout_projects: {}, auto_retry_projects: nil)
+        prune_retry_entries(rows)
+
         rows.each do |row|
           next if legacy_layout_projects.include?(row.project)
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
           if row.marker.to_s == "review_error"
-            heal_review_error_if_auto_recoverable(row, now: now)
+            heal_review_error_if_auto_recoverable(row, now: now) if auto_retry_allowed?(
+              row, auto_retry_projects
+            )
             next
           end
 
           if row.marker.to_s == "error"
-            heal_error_if_auto_recoverable(row, now: now)
+            heal_error_if_auto_recoverable(row, now: now) if auto_retry_allowed?(
+              row, auto_retry_projects
+            )
             next
           end
 
@@ -277,14 +276,17 @@ module Hive
       end
 
       # Read-only retry ownership for the dispatcher-owned observation. Keys
-      # are reduced to task identity and bounded counters; marker contents and
-      # executable commands never cross this interface.
+      # are reduced to task identity and counters; marker contents and
+      # executable commands never cross this interface. Nil limits mean the
+      # retry state never exhausts.
       def operational_snapshot
         {
+          "enabled" => @auto_retry_enabled,
           "error_retries" => retry_entries(@error_auto_recoveries, kind: "error"),
           "review_retries" => retry_entries(@review_error_auto_recoveries, kind: "review"),
-          "error_exhausted" => exhausted_entries(@error_recovery_exhausted, kind: "error"),
-          "review_exhausted" => exhausted_entries(@review_error_recovery_exhausted, kind: "review"),
+          # Compatibility fields from the former bounded policy.
+          "error_exhausted" => [],
+          "review_exhausted" => [],
           "limits" => {
             "error" => @error_auto_recovery_limit,
             "review" => @review_error_auto_recovery_limit,
@@ -295,19 +297,39 @@ module Hive
 
       private
 
+      def attempt_loss_retry_due?(attempt, outcome, now:)
+        limited_at = parse_retry_time(outcome["last_retry_at"]) ||
+                     parse_retry_time(attempt["loss"].to_h["at"])
+        Hive::AgentLimit.retry_due?(limited_at: limited_at, now: now)
+      end
+
+      def parse_retry_time(value)
+        Time.parse(value.to_s)
+      rescue ArgumentError, TypeError
+        nil
+      end
+
+      def auto_retry_allowed?(row, projects)
+        @auto_retry_enabled && (projects.nil? || projects.include?(row.project))
+      end
+
+      def prune_retry_entries(rows)
+        error_tasks = {}
+        review_tasks = {}
+        rows.each do |row|
+          key = [ row.project.to_s, row.slug.to_s ]
+          error_tasks[key] = true if row.marker.to_s == "error"
+          review_tasks[key] = true if row.marker.to_s == "review_error"
+        end
+        @error_auto_recoveries.delete_if { |key, _| !error_tasks[key.first(2)] }
+        @review_error_auto_recoveries.delete_if { |key, _| !review_tasks[key.first(2)] }
+      end
+
       def retry_entries(source, kind:)
         source.filter_map do |key, attempts|
           next unless attempts.to_i.positive?
 
           operational_recovery_entry(key, kind: kind).merge("attempts" => attempts.to_i)
-        end
-      end
-
-      def exhausted_entries(source, kind:)
-        source.filter_map do |key, exhausted|
-          next unless exhausted
-
-          operational_recovery_entry(key, kind: kind)
         end
       end
 
@@ -355,7 +377,7 @@ module Hive
         return if marker_reason(row) == "attempt_lost"
         return if row.live_task_lock == true
         return unless auto_recoverable_error?(row, now: now)
-        # The clear makes a markerless terminal-error row take the
+        # The clear makes a markerless error row take the
         # edit-resume path; without a pre-clear mtime to seed as the
         # dispatch baseline, that row can strand as first-sight
         # `record_baseline`.
@@ -364,21 +386,8 @@ module Hive
         marker_reason = marker_reason(row)
         heal_label = error_heal_label(row, marker_reason)
         recovery_key = error_recovery_key(row, marker_reason)
-        recovery_limit = error_auto_recovery_limit_for(marker_reason)
+        recovery_limit = nil
         attempts = @error_auto_recoveries[recovery_key]
-        if recovery_limit && attempts >= recovery_limit
-          log_recovery_exhausted_once(
-            @error_recovery_exhausted,
-            recovery_key,
-            row,
-            reason: heal_label,
-            marker_reason: marker_reason,
-            attempts: attempts,
-            max_attempts: recovery_limit,
-            remediation: error_recovery_remediation(row, marker_reason)
-          )
-          return
-        end
 
         # A false return is an intentional, silent no-op: either a benign
         # race (finalize already advanced and rewrote/removed the marker)
@@ -410,7 +419,10 @@ module Hive
         # Every 3-plan heal needs the explicit requeue — limits_reached
         # cooldown heals leave the same markerless empty plan.md as agent
         # loss does (PR review P2 #7).
-        requeue_plan_rerun(row, trigger: "terminal_agent_loss") if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" # coding-scoped: coding plan pause needs bespoke rerun after marker clear
+        if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" # coding-scoped: coding plan pause needs bespoke rerun after marker clear
+          queued = requeue_plan_rerun(row, trigger: "error_retry")
+          restore_plan_retry_error(row) unless queued
+        end
       rescue StandardError => e
         @logger.event(:marker_heal_failed,
                       project: row.project,
@@ -427,61 +439,28 @@ module Hive
       # skips, and with no marker reason left this healer can never match it
       # again. Re-entry must be explicit: enqueue the exact rerun an operator
       # would type (see HealerSupport#requeue_plan_rerun, which carries its
-      # own rescue so a failed request write logs `heal_requeue_failed`
-      # rather than the caller's `marker_heal_failed`). The daemon executes
-      # it like any web/bot request, so the usual concurrency gates (caps,
-      # cooldown, quarantine) still apply — which also means a request
-      # blocked longer than the queue's expiry (~10 min) is silently dropped
-      # and the row stays red until the web Retry button / bot Autofix
-      # re-enter it; acceptable, since both remain available on the
-      # markerless red row.
+      # own rescue). A failed request write restores a fresh ERROR generation,
+      # restarting the shared cooldown. Successfully written healer plan
+      # requests do not expire while waiting behind admission/capacity gates,
+      # so the marker clear always retains a durable continuation.
 
       def auto_recoverable_error?(row, now:)
-        reason = marker_reason(row)
-        return true if Hive::Workflows.coding_row?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: unpushed commits are finalize/PR recovery
+        error_retry_due?(row, now: now) && @safety.safe_to_retry?(row).first == true
+      end
 
-        # A usage/credit limit can hit any stage (brainstorm/plan/execute/…),
-        # so the periodic readiness attempt is not stage-gated. A provider's
-        # dated reset is display-only: the latest quota marker's mtime schedules
-        # the next attempt after one cooldown interval.
-        return limit_retry_due?(row, now: now) if reason == "limits_reached"
-
-        # A `reason=timeout` on the two side-effect-safe stages recovers EXACTLY
-        # ONCE (TIMEOUT_RECOVERY_LIMIT). The agent did the real work but returned
-        # to idle without stamping the terminal marker, so the wait timed out.
-        # Clearing the marker re-dispatches the stage, which is safe to re-run:
-        # 5-open-pr re-enters its already-open arm (open_pr_already_open) and
-        # returns :complete without spawning a second PR; 7-artifacts re-runs its
-        # agent, which only (idempotently) rewrites the artifact.md summary — the
-        # timeout means :complete was never stamped, so artifacts does NOT hit
-        # its own :complete short-circuit, it just re-collects. Stage-gated
-        # because other stages' timeouts are NOT safe to blindly re-run, and
-        # bounded to one attempt because a timeout (unlike a lost session) means
-        # "I ran and didn't finish" — retry once, then leave it red for manual
-        # recovery.
-        return true if reason == "timeout" && TIMEOUT_RECOVERABLE_STAGES.include?(row.stage.to_s)
-
-        # CleanExit stage-exit residue (`ensure_clean_on_exit_failed`) heals in
-        # any worktree-owning stage. The rerun re-runs CleanExit, which re-adds
-        # and re-scope-checks the residue: residue that is now in scope (e.g. a
-        # gitignored transient that no longer stages, or a path the allowlist
-        # now covers) auto-commits and advances; genuinely out-of-scope residue
-        # simply re-fails and parks after the budget (default 3). The scope
-        # check is never bypassed — this only stops the immediate manual park.
-        return true if reason == "ensure_clean_on_exit_failed"
-
-        # Agent-loss reasons heal in every stage EXCEPT 6-review: a lost
-        # tmux session or orphaned agent is environmental wherever it
-        # happens (the sweep-kills-the-server bug took out parallel
-        # BRAINSTORMS), and a stage rerun resumes from on-disk artifacts —
-        # brainstorm picks its rounds back up from brainstorm.md exactly
-        # like a manual re-dispatch. 6-review stays excluded because the
-        # review tree has its own specialized heal paths (REVIEW_ERROR /
-        # review_error_signature) and generic clearing would double-handle.
-        # The retry budget (default 3) still bounds every stage.
-        return false if Hive::Workflows.coding_row?(row) && row.stage.to_s == "6-review" # coding-scoped: coding review has specialized heal paths
-
-        %w[tmux_session_terminated agent_orphaned].include?(reason)
+      def restore_plan_retry_error(row)
+        attrs = marker_attrs_for(row).to_h.transform_keys(&:to_s)
+        attrs.delete("marker_id")
+        Hive::Markers.set_if_none(row.state_file, :error, attrs)
+      rescue StandardError => e
+        @logger.event(
+          :marker_heal_failed,
+          project: row.project,
+          slug: row.slug,
+          stage: row.stage,
+          reason: "plan_retry_restore_failed",
+          error: "#{e.class}: #{e.message}"
+        )
       end
 
       def error_heal_label(row, reason)
@@ -489,47 +468,14 @@ module Hive
         return "limits_reached" if reason == "limits_reached"
         return "stage_timeout" if reason == "timeout"
         return "clean_exit_residue" if reason == "ensure_clean_on_exit_failed"
+        return "agent_loss_retry" if %w[tmux_session_terminated agent_orphaned].include?(reason)
 
-        "terminal_agent_loss"
-      end
-
-      # Provider-limit retries are periodic readiness attempts rather than
-      # task-failure recovery, so they remain available until the provider is
-      # usable. `reason=timeout` is capped at a single re-entry; every other
-      # auto-recoverable error reason shares the agent-loss budget (default 3).
-      def error_auto_recovery_limit_for(reason)
-        return nil if reason == "limits_reached"
-
-        reason == "timeout" ? TIMEOUT_RECOVERY_LIMIT : @error_auto_recovery_limit
-      end
-
-      def error_recovery_remediation(row, reason)
-        command = "hive run #{row.slug} --project #{row.project} --stage #{row.stage}"
-
-        if Hive::Workflows.coding_row?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: finalize unpushed branch recovery
-          return "rerun finalize (`#{command}`) or push the branch manually"
-        end
-
-        if reason == "timeout"
-          return "the #{row.stage} agent finished but did not stamp its completion marker before the " \
-                 "stage timeout; it was retried once and timed out again — rerun #{row.stage} " \
-                 "(`#{command}`) or run `hive markers clear`"
-        end
-
-        if reason == "ensure_clean_on_exit_failed"
-          return "#{row.stage} left worktree residue the auto-commit scope check rejected and #{@error_auto_recovery_limit} " \
-                 "reruns did not clear it — inspect the worktree, move the out-of-scope changes into an allowed path or " \
-                 "commit/discard them by hand, then rerun #{row.stage} (`#{command}`)"
-        end
-
-        "rerun #{row.stage} (`#{command}`) " \
-          "after confirming no live agent still owns the task"
+        "error_retry"
       end
 
       # marker_match_attrs (legacy no-id match semantics),
       # observe_pre_clear_mtime (baseline seeding + missing-observer event),
-      # and error_recovery_key are provided by HealerSupport (shared with
-      # RecoverableErrorHealer).
+      # and error_recovery_key are provided by HealerSupport.
 
       def heal_review_error_if_auto_recoverable(row, now:)
         return if row.live_task_lock == true
@@ -543,23 +489,7 @@ module Hive
         end
         recovery_key = review_error_auto_recovery_key(row, reason: reason)
         attempts = @review_error_auto_recoveries[recovery_key]
-        recovery_limit = reason == "limits_reached" ? nil : @review_error_auto_recovery_limit
-        if recovery_limit && attempts >= recovery_limit
-          log_recovery_exhausted_once(
-            @review_error_recovery_exhausted,
-            recovery_key,
-            row,
-            reason: review_heal_label(reason),
-            marker_reason: reason,
-            attempts: attempts,
-            max_attempts: recovery_limit,
-            phase: marker_attrs["phase"],
-            pass: marker_attrs["pass"],
-            errors_path: reviewer_errors_path(row),
-            remediation: review_error_recovery_remediation(row, reason)
-          )
-          return
-        end
+        recovery_limit = nil
 
         return unless Hive::Markers.clear_current(
           row.state_file,
@@ -591,34 +521,6 @@ module Hive
                       error: "#{e.class}: #{e.message}")
       end
 
-      # Emit `marker_heal_exhausted` at most once per (process, recovery_key).
-      # The event name reads terminal, but the budget it reports is
-      # in-memory and per-process: a daemon restart — or a routine SIGHUP
-      # config reload, which rebuilds the healer in Dispatcher (see the
-      # `@stale_agent_healer = StaleAgentHealer.new` rebuild in
-      # dispatcher.rb) — drops both the retry counts AND these `seen` dedup
-      # maps. So a reload re-arms `max_attempts` fresh clears and re-arms
-      # this one-shot guard, which means the exhausted event can fire again
-      # afterwards for the same key. `budget_scope: "per_process"` flags that
-      # on the event; each call site also passes a `remediation:` hint so an
-      # operator reading the log knows how to recover now instead of
-      # over-reading "red forever".
-      def log_recovery_exhausted_once(seen, recovery_key, row, **attrs)
-        return if seen[recovery_key]
-
-        seen[recovery_key] = true
-        @logger.event(:marker_heal_exhausted,
-                      **{
-                        project: row.project,
-                        slug: row.slug,
-                        stage: row.stage,
-                        prior_marker: row.marker,
-                        state_file: row.state_file,
-                        budget_scope: "per_process",
-                        suggested_next_action: "manual_fix"
-                      }.merge(attrs))
-      end
-
       # marker_reason (the marker's own `reason=` attribute, keyed by both
       # the finalize and review auto-recovery paths) is provided by
       # HealerSupport.
@@ -636,25 +538,25 @@ module Hive
         when "all_failed" then "reviewer_all_failed"
         when "fix_failed" then "fix_claude_stop_hook"
         when *FIX_AUTO_COMMIT_RETRYABLE_REASONS then "fix_auto_commit_retry"
-        else "reviewer_tmux_session_terminated"
+        when "reviewer_partial_failure" then "reviewer_tmux_session_terminated"
+        else "review_error_retry"
         end
-      end
-
-      def review_error_recovery_remediation(row, reason)
-        "rerun review for this task " \
-          "(`hive run #{row.project} #{row.slug}`) or inspect the reviewer errors file"
       end
 
       # A provider reset hint is display-only: credits, usage, or the active
       # account can change before it. `AgentLimit` schedules solely from the
       # quota marker's observed mtime, so legacy/malformed hints cannot strand a
       # task and each failed readiness attempt naturally starts a new interval.
-      def limit_retry_due?(row, now:)
+      def error_retry_due?(row, now:)
         Hive::AgentLimit.retry_due?(
           limited_at: row.state_file_mtime,
           now: now
         )
       end
+
+      # Private compatibility alias for extensions/tests that used the old
+      # quota-specific name before the cooldown became the universal fallback.
+      alias_method :limit_retry_due?, :error_retry_due?
 
       def review_error_auto_recovery_key(row, reason:)
         attrs = marker_attrs_for(row)
@@ -663,69 +565,12 @@ module Hive
           row.slug.to_s,
           reason.to_s,
           attrs["phase"].to_s,
-          attrs["pass"].to_s,
-          review_error_signature(row, reason: reason)
+          attrs["pass"].to_s
         ]
       end
 
-      def review_error_signature(row, reason:)
-        return reason.to_s unless reason.to_s == "reviewer_partial_failure"
-
-        path = reviewer_errors_path(row)
-        return reason.to_s unless path
-
-        ::Digest::SHA256.hexdigest(File.read(path))
-      rescue SystemCallError
-        reason.to_s
-      end
-
       def auto_recoverable_review_error?(row, now:)
-        attrs = marker_attrs_for(row)
-        return true if attrs["reason"].to_s == "review_agent_died"
-
-        # All reviewers hit a usage/credit limit: self-heal after one cooldown
-        # interval, regardless of the provider's displayed reset estimate.
-        # These are unbounded readiness attempts, not task-failure retries; a
-        # fresh quota marker resets the hourly clock without consuming the
-        # bounded budget used by the non-limit branches below.
-        return limit_retry_due?(row, now: now) if attrs["reason"].to_s == "limits_reached"
-
-        # All reviewers crashed for a non-limit reason (e.g. a native reviewer
-        # exited non-zero, a tool/infra fault): bounded rerun. A persistent
-        # crash just re-fails and parks after the budget; a transient one
-        # clears. The pass stays put across a failed reviewers phase, so the
-        # recovery key (which includes pass) bounds this to the budget.
-        return true if attrs["phase"].to_s == "reviewers" && attrs["reason"].to_s == "all_failed"
-
-        # The fix phase's scope-checked auto-commit failed (out-of-scope
-        # residue, or a signing/sign-policy hiccup): bounded rerun. The rerun
-        # re-runs the fix agent and re-applies the SAME scope check, so this
-        # never lands an out-of-scope change — it only stops the immediate park.
-        return true if attrs["phase"].to_s == "fix" &&
-                       FIX_AUTO_COMMIT_RETRYABLE_REASONS.include?(attrs["reason"].to_s)
-
-        # Legacy Claude Code stop-hook failures are environmental: the fix run
-        # completed far enough to hit the stop hook, but the hook failed to
-        # signal completion and Review stamped a generic fix_failed marker.
-        # Keep ordinary fix_failed manual; this bounded retry only covers the
-        # exact known stop-hook signature and still re-runs the normal fix path.
-        return true if fix_claude_stop_hook_failure?(attrs)
-
-        return false unless attrs["phase"].to_s == "reviewers"
-        return false unless attrs["reason"].to_s == "reviewer_partial_failure"
-        return false if attrs["pass"].to_s.empty?
-
-        path = reviewer_errors_path(row)
-        return false unless path
-
-        lines = File.readlines(path, chomp: true).grep(/\A- \[/)
-        return false if lines.empty?
-
-        lines.all? do |line|
-          line.include?("tmux_session_terminated before writing expected output file")
-        end
-      rescue SystemCallError
-        false
+        error_retry_due?(row, now: now) && @safety.safe_to_retry?(row).first == true
       end
 
       def fix_claude_stop_hook_failure?(attrs)

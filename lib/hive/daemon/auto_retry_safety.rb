@@ -4,7 +4,12 @@ require "hive/worktree"
 
 module Hive
   module Daemon
-    # Fail-closed guard before clearing a terminal ERROR for same-stage rerun.
+    # Work-area guard before clearing a durable error for a same-stage rerun.
+    # It temporarily defers retries when current files prove that a blind rerun
+    # would overwrite operator input or collide with uncommitted execute work.
+    # Unknown stages are allowed: their runner remains responsible for
+    # re-validating current state, and parking them forever would contradict
+    # Hive's file-based recovery contract.
     module AutoRetrySafety
       SUCCESS_MARKERS = %w[complete execute_complete review_complete].freeze
       FEEDBACK_PATTERN = /\b(user\s+feedback|feedback|requested\s+change|operator\s+feedback)\b/i.freeze
@@ -23,12 +28,7 @@ module Hive
         when "3-plan"
           plan_safe?(row)
         else
-          # Fail CLOSED for any stage without a bespoke work-area check. A
-          # category like :claude_launcher can be classified on a marker in
-          # ANY stage, and "when uncertain, do not retry" (plan R8) governs:
-          # we will not blind-clear a terminal error in a stage whose
-          # re-entry safety we have not verified here.
-          [ false, "no work-area safety check for stage #{row.stage}" ]
+          [ true, "no mutable work-area guard required for stage #{row.stage}" ]
         end
       rescue StandardError => e
         [ false, "inspection failed: #{e.class}: #{e.message}" ]
@@ -37,8 +37,8 @@ module Hive
       def execute_safe?(row)
         pointer = Hive::Worktree.read_pointer(row.folder.to_s)
         path = pointer ? pointer["path"].to_s : ""
-        return [ false, "missing worktree pointer" ] if path.empty?
-        return [ false, "worktree missing" ] unless File.directory?(path)
+        return [ true, "missing worktree pointer; runner will revalidate" ] if path.empty?
+        return [ true, "worktree missing; runner will revalidate" ] unless File.directory?(path)
 
         status = Hive::GitOps.new(path).status_short
         return [ true, "worktree clean" ] if status.to_s.strip.empty?

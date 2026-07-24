@@ -102,6 +102,35 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", manual.fetch("blocker_owner")
   end
 
+  def test_daemon_owned_error_retry_is_not_reported_as_operator_repair
+    error = task(
+      action: "error",
+      slug: "retryable",
+      stage: "4-execute",
+      marker: "error",
+      attrs: { "reason" => "agent_preflight_failed" }
+    )
+
+    automated = project(
+      status_payload(error),
+      project_context: {
+        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+      }
+    ).fetch("tasks").first
+    disabled = project(
+      status_payload(error),
+      project_context: {
+        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => false }
+      }
+    ).fetch("tasks").first
+
+    assert_equal "waiting_on_provider_or_scheduler", automated.fetch("state")
+    assert_equal "scheduler", automated.fetch("blocker_owner")
+    assert_equal "error_retry_scheduled", automated.dig("reasons", 0, "code")
+    assert_equal "needs_repair", disabled.fetch("state")
+    assert_equal "operator", disabled.fetch("blocker_owner")
+  end
+
   def test_dependency_block_is_scheduler_owned_and_primary_unless_human_input_wins
     blocked = task(
       action: "ready_to_develop", slug: "blocked", blocked: true,
@@ -293,6 +322,7 @@ class OperationalStatusTest < Minitest::Test
     expectations = {
       "provider_hold" => [ "waiting_on_provider_or_scheduler", "provider" ],
       "dispatched" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
+      "retry_cooldown" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
       "wait_for_answers" => [ "waiting_on_you", "operator" ],
       "quarantined" => [ "needs_repair", "scheduler" ],
       "skip" => [ "idle", "scheduler" ]

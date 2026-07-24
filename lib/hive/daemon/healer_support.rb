@@ -3,14 +3,11 @@ require "hive/daemon/dispatch_request_queue"
 
 module Hive
   module Daemon
-    # Marker-attribute, baseline-seeding, and 3-plan requeue helpers shared by
-    # StaleAgentHealer and RecoverableErrorHealer. Both healers clear terminal
-    # ERROR markers and must read marker attrs the same way, seed the same
-    # pre-clear dispatch baseline, and (for 3-plan) enqueue the same rerun, so
-    # this logic lives in one place rather than drifting between two copies.
+    # Marker-attribute, baseline-seeding, and 3-plan requeue helpers for the
+    # daemon's universal StaleAgentHealer.
     #
-    # Mixed into both healers; relies on the host exposing `@controller`,
-    # `@logger`, and `@request_queue` instance variables.
+    # Relies on the host exposing `@controller`, `@logger`, and
+    # `@request_queue` instance variables.
     module HealerSupport
       # Read the row's marker attrs hash, tolerating rows that predate the
       # `marker_attrs` accessor or carry a non-hash value.
@@ -21,7 +18,7 @@ module Hive
       end
 
       # The marker's own `reason=` attribute as a string — the single source
-      # both healers key recovery budgets and match-attrs off of.
+      # the universal healer keys retry telemetry and match attrs from.
       def marker_reason(row)
         marker_attrs_for(row)["reason"].to_s
       end
@@ -71,29 +68,42 @@ module Hive
       # 3-plan marker clear. Clearing alone leaves an empty markerless
       # plan.md that classifies straight back to :error, so re-entry must be
       # explicit. `trigger:` distinguishes the calling healer. Carries its
-      # own rescue: by this point the clear already SUCCEEDED, so a failed
-      # request write is logged as `heal_requeue_failed` (with the manual
-      # remediation) rather than bubbling up to a caller's heal-failed path.
+      # own rescue and returns false when durable enqueue fails. The caller can
+      # then restore a fresh guarded ERROR so the shared cooldown retries the
+      # enqueue instead of stranding a markerless empty plan.
       def requeue_plan_rerun(row, trigger:)
-        request_id = @request_queue.write_request!(
-          project: row.project,
-          slug: row.slug,
-          argv: [ "hive", "plan", row.slug, "--project", row.project, "--from", "3-plan" ], # coding-scoped: healer re-enters coding plan verb
-          requestor: "healer",
-          trigger: trigger
-        )
-        @logger.event(:heal_requeued,
-                      project: row.project,
-                      slug: row.slug,
-                      stage: row.stage,
-                      request_id: request_id)
-      rescue StandardError => e
-        @logger.event(:heal_requeue_failed,
-                      project: row.project,
-                      slug: row.slug,
-                      stage: row.stage,
-                      error: "#{e.class}: #{e.message}",
-                      remediation: "hive plan #{row.slug} --project #{row.project} --from 3-plan") # coding-scoped: healer re-enters coding plan verb
+        request_id = begin
+          @request_queue.write_request!(
+            project: row.project,
+            slug: row.slug,
+            argv: [ "hive", "plan", row.slug, "--project", row.project, "--from", "3-plan" ], # coding-scoped: healer re-enters coding plan verb
+            requestor: "healer",
+            trigger: trigger
+          )
+        rescue StandardError => e
+          begin
+            @logger.event(:heal_requeue_failed,
+                          project: row.project,
+                          slug: row.slug,
+                          stage: row.stage,
+                          error: "#{e.class}: #{e.message}",
+                          remediation: "hive plan #{row.slug} --project #{row.project} --from 3-plan") # coding-scoped: healer re-enters coding plan verb
+          rescue StandardError
+            nil
+          end
+          return false
+        end
+
+        begin
+          @logger.event(:heal_requeued,
+                        project: row.project,
+                        slug: row.slug,
+                        stage: row.stage,
+                        request_id: request_id)
+        rescue StandardError
+          nil
+        end
+        true
       end
     end
   end

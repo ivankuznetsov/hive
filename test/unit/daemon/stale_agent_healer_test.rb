@@ -72,24 +72,146 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     )
   end
 
-  def test_operational_snapshot_starts_with_bounded_empty_recovery_state
+  def test_operational_snapshot_starts_with_unbounded_empty_recovery_state
     snapshot = @healer.operational_snapshot
 
-    assert_equal 3, snapshot.dig("limits", "error")
+    assert_nil snapshot.dig("limits", "error")
+    assert_nil snapshot.dig("limits", "review")
+    assert_nil snapshot.dig("limits", "attempt_loss")
     assert_empty snapshot.fetch("error_retries")
     assert_empty snapshot.fetch("review_exhausted")
   end
 
-  def test_operational_snapshot_serializes_retry_and_exhaustion_ownership
+  def test_agent_preflight_error_retries_after_cooldown_beyond_legacy_budget
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      error_auto_recovery_limit: 1,
+      request_queue: @request_queue
+    )
+
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        mtime: NOW - Hive::AgentLimit.retry_cooldown_sec - 1,
+        stage: "3-generate",
+        marker: "error",
+        marker_attrs: {
+          "reason" => "agent_preflight_failed",
+          "message" => "codex binary not runnable"
+        },
+        action: "error",
+        live_task_lock: false,
+        workflow: "bench"
+      )
+
+      2.times do
+        Hive::Markers.set(
+          state_file,
+          :error,
+          reason: "agent_preflight_failed",
+          message: "codex binary not runnable"
+        )
+        row.marker_attrs = Hive::Markers.current(state_file).attrs
+        row.state_file_mtime = NOW - Hive::AgentLimit.retry_cooldown_sec - 1
+
+        heal([ row ])
+
+        assert Hive::Markers.current(state_file).none?,
+               "every cooled-down preflight error must remain retryable"
+      end
+
+      heals = @logger.events.select { |name, _attrs| name == :marker_healed }
+      assert_equal 2, heals.size
+      assert_empty @logger.events.select { |name, _attrs| name == :marker_heal_exhausted }
+    end
+  end
+
+  def test_review_integrity_error_retries_after_cooldown_beyond_legacy_budget
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      review_error_auto_recovery_limit: 1,
+      request_queue: @request_queue
+    )
+
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        mtime: NOW - Hive::AgentLimit.retry_cooldown_sec - 1,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "fix",
+          "reason" => "fix_tampered",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      2.times do
+        Hive::Markers.set(
+          state_file,
+          :review_error,
+          phase: "fix",
+          reason: "fix_tampered",
+          pass: "1"
+        )
+        row.marker_attrs = Hive::Markers.current(state_file).attrs
+        row.state_file_mtime = NOW - Hive::AgentLimit.retry_cooldown_sec - 1
+
+        heal([ row ])
+
+        assert Hive::Markers.current(state_file).none?,
+               "every cooled-down review error must remain retryable"
+      end
+
+      heals = @logger.events.select { |name, _attrs| name == :marker_healed }
+      assert_equal 2, heals.size
+      assert_empty @logger.events.select { |name, _attrs| name == :marker_heal_exhausted }
+    end
+  end
+
+  def test_error_and_review_error_share_the_same_cooldown_boundary
+    [
+      [ :error, "error", { "reason" => "git_status_failed" }, "4-execute" ],
+      [ :review_error, "review_error",
+        { "phase" => "fix", "reason" => "fix_tampered", "pass" => "1" },
+        "6-review" ]
+    ].each do |marker_name, row_marker, attrs, stage|
+      with_marker_file do |state_file|
+        Hive::Markers.set(state_file, marker_name, attrs)
+        row = make_row(
+          state_file,
+          pid_alive: nil,
+          mtime: NOW - Hive::AgentLimit.retry_cooldown_sec + 1,
+          stage: stage,
+          marker: row_marker,
+          marker_attrs: Hive::Markers.current(state_file).attrs,
+          action: row_marker == "error" ? "error" : "recover_review",
+          live_task_lock: false
+        )
+
+        heal([ row ])
+
+        assert_equal marker_name, Hive::Markers.current(state_file).name,
+                     "#{row_marker} must remain parked before the shared cooldown"
+        refute @logger.events.any? { |name, _| name == :marker_healed }
+      end
+    end
+  end
+
+  def test_operational_snapshot_serializes_retry_ownership_without_exhaustion
     error_key = [ "project-a", "task-a", "7-artifacts", "agent_died" ]
-    review_key = [ "project-b", "task-b", "review_agent_died", "reviewers", "1", "signature" ]
+    review_key = [ "project-b", "task-b", "review_agent_died", "reviewers", "1" ]
     @healer.instance_variable_get(:@error_auto_recoveries)[error_key] = 2
     @healer.instance_variable_get(:@error_auto_recoveries)[[ "ignored", "zero" ]] = 0
     @healer.instance_variable_get(:@review_error_auto_recoveries)[review_key] = 1
-    @healer.instance_variable_get(:@error_recovery_exhausted)[error_key] = true
-    @healer.instance_variable_get(:@review_error_recovery_exhausted)[review_key] = true
-    @healer.instance_variable_get(:@review_error_recovery_exhausted)[[ "ignored", "false" ]] = false
-
     snapshot = @healer.operational_snapshot
 
     assert_equal [ {
@@ -100,8 +222,23 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       "project" => "project-b", "slug" => "task-b", "stage" => "6-review",
       "reason" => "review_agent_died", "kind" => "review", "attempts" => 1
     } ], snapshot.fetch("review_retries")
-    assert_equal "agent_died", snapshot.fetch("error_exhausted").first.fetch("reason")
-    assert_equal "review_agent_died", snapshot.fetch("review_exhausted").first.fetch("reason")
+    assert_empty snapshot.fetch("error_exhausted")
+    assert_empty snapshot.fetch("review_exhausted")
+  end
+
+  def test_retry_counters_are_pruned_after_error_rows_disappear
+    @healer.instance_variable_get(:@error_auto_recoveries)[
+      [ "project-a", "task-a", "4-execute", "failed" ]
+    ] = 2
+    @healer.instance_variable_get(:@review_error_auto_recoveries)[
+      [ "project-b", "task-b", "fix_failed", "fix", "1" ]
+    ] = 3
+
+    heal([])
+
+    snapshot = @healer.operational_snapshot
+    assert_empty snapshot.fetch("error_retries")
+    assert_empty snapshot.fetch("review_retries")
   end
 
   def heal(rows, **opts)
@@ -120,7 +257,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   # rows with action="error". The healer keys off row.marker (the
   # on-disk marker name), not row.action, so we use the production-
   # accurate combo by default. Tests can override via the action: kwarg.
-  def make_row(state_file, pid_alive:, mtime: NOW - 1000, project: "p", slug: "s", stage: "4-execute",
+  def make_row(state_file, pid_alive:, mtime: NOW - Hive::AgentLimit.retry_cooldown_sec - 1,
+               project: "p", slug: "s", stage: "4-execute",
                marker: "agent_working", marker_attrs: {}, action: "error", live_task_lock: nil, workflow: nil,
                task_lock_pid: nil, task_lock_process_start_time: nil, task_lock_id: nil)
     Row.new(
@@ -734,7 +872,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_does_not_auto_recover_reviewer_partial_failure_with_mixed_error_causes
+  def test_retries_reviewer_partial_failure_with_mixed_error_causes_after_cooldown
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=1 -->\n")
       reviews_dir = File.join(File.dirname(state_file), "reviews")
@@ -762,12 +900,12 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       heal([ row ])
 
-      refute @logger.events.any? { |name, _| name == :marker_healed }
-      assert_match(/REVIEW_ERROR/, File.read(state_file))
+      assert @logger.events.any? { |name, _| name == :marker_healed }
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
     end
   end
 
-  def test_does_not_auto_recover_reviewer_partial_failure_when_errors_file_is_missing
+  def test_retries_reviewer_partial_failure_when_errors_file_is_missing_after_cooldown
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=1 -->\n")
       row = make_row(
@@ -786,12 +924,12 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       heal([ row ])
 
-      refute @logger.events.any? { |name, _| name == :marker_healed }
-      assert_match(/REVIEW_ERROR/, File.read(state_file))
+      assert @logger.events.any? { |name, _| name == :marker_healed }
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
     end
   end
 
-  def test_reviewer_partial_failure_signature_falls_back_when_errors_file_disappears
+  def test_reviewer_partial_failure_retry_does_not_depend_on_errors_file
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=1 -->\n")
       reviews_dir = File.join(File.dirname(state_file), "reviews")
@@ -861,19 +999,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  # Safety invariant (plan Q5's two-tier guarantee): the reasons
-  # ReviewErrorReason.classify can emit are agent-influenceable — a triage/fix
-  # agent's own captured error text decides them (Stages::Review#mark_review_
-  # phase_failure) — so NONE of them, nor the `unknown` fallback, may be
-  # auto-recoverable. Today this holds only by inspection: no allow-list in
-  # auto_recoverable_review_error? happens to name these strings. This guard
-  # feeds every classified reason across each review phase that carries a
-  # recovery allow-list (triage/fix/reviewers) and pins non-recovery, so a
-  # future allow-list edit that admitted one of these strings — silently
-  # re-arming an agent-controllable signal into a free rerun — fails loudly
-  # instead of shipping green. Driven off CLASSIFIED so a new enum member is
-  # covered the moment it is added.
-  def test_classified_review_reasons_are_never_auto_recovered
+  def test_every_classified_review_reason_retries_after_cooldown
     reasons = Hive::ReviewErrorReason::CLASSIFIED + [ "unknown" ]
 
     reasons.product(%w[triage fix reviewers]).each do |reason, phase|
@@ -890,12 +1016,14 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
           live_task_lock: false
         )
 
+        healed_before = @logger.events.count { |name, _| name == :marker_healed }
         heal([ row ])
 
-        assert_match(/REVIEW_ERROR/, File.read(state_file),
-                     "classified reason #{reason.inspect} on phase #{phase.inspect} must stay terminal, never auto-recover")
-        refute @logger.events.any? { |name, _| name == :marker_healed },
-               "no classified reason may fire a heal; #{reason.inspect}/#{phase.inspect} did. events: #{@logger.events.inspect}"
+        refute_match(/REVIEW_ERROR/, File.read(state_file),
+                     "classified reason #{reason.inspect} on phase #{phase.inspect} must retry after cooldown")
+        assert_equal healed_before + 1,
+                     @logger.events.count { |name, _| name == :marker_healed },
+                     "expected a heal for #{reason.inspect}/#{phase.inspect}; events: #{@logger.events.inspect}"
       end
     end
   end
@@ -1103,7 +1231,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  # --- limits_reached cooldown auto-retry (terminal ERROR path) --------
+  # --- limits_reached cooldown auto-retry (ERROR path) -----------------
 
   def make_error_limit_row(state_file, retry_after:, stage: "4-execute", mtime: NOW - 1000)
     marker_attrs = { "reason" => "limits_reached" }
@@ -1315,14 +1443,13 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   # ── Generic-workflow heal paths (cover the coding-id gates) ────────────────
 
-  def test_generic_finalize_unpushed_commits_does_not_auto_recover
-    # The 8-finalize + unpushed_commits auto-recovery is a coding-only branch
-    # (finalize/PR recovery). A generic workflow reusing 8-finalize must NOT be
-    # treated as auto-recoverable, so its error marker stays red.
+  def test_generic_finalize_unpushed_commits_retries_after_cooldown
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=err-g -->\n")
       row = make_row(
-        state_file, pid_alive: nil, mtime: NOW - 100, stage: "8-finalize",
+        state_file, pid_alive: nil,
+        mtime: NOW - Hive::AgentLimit.retry_cooldown_sec - 1,
+        stage: "8-finalize",
         marker: "error",
         marker_attrs: { "reason" => "unpushed_commits", "marker_id" => "err-g" },
         action: "error", live_task_lock: false, workflow: "research"
@@ -1330,10 +1457,9 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       heal([ row ])
 
-      refute(@logger.events.any? { |name, _| name == :marker_healed },
-             "a generic 8-finalize unpushed_commits error must not take the coding finalize recovery")
-      refute Hive::Markers.current(state_file).none?,
-             "generic finalize unpushed error stays red (coding-only auto-recovery)"
+      assert(@logger.events.any? { |name, _| name == :marker_healed },
+             "a generic 8-finalize error must retry after the shared cooldown")
+      assert Hive::Markers.current(state_file).none?
     end
   end
 
@@ -1344,7 +1470,9 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated marker_id=err-r -->\n")
       row = make_row(
-        state_file, pid_alive: nil, mtime: NOW - 100, stage: "6-review",
+        state_file, pid_alive: nil,
+        mtime: NOW - Hive::AgentLimit.retry_cooldown_sec - 1,
+        stage: "6-review",
         marker: "error",
         marker_attrs: { "reason" => "tmux_session_terminated", "marker_id" => "err-r" },
         action: "error", live_task_lock: false, workflow: "research"
@@ -1354,7 +1482,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       heal_event = @logger.events.find { |name, _| name == :marker_healed }
       assert heal_event, "a generic 6-review agent-loss error should heal (no coding review exclusion)"
-      assert_equal "terminal_agent_loss", heal_event[1][:reason]
+      assert_equal "agent_loss_retry", heal_event[1][:reason]
       assert Hive::Markers.current(state_file).none?,
              "generic 6-review agent-loss marker clears so the daemon can rerun the stage"
     end
@@ -1367,7 +1495,9 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- ERROR reason=agent_orphaned marker_id=err-p -->\n")
       row = make_row(
-        state_file, pid_alive: nil, mtime: NOW - 100, stage: "3-plan",
+        state_file, pid_alive: nil,
+        mtime: NOW - Hive::AgentLimit.retry_cooldown_sec - 1,
+        stage: "3-plan",
         marker: "error",
         marker_attrs: { "reason" => "agent_orphaned", "marker_id" => "err-p" },
         action: "error", live_task_lock: false, workflow: "research"
@@ -1402,7 +1532,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_requeue_failure_after_a_successful_clear_logs_its_own_event
+  def test_requeue_failure_restores_fresh_error_for_next_cooldown
     failing_queue = Class.new do
       def write_request!(**)
         raise Errno::ENOSPC, "no space left on device"
@@ -1427,14 +1557,84 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       names = @logger.events.map(&:first)
       assert_includes names, :marker_healed, "the clear itself succeeded and must say so"
       assert_includes names, :heal_requeue_failed,
-                      "a lost requeue is NOT a retryable heal failure — it needs its own truthful event"
+                      "the durable enqueue failure needs its own truthful event"
       refute_includes names, :marker_heal_failed,
-                      "marker_heal_failed means 'next tick retries' — a lie here, the marker is gone"
+                      "the original clear succeeded; the queue event owns the enqueue failure"
       requeue_event = @logger.events.find { |name, _| name == :heal_requeue_failed }[1]
       assert_match(/hive plan/, requeue_event[:remediation],
                    "the operator needs the manual re-entry command")
-      assert Hive::Markers.current(state_file).none?,
-             "the marker stays cleared — the failure is the requeue, not the heal"
+      restored = Hive::Markers.current(state_file)
+      assert_equal :error, restored.name
+      assert_equal "tmux_session_terminated", restored.attrs.fetch("reason")
+      refute_equal "rq1", restored.attrs.fetch("marker_id"),
+                   "restoration must create a fresh generation and restart the cooldown"
+    end
+  end
+
+  def test_plan_requeue_survives_success_audit_failure
+    logger = Class.new do
+      def event(name, **)
+        raise "logger unavailable" if name == :heal_requeued
+      end
+    end.new
+    healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller, logger: logger, grace_sec: 300,
+      request_queue: @request_queue
+    )
+
+    with_marker_file do |state_file|
+      row = make_row(state_file, pid_alive: nil, stage: "3-plan")
+
+      assert healer.send(:requeue_plan_rerun, row, trigger: "error_retry")
+      assert_equal 1, @request_queue.requests.size
+    end
+  end
+
+  def test_plan_requeue_survives_failure_audit_failure
+    failing_queue = Class.new do
+      def write_request!(**)
+        raise Errno::ENOSPC, "no space left on device"
+      end
+    end.new
+    logger = Class.new do
+      def event(name, **)
+        raise "logger unavailable" if name == :heal_requeue_failed
+      end
+    end.new
+    healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller, logger: logger, grace_sec: 300,
+      request_queue: failing_queue
+    )
+
+    with_marker_file do |state_file|
+      row = make_row(state_file, pid_alive: nil, stage: "3-plan")
+
+      refute healer.send(:requeue_plan_rerun, row, trigger: "error_retry")
+    end
+  end
+
+  def test_plan_retry_restore_failure_is_audited
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "3-plan",
+        marker: "error",
+        marker_attrs: { "reason" => "agent_preflight_failed", "marker_id" => "old" }
+      )
+
+      with_replaced_singleton_method(
+        Hive::Markers,
+        :set_if_none,
+        ->(*) { raise Errno::ENOSPC, "no space left on device" }
+      ) do
+        @healer.send(:restore_plan_retry_error, row)
+      end
+
+      event = @logger.events.find { |name, _| name == :marker_heal_failed }
+      refute_nil event
+      assert_equal "plan_retry_restore_failed", event[1].fetch(:reason)
+      assert_match(/ENOSPC/, event[1].fetch(:error))
     end
   end
 
@@ -1461,13 +1661,13 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
         heal_event = @logger.events.reverse.find { |e| e[0] == :marker_healed }
         refute_nil heal_event, "#{stage}/#{reason} must log marker_healed"
-        assert_equal "terminal_agent_loss", heal_event[1][:reason]
+        assert_equal "agent_loss_retry", heal_event[1][:reason]
         assert_equal reason, heal_event[1][:marker_reason]
         assert_equal stage, heal_event[1][:stage]
         assert_equal 1, heal_event[1][:attempts]
         assert_equal({ project: "p", slug: "s", mtime: pre_clear_mtime }, @controller.observed_mtimes.last)
         assert Hive::Markers.current(state_file).none?,
-               "#{stage}/#{reason} terminal ERROR should clear so the daemon can rerun the stage"
+               "#{stage}/#{reason} ERROR should clear so the daemon can rerun the stage"
 
         if stage == "3-plan"
           req = @request_queue.requests.last
@@ -1484,9 +1684,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
                  "ONLY the two 3-plan heals may requeue (other stages re-enter via the edit-resume path)"
   end
 
-  def test_terminal_agent_loss_recovery_stays_out_of_review
-    # 6-review owns its agent-loss healing (REVIEW_ERROR paths); the generic
-    # terminal-ERROR clear must not double-handle it.
+  def test_error_agent_loss_recovery_includes_review_stage
     %w[tmux_session_terminated agent_orphaned].each do |reason|
       with_marker_file do |state_file|
         File.write(state_file, "# task\n\n<!-- ERROR reason=#{reason} -->\n")
@@ -1502,10 +1700,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
         heal([ row ])
 
-        refute @logger.events.any? { |name, _| name == :marker_healed },
-               "6-review/#{reason} must stay with the review-specific heal paths"
+        assert @logger.events.any? { |name, _| name == :marker_healed },
+               "6-review/#{reason} must retry after the shared cooldown"
         refute @logger.events.any? { |name, _| name == :marker_heal_failed }
-        assert_match(/ERROR reason=#{reason}/, File.read(state_file))
+        refute_match(/ERROR reason=#{reason}/, File.read(state_file))
       end
     end
   end
@@ -1553,7 +1751,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_terminal_agent_loss_recovery_does_not_clear_git_status_failed
+  def test_git_status_failed_retries_after_cooldown
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- ERROR reason=git_status_failed -->\n")
       row = make_row(
@@ -1568,14 +1766,14 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       heal([ row ])
 
-      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert @logger.events.any? { |name, _| name == :marker_healed }
       refute @logger.events.any? { |name, _| name == :marker_heal_failed },
-             "a repository-state failure must stay manual, not enter agent-loss retry"
-      assert_match(/ERROR reason=git_status_failed/, File.read(state_file))
+             "a repository-state retry should clear cleanly"
+      refute_match(/ERROR reason=git_status_failed/, File.read(state_file))
     end
   end
 
-  def test_terminal_agent_loss_stays_red_after_retry_budget_is_exhausted
+  def test_agent_loss_retries_beyond_legacy_budget
     @healer = Hive::Daemon::StaleAgentHealer.new(
       controller: @controller,
       logger: @logger,
@@ -1601,28 +1799,17 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated -->\n")
       heal([ row ])
 
-      assert_match(/ERROR reason=tmux_session_terminated/, File.read(state_file),
-                   "same terminal agent loss must stay red after budget exhaustion")
+      refute_match(/ERROR reason=tmux_session_terminated/, File.read(state_file),
+                   "agent loss must remain retryable beyond the old budget")
       heals = @logger.events.select { |name, _| name == :marker_healed }
-      assert_equal 1, heals.size
-      assert_equal "terminal_agent_loss", heals.first[1][:reason]
-
-      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
-      assert_equal 1, exhausted.size
-      assert_equal "terminal_agent_loss", exhausted.first[1][:reason]
-      assert_equal "tmux_session_terminated", exhausted.first[1][:marker_reason]
-      assert_equal 1, exhausted.first[1][:attempts]
-      assert_equal 1, exhausted.first[1][:max_attempts]
-      assert_equal "per_process", exhausted.first[1][:budget_scope]
-      assert_equal "manual_fix", exhausted.first[1][:suggested_next_action]
-      assert_match(/rerun 7-artifacts/, exhausted.first[1][:remediation])
-      assert_match(/hive run s --project p --stage 7-artifacts/, exhausted.first[1][:remediation])
-      refute_match(/--from/, exhausted.first[1][:remediation])
-      assert_match(/no live agent/, exhausted.first[1][:remediation])
+      assert_equal 2, heals.size
+      assert heals.all? { |_name, attrs| attrs[:reason] == "agent_loss_retry" }
+      assert heals.all? { |_name, attrs| attrs[:max_attempts].nil? }
+      assert_empty @logger.events.select { |name, _| name == :marker_heal_exhausted }
     end
   end
 
-  def test_terminal_agent_loss_budget_accumulates_across_fresh_marker_ids
+  def test_agent_loss_fresh_marker_ids_remain_retryable
     @healer = Hive::Daemon::StaleAgentHealer.new(
       controller: @controller,
       logger: @logger,
@@ -1657,14 +1844,12 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated marker_id=err-b -->\n")
       heal([ second ])
 
-      assert_match(/ERROR reason=tmux_session_terminated marker_id=err-b/, File.read(state_file),
-                   "retry budget should key on task/stage/reason, not marker_id")
+      refute_match(/ERROR reason=tmux_session_terminated marker_id=err-b/, File.read(state_file),
+                   "a fresh marker id must remain retryable")
       heals = @logger.events.select { |name, _| name == :marker_healed }
       exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
-      assert_equal 1, heals.size
-      assert_equal 1, exhausted.size
-      assert_equal "terminal_agent_loss", exhausted.first[1][:reason]
-      assert_equal "tmux_session_terminated", exhausted.first[1][:marker_reason]
+      assert_equal 2, heals.size
+      assert_empty exhausted
     end
   end
 
@@ -1757,7 +1942,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_finalize_unpushed_recovery_ignores_missing_or_malformed_marker_attrs
+  def test_error_with_missing_marker_attrs_retries_after_cooldown
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- ERROR -->\n")
       row = make_row(
@@ -1772,9 +1957,9 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       heal([ row ])
 
-      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert @logger.events.any? { |name, _| name == :marker_healed }
       refute @logger.events.any? { |name, _| name == :marker_heal_failed }
-      assert_match(/ERROR/, File.read(state_file))
+      refute_match(/ERROR/, File.read(state_file))
     end
   end
 
@@ -1823,7 +2008,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_does_not_auto_recover_unpushed_commits_outside_finalize
+  def test_unpushed_commits_outside_finalize_retries_after_cooldown
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
       row = make_row(
@@ -1838,20 +2023,14 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       heal([ row ])
 
-      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert @logger.events.any? { |name, _| name == :marker_healed }
       refute @logger.events.any? { |name, _| name == :marker_heal_failed },
-             "a wrong-stage skip must be a clean no-op, not a logged failure"
-      assert_match(/ERROR reason=unpushed_commits/, File.read(state_file))
+             "a wrong-stage error retry should clear cleanly"
+      refute_match(/ERROR reason=unpushed_commits/, File.read(state_file))
     end
   end
 
-  # `dirty_worktree` (legacy operator-residue reason) stays manual: auto-
-  # committing residue a human left without review is not safe to retry
-  # blindly, so the healer must leave it red as a clean no-op. (Its sibling
-  # `ensure_clean_on_exit_failed` IS auto-retried now — see
-  # test_auto_recovers_error_ensure_clean_on_exit_failed — because a rerun
-  # re-applies the scope check rather than bypassing it.)
-  def test_does_not_auto_recover_dirty_worktree
+  def test_dirty_worktree_retries_after_cooldown
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- ERROR reason=dirty_worktree -->\n")
       row = make_row(
@@ -1866,14 +2045,14 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       heal([ row ])
 
-      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert @logger.events.any? { |name, _| name == :marker_healed }
       refute @logger.events.any? { |name, _| name == :marker_heal_failed },
-             "a wrong-reason (non-recoverable) skip must be a clean no-op, not a logged failure"
-      assert_match(/ERROR reason=dirty_worktree/, File.read(state_file))
+             "a dirty-worktree retry should clear cleanly"
+      refute_match(/ERROR reason=dirty_worktree/, File.read(state_file))
     end
   end
 
-  def test_auto_recoverable_finalize_unpushed_commits_stays_red_after_retry_budget_is_exhausted
+  def test_finalize_unpushed_commits_retries_beyond_legacy_budget
     @healer = Hive::Daemon::StaleAgentHealer.new(
       controller: @controller,
       logger: @logger,
@@ -1899,28 +2078,17 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
       heal([ row ])
 
-      assert_match(/ERROR reason=unpushed_commits/, File.read(state_file),
-                   "same finalize push failure must stay red after budget exhaustion")
+      refute_match(/ERROR reason=unpushed_commits/, File.read(state_file),
+                   "finalize push failure must remain retryable beyond the old budget")
       heals = @logger.events.select { |name, _| name == :marker_healed }
-      assert_equal 1, heals.size
+      assert_equal 2, heals.size
       assert_equal 1, heals.first[1][:attempts]
-      assert_equal 1, heals.first[1][:max_attempts]
-
-      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
-      assert_equal 1, exhausted.size
-      assert_equal "finalize_unpushed_commits", exhausted.first[1][:reason]
-      assert_equal "unpushed_commits", exhausted.first[1][:marker_reason]
-      assert_equal 1, exhausted.first[1][:attempts]
-      assert_equal 1, exhausted.first[1][:max_attempts]
-      assert_equal "per_process", exhausted.first[1][:budget_scope]
-      assert_equal "manual_fix", exhausted.first[1][:suggested_next_action]
-      assert_match(/rerun finalize/, exhausted.first[1][:remediation],
-                   "exhausted event must carry an actionable remediation hint")
-      assert_match(/push the branch manually/, exhausted.first[1][:remediation])
+      assert_nil heals.first[1][:max_attempts]
+      assert_empty @logger.events.select { |name, _| name == :marker_heal_exhausted }
     end
   end
 
-  def test_finalize_unpushed_budget_accumulates_across_fresh_marker_ids
+  def test_finalize_unpushed_fresh_marker_ids_remain_retryable
     @healer = Hive::Daemon::StaleAgentHealer.new(
       controller: @controller,
       logger: @logger,
@@ -1954,12 +2122,12 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       )
       heal([ second ])
 
-      assert_match(/ERROR reason=unpushed_commits marker_id=err-b/, File.read(state_file),
-                   "fresh marker ids from repeated finalize failures must share one recovery budget")
+      refute_match(/ERROR reason=unpushed_commits marker_id=err-b/, File.read(state_file),
+                   "fresh marker ids from repeated finalize failures remain retryable")
       heals = @logger.events.select { |name, _| name == :marker_healed }
-      assert_equal 1, heals.size
+      assert_equal 2, heals.size
       exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
-      assert_equal 1, exhausted.size
+      assert_empty exhausted
     end
   end
 
@@ -2086,13 +2254,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_finalize_unpushed_budget_resets_on_fresh_healer_instance
-    # The recovery budget is in-memory and per-process. A daemon restart
-    # — or the SIGHUP rebuild of the healer in Dispatcher — drops the
-    # accumulated counts, so a row that exhausted its budget on the old
-    # instance is eligible again on a fresh one. This pins that reset as
-    # INTENDED: a future "persist the budget" change must consciously
-    # break this test.
+  def test_finalize_unpushed_remains_retryable_across_healer_instances
     row_attrs = {
       pid_alive: nil,
       stage: "8-finalize",
@@ -2113,17 +2275,18 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       first.heal([ row ], now: NOW)
       File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
       first.heal([ row ], now: NOW)
-      assert_match(/ERROR/, File.read(state_file),
-                   "budget must be exhausted on the first instance after the second pass")
+      assert Hive::Markers.current(state_file).none?,
+             "the existing healer must never exhaust retries"
 
       fresh = Hive::Daemon::StaleAgentHealer.new(
         controller: @controller, logger: @logger, grace_sec: 300,
         error_auto_recovery_limit: 1
       )
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
       fresh.heal([ row ], now: NOW)
 
       assert Hive::Markers.current(state_file).none?,
-             "a fresh healer instance must heal the same row again (per-process budget reset)"
+             "a fresh healer instance must preserve the same unbounded policy"
     end
   end
 
@@ -2214,7 +2377,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_auto_recoverable_review_error_stays_red_after_retry_budget_is_exhausted
+  def test_review_error_retries_beyond_legacy_budget
     @healer = Hive::Daemon::StaleAgentHealer.new(
       controller: @controller,
       logger: @logger,
@@ -2244,22 +2407,13 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 -->\n")
       heal([ row ])
 
-      assert_match(/REVIEW_ERROR/, File.read(state_file),
-                   "same auto-recoverable review error must stay red after budget exhaustion")
+      refute_match(/REVIEW_ERROR/, File.read(state_file),
+                   "review errors must remain retryable beyond the old budget")
       heals = @logger.events.select { |name, _| name == :marker_healed }
-      assert_equal 1, heals.size
+      assert_equal 2, heals.size
       assert_equal 1, heals.first[1][:attempts]
-      assert_equal 1, heals.first[1][:max_attempts]
-
-      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
-      assert_equal 1, exhausted.size
-      assert_equal "review_agent_died", exhausted.first[1][:marker_reason]
-      assert_equal "reviewers", exhausted.first[1][:phase]
-      assert_equal "1", exhausted.first[1][:pass]
-      assert_equal "per_process", exhausted.first[1][:budget_scope]
-      assert_equal "manual_fix", exhausted.first[1][:suggested_next_action]
-      assert_match(/rerun review/, exhausted.first[1][:remediation],
-                   "exhausted event must carry an actionable remediation hint")
+      assert_nil heals.first[1][:max_attempts]
+      assert_empty @logger.events.select { |name, _| name == :marker_heal_exhausted }
     end
   end
 
@@ -2335,7 +2489,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_finalize_unpushed_exhausted_event_is_logged_once_per_process_key
+  def test_finalize_unpushed_never_logs_retry_exhaustion
     @healer = Hive::Daemon::StaleAgentHealer.new(
       controller: @controller,
       logger: @logger,
@@ -2362,8 +2516,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       end
 
       exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
-      assert_equal 1, exhausted.size,
-                   "exhausted seen-map must suppress repeated log spam for the same process key"
+      assert_empty exhausted
+      assert_equal 4, @logger.events.count { |name, _| name == :marker_healed }
     end
   end
 
@@ -2488,7 +2642,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  # ---- reason=timeout single bounded re-entry (U2) ----
+  # ---- reason=timeout retries ----
 
   def test_recovers_timeout_once_on_idempotent_stages
     # 5-open-pr / 7-artifacts: the agent did the work (PR already open;
@@ -2519,7 +2673,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         assert_equal "timeout", heal_event[1][:marker_reason]
         assert_equal stage, heal_event[1][:stage]
         assert_equal 1, heal_event[1][:attempts]
-        assert_equal 1, heal_event[1][:max_attempts], "timeout is capped at one re-entry"
+        assert_nil heal_event[1][:max_attempts], "timeout retries never exhaust"
         assert Hive::Markers.current(state_file).none?,
                "#{stage} timeout ERROR should clear so the daemon re-dispatches the stage"
       end
@@ -2528,14 +2682,14 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
                  "open_pr/artifacts re-enter via the markerless edit-resume path; only 3-plan requeues"
   end
 
-  def test_timeout_not_recovered_outside_idempotent_stages
-    # Other stages' timeouts are NOT safe to blindly re-run.
+  def test_timeout_outside_idempotent_stages_retries_after_cooldown
     %w[3-plan 4-execute 8-finalize 6-review].each do |stage|
       with_marker_file do |state_file|
         File.write(state_file, "# task\n\n<!-- ERROR reason=timeout marker_id=t -->\n")
         row = make_row(
           state_file,
           pid_alive: nil,
+          mtime: NOW - Hive::AgentLimit.retry_cooldown_sec - 1,
           stage: stage,
           marker: "error",
           marker_attrs: { "reason" => "timeout", "marker_id" => "t" },
@@ -2545,16 +2699,18 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
         heal([ row ])
 
-        refute(@logger.events.any? { |name, _| name == :marker_healed },
-               "#{stage} timeout must NOT auto-recover (re-entry there is not side-effect-safe)")
-        assert_match(/ERROR reason=timeout/, File.read(state_file))
+        assert(@logger.events.any? { |name, _| name == :marker_healed },
+               "#{stage} timeout must retry after the shared cooldown")
+        refute_match(/ERROR reason=timeout/, File.read(state_file))
       end
+      @logger = FakeLogger.new
+      @healer = Hive::Daemon::StaleAgentHealer.new(
+        controller: @controller, logger: @logger, grace_sec: 300, request_queue: @request_queue
+      )
     end
   end
 
-  def test_timeout_caps_at_one_retry_even_when_general_budget_is_higher
-    # @healer uses the default error_auto_recovery_limit (3); timeout must still
-    # cap at 1 via the per-reason limit, then stay red for manual recovery.
+  def test_timeout_retries_beyond_legacy_single_retry_cap
     with_marker_file do |state_file|
       row = make_row(
         state_file,
@@ -2573,21 +2729,14 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       File.write(state_file, "# task\n\n<!-- ERROR reason=timeout marker_id=t -->\n")
       heal([ row ])
 
-      assert_match(/ERROR reason=timeout/, File.read(state_file),
-                   "a second timeout stays red — capped at one re-entry")
-      assert_equal 1, @logger.events.count { |name, _| name == :marker_healed }
-      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
-      assert_equal 1, exhausted.size
-      assert_equal "stage_timeout", exhausted.first[1][:reason]
-      assert_equal "timeout", exhausted.first[1][:marker_reason]
-      assert_equal 1, exhausted.first[1][:attempts]
-      assert_equal 1, exhausted.first[1][:max_attempts]
-      assert_match(/did not stamp its completion marker/, exhausted.first[1][:remediation])
-      assert_match(/rerun 5-open-pr/, exhausted.first[1][:remediation])
+      refute_match(/ERROR reason=timeout/, File.read(state_file),
+                   "a second timeout remains retryable")
+      assert_equal 2, @logger.events.count { |name, _| name == :marker_healed }
+      assert_empty @logger.events.select { |name, _| name == :marker_heal_exhausted }
     end
   end
 
-  def test_timeout_budget_keys_on_stage_reason_not_marker_id
+  def test_timeout_fresh_marker_ids_remain_retryable
     with_marker_file do |state_file|
       first = make_row(
         state_file,
@@ -2615,10 +2764,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       File.write(state_file, "# task\n\n<!-- ERROR reason=timeout marker_id=t-b -->\n")
       heal([ second ])
 
-      assert_match(/ERROR reason=timeout marker_id=t-b/, File.read(state_file),
-                   "a fresh timeout marker_id must not earn a fresh budget")
-      assert_equal 1, @logger.events.count { |name, _| name == :marker_healed }
-      assert_equal 1, @logger.events.count { |name, _| name == :marker_heal_exhausted }
+      refute_match(/ERROR reason=timeout marker_id=t-b/, File.read(state_file),
+                   "a fresh timeout marker id remains retryable")
+      assert_equal 2, @logger.events.count { |name, _| name == :marker_healed }
+      assert_empty @logger.events.select { |name, _| name == :marker_heal_exhausted }
     end
   end
 
@@ -2675,7 +2824,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_review_all_failed_auto_recovery_is_bounded
+  def test_review_all_failed_auto_recovery_is_unbounded
     with_marker_file do |state_file|
       3.times do
         File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=all_failed pass=1 -->\n")
@@ -2687,10 +2836,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=all_failed pass=1 -->\n")
       heal([ make_review_error_row(state_file, reason: "all_failed", phase: "reviewers") ])
 
-      assert_match(/REVIEW_ERROR/, File.read(state_file),
-                   "the 4th all_failed must stay red — bounded retry, then park")
-      assert_equal 3, @logger.events.count { |name, _| name == :marker_healed }
-      assert_equal 1, @logger.events.count { |name, _| name == :marker_heal_exhausted }
+      assert Hive::Markers.current(state_file).none?,
+             "the 4th all_failed remains retryable"
+      assert_equal 4, @logger.events.count { |name, _| name == :marker_healed }
+      assert_empty @logger.events.select { |name, _| name == :marker_heal_exhausted }
     end
   end
 
@@ -2710,16 +2859,16 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_does_not_auto_recover_review_fix_status_check_failed
+  def test_review_fix_status_check_failed_retries_after_cooldown
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=fix reason=fix_status_check_failed pass=2 -->\n")
       row = make_review_error_row(state_file, reason: "fix_status_check_failed", phase: "fix", pass: "2")
 
       heal([ row ])
 
-      refute @logger.events.any? { |name, _| name == :marker_healed },
-             "git-level/integrity fix reasons must stay manual"
-      assert_match(/REVIEW_ERROR/, File.read(state_file))
+      assert @logger.events.any? { |name, _| name == :marker_healed },
+             "git-level/integrity fix reasons retry after cooldown"
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
     end
   end
 
@@ -2747,7 +2896,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_does_not_auto_recover_plain_review_fix_failed
+  def test_plain_review_fix_failed_retries_after_cooldown
     with_marker_file do |state_file|
       File.write(
         state_file,
@@ -2762,13 +2911,13 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       heal([ row ])
 
-      refute @logger.events.any? { |name, _| name == :marker_healed },
-             "generic fix_failed must stay manual"
-      assert_match(/REVIEW_ERROR/, File.read(state_file))
+      assert @logger.events.any? { |name, _| name == :marker_healed },
+             "generic fix_failed must retry after cooldown"
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
     end
   end
 
-  # --- ensure_clean_on_exit_failed terminal ERROR auto-retry ---
+  # --- ensure_clean_on_exit_failed ERROR auto-retry ---
 
   def test_auto_recovers_error_ensure_clean_on_exit_failed
     %w[4-execute 6-review 8-finalize].each do |stage|
@@ -2795,7 +2944,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_ensure_clean_on_exit_failed_auto_recovery_is_bounded
+  def test_ensure_clean_on_exit_failed_auto_recovery_is_unbounded
     with_marker_file do |state_file|
       attrs = { "reason" => "ensure_clean_on_exit_failed" }
       3.times do
@@ -2809,9 +2958,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       heal([ make_row(state_file, pid_alive: nil, stage: "6-review", marker: "error",
                       marker_attrs: attrs, action: "error", live_task_lock: false) ])
 
-      assert_match(/ERROR reason=ensure_clean_on_exit_failed/, File.read(state_file),
-                   "the 4th attempt must stay red — bounded, then park for a human")
-      assert_equal 1, @logger.events.count { |name, _| name == :marker_heal_exhausted }
+      assert Hive::Markers.current(state_file).none?,
+             "the 4th attempt remains retryable"
+      assert_equal 4, @logger.events.count { |name, _| name == :marker_healed }
+      assert_empty @logger.events.select { |name, _| name == :marker_heal_exhausted }
     end
   end
 

@@ -18,25 +18,17 @@ module Hive
         # Short-circuits with an operator-facing reply when the marker is
         # manual-only or the stage has no retry verb.
         #
-        # attrs is optional: the inline-button / clear-and-retry callback
-        # paths only carry the marker (the callback_data does not encode the
-        # full attrs hash), so they pass nil and fall back to the marker-only
-        # ALWAYS_MANUAL_MARKERS check. The /autofix slash command has the full
-        # row in hand and passes row.attrs, which additionally catches the
-        # attrs-gated manual-only states (e.g. review_error + phase=fix +
-        # reason=fix_tampered) so a directly-typed /autofix on such a row
-        # refuses with the "open it on a laptop" reply instead of dispatching
-        # a retry against a tampered fix.
+        # attrs is optional because callback paths carry only the encoded
+        # marker match attributes while slash/web callers have the full row.
+        # EXECUTE_STALE is the sole manual-only marker; ERROR and REVIEW_ERROR
+        # always retain a guarded retry path.
         def self.build(project:, slug:, stage:, marker:, match_attr:, result_class:, clear_keyboard:,
                        attrs: nil, workflow: nil)
           # `match_attr` is a single `key=value` pair the inline-button
           # path encoded into callback_data because the full row.attrs
           # hash doesn't survive a Telegram callback. Synthesise a
-          # minimal attrs Hash from it so the attrs-gated manual-only
-          # rules (review_error+fix_tampered, error+dirty_worktree,
-          # error+ensure_clean_on_exit_failed) refuse on the callback
-          # path too — not only the slash-handler path that already
-          # passes the full row.attrs.
+          # minimal attrs Hash from it for compatibility with callers that
+          # inspect the resolved marker context.
           resolved_attrs = attrs || attrs_from_match_attr(match_attr)
           if manual_only?(marker, resolved_attrs)
             return result_class.new(action: :reply,
@@ -71,9 +63,8 @@ module Hive
         # Inline keyboard callback_data carries `key=value` pairs via
         # `recovery_match_attr`, comma-separated when more than one is
         # encoded (e.g. `marker_id=abc,reason=ensure_clean_on_exit_failed`
-        # — both tokens are needed so `manual_only?` can route on
-        # `reason` while `marker_id` remains the race-safe clear
-        # guard). Split each pair on the first `=` so a value like
+        # — marker_id remains the race-safe clear guard while reason is an
+        # additional assertion). Split each pair on the first `=` so a value like
         # `foo=bar=baz` keeps the trailing `=baz` intact.
         def self.attrs_from_match_attr(match_attr)
           raw = match_attr.to_s

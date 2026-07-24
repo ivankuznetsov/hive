@@ -14,7 +14,7 @@ module Hive
     # cleanup/preservation progress so daemon restarts cannot repeat signals
     # or mint another successor.
     class LostOutcomeStore
-      FINAL_STATUSES = %w[manual successor_dispatched exhausted].freeze
+      FINAL_STATUSES = %w[successor_dispatched].freeze
 
       def initialize(store:)
         @store = store
@@ -37,6 +37,7 @@ module Hive
             "capture_references" => [],
             "cleanup" => nil,
             "successor_attempt_id" => nil,
+            "last_retry_at" => nil,
             "diagnostic" => nil
           })
         end
@@ -91,9 +92,10 @@ module Hive
       end
     end
 
-    # Performs the one-time cleanup and observational worktree capture that
-    # must precede successor policy. Unsafe process identity is a durable
-    # manual outcome, never a best-effort signal.
+    # Performs cleanup and observational worktree capture before successor
+    # policy. Unsafe process identity remains pending: a later observation may
+    # prove the old process gone, so this error must not become a permanent
+    # durable retry state.
     class LostOutcomeProcessor
       def initialize(store:, outcome_store:, process_identity:, dirty_capture: nil,
                      task_resolver: nil, orphan_grace_sec: 2)
@@ -112,9 +114,14 @@ module Hive
 
         cleanup = cleanup_orphan(attempt)
         unless %w[absent terminated no_worker].include?(cleanup)
+          diagnostic = "worker group identity is not safe to terminate yet; retrying"
+          return outcome if outcome["status"] == "pending" &&
+                            outcome["cleanup"] == cleanup &&
+                            outcome["diagnostic"] == diagnostic
+
           return @outcome_store.update(
-            attempt, now: now, status: "manual", cleanup: cleanup,
-            diagnostic: "worker group identity could not be safely terminated"
+            attempt, now: now, status: "pending", cleanup: cleanup,
+            diagnostic: diagnostic
           )
         end
 
@@ -133,7 +140,8 @@ module Hive
         ready = @outcome_store.update(
           annotated, now: now, status: "ready", cleanup: cleanup,
           task_folder: task&.folder,
-          capture_references: capture&.references || []
+          capture_references: capture&.references || [],
+          diagnostic: nil
         )
         project_marker(task, annotated)
         ready

@@ -1,4 +1,5 @@
 require "json"
+require "hive"
 
 module Hive
   module ImplementationIdentity

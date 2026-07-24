@@ -315,8 +315,8 @@ module Hive
           # Gate on retryable_recovery? exactly as the inline 🔧 Autofix button
           # and the /status /autofix link do. The slash path has the full row
           # (including the diagnostic), so a directly-typed /autofix on a row
-          # that isn't auto-retryable — a manual-only state, or a recovery row
-          # whose diagnostic carries no suggested_next_action.retry — must
+          # that isn't auto-retryable — a manual-only state, or a non-error
+          # recovery row whose diagnostic carries no retry suggestion — must
           # refuse here rather than dispatch markers-clear + a retry verb.
           # Without this, manually typing /autofix bypassed the retryability
           # gate that both other surfaces enforce.
@@ -327,11 +327,9 @@ module Hive
           match_attr = Hive::Bot::NotificationBuilders.recovery_match_attr(row)
           # clear_keyboard is false for the slash path — no inline button was
           # tapped, so there's no keyboard to clear on the originating
-          # message. The inline-button path (CallbackHandlers#autofix) sets
-          # it to true. This is the only legitimate divergence between the
-          # two surfaces. We forward row.attrs (which the slash path has but
-          # the callback_data does not carry) so attrs-gated manual-only
-          # states refuse here instead of dispatching a retry.
+          # message. The inline-button path (CallbackHandlers#autofix) sets it
+          # to true. This is the only legitimate divergence between surfaces.
+          # We forward row.attrs for guarded marker matching.
           RecoverySequence.build(
             project: row.project, slug: row.slug, stage: row.stage,
             marker: row.marker, match_attr: match_attr, attrs: row.attrs,
@@ -374,7 +372,7 @@ module Hive
         end
 
         # Operator-facing refusal for a /autofix on a non-retryable row.
-        # Manual-only states (execute_stale, fix_tampered) point at a laptop;
+        # Manual-only states (currently execute_stale) point at a laptop;
         # other non-retryable recovery rows (and any non-recovery row) point
         # at /details so the operator can see what the task actually needs.
         def not_retryable_hint(row)

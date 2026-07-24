@@ -279,6 +279,11 @@ module Hive
       end
 
       def operational_project_context(projects)
+        auto_retry_enabled = begin
+          Hive::Config.load_global_daemon.dig("auto_retry", "enabled") != false
+        rescue Hive::Error, SystemCallError
+          false
+        end
         projects.to_h do |project|
           enabled = begin
             Hive::Config.load(project.fetch("path")).dig("daemon", "enabled") == true
@@ -287,7 +292,13 @@ module Hive
           rescue Hive::Error, SystemCallError
             false
           end
-          [ project.fetch("name"), { "daemon_enabled" => enabled } ]
+          [
+            project.fetch("name"),
+            {
+              "daemon_enabled" => enabled,
+              "auto_retry_enabled" => auto_retry_enabled
+            }
+          ]
         end
       end
 

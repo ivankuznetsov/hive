@@ -54,14 +54,18 @@ class TaskMutationsTest < ActiveSupport::TestCase
       "stage" => "6-review",
       "workflow" => "coding",
       "marker" => "review_error",
-      "attrs" => { "phase" => "triage", "reason" => "merge_conflict", "pass" => "1" }
+      "attrs" => {
+        "phase" => "triage", "reason" => "merge_conflict", "pass" => "1",
+        "marker_id" => "review-generation-1"
+      }
     )
 
     request_id = subject.recover!
     contents = queue_files(request_id).map { |path| File.read(path) }.join("\n")
 
     assert_includes contents, "markers"
-    assert_includes contents, "pass=1"
+    assert_includes contents, "marker_id=review-generation-1,reason=merge_conflict"
+    refute_includes contents, "pass=1"
     assert_includes contents, "review"
   end
 
@@ -92,10 +96,10 @@ class TaskMutationsTest < ActiveSupport::TestCase
 
   test "refuses manual-only recovery states" do
     subject = task(
-      "stage" => "6-review",
+      "stage" => "4-execute",
       "workflow" => "coding",
-      "marker" => "review_error",
-      "attrs" => { "phase" => "fix", "reason" => "fix_tampered" }
+      "marker" => "execute_stale",
+      "attrs" => {}
     )
 
     error = assert_raises(Hive::Error) { subject.recover! }

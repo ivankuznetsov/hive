@@ -439,6 +439,30 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_guarded_clear_without_purge_removes_only_the_current_marker
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      File.write(file, <<~MD)
+        # status history
+
+        <!-- ERROR reason=first marker_id=old -->
+        second attempt
+        <!-- ERROR reason=second marker_id=current -->
+      MD
+
+      cleared = Hive::Markers.clear_current(
+        file,
+        expected_name: :error,
+        match_attrs: { marker_id: "current" }
+      )
+
+      assert cleared
+      assert_equal "old", Hive::Markers.current(file).attrs.fetch("marker_id")
+      assert_includes File.read(file), "second attempt"
+      refute_includes File.read(file), "marker_id=current"
+    end
+  end
+
   # The orchestrator-owns-terminal-marker rule (ADR-005) means a transient
   # REVIEW_WORKING is replaced by the terminal marker when the phase
   # finalizes. Verify the transition from REVIEW_WORKING phase=fix to

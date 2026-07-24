@@ -1571,6 +1571,73 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_plan_requeue_survives_success_audit_failure
+    logger = Class.new do
+      def event(name, **)
+        raise "logger unavailable" if name == :heal_requeued
+      end
+    end.new
+    healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller, logger: logger, grace_sec: 300,
+      request_queue: @request_queue
+    )
+
+    with_marker_file do |state_file|
+      row = make_row(state_file, pid_alive: nil, stage: "3-plan")
+
+      assert healer.send(:requeue_plan_rerun, row, trigger: "error_retry")
+      assert_equal 1, @request_queue.requests.size
+    end
+  end
+
+  def test_plan_requeue_survives_failure_audit_failure
+    failing_queue = Class.new do
+      def write_request!(**)
+        raise Errno::ENOSPC, "no space left on device"
+      end
+    end.new
+    logger = Class.new do
+      def event(name, **)
+        raise "logger unavailable" if name == :heal_requeue_failed
+      end
+    end.new
+    healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller, logger: logger, grace_sec: 300,
+      request_queue: failing_queue
+    )
+
+    with_marker_file do |state_file|
+      row = make_row(state_file, pid_alive: nil, stage: "3-plan")
+
+      refute healer.send(:requeue_plan_rerun, row, trigger: "error_retry")
+    end
+  end
+
+  def test_plan_retry_restore_failure_is_audited
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "3-plan",
+        marker: "error",
+        marker_attrs: { "reason" => "agent_preflight_failed", "marker_id" => "old" }
+      )
+
+      with_replaced_singleton_method(
+        Hive::Markers,
+        :set_if_none,
+        ->(*) { raise Errno::ENOSPC, "no space left on device" }
+      ) do
+        @healer.send(:restore_plan_retry_error, row)
+      end
+
+      event = @logger.events.find { |name, _| name == :marker_heal_failed }
+      refute_nil event
+      assert_equal "plan_retry_restore_failed", event[1].fetch(:reason)
+      assert_match(/ENOSPC/, event[1].fetch(:error))
+    end
+  end
+
   def test_auto_recovers_terminal_agent_loss_error_matrix
     # Every stage except 6-review: the sweep-kills-the-server incident took
     # out parallel BRAINSTORMS, and a rerun resumes from on-disk artifacts.

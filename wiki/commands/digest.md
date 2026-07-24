@@ -3,7 +3,7 @@ title: hive digest
 type: command
 source: lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, templates/digest_prompt.md.erb
 created: 2026-06-14
-updated: 2026-07-22
+updated: 2026-07-24
 tags: [command, digest, github, telegram, json]
 ---
 
@@ -123,11 +123,27 @@ labelled `(partial)` and accompanied by a repository/PR/metric warning; a
 metric with no known contributing values is omitted. An empty day reports
 `PRs 0` and does not invent line or commit totals.
 
-Long output is split at safe raw-text boundaries before Telegram MarkdownV2
-delivery. A mid-stream send failure is nonzero and logs accepted/failed chunk
-positions without claiming success. A later daemon retry re-sends the whole
-date, so a rare failure after earlier chunks were accepted can duplicate those
-chunks.
+Long output is split only at independently valid Telegram MarkdownV2
+boundaries: escapes, links, emphasis, code, and other supported entities stay
+closed inside each message, and every chunk remains within Telegram's
+4096-character limit. Before sending, Hive stores the stable redacted payload,
+its exact chunks, and the next-unsent cursor under
+`<state_home>/digest-deliveries/YYYY-MM-DD.json`. A mid-stream transport
+failure remains nonzero and logs `accepted_chunks`, `total_chunks`, and
+`failed_chunk`. When Telegram returned a definite rejection, the next attempt
+resumes at the failed chunk without replacing the stored payload or
+duplicating the accepted prefix.
+
+A Telegram HTTP 400 entity-parse rejection gets one bounded retry of that same
+chunk as equivalent HTML. If that fallback or another request receives a
+deterministic 4xx rejection, Hive parks the checkpoint as a permanent delivery
+failure. The daemon keeps the digest date owed but records it as blocked
+instead of running the same failure forever. An in-flight marker is persisted
+before every Telegram call; if the process loses the response and cannot know
+whether Telegram accepted the message, Hive parks the date instead of risking
+a duplicate. Operators should inspect both `digest_state.json` and the matching
+delivery checkpoint before clearing a blocked date; the cursor still advances
+only after the complete payload has been accepted.
 
 ## JSON Contract
 
@@ -221,9 +237,11 @@ hive digest --date YYYY-MM-DD --json
 
 It seeds without historical backfill on first run, catches up oldest-first,
 honours `digest.max_catchup_days`, advances its cursor after empty or
-warning-bearing success, and leaves a total collection or generation failure
-owed with 60/300/900-second backoff. Day calculations use Europe/London;
-`hive answer-digest` retains its separate host-local schedule.
+warning-bearing success, and leaves a retryable collection, generation,
+pre-send checkpoint, or definitively rejected Telegram failure owed with
+60/300/900-second backoff. Typed permanent or ambiguous delivery/checkpoint
+failures persist a blocked date and stop redispatching it. Day calculations use
+Europe/London; `hive answer-digest` retains its separate host-local schedule.
 
 PR bodies/diffs cross the configured agent-provider boundary only after
 recognized-secret redaction. Generated changelist text crosses the Telegram
@@ -237,13 +255,13 @@ when choosing providers and recipients.
   redaction, safety ceilings, and optional metrics.
 - `test/unit/digest/changelog_generator_test.rb` covers strict
   evidence-to-fact-to-bullet generation.
-- `test/unit/digest/{run,renderer,sender}_test.rb` and
+- `test/unit/digest/{run,renderer,sender,delivery_checkpoint_store}_test.rb` and
   `test/unit/bot/telegram_test.rb` cover orchestration, human output, safe
-  splitting, and delivery failure.
+  entity-aware splitting, durable resume, and bounded delivery failure.
 - `test/unit/commands/digest_test.rb`, schema tests, and CLI integration tests
   cover the sole v2 producer and error envelopes.
 - `test/unit/daemon/digest_scheduler_test.rb` covers the cursor, catch-up,
-  backoff, and London dates.
+  retry backoff, permanent-date blocking, and London dates.
 
 ## Backlinks
 

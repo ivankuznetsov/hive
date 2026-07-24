@@ -82,6 +82,25 @@ class HiveCommandsDigestTest < Minitest::Test
     assert_schema_valid(payload)
   end
 
+  def test_json_error_envelope_preserves_typed_permanent_delivery_class
+    output = StringIO.new
+    error = Hive::Digest::PermanentDeliveryCheckpointError.new(
+      "hive digest: corrupt delivery checkpoint"
+    )
+    command = Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      json: true,
+      runner: Runner.new([], nil, error),
+      output: output
+    )
+
+    assert_raises(Hive::Digest::PermanentDeliveryCheckpointError) { command.call }
+    payload = JSON.parse(output.string)
+    assert_equal "PermanentDeliveryCheckpointError", payload.fetch("error_class")
+    assert_equal Hive::ExitCodes::SOFTWARE, payload.fetch("exit_code")
+    assert_schema_valid(payload)
+  end
+
   def test_non_json_error_prints_no_envelope
     output = StringIO.new
     command = Hive::Commands::Digest.new(

@@ -262,8 +262,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
       out
     end
 
-    def complete(date:, exit_code:, now:)
-      @completed << { date: date, exit_code: exit_code, now: now }
+    def complete(date:, exit_code:, envelope:, now:)
+      completion = { date: date, exit_code: exit_code, now: now }
+      completion[:envelope] = envelope if envelope
+      @completed << completion
     end
 
     def cancel(date:)
@@ -294,8 +296,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
       out
     end
 
-    def complete(date:, exit_code:, now:)
-      @completed << { date: date, exit_code: exit_code, now: now }
+    def complete(date:, exit_code:, envelope:, now:)
+      completion = { date: date, exit_code: exit_code, now: now }
+      completion[:envelope] = envelope if envelope
+      @completed << completion
     end
 
     def cancel(date:)
@@ -1299,10 +1303,15 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def test_digest_scheduler_completes_on_digest_child_exit
     dispatcher, sup, = make_dispatcher(rows: [], with_digest_scheduler: true)
     digest = dispatcher.instance_variable_get(:@digest_scheduler)
+    envelope = {
+      "ok" => false,
+      "error_class" => "PermanentDeliveryError",
+      "message" => "Telegram rejected the chunk"
+    }
     sup.next_exits = [
       ChildExit.new(
         pid: 123,
-        exit_code: 0,
+        exit_code: Hive::ExitCodes::SOFTWARE,
         project: "digest",
         slug: "2026-06-13",
         stage: "digest",
@@ -1310,13 +1319,20 @@ class HiveDaemonDispatcherTest < Minitest::Test
         state_file_path: nil,
         started_at: T0 - 5,
         finished_at: T0,
-        json_envelope: nil
+        json_envelope: envelope
       )
     ]
 
     dispatcher.tick(now: T0)
 
-    assert_equal [ { date: "2026-06-13", exit_code: 0, now: T0 } ], digest.completed
+    assert_equal [
+      {
+        date: "2026-06-13",
+        exit_code: Hive::ExitCodes::SOFTWARE,
+        envelope: envelope,
+        now: T0
+      }
+    ], digest.completed
   end
 
   def test_digest_scheduler_tick_raise_is_isolated_as_a_fatal_event
@@ -1336,7 +1352,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def test_digest_scheduler_complete_raise_is_isolated_as_a_fatal_event
     dispatcher, sup, _ctrl, logger, = make_dispatcher(rows: [], with_digest_scheduler: true)
     raising = Object.new
-    raising.define_singleton_method(:complete) { |date:, exit_code:, now:| raise IOError, "EROFS on cursor write" }
+    raising.define_singleton_method(:complete) do |date:, exit_code:, envelope:, now:|
+      raise IOError, "EROFS on cursor write"
+    end
     dispatcher.instance_variable_set(:@digest_scheduler, raising)
     sup.next_exits = [
       ChildExit.new(
@@ -1650,7 +1668,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def test_answer_digest_scheduler_complete_raise_is_isolated_as_a_fatal_event
     dispatcher, sup, _ctrl, logger, = make_dispatcher(rows: [], with_answer_digest_scheduler: true)
     raising = Object.new
-    raising.define_singleton_method(:complete) { |date:, exit_code:, now:| raise IOError, "EROFS on cursor write" }
+    raising.define_singleton_method(:complete) do |date:, exit_code:, envelope:, now:|
+      raise IOError, "EROFS on cursor write"
+    end
     dispatcher.instance_variable_set(:@answer_digest_scheduler, raising)
     sup.next_exits = [
       ChildExit.new(

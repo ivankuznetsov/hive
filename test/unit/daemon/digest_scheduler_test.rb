@@ -94,6 +94,82 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
     end
   end
 
+  def test_permanent_delivery_failure_parks_date_without_advancing_or_retrying
+    with_tmp_dir do |dir|
+      write_state(dir, "last_digested_date" => "2026-06-12")
+      logger = StubLogger.new
+      scheduler = scheduler(dir, enabled: true, logger: logger)
+
+      assert_equal "2026-06-13", scheduler.tick(now: T0).first.fetch(:slug)
+      scheduler.complete(
+        date: "2026-06-13",
+        exit_code: Hive::ExitCodes::SOFTWARE,
+        envelope: {
+          "ok" => false,
+          "error_class" => "PermanentDeliveryError",
+          "message" => "Telegram rejected MarkdownV2"
+        },
+        now: T0 + 1
+      )
+
+      persisted = state(dir)
+      assert_equal "2026-06-12", persisted.fetch("last_digested_date")
+      assert_equal "2026-06-13", persisted.fetch("blocked_date")
+      assert_equal "PermanentDeliveryError", persisted.fetch("blocked_error_class")
+      assert_empty scheduler.tick(now: T0 + 86_400),
+                   "a deterministic parse rejection must not enter the 900-second retry loop"
+      event = logger.events.find { |name, _| name == :digest_permanent_failure }
+      refute_nil event
+      assert_equal "2026-06-13", event.last.fetch(:date)
+      refute logger.events.any? { |name, _| name == :digest_failure_backoff }
+    end
+  end
+
+  def test_all_typed_non_replayable_delivery_failures_park_the_date
+    %w[AmbiguousDeliveryError PermanentDeliveryCheckpointError].each do |error_class|
+      with_tmp_dir do |dir|
+        write_state(dir, "last_digested_date" => "2026-06-12")
+        scheduler = scheduler(dir, enabled: true)
+
+        assert_equal "2026-06-13", scheduler.tick(now: T0).first.fetch(:slug)
+        scheduler.complete(
+          date: "2026-06-13",
+          exit_code: Hive::ExitCodes::SOFTWARE,
+          envelope: {
+            "error_class" => error_class,
+            "message" => "delivery must not be replayed"
+          },
+          now: T0 + 1
+        )
+
+        assert_equal error_class, state(dir).fetch("blocked_error_class")
+        assert_empty scheduler.tick(now: T0 + 86_400)
+      end
+    end
+  end
+
+  def test_retryable_checkpoint_io_failure_uses_normal_backoff
+    with_tmp_dir do |dir|
+      write_state(dir, "last_digested_date" => "2026-06-12")
+      scheduler = scheduler(dir, enabled: true)
+
+      assert_equal "2026-06-13", scheduler.tick(now: T0).first.fetch(:slug)
+      scheduler.complete(
+        date: "2026-06-13",
+        exit_code: Hive::ExitCodes::SOFTWARE,
+        envelope: {
+          "error_class" => "DeliveryCheckpointError",
+          "message" => "temporary checkpoint disk outage"
+        },
+        now: T0 + 1
+      )
+
+      refute state(dir).key?("blocked_date")
+      assert_empty scheduler.tick(now: T0 + 60)
+      assert_equal "2026-06-13", scheduler.tick(now: T0 + 61).first.fetch(:slug)
+    end
+  end
+
   def test_failed_date_backoff_escalates_and_logs
     with_tmp_dir do |dir|
       write_state(dir, "last_digested_date" => "2026-06-12")

@@ -65,7 +65,7 @@ module Hive
       message = renderer.render(
         changelog: changelog, date: local_date, stats: stats_report, warnings: warnings
       )
-      delivery = sender.deliver(message, dry_run: dry_run)
+      delivery = sender.deliver(message, dry_run: dry_run, digest_date: local_date)
       pr_count = stats_report.overall.pr_count
       status = pr_count.zero? ? :empty : :sent
 

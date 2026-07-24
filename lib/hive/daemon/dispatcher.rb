@@ -729,7 +729,12 @@ module Hive
         return unless scheduler
 
         label = "#{global_digest_action(entry.stage)}_scheduler.complete"
-        scheduler.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
+        scheduler.complete(
+          date: entry.slug,
+          exit_code: entry.exit_code,
+          envelope: entry.json_envelope,
+          now: now
+        )
         @digest_scheduler_fatal_signatures.delete(label)
       rescue StandardError => e
         log_digest_scheduler_fatal(label, e)
@@ -1678,7 +1683,7 @@ module Hive
         # dispatch, double-incrementing the backoff count. Only complete when
         # no child is in flight for this date (spawn failed before recording).
         if date && !@controller.running_task?(project: project, slug: date)
-          scheduler&.complete(date: date, exit_code: 1, now: now)
+          scheduler&.complete(date: date, exit_code: 1, envelope: nil, now: now)
         end
         @logger.event(:fatal, message: "#{action} dispatch error: #{e.class}: #{e.message}",
                               project: digest_dispatch[:project], slug: date)

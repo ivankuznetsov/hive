@@ -159,14 +159,8 @@ module Hive
           exit 1
         end
 
-        worktree_root = canonical_worktree_root(task, cfg)
-        pointer = Hive::Worktree.read_pointer(task.folder)
-        worktree_path = pointer["path"]
-        Hive::Worktree.validate_pointer_path(worktree_path, worktree_root)
-        unless File.directory?(worktree_path)
-          warn "hive: worktree pointer present but worktree missing at #{worktree_path}; recover with `git -C <root> worktree prune`, fix worktree.yml, then re-run"
-          exit 1
-        end
+        pointer = Hive::Stages::Base.worktree_pointer_or_exit(task)
+        worktree_path = pointer.fetch("path")
 
         ops = Hive::GitOps.new(worktree_path)
         default_branch = reviewer_compare_ref(cfg, ops)
@@ -448,10 +442,22 @@ module Hive
               when :tampered
                 Hive::Markers.set(task.state_file, :review_error,
                                   phase: :triage, reason: "triage_tampered",
-                                  files: triage_result.tampered_files.join(","), pass: pass)
+                                  files: triage_result.tampered_files.join(","), pass: pass,
+                                  restored: true)
                 return { commit: "triage_tampered_pass_#{format('%02d', pass)}",
                          status: :review_error }
               when :error
+                if triage_result.tampered_files.any?
+                  Hive::Markers.set(
+                    task.state_file, :review_error,
+                    phase: :triage, reason: "triage_tampered",
+                    files: triage_result.tampered_files.join(","), pass: pass,
+                    restored: false,
+                    restore_error: triage_result.error_message.to_s[0, 200]
+                  )
+                  return { commit: "triage_tampered_pass_#{format('%02d', pass)}",
+                           status: :review_error }
+                end
                 limited = mark_review_phase_failure(
                   task, phase: :triage, pass: pass,
                   error_message: triage_result.error_message,
@@ -588,6 +594,7 @@ module Hive
             fix_success_relative_path(pass)
           ]
           fix_identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
+          protected_capture = Hive::ProtectedFiles.capture(task.folder, protected_set)
           before_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
           before_fix_head = git_head(worktree_path)
 
@@ -598,9 +605,14 @@ module Hive
           after_fix_head = git_head(worktree_path)
 
           if (tampered = Hive::ProtectedFiles.diff(before_fix_sha, after_fix_sha)).any?
+            restored, restore_error = Hive::ProtectedFiles.restore_safely(
+              task.folder, protected_capture, tampered
+            )
             Hive::Markers.set(task.state_file, :review_error,
                               phase: :fix, reason: "fix_tampered",
-                              files: tampered.join(","), pass: pass)
+                              files: tampered.join(","), pass: pass,
+                              restored: restored,
+                              restore_error: restore_error.to_s[0, 200])
             return { commit: "fix_tampered_pass_#{format('%02d', pass)}",
                      status: :review_error }
           end

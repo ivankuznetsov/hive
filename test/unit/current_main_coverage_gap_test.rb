@@ -306,10 +306,13 @@ class CurrentMainCoverageGapTest < Minitest::Test
       FileUtils.mkdir_p(worktree)
       task = Hive::Task.new(folder)
       File.write(task.state_file, "")
-      File.write(task.worktree_yml_path, { "path" => worktree }.to_yaml)
+      File.write(task.worktree_yml_path, { "path" => worktree, "branch" => task.slug }.to_yaml)
 
       with_replaced_singleton_method(Hive::Stages::Review, :canonical_worktree_root, ->(_task, _cfg) { root }) do
-        with_replaced_singleton_method(Hive::Worktree, :read_pointer, ->(_folder) { { "path" => worktree } }) do
+        owned_pointer = lambda do |_folder, slug:, **_kwargs|
+          { "path" => worktree, "branch" => slug }
+        end
+        with_replaced_singleton_method(Hive::Worktree, :read_owned_pointer, owned_pointer) do
           with_replaced_singleton_method(Hive::Worktree, :validate_pointer_path, ->(_path, _root) { true }) do
             with_replaced_singleton_method(Hive::Stages::Review, :reviewer_compare_ref, ->(_cfg, _ops) { "main" }) do
               with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**_kwargs) { raise Hive::AgentError, "tmux binary not runnable: tmux" }) do
@@ -370,13 +373,16 @@ class CurrentMainCoverageGapTest < Minitest::Test
       FileUtils.mkdir_p(worktree)
       task = Hive::Task.new(folder)
       File.write(task.state_file, "---\nslug: #{File.basename(folder)}\n---\n")
-      File.write(task.worktree_yml_path, { "path" => worktree }.to_yaml)
+      File.write(task.worktree_yml_path, { "path" => worktree, "branch" => task.slug }.to_yaml)
       File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
       Hive::Markers.set(task.state_file, :review_waiting, pass: 1, escalations: 1)
 
       status_checks = [ :clean, :dirty ]
       with_replaced_singleton_method(Hive::Stages::Review, :canonical_worktree_root, ->(_task, _cfg) { root }) do
-        with_replaced_singleton_method(Hive::Worktree, :read_pointer, ->(_folder) { { "path" => worktree } }) do
+        owned_pointer = lambda do |_folder, slug:, **_kwargs|
+          { "path" => worktree, "branch" => slug }
+        end
+        with_replaced_singleton_method(Hive::Worktree, :read_owned_pointer, owned_pointer) do
           with_replaced_singleton_method(Hive::Worktree, :validate_pointer_path, ->(_path, _root) { true }) do
             with_replaced_singleton_method(Hive::Stages::Review, :reviewer_compare_ref, ->(_cfg, _ops) { "main" }) do
               with_replaced_singleton_method(Hive::Stages::Review, :git_head, ->(_path) { "head-before-fix" }) do
@@ -413,13 +419,16 @@ class CurrentMainCoverageGapTest < Minitest::Test
       FileUtils.mkdir_p(worktree)
       task = Hive::Task.new(folder)
       File.write(task.state_file, "---\nslug: #{File.basename(folder)}\n---\n")
-      File.write(task.worktree_yml_path, { "path" => worktree }.to_yaml)
+      File.write(task.worktree_yml_path, { "path" => worktree, "branch" => task.slug }.to_yaml)
       File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
       Hive::Markers.set(task.state_file, :review_waiting, pass: 1, escalations: 1)
 
       status_checks = [ :clean, [ :status_failed, "fatal: bad git" ] ]
       with_replaced_singleton_method(Hive::Stages::Review, :canonical_worktree_root, ->(_task, _cfg) { root }) do
-        with_replaced_singleton_method(Hive::Worktree, :read_pointer, ->(_folder) { { "path" => worktree } }) do
+        owned_pointer = lambda do |_folder, slug:, **_kwargs|
+          { "path" => worktree, "branch" => slug }
+        end
+        with_replaced_singleton_method(Hive::Worktree, :read_owned_pointer, owned_pointer) do
           with_replaced_singleton_method(Hive::Worktree, :validate_pointer_path, ->(_path, _root) { true }) do
             with_replaced_singleton_method(Hive::Stages::Review, :reviewer_compare_ref, ->(_cfg, _ops) { "main" }) do
               with_replaced_singleton_method(Hive::Stages::Review, :git_head, ->(_path) { "head-before-fix" }) do
@@ -1069,13 +1078,16 @@ class CurrentMainCoverageGapTest < Minitest::Test
       FileUtils.mkdir_p(worktree)
       task = Hive::Task.new(folder)
       File.write(task.state_file, "---\nslug: #{File.basename(folder)}\n---\n")
-      File.write(task.worktree_yml_path, { "path" => worktree }.to_yaml)
+      File.write(task.worktree_yml_path, { "path" => worktree, "branch" => task.slug }.to_yaml)
       File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
       Hive::Markers.set(task.state_file, :review_waiting, pass: 1, escalations: 1)
 
       fail_status = ReviewCommandStatus.new(false)
       with_replaced_singleton_method(Hive::Stages::Review, :canonical_worktree_root, ->(_task, _cfg) { root }) do
-        with_replaced_singleton_method(Hive::Worktree, :read_pointer, ->(_folder) { { "path" => worktree } }) do
+        owned_pointer = lambda do |_folder, slug:, **_kwargs|
+          { "path" => worktree, "branch" => slug }
+        end
+        with_replaced_singleton_method(Hive::Worktree, :read_owned_pointer, owned_pointer) do
           with_replaced_singleton_method(Hive::Worktree, :validate_pointer_path, ->(_path, _root) { true }) do
             with_replaced_singleton_method(Hive::Stages::Review, :reviewer_compare_ref, ->(_cfg, _ops) { "main" }) do
               with_replaced_singleton_method(Open3, :capture3, ->(*argv) {

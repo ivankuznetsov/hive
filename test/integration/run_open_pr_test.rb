@@ -101,12 +101,12 @@ class RunOpenPrTest < Minitest::Test
     FileUtils.mkdir_p(task_dir)
     File.write(File.join(task_dir, "plan.md"), "plan content")
     File.write(File.join(task_dir, "task.md"), "## Execute Output\nimplemented\n")
-    worktree_path = Dir.mktmpdir("wt-#{slug}-")
+    worktree_root = Hive::Worktree.default_worktree_root(File.basename(dir))
+    worktree_path = File.join(worktree_root, slug)
+    FileUtils.mkdir_p(worktree_root)
     @worktree_paths ||= []
-    @worktree_paths << worktree_path
-    run!("git", "-C", worktree_path, "init", "-b", slug, "--quiet")
-    run!("git", "-C", worktree_path, "config", "user.email", "t@t")
-    run!("git", "-C", worktree_path, "config", "user.name", "t")
+    @worktree_paths << worktree_root
+    run!("git", "-C", dir, "worktree", "add", "-b", slug, worktree_path, "master", "--quiet")
     run!("git", "-C", worktree_path, "config", "commit.gpgsign", "false")
     File.write(File.join(worktree_path, "f"), "x")
     run!("git", "-C", worktree_path, "add", ".")
@@ -190,8 +190,8 @@ class RunOpenPrTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "agent wrote a body but no marker\n"
 
-        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
-        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        _out, err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status, err
         marker = Hive::Markers.current(pr_md)
         assert_equal :error, marker.name
         assert_equal "open_pr_marker_missing_complete", marker.attrs["reason"]
@@ -222,8 +222,8 @@ class RunOpenPrTest < Minitest::Test
         # NO arm_post_agent_pr_exists: simulate an agent that wrote
         # a marker but never actually called `gh pr create`.
 
-        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
-        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        _out, err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status, err
         marker = Hive::Markers.current(pr_md)
         assert_equal :error, marker.name
         assert_equal "open_pr_url_mismatch", marker.attrs["reason"]
@@ -306,7 +306,7 @@ class RunOpenPrTest < Minitest::Test
 
         _out, err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
         assert_equal 1, status
-        assert_match(/no worktree pointer/, err)
+        assert_match(/worktree ownership validation failed: worktree\.yml is missing/, err)
         assert_match(/4-execute/, err)
       end
     end

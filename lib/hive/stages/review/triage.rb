@@ -89,6 +89,9 @@ module Hive
             escalations_path: escalations
           )
 
+          protected_capture = Hive::ProtectedFiles.capture(
+            ctx.task_folder, TRIAGE_PROTECTED_FILES
+          )
           before = Hive::ProtectedFiles.snapshot(ctx.task_folder, TRIAGE_PROTECTED_FILES)
           task = synthetic_task(ctx)
           scope = Hive::Stages::Base.stage_permission_scope(
@@ -122,6 +125,18 @@ module Hive
 
           tampered = Hive::ProtectedFiles.diff(before, after)
           if tampered.any?
+            restored, restore_error = Hive::ProtectedFiles.restore_safely(
+              ctx.task_folder, protected_capture, tampered
+            )
+            unless restored
+              return Result.new(
+                status: :error,
+                escalations_path: escalations,
+                error_message: "triage protected-file restore failed: #{restore_error}",
+                tampered_files: tampered,
+                limit_text: nil
+              )
+            end
             return Result.new(
               status: :tampered,
               escalations_path: escalations,

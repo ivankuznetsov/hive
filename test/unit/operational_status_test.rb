@@ -323,6 +323,8 @@ class OperationalStatusTest < Minitest::Test
       "provider_hold" => [ "waiting_on_provider_or_scheduler", "provider" ],
       "dispatched" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
       "retry_cooldown" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
+      "retry_in_flight" => [ "running", "agent" ],
+      "retry_safety_blocked" => [ "needs_repair", "scheduler" ],
       "wait_for_answers" => [ "waiting_on_you", "operator" ],
       "quarantined" => [ "needs_repair", "scheduler" ],
       "skip" => [ "idle", "scheduler" ]
@@ -344,6 +346,45 @@ class OperationalStatusTest < Minitest::Test
       assert_equal state, projected.fetch("state"), decision
       assert_equal owner, projected.fetch("blocker_owner"), decision
     end
+  end
+
+  def test_retry_projection_exposes_exact_deadline_and_safety_owner
+    source_task = task(
+      action: "error",
+      slug: "guarded-retry",
+      stage: "4-execute",
+      marker: "error",
+      attrs: { "reason" => "implementer_failed" }
+    )
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "retry_safety_blocked",
+      reason: "automatic retry is safety-blocked: worktree dirty"
+    )
+    snapshot.dig("tasks", 0, "disposition").merge!(
+      "owner" => "operator",
+      "retry_due" => true,
+      "retry_at" => "2026-07-20T11:00:00.000000Z",
+      "retry_safe" => false,
+      "safety_reason" => "worktree dirty"
+    )
+
+    projected = project(
+      status_payload(source_task),
+      project_context: {
+        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+      },
+      scheduler_snapshot: snapshot
+    ).fetch("tasks").first
+
+    assert_equal "needs_repair", projected.fetch("state")
+    assert_equal "operator", projected.fetch("blocker_owner")
+    assert_equal({
+      "due" => true,
+      "retry_at" => "2026-07-20T11:00:00.000000Z",
+      "safe" => false,
+      "safety_reason" => "worktree dirty"
+    }, projected.fetch("retry"))
   end
 
   def test_matching_complete_daemon_observation_explains_scheduler_gate

@@ -103,28 +103,6 @@ module Hive
       new_marker
     end
 
-    # Restore a retry marker only while the file is still markerless. Used
-    # after a post-clear durable-enqueue failure: if another writer already
-    # published a newer state, leave it untouched instead of replacing it.
-    def set_if_none(state_file_path, name, attrs = {})
-      marker_name = name.to_s.upcase
-      raise ArgumentError, "unknown marker #{marker_name}" unless KNOWN_NAMES.include?(marker_name)
-
-      attrs = attrs_with_recovery_marker_id(marker_name, attrs)
-              .to_h
-              .merge(Hive::Attempts::Context.projection)
-      new_marker = build_marker(marker_name, attrs)
-      ensure_dir(state_file_path)
-      with_markers_lock(state_file_path) do
-        return false unless current(state_file_path).none?
-
-        body = File.exist?(state_file_path) ? File.read(state_file_path, encoding: "UTF-8") : ""
-        separator = body.empty? || body.end_with?("\n") ? "" : "\n"
-        write_atomic(state_file_path, "#{body}#{separator}#{new_marker}\n")
-      end
-      new_marker
-    end
-
     def clear_current(state_file_path, expected_name:, match_attrs: {}, purge_history: false)
       with_markers_lock(state_file_path) do
         marker = current(state_file_path)
@@ -140,6 +118,15 @@ module Hive
         end
         true
       end
+    end
+
+    # Return the exact body that `clear_current(..., purge_history: true)`
+    # would persist. Recovery code uses this before the clear to derive the
+    # post-clear durable attempt generation, so a queued continuation can be
+    # bound to the artifact it will actually execute without creating a
+    # markerless crash window first.
+    def without_markers(body)
+      body.to_s.gsub(MARKER_RE, "")
     end
 
     # Serialize concurrent state-file writers via a sidecar `.markers-lock`
@@ -306,7 +293,7 @@ module Hive
       return unless File.exist?(state_file_path)
 
       body = File.read(state_file_path, encoding: "UTF-8")
-      write_atomic(state_file_path, body.gsub(MARKER_RE, ""))
+      write_atomic(state_file_path, without_markers(body))
     end
   end
 end

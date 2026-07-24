@@ -35,6 +35,29 @@ module Hive
         pr_url, pr_error = pr_url_or_error(task)
         return pr_error if pr_error
 
+        # Fail closed before any agent or GitHub mutation. A prior
+        # secret_in_pr_body / fetch failure retry must prove both the local
+        # source and current remote body are clean before it can refresh the
+        # body again.
+        entry_scan = Hive::Gh.scan_pr_for_secrets(
+          state_file: task.state_file, pr_url: pr_url, cfg: cfg
+        )
+        if entry_scan.fetch_failed
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "secret_scan_fetch_failed",
+                            detail: entry_scan.fetch_error.to_s[0, 200],
+                            patterns: entry_scan.hits.map { |h| h[:name].to_s }.uniq.first(3).join(","))
+          return { commit: "finalize_secret_scan_failed", status: :error }
+        end
+        if entry_scan.hits.any?
+          redact_status = redact_pr_body!(pr_url, cfg)
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "secret_in_pr_body",
+                            patterns: entry_scan.hits.map { |h| h[:name].to_s }.uniq.first(3).join(","),
+                            redact_status: redact_status.to_s)
+          return { commit: "finalize_secret_blocked", status: :error }
+        end
+
         # If the PR already merged out-of-band (e.g. squash-merged while the
         # task was still mid-pipeline), finalization is moot — the merged PR is
         # final. Short-circuit to complete instead of running the body-refresh
@@ -56,12 +79,18 @@ module Hive
 
         prompt = render_prompt(task, worktree_path, branch, pr_url)
         profile = Hive::Stages::Base.stage_profile(cfg, "finalize")
+        protected_capture = Hive::ProtectedFiles.capture(task.folder)
         before_sha = Hive::ProtectedFiles.snapshot(task.folder)
         spawn_finalize_agent(task, cfg, prompt, profile, worktree_path)
         after_sha = Hive::ProtectedFiles.snapshot(task.folder)
         if (tampered = Hive::ProtectedFiles.diff(before_sha, after_sha)).any?
+          restored, restore_error = Hive::ProtectedFiles.restore_safely(
+            task.folder, protected_capture, tampered
+          )
           Hive::Markers.set(task.state_file, :error,
-                            reason: "finalize_tampered", files: tampered.join(","))
+                            reason: "finalize_tampered", files: tampered.join(","),
+                            restored: restored,
+                            restore_error: restore_error.to_s[0, 200])
           return { commit: "finalize_tampered", status: :error }
         end
 

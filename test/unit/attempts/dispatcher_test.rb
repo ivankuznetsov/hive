@@ -84,6 +84,66 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_failed_terminal_replays_same_request_but_new_request_retries
+    with_dispatcher do |dispatcher, launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      failed = terminalize_attempt(
+        store, launcher, first, outcome: "failed", exit_status: 1, now: NOW + 3
+      )
+
+      replay = dispatch(dispatcher, task, request_id: "request-one")
+      retry_result = dispatch(dispatcher, task, request_id: "request-two")
+
+      assert_equal :terminal_replay, replay.status
+      assert_equal failed.receipt, replay.receipt
+      assert_equal :accepted, retry_result.status
+      refute_equal first.attempt.attempt_id, retry_result.attempt.attempt_id
+      assert_equal 2, launcher.launched.size
+    end
+  end
+
+  def test_successful_retry_replays_for_new_requests_without_changing_old_request_result
+    with_dispatcher do |dispatcher, launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      failed = terminalize_attempt(
+        store, launcher, first, outcome: "failed", exit_status: 1, now: NOW + 3
+      )
+      retry_result = dispatch(dispatcher, task, request_id: "request-two")
+      succeeded = terminalize_attempt(
+        store, launcher, retry_result, outcome: "succeeded", exit_status: 0, now: NOW + 6
+      )
+
+      old_request = dispatch(dispatcher, task, request_id: "request-one")
+      new_request = dispatch(dispatcher, task, request_id: "request-three")
+
+      assert_equal failed.receipt, old_request.receipt
+      assert_equal succeeded.receipt, new_request.receipt
+      assert_equal :terminal_replay, new_request.status
+      assert_equal 2, launcher.launched.size
+    end
+  end
+
+  def test_failed_successor_allows_retry_after_resolved_lost_ancestor
+    with_dispatcher do |dispatcher, launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
+      successor = dispatcher.dispatch_successor(
+        predecessor: lost, task: task, project: "demo",
+        argv: [ "hive", "run", task.slug ], request_id: "request-two",
+        provider: "codex", retry_charge: 1, now: NOW + 2
+      )
+      terminalize_attempt(
+        store, launcher, successor, outcome: "failed", exit_status: 1, now: NOW + 5
+      )
+
+      retry_result = dispatch(dispatcher, task, request_id: "request-three")
+
+      assert_equal :accepted, retry_result.status
+      assert_equal "attempt-three", retry_result.attempt.attempt_id
+      assert_equal 3, launcher.launched.size
+    end
+  end
+
   def test_capacity_defers_before_creating_an_attempt
     with_dispatcher(limits: { max_global: 0, max_per_project: 1, max_daily: 10 }) do |dispatcher, launcher, task, store|
       result = dispatch(dispatcher, task, request_id: "request-one")
@@ -500,6 +560,42 @@ class AttemptsDispatcherTest < Minitest::Test
       task: task, project: "demo", intended_stage: "4-execute",
       argv: [ "hive", "run", task.slug ], request_id: request_id,
       provider: "codex", interactive: interactive, now: NOW
+    )
+  end
+
+  def terminalize_attempt(store, launcher, result, outcome:, exit_status:, now:)
+    capability = launcher.launched.find do |record, _claim_capability|
+      record.attempt_id == result.attempt.attempt_id
+    end.fetch(1)
+    owner = {
+      "pid" => Process.pid,
+      "start_fingerprint" => "start",
+      "session_id" => Process.getsid(0),
+      "process_group_id" => Process.getpgrp
+    }
+    claimed = store.claim(
+      result.attempt,
+      owner: owner,
+      claim_capability: capability,
+      first_heartbeat_timeout_sec: 30,
+      now: now - 2
+    )
+    running = store.first_heartbeat(claimed, stale_sec: 30, now: now - 1)
+    store.terminalize(
+      running,
+      outcome: outcome,
+      exit_status: exit_status,
+      final_checkpoint: {
+        "revision" => "b" * 40,
+        "progress_token" => result.attempt["progress_token"]
+      },
+      output_references: [],
+      log_reference: {
+        "path" => "logs/#{result.attempt.attempt_id}.frames",
+        "size" => 0,
+        "sha256" => "0" * 64
+      },
+      now: now
     )
   end
 end

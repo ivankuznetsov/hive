@@ -82,6 +82,12 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     assert_empty snapshot.fetch("review_exhausted")
   end
 
+  def test_default_project_retry_gate_is_enabled
+    gate = @healer.instance_variable_get(:@project_auto_retry_enabled)
+
+    assert_equal true, gate.call("any-project")
+  end
+
   def test_agent_preflight_error_retries_after_cooldown_beyond_legacy_budget
     @healer = Hive::Daemon::StaleAgentHealer.new(
       controller: @controller,
@@ -148,7 +154,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         marker_attrs: {
           "phase" => "fix",
           "reason" => "fix_tampered",
-          "pass" => "1"
+          "pass" => "1",
+          "restored" => "true"
         },
         action: "recover_review",
         live_task_lock: false
@@ -160,7 +167,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
           :review_error,
           phase: "fix",
           reason: "fix_tampered",
-          pass: "1"
+          pass: "1",
+          restored: true
         )
         row.marker_attrs = Hive::Markers.current(state_file).attrs
         row.state_file_mtime = NOW - Hive::AgentLimit.retry_cooldown_sec - 1
@@ -262,7 +270,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
                marker: "agent_working", marker_attrs: {}, action: "error", live_task_lock: nil, workflow: nil,
                task_lock_pid: nil, task_lock_process_start_time: nil, task_lock_id: nil)
     Row.new(
-      project: project, slug: slug, stage: stage, workflow: workflow,
+      project: project, slug: slug, id: 42, stage: stage, workflow: workflow,
       marker: marker, marker_attrs: marker_attrs, folder: File.dirname(state_file), state_file: state_file,
       state_file_mtime: mtime,
       action: action, suggested_command: nil,
@@ -720,6 +728,41 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_match(/REVIEW_WORKING.*marker_id=observed/, File.read(state_file))
       assert_equal "new_runner", YAML.safe_load(File.read(lock_path)).fetch("owner")
       refute @logger.events.any? { |name, _| name == :marker_healed }
+    end
+  end
+
+  def test_terminal_error_retries_do_not_clear_a_lock_acquired_after_status_snapshot
+    [
+      [ :error, "error", "git_status_failed", "4-execute", {} ],
+      [ :review_error, "review_error", "review_agent_died", "6-review",
+        { "phase" => "reviewers", "pass" => "1" } ]
+    ].each do |marker_name, row_marker, reason, stage, extra_attrs|
+      with_marker_file do |state_file|
+        attrs = extra_attrs.merge("reason" => reason, "marker_id" => "observed")
+        Hive::Markers.set(state_file, marker_name, attrs)
+        lock_path = File.join(File.dirname(state_file), ".lock")
+        File.write(lock_path, {
+          "pid" => Process.pid,
+          "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+          "owner" => "new_runner"
+        }.to_yaml)
+        row = make_row(
+          state_file,
+          pid_alive: nil,
+          stage: stage,
+          marker: row_marker,
+          marker_attrs: Hive::Markers.current(state_file).attrs,
+          action: row_marker == "error" ? "error" : "recover_review",
+          live_task_lock: false
+        )
+
+        heal([ row ])
+
+        assert_equal marker_name, Hive::Markers.current(state_file).name,
+                     "#{row_marker} must survive a post-snapshot lock acquisition"
+        assert_equal "new_runner", YAML.safe_load(File.read(lock_path)).fetch("owner")
+        refute @logger.events.any? { |name, _| name == :marker_healed }
+      end
     end
   end
 
@@ -1532,7 +1575,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_requeue_failure_restores_fresh_error_for_next_cooldown
+  def test_requeue_failure_leaves_original_error_intact
     failing_queue = Class.new do
       def write_request!(**)
         raise Errno::ENOSPC, "no space left on device"
@@ -1555,26 +1598,27 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       healer.heal([ row ], now: NOW)
 
       names = @logger.events.map(&:first)
-      assert_includes names, :marker_healed, "the clear itself succeeded and must say so"
+      refute_includes names, :marker_healed,
+                      "the marker must not clear before its continuation is durable"
       assert_includes names, :heal_requeue_failed,
                       "the durable enqueue failure needs its own truthful event"
       refute_includes names, :marker_heal_failed,
-                      "the original clear succeeded; the queue event owns the enqueue failure"
+                      "the queue event owns the enqueue failure"
       requeue_event = @logger.events.find { |name, _| name == :heal_requeue_failed }[1]
       assert_match(/hive plan/, requeue_event[:remediation],
                    "the operator needs the manual re-entry command")
-      restored = Hive::Markers.current(state_file)
-      assert_equal :error, restored.name
-      assert_equal "tmux_session_terminated", restored.attrs.fetch("reason")
-      refute_equal "rq1", restored.attrs.fetch("marker_id"),
-                   "restoration must create a fresh generation and restart the cooldown"
+      current = Hive::Markers.current(state_file)
+      assert_equal :error, current.name
+      assert_equal "tmux_session_terminated", current.attrs.fetch("reason")
+      assert_equal "rq1", current.attrs.fetch("marker_id"),
+                   "enqueue failure must leave the original marker generation untouched"
     end
   end
 
-  def test_plan_requeue_survives_success_audit_failure
+  def test_plan_requeue_survives_success_audit_failures
     logger = Class.new do
       def event(name, **)
-        raise "logger unavailable" if name == :heal_requeued
+        raise "logger unavailable" if %i[marker_healed heal_requeued].include?(name)
       end
     end.new
     healer = Hive::Daemon::StaleAgentHealer.new(
@@ -1583,9 +1627,26 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     )
 
     with_marker_file do |state_file|
-      row = make_row(state_file, pid_alive: nil, stage: "3-plan")
+      File.write(
+        state_file,
+        "# plan\n\n<!-- ERROR reason=agent_orphaned marker_id=audit-failure -->\n"
+      )
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "3-plan",
+        marker: "error",
+        marker_attrs: {
+          "reason" => "agent_orphaned",
+          "marker_id" => "audit-failure"
+        },
+        action: "error",
+        live_task_lock: false
+      )
 
-      assert healer.send(:requeue_plan_rerun, row, trigger: "error_retry")
+      healer.heal([ row ], now: NOW)
+
+      assert Hive::Markers.current(state_file).none?
       assert_equal 1, @request_queue.requests.size
     end
   end
@@ -1613,29 +1674,22 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_plan_retry_restore_failure_is_audited
-    with_marker_file do |state_file|
-      row = make_row(
-        state_file,
-        pid_alive: nil,
-        stage: "3-plan",
-        marker: "error",
-        marker_attrs: { "reason" => "agent_preflight_failed", "marker_id" => "old" }
-      )
-
-      with_replaced_singleton_method(
-        Hive::Markers,
-        :set_if_none,
-        ->(*) { raise Errno::ENOSPC, "no space left on device" }
-      ) do
-        @healer.send(:restore_plan_retry_error, row)
-      end
-
-      event = @logger.events.find { |name, _| name == :marker_heal_failed }
-      refute_nil event
-      assert_equal "plan_retry_restore_failed", event[1].fetch(:reason)
-      assert_match(/ENOSPC/, event[1].fetch(:error))
+  def test_plan_retry_cancel_failure_is_audited
+    queue = Object.new
+    queue.define_singleton_method(:remove_if_unclaimed) do |_request_id|
+      raise Errno::ENOSPC, "no space left on device"
     end
+    healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller, logger: @logger, grace_sec: 300,
+      request_queue: queue
+    )
+
+    healer.send(:remove_plan_retry_if_unclaimed, "request-1")
+
+    event = @logger.events.find { |name, _| name == :marker_heal_failed }
+    refute_nil event
+    assert_equal "plan_retry_cancel_failed", event[1].fetch(:reason)
+    assert_match(/ENOSPC/, event[1].fetch(:error))
   end
 
   def test_auto_recovers_terminal_agent_loss_error_matrix
@@ -1674,6 +1728,12 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
           refute_nil req, "3-plan heal must enqueue a plan rerun - a markerless empty plan.md "                           "classifies straight back to :error and nothing else can re-enter the stage"
           assert_equal [ "hive", "plan", "s", "--project", "p", "--from", "3-plan" ], req[:argv]
           assert_equal "healer", req[:requestor]
+          assert_equal 42, req[:task_id]
+          assert_equal "3-plan", req[:expected_stage]
+          assert_equal "error", req[:expected_marker_name]
+          assert_equal marker_id, req[:expected_marker_id]
+          refute_empty req[:task_generation].to_s,
+                       "the queued continuation must be bound to the predicted post-clear artifact"
           assert_equal :heal_requeued, @logger.events.last[0],
                        "the requeue must be logged so operators can trace the rerun to its heal"
         end

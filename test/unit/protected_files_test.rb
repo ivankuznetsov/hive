@@ -10,7 +10,7 @@ class ProtectedFilesTest < Minitest::Test
   include HiveTestHelper
 
   def test_orchestrator_owned_lists_canonical_state_and_identity_files
-    assert_equal %w[plan.md worktree.yml task.md task-journal.jsonl task-projection.json],
+    assert_equal %w[plan.md worktree.yml handoff.yml task.md task-journal.jsonl task-projection.json],
                  Hive::ProtectedFiles::ORCHESTRATOR_OWNED,
                  "ORCHESTRATOR_OWNED is the single source of truth for the protected set"
   end
@@ -19,6 +19,7 @@ class ProtectedFilesTest < Minitest::Test
     with_tmp_dir do |dir|
       File.write(File.join(dir, "plan.md"), "plan body\n")
       File.write(File.join(dir, "worktree.yml"), "path: /x\n")
+      File.write(File.join(dir, "handoff.yml"), "phase: worktree_created\n")
       File.write(File.join(dir, "task.md"), "## task\n")
       File.write(File.join(dir, "task-journal.jsonl"), "{}\n")
       File.write(File.join(dir, "task-projection.json"), "{}\n")
@@ -49,6 +50,7 @@ class ProtectedFilesTest < Minitest::Test
                  "missing file records nil so a later add yields a diff"
       assert_nil snap["worktree.yml"],
                  "missing file records nil so a later add yields a diff"
+      assert_nil snap["handoff.yml"]
       assert_nil snap["task-journal.jsonl"]
       assert_nil snap["task-projection.json"]
     end
@@ -120,6 +122,95 @@ class ProtectedFilesTest < Minitest::Test
       after = Hive::ProtectedFiles.snapshot_paths("repository config" => config)
 
       assert_equal [ "repository config" ], Hive::ProtectedFiles.diff(before, after)
+    end
+  end
+
+  def test_capture_restores_changed_deleted_and_new_files
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "plan.md"), "trusted plan\n")
+      File.write(File.join(dir, "task.md"), "trusted task\n")
+      captured = Hive::ProtectedFiles.capture(
+        dir, %w[plan.md task.md worktree.yml]
+      )
+
+      File.write(File.join(dir, "plan.md"), "tampered\n")
+      FileUtils.rm_f(File.join(dir, "task.md"))
+      File.write(File.join(dir, "worktree.yml"), "path: /attacker\n")
+
+      restored, error = Hive::ProtectedFiles.restore_safely(
+        dir, captured, %w[plan.md task.md worktree.yml]
+      )
+
+      assert_equal true, restored
+      assert_nil error
+      assert_equal "trusted plan\n", File.read(File.join(dir, "plan.md"))
+      assert_equal "trusted task\n", File.read(File.join(dir, "task.md"))
+      refute File.exist?(File.join(dir, "worktree.yml"))
+    end
+  end
+
+  def test_restore_fails_closed_for_agent_created_directory
+    with_tmp_dir do |dir|
+      captured = Hive::ProtectedFiles.capture(dir, [ "plan.md" ])
+      FileUtils.mkdir_p(File.join(dir, "plan.md", "nested"))
+
+      restored, error = Hive::ProtectedFiles.restore_safely(
+        dir, captured, [ "plan.md" ]
+      )
+
+      assert_equal false, restored
+      assert_includes error, "refusing to replace protected path directory"
+      assert File.directory?(File.join(dir, "plan.md"))
+    end
+  end
+
+  def test_restore_paths_safely_reports_absolute_control_path_failure
+    with_tmp_dir do |dir|
+      path = File.join(dir, "config")
+      paths = { "repository config" => path }
+      captured = Hive::ProtectedFiles.capture_paths(paths)
+      FileUtils.mkdir_p(path)
+
+      restored, error = Hive::ProtectedFiles.restore_paths_safely(
+        paths, captured, [ "repository config" ]
+      )
+
+      assert_equal false, restored
+      assert_includes error, "refusing to replace protected path directory"
+    end
+  end
+
+  def test_restore_rejects_unreconstructable_and_unknown_capture_types
+    with_tmp_dir do |dir|
+      target = File.join(dir, "target")
+      File.write(target, "outside\n")
+      File.symlink(target, File.join(dir, "plan.md"))
+      captured = Hive::ProtectedFiles.capture(dir, [ "plan.md" ])
+
+      restored, error = Hive::ProtectedFiles.restore_safely(
+        dir, captured, [ "plan.md" ]
+      )
+      assert_equal false, restored
+      assert_includes error, "non-file path cannot be reconstructed"
+
+      unknown = {
+        "task.md" => { kind: :future_capture_type, fingerprint: nil }
+      }
+      restored, error = Hive::ProtectedFiles.restore_safely(
+        dir, unknown, [ "task.md" ]
+      )
+      assert_equal false, restored
+      assert_includes error, "unknown protected capture type"
+    end
+  end
+
+  def test_capture_rejects_parent_traversal
+    with_tmp_dir do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::ProtectedFiles.capture(dir, [ "../outside" ])
+      end
+
+      assert_includes error.message, "must stay relative"
     end
   end
 end

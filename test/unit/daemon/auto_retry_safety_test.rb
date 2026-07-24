@@ -4,15 +4,18 @@ require "hive/daemon/auto_retry_safety"
 class HiveDaemonAutoRetrySafetyTest < Minitest::Test
   include HiveTestHelper
 
-  Row = Struct.new(:folder, :stage, :marker, keyword_init: true)
+  Row = Struct.new(:folder, :stage, :marker, :marker_attrs, :state_file, keyword_init: true)
   FakeGit = Struct.new(:status) do
     def status_short
       status
     end
   end
 
-  def row(folder:, stage:, marker: "error")
-    Row.new(folder: folder, stage: stage, marker: marker)
+  def row(folder:, stage:, marker: "error", marker_attrs: {})
+    Row.new(
+      folder: folder, stage: stage, marker: marker,
+      marker_attrs: marker_attrs, state_file: File.join(folder, "task.md")
+    )
   end
 
   def write_pointer(folder, path)
@@ -36,11 +39,17 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
       FileUtils.mkdir_p(worktree)
       write_pointer(dir, worktree)
 
-      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { FakeGit.new("") }) do
-        ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "4-execute"))
+      with_replaced_singleton_method(
+        Hive::Daemon::AutoRetrySafety,
+        :owned_worktree_safe?,
+        ->(_row) { [ true, "worktree ownership verified", worktree ] }
+      ) do
+        with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { FakeGit.new("") }) do
+          ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "4-execute"))
 
-        assert_equal true, ok
-        assert_equal "worktree clean", reason
+          assert_equal true, ok
+          assert_equal "worktree clean", reason
+        end
       end
     end
   end
@@ -51,11 +60,17 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
       FileUtils.mkdir_p(worktree)
       write_pointer(dir, worktree)
 
-      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { FakeGit.new(" M app.rb\n") }) do
-        ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "4-execute"))
+      with_replaced_singleton_method(
+        Hive::Daemon::AutoRetrySafety,
+        :owned_worktree_safe?,
+        ->(_row) { [ true, "worktree ownership verified", worktree ] }
+      ) do
+        with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { FakeGit.new(" M app.rb\n") }) do
+          ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "4-execute"))
 
-        assert_equal false, ok
-        assert_equal "worktree dirty", reason
+          assert_equal false, ok
+          assert_equal "worktree dirty", reason
+        end
       end
     end
   end
@@ -66,6 +81,47 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
 
       assert_equal true, ok
       assert_includes reason, "missing worktree pointer"
+    end
+  end
+
+  def test_pointer_stages_delegate_to_the_owned_worktree_validator
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "worktree.yml"), "path: /trusted/worktree\nbranch: task\n")
+      task = Struct.new(:folder, :project_root, :slug)
+                   .new(dir, "/trusted/project", "task")
+      observed = nil
+
+      with_replaced_singleton_method(Hive::Task, :new, ->(_folder) { task }) do
+        with_replaced_singleton_method(
+          Hive::Worktree, :canonical_root, ->(_project_root) { "/trusted/root" }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Worktree, :read_owned_pointer, lambda { |folder, **kwargs|
+              observed = [ folder, kwargs ]
+              { "path" => "/trusted/worktree", "branch" => "task" }
+            }
+          ) do
+            ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(
+              row(folder: dir, stage: "5-open-pr")
+            )
+
+            assert_equal true, ok
+            assert_equal "worktree ownership verified", reason
+          end
+        end
+      end
+
+      assert_equal(
+        [
+          dir,
+          {
+            project_root: "/trusted/project",
+            slug: "task",
+            expected_root: "/trusted/root"
+          }
+        ],
+        observed
+      )
     end
   end
 
@@ -113,7 +169,10 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
 
   def test_inspection_errors_fail_closed
     with_tmp_dir do |dir|
-      with_replaced_singleton_method(Hive::Worktree, :read_pointer, ->(_folder) { raise "boom" }) do
+      File.write(File.join(dir, "worktree.yml"), "---\n")
+      with_replaced_singleton_method(
+        Hive::Daemon::AutoRetrySafety, :owned_worktree_safe?, ->(_row) { raise "boom" }
+      ) do
         ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "4-execute"))
 
         assert_equal false, ok
@@ -139,6 +198,57 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
 
       assert_equal true, ok, "a stage with no mutable-work guard must remain retryable"
       assert_match(/no mutable work-area guard required for stage 7-artifacts/, reason)
+    end
+  end
+
+  def test_unrestored_tamper_is_unsafe_but_restored_tamper_can_retry
+    with_tmp_dir do |dir|
+      unsafe, unsafe_reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(
+        row(
+          folder: dir,
+          stage: "7-artifacts",
+          marker_attrs: { "reason" => "fix_tampered", "restored" => "false" }
+        )
+      )
+      safe, safe_reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(
+        row(
+          folder: dir,
+          stage: "7-artifacts",
+          marker_attrs: { "reason" => "fix_tampered", "restored" => "true" }
+        )
+      )
+
+      assert_equal false, unsafe
+      assert_includes unsafe_reason, "not restored"
+      assert_equal true, safe
+      assert_includes safe_reason, "no mutable work-area guard"
+    end
+  end
+
+  def test_secret_retry_waits_until_the_local_pr_source_is_clean
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "task.md")
+      File.write(state_file, "token: sk-abcdefghijklmnopqrstuvwxyz1234\n")
+      blocked, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(
+        row(
+          folder: dir,
+          stage: "7-artifacts",
+          marker_attrs: { "reason" => "secret_in_pr_body" }
+        )
+      )
+      File.write(state_file, "credential removed\n")
+      safe, safe_reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(
+        row(
+          folder: dir,
+          stage: "7-artifacts",
+          marker_attrs: { "reason" => "secret_in_pr_body" }
+        )
+      )
+
+      assert_equal false, blocked
+      assert_includes reason, "credential pattern remains"
+      assert_equal true, safe
+      assert_includes safe_reason, "no mutable work-area guard"
     end
   end
 end

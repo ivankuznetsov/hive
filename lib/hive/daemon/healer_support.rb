@@ -1,3 +1,7 @@
+require "digest"
+require "hive/attempts/generation"
+require "hive/markers"
+require "hive/task"
 require "hive/workflows"
 require "hive/daemon/dispatch_request_queue"
 
@@ -9,6 +13,8 @@ module Hive
     # Relies on the host exposing `@controller`, `@logger`, and
     # `@request_queue` instance variables.
     module HealerSupport
+      RetryTask = Struct.new(:id, :slug, :state_file, :folder, keyword_init: true)
+
       # Read the row's marker attrs hash, tolerating rows that predate the
       # `marker_attrs` accessor or carry a non-hash value.
       def marker_attrs_for(row)
@@ -64,21 +70,53 @@ module Hive
         )
       end
 
-      # Enqueue the explicit `hive plan ... --from 3-plan` rerun after a
+      # Enqueue the explicit `hive plan ... --from 3-plan` rerun before a
       # 3-plan marker clear. Clearing alone leaves an empty markerless
       # plan.md that classifies straight back to :error, so re-entry must be
-      # explicit. `trigger:` distinguishes the calling healer. Carries its
-      # own rescue and returns false when durable enqueue fails. The caller can
-      # then restore a fresh guarded ERROR so the shared cooldown retries the
-      # enqueue instead of stranding a markerless empty plan.
+      # explicit. The request is bound to the immutable task id, the exact
+      # ERROR marker generation, and the durable-attempt generation of the
+      # post-clear artifact. A deterministic request id makes a daemon restart
+      # between enqueue and clear idempotent. Returns the request id, or false
+      # when durable enqueue fails so the caller can leave the marker intact.
       def requeue_plan_rerun(row, trigger:)
+        task = plan_retry_task(row)
+        task_id = task.id
+        raise Hive::Error, "cannot queue a plan retry without a task id" if task_id.nil?
+
+        marker = Hive::Markers.current(row.state_file)
+        marker_id = marker.attrs["marker_id"].to_s
+        if marker_id.empty?
+          marker_id = "legacy-#{::Digest::SHA256.hexdigest(marker.raw.to_s)[0, 16]}"
+        end
+
+        markerless_body = Hive::Markers.without_markers(File.binread(row.state_file))
+        progress_token = Hive::Attempts::Generation.artifact_token(
+          task, state_file_content: markerless_body
+        )
+        task_generation = Hive::Attempts::Generation.resolve(
+          task: task,
+          project: row.project,
+          intended_stage: row.stage,
+          progress_token: progress_token
+        ).task_generation
+        request_id = ::Digest::SHA256.hexdigest(
+          [ "hive-plan-error-retry-v1", row.project, task_id, row.stage, marker_id,
+            task_generation ].join("\0")
+        )[0, 32]
+
         request_id = begin
           @request_queue.write_request!(
             project: row.project,
             slug: row.slug,
             argv: [ "hive", "plan", row.slug, "--project", row.project, "--from", "3-plan" ], # coding-scoped: healer re-enters coding plan verb
             requestor: "healer",
-            trigger: trigger
+            trigger: trigger,
+            request_id: request_id,
+            task_generation: task_generation,
+            task_id: task_id,
+            expected_stage: row.stage,
+            expected_marker_name: row.marker,
+            expected_marker_id: marker_id
           )
         rescue StandardError => e
           begin
@@ -93,17 +131,31 @@ module Hive
           end
           return false
         end
+        request_id
+      end
 
-        begin
-          @logger.event(:heal_requeued,
-                        project: row.project,
-                        slug: row.slug,
-                        stage: row.stage,
-                        request_id: request_id)
-        rescue StandardError
-          nil
-        end
-        true
+      def plan_retry_task(row)
+        Hive::Task.new(row.folder.to_s)
+      rescue Hive::InvalidTaskPath
+        # Extensions and focused unit tests may supply a structurally complete
+        # status row without materialising the full project stage hierarchy.
+        # Production status rows always take the strict Hive::Task path.
+        RetryTask.new(
+          id: row.respond_to?(:id) ? row.id : nil,
+          slug: row.slug.to_s,
+          state_file: row.state_file.to_s,
+          folder: row.folder.to_s
+        )
+      end
+
+      def log_plan_requeued(row, request_id)
+        @logger.event(:heal_requeued,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      request_id: request_id)
+      rescue StandardError
+        nil
       end
     end
   end

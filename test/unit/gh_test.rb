@@ -145,6 +145,17 @@ class GhUnitTest < Minitest::Test
     end
   end
 
+  def test_scan_pr_for_secrets_allows_missing_first_entry_file
+    with_tmp_dir do |dir|
+      result = Hive::Gh.scan_pr_for_secrets(
+        state_file: File.join(dir, "pr.md"), pr_url: ""
+      )
+
+      assert result.clean?
+      refute result.fetch_failed
+    end
+  end
+
   def test_scan_pr_for_secrets_detects_secret_in_state_file
     with_tmp_dir do |dir|
       state = File.join(dir, "pr.md")

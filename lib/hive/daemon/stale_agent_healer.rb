@@ -104,6 +104,7 @@ module Hive
                      lost_outcome_store: nil, lost_outcome_processor: nil,
                      attempt_loss_recovery_limit: ATTEMPT_LOSS_RECOVERY_LIMIT,
                      auto_retry_enabled: true,
+                     project_auto_retry_enabled: ->(_project) { true },
                      safety: Hive::Daemon::AutoRetrySafety)
         @controller = controller
         @logger = logger
@@ -119,6 +120,7 @@ module Hive
         @lost_outcome_processor = lost_outcome_processor
         @attempt_loss_recovery_limit = nil
         @auto_retry_enabled = auto_retry_enabled == true
+        @project_auto_retry_enabled = project_auto_retry_enabled
         @safety = safety
       end
 
@@ -126,6 +128,7 @@ module Hive
       # The durable retry charge and predecessor link survive daemon restart,
       # while the outcome sidecar makes repeated ticks idempotent.
       def heal_attempt_losses(attempts, now: Time.now.utc)
+        return unless @auto_retry_enabled
         return unless @attempt_store && @attempt_dispatcher &&
                       @lost_outcome_store && @lost_outcome_processor
 
@@ -139,6 +142,7 @@ module Hive
 
         attempts.each do |attempt|
           next if attempt.compatibility?
+          next unless @project_auto_retry_enabled.call(attempt["project"])
 
           outcome = @lost_outcome_processor.process(attempt, now: now)
           next unless outcome["status"] == "ready"
@@ -295,6 +299,22 @@ module Hive
         }
       end
 
+      # Read-only assessment shared with the scheduler disposition publisher.
+      # Keeping the deadline and the safety decision here prevents status from
+      # claiming scheduler ownership for a row the healer will deliberately
+      # leave parked.
+      def retry_assessment(row, now: Time.now.utc)
+        retry_at = row.state_file_mtime &&
+                   (row.state_file_mtime + Hive::AgentLimit.retry_cooldown_sec)
+        safe, safety_reason = @safety.safe_to_retry?(row)
+        {
+          due: error_retry_due?(row, now: now),
+          retry_at: retry_at,
+          safe: safe == true,
+          safety_reason: safety_reason.to_s
+        }
+      end
+
       private
 
       def attempt_loss_retry_due?(attempt, outcome, now:)
@@ -388,41 +408,49 @@ module Hive
         recovery_key = error_recovery_key(row, marker_reason)
         recovery_limit = nil
         attempts = @error_auto_recoveries[recovery_key]
+        # coding-scoped (block): plan recovery needs durable pre-clear enqueue
+        plan_retry = Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan"
+        request_id = nil
 
-        # A false return is an intentional, silent no-op: either a benign
-        # race (finalize already advanced and rewrote/removed the marker)
-        # or a marker_id mismatch (the on-disk marker is newer than this
-        # stale status row). Either way we must NOT consume a retry or log
-        # — the budget increment below is deliberately ordered AFTER this
-        # guard so only a real clear counts against the limit. The next
-        # tick re-reads the marker and reconciles.
-        return unless Hive::Markers.clear_current(
-          row.state_file,
-          expected_name: :error,
-          match_attrs: marker_match_attrs(row, marker_reason),
-          purge_history: true
-        )
+        # Claim the task after the status snapshot and hold that claim across
+        # enqueue+clear. This closes the window where an external runner could
+        # acquire .lock after status and have its marker cleared underneath it.
+        cleared = with_error_heal_lock(row, reason: heal_label) do
+          # Coding plan is unique: a markerless empty plan cannot redispatch
+          # itself. Persist its identity-bound continuation before clearing so
+          # a crash or logger failure can never strand it.
+          request_id = requeue_plan_rerun(row, trigger: "error_retry") if plan_retry
+          next false if plan_retry && !request_id
+
+          result = Hive::Markers.clear_current(
+            row.state_file,
+            expected_name: :error,
+            match_attrs: marker_match_attrs(row, marker_reason),
+            purge_history: true
+          )
+          remove_plan_retry_if_unclaimed(request_id) unless result
+          result
+        end
+        return unless cleared
 
         observe_pre_clear_mtime(row)
         attempts += 1
         @error_auto_recoveries[recovery_key] = attempts
-        @logger.event(:marker_healed,
-                      project: row.project,
-                      slug: row.slug,
-                      stage: row.stage,
-                      prior_marker: row.marker,
-                      reason: heal_label,
-                      marker_reason: marker_reason,
-                      state_file: row.state_file,
-                      attempts: attempts,
-                      max_attempts: recovery_limit)
-        # Every 3-plan heal needs the explicit requeue — limits_reached
-        # cooldown heals leave the same markerless empty plan.md as agent
-        # loss does (PR review P2 #7).
-        if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" # coding-scoped: coding plan pause needs bespoke rerun after marker clear
-          queued = requeue_plan_rerun(row, trigger: "error_retry")
-          restore_plan_retry_error(row) unless queued
+        begin
+          @logger.event(:marker_healed,
+                        project: row.project,
+                        slug: row.slug,
+                        stage: row.stage,
+                        prior_marker: row.marker,
+                        reason: heal_label,
+                        marker_reason: marker_reason,
+                        state_file: row.state_file,
+                        attempts: attempts,
+                        max_attempts: recovery_limit)
+        rescue StandardError
+          nil
         end
+        log_plan_requeued(row, request_id) if request_id
       rescue StandardError => e
         @logger.event(:marker_heal_failed,
                       project: row.project,
@@ -445,22 +473,8 @@ module Hive
       # so the marker clear always retains a durable continuation.
 
       def auto_recoverable_error?(row, now:)
-        error_retry_due?(row, now: now) && @safety.safe_to_retry?(row).first == true
-      end
-
-      def restore_plan_retry_error(row)
-        attrs = marker_attrs_for(row).to_h.transform_keys(&:to_s)
-        attrs.delete("marker_id")
-        Hive::Markers.set_if_none(row.state_file, :error, attrs)
-      rescue StandardError => e
-        @logger.event(
-          :marker_heal_failed,
-          project: row.project,
-          slug: row.slug,
-          stage: row.stage,
-          reason: "plan_retry_restore_failed",
-          error: "#{e.class}: #{e.message}"
-        )
+        assessment = retry_assessment(row, now: now)
+        assessment[:due] && assessment[:safe]
       end
 
       def error_heal_label(row, reason)
@@ -491,12 +505,15 @@ module Hive
         attempts = @review_error_auto_recoveries[recovery_key]
         recovery_limit = nil
 
-        return unless Hive::Markers.clear_current(
-          row.state_file,
-          expected_name: :review_error,
-          match_attrs: marker_attrs,
-          purge_history: true
-        )
+        cleared = with_error_heal_lock(row, reason: review_heal_label(reason)) do
+          Hive::Markers.clear_current(
+            row.state_file,
+            expected_name: :review_error,
+            match_attrs: marker_attrs,
+            purge_history: true
+          )
+        end
+        return unless cleared
 
         attempts += 1
         @review_error_auto_recoveries[recovery_key] = attempts
@@ -570,7 +587,8 @@ module Hive
       end
 
       def auto_recoverable_review_error?(row, now:)
-        error_retry_due?(row, now: now) && @safety.safe_to_retry?(row).first == true
+        assessment = retry_assessment(row, now: now)
+        assessment[:due] && assessment[:safe]
       end
 
       def fix_claude_stop_hook_failure?(attrs)
@@ -788,6 +806,24 @@ module Hive
         # Leave both its lock and the marker untouched; the next tick will
         # reconcile the new generation.
         false
+      end
+
+      def with_error_heal_lock(row, reason:, &block)
+        with_review_heal_lock(row, reason: reason, &block)
+      end
+
+      def remove_plan_retry_if_unclaimed(request_id)
+        return if request_id.to_s.empty?
+        return unless @request_queue.respond_to?(:remove_if_unclaimed)
+
+        @request_queue.remove_if_unclaimed(request_id)
+      rescue StandardError => e
+        @logger.event(
+          :marker_heal_failed,
+          reason: "plan_retry_cancel_failed",
+          request_id: request_id,
+          error: "#{e.class}: #{e.message}"
+        )
       end
 
       def classify_stale(row, now:)

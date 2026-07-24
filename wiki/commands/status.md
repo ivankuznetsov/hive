@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-07-21
+updated: 2026-07-24
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, dependencies, scheduler]
 ---
 
@@ -49,12 +49,15 @@ dependency-blocked and waiting for answers remains `waiting_on_you` while the
 dependency reason stays secondary.
 
 For a daemon-enrolled project with global automatic retry enabled, a real
-`ERROR` or `REVIEW_ERROR` is `waiting_on_provider_or_scheduler` with
-`blocker_owner: scheduler`, not `needs_repair`: Hive owns the next guarded
-retry after its shared cooldown and temporary safety checks. Disabling either
-the project daemon or global automatic retry restores the operator-owned
-`needs_repair` classification. A current daemon snapshot records the same
-ownership as the `retry_cooldown` disposition.
+`ERROR` or `REVIEW_ERROR` defaults to
+`waiting_on_provider_or_scheduler` with `blocker_owner: scheduler`: Hive owns
+the next guarded retry after its shared cooldown. A current daemon snapshot
+refines that projection. `retry_cooldown` carries the exact deadline and stays
+scheduler-owned; `retry_in_flight` is running/agent-owned; and
+`retry_safety_blocked` becomes `needs_repair` with the reported operator or
+Hive owner instead of falsely claiming the scheduler will clear it.
+Disabling either the project daemon or global automatic retry restores the
+operator-owned `needs_repair` classification.
 
 Completeness is explicit: `complete`, `partial`, or `unknown`. Missing project
 roots, legacy stage directories, invalid task metadata, unavailable/stale
@@ -65,8 +68,9 @@ from missing evidence.
 
 `hive-operational-status.v1` includes summary/state counts, daemon identity and
 phase, scheduler capacity/queue/provider holds, archive counts, typed issues,
-per-task liveness/freshness, blocker ownership and reasons, and an optional
-closed action descriptor. It never embeds a shell command or argv. A routine,
+per-task liveness/freshness, blocker ownership and reasons, nullable retry
+evidence (`due`, `retry_at`, `safe`, `safety_reason`), and an optional closed
+action descriptor. It never embeds a shell command or argv. A routine,
 confirmation-free recommendation carries `action_id`, exact `project:slug`, an
 observation token, risk class, and provenance; execute it only with:
 

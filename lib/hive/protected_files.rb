@@ -1,4 +1,6 @@
 require "digest"
+require "fileutils"
+require "hive/atomic_file"
 
 module Hive
   # SHA-256 snapshot/diff helper for orchestrator-owned files.
@@ -15,7 +17,7 @@ module Hive
   module ProtectedFiles
     # Files the orchestrator owns; sub-spawns must not modify them.
     ORCHESTRATOR_OWNED = %w[
-      plan.md worktree.yml task.md task-journal.jsonl task-projection.json
+      plan.md worktree.yml handoff.yml task.md task-journal.jsonl task-projection.json
     ].freeze
 
     module_function
@@ -38,6 +40,57 @@ module Hive
       paths.to_h { |label, path| [ label, fingerprint(path) ] }
     end
 
+    # Capture the bytes needed to restore controller-owned files immediately
+    # after a spawn. The capture stays in controller memory; an agent never
+    # receives a path it can rewrite and establish as a new trusted baseline.
+    def capture(root, names = ORCHESTRATOR_OWNED)
+      names.to_h do |name|
+        validate_relative_name!(name)
+        [ name, capture_path(File.join(root, name)) ]
+      end
+    end
+
+    def capture_paths(paths)
+      paths.to_h { |label, path| [ label, capture_path(path) ] }
+    end
+
+    # Restore only names that the integrity diff proved changed. Missing files
+    # are removed, while regular files are atomically replaced with their
+    # original bytes and mode. Unexpected directories fail closed rather than
+    # recursively deleting agent-controlled data.
+    def restore(root, captured, names)
+      Array(names).each do |name|
+        validate_relative_name!(name)
+        restore_path(File.join(root, name), captured.fetch(name))
+      end
+      verify_restored!(root, captured, names)
+      true
+    end
+
+    def restore_paths(paths, captured, labels)
+      Array(labels).each do |label|
+        restore_path(paths.fetch(label), captured.fetch(label))
+      end
+      mismatches = Array(labels).reject do |label|
+        fingerprint(paths.fetch(label)) == captured.fetch(label).fetch(:fingerprint)
+      end
+      raise Hive::Error, "protected paths could not be restored: #{mismatches.join(', ')}" unless mismatches.empty?
+
+      true
+    end
+
+    def restore_safely(root, captured, names)
+      [ restore(root, captured, names), nil ]
+    rescue StandardError => e
+      [ false, "#{e.class}: #{e.message}" ]
+    end
+
+    def restore_paths_safely(paths, captured, labels)
+      [ restore_paths(paths, captured, labels), nil ]
+    rescue StandardError => e
+      [ false, "#{e.class}: #{e.message}" ]
+    end
+
     # Names that differ between two snapshots produced by #snapshot.
     def diff(before, after)
       before.keys.reject { |k| before[k] == after[k] }
@@ -57,5 +110,65 @@ module Hive
       nil
     end
     private_class_method :fingerprint
+
+    def capture_path(path)
+      stat = File.lstat(path)
+      unless stat.file?
+        return {
+          kind: :unrestorable,
+          fingerprint: fingerprint(path)
+        }
+      end
+
+      content = File.open(path, File::RDONLY | File::NOFOLLOW, &:read)
+      {
+        kind: :file,
+        content: content,
+        mode: stat.mode & 0o777,
+        fingerprint: ::Digest::SHA256.hexdigest(content)
+      }
+    rescue Errno::ENOENT
+      { kind: :missing, fingerprint: nil }
+    end
+    private_class_method :capture_path
+
+    def restore_path(path, entry)
+      if File.directory?(path) && !File.symlink?(path)
+        raise Hive::Error, "refusing to replace protected path directory: #{path}"
+      end
+
+      case entry.fetch(:kind)
+      when :missing
+        FileUtils.rm_f(path)
+      when :file
+        Hive::AtomicFile.write(
+          path, entry.fetch(:content), mode: entry.fetch(:mode)
+        )
+        File.chmod(entry.fetch(:mode), path)
+      when :unrestorable
+        raise Hive::Error, "protected non-file path cannot be reconstructed safely: #{path}"
+      else
+        raise Hive::Error, "unknown protected capture type for #{path}"
+      end
+    end
+    private_class_method :restore_path
+
+    def verify_restored!(root, captured, names)
+      mismatches = Array(names).reject do |name|
+        fingerprint(File.join(root, name)) == captured.fetch(name).fetch(:fingerprint)
+      end
+      raise Hive::Error, "protected files could not be restored: #{mismatches.join(', ')}" unless mismatches.empty?
+    end
+    private_class_method :verify_restored!
+
+    def validate_relative_name!(name)
+      value = name.to_s
+      expanded = File.expand_path(value, "/")
+      unless !value.empty? && !value.start_with?("/") && expanded.start_with?("/") &&
+             !value.split(File::SEPARATOR).include?("..")
+        raise ArgumentError, "protected filename must stay relative: #{name.inspect}"
+      end
+    end
+    private_class_method :validate_relative_name!
   end
 end

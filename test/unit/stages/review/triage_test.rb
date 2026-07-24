@@ -264,6 +264,8 @@ class TriageTest < Minitest::Test
         assert_includes result.tampered_files, protected_file,
                         "#{protected_file}: expected in tampered_files=#{result.tampered_files.inspect}"
         assert_match(/protected files/, result.error_message)
+        assert_equal "original #{protected_file} content\n", File.binread(target),
+                     "#{protected_file}: triage must restore the controller-owned bytes"
       end
     end
   end
@@ -304,6 +306,39 @@ class TriageTest < Minitest::Test
       assert_includes result.tampered_files, "reviews/suppressed.md",
                       "expected reviews/suppressed.md in tampered_files=#{result.tampered_files.inspect}"
       assert_match(/protected files/, result.error_message)
+      assert_equal "<!-- HIVE-SUPPRESS v1 base=abc123 -->\n", File.binread(suppressed)
+    end
+  end
+
+  def test_triage_reports_protected_file_restore_failure
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder)
+      File.write(
+        File.join(task_folder, "reviews", "claude-ce-code-review-01.md"),
+        "## High\n- [ ] finding\n"
+      )
+      task_md = File.join(task_folder, "task.md")
+      File.write(task_md, "trusted task\n")
+      escalations = File.join(task_folder, "reviews", "escalations-01.md")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task_md
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "tampered task\n"
+
+      result = nil
+      with_replaced_singleton_method(
+        Hive::ProtectedFiles,
+        :restore_safely,
+        ->(_root, _captured, _names) { [ false, "synthetic restore failure" ] }
+      ) do
+        result = Hive::Stages::Review::Triage.run!(
+          cfg: default_cfg,
+          ctx: ctx
+        )
+      end
+
+      assert_equal :error, result.status
+      assert_equal [ "task.md" ], result.tampered_files
+      assert_includes result.error_message, "synthetic restore failure"
+      refute File.exist?(escalations)
     end
   end
 

@@ -307,6 +307,7 @@ module Hive
         "reason" => reasons.first.fetch("message"),
         "reasons" => reasons,
         "provider" => provider_payload(row),
+        "retry" => retry_payload(scheduler_disposition),
         "dependency" => {
           "blocked" => row["blocked"] == true,
           "blocked_by" => row["blocked_by"],
@@ -456,8 +457,12 @@ module Hive
         [ "waiting_on_provider_or_scheduler", "provider" ]
       when "global_cap", "project_cap", "daily_cap", "cooldown", "in_flight",
            "dispatched", "wait_for_debounce", "record_baseline", "poll_for_merge",
-           "merge_watch", "blocked_on_dependency", "retry_cooldown"
+           "merge_watch", "blocked_on_dependency", "retry_cooldown", "retry_pending"
         [ "waiting_on_provider_or_scheduler", "scheduler" ]
+      when "retry_in_flight"
+        [ "running", "agent" ]
+      when "retry_safety_blocked"
+        [ "needs_repair", disposition["owner"] || "operator" ]
       when "wait_for_answers"
         [ "waiting_on_you", "operator" ]
       when "quarantined", "project_dropped", "folder_missing", "folder_missing_nil",
@@ -485,6 +490,18 @@ module Hive
         COMPLETION_ACTIONS.include?(row["action"])
 
       [ "idle", daemon_enabled?(project["name"]) ? "scheduler" : "none" ]
+    end
+
+    def retry_payload(disposition)
+      return nil unless disposition.is_a?(Hash)
+      return nil unless disposition["decision"].to_s.start_with?("retry_")
+
+      {
+        "due" => disposition["retry_due"] == true,
+        "retry_at" => disposition["retry_at"],
+        "safe" => disposition["retry_safe"] == true,
+        "safety_reason" => disposition["safety_reason"]
+      }
     end
 
     def invalid_task?(row)

@@ -8,6 +8,7 @@ require "hive/daemon/logger"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/policy"
 require "hive/markers"
+require "hive/task_meta"
 
 # End-to-end integration: drive the real status command on a tmpdir
 # project, feed its JSON-shaped output through the daemon's
@@ -82,6 +83,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
         rows << Hive::Daemon::StatusConsumer::Row.new(
           project: project["name"],
           slug: task["slug"],
+          id: task["id"],
           stage: task["stage"],
           marker: task["marker"],
           marker_attrs: task["attrs"],
@@ -106,6 +108,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
         slug = "stale-plan-260612-aaaa"
         folder = File.join(dir, ".hive-state", "stages", "3-plan", slug)
         FileUtils.mkdir_p(folder)
+        Hive::TaskMeta.write(folder, id: 1, slug: slug, display_name: nil)
         state_file = File.join(folder, "plan.md")
         File.write(state_file, "# plan\n\n<!-- ERROR reason=tmux_session_terminated marker_id=it1 -->\n")
         backdated = Time.now - Hive::AgentLimit.retry_cooldown_sec - 60

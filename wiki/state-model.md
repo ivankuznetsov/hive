@@ -512,7 +512,12 @@ created_at: <UTC-ISO>
 execute_base_head: <sha>
 ```
 
-`Hive::Worktree.read_pointer` is the only reader; `Hive::Worktree.validate_pointer_path` rejects paths outside the configured `worktree_root` prefix. See [[modules/worktree]].
+Runtime coding stages read the pointer through
+`Hive::Worktree.read_owned_pointer`, which requires the exact
+`<worktree_root>/<slug>` path and slug branch, current Git worktree
+registration, and the same repository common directory. The permissive
+`read_pointer` remains for compatibility cleanup/inspection only. See
+[[modules/worktree]].
 
 ### Managed draft-PR receipt
 

@@ -74,7 +74,9 @@ module Hive
         resource_limits = Hive::Stages::Base.stage_resource_limits(cfg || {}, stage)
 
         git_control_paths = git_control_paths!(context.worktree_path)
+        git_controls_capture = Hive::ProtectedFiles.capture_paths(git_control_paths)
         git_controls_before = Hive::ProtectedFiles.snapshot_paths(git_control_paths)
+        protected_capture = Hive::ProtectedFiles.capture(task.folder, PROTECTED_FILES)
         protected_before = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
         result = nil
         spawn_error = nil
@@ -101,13 +103,21 @@ module Hive
         end
         tampered = Hive::ProtectedFiles.diff(protected_before, protected_after)
         unless tampered.empty?
+          restored, restore_error = Hive::ProtectedFiles.restore_safely(
+            task.folder, protected_capture, tampered
+          )
           raise Hive::StageError,
-                "worktree agent modified protected task files: #{tampered.join(', ')}"
+                "worktree agent modified protected task files: #{tampered.join(', ')}; " \
+                "restored=#{restored}#{": #{restore_error}" if restore_error}"
         end
         git_tampered = Hive::ProtectedFiles.diff(git_controls_before, git_controls_after)
         unless git_tampered.empty?
+          restored, restore_error = Hive::ProtectedFiles.restore_paths_safely(
+            git_control_paths, git_controls_capture, git_tampered
+          )
           raise Hive::StageError,
-                "worktree agent modified protected Git control files: #{git_tampered.join(', ')}"
+                "worktree agent modified protected Git control files: #{git_tampered.join(', ')}; " \
+                "restored=#{restored}#{": #{restore_error}" if restore_error}"
         end
         return managed_failure_result(task, error: spawn_error, context: context) if spawn_error
 

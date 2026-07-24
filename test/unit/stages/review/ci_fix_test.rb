@@ -225,6 +225,46 @@ class CiFixTest < Minitest::Test
         assert_equal :error, result.status
         assert_match(/protected files/, result.error_message)
         assert_match(/task\.md/, result.error_message)
+        assert_match(/restored=true/, result.error_message)
+        assert_equal "<!-- REVIEW_WORKING phase=ci pass=1 -->\n",
+                     File.binread(task_md)
+      end
+    end
+  end
+
+  def test_reports_restore_failure_when_fix_agent_tampers_with_protected_files
+    with_tmp_dir do |task_root|
+      with_tmp_git_repo do |worktree|
+        task_folder = File.join(
+          task_root, ".hive-state", "stages", "6-review", "ci-restore-failure"
+        )
+        FileUtils.mkdir_p(File.join(task_folder, "reviews"))
+        task_md = File.join(task_folder, "task.md")
+        File.write(task_md, "<!-- REVIEW_WORKING phase=ci pass=1 -->\n")
+        File.write(File.join(task_folder, "plan.md"), "plan\n")
+        File.write(
+          File.join(task_folder, "worktree.yml"),
+          { "path" => worktree }.to_yaml
+        )
+        ci = write_ci_script(task_root, "echo fail >&2\nexit 1")
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "<!-- REVIEW_COMPLETE -->\n"
+
+        result = nil
+        with_replaced_singleton_method(
+          Hive::ProtectedFiles,
+          :restore_safely,
+          ->(_root, _captured, _names) { [ false, "synthetic restore failure" ] }
+        ) do
+          result = Hive::Stages::Review::CiFix.run!(
+            cfg: cfg_with(ci),
+            ctx: make_ctx(worktree, task_folder)
+          )
+        end
+
+        assert_equal :error, result.status
+        assert_includes result.error_message, "restored=false"
+        assert_includes result.error_message, "synthetic restore failure"
       end
     end
   end

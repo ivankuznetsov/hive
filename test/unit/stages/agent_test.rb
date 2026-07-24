@@ -339,8 +339,10 @@ class StagesAgentTest < Minitest::Test
       with_draft_pr_task do |task, _worktree_root|
         run_command = method(:run!)
         report_source = valid_fix_report
+        protected_path = File.join(task.folder, protected_name)
+        original = File.binread(protected_path) if File.file?(protected_path)
         spawn = lambda do |_task, **kwargs|
-          File.write(File.join(task.folder, protected_name), "agent-owned\n")
+          File.write(protected_path, "agent-owned\n")
           File.write(File.join(kwargs.fetch(:cwd), "fix.rb"), "fixed\n")
           run_command.call("git", "-C", kwargs.fetch(:cwd), "add", "fix.rb")
           run_command.call("git", "-C", kwargs.fetch(:cwd), "commit", "-m", "fix", "--quiet")
@@ -355,6 +357,13 @@ class StagesAgentTest < Minitest::Test
             assert_equal "managed_agent_failed", result.fetch(:commit)
             marker = Hive::Markers.current(File.join(task.folder, "fix-report.md"))
             assert_equal "Hive::StageError", marker.attrs.fetch("exception_class")
+            if original
+              assert_equal original, File.binread(protected_path),
+                           "#{protected_name} must be restored before recovery"
+            else
+              refute_path_exists protected_path,
+                                 "#{protected_name} must be removed before recovery"
+            end
           end
         end
       end
@@ -380,6 +389,65 @@ class StagesAgentTest < Minitest::Test
           assert_equal "Hive::StageError", result.fetch(:error)
           marker = Hive::Markers.current(File.join(task.folder, "fix-report.md"))
           assert_equal "managed_agent_failed", marker.attrs.fetch("reason")
+          worktree_path = YAML.safe_load(
+            File.read(File.join(task.folder, "worktree.yml"))
+          ).fetch("path")
+          _value, _err, status = Open3.capture3(
+            "git", "-C", worktree_path, "config", "--local", "--get", "core.hooksPath"
+          )
+          refute status.success?, "the agent-authored local Git control must be removed"
+        end
+      end
+    end
+  end
+
+  def test_worktree_stage_contains_protected_task_restore_failure
+    with_draft_pr_task do |task, _worktree_root|
+      spawn = lambda do |_task, **_kwargs|
+        File.write(File.join(task.folder, "task.md"), "agent-owned\n")
+        { status: :ok, exit_code: 0 }
+      end
+
+      with_fake_github_controller do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          with_replaced_singleton_method(
+            Hive::ProtectedFiles,
+            :restore_safely,
+            ->(_root, _captured, _names) { [ false, "synthetic restore failure" ] }
+          ) do
+            result = Hive::Stages::AgentWorktree.run!(task, {})
+
+            assert_equal :error, result.fetch(:status)
+            assert_equal "Hive::StageError", result.fetch(:error)
+          end
+        end
+      end
+    end
+  end
+
+  def test_worktree_stage_contains_git_control_restore_failure
+    with_draft_pr_task do |task, _worktree_root|
+      run_command = method(:run!)
+      spawn = lambda do |_task, **kwargs|
+        run_command.call(
+          "git", "-C", kwargs.fetch(:cwd),
+          "config", "core.hooksPath", "/tmp/agent-hooks"
+        )
+        { status: :ok, exit_code: 0 }
+      end
+
+      with_fake_github_controller do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          with_replaced_singleton_method(
+            Hive::ProtectedFiles,
+            :restore_paths_safely,
+            ->(_paths, _captured, _labels) { [ false, "synthetic restore failure" ] }
+          ) do
+            result = Hive::Stages::AgentWorktree.run!(task, {})
+
+            assert_equal :error, result.fetch(:status)
+            assert_equal "Hive::StageError", result.fetch(:error)
+          end
         end
       end
     end
@@ -402,6 +470,11 @@ class StagesAgentTest < Minitest::Test
               assert_equal :error, result.fetch(:status)
               assert_equal "managed_agent_failed", result.fetch(:commit)
               assert_equal "Hive::StageError", result.fetch(:error)
+              _value, _err, status = Open3.capture3(
+                { "HOME" => agent_home },
+                "git", "config", "--global", "--get", "credential.helper"
+              )
+              refute status.success?, "the agent-authored global Git control must be removed"
             end
           end
         end
@@ -410,7 +483,7 @@ class StagesAgentTest < Minitest::Test
   end
 
   def test_worktree_stage_protects_controller_handoff_files_without_changing_global_stage_ownership
-    expected = Hive::ProtectedFiles::ORCHESTRATOR_OWNED + %w[meta.yml handoff.yml pr.md]
+    expected = (Hive::ProtectedFiles::ORCHESTRATOR_OWNED + %w[meta.yml handoff.yml pr.md]).uniq
 
     assert_equal expected, Hive::Stages::AgentWorktree::PROTECTED_FILES
     refute_includes Hive::ProtectedFiles::ORCHESTRATOR_OWNED, "pr.md"

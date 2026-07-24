@@ -24,6 +24,13 @@
     "trigger": { "type": ["string", "null"] },
     "task_generation": { "type": ["string", "null"] },
     "predecessor_attempt_id": { "type": ["string", "null"] },
+    "task_id": { "type": ["string", "integer", "null"] },
+    "expected_stage": { "type": ["string", "null"] },
+    "expected_marker_name": {
+      "type": ["string", "null"],
+      "enum": ["error", "review_error", null]
+    },
+    "expected_marker_id": { "type": ["string", "null"] },
     "inherited_outputs": {
       "type": "array",
       "items": { "$ref": "#/$defs/OutputReference" }

@@ -434,6 +434,64 @@ module Hive
       raise WorktreeError, "worktree.yml is invalid YAML: #{e.message}"
     end
 
+    # Coding-workflow pointer validation for legacy and current tasks. Unlike
+    # read_pointer, this treats the pointer as a trust boundary: it must be a
+    # regular file, resolve to this task's deterministic path and branch, be a
+    # registered worktree of the task's project repository, and actually have
+    # that branch checked out. Older coding pointers do not carry the strict
+    # draft-PR receipt fields, so these live repository checks provide the
+    # equivalent ownership proof without breaking their recovery.
+    def self.read_owned_pointer(task_folder, project_root:, slug:, expected_root:)
+      pointer_path = File.join(task_folder, "worktree.yml")
+      source = File.open(pointer_path, File::RDONLY | File::NOFOLLOW) do |file|
+        raise WorktreeError, "worktree.yml must be a regular file" unless file.stat.file?
+
+        value = file.read(STRICT_POINTER_MAX_BYTES + 1)
+        raise WorktreeError, "worktree.yml exceeds #{STRICT_POINTER_MAX_BYTES} bytes" if value.bytesize > STRICT_POINTER_MAX_BYTES
+
+        value
+      end
+      keys = source.lines.filter_map { |line| line[/\A([A-Za-z_][A-Za-z0-9_]*):(?:\s|$)/, 1] }
+      duplicates = keys.tally.select { |_key, count| count > 1 }.keys
+      raise WorktreeError, "worktree.yml contains duplicate keys: #{duplicates.join(', ')}" unless duplicates.empty?
+
+      raw = YAML.safe_load(source, permitted_classes: [], permitted_symbols: [], aliases: false)
+      raise WorktreeError, "worktree.yml must be a hash" unless raw.is_a?(Hash)
+      missing = %w[path branch].reject { |key| raw.key?(key) && !raw[key].to_s.empty? }
+      raise WorktreeError, "worktree.yml is missing keys: #{missing.join(', ')}" unless missing.empty?
+
+      root = realpath_or_expand(expected_root)
+      expected_path = realpath_or_expand(File.join(root, slug.to_s))
+      path = validate_pointer_path(raw["path"], root)
+      branch = validate_branch_name!(raw["branch"])
+      raise WorktreeError, "worktree.yml path does not belong to task #{slug}" unless path == expected_path
+      raise WorktreeError, "worktree.yml branch does not belong to task #{slug}" unless branch == slug.to_s
+      raise WorktreeError, "worktree #{path} is missing" unless File.directory?(path)
+
+      registered = run_materialize_git!(project_root, "worktree", "list", "--porcelain")
+                   .lines
+                   .filter_map { |line| line.delete_prefix("worktree ").strip if line.start_with?("worktree ") }
+                   .map { |candidate| realpath_or_expand(candidate) }
+      raise WorktreeError, "worktree #{path} is not registered for this project" unless registered.include?(path)
+
+      checked_out = run_materialize_git!(path, "branch", "--show-current").strip
+      raise WorktreeError, "worktree #{path} is on branch #{checked_out.inspect}, expected #{branch}" unless checked_out == branch
+
+      project_common = git_common_dir(project_root)
+      worktree_common = git_common_dir(path)
+      unless project_common == worktree_common
+        raise WorktreeError, "worktree #{path} belongs to a different repository"
+      end
+
+      raw.merge("path" => path, "branch" => branch)
+    rescue Errno::ENOENT
+      raise WorktreeError, "worktree.yml is missing"
+    rescue Errno::ELOOP
+      raise WorktreeError, "worktree.yml must be a regular file, not a symlink"
+    rescue Psych::Exception => e
+      raise WorktreeError, "worktree.yml is invalid YAML: #{e.message}"
+    end
+
     # Base dir under which per-project worktree roots live by default
     # (`<base>/<project>.worktrees`). Overridable via HIVE_WORKTREE_BASE so
     # tests (and relocated setups) never seed the developer's real ~/Dev.
@@ -575,6 +633,12 @@ module Hive
       # Path doesn't exist yet (init pass before mkdir); fall back to lexical.
       File.expand_path(path)
     end
+
+    def self.git_common_dir(path)
+      value = run_materialize_git!(path, "rev-parse", "--git-common-dir").strip
+      realpath_or_expand(File.expand_path(value, path))
+    end
+    private_class_method :git_common_dir
 
     # Run one `git -C <dir>` command for the materialize path and return its
     # stdout. `dir` is the directory git runs in — the repo root for fetch /

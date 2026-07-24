@@ -117,6 +117,9 @@ module Hive
             fix_identity = Hive::Stages::Base.implementation_stage_identity(
               synthetic_task(ctx), cfg, "review.ci"
             )
+            protected_capture = Hive::ProtectedFiles.capture(
+              ctx.task_folder, PROTECTED_FILES
+            )
             before = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
             spawn_result = spawn_fix_agent(
               cfg: cfg,
@@ -130,11 +133,15 @@ module Hive
             after = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
             tampered = Hive::ProtectedFiles.diff(before, after)
             if tampered.any?
+              restored, restore_error = Hive::ProtectedFiles.restore_safely(
+                ctx.task_folder, protected_capture, tampered
+              )
               return Result.new(
                 status: :error,
                 attempts: attempts,
                 last_output: output,
-                error_message: "ci fix agent modified protected files: #{tampered.join(', ')}",
+                error_message: "ci fix agent modified protected files: #{tampered.join(', ')}; " \
+                               "restored=#{restored}#{": #{restore_error}" if restore_error}",
                 limit_text: nil
               )
             end

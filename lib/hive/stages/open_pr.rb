@@ -53,6 +53,19 @@ module Hive
           return { commit: "open_pr_already_open", status: :complete }
         end
 
+        # A prior failed pass may have left an OPEN PR whose remote head no
+        # longer matches the local branch. Scan every such remote body before
+        # pushing or spawning another body-authoring agent; otherwise an hourly
+        # retry could republish a credential before the next post-write scan.
+        prs.select { |pr| pr["state"] == "OPEN" }.each do |pr|
+          pr_url = pr["url"].to_s
+          scan = Hive::Gh.scan_pr_for_secrets(
+            state_file: task.state_file, pr_url: pr_url, cfg: cfg
+          )
+          result = handle_secret_scan_result(task, pr_url, scan, "open_pr")
+          return result if result
+        end
+
         merged = head_oid && prs.find { |pr| pr["state"] == "MERGED" && pr["headRefOid"].to_s == head_oid.to_s }
         if merged
           pr_url = merged["url"].to_s
@@ -97,6 +110,12 @@ module Hive
           return { commit: "open_pr_already_merged", status: :complete }
         end
 
+        local_scan = Hive::Gh.scan_pr_for_secrets(
+          state_file: task.state_file, pr_url: "", cfg: cfg
+        )
+        local_result = handle_secret_scan_result(task, "", local_scan, "open_pr")
+        return local_result if local_result
+
         Hive::Gh.push_branch!(worktree_path, branch, cfg: cfg)
 
         prompt = render_prompt(task, worktree_path, branch,
@@ -107,12 +126,18 @@ module Hive
         else
           Hive::Stages::Base.stage_profile(cfg, "open_pr")
         end
+        protected_capture = Hive::ProtectedFiles.capture(task.folder)
         before_sha = Hive::ProtectedFiles.snapshot(task.folder)
         spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path, identity: identity)
         after_sha = Hive::ProtectedFiles.snapshot(task.folder)
         if (tampered = Hive::ProtectedFiles.diff(before_sha, after_sha)).any?
+          restored, restore_error = Hive::ProtectedFiles.restore_safely(
+            task.folder, protected_capture, tampered
+          )
           Hive::Markers.set(task.state_file, :error,
-                            reason: "open_pr_tampered", files: tampered.join(","))
+                            reason: "open_pr_tampered", files: tampered.join(","),
+                            restored: restored,
+                            restore_error: restore_error.to_s[0, 200])
           return { commit: "open_pr_tampered", status: :error }
         end
 

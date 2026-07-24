@@ -3,6 +3,7 @@ require "fileutils"
 require "json"
 require "time"
 require "hive/atomic_file"
+require "hive/agent_limit"
 require "hive/attempts/dirty_state_capture"
 require "hive/markers"
 require "hive/task_resolver"
@@ -37,6 +38,7 @@ module Hive
             "capture_references" => [],
             "cleanup" => nil,
             "successor_attempt_id" => nil,
+            "last_cleanup_at" => nil,
             "last_retry_at" => nil,
             "diagnostic" => nil
           })
@@ -111,16 +113,14 @@ module Hive
         outcome = @outcome_store.ensure_for(attempt, now: now)
         return outcome if LostOutcomeStore::FINAL_STATUSES.include?(outcome["status"])
         return outcome if outcome["status"] == "ready"
+        return outcome unless cleanup_retry_due?(outcome, now: now)
 
         cleanup = cleanup_orphan(attempt)
         unless %w[absent terminated no_worker].include?(cleanup)
           diagnostic = "worker group identity is not safe to terminate yet; retrying"
-          return outcome if outcome["status"] == "pending" &&
-                            outcome["cleanup"] == cleanup &&
-                            outcome["diagnostic"] == diagnostic
-
           return @outcome_store.update(
             attempt, now: now, status: "pending", cleanup: cleanup,
+            last_cleanup_at: now.utc.iso8601(6),
             diagnostic: diagnostic
           )
         end
@@ -150,6 +150,13 @@ module Hive
       end
 
       private
+
+      def cleanup_retry_due?(outcome, now:)
+        last_cleanup_at = Time.parse(outcome["last_cleanup_at"].to_s)
+        Hive::AgentLimit.retry_due?(limited_at: last_cleanup_at, now: now)
+      rescue ArgumentError, TypeError
+        true
+      end
 
       def cleanup_orphan(attempt)
         return "no_worker" unless attempt.worker

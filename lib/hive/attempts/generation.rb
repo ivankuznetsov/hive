@@ -53,11 +53,13 @@ module Hive
         )
       end
 
-      def self.artifact_token(task)
+      def self.artifact_token(task, state_file_content: nil)
         digest = ::Digest::SHA256.new
         digest << "hive-progress-v2\0"
         digest << task.state_file.to_s
-        if File.file?(task.state_file)
+        if !state_file_content.nil?
+          digest << state_file_content.to_s
+        elsif File.file?(task.state_file)
           File.open(task.state_file, "rb") do |file|
             digest << file.read(64 * 1024) until file.eof?
           end

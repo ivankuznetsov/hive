@@ -120,13 +120,13 @@ module Hive
           tick_sequence
         end
 
-        def observe(row, decision:, owner:, reason:)
+        def observe(row, decision:, owner:, reason:, **details)
           @observations[row_key(row)] = {
             "status" => "available",
             "decision" => decision.to_s,
             "owner" => owner.to_s,
             "reason" => reason.to_s
-          }
+          }.merge(details.transform_keys(&:to_s))
         end
 
         def fail(reason:, now: Time.now.utc)

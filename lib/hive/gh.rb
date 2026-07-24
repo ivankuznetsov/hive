@@ -808,10 +808,14 @@ module Hive
     end
 
     # Scan the agent-authored state-file plus the remote PR body for
-    # credential patterns. Returns a ScanResult. fetch_failed=true
-    # signals the caller to fail loud rather than treat as clean.
+    # credential patterns. A missing local file is the normal first-entry
+    # shape for open-pr, before its agent has authored pr.md; remote scanning
+    # must still proceed in that case. Other local read failures propagate.
+    # Returns a ScanResult. fetch_failed=true signals the caller to fail loud
+    # rather than treat a remote-fetch failure as clean.
     def scan_pr_for_secrets(state_file:, pr_url:, cfg: nil)
-      sources = [ File.read(state_file) ]
+      sources = []
+      sources << File.read(state_file) if File.exist?(state_file)
       local_hits = sources.flat_map { |s| Hive::SecretPatterns.scan(s) }
 
       if pr_url.to_s.empty?

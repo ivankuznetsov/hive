@@ -68,17 +68,23 @@ class AttemptsLostOutcomeTest < Minitest::Test
 
         assert_equal "pending", pending.fetch("status")
         assert_equal pending, pending_again,
-                     "an unchanged unsafe identity must be rechecked without rewriting the outcome"
+                     "an unchanged unsafe identity must wait for the shared cleanup cooldown"
         assert_empty pending.fetch("capture_references")
-        assert_equal 2, identity.calls.size
+        assert_equal 1, identity.calls.size
         assert Hive::Markers.current(task.state_file).none?
 
         identity.result = :absent
-        ready = processor.process(lost, now: NOW + 4)
+        still_pending = processor.process(
+          lost, now: NOW + Hive::AgentLimit.retry_cooldown_sec
+        )
+        ready = processor.process(
+          lost, now: NOW + Hive::AgentLimit.retry_cooldown_sec + 4
+        )
 
+        assert_equal "pending", still_pending.fetch("status")
         assert_equal "ready", ready.fetch("status")
         assert_nil ready.fetch("diagnostic")
-        assert_equal 3, identity.calls.size
+        assert_equal 2, identity.calls.size
       end
     end
   end

@@ -282,16 +282,61 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
+  def test_global_auto_retry_gate_holds_attempt_loss
+    with_task do |task|
+      with_tmp_dir do |root|
+        store = Hive::Attempts::Store.new(root: root)
+        lost = lost_attempt(store, retry_charge: 0, task_folder: task.folder)
+        outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+        dispatcher = FakeDispatcher.new
+
+        healer(
+          store, outcomes, FakeProcessor.new(outcomes, task.folder),
+          dispatcher, FakeLogger.new, auto_retry_enabled: false
+        ).heal_attempt_losses([ lost ], now: RETRY_AT)
+
+        assert_empty dispatcher.calls
+        assert_nil outcomes.fetch(lost.attempt_id),
+                   "a disabled global retry policy must not even advance the loss sidecar"
+      end
+    end
+  end
+
+  def test_project_auto_retry_gate_holds_only_the_disabled_project
+    with_task do |task|
+      with_tmp_dir do |root|
+        store = Hive::Attempts::Store.new(root: root)
+        lost = lost_attempt(store, retry_charge: 0, task_folder: task.folder)
+        outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+        dispatcher = FakeDispatcher.new
+
+        healer(
+          store, outcomes, FakeProcessor.new(outcomes, task.folder),
+          dispatcher, FakeLogger.new,
+          project_auto_retry_enabled: ->(project) { project != "demo" }
+        ).heal_attempt_losses([ lost ], now: RETRY_AT)
+
+        assert_empty dispatcher.calls
+        assert_nil outcomes.fetch(lost.attempt_id),
+                   "a per-project opt-out must apply to lease-backed loss as well as marker errors"
+      end
+    end
+  end
+
   private
 
-  def healer(store, outcomes, processor, dispatcher, logger)
+  def healer(store, outcomes, processor, dispatcher, logger,
+             auto_retry_enabled: true,
+             project_auto_retry_enabled: ->(_project) { true })
     Hive::Daemon::StaleAgentHealer.new(
       controller: FakeController.new,
       logger: logger,
       attempt_store: store,
       attempt_dispatcher: dispatcher,
       lost_outcome_store: outcomes,
-      lost_outcome_processor: processor
+      lost_outcome_processor: processor,
+      auto_retry_enabled: auto_retry_enabled,
+      project_auto_retry_enabled: project_auto_retry_enabled
     )
   end
 

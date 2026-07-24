@@ -53,15 +53,21 @@ It recursively copies hashes/arrays and stringifies keys while leaving scalar
 values unchanged, preserving the former `Record.deep_copy` contract without a
 second normalization implementation.
 
-Task generation—not request ID—is semantic idempotency. Its progress token
-hashes both the stage artifact and this task's deterministic dependency-
-admission verdict. Duplicate live deliveries receive the same attempt and an
-unchanged completed generation replays its receipt, while a dependency wait
-that later becomes clear advances generation instead of replaying the stale
-exit-75 receipt. A loss successor has a new attempt ID but inherits generation,
-predecessor, outputs, worktree/branch, and an incremented retry charge. An
-omitted or empty successor-output override inherits the predecessor's complete
-output set; only a non-empty explicit override replaces it.
+Task generation owns semantic success while request ID owns delivery
+idempotency. Its progress token hashes both the stage artifact and this task's
+deterministic dependency-admission verdict. Replaying the same request returns
+that request's original terminal receipt, including a failure. A different
+request against an unchanged generation may start a fresh attempt after a
+failed/cancelled receipt; only a successful terminal receipt remains the
+semantic owner for later requests. A dependency wait that later becomes clear
+advances generation instead of replaying the stale exit-75 receipt. A lost
+attempt blocks admission only until its explicit successor exists, so a
+terminally failed successor cannot leave the generation trapped behind a
+resolved ancestor loss. A loss successor has a new attempt ID but inherits
+generation, predecessor, outputs, worktree/branch, and an incremented retry
+charge. An omitted or empty successor-output override inherits the
+predecessor's complete output set; only a non-empty explicit override replaces
+it.
 
 Condition projection adds an explicit numeric `task_input_epoch` to attempt
 records/context while retaining the prerequisite's opaque ownership generation
@@ -172,9 +178,13 @@ lease loss healer consumes it; legacy and generic error-marker discovery skip
 it. `retry_charge` remains durable lineage/accounting evidence but is not an
 exhaustion budget. Unsafe cleanup, temporarily missing task lookup, and lost
 successors remain retryable until the process becomes safely absent or a
-successor is admitted. Successor dispatch attempts are paced by the same
-persisted marker-age cooldown; a deferred admission records `last_retry_at` so
-daemon restarts cannot collapse the delay into a per-tick loop. A successor
+successor is admitted. Unsafe orphan-cleanup inspection itself is paced by the
+shared cooldown, so one unreaped process cannot trigger expensive cleanup on
+every daemon tick. Successor dispatch attempts use the same persisted
+cooldown; a deferred admission records `last_retry_at` so daemon restarts
+cannot collapse the delay into a per-tick loop. Global and per-project
+automatic-retry gates apply to this lease-backed path exactly as they do to
+marker errors. A successor
 replays the immutable admitted workflow
 argv and flags; if the command already moved the task, only its locator is
 retargeted and a satisfied `--from` assertion is removed. Queue claims follow

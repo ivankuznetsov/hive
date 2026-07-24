@@ -119,7 +119,7 @@ module Hive
             end
 
             exact = records.select { |record| record.task_generation == generation.task_generation }
-            terminal = exact.reverse.find { |record| record.state == "terminal" }
+            terminal = replayable_terminal(exact, request_id)
             if terminal
               result = DispatchResult.new(
                 status: :terminal_replay, attempt: terminal, receipt: terminal.receipt,
@@ -128,7 +128,7 @@ module Hive
               next
             end
 
-            lost = exact.select { |record| record.state == "lost" }
+            lost = unresolved_lost_attempts(exact)
             predecessor = successor_of && exact.find { |record| record.attempt_id == successor_of }
             if successor_of && (!predecessor || predecessor.state != "lost")
               result = DispatchResult.new(
@@ -198,6 +198,27 @@ module Hive
         raise unless created
 
         resolve_failed_handoff(created, interactive: interactive, error: "#{e.class}: #{e.message}")
+      end
+
+      # Request IDs own delivery idempotency: replaying the same request must
+      # keep returning its original receipt, including a failure. A different
+      # request is a deliberate retry, so only a successful terminal receipt
+      # remains the semantic owner of the unchanged generation.
+      def replayable_terminal(records, request_id)
+        terminals = records.select { |record| record.state == "terminal" }
+        terminals.reverse.find { |record| record["request_id"] == request_id } ||
+          terminals.reverse.find { |record| record.outcome == "succeeded" }
+      end
+
+      # A lost attempt blocks ordinary admission only until its explicit
+      # successor exists. Once that descendant terminalizes unsuccessfully, a
+      # new error-retry request must not be trapped behind the older resolved
+      # loss forever.
+      def unresolved_lost_attempts(records)
+        resolved = records.filter_map { |record| record["predecessor_attempt_id"] }.to_h do |attempt_id|
+          [ attempt_id, true ]
+        end
+        records.select { |record| record.state == "lost" && !resolved[record.attempt_id] }
       end
 
       def find_semantic_owner(records, generation)

@@ -183,7 +183,7 @@
       "additionalProperties": false,
       "required": [
         "identity", "workflow", "position", "liveness", "state", "blocker_owner",
-        "reason", "reasons", "provider", "dependency", "freshness", "evidence", "action"
+        "reason", "reasons", "provider", "retry", "dependency", "freshness", "evidence", "action"
       ],
       "properties": {
         "identity": {
@@ -236,6 +236,22 @@
               "properties": {
                 "name": { "type": ["string", "null"] },
                 "retry_after": { "type": ["string", "null"], "format": "date-time" }
+              }
+            }
+          ]
+        },
+        "retry": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["due", "retry_at", "safe", "safety_reason"],
+              "properties": {
+                "due": { "type": "boolean" },
+                "retry_at": { "type": ["string", "null"], "format": "date-time" },
+                "safe": { "type": "boolean" },
+                "safety_reason": { "type": ["string", "null"] }
               }
             }
           ]

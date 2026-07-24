@@ -58,7 +58,11 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assembler.begin_tick(now: T0)
       assembler.observe(
         observed, decision: "global_cap", owner: "scheduler",
-        reason: "global dispatch capacity is exhausted"
+        reason: "global dispatch capacity is exhausted",
+        retry_at: (T0 + 3_600).iso8601(6),
+        retry_due: false,
+        retry_safe: true,
+        safety_reason: "worktree clean"
       )
       assembler.complete(
         initial_rows: [ observed ], final_rows: [ observed ],
@@ -71,6 +75,10 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assert_equal "current", snapshot.fetch("status")
       assert_equal "complete", snapshot.fetch("phase")
       assert_equal "global_cap", snapshot.dig("tasks", 0, "disposition", "decision")
+      assert_equal (T0 + 3_600).iso8601(6),
+                   snapshot.dig("tasks", 0, "disposition", "retry_at")
+      assert_equal false, snapshot.dig("tasks", 0, "disposition", "retry_due")
+      assert_equal true, snapshot.dig("tasks", 0, "disposition", "retry_safe")
       assert_equal 0o700, File.stat(File.dirname(path)).mode & 0o777
       assert_equal 0o600, File.stat(path).mode & 0o777
       assert_empty Dir.glob(File.join(File.dirname(path), ".*tmp*"))

@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/managed_git.rb, lib/hive/stages/agent_worktree.rb
 created: 2026-04-25
-updated: 2026-07-21
+updated: 2026-07-24
 tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
 ---
 
@@ -27,6 +27,9 @@ Class methods:
 
 ```ruby
 Hive::Worktree.read_pointer(task_folder) → Hash | nil
+Hive::Worktree.read_owned_pointer(
+  task_folder, project_root:, slug:, expected_root:
+) → Hash or raises
 Hive::Worktree.read_strict_pointer(task_folder, expected_root:, expected: nil) → Hash or raises
 Hive::Worktree.validate_pointer_path(path, expected_root) → expanded_path | raises
 Hive::Worktree.materialize_pr(repo_root:, pr_number:, path:, branch:) → {path:, branch:, head_sha:}
@@ -153,7 +156,17 @@ base_oid: <sha>            # strict draft-PR path only
 repository: github.com/owner/name # strict draft-PR path only
 ```
 
-`read_pointer` parses with `YAML.safe_load` and validates the result is a Hash; raises `WorktreeError` otherwise. `Hive::Stages::Base.worktree_pointer_or_exit` owns the stricter stage-entry policy shared by open-PR and finalize: the pointer must contain `path`, that directory must still exist, and either failure preserves the established warning and exit status 1.
+`read_pointer` is the permissive compatibility reader for cleanup and
+inspection. Runtime coding stages and automatic-retry safety use
+`read_owned_pointer`: a bounded no-follow read that requires unique `path` and
+`branch` keys, the exact deterministic `<worktree_root>/<slug>` path, the exact
+slug branch, a live registration in this project's `git worktree list`, the
+expected branch checked out, and the same Git common directory as the project.
+A sibling task worktree, unregistered directory, branch mismatch, symlinked
+pointer, or different repository fails closed.
+`Hive::Stages::Base.worktree_pointer_or_exit` shares this policy across
+open-PR, review, and finalize; execute continuation and the healer use it
+directly.
 
 The strict reader uses a bounded owner-side no-follow read and additionally
 rejects symlinks, oversized input, malformed or duplicate fields, out-of-root

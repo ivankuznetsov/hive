@@ -50,19 +50,21 @@ class RunFinalizeTest < Minitest::Test
   def setup_finalize_task(dir)
     capture_io { Hive::Commands::Init.new(dir).call }
     set_project_claude_mode(dir, "headless")
+    cfg_path = File.join(dir, ".hive-state", "config.yml")
+    cfg = YAML.safe_load(File.read(cfg_path))
+    worktree_root = Dir.mktmpdir("finalize-wt-root-")
+    @worktree_paths ||= []
+    @worktree_paths << worktree_root
+    cfg["worktree_root"] = worktree_root
+    File.write(cfg_path, cfg.to_yaml)
     slug = "fix-bug-260424-aaaa"
     task_dir = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
     FileUtils.mkdir_p(task_dir)
     File.write(File.join(task_dir, "plan.md"), "plan content")
     FileUtils.mkdir_p(File.join(task_dir, "reviews"))
     File.write(File.join(task_dir, "reviews", "codex-01.md"), "- [x] fixed\n")
-    worktree_path = Dir.mktmpdir("wt-#{slug}-")
-    @worktree_paths ||= []
-    @worktree_paths << worktree_path
-    run!("git", "-C", worktree_path, "init", "-b", slug, "--quiet")
-    run!("git", "-C", worktree_path, "config", "user.email", "t@t")
-    run!("git", "-C", worktree_path, "config", "user.name", "t")
-    run!("git", "-C", worktree_path, "config", "commit.gpgsign", "false")
+    worktree_path = File.join(worktree_root, slug)
+    run!("git", "-C", dir, "worktree", "add", "--quiet", "-b", slug, worktree_path, "HEAD")
     File.write(File.join(worktree_path, "f"), "x")
     run!("git", "-C", worktree_path, "add", ".")
     run!("git", "-C", worktree_path, "commit", "-m", "wt", "--quiet")
@@ -459,6 +461,87 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
+  def test_finalize_blocks_a_preexisting_local_secret_before_agent_or_github_mutation
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        File.write(pr_md, <<~MD)
+          ---
+          pr_url: https://example.com/pr/9
+          pr_number: 9
+          ---
+
+          ## Summary
+          leaked token sk-ant-#{"b" * 30}
+
+          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=true -->
+        MD
+
+        _out, _err, status = with_captured_exit do
+          Hive::Commands::Run.new(task_dir).call
+        end
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :error, marker.name
+        assert_equal "secret_in_pr_body", marker.attrs.fetch("reason")
+        assert_includes marker.attrs.fetch("patterns"), "anthropic"
+        assert_match(/arg=edit\n.*arg=https:\/\/example\.com\/pr\/9/m, gh_argv_log)
+        refute_match(/arg=ready\n/, gh_argv_log)
+      end
+    end
+  end
+
+  def test_finalize_records_a_remote_scan_failure_after_agent_completion
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          pr_url: https://example.com/pr/9
+          pr_number: 9
+          ---
+
+          ## Summary
+          refreshed
+
+          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+        MD
+        scans = [
+          Hive::Gh::ScanResult.new(
+            hits: [], fetch_failed: false, fetch_error: nil
+          ),
+          Hive::Gh::ScanResult.new(
+            hits: [ { name: "anthropic_api_key" } ],
+            fetch_failed: true,
+            fetch_error: "remote body unavailable"
+          )
+        ]
+
+        with_stubbed_singleton_method(
+          Hive::Gh,
+          :scan_pr_for_secrets,
+          ->(**_kwargs) { scans.shift || raise("unexpected third scan") }
+        ) do
+          _out, _err, status = with_captured_exit do
+            Hive::Commands::Run.new(task_dir).call
+          end
+
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        assert_empty scans
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :error, marker.name
+        assert_equal "secret_scan_fetch_failed", marker.attrs.fetch("reason")
+        assert_equal "remote body unavailable", marker.attrs.fetch("detail")
+        assert_includes marker.attrs.fetch("patterns"), "anthropic_api_key"
+        refute_match(/arg=ready\n/, gh_argv_log)
+      end
+    end
+  end
+
   # plan U6 idempotency: a second `hive run` on a task whose summary.md
   # already exists must short-circuit (no agent spawn, no `gh pr ready`).
   def test_finalize_already_complete_short_circuits
@@ -563,6 +646,7 @@ class RunFinalizeTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        original_plan = File.binread(File.join(task_dir, "plan.md"))
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(task_dir, "plan.md")
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "tampered plan\n"
 
@@ -573,6 +657,8 @@ class RunFinalizeTest < Minitest::Test
         assert_equal :error, marker.name
         assert_equal "finalize_tampered", marker.attrs["reason"]
         assert_equal "plan.md", marker.attrs["files"]
+        assert_equal "true", marker.attrs["restored"]
+        assert_equal original_plan, File.binread(File.join(task_dir, "plan.md"))
         refute File.exist?(File.join(task_dir, "summary.md"))
       end
     end
@@ -582,8 +668,7 @@ class RunFinalizeTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
-        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
-        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+        File.write(pr_md, <<~MD)
           ---
           pr_url: https://example.com/pr/9
           pr_number: 9
@@ -592,7 +677,7 @@ class RunFinalizeTest < Minitest::Test
           ## Summary
           api_key sk-ant-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=true -->
         MD
         ENV["HIVE_FAKE_GH_VIEW_EXIT"] = "1"
 
@@ -602,7 +687,8 @@ class RunFinalizeTest < Minitest::Test
         marker = Hive::Markers.current(pr_md)
         assert_equal :error, marker.name
         assert_equal "secret_scan_fetch_failed", marker.attrs["reason"]
-        refute_empty marker.attrs["patterns"].to_s
+        assert_includes marker.attrs["patterns"].to_s, "anthropic_api_key",
+                        "local hits must remain visible when the remote fetch also fails"
         refute_match(/arg=ready\n/, gh_argv_log)
       end
     end
@@ -620,9 +706,12 @@ class RunFinalizeTest < Minitest::Test
         end
 
         assert_equal 1, status
-        assert_match(/no worktree pointer/, err)
+        assert_match(/worktree ownership validation failed: worktree.yml is missing/, err)
 
-        File.write(File.join(task_dir, "worktree.yml"), { "path" => worktree_path }.to_yaml)
+        File.write(
+          File.join(task_dir, "worktree.yml"),
+          { "path" => worktree_path, "branch" => task.slug }.to_yaml
+        )
         FileUtils.rm_rf(worktree_path)
 
         _out, err, status = with_captured_exit do
@@ -630,7 +719,7 @@ class RunFinalizeTest < Minitest::Test
         end
 
         assert_equal 1, status
-        assert_match(/worktree pointer .* no longer exists/, err)
+        assert_match(/worktree ownership validation failed: worktree .* is missing/, err)
       end
     end
   end

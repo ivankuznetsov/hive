@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/config"
+require "hive/gh"
 require "hive/git_ops"
 require "hive/worktree"
 
@@ -1349,6 +1350,143 @@ class WorktreeTest < Minitest::Test
         )
       end
       assert_includes error.message, "contradicts saved task state"
+    end
+  end
+
+  def test_owned_pointer_accepts_only_the_registered_deterministic_task_worktree
+    with_initialized_project do |dir, root|
+      slug = "owned-task"
+      task_folder = File.join(
+        dir, ".hive-state", "stages", "4-execute", slug
+      )
+      FileUtils.mkdir_p(task_folder)
+      worktree = Hive::Worktree.new(dir, slug, worktree_root: root)
+      worktree.create!(slug, default_branch: "master")
+      pointer_path = File.join(task_folder, "worktree.yml")
+      File.write(pointer_path, { "path" => worktree.path, "branch" => slug }.to_yaml)
+
+      pointer = Hive::Worktree.read_owned_pointer(
+        task_folder,
+        project_root: dir,
+        slug: slug,
+        expected_root: root
+      )
+
+      assert_equal File.realpath(worktree.path), pointer.fetch("path")
+      assert_equal slug, pointer.fetch("branch")
+
+      common_dir_calls = 0
+      with_replaced_singleton_method(
+        Hive::Worktree, :git_common_dir, lambda { |_path|
+          common_dir_calls += 1
+          common_dir_calls == 1 ? "/trusted/common" : "/foreign/common"
+        }
+      ) do
+        repository_error = assert_raises(Hive::WorktreeError) do
+          Hive::Worktree.read_owned_pointer(
+            task_folder,
+            project_root: dir,
+            slug: slug,
+            expected_root: root
+          )
+        end
+        assert_includes repository_error.message, "different repository"
+      end
+      Hive::Worktree.singleton_class.send(:private, :git_common_dir)
+
+      sibling = Hive::Worktree.new(dir, "sibling-task", worktree_root: root)
+      sibling.create!("sibling-task", default_branch: "master")
+      File.write(
+        pointer_path,
+        { "path" => sibling.path, "branch" => "sibling-task" }.to_yaml
+      )
+      sibling_error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder,
+          project_root: dir,
+          slug: slug,
+          expected_root: root
+        )
+      end
+      assert_includes sibling_error.message, "does not belong to task"
+
+      File.write(
+        pointer_path,
+        { "path" => worktree.path, "branch" => "sibling-task" }.to_yaml
+      )
+      branch_error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder,
+          project_root: dir,
+          slug: slug,
+          expected_root: root
+        )
+      end
+      assert_includes branch_error.message, "branch does not belong to task"
+    end
+  end
+
+  def test_owned_pointer_rejects_a_same_slug_worktree_from_another_repository
+    with_initialized_project do |project, _project_root|
+      with_initialized_project do |other_project, other_root|
+        slug = "foreign-task"
+        task_folder = File.join(
+          project, ".hive-state", "stages", "4-execute", slug
+        )
+        FileUtils.mkdir_p(task_folder)
+        foreign = Hive::Worktree.new(
+          other_project, slug, worktree_root: other_root
+        )
+        foreign.create!(slug, default_branch: "master")
+        File.write(
+          File.join(task_folder, "worktree.yml"),
+          { "path" => foreign.path, "branch" => slug }.to_yaml
+        )
+
+        error = assert_raises(Hive::WorktreeError) do
+          Hive::Worktree.read_owned_pointer(
+            task_folder,
+            project_root: project,
+            slug: slug,
+            expected_root: other_root
+          )
+        end
+        assert_includes error.message, "not registered for this project"
+      end
+    end
+  end
+
+  def test_owned_pointer_rejects_symlink_and_malformed_yaml
+    with_tmp_dir do |root|
+      task_folder = File.join(root, "task")
+      worktree_root = File.join(root, "worktrees")
+      FileUtils.mkdir_p(task_folder)
+      pointer_path = File.join(task_folder, "worktree.yml")
+      target = File.join(root, "pointer-target.yml")
+      File.write(target, "path: /tmp/worktree\nbranch: task\n")
+      File.symlink(target, pointer_path)
+
+      symlink_error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder,
+          project_root: root,
+          slug: "task",
+          expected_root: worktree_root
+        )
+      end
+      assert_includes symlink_error.message, "must be a regular file, not a symlink"
+
+      FileUtils.rm_f(pointer_path)
+      File.write(pointer_path, "path: [unterminated\n")
+      yaml_error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder,
+          project_root: root,
+          slug: "task",
+          expected_root: worktree_root
+        )
+      end
+      assert_includes yaml_error.message, "invalid YAML"
     end
   end
 

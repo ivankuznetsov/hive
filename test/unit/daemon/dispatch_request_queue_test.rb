@@ -13,7 +13,8 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
   def write_request(state_home, request_id:, created_at:, argv: [ "hive", "run", "slug-x", "--json" ],
                     project: "hive", slug: "slug-x", requestor: "bot", chat_id: 42,
                     update_id: 99, trigger: "answer_complete", schema_version: Q::SCHEMA_VERSION,
-                    schema: "hive-dispatch-request")
+                    schema: "hive-dispatch-request", task_id: nil, expected_stage: nil,
+                    expected_marker_name: nil, expected_marker_id: nil)
     dir = Q.directory(state_home: state_home)
     filename = Q.filename_for(created_at: created_at, request_id: request_id)
     path = File.join(dir, filename)
@@ -31,7 +32,11 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       "trigger" => trigger,
       "task_generation" => nil,
       "predecessor_attempt_id" => nil,
-      "inherited_outputs" => []
+      "inherited_outputs" => [],
+      "task_id" => task_id,
+      "expected_stage" => expected_stage,
+      "expected_marker_name" => expected_marker_name,
+      "expected_marker_id" => expected_marker_id
     }
     File.write(path, JSON.generate(payload))
     path
@@ -55,6 +60,53 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       pending = Q.pending(state_home: dir)
       assert_equal %w[first second], pending.map(&:slug)
       assert_equal %w[A B], pending.map(&:request_id)
+    end
+  end
+
+  def test_error_retry_identity_round_trips_and_duplicate_write_is_idempotent
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      at = Time.utc(2026, 7, 24, 10, 0, 0)
+      request_id = Q.write_request!(
+        project: "hive",
+        slug: "plan-task",
+        argv: %w[hive plan plan-task],
+        requestor: "healer",
+        trigger: "error_retry",
+        request_id: "stable-plan-retry",
+        task_generation: "generation-a",
+        task_id: 817,
+        expected_stage: "3-plan",
+        expected_marker_name: "error",
+        expected_marker_id: "marker-a",
+        state_home: dir,
+        now: at
+      )
+      duplicate = Q.write_request!(
+        project: "hive",
+        slug: "plan-task",
+        argv: %w[hive plan plan-task],
+        requestor: "healer",
+        trigger: "error_retry",
+        request_id: "stable-plan-retry",
+        task_generation: "generation-b",
+        task_id: 999,
+        expected_stage: "8-finalize",
+        expected_marker_name: "review_error",
+        expected_marker_id: "marker-b",
+        state_home: dir,
+        now: at + 1
+      )
+
+      assert_equal "stable-plan-retry", request_id
+      assert_equal request_id, duplicate
+      request = Q.pending(state_home: dir).fetch(0)
+      assert_equal 1, Q.pending(state_home: dir).size
+      assert_equal "generation-a", request.task_generation
+      assert_equal 817, request.task_id
+      assert_equal "3-plan", request.expected_stage
+      assert_equal "error", request.expected_marker_name
+      assert_equal "marker-a", request.expected_marker_id
+      assert_equal 817, Q.metadata(request_id, state_home: dir).fetch(:task_id)
     end
   end
 

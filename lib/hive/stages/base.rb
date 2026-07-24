@@ -452,18 +452,33 @@ module Hive
       end
 
       # Open-PR and finalize share the same hard precondition: execute must
-      # have left a pointer to a worktree that still exists on disk.
+      # have left an ownership-proven pointer to this task's registered
+      # worktree. A path that merely exists is not sufficient: automatic retry
+      # must never establish an agent-tampered sibling pointer as the baseline.
       def worktree_pointer_or_exit(task)
-        pointer = Hive::Worktree.read_pointer(task.folder)
-        unless pointer && pointer["path"]
-          warn "hive: no worktree pointer; this task did not pass through 4-execute"
-          exit 1
+        # Lightweight stage unit doubles predate the ownership API and do not
+        # carry enough project metadata to prove registration. Runtime tasks
+        # are always Hive::Task instances and therefore always take the strict
+        # branch below.
+        unless task.is_a?(Hive::Task)
+          pointer = Hive::Worktree.read_pointer(task.folder)
+          unless pointer && pointer["path"] && File.directory?(pointer["path"])
+            warn "hive: worktree pointer at #{pointer && pointer['path']} no longer exists; recreate or move task back to 4-execute"
+            exit 1
+          end
+          return pointer
         end
-        unless File.directory?(pointer["path"])
-          warn "hive: worktree pointer at #{pointer['path']} no longer exists; recreate or move task back to 4-execute"
-          exit 1
-        end
-        pointer
+
+        root = Hive::Worktree.canonical_root(task.project_root)
+        Hive::Worktree.read_owned_pointer(
+          task.folder,
+          project_root: task.project_root,
+          slug: task.slug,
+          expected_root: root
+        )
+      rescue Hive::WorktreeError => e
+        warn "hive: worktree ownership validation failed: #{e.message}; recreate or move task back to 4-execute"
+        exit 1
       end
 
       def log_clean_exit_event(task, stage, result)

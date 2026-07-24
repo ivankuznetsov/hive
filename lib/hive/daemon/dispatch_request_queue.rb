@@ -44,7 +44,9 @@ module Hive
       Request = Struct.new(
         :request_id, :created_at, :project, :slug, :argv, :requestor,
         :chat_id, :update_id, :trigger, :task_generation,
-        :predecessor_attempt_id, :inherited_outputs, :schema_version, :path,
+        :predecessor_attempt_id, :inherited_outputs, :task_id,
+        :expected_stage, :expected_marker_name, :expected_marker_id,
+        :schema_version, :path,
         keyword_init: true
       )
       ClaimedDelivery = Data.define(:request, :claim, :path)
@@ -66,7 +68,9 @@ module Hive
       def write_request!(project:, slug:, argv:, requestor: "bot", chat_id: nil,
                          update_id: nil, trigger: nil, request_id: generate_request_id,
                          task_generation: nil, predecessor_attempt_id: nil,
-                         inherited_outputs: [],
+                         inherited_outputs: [], task_id: nil,
+                         expected_stage: nil, expected_marker_name: nil,
+                         expected_marker_id: nil,
                          state_home: Hive::Paths.state_home, now: Time.now)
         unless valid_argv?(argv)
           raise ArgumentError, "argv #{argv.inspect} is not allowlisted for dispatch requests"
@@ -94,10 +98,16 @@ module Hive
           "trigger" => trigger.to_s,
           "task_generation" => task_generation,
           "predecessor_attempt_id" => predecessor_attempt_id,
-          "inherited_outputs" => inherited_outputs || []
+          "inherited_outputs" => inherited_outputs || [],
+          "task_id" => task_id,
+          "expected_stage" => expected_stage,
+          "expected_marker_name" => expected_marker_name,
+          "expected_marker_id" => expected_marker_id
         }
 
         dir = directory(state_home: state_home)
+        return request_id.to_s if request_present?(dir, request_id)
+
         filename = filename_for(created_at: created_at, request_id: request_id)
         final_path = File.join(dir, filename)
         tmp_path = File.join(dir, ".#{filename}.tmp.#{Process.pid}.#{Thread.current.object_id}")
@@ -107,6 +117,7 @@ module Hive
           f.fsync
         end
         File.rename(tmp_path, final_path)
+        fsync_directory(dir)
         request_id.to_s
       ensure
         FileUtils.rm_f(tmp_path) if defined?(tmp_path) && tmp_path && File.exist?(tmp_path)
@@ -344,7 +355,10 @@ module Hive
             chat_id: data["chat_id"], update_id: data["update_id"],
             project: data["project"], slug: data["slug"],
             requestor: data["requestor"], task_generation: data["task_generation"],
-            predecessor_attempt_id: data["predecessor_attempt_id"]
+            predecessor_attempt_id: data["predecessor_attempt_id"],
+            task_id: data["task_id"], expected_stage: data["expected_stage"],
+            expected_marker_name: data["expected_marker_name"],
+            expected_marker_id: data["expected_marker_id"]
           }
         end
         nil
@@ -409,6 +423,8 @@ module Hive
           slug: slug.to_s, argv: next_argv, requestor: requestor.to_s,
           chat_id: chat_id, update_id: update_id, trigger: trigger.to_s,
           task_generation: nil, predecessor_attempt_id: nil, inherited_outputs: [],
+          task_id: nil, expected_stage: nil, expected_marker_name: nil,
+          expected_marker_id: nil,
           schema_version: SCHEMA_VERSION, path: nil
         )
       end
@@ -469,6 +485,13 @@ module Hive
       def request_files(dir)
         Dir.glob(File.join(dir, "*.json")) +
           Dir.glob(File.join(dir, "*.json#{CLAIMED_SUFFIX}"))
+      end
+
+      def request_present?(dir, request_id)
+        request_files(dir).any? do |path|
+          data = parse_json_hash(path)
+          data && data["request_id"] == request_id.to_s
+        end
       end
 
       def claimed_request_ids(dir)
@@ -626,6 +649,10 @@ module Hive
             task_generation: data["task_generation"],
             predecessor_attempt_id: data["predecessor_attempt_id"],
             inherited_outputs: data["inherited_outputs"].is_a?(Array) ? data["inherited_outputs"] : [],
+            task_id: data["task_id"],
+            expected_stage: data["expected_stage"],
+            expected_marker_name: data["expected_marker_name"],
+            expected_marker_id: data["expected_marker_id"],
             schema_version: schema_version,
             path: path
           )

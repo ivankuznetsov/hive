@@ -804,10 +804,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
           state_file: nil, folder: nil, marker_attrs: {},
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
           blocked: false, workflow: nil, admission_error: nil,
-          attempt_id: nil, task_generation: nil)
+          attempt_id: nil, task_generation: nil, id: 1)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
-      project: project, slug: slug, stage: stage, workflow: workflow, marker: marker,
+      project: project, slug: slug, id: id, stage: stage, workflow: workflow, marker: marker,
       folder: folder,
       state_file: state_file || File.join(folder, "idea.md"),
       state_file_mtime: mtime, action: action,
@@ -960,6 +960,57 @@ class HiveDaemonDispatcherTest < Minitest::Test
     disposition = snapshot.calls.last.last
     assert_equal :retry_cooldown, disposition.fetch(:decision)
     assert_equal "scheduler", disposition.fetch(:owner)
+    assert_equal (T0 - 600 + Hive::AgentLimit.retry_cooldown_sec).iso8601(6),
+                 disposition.fetch(:retry_at)
+    assert_equal false, disposition.fetch(:retry_due)
+    assert_equal true, disposition.fetch(:retry_safe)
+  end
+
+  def test_error_retry_with_live_task_lock_publishes_agent_owned_in_flight_disposition
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
+    observed = row(
+      marker: "error",
+      action: "error",
+      live_task_lock: true,
+      marker_attrs: { "reason" => "agent_orphaned" }
+    )
+
+    dispatcher.send(:handle_row, observed, now: T0)
+
+    assert_empty supervisor.spawned
+    disposition = snapshot.calls.last.last
+    assert_equal :retry_in_flight, disposition.fetch(:decision)
+    assert_equal "agent", disposition.fetch(:owner)
+    assert_equal true, disposition.fetch(:retry_safe)
+  end
+
+  def test_error_retry_publishes_safety_block_instead_of_false_scheduler_ownership
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "answered")
+    state_file = File.join(folder, "brainstorm.md")
+    File.write(state_file, "### Q1. Continue?\n### A1.\nNo; keep this answer.\n")
+    observed = row(
+      slug: "answered",
+      stage: "2-brainstorm",
+      marker: "error",
+      action: "error",
+      folder: folder,
+      state_file: state_file,
+      marker_attrs: { "reason" => "agent_failed" },
+      mtime: T0 - Hive::AgentLimit.retry_cooldown_sec - 1
+    )
+
+    dispatcher.send(:handle_row, observed, now: T0)
+
+    assert_empty supervisor.spawned
+    disposition = snapshot.calls.last.last
+    assert_equal :retry_safety_blocked, disposition.fetch(:decision)
+    assert_equal "operator", disposition.fetch(:owner)
+    assert_equal true, disposition.fetch(:retry_due)
+    assert_equal false, disposition.fetch(:retry_safe)
+    assert_includes disposition.fetch(:safety_reason), "answers present"
   end
 
   def test_unknown_durable_admission_results_defer_safely
@@ -2758,6 +2809,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 1, sup.spawned.size, "dispatch must run after the healer slot"
   end
 
+  def test_boot_healer_uses_the_live_per_project_retry_gate
+    dispatcher, = make_dispatcher(project_enabled: false)
+    healer = dispatcher.instance_variable_get(:@stale_agent_healer)
+    gate = healer.instance_variable_get(:@project_auto_retry_enabled)
+
+    assert_equal false, gate.call("disabled-project")
+  end
+
   def test_reload_config_rebuilds_healer_with_new_grace_sec
     dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
     original_healer = dispatcher.instance_variable_get(:@stale_agent_healer)
@@ -2783,6 +2842,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
                 "reload_config! must rebuild the healer so new daemon.agent_marker_grace_sec binds"
     assert_equal 60, rebuilt.instance_variable_get(:@grace_sec),
                  "rebuilt healer must carry the reloaded grace value"
+    gate = rebuilt.instance_variable_get(:@project_auto_retry_enabled)
+    assert_equal true, gate.call("enabled-project"),
+                 "the rebuilt healer must retain the live per-project gate"
   end
 
   def test_reload_config_applies_auto_retry_kill_switch_to_universal_healer
@@ -3395,6 +3457,59 @@ def test_reload_config_error_logs_and_keeps_previous_config
   assert_includes fatal[1][:message], "max_concurrent_runs"
   refute logger.events.any? { |name, _attrs| name == :config_reloaded },
          "an invalid reload must not emit a success event"
+end
+
+def test_late_reload_loader_failure_never_splits_auto_retry_policy
+  [ false, true ].each do |previously_enabled|
+    dispatcher, _sup, controller, logger, _mw = make_dispatcher
+    previous_daemon = {
+      "edit_debounce_sec" => 30,
+      "auto_retry" => { "enabled" => previously_enabled }
+    }
+    previous_config = dispatcher.instance_variable_get(:@config)
+    previous_config["daemon"] = previous_daemon
+    dispatcher.instance_variable_set(:@daemon_cfg, previous_daemon)
+    previous_healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: controller,
+      logger: logger,
+      auto_retry_enabled: previously_enabled
+    )
+    dispatcher.instance_variable_set(:@stale_agent_healer, previous_healer)
+    requested_daemon = {
+      "edit_debounce_sec" => 45,
+      "auto_retry" => { "enabled" => !previously_enabled }
+    }
+
+    with_replaced_singleton_method(
+      Hive::Config, :load_global_daemon, -> { requested_daemon }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Config, :load_global_update, -> { { "check" => false } }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Config, :load_global_digest_block, -> { { "enabled" => true } }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Config, :load_global_answer_digest_block,
+            -> { raise Hive::ConfigError, "answer digest is invalid" }
+          ) do
+            dispatcher.send(:reload_config!)
+          end
+        end
+      end
+    end
+
+    assert_same previous_daemon, dispatcher.instance_variable_get(:@daemon_cfg)
+    assert_same previous_config, dispatcher.instance_variable_get(:@config)
+    assert_same previous_healer, dispatcher.instance_variable_get(:@stale_agent_healer)
+    assert_equal previously_enabled,
+                 previous_healer.operational_snapshot.fetch("enabled"),
+                 "failed #{previously_enabled ? 'disable' : 'enable'} reload must retain one coherent policy"
+    refute logger.events.any? { |name, _attrs| name == :config_reloaded }
+    assert logger.events.any? { |name, attrs|
+      name == :fatal && attrs[:message].include?("answer digest is invalid")
+    }
+  end
 end
 
 def test_interruptible_sleep_stops_after_shutdown_request
@@ -4599,6 +4714,144 @@ end
       ensure
         restore_find_project!
       end
+    end
+  end
+
+  def test_durable_error_retry_identity_inspection_failure_is_deferred
+    with_tmp_dir do |dir|
+      request = Q::Request.new(
+        request_id: "retry-inspection",
+        created_at: T0,
+        project: "p1",
+        slug: "plan-task",
+        argv: %w[hive plan plan-task],
+        requestor: "healer",
+        trigger: "error_retry",
+        task_generation: "generation",
+        task_id: 817,
+        expected_stage: "3-plan",
+        expected_marker_name: "error",
+        expected_marker_id: "marker-a"
+      )
+      observed = row(
+        project: "p1",
+        slug: "plan-task",
+        id: 817,
+        stage: "3-plan",
+        marker: "none",
+        folder: dir,
+        state_file: dir
+      )
+      dispatcher, _supervisor, _controller, logger = make_dispatcher(rows: [])
+
+      refute dispatcher.send(
+        :durable_error_retry_current?, request, rows: [ observed ]
+      )
+      event = logger.events.find do |name, attrs|
+        name == :dispatch_request_blocked &&
+          attrs[:request_id] == "retry-inspection"
+      end
+      refute_nil event
+      assert_equal "retry_identity_inspection_failed", event.last.fetch(:reason)
+      assert_includes event.last.fetch(:error), "EISDIR"
+    end
+  end
+
+  def test_legacy_recovery_marker_identity_is_content_addressed
+    dispatcher, = make_dispatcher
+    marker = Hive::Markers::State.new(
+      name: :error,
+      attrs: { "reason" => "agent_orphaned" },
+      raw: "<!-- ERROR reason=agent_orphaned -->"
+    )
+
+    identity = dispatcher.send(:recovery_marker_identity, marker)
+
+    assert_match(/\Alegacy-[0-9a-f]{16}\z/, identity)
+    assert_equal identity, dispatcher.send(:recovery_marker_identity, marker)
+  end
+
+  def test_healer_plan_retry_waits_for_exact_clear_and_rejects_later_task_generation
+    with_tmp_dir do |project_root|
+      folder = File.join(
+        project_root, ".hive-state", "stages", "3-plan", "plan-task"
+      )
+      FileUtils.mkdir_p(folder)
+      Hive::TaskMeta.write(
+        folder,
+        id: 817,
+        slug: "plan-task",
+        display_name: "Plan task"
+      )
+      state_file = File.join(folder, "plan.md")
+      Hive::Markers.set(state_file, :error, reason: "agent_failed", marker_id: "marker-a")
+      task = Hive::Task.new(folder)
+      markerless = Hive::Markers.without_markers(File.binread(state_file))
+      progress_token = Hive::Attempts::Generation.artifact_token(
+        task, state_file_content: markerless
+      )
+      task_generation = Hive::Attempts::Generation.resolve(
+        task: task,
+        project: "p1",
+        intended_stage: "3-plan",
+        progress_token: progress_token
+      ).task_generation
+      request = Q::Request.new(
+        request_id: "plan-retry",
+        created_at: T0,
+        project: "p1",
+        slug: "plan-task",
+        argv: %w[hive plan plan-task],
+        requestor: "healer",
+        trigger: "error_retry",
+        task_generation: task_generation,
+        task_id: 817,
+        expected_stage: "3-plan",
+        expected_marker_name: "error",
+        expected_marker_id: "marker-a"
+      )
+      observed = row(
+        project: "p1",
+        slug: "plan-task",
+        id: 817,
+        stage: "3-plan",
+        marker: "error",
+        action: "error",
+        folder: folder,
+        state_file: state_file,
+        marker_attrs: Hive::Markers.current(state_file).attrs
+      )
+      dispatcher, _supervisor, _controller, logger = make_dispatcher(rows: [])
+      rejected = []
+      dispatcher.define_singleton_method(:reject_request) do |_request, reason:|
+        rejected << reason
+      end
+
+      refute dispatcher.send(
+        :durable_error_retry_current?, request, rows: [ observed ]
+      )
+      assert logger.events.any? { |name, attrs|
+        name == :dispatch_request_blocked &&
+          attrs[:reason] == "awaiting_marker_clear"
+      }
+
+      assert Hive::Markers.clear_current(
+        state_file,
+        expected_name: :error,
+        match_attrs: { "reason" => "agent_failed", "marker_id" => "marker-a" },
+        purge_history: true
+      )
+      observed.marker = "none"
+      observed.marker_attrs = {}
+      assert dispatcher.send(
+        :durable_error_retry_current?, request, rows: [ observed ]
+      ), "the exact predicted post-clear generation must be dispatchable"
+
+      File.open(state_file, "a") { |file| file.write("\noperator replaced the task generation\n") }
+      refute dispatcher.send(
+        :durable_error_retry_current?, request, rows: [ observed ]
+      )
+      assert_equal [ "stale_task_generation" ], rejected
     end
   end
 

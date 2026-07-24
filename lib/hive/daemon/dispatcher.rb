@@ -33,6 +33,7 @@ require "hive/update_check/state"
 require "hive/install_channel"
 require "hive/commands/update"
 require "hive/attempts/dispatcher"
+require "hive/attempts/generation"
 
 module Hive
   module Daemon
@@ -128,7 +129,8 @@ module Hive
           attempt_dispatcher: @attempt_dispatcher,
           lost_outcome_store: @lost_outcome_store,
           lost_outcome_processor: @lost_outcome_processor,
-          auto_retry_enabled: auto_retry_enabled?
+          auto_retry_enabled: auto_retry_enabled?,
+          project_auto_retry_enabled: ->(project) { project_enabled?(project) }
         )
         # Additive self-heal for tasks whose one-shot name generation at
         # `hive new` never landed (agent/codex outage). Re-spawns
@@ -948,19 +950,25 @@ module Hive
           return
         end
         if auto_retry_error_row?(row)
+          assessment = @stale_agent_healer.retry_assessment(row, now: now)
+          decision, owner, reason = retry_disposition(row, assessment)
           @logger.event(
             :skipped,
             project: row.project,
             slug: row.slug,
             stage: row.stage,
             action: row.action,
-            reason: "error_retry_scheduled"
+            reason: decision.to_s
           )
           observe_operational_disposition(
             row,
-            decision: :retry_cooldown,
-            owner: "scheduler",
-            reason: "ERROR retry remains scheduled after the shared cooldown and safety checks"
+            decision: decision,
+            owner: owner,
+            reason: reason,
+            retry_at: assessment[:retry_at]&.utc&.iso8601(6),
+            retry_due: assessment[:due],
+            retry_safe: assessment[:safe],
+            safety_reason: assessment[:safety_reason]
           )
           return
         end
@@ -1275,11 +1283,11 @@ module Hive
         observe_operational_disposition(row, decision: outcome, owner: owner, reason: reason)
       end
 
-      def observe_operational_disposition(row, decision:, owner:, reason:)
+      def observe_operational_disposition(row, decision:, owner:, reason:, **details)
         return unless @operational_snapshot
 
         @operational_snapshot.observe(
-          row, decision: decision, owner: owner, reason: reason
+          row, decision: decision, owner: owner, reason: reason, **details
         )
       rescue StandardError => e
         log_operational_snapshot_failure(phase: "observe", error: e)
@@ -1848,6 +1856,9 @@ module Hive
           return
         end
 
+        return if durable_error_retry_request?(req) &&
+                  !durable_error_retry_current?(req, rows: rows)
+
         if dependency_gated_request?(req)
           row = rows.find { |candidate| candidate.project == req.project && candidate.slug == req.slug }
           if row&.admission_error
@@ -1907,6 +1918,73 @@ module Hive
       # project must defer this request rather than deleting it permanently.
       def durable_error_retry_request?(req)
         req.requestor.to_s == "healer" && req.trigger.to_s == "error_retry"
+      end
+
+      # A healer plan request is intentionally non-expiring, so admission must
+      # prove it still belongs to the same immutable task and post-clear
+      # artifact. The matching ERROR may still be present after a crash between
+      # enqueue and clear; in that case leave the request pending so the healer
+      # can finish the guarded clear on a later tick.
+      def durable_error_retry_current?(req, rows:)
+        required = [
+          req.task_id, req.expected_stage, req.expected_marker_name,
+          req.expected_marker_id, req.task_generation
+        ]
+        return reject_stale_error_retry(req, "unbound_error_retry") if required.any? { |value| value.to_s.empty? }
+
+        row = Array(rows).find do |candidate|
+          candidate.project.to_s == req.project.to_s &&
+            candidate.slug.to_s == req.slug.to_s
+        end
+        return reject_stale_error_retry(req, "stale_task_missing") unless row
+        return reject_stale_error_retry(req, "stale_task_id") unless row.id.to_s == req.task_id.to_s
+        return reject_stale_error_retry(req, "stale_task_stage") unless row.stage.to_s == req.expected_stage.to_s
+
+        marker = Hive::Markers.current(row.state_file)
+        if marker.name.to_s == req.expected_marker_name.to_s &&
+           recovery_marker_identity(marker) == req.expected_marker_id.to_s
+          @logger.event(
+            :dispatch_request_blocked,
+            request_id: req.request_id, project: req.project, slug: req.slug,
+            reason: "awaiting_marker_clear"
+          )
+          return false
+        end
+        return reject_stale_error_retry(req, "stale_marker_generation") unless marker.none?
+
+        task = Hive::Task.new(row.folder)
+        return reject_stale_error_retry(req, "stale_task_id") unless task.id.to_s == req.task_id.to_s
+
+        current_generation = Hive::Attempts::Generation.resolve(
+          task: task,
+          project: req.project,
+          intended_stage: req.expected_stage
+        ).task_generation
+        unless current_generation == req.task_generation
+          return reject_stale_error_retry(req, "stale_task_generation")
+        end
+
+        true
+      rescue StandardError => e
+        @logger.event(
+          :dispatch_request_blocked,
+          request_id: req.request_id, project: req.project, slug: req.slug,
+          reason: "retry_identity_inspection_failed",
+          error: "#{e.class}: #{e.message}"
+        )
+        false
+      end
+
+      def recovery_marker_identity(marker)
+        marker_id = marker.attrs["marker_id"].to_s
+        return marker_id unless marker_id.empty?
+
+        "legacy-#{::Digest::SHA256.hexdigest(marker.raw.to_s)[0, 16]}"
+      end
+
+      def reject_stale_error_retry(req, reason)
+        reject_request(req, reason: reason)
+        false
       end
 
       # Host-global maintenance request (project == "__global__"): not tied to
@@ -2565,6 +2643,37 @@ module Hive
         auto_retry_enabled? && %w[error review_error].include?(row.marker.to_s)
       end
 
+      def retry_disposition(row, assessment)
+        if row.live_task_lock == true
+          return [
+            :retry_in_flight,
+            "agent",
+            "automatic retry is waiting for the task's live runner"
+          ]
+        end
+        unless assessment[:safe]
+          owner = assessment[:safety_reason].start_with?("inspection failed:") ? "hive" : "operator"
+          return [
+            :retry_safety_blocked,
+            owner,
+            "automatic retry is safety-blocked: #{assessment[:safety_reason]}"
+          ]
+        end
+        unless assessment[:due]
+          return [
+            :retry_cooldown,
+            "scheduler",
+            "automatic retry is scheduled for #{assessment[:retry_at]&.utc&.iso8601(6) || 'the next eligible tick'}"
+          ]
+        end
+
+        [
+          :retry_pending,
+          "scheduler",
+          "automatic retry is eligible and awaiting the next guarded transition"
+        ]
+      end
+
       def enabled_auto_retry_projects(rows)
         return {} unless auto_retry_enabled?
 
@@ -2593,11 +2702,33 @@ module Hive
 
       def reload_config!
         # PR-40 review P1 #2: rebase on the global ~/Dev/hive/config.yml's
-        # daemon block, not bare DEFAULTS.
-        @daemon_cfg = Hive::Config.load_global_daemon
-        @update_cfg = Hive::Config.load_global_update
-        @digest_cfg = Hive::Config.load_global_digest_block
-        @answer_digest_cfg = Hive::Config.load_global_answer_digest_block
+        # daemon block, not bare DEFAULTS. Read every independently validated
+        # block into locals before mutating live state: a later invalid block
+        # must not split the dispatcher's advertised retry policy from the
+        # already-constructed healer.
+        daemon_cfg = Hive::Config.load_global_daemon
+        update_cfg = Hive::Config.load_global_update
+        digest_cfg = Hive::Config.load_global_digest_block
+        answer_digest_cfg = Hive::Config.load_global_answer_digest_block
+        stale_agent_healer = StaleAgentHealer.new(
+          controller: @controller,
+          logger: @logger,
+          grace_sec: daemon_cfg.fetch(
+            "agent_marker_grace_sec",
+            Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC
+          ),
+          attempt_store: @attempt_reconciler&.respond_to?(:store) ? @attempt_reconciler.store : nil,
+          attempt_dispatcher: @attempt_dispatcher,
+          lost_outcome_store: @lost_outcome_store,
+          lost_outcome_processor: @lost_outcome_processor,
+          auto_retry_enabled: daemon_cfg.fetch("auto_retry", {}).fetch("enabled", true) == true,
+          project_auto_retry_enabled: ->(project) { project_enabled?(project) }
+        )
+
+        @daemon_cfg = daemon_cfg
+        @update_cfg = update_cfg
+        @digest_cfg = digest_cfg
+        @answer_digest_cfg = answer_digest_cfg
         @config = {
           "daemon" => @daemon_cfg,
           "update" => @update_cfg,
@@ -2659,19 +2790,7 @@ module Hive
         # one tick. Without this rebuild the healer keeps the grace it
         # captured at boot and only a full daemon restart applies new
         # values.
-        @stale_agent_healer = StaleAgentHealer.new(
-          controller: @controller,
-          logger: @logger,
-          grace_sec: @daemon_cfg.fetch(
-            "agent_marker_grace_sec",
-            Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC
-          ),
-          attempt_store: @attempt_reconciler&.respond_to?(:store) ? @attempt_reconciler.store : nil,
-          attempt_dispatcher: @attempt_dispatcher,
-          lost_outcome_store: @lost_outcome_store,
-          lost_outcome_processor: @lost_outcome_processor,
-          auto_retry_enabled: auto_retry_enabled?
-        )
+        @stale_agent_healer = stale_agent_healer
         # Rebuild alongside the healer on SIGHUP reload so a future
         # operator-tunable knob (e.g. max_per_tick) would take effect
         # within one tick; today it carries only the dry_run flag.

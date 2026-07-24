@@ -69,14 +69,10 @@ class RunReviewTest < Minitest::Test
 
     if with_worktree
       wt_path = File.join(@local_worktree_root, slug)
-      FileUtils.mkdir_p(wt_path)
-      run!("git", "-C", wt_path, "init", "-b", "main", "--quiet")
-      run!("git", "-C", wt_path, "config", "user.email", "test@example.com")
-      run!("git", "-C", wt_path, "config", "user.name", "Test")
-      run!("git", "-C", wt_path, "config", "commit.gpgsign", "false")
-      File.write(File.join(wt_path, "README.md"), "test\n")
+      run!("git", "-C", dir, "worktree", "add", "--quiet", "-b", slug, wt_path, "HEAD")
+      File.write(File.join(wt_path, "README.md"), "review worktree\n")
       run!("git", "-C", wt_path, "add", ".")
-      run!("git", "-C", wt_path, "commit", "-m", "init", "--quiet")
+      run!("git", "-C", wt_path, "commit", "-m", "review worktree", "--quiet")
       File.write(File.join(folder, "worktree.yml"), { "path" => wt_path, "branch" => slug }.to_yaml)
     end
 
@@ -378,7 +374,7 @@ class RunReviewTest < Minitest::Test
 
         _out, err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
         assert_equal 1, status
-        assert_match(/worktree pointer present but worktree missing/, err)
+        assert_match(/worktree ownership validation failed: worktree .* is missing/, err)
       end
     end
   end
@@ -431,6 +427,43 @@ class RunReviewTest < Minitest::Test
         assert_equal "skipped", marker.attrs["browser"]
       end
     end
+  end
+
+  def test_degraded_suppression_base_is_reported_before_triage
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        degraded = Hive::Stages::Review::ReviewerCompareBase.new(
+          sha: "degraded-head",
+          degraded: true
+        )
+
+        _out, err = capture_io do
+          with_replaced_singleton_method(
+            Hive::Stages::Review,
+            :reviewer_compare_base_sha,
+            ->(_ops, _ref) { degraded }
+          ) do
+            Hive::Commands::Run.new(folder).call
+          end
+        end
+
+        assert_includes err, "suppression base unresolved"
+        assert_equal(
+          :review_complete,
+          Hive::Markers.current(File.join(folder, "task.md")).name
+        )
+      end
+    end
+  end
+
+  def test_review_default_worktree_root_uses_the_project_name
+    task = Struct.new(:project_root).new("/tmp/demo-project")
+
+    assert_equal(
+      Hive::Worktree.default_worktree_root("demo-project"),
+      Hive::Stages::Review.canonical_worktree_root(task, {})
+    )
   end
 
   def test_clean_adhoc_fix_off_review_reaches_review_complete
@@ -770,8 +803,8 @@ class RunReviewTest < Minitest::Test
         SH
         File.chmod(0o755, @driver_bin)
 
-        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        _out, run_err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status, run_err
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
         assert_equal "fix", marker.attrs["phase"]
@@ -800,7 +833,8 @@ class RunReviewTest < Minitest::Test
           }
         })
         worktree = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
-        run!("git", "-C", worktree, "config", "commit.gpgsign", "true")
+        run!("git", "-C", dir, "config", "extensions.worktreeConfig", "true")
+        run!("git", "-C", worktree, "config", "--worktree", "commit.gpgsign", "true")
         FileUtils.mkdir_p(File.join(folder, "reviews"))
         File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
                    "## High\n- [x] apply a fix\n")
@@ -1036,6 +1070,7 @@ class RunReviewTest < Minitest::Test
             exit 0
           fi
           printf '# Escalations for pass 01\\n\\n- [x] AUTO-RESOLVED\\n' > "#{escalations}"
+          printf 'forged success\\n' > "#{File.join(folder, "reviews", "fix-success-01.md")}"
           exit 0
         SH
         File.chmod(0o755, @driver_bin)
@@ -1047,6 +1082,12 @@ class RunReviewTest < Minitest::Test
         assert_equal "fix", marker.attrs["phase"]
         assert_equal "fix_tampered", marker.attrs["reason"]
         assert_includes marker.attrs["files"], "escalations-01.md"
+        assert_includes marker.attrs["files"], "fix-success-01.md"
+        assert_equal "true", marker.attrs["restored"]
+        assert_equal "# Escalations for pass 01\n\n- [ ] needs human review\n",
+                     File.binread(escalations)
+        refute File.exist?(File.join(folder, "reviews", "fix-success-01.md")),
+               "a forged success sentinel must be removed before retry"
       end
     end
   end
@@ -2243,7 +2284,8 @@ class RunReviewTest < Minitest::Test
   def test_triage_tampered_and_error_statuses_yield_review_error
     cases = [
       [ :tampered, "triage_tampered", [ "reviews/stub-reviewer-01.md" ] ],
-      [ :error, "unknown", [] ]
+      [ :error, "unknown", [] ],
+      [ :error, "triage_tampered", [ "task.md" ] ]
     ]
 
     cases.each do |triage_status, expected_reason, tampered_files|
@@ -2279,7 +2321,13 @@ class RunReviewTest < Minitest::Test
           assert_equal expected_reason, marker.attrs["reason"]
           assert_equal "1", marker.attrs["pass"]
           assert_equal tampered_files.join(","), marker.attrs["files"] if triage_status == :tampered
-          assert_equal "triage error", marker.attrs["message"] if triage_status == :error
+          if triage_status == :error && tampered_files.empty?
+            assert_equal "triage error", marker.attrs["message"]
+          elsif triage_status == :error
+            assert_equal "false", marker.attrs["restored"]
+            assert_equal "triage error", marker.attrs["restore_error"]
+            assert_equal tampered_files.join(","), marker.attrs["files"]
+          end
         end
       end
     end

@@ -116,9 +116,13 @@ module Hive
       # time).
       def run_continuation_pass(task, cfg)
         worktree_root = canonical_worktree_root(task, cfg)
-        pointer = Hive::Worktree.read_pointer(task.folder)
-        worktree_path = pointer["path"]
-        Hive::Worktree.validate_pointer_path(worktree_path, worktree_root)
+        pointer = Hive::Worktree.read_owned_pointer(
+          task.folder,
+          project_root: task.project_root,
+          slug: task.slug,
+          expected_root: worktree_root
+        )
+        worktree_path = pointer.fetch("path")
 
         run_pass(task, cfg, worktree_path)
       end
@@ -132,13 +136,20 @@ module Hive
         return worktree_git_failed(task, cfg, worktree_path) unless baseline_head
 
         identity = capture_implementation_identity(task, cfg)
+        protected_capture = Hive::ProtectedFiles.capture(task.folder, PROTECTED_FILES)
         before_impl = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
         impl_result = spawn_implementation(task, cfg, worktree_path, identity: identity)
         after_impl = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
         append_implementation_output(task, impl_result)
 
         if (tampered = Hive::ProtectedFiles.diff(before_impl, after_impl)).any?
-          return record_tamper(task, tampered, who: "implementer")
+          restored, restore_error = Hive::ProtectedFiles.restore_safely(
+            task.folder, protected_capture, tampered
+          )
+          return record_tamper(
+            task, tampered, who: "implementer",
+            restored: restored, restore_error: restore_error
+          )
         end
 
         if agent_failed?(impl_result)
@@ -370,10 +381,12 @@ module Hive
         result&.merge(implementation_provider: profile.name.to_s)
       end
 
-      def record_tamper(task, tampered, who:)
+      def record_tamper(task, tampered, who:, restored: false, restore_error: nil)
         Hive::Markers.set(task.state_file, :error,
                           reason: "#{who}_tampered",
-                          files: tampered.join(","))
+                          files: tampered.join(","),
+                          restored: restored,
+                          restore_error: restore_error.to_s[0, 200])
         { commit: "#{who}_tampered", status: :error }
       end
 

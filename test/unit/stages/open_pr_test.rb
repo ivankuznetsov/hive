@@ -62,24 +62,28 @@ class HiveStagesOpenPrTest < Minitest::Test
       worktree = File.join(root, "worktree")
       FileUtils.mkdir_p(worktree)
       write_pointer(task, worktree)
+      pointer_path = File.join(task.folder, "worktree.yml")
+      original_pointer = File.binread(pointer_path)
 
       with_basic_open_pr_run_stubs do
-        with_replaced_singleton_method(Hive::ProtectedFiles, :snapshot, ->(_folder) { Object.new }) do
-          with_replaced_singleton_method(Hive::ProtectedFiles, :diff, ->(_before, _after) { [ "worktree.yml" ] }) do
-            with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { }) do
-              # capture_io swallows the expected `local_head_oid` warn —
-              # this test uses a plain dir, not a git repo, so the new
-              # rev-parse warn fires by design. Keep it out of test output.
-              result = nil
-              capture_io { result = Hive::Stages::OpenPr.run!(task, cfg) }
+        with_replaced_singleton_method(
+          Hive::Stages::Base,
+          :spawn_agent,
+          ->(*_args, **_kwargs) { File.write(pointer_path, "path: /tmp/foreign\n") }
+        ) do
+          # capture_io swallows the expected `local_head_oid` warn —
+          # this test uses a plain dir, not a git repo, so the new
+          # rev-parse warn fires by design. Keep it out of test output.
+          result = nil
+          capture_io { result = Hive::Stages::OpenPr.run!(task, cfg) }
 
-              marker = Hive::Markers.current(task.state_file)
-              assert_equal({ commit: "open_pr_tampered", status: :error }, result)
-              assert_equal :error, marker.name
-              assert_equal "open_pr_tampered", marker.attrs.fetch("reason")
-              assert_equal "worktree.yml", marker.attrs.fetch("files")
-            end
-          end
+          marker = Hive::Markers.current(task.state_file)
+          assert_equal({ commit: "open_pr_tampered", status: :error }, result)
+          assert_equal :error, marker.name
+          assert_equal "open_pr_tampered", marker.attrs.fetch("reason")
+          assert_equal "worktree.yml", marker.attrs.fetch("files")
+          assert_equal "true", marker.attrs.fetch("restored")
+          assert_equal original_pointer, File.binread(pointer_path)
         end
       end
     end

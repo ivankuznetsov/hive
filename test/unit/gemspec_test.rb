@@ -43,6 +43,24 @@ class GemspecTest < Minitest::Test
     expected.each { |path| assert_includes spec.files, path }
   end
 
+  def test_gem_package_includes_workflow_creator_references
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+    references = %w[
+      workflow-creator.md
+      workflow-creator-example.md
+      workflow-schema.md
+      workflow-stage-design.md
+      workflow-checkpoints.md
+      workflow-permissions.md
+      workflow-testing.md
+      workflow-common-mistakes.md
+    ]
+
+    references.each do |name|
+      assert_includes spec.files, "skills/hive/references/#{name}"
+    end
+  end
+
   def test_gem_package_includes_metadata_for_managed_web_path_dependency
     spec = Gem::Specification.load(GEMSPEC_PATH)
 

@@ -14,6 +14,12 @@ Explain scope, affected state, and recovery before running:
 
 Routine read-only inspection, `hive watch`, `hive doctor`, and a fresh `hive act` descriptor with `confirmation_required: false` do not require another prompt.
 
+Creating a new workflow authorizes only the newly scaffolded descriptor and
+instruction paths. It never authorizes edits to an existing workflow or task
+creation. Fresh minimal initialization requires its own disclosed preview and
+one explicit confirmation. External publication remains separately gated even
+when a human outcome marks an artifact publish-ready.
+
 No-write Honeycomb workflow previews (`workflow install|update|remove` with
 `--dry-run --json`) are read-only. Do not generalize that exemption: patrol
 and refactor-patrol dry-runs still launch agents and remain consent-gated.

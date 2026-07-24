@@ -41,7 +41,12 @@ class ReleaseContractTest < Minitest::Test
 
     assert_includes workflows, "built-in `coding`, `content`, and `bench` workflows"
     assert_includes workflows, "hive workflow install honeycomb/architecture --yes"
-    assert_includes workflows, "The last stage may be `kind: terminal`, `kind: agent`, or `kind: council`."
+    assert_includes workflows, "/hive create a three-stage editorial workflow"
+    assert_includes workflows, "hive workflow validate editorial --json"
+    assert_includes workflows, "hive decide <task> approve --from approval"
+    assert_includes workflows, "The last stage may be `kind: terminal`, `kind: agent`, `kind: council`, or `kind: human`."
+    assert_includes workflows, "No task is created by workflow creation alone."
+    assert_includes readme, "natural language"
 
     %w[OpenClaw Grok hive-bench Honeycomb].each { |capability| assert_includes readme, capability }
     assert_includes readme, "### Hive web (default native experience)"
@@ -68,6 +73,7 @@ class ReleaseContractTest < Minitest::Test
     projection = JSON.parse(File.read(File.join(ROOT, "openclaw/skills/hive/.hive-skill.json")))
     setup = File.read(File.join(ROOT, "openclaw/skills/hive/references/setup-and-platforms.md"))
     publish_docs = read("openclaw/README.md")
+    release_docs = read("docs/RELEASING.md")
 
     assert_equal canonical.version, openclaw.fetch("version")
     assert_equal canonical.version, projection.fetch("skill_version")
@@ -76,6 +82,9 @@ class ReleaseContractTest < Minitest::Test
     refute_match(%r{/v(?!#{Regexp.escape(Hive::VERSION)}/)[0-9]+\.[0-9]+\.[0-9]+/install\.sh}, setup)
     assert_includes publish_docs, "skills/hive/skill.json"
     refute_match(/--version\s+\d+\.\d+\.\d+/, publish_docs)
+    assert_includes release_docs, "hive-site #23116"
+    assert_includes release_docs, "does not block this repository"
+    assert_match(/Do\s+not describe current-main workflow-creator commands as stable/, release_docs)
   end
 
   def test_live_agent_proof_is_protected_exact_sha_and_four_surface

@@ -37,6 +37,92 @@ the stage writes a cooldown-aware `limits_reached` marker so the daemon retries
 after reset; malformed/missing/non-limit failures remain manual `WAITING`
 states.
 
+## Create A Workflow From Natural Language
+
+The canonical Hive agent skill accepts ordinary-language workflow creation
+requests. In OpenClaw and Claude invoke it as `/hive`; Codex uses `$hive` and
+Pi uses `/skill:hive`. For example:
+
+```text
+/hive create a three-stage editorial workflow that researches, drafts, and requires approval before publishing
+```
+
+The creator checks the installed Hive version, project settings, templates,
+reserved IDs, and existing workflow IDs before it writes anything. In an
+initialized project it scaffolds only new paths with `hive workflow new`, edits
+those generated files, then runs:
+
+```bash
+hive workflow validate editorial --json
+```
+
+In a fresh project it first renders the no-write
+`hive init --new-workflow editorial --minimal --preview --json` plan and waits
+for one explicit confirmation before running the matching command without
+`--preview`. The minimal profile creates the core Hive project, state worktree,
+registration, and required wiki/context integration while leaving optional
+patrol, auto-fix, daemon dispatch/autostart, babysitter, and timer setup off. It
+never selects a starter template or adds `--force`.
+
+The accepted editorial result has exactly three stages:
+
+```yaml
+id: editorial
+stages:
+  - name: research
+    kind: agent
+    state_file: research.md
+    instruction: ./editorial/research.md
+    permissions: yolo
+  - name: draft
+    kind: agent
+    state_file: draft.md
+    instruction: ./editorial/draft.md
+    permissions: yolo
+  - name: approval
+    kind: human
+    state_file: approval.md
+    input: draft.md
+    outcomes:
+      approve:
+        complete: true
+        artifact: draft.md
+      reject:
+        to: draft
+```
+
+The stage and model choices inherit project defaults. The creator reports that
+inheritance, sequential transitions, local `yolo` permissions, artifact names,
+the neutral scaffold/template choice, every created file, and the validation
+result. No task is created by workflow creation alone. Its completion summary
+includes the exact opt-in command:
+
+```bash
+hive new <project> --workflow editorial "<your request>"
+```
+
+If the original request explicitly asks to create or run a task, the creator
+uses `hive new --idempotency-key KEY --json`, so a retry finds the same task
+even after it moves stages. It queries `hive status --operational --json` after
+creation or an explicitly requested first run.
+
+When the task reaches approval, the only transitions are:
+
+```bash
+hive decide <task> approve --from approval
+hive decide <task> reject --from approval --note "revise the conclusion"
+```
+
+Approve requires a non-empty `draft.md`, records it as publish-ready, and
+completes the task. Reject records the decision, returns the same task to
+`draft`, and resets that stage to `WAITING`. Neither outcome publishes,
+deploys, sends, or otherwise acts outside Hive; an external destination and
+separate authorization are always required.
+
+The creator is create-only. Reserved or colliding IDs stop before mutation and
+return an available alternative. Editing or repairing an existing workflow is
+outside this contract.
+
 ## Create A Blank Workflow
 
 ```bash
@@ -54,7 +140,11 @@ This writes a minimal `inbox -> work -> done` workflow:
 
 The generated descriptor is valid immediately, and the placeholder
 `work.md` is the prompt for the `work` stage. Edit that file to define what the
-agent should do.
+agent should do, then validate the production-loaded descriptor:
+
+```bash
+hive workflow validate my-flow --json
+```
 
 `README.md` and `honeycomb.yml` are publish-preflight inputs. The scaffolded
 summary and author are placeholders; edit them before running `workflow
@@ -196,6 +286,8 @@ Rules:
 - `kind: terminal` creates an inert stage; it does not spawn an agent.
 - `kind: agent` spawns the generic stage runner.
 - `kind: council` runs a document review council over an input artifact.
+- `kind: human` persists `WAITING` and exposes only descriptor-declared
+  outcomes through `hive decide TARGET OUTCOME --from STAGE`.
 - Every agent stage must declare exactly one of `skill:` or `instruction:`.
 - `agent:`, `model:`, and `effort:` are optional on `kind: agent` and
   `kind: council`. Descriptor `agent` overrides the project stage block;
@@ -214,6 +306,10 @@ Rules:
     enforce it; `timeout_sec` remains enforced for every agent spawn.
   - Council command reviewers and command revisers also use `timeout_sec`; Hive
     terminates their process group when the limit expires.
+- A human stage declares `input:` plus one or more named `outcomes:`. Every
+  outcome has exactly one action: `complete: true` (optionally requiring a
+  non-empty `artifact:`) or `to: <stage>`. Human stages cannot declare agent,
+  model, permission, runner, reviewer, or executable command settings.
 - `skill:`, `instruction:`, `agent:`, `model:`, `effort:`, `budget_usd:`,
   `timeout_sec:`, `permissions:`, `input:`, `reviewers:`, `council:`, and
   `deliverable:` are rejected on `kind: terminal` stages.
@@ -225,7 +321,7 @@ Rules:
   report names, inert/council use, and nonterminal use are rejected. The pair
   creates a controller-owned exact-origin worktree and controller-owned draft
   PR delivery without embedding an agent, model, or effort choice.
-- The last stage may be `kind: terminal`, `kind: agent`, or `kind: council`.
+- The last stage may be `kind: terminal`, `kind: agent`, `kind: council`, or `kind: human`.
   A terminal agent/council stage is archived only when it has a terminal
   `COMPLETE` marker and a non-empty deliverable. `deliverable:` defaults to the
   stage's `state_file`.

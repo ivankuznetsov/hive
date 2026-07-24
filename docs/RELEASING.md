@@ -75,6 +75,20 @@ bullets (prefix fixes with "Fixed"); no `[Unreleased]` accumulator and no dates
 notable minor/major releases; keep routine patch releases terse. A release with
 nothing user-facing gets a one-line "no user-facing changes" note.
 
+### Workflow-creator public wording
+
+The canonical skill may describe current-main behavior because its generated
+projections and candidate artifacts are pinned to the same source commit. Do
+not describe current-main workflow-creator commands as stable on hivecli.sh,
+ClawHub, or release announcements until a separately authorized release
+containing those commands is published. Stable-user wording should name the
+containing release or tell users to run the supported `hive update` path after
+that release exists.
+
+The downstream wording handoff is tracked as `hive-site #23116`. It does not block this repository.
+Implementation, tests, and release readiness proceed independently, and this
+repository must not mutate or deploy hive-site as part of that coordination.
+
 ---
 
 ## One-time setup

@@ -5,9 +5,22 @@ module Hive
       DEFAULT_AGGREGATE_SECONDS = 30.0
       INCIDENT_TAG = "incident-regression"
 
-      Result = Data.define(:durations, :total_seconds, :violations) do
-        def ok?
-          violations.empty?
+      Result = Data.define(:durations, :total_seconds, :integrity_violations, :timing_violations) do
+        def violations
+          integrity_violations + timing_violations
+        end
+
+        def violations_for(kind)
+          case kind
+          when :all then violations
+          when :integrity then integrity_violations
+          when :timing then timing_violations
+          else raise ArgumentError, "unknown incident budget check kind: #{kind.inspect}"
+          end
+        end
+
+        def ok?(kind = :all)
+          violations_for(kind).empty?
         end
       end
 
@@ -28,13 +41,14 @@ module Hive
         results = Array(@report["scenarios"])
         results_by_name = results.group_by { |result| result["name"] }
         durations = {}
-        violations = duplicate_violations(metadata, results)
+        integrity_violations = duplicate_violations(metadata, results)
+        timing_violations = []
 
         metadata.each do |entry|
           name = entry["name"]
           matches = results_by_name[name]
           if matches.nil? || matches.empty?
-            violations << "enabled incident #{name.inspect} has no scenario result"
+            integrity_violations << "enabled incident #{name.inspect} has no scenario result"
             next
           end
           next unless matches.one?
@@ -44,24 +58,29 @@ module Hive
           duration = Float(result["duration_seconds"])
           durations[name] = duration
           if duration >= @per_scenario_limit
-            violations << format(
+            timing_violations << format(
               "%s took %.3fs (must be below %.3fs)",
               name, duration, @per_scenario_limit
             )
           end
         rescue ArgumentError, TypeError
-          violations << "enabled incident #{name.inspect} has an invalid duration"
+          integrity_violations << "enabled incident #{name.inspect} has an invalid duration"
         end
 
         total = durations.values.sum
         if total >= @aggregate_limit
-          violations << format(
+          timing_violations << format(
             "incident group took %.3fs (must be below %.3fs)",
             total, @aggregate_limit
           )
         end
 
-        Result.new(durations: durations.freeze, total_seconds: total, violations: violations.freeze)
+        Result.new(
+          durations: durations.freeze,
+          total_seconds: total,
+          integrity_violations: integrity_violations.freeze,
+          timing_violations: timing_violations.freeze
+        )
       end
 
       private

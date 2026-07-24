@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release}.yml, packaging/live_agent_skills/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-23
+updated: 2026-07-24
 tags: [test, minitest, fixtures, honeycomb, agent-skills, release-proof]
 ---
 
@@ -283,12 +283,16 @@ remains visible in `report.json#scenario_metadata` with `pending: true`, while
 its steps and ordinary result row remain absent. CI runs
 `bundle exec rake e2e:lib_test` and `bundle exec rake e2e` in a dedicated
 pull-request job, uploads the configured `HIVE_E2E_RUNS_DIR` on success or
-failure, and uses `test/e2e/check_incident_budget.rb` to enforce below ten
-seconds per enabled incident (including sandbox bootstrap) and below thirty
-seconds for the group. The #9771 dependency-gate and repository-routing
-incidents are enabled; four sibling-gated fixtures remain pending. The
-incident index and activation rules live in
-`test/e2e/scenarios/README.md`.
+failure, and feeds the functional job result into the protected
+`rake test (Ruby 3.4)` aggregate. That job treats missing enabled results,
+duplicate metadata/results, and invalid durations as functional failures. A
+separate `continue-on-error` job downloads the retained report and runs only
+the timing mode of `test/e2e/check_incident_budget.rb`, flagging enabled
+incidents at or above ten seconds (including sandbox bootstrap) or a group
+total at or above thirty seconds without blocking the merge. The #9771
+dependency-gate and repository-routing incidents are enabled; four
+sibling-gated fixtures remain pending. The incident index and activation rules
+live in `test/e2e/scenarios/README.md`.
 
 `durable_attempt_1849_replay.yml` is the ownership acceptance replay. It starts
 a foreground develop attachment, makes three provider commits, kills the

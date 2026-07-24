@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-07-22
+updated: 2026-07-24
 tags: [test, e2e, tui, incidents, artifacts]
 ---
 
@@ -100,7 +100,7 @@ variable from silently overriding the harness-specific cleanup policy.
 | `test/e2e/fixtures/gh` | Run-global, default-deny GitHub CLI shim with no host-binary fallback. |
 | `test/e2e/sample-project/` | Tiny Ruby fixture copied into each scenario sandbox. Vendored gems keep bootstrap offline. |
 | `test/e2e/runs/` | Gitignored run artifacts. Each run has `report.json` and per-scenario artifact directories. |
-| `test/e2e/check_incident_budget.rb` | Report-driven below-10s-per-incident and below-30s-aggregate CI gate. |
+| `test/e2e/check_incident_budget.rb` | Report-integrity gate plus below-10s-per-incident and below-30s-aggregate advisory check. |
 | `bin/hive-e2e` | Thor shell for run/list/replay/clean. |
 
 ## Scenario DSL
@@ -241,10 +241,14 @@ The harness prepends repo `bin/` to the tmux environment PATH because TUI rows d
 `CliDriver` starts CLI subprocesses in their own process group and applies the step timeout to both the direct child and stdout/stderr reader threads, so descendants that inherit the capture pipes cannot hold an e2e step open after their parent exits.
 
 Routine pull-request CI runs `e2e:lib_test` and `rake e2e` in a separate job,
-retains the run directory even after failure, and then reads enabled incident
-durations from `report.json`. Durations include sandbox bootstrap; each enabled
-incident must be below ten seconds and the group below thirty seconds. This job does not fold e2e into the default
-`rake test` task.
+retains the run directory even after failure, and feeds that functional job
+into the protected `rake test (Ruby 3.4)` aggregate. A downstream advisory job
+downloads the artifact and reads enabled incident durations from `report.json`.
+Durations include sandbox bootstrap; each enabled incident targets below ten
+seconds and the group targets below thirty seconds. Timing failures remain
+visible without blocking a merge. Missing enabled results, duplicate
+metadata/results, and invalid durations remain functional failures in the E2E
+job. Neither job folds e2e into the local default `rake test` task.
 
 `tmux` is required for TUI scenarios. `asciinema` is test-time optional: when
 it is unavailable or too old, TUI scenarios run without cast capture while the

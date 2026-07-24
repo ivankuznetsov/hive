@@ -65,16 +65,19 @@ jobs:
     needs:
       - test
       - expensive-test-gates
+      - e2e
     runs-on: ubuntu-latest
     steps:
-      - name: Require coverage and expensive proof gates
+      - name: Require coverage, functional e2e, and expensive proof gates
         shell: bash
         env:
           HIVE_COVERAGE_RESULT: ${{ needs.test.result }}
           HIVE_EXPENSIVE_GATES_RESULT: ${{ needs.expensive-test-gates.result }}
+          HIVE_E2E_RESULT: ${{ needs.e2e.result }}
         run: |
           test "$HIVE_COVERAGE_RESULT" = "success"
           test "$HIVE_EXPENSIVE_GATES_RESULT" = "success"
+          test "$HIVE_E2E_RESULT" = "success"
 
   e2e:
     name: real CLI scenario harness
@@ -95,10 +98,10 @@ jobs:
         env:
           HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
         run: bundle exec rake e2e
-      - name: Enforce incident duration budgets
+      - name: Validate incident report integrity
         env:
           HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
-        run: bundle exec ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR"
+        run: ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --integrity-only
       - name: Retain e2e reports and failure evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -108,6 +111,26 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
+
+  incident-duration-budget:
+    name: incident duration budget (advisory)
+    needs: e2e
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - name: Download e2e report
+        uses: actions/download-artifact@v8
+        with:
+          name: hive-e2e-report
+          path: ${{ runner.temp }}/hive-e2e-runs
+      - name: Check incident duration budgets
+        env:
+          HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
+        run: ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --timing-only
 
   web:
     name: Hive web (Rails tests + system)

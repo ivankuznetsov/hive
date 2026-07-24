@@ -23,9 +23,7 @@ require "hive/daemon/status_report"
 require "hive/invoked_binary"
 require "hive/update_check/state"
 require "hive/attempts/store"
-require "hive/attempts/detached_launcher"
-require "hive/attempts/dispatcher"
-require "hive/attempts/configured_dispatcher"
+require "hive/attempts/api"
 require "hive/attempts/process_identity"
 require "hive/attempts/legacy_backfiller"
 require "hive/attempts/reconciler"
@@ -255,7 +253,7 @@ module Hive
         )
 
         attempt_store = Hive::Attempts::Store.new
-        attempt_dispatcher = Hive::Attempts::ConfiguredDispatcher.new(
+        attempts_api = Hive::Attempts::API.new(
           store: attempt_store
         )
         attempt_process_identity = Hive::Attempts::ProcessIdentity.new
@@ -300,7 +298,7 @@ module Hive
           digest_scheduler: digest_scheduler, answer_digest_scheduler: answer_digest_scheduler,
           dry_run: @dry_run,
           update_state: Hive::UpdateCheck::State.new,
-          attempt_dispatcher: attempt_dispatcher,
+          attempt_dispatcher: attempts_api,
           attempt_reconciler: attempt_reconciler,
           lost_outcome_store: lost_outcome_store,
           lost_outcome_processor: lost_outcome_processor,

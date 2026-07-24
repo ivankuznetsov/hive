@@ -43,7 +43,7 @@ module Hive
         @json = json
         @recover_merged_error_reason = recover_merged_error_reason
         @durable = durable
-        @attempt_entrypoint = attempt_entrypoint
+        @attempts_api = attempt_entrypoint
         @quiet = quiet
         @observation_guard = observation_guard
       end

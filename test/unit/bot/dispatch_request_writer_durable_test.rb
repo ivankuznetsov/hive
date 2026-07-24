@@ -26,11 +26,14 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
 
       with_replaced_singleton_method(Hive::Bot::DispatchRequestWriter, :resolve_task,
                                      ->(**_kwargs) { task }) do
-        reference = Hive::Bot::DispatchRequestWriter.dispatch!(
-          project: "demo", slug: "demo-task",
-          argv: %w[hive run demo-task], request_id: "request-1",
-          state_home: state_home, entrypoint: entrypoint
-        )
+        reference = nil
+        with_replaced_singleton_method(Hive::Attempts::API, :new, -> { entrypoint }) do
+          reference = Hive::Bot::DispatchRequestWriter.dispatch!(
+            project: "demo", slug: "demo-task",
+            argv: %w[hive run demo-task], request_id: "request-1",
+            state_home: state_home
+          )
+        end
 
         assert_equal "attempt-1", reference.attempt_id
         assert_equal :accepted, reference.status

@@ -32,7 +32,7 @@ require "hive/update_check"
 require "hive/update_check/state"
 require "hive/install_channel"
 require "hive/commands/update"
-require "hive/attempts/dispatcher"
+require "hive/attempts/api"
 require "hive/attempts/generation"
 
 module Hive

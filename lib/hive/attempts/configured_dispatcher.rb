@@ -6,10 +6,11 @@ require "hive/attempts/launch_policy"
 
 module Hive
   module Attempts
-    # Daemon adapter that resolves attempt timers, execution timeout, and
-    # project-specific lease timers plus global execution/capacity policy for
-    # every admission. A long-lived daemon therefore applies config reloads to
-    # fresh attempts without replacing the adapter or mutating running wrappers.
+    # Internal daemon adapter behind Attempts::API. It resolves attempt timers,
+    # execution timeout, and project-specific lease timers plus global
+    # execution/capacity policy for every admission. A long-lived daemon
+    # therefore applies config reloads to fresh attempts without replacing the
+    # adapter or mutating running wrappers.
     class ConfiguredDispatcher
       def initialize(store:, config_loader: Hive::Config.method(:load),
                      daemon_config_loader: Hive::Config.method(:load_global_daemon),

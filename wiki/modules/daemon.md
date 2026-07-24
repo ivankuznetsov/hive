@@ -170,12 +170,12 @@ advisory: write/assembly failure logs `operational_snapshot_publish_failed` but
 does not stop dispatch. Consumers therefore report partial/unknown status
 rather than either crashing Hive or presenting old scheduler state as current.
 
-Durable task admissions use `Attempts::ConfiguredDispatcher`: it resolves the
-task and reloads that project's attempt heartbeat, stale, launch, and
-first-heartbeat timers for every initial or loss-successor dispatch. A daemon
-crash between queue preclaim and attempt-ID stamping is repaired on restart by
-looking up the immutable attempt `request_id`; the repaired claim is persisted
-before normal live/terminal/lost delivery reconciliation continues.
+Durable task admissions use `Attempts::API`; its internal daemon adapter
+resolves the task and reloads that project's attempt heartbeat, stale, launch,
+and first-heartbeat timers for every initial or loss-successor dispatch. A
+daemon crash between queue preclaim and attempt-ID stamping is repaired on
+restart by looking up the immutable attempt `request_id`; the repaired claim is
+persisted before normal live/terminal/lost delivery reconciliation continues.
 
 On Linux the shipped systemd-user unit uses `KillMode=process`. Service
 restart therefore replaces only the daemon process; detached durable-attempt
@@ -762,11 +762,12 @@ daemon block can never silently drift from the canonical default (#255).
 
 Task-stage commands now resolve the same verb timeout and
 `child_kill_grace_sec` when their detached durable wrapper is created. The
-long-lived `ConfiguredDispatcher` reloads the task project for lease timers and
-the global daemon block for verb timeout, kill grace, and global, per-project,
-and daily admission caps on every initial attempt and loss successor. A global
-config change therefore affects the next admission without replacing the
-daemon, while each already-running wrapper keeps its frozen launch policy.
+long-lived `Attempts::API` delegates daemon admissions to an internal configured
+adapter that reloads the task project for lease timers and the global daemon
+block for verb timeout, kill grace, and global, per-project, and daily admission
+caps on every initial attempt and loss successor. A global config change
+therefore affects the next admission without replacing the daemon, while each
+already-running wrapper keeps its frozen launch policy.
 After a worker leader exits, its supervisor
 continues heartbeats and the monotonic timeout while draining inherited output
 pipes. Heartbeats also continue during the TERM-to-KILL grace; the supervisor

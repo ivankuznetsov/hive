@@ -33,12 +33,15 @@ Master is never modified by Hive (apart from one initial `chore: ignore .hive-st
 
 ## Process model
 
-Public task commands admit through `Hive::Attempts::Dispatcher`. Admission
-creates one `launching` lease for the task generation, then a short launcher
-creates a detached POSIX session. Its supervisor claims the lease, wins first
-heartbeat, and only then starts the existing Hive command in a worker group.
-That internal command still takes the task lock, runs auto-rebase/stage/provider
-logic, commits state under the project lock, and writes normal markers.
+Public task commands, bot-local delivery, and daemon queue/recovery delivery
+admit through `Hive::Attempts::API`. The API keeps foreground and daemon
+adapters behind one in-monorepo boundary and delegates semantic admission to
+the internal dispatcher. Admission creates one `launching` lease for the task
+generation, then a short launcher creates a detached POSIX session. Its
+supervisor claims the lease, wins first heartbeat, and only then starts the
+existing Hive command in a worker group. That internal command still takes the
+task lock, runs auto-rebase/stage/provider logic, commits state under the
+project lock, and writes normal markers.
 
 The wrapper owns heartbeat, checkpoints, ordered output frames, timeout,
 worker identity, exit capture, and terminal receipt. The foreground CLI is a

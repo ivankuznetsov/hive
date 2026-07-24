@@ -6,9 +6,9 @@ require "hive/attempts/launch_policy"
 
 module Hive
   module Attempts
-    # Foreground facade shared by CLI commands and local request producers.
-    # It performs durable admission and optionally attaches a read-only client;
-    # the existing command implementation runs later inside the wrapper.
+    # Internal foreground adapter behind Attempts::API. It performs durable
+    # admission and optionally attaches a read-only client; the existing
+    # command implementation runs later inside the wrapper.
     class Entrypoint
       def initialize(store: nil, dispatcher: nil, client: nil,
                      config_loader: Hive::Config.method(:load),

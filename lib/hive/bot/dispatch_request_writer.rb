@@ -1,6 +1,6 @@
 require "hive/paths"
 require "hive/daemon/dispatch_request_queue"
-require "hive/attempts/entrypoint"
+require "hive/attempts/api"
 require "hive/task_resolver"
 require "hive/workflows"
 
@@ -48,7 +48,7 @@ module Hive
       def dispatch!(project:, slug:, argv:, chat_id: nil, update_id: nil,
                     trigger: nil, request_id: generate_request_id,
                     state_home: Hive::Paths.state_home, now: Time.now,
-                    entrypoint: Hive::Attempts::Entrypoint.new)
+                    entrypoint: nil)
         write!(
           project: project, slug: slug, argv: argv,
           chat_id: chat_id, update_id: update_id, trigger: trigger,
@@ -57,7 +57,7 @@ module Hive
 
         task = resolve_task(project: project, slug: slug, argv: argv)
         intended_stage = intended_stage_for(argv, task)
-        result = entrypoint.dispatch(
+        result = (entrypoint || Hive::Attempts::API.new).dispatch(
           task: task,
           intended_stage: intended_stage,
           argv: argv,

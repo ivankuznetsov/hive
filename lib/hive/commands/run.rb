@@ -45,7 +45,7 @@ module Hive
         @quiet = quiet
         @no_rebase = no_rebase
         @durable = durable
-        @attempt_entrypoint = attempt_entrypoint
+        @attempts_api = attempt_entrypoint
         @observation_guard = observation_guard
       end
 

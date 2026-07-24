@@ -1,18 +1,9 @@
 require "hive/attempts/store"
 require "hive/attempts/stream_log"
+require "hive/attempts/contracts"
 
 module Hive
   module Attempts
-    ClientResult = Data.define(
-      :status, :exit_status, :outcome, :receipt, :attempt_id, :stdout_bytes
-    ) do
-      def initialize(status:, exit_status:, outcome:, receipt:, attempt_id:, stdout_bytes: 0)
-        super
-      end
-
-      def stdout_emitted? = stdout_bytes.to_i.positive?
-    end
-
     # Read-only attachment to a durable attempt. Closing or interrupting this
     # reader never sends a signal to the wrapper or worker group.
     class Client

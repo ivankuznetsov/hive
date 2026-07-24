@@ -158,7 +158,9 @@ The canonical builder emits only `packages/NAME/VERSION/` with generated
 instructions, and declared assets. The manifest owns normalized permissions,
 the complete registry-relative hash map, and `release_sha256`; the final
 manifest byte hash is `package_digest`. The current consumer validator and
-pinned Honeycomb lint contract run before remote access. Dry-run returns
+pinned Honeycomb lint contract run before remote access. The lint receipt
+identity binds the upstream policy, fixture corpus, expected output, and local
+contract checksums. Dry-run returns
 `state: validated`, both digests, and `freshness: not_checked` without durable
 publication state.
 
@@ -168,15 +170,20 @@ The real invocation must pass the confirmed full digest through
 receipts and digest bundles under `Hive::Paths.state_home/workflow-publish/v1`
 journal fork, push, and PR intent before effects. Retry identity is registry,
 name, version, and full release digest; a different digest is an immutable
-conflict. The same digest verifies exact fork parent/owner, branch/commit,
-package bytes, and non-draft PR head/base before reuse. No force, merge,
+conflict. The same digest verifies exact fork parent/owner, head
+repository/branch, commit parent/OID, package bytes, and non-draft PR head/base
+before reuse. A branch name is only a locator, so a matching external PR can be
+adopted after those authority checks. Receipt steps and observations are
+monotonic under the per-version lock. No force, merge,
 approval, close, branch/fork deletion, or catalogue edit path exists.
 
 Schema v2 reports `pending_review`, `merged_pending_listing`, `listed`, or
 `closed_unmerged`, separately from `freshness: current|cached`. Only a current
 exact catalogue name/version/release-digest entry yields `listed`; offline
 reconciliation may return a prior state as cached with its original
-`observed_at`. Publication ends at registry review. Hivebox has no publish or
+`observed_at`. A newer blocking lint policy is reported during retained
+read-only reconciliation and stops only a still-required remote mutation.
+Publication ends at registry review. Hivebox has no publish or
 status route, and no legacy conversion/migration command is provided.
 
 For a fresh project that should default to the custom workflow immediately,

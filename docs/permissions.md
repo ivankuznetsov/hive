@@ -58,8 +58,11 @@ registry reviewers; publication does not manufacture approval evidence.
 
 Admission runs before installation/update, then the policy is compiled again
 from the task-pinned manifest immediately before spawn. `workflow publish`
-runs authoring validation, consumer validation, exact-policy admission, and
-the pinned local Honeycomb lint before any remote interaction.
+runs authoring validation, conservative exact-actor disclosure projection,
+consumer validation, and the pinned local Honeycomb lint before any remote
+interaction. It deliberately does not apply the current runtime admission
+limit to author submission, so a correctly disclosed high-risk package remains
+reviewable even when this Hive version cannot yet install it.
 Codex, Pi, Grok,
 custom profiles without the full `policy_capabilities` set, and explicit
 managed actors selecting them fail closed. These controls reduce agent/tool

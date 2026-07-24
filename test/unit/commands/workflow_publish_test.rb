@@ -1,10 +1,12 @@
 require "test_helper"
+require "json_schemer"
 require "hive/commands/workflow/publish"
 require "hive/workflow_package/publisher"
 
 class WorkflowPublishCommandTest < Minitest::Test
   Package = Hive::WorkflowPackage::Publisher::Package
   Result = Data.define(:state, :freshness, :observed_at, :pr_url, :warnings)
+  Receipt = Data.define(:last_completed_step, :observation, :data)
 
   def test_dry_run_returns_validated_v2_payload_without_publication
     publisher, calls = publisher_double
@@ -52,6 +54,45 @@ class WorkflowPublishCommandTest < Minitest::Test
     assert_equal error.status, payload.fetch("exit_code")
   end
 
+  def test_remote_and_internal_errors_emit_their_exact_schema_arms
+    cases = [
+      [ Hive::WorkflowPackage::PublishAuthenticationError.new("auth"), "authentication", 78, false ],
+      [ Hive::WorkflowPackage::PublishOfflineError.new("offline"), "offline", 69, true ],
+      [ Hive::WorkflowPackage::PublishConflict.new("conflict"), "immutable_conflict", 1, false ],
+      [ Hive::WorkflowPackage::PublishAmbiguousError.new("ambiguous"), "remote_ambiguous", 75, true ],
+      [ Hive::WorkflowPackage::PublishPolicyBlocked.new("policy"), "validation", 64, false ],
+      [ RuntimeError.new("raw internal detail"), "internal", 70, false ]
+    ]
+
+    cases.each do |raised, kind, exit_code, retryable|
+      stdout = StringIO.new
+      error = assert_raises(SystemExit) do
+        command(erroring_publisher(raised), stdout: stdout).call
+      end
+      payload = JSON.parse(stdout.string)
+
+      assert_equal exit_code, error.status
+      assert_equal kind, payload.fetch("error_kind")
+      assert_equal retryable, payload.fetch("retryable")
+      assert publish_schemer.valid?(payload), "#{kind} producer payload must validate"
+    end
+  end
+
+  def test_invalid_registry_configuration_remains_configuration_not_authoring_validation
+    publisher = Object.new
+    publisher.define_singleton_method(:prepare) do |destination:|
+      raise Hive::WorkflowPackage::PublishConfigurationError, "invalid registry"
+    end
+    stdout = StringIO.new
+
+    error = assert_raises(SystemExit) { command(publisher, stdout: stdout).call }
+    payload = JSON.parse(stdout.string)
+
+    assert_equal 78, error.status
+    assert_equal "configuration", payload.fetch("error_kind")
+    assert publish_schemer.valid?(payload)
+  end
+
   private
 
   def command(publisher, stdout: StringIO.new, dry_run: false, expected_release_digest: nil)
@@ -81,5 +122,27 @@ class WorkflowPublishCommandTest < Minitest::Test
       )
     end
     [ publisher, calls ]
+  end
+
+  def erroring_publisher(error)
+    package = Package.new(
+      name: "demo", version: "1.2.3", root: Dir.pwd,
+      package_digest: "a" * 64, release_digest: "b" * 64,
+      warnings: [], findings: [], lint_contract: nil
+    )
+    receipt = Receipt.new(
+      last_completed_step: "validated", observation: nil, data: {}
+    )
+    Object.new.tap do |publisher|
+      publisher.define_singleton_method(:prepare) { |destination:| package }
+      publisher.define_singleton_method(:publish) { |_package| raise error }
+      publisher.define_singleton_method(:receipt_for) { |_package| receipt }
+    end
+  end
+
+  def publish_schemer
+    @publish_schemer ||= JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-workflow-publish")))
+    )
   end
 end

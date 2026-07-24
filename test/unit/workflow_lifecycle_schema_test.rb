@@ -17,7 +17,9 @@ class WorkflowLifecycleSchemaTest < Minitest::Test
         {
           "schema" => name, "schema_version" => 2, "ok" => false,
           "error_class" => "PublishOfflineError", "error_kind" => "offline",
-          "exit_code" => 69, "message" => "unavailable", "retryable" => true
+          "exit_code" => 69, "message" => "unavailable", "retryable" => true,
+          "package_digest" => "a" * 64, "release_digest" => "b" * 64,
+          "last_completed_step" => "validated"
         }
       else
         {
@@ -28,6 +30,44 @@ class WorkflowLifecycleSchemaTest < Minitest::Test
       end
       assert schemer(name).valid?(payload), "#{name} must accept the shared error envelope"
     end
+  end
+
+  def test_publish_error_arms_bind_kind_exit_code_retryability_and_recovery_fields
+    valid = [
+      [ "validation", 64, false, {} ],
+      [ "authentication", 78, false, {} ],
+      [ "configuration", 78, false, {} ],
+      [ "offline", 69, true, recovery_identity ],
+      [ "immutable_conflict", 1, false, {} ],
+      [ "remote_ambiguous", 75, true, recovery_identity ],
+      [ "internal", 70, false, {} ]
+    ]
+
+    valid.each do |kind, exit_code, retryable, extras|
+      payload = publish_error(kind, exit_code, retryable).merge(extras)
+      assert schemer("hive-workflow-publish").valid?(payload), "#{kind} must validate"
+
+      refute schemer("hive-workflow-publish").valid?(payload.merge("exit_code" => 1_000)),
+             "#{kind} must bind its process exit code"
+      refute schemer("hive-workflow-publish").valid?(payload.merge("retryable" => !retryable)),
+             "#{kind} must bind retryability"
+    end
+  end
+
+  def test_publish_schema_rejects_invalid_semver_and_accepts_structured_lint_evidence
+    payload = Marshal.load(Marshal.dump(success_payloads.fetch("hive-workflow-publish")))
+    payload["version"] = "01.0.0"
+    refute schemer("hive-workflow-publish").valid?(payload)
+
+    payload["version"] = "1.0.0"
+    payload["warnings"] = [ {
+      "rule_id" => "permission.broad-declaration",
+      "severity" => "warning", "path" => "manifest.yml",
+      "line" => 1, "column" => 1, "message" => "review required",
+      "review_required" => true, "suppression_allowed" => true,
+      "fingerprint" => "f" * 64, "suppression_requested" => false
+    } ]
+    assert schemer("hive-workflow-publish").valid?(payload)
   end
 
   def test_lifecycle_schemas_reject_incomplete_and_open_envelopes
@@ -157,5 +197,21 @@ class WorkflowLifecycleSchemaTest < Minitest::Test
       "agent" => "claude", "model" => nil, "effort" => nil,
       "profile_fingerprint" => "e" * 64, "policy_fingerprint" => "f" * 64
     }
+  end
+
+  def publish_error(kind, exit_code, retryable)
+    {
+      "schema" => "hive-workflow-publish", "schema_version" => 2, "ok" => false,
+      "error_class" => "PublishError", "error_kind" => kind,
+      "exit_code" => exit_code, "message" => "failed", "retryable" => retryable
+    }
+  end
+
+  def digest_identity
+    { "package_digest" => "a" * 64, "release_digest" => "b" * 64 }
+  end
+
+  def recovery_identity
+    digest_identity.merge("last_completed_step" => "validated")
   end
 end

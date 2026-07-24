@@ -15,6 +15,8 @@ require "hive/workflows/loader"
 
 module Hive
   module WorkflowPackage
+    class PublishConfigurationError < Hive::ConfigError; end
+
     class Publisher
       OFFICIAL_REPOSITORY = "ivankuznetsov/honeycomb".freeze
       METADATA_FILE = "honeycomb.yml".freeze
@@ -169,10 +171,19 @@ module Hive
       def publication_destination
         config = @config || Hive::Config.load(@project_root)
         honeycomb = config.fetch("honeycomb", {})
-        [
-          honeycomb.fetch("repository", OFFICIAL_REPOSITORY).to_s,
-          honeycomb.fetch("base_branch", "main").to_s
-        ]
+        repository = honeycomb.fetch("repository", OFFICIAL_REPOSITORY).to_s
+        branch = honeycomb.fetch("base_branch", "main").to_s
+        unless PublishReceipt::REPOSITORY.match?(repository)
+          raise PublishConfigurationError, "Honeycomb registry repository must be owner/name"
+        end
+        unless PublishReceipt::BRANCH.match?(branch)
+          raise PublishConfigurationError, "Honeycomb registry base branch is invalid"
+        end
+        [ repository, branch ]
+      rescue PublishConfigurationError
+        raise
+      rescue Hive::ConfigError, KeyError, TypeError
+        raise PublishConfigurationError, "Honeycomb registry configuration is invalid"
       end
 
       def retained_receipt_path?(registry)

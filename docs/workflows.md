@@ -179,12 +179,19 @@ no receipt, Git, GitHub, or catalogue side effects.
 A real submission must bind `--expected-release-digest` to the exact confirmed
 dry-run bytes. Hive retains an owner-private digest bundle and receipt under
 the XDG state home, journals intent before fork/push/PR effects, and reconciles
-the exact branch, commit, manifest, PR head/base, and catalogue entry on retry.
+the exact fork parent, head repository/branch, commit parent and OID, manifest,
+PR base, and catalogue entry on retry. A matching externally created PR may use
+a different branch name; names are locators, while verified bytes and remote
+identity are authority. Receipt progress and lifecycle observations are
+monotonic, so a stale concurrent retry cannot replace newer evidence.
 The schema-v2 lifecycle is `pending_review`, `merged_pending_listing`, `listed`,
 or `closed_unmerged`; freshness is independently `current` or `cached`, and
 cached results retain the original observation time. Publication never merges,
 approves, closes, force-pushes, deletes remote state, or authors catalogue and
-review evidence. Registry maintainers own review, merge, and listing.
+review evidence. A retained release is rechecked against both its recorded lint
+identity and the current policy: a new blocking rule remains visible during
+read-only reconciliation but prevents any new fork, push, or PR mutation.
+Registry maintainers own review, merge, and listing.
 
 ## Descriptor Schema
 

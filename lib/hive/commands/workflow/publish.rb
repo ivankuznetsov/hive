@@ -63,6 +63,8 @@ module Hive
           else
             @publisher.prepare(destination: root)
           end
+        rescue Hive::WorkflowPackage::PublishConfigurationError
+          raise
         rescue Hive::WorkflowPackage::PackageError, Hive::ConfigError => e
           raise ValidationError, e.message
         end
@@ -150,6 +152,7 @@ module Hive
           when ValidationError, Hive::WorkflowPackage::PackageError,
                Hive::WorkflowPackage::PublishPolicyBlocked then "validation"
           when Hive::WorkflowPackage::PublishAuthenticationError then "authentication"
+          when Hive::WorkflowPackage::PublishConfigurationError then "configuration"
           when Hive::WorkflowPackage::PublishOfflineError, Hive::WorkflowPackage::CatalogueUnavailable then "offline"
           when Hive::WorkflowPackage::PublishConflict then "immutable_conflict"
           when Hive::WorkflowPackage::PublishAmbiguousError then "remote_ambiguous"

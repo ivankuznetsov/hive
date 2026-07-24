@@ -23,7 +23,9 @@
         "line": {"type": "integer", "minimum": 1},
         "column": {"type": "integer", "minimum": 1},
         "review_required": {"type": "boolean"},
-        "suppression_allowed": {"type": "boolean"}
+        "suppression_allowed": {"type": "boolean"},
+        "fingerprint": {"$ref": "#/$defs/Digest"},
+        "suppression_requested": {"type": "boolean"}
       }
     },
     "SuccessProperties": {
@@ -33,7 +35,7 @@
         "schema_version": {"const": 2},
         "ok": {"const": true},
         "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"},
-        "version": {"type": "string"},
+        "version": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"},
         "package_digest": {"$ref": "#/$defs/Digest"},
         "release_digest": {"$ref": "#/$defs/Digest"},
         "warnings": {"type": "array", "items": {"$ref": "#/$defs/Warning"}}
@@ -48,7 +50,7 @@
         "schema_version": {"const": 2},
         "ok": {"const": true},
         "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"},
-        "version": {"type": "string"},
+        "version": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"},
         "package_digest": {"$ref": "#/$defs/Digest"},
         "release_digest": {"$ref": "#/$defs/Digest"},
         "warnings": {"type": "array", "items": {"$ref": "#/$defs/Warning"}},
@@ -66,7 +68,7 @@
         "schema_version": {"const": 2},
         "ok": {"const": true},
         "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"},
-        "version": {"type": "string"},
+        "version": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"},
         "package_digest": {"$ref": "#/$defs/Digest"},
         "release_digest": {"$ref": "#/$defs/Digest"},
         "warnings": {"type": "array", "items": {"$ref": "#/$defs/Warning"}},
@@ -85,7 +87,7 @@
         "schema_version": {"const": 2},
         "ok": {"const": true},
         "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"},
-        "version": {"type": "string"},
+        "version": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"},
         "package_digest": {"$ref": "#/$defs/Digest"},
         "release_digest": {"$ref": "#/$defs/Digest"},
         "warnings": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/Warning"}},
@@ -96,17 +98,26 @@
       }
     },
     "ErrorPayload": {
+      "oneOf": [
+        {"$ref": "#/$defs/ValidationErrorPayload"},
+        {"$ref": "#/$defs/ConfigurationErrorPayload"},
+        {"$ref": "#/$defs/OfflineErrorPayload"},
+        {"$ref": "#/$defs/ImmutableConflictErrorPayload"},
+        {"$ref": "#/$defs/RemoteAmbiguousErrorPayload"},
+        {"$ref": "#/$defs/InternalErrorPayload"}
+      ]
+    },
+    "ErrorBase": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message", "retryable"],
       "properties": {
         "schema": {"const": "hive-workflow-publish"},
         "schema_version": {"const": 2},
         "ok": {"const": false},
-        "error_class": {"type": "string"},
-        "error_kind": {"enum": ["validation", "authentication", "configuration", "offline", "immutable_conflict", "remote_ambiguous", "internal"]},
-        "exit_code": {"enum": [1, 64, 69, 70, 75, 78]},
-        "message": {"type": "string"},
+        "error_class": {"type": "string", "minLength": 1},
+        "error_kind": {"type": "string"},
+        "exit_code": {"type": "integer"},
+        "message": {"type": "string", "minLength": 1},
         "retryable": {"type": "boolean"},
         "package_digest": {"$ref": "#/$defs/Digest"},
         "release_digest": {"$ref": "#/$defs/Digest"},
@@ -114,6 +125,86 @@
         "last_observed_state": {"enum": ["pending_review", "merged_pending_listing", "listed", "closed_unmerged"]},
         "pr_url": {"type": "string"}
       }
+    },
+    "ValidationErrorPayload": {
+      "allOf": [
+        {"$ref": "#/$defs/ErrorBase"},
+        {
+          "properties": {
+            "error_kind": {"const": "validation"},
+            "exit_code": {"const": 64},
+            "retryable": {"const": false}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "ConfigurationErrorPayload": {
+      "allOf": [
+        {"$ref": "#/$defs/ErrorBase"},
+        {
+          "properties": {
+            "error_kind": {"enum": ["authentication", "configuration"]},
+            "exit_code": {"const": 78},
+            "retryable": {"const": false}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "OfflineErrorPayload": {
+      "allOf": [
+        {"$ref": "#/$defs/ErrorBase"},
+        {
+          "required": ["package_digest", "release_digest", "last_completed_step"],
+          "properties": {
+            "error_kind": {"const": "offline"},
+            "exit_code": {"const": 69},
+            "retryable": {"const": true}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "ImmutableConflictErrorPayload": {
+      "allOf": [
+        {"$ref": "#/$defs/ErrorBase"},
+        {
+          "properties": {
+            "error_kind": {"const": "immutable_conflict"},
+            "exit_code": {"const": 1},
+            "retryable": {"const": false}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "RemoteAmbiguousErrorPayload": {
+      "allOf": [
+        {"$ref": "#/$defs/ErrorBase"},
+        {
+          "required": ["package_digest", "release_digest", "last_completed_step"],
+          "properties": {
+            "error_kind": {"const": "remote_ambiguous"},
+            "exit_code": {"const": 75},
+            "retryable": {"const": true}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "InternalErrorPayload": {
+      "allOf": [
+        {"$ref": "#/$defs/ErrorBase"},
+        {
+          "properties": {
+            "error_kind": {"const": "internal"},
+            "exit_code": {"const": 70},
+            "retryable": {"const": false}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
     }
   }
 }

@@ -228,14 +228,14 @@ class NewTest < Minitest::Test
       with_tmp_git_repo do |dir|
         setup_project { initialize_project(dir) }
         project = File.basename(dir)
-        File.write(File.join(dir, ".hive-state", "config.yml"), "reviewers: []\n")
+        File.write(File.join(dir, ".hive-state", "config.yml"), "reviewres: []\n")
 
         _out, err, status = with_captured_exit do
           Hive::Commands::New.new(project, "unsupported config probe").call
         end
 
         assert_equal Hive::ExitCodes::CONFIG, status
-        assert_includes err, "move it to `review.reviewers`"
+        assert_includes err, "Unknown top-level key `reviewres`"
         assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", "unsupported-config-probe-*")]
       end
     end

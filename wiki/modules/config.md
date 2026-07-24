@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-22
+updated: 2026-07-23
 tags: [config, yaml, validation]
 ---
 
@@ -29,10 +29,21 @@ All unsupported root keys are reported together in deterministic order and the
 error names the source config path. The loader raises
 `UnsupportedProjectConfigError` (a `ConfigError`, exit 78) so task/workflow
 discovery cannot mistake this shared validation result for a recoverable config
-read failure and fall back to the built-in `coding` workflow. A literal
-root-level `reviewers` key is
-always invalid, including `reviewers: null`, `reviewers: []`, or a populated
-list. Move reviewer entries under `review.reviewers`:
+read failure and fall back to the built-in `coding` workflow.
+
+There is one narrow upgrade compatibility alias. Older Hive versions silently
+ignored a literal root-level `reviewers` key, so the loader temporarily promotes
+that value in memory to `review.reviewers`, validates it there, and emits one
+warning per process and source path telling the operator to run `hive migrate`.
+This keeps an older project usable immediately after `hive update` without
+silently discarding its intended reviewer selection. `hive migrate` performs
+the durable, comment-preserving rewrite in the project's tracked Hive state.
+If both the legacy and canonical locations exist, Hive exits 78 and requires
+the operator to choose which value to keep; it never guesses. Invalid promoted
+values such as `reviewers: null` still fail the normal
+`review.reviewers` validation.
+
+The canonical form is:
 
 ```yaml
 review:
@@ -50,7 +61,8 @@ This root allowlist applies only to project config loaded through
 same malformed project config fails consistently in `hive run`, `hive doctor`,
 `hive new`, text/JSON `hive status`, and other consumers instead of reaching
 command-specific fallback behavior. An invalid workflow path cannot pre-empt
-the targeted root-level `reviewers` migration diagnostic.
+an unsupported-root diagnostic; the legacy reviewers alias is normalized before
+workflow-path resolution.
 
 ## Condition authority
 

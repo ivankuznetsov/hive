@@ -420,7 +420,7 @@ module Hive
       ).call
     end
 
-    desc "migrate [PROJECT_PATH]", "Rename in-flight task folders from the pre-open-pr stage layout"
+    desc "migrate [PROJECT_PATH]", "Migrate legacy project config, task folders, and metadata"
     def migrate(project_path = Dir.pwd)
       require "hive/commands/migrate"
       Hive::Commands::Migrate.new(project_path).call

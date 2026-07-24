@@ -53,6 +53,7 @@ module Hive
           unless data
             return load_overlay!(project_root, fallback_workflow_dir(project_root))
           end
+          data = Hive::Config.normalize_legacy_project_config(data, source_path)
 
           configured_path = data["hive_state_path"]
           configured_path = Hive::Config::DEFAULTS.fetch("hive_state_path") unless configured_path.is_a?(String)

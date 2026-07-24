@@ -27,7 +27,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       assert_equal [ "git diff *", "git status" ], policy.commands
       assert_equal [ "api.example.com" ], policy.domains
       assert_equal policy_dir, File.dirname(policy.settings_path)
-      assert_equal({}, JSON.parse(File.read(policy.mcp_config_path)))
+      assert_equal({ "mcpServers" => {} }, JSON.parse(File.read(policy.mcp_config_path)))
       settings = JSON.parse(File.read(policy.settings_path))
       assert_equal policy.directories.drop(1), settings.fetch("permissions").fetch("additionalDirectories")
       assert settings.fetch("hooks").key?("PreToolUse")

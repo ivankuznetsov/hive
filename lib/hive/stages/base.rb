@@ -607,8 +607,14 @@ module Hive
                       profile: nil, expected_output: nil, status_mode: nil,
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
                       disallowed_tools: nil, cli_flags: nil,
-                      model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil)
+                      model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
+                      routing_resolution: nil, routing_arguments: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
+        if routing_resolution && routing_arguments
+          raise ArgumentError, "pass routing_resolution or routing_arguments, not both"
+        end
+        routing_arguments ||= profile.routing_arguments(routing_resolution) if routing_resolution
+        profile.validate_routing_arguments!(routing_arguments) if routing_arguments
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
         # so callers (Review.run!'s spawn_fix_agent etc.) write a
@@ -636,9 +642,10 @@ module Hive
         # path, already assembled the flags and must win over cfg; commit
         # 01841e12). Keying derivation on nil-vs-[] keeps those two intents
         # distinct rather than collapsing both to "empty".
-        derive_flags_from_cfg = cli_flags.nil? && identity_arguments.nil?
+        derive_flags_from_cfg =
+          cli_flags.nil? && identity_arguments.nil? && routing_arguments.nil?
         cli_flags ||= []
-        if identity_arguments.nil? && (model || effort)
+        if routing_arguments.nil? && identity_arguments.nil? && (model || effort)
           if profile.model_argument_builder
             concrete_model = model || profile.concrete_default_model(
               cfg: cfg, project_root: cfg && cfg["project_root"]
@@ -677,7 +684,8 @@ module Hive
           disallowed_tools: disallowed_tools,
           cli_flags: cli_flags,
           identity_arguments: identity_arguments || [],
-          runtime_policy: runtime_policy
+          runtime_policy: runtime_policy,
+          routing_arguments: routing_arguments
         ).run!
         record_usage(task, profile, result, started_at)
         result

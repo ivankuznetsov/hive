@@ -97,6 +97,9 @@ module Hive
         Hive::ImplementationIdentity::NativeDefaults.resolve(:grok, **kwargs)
       },
       model_argument_builder: ->(model) { [ "--model", model ] },
+      routed_model_argument_builder: ->(model) {
+        %w[default inherit].include?(model) ? [] : [ "--model", model ]
+      },
       launcher_identity: "grok-cli/v1"
     )
 

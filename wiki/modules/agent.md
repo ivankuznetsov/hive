@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-07-22
+updated: 2026-07-25
 tags: [agent, claude, subprocess]
 ---
 
@@ -70,7 +70,7 @@ There is **no inode-tracking concurrent-edit detection.** It was tried in early 
 hardcoded Claude template:
 
 ```
-<profile.bin> <profile.headless_flag>
+<profile.bin> [<profile-routed global arguments>] <profile.headless_flag>
   <permission flags>
   [<profile.add_dir_flag> <dir> ...]
   [--allowedTools <csv>]
@@ -80,6 +80,15 @@ hardcoded Claude template:
   <profile.output_format_flags...>
   <prompt>
 ```
+
+In actual argv the binary remains first: profile-routed global arguments are
+inserted immediately after it and before the headless subcommand. This is an
+opt-in path used only for an active recognized `ModelRouting` resolution.
+Codex therefore receives `codex --model ... -c
+model_reasoning_effort=... exec ...`; Claude, Grok, and Pi keep their
+profile-native routed arguments in the subcommand segment. Unscoped calls and
+inactive resolutions stay on the original assembly path, including the
+existing flat implementation-identity argument position.
 
 Prompt placement is profile data: Claude/Pi use a trailing positional prompt,
 Codex sends the prompt through stdin and places `-` in argv, and Grok places

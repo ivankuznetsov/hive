@@ -139,7 +139,7 @@ module Hive
                    permission_mode: nil, allowed_tools: nil,
                    disallowed_tools: nil, cli_flags: [], max_tokens: nil,
                    max_turns: nil, identity_arguments: [], runtime_policy: nil,
-                   log_stream: true)
+                   routing_arguments: nil, log_stream: true)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -179,6 +179,8 @@ module Hive
         @child_environment = SCRUBBED_CHILD_ENV
       end
       @identity_arguments = Hive::ImplementationIdentity.validate_native_arguments(identity_arguments).freeze
+      @routing_arguments =
+        routing_arguments && @profile.validate_routing_arguments!(routing_arguments)
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -483,6 +485,7 @@ module Hive
     # the refactor — the claude profile's flag set IS today's flag set).
     def build_cmd
       cmd = [ @profile.bin ]
+      cmd.concat(@routing_arguments.global_arguments) if @routing_arguments
       if @profile.headless_flag
         cmd << @profile.headless_flag
         # Some CLIs' headless flag TAKES the prompt as its value (grok's
@@ -512,6 +515,7 @@ module Hive
       # remains Claude-only for backward compatibility with callers that
       # need unrelated Claude flags (MCP, legacy capability adapters).
       cmd.concat(@identity_arguments)
+      cmd.concat(@routing_arguments.subcommand_arguments) if @routing_arguments
       if @cli_flags.any? && @profile.name != :claude
         raise ArgumentError, "cli_flags are claude-specific; got #{@cli_flags.inspect} for #{@profile.name}"
       end

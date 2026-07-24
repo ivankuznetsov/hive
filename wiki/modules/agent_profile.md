@@ -3,7 +3,7 @@ title: Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-07-22
+updated: 2026-07-25
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -39,6 +39,9 @@ Constructor kwargs (every profile freezes after init):
 | `default_model_resolver:` | Optional read-only callable that resolves provider-native configuration to one concrete model; `default`/`inherit` are rejected. |
 | `model_argument_builder:` | Optional callable translating a normalized model to discrete native argv. |
 | `effort_argument_builder:` | Optional callable translating a normalized effort to discrete native argv; absence means unsupported. |
+| `routed_model_argument_builder:` / `routed_effort_argument_builder:` | Optional routing-only builders. They default to the identity builders, but let a profile keep legacy identity observability while applying native `default`/`inherit` sentinel behavior to active stage routing. |
+| `routed_effort_values:` | Optional profile-native allowlist for effective routed effort. A profile with no routed effort builder rejects every newly routed effort. |
+| `routing_argument_placement:` | `:subcommand` by default; `:global` for CLIs such as Codex whose model controls must precede `exec` or `review`. |
 | `launcher_identity:` | Stable profile/launcher version label stored in implementation identity events. |
 | `policy_capabilities:` | Optional symbols proving which managed-package controls the runner can enforce. Empty preserves custom-profile construction but makes managed admission fail closed. |
 
@@ -58,6 +61,8 @@ Constructor kwargs (every profile freezes after init):
 | `require_cli_capability!(name)` | Version-checks the resolved binary, probes `<bin> <capability-argv> --help` under the same bounded process-group deadline as version discovery, verifies every option token (arguments such as a `--tools` CSV are not mistaken for flags), caches the result by binary/version/capability/argv, and returns a copy. Missing declarations, flags, binaries, failed help, and timeouts raise `Hive::AgentError`. |
 | `concrete_default_model(cfg:, project_root:)` | Resolves and validates a provider-native model without copying credentials or arbitrary CLI configuration into Hive state. Codex discovery reads the top-level TOML `model` assignment and accepts ordinary inline comments. |
 | `identity_arguments(model:, effort:, pin_model:)` | Returns normalized model/effort observability plus discrete native argv, including requested/effective effort and support. |
+| `validate_routed_control!(control, source:)` | Validates one exact/coarse `ModelRouting::EffectiveControl` against this profile's native model/effort capabilities and vocabulary. |
+| `routing_arguments(resolution, source:)` | Atomically validates an active `ModelRouting::Resolution`, renders both routed and inherited effective fields with profile-native sentinel behavior, and returns typed global/subcommand argv. Inactive or unscoped resolutions return nil. |
 
 `STATUS_DETECTION_MODES` is the closed enum used by `Hive::Agent#handle_exit` to decide success: `state_file_marker` (claude default — agent writes the marker), `exit_code_only` (CI-fix loops — make the command succeed), `output_file_exists` (reviewer/triage spawns — produce the artifact).
 
@@ -72,6 +77,15 @@ Module-level singleton, mutex-guarded. `register(name, profile)` adds (or replac
 Auto-required from `lib/hive/agent_profiles.rb`:
 
 For implementation identity, Claude translates normalized values to `--model <model> --effort <effort>` and Codex to `--model <model> -c model_reasoning_effort=<effort>`. Pi and Grok can resolve and optionally pin a concrete provider-native model but declare effort unsupported. An unsupported effort stays visible as requested while native argv omits it and `effective_effort` remains unset.
+
+Active stage routing is stricter than that legacy identity path. Claude accepts
+`default`, `inherit`, `low`, `medium`, `high`, `xhigh`, and `max`; Codex
+accepts `default`, `inherit`, `none`, `minimal`, `low`, `medium`, `high`, and
+`xhigh`; Grok and Pi reject routed effort. Claude routing omits model
+`inherit` and effort `default`/`inherit`. Codex routing emits model and
+reasoning controls as global arguments before its subcommand. The typed
+argument envelope retains profile, stage, values, and provenance and is
+revalidated at the spawn boundary to prevent cross-profile argv reuse.
 
 `Hive::ImplementationIdentity::EventBuilder` owns the durable journal envelope
 shared by first-time identity capture and legacy reconstruction. It binds the

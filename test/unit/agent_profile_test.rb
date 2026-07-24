@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/agent_profile"
 require "hive/implementation_identity"
+require "hive/model_routing"
 
 class AgentProfileTest < Minitest::Test
   def test_policy_capabilities_are_optional_and_frozen
@@ -146,6 +147,190 @@ class AgentProfileTest < Minitest::Test
     end
 
     assert_match(/cannot pin model/, error.message)
+  end
+
+  def test_routed_effort_rejects_profiles_without_native_effort_support
+    %i[grok pi].each do |name|
+      profile = Hive::AgentProfiles.lookup(name)
+      resolution = Hive::ModelRouting.resolve(
+        models: { "plan" => { "effort" => "high" } },
+        stage: "plan",
+        provider: name,
+        current: { model: "provider/model-v1" }
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        profile.routing_arguments(resolution)
+      end
+
+      assert_match(/models\.plan\.effort/, error.message)
+      assert_match(/profile :#{name}/, error.message)
+      assert_match(/does not support reasoning effort/, error.message)
+    end
+  end
+
+  def test_builtin_profiles_render_only_their_native_routed_arguments
+    cases = {
+      claude: {
+        model: "opus",
+        effort: "high",
+        global: [],
+        subcommand: [ "--model", "opus", "--effort", "high" ]
+      },
+      codex: {
+        model: "gpt-5.6-sol",
+        effort: "xhigh",
+        global: [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh" ],
+        subcommand: []
+      },
+      grok: {
+        model: "grok-code-fast-1",
+        effort: nil,
+        global: [],
+        subcommand: [ "--model", "grok-code-fast-1" ]
+      },
+      pi: {
+        model: "openai/gpt-5.6-sol",
+        effort: nil,
+        global: [],
+        subcommand: [ "--model", "openai/gpt-5.6-sol" ]
+      }
+    }
+
+    cases.each do |name, expected|
+      profile = Hive::AgentProfiles.lookup(name)
+      resolution = Hive::ModelRouting.resolve(
+        models: {
+          "plan" => {
+            "model" => expected.fetch(:model),
+            **({ "effort" => expected.fetch(:effort) } if expected.fetch(:effort))
+          }
+        },
+        stage: "plan",
+        provider: name
+      )
+
+      arguments = profile.routing_arguments(resolution)
+
+      assert_equal expected.fetch(:global), arguments.global_arguments, name
+      assert_equal expected.fetch(:subcommand), arguments.subcommand_arguments, name
+      assert_equal name, arguments.profile_name
+      assert_equal "plan", arguments.stage
+    end
+  end
+
+  def test_codex_routed_model_and_effort_can_be_rendered_independently
+    profile = Hive::AgentProfiles.lookup(:codex)
+    only_model = profile.routing_arguments(
+      Hive::ModelRouting.resolve(
+        models: { "plan" => { "model" => "gpt-5.6-sol" } },
+        stage: "plan",
+        provider: :codex
+      )
+    )
+    only_effort = profile.routing_arguments(
+      Hive::ModelRouting.resolve(
+        models: { "plan" => { "effort" => "xhigh" } },
+        stage: "plan",
+        provider: :codex
+      )
+    )
+
+    assert_equal [ "--model", "gpt-5.6-sol" ], only_model.global_arguments
+    assert_equal [ "-c", "model_reasoning_effort=xhigh" ], only_effort.global_arguments
+  end
+
+  def test_routing_resolution_cannot_be_rendered_by_a_different_provider_profile
+    resolution = Hive::ModelRouting.resolve(
+      models: { "plan" => { "model" => "gpt-5.6-sol" } },
+      stage: "plan",
+      provider: :codex
+    )
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::AgentProfiles.lookup(:claude).routing_arguments(resolution)
+    end
+
+    assert_match(/selected provider :codex/, error.message)
+    assert_match(/profile :claude/, error.message)
+    assert_match(/may not change providers/, error.message)
+  end
+
+  def test_routed_field_renders_fallback_field_with_profile_native_sentinels
+    claude = Hive::AgentProfiles.lookup(:claude)
+    inherited_model = claude.routing_arguments(
+      Hive::ModelRouting.resolve(
+        models: { "plan" => { "effort" => "high" } },
+        stage: "plan",
+        provider: :claude,
+        current: { model: "inherit" }
+      )
+    )
+    default_effort = claude.routing_arguments(
+      Hive::ModelRouting.resolve(
+        models: { "plan" => { "model" => "opus" } },
+        stage: "plan",
+        provider: :claude,
+        current: { effort: "default" }
+      )
+    )
+
+    assert_equal [ "--effort", "high" ], inherited_model.subcommand_arguments
+    assert_equal [ "--model", "opus" ], default_effort.subcommand_arguments
+  end
+
+  def test_routed_effort_uses_each_profile_native_vocabulary
+    codex = Hive::AgentProfiles.lookup(:codex)
+    claude = Hive::AgentProfiles.lookup(:claude)
+
+    codex_error = assert_raises(Hive::ConfigError) do
+      codex.routing_arguments(
+        Hive::ModelRouting.resolve(
+          models: { "plan" => { "effort" => "max" } },
+          stage: "plan",
+          provider: :codex
+        )
+      )
+    end
+    claude_error = assert_raises(Hive::ConfigError) do
+      claude.routing_arguments(
+        Hive::ModelRouting.resolve(
+          models: { "plan" => { "effort" => "minimal" } },
+          stage: "plan",
+          provider: :claude
+        )
+      )
+    end
+
+    assert_match(/must be one of/, codex_error.message)
+    assert_match(/must be one of/, claude_error.message)
+  end
+
+  def test_inactive_routing_does_not_create_a_staged_argument_channel
+    profile = Hive::AgentProfiles.lookup(:codex)
+    resolution = Hive::ModelRouting.resolve(
+      models: {},
+      stage: nil,
+      provider: :codex,
+      current: { model: " untouched ", effort: "legacy-shape" }
+    )
+
+    assert_nil profile.routing_arguments(resolution)
+  end
+
+  def test_custom_profile_routing_metadata_is_optional_and_preserved_by_overrides
+    legacy = make_profile(model_argument_builder: ->(model) { [ "--model", model ] })
+    assert_equal :subcommand, legacy.routing_argument_placement
+
+    global = make_profile(
+      model_argument_builder: ->(model) { [ "--choose-model", model ] },
+      routed_effort_values: %w[low high],
+      routing_argument_placement: :global
+    )
+    overridden = global.with_overrides("min_version" => "9.9.9")
+
+    assert_equal :global, overridden.routing_argument_placement
+    assert_equal %w[low high], overridden.routed_effort_values
   end
 
   def test_bin_uses_env_override_when_set

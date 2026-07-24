@@ -1,6 +1,7 @@
 require "open3"
 require "timeout"
 require "hive/implementation_identity"
+require "hive/model_routing"
 
 module Hive
   # Per-CLI invocation contract for a headless agent.
@@ -14,6 +15,7 @@ module Hive
   # each CLI's flag mapping. Profiles ship in lib/hive/agent_profiles/.
   class AgentProfile
     PROMPT_STYLES = %i[positional headless_flag_value stdin].freeze
+    ROUTING_ARGUMENT_PLACEMENTS = %i[global subcommand].freeze
     WORKSPACE_WRITE_PERMISSION_MODE = "workspace-write".freeze
     READ_ONLY_PERMISSION_MODE = "read-only".freeze
     # Status-detection modes. handle_exit branches on these:
@@ -36,6 +38,35 @@ module Hive
     CAPTURE_TERM_GRACE_SEC = 0.2
     CAPTURE_REAP_GRACE_SEC = 0.2
 
+    RoutingArguments = Data.define(
+      :profile_name, :stage, :model, :effort, :provenance,
+      :global_arguments, :subcommand_arguments
+    ) do
+      def initialize(profile_name:, stage:, model:, effort:, provenance:,
+                     global_arguments:, subcommand_arguments:)
+        super(
+          profile_name: profile_name.to_sym,
+          stage: stage.to_s.dup.freeze,
+          model: model&.to_s&.dup&.freeze,
+          effort: effort&.to_s&.dup&.freeze,
+          provenance: provenance.dup.freeze,
+          global_arguments: freeze_arguments(global_arguments),
+          subcommand_arguments: freeze_arguments(subcommand_arguments)
+        )
+        freeze
+      end
+
+      def native_arguments
+        global_arguments + subcommand_arguments
+      end
+
+      private
+
+      def freeze_arguments(arguments)
+        Array(arguments).map { |argument| argument.to_s.dup.freeze }.freeze
+      end
+    end
+
     attr_reader :prompt_style
     attr_reader :name, :bin_default, :env_bin_override_key,
                 :headless_flag, :permission_skip_flag, :add_dir_flag,
@@ -45,7 +76,9 @@ module Hive
                 :workspace_write_flags, :read_only_flags, :cli_capabilities,
                 :initial_context_tokens, :default_model_resolver,
                 :model_argument_builder, :effort_argument_builder,
-                :launcher_identity, :policy_capabilities
+                :launcher_identity, :policy_capabilities,
+                :routed_effort_values, :routing_argument_placement,
+                :routed_model_argument_builder, :routed_effort_argument_builder
 
     # Public API — do not break.
     #
@@ -123,7 +156,11 @@ module Hive
                    model_argument_builder: nil,
                    effort_argument_builder: nil,
                    launcher_identity: nil,
-                   policy_capabilities: [])
+                   policy_capabilities: [],
+                   routed_effort_values: nil,
+                   routing_argument_placement: :subcommand,
+                   routed_model_argument_builder: nil,
+                   routed_effort_argument_builder: nil)
       prompt_style ||= name.to_sym == :codex ? :stdin : :positional
       unless PROMPT_STYLES.include?(prompt_style)
         raise ArgumentError,
@@ -138,6 +175,11 @@ module Hive
 
       unless initial_context_tokens.is_a?(Integer) && initial_context_tokens >= 0
         raise ArgumentError, "initial_context_tokens must be a non-negative Integer"
+      end
+      unless ROUTING_ARGUMENT_PLACEMENTS.include?(routing_argument_placement)
+        raise ArgumentError,
+              "unknown routing_argument_placement: #{routing_argument_placement.inspect}; " \
+              "valid: #{ROUTING_ARGUMENT_PLACEMENTS.inspect}"
       end
 
       @name = name
@@ -166,6 +208,11 @@ module Hive
       @effort_argument_builder = effort_argument_builder
       @launcher_identity = (launcher_identity || "AgentProfile/v1:#{name}").to_s.freeze
       @policy_capabilities = Array(policy_capabilities).map(&:to_sym).uniq.freeze
+      @routed_effort_values =
+        routed_effort_values && Array(routed_effort_values).map { |value| value.to_s.freeze }.uniq.freeze
+      @routing_argument_placement = routing_argument_placement
+      @routed_model_argument_builder = routed_model_argument_builder || @model_argument_builder
+      @routed_effort_argument_builder = routed_effort_argument_builder || @effort_argument_builder
 
       freeze
     end
@@ -298,6 +345,123 @@ module Hive
         model_pinned: pin_model,
         native_arguments: Hive::ImplementationIdentity.validate_native_arguments(native_arguments)
       )
+    end
+
+    # Validate one exact/coarse control produced by ModelRouting's reachable
+    # call projection. Current/legacy fallbacks deliberately do not use this
+    # strict path: unsupported effort remains observable-but-unrendered for
+    # legacy implementation identities.
+    def validate_routed_control!(control, source: nil)
+      unless control.is_a?(Hive::ModelRouting::EffectiveControl)
+        raise ArgumentError, "routed control must be a Hive::ModelRouting::EffectiveControl"
+      end
+
+      value = normalize_routed_value(control.value, control_path(control, source))
+      case control.field
+      when :model
+        return value if @routed_model_argument_builder
+
+        raise Hive::ConfigError,
+              "#{control_path(control, source)} requests model selection, but agent profile " \
+              "#{@name.inspect} does not support model selection"
+      when :effort
+        unless @routed_effort_argument_builder
+          raise Hive::ConfigError,
+                "#{control_path(control, source)} requests reasoning effort, but agent profile " \
+                "#{@name.inspect} does not support reasoning effort"
+        end
+        if @routed_effort_values && !@routed_effort_values.include?(value)
+          raise Hive::ConfigError,
+                "#{control_path(control, source)} for agent profile #{@name.inspect} must be one of " \
+                "#{@routed_effort_values.inspect}; got #{control.value.inspect}"
+        end
+        value
+      else
+        raise ArgumentError, "unknown routed control field #{control.field.inspect}"
+      end
+    end
+
+    # Atomically validate and render an active ModelRouting resolution. The
+    # returned typed value keeps provider-native global arguments separate
+    # from subcommand arguments so Codex controls can precede `exec`/`review`.
+    # Inactive/unscoped resolutions return nil and therefore cannot reorder
+    # legacy argv.
+    def routing_arguments(resolution, source: nil)
+      unless resolution.is_a?(Hive::ModelRouting::Resolution)
+        raise ArgumentError, "routing resolution must be a Hive::ModelRouting::Resolution"
+      end
+      return nil unless resolution.active?
+      if resolution.provider &&
+         resolution.provider.to_s != @name.to_s
+        raise Hive::ConfigError,
+              "model routing selected provider #{resolution.provider.inspect}, but agent profile " \
+              "#{@name.inspect} was chosen; models may not change providers"
+      end
+
+      Hive::ModelRouting.fetch(resolution.stage)
+      Hive::ModelRouting::FIELDS.each do |field|
+        provenance = resolution.provenance.fetch(field)
+        next unless provenance.routed?
+
+        validate_routed_control!(
+          Hive::ModelRouting::EffectiveControl.new(
+            stage: resolution.stage,
+            profile: @name,
+            provider: resolution.provider,
+            field: field,
+            value: resolution.public_send(field),
+            provenance: provenance
+          ),
+          source: source
+        )
+      end
+
+      native_arguments = []
+      append_routing_argument(
+        native_arguments, @routed_model_argument_builder, resolution.model, "model"
+      )
+      append_routing_argument(
+        native_arguments, @routed_effort_argument_builder, resolution.effort, "effort"
+      )
+      native_arguments = Hive::ImplementationIdentity.validate_native_arguments(native_arguments)
+      global_arguments = @routing_argument_placement == :global ? native_arguments : []
+      subcommand_arguments = @routing_argument_placement == :subcommand ? native_arguments : []
+
+      RoutingArguments.new(
+        profile_name: @name,
+        stage: resolution.stage,
+        model: resolution.model,
+        effort: resolution.effort,
+        provenance: resolution.provenance,
+        global_arguments: global_arguments,
+        subcommand_arguments: subcommand_arguments
+      )
+    end
+
+    def validate_routing_arguments!(arguments)
+      unless arguments.is_a?(RoutingArguments)
+        raise ArgumentError, "routing_arguments must be an AgentProfile::RoutingArguments"
+      end
+      unless arguments.profile_name == @name.to_sym
+        raise ArgumentError,
+              "routing arguments for profile #{arguments.profile_name.inspect} cannot be used with #{@name.inspect}"
+      end
+
+      Hive::ModelRouting.fetch(arguments.stage)
+      expected = routing_arguments(
+        Hive::ModelRouting::Resolution.new(
+          stage: arguments.stage,
+          provider: @name,
+          model: arguments.model,
+          effort: arguments.effort,
+          provenance: arguments.provenance
+        )
+      )
+      unless expected == arguments
+        raise ArgumentError,
+              "routing arguments do not match agent profile #{@name.inspect} native rendering"
+      end
+      arguments
     end
 
     # Return the argv for an explicitly declared CLI capability, but only
@@ -584,8 +748,37 @@ module Hive
         model_argument_builder: @model_argument_builder,
         effort_argument_builder: @effort_argument_builder,
         launcher_identity: @launcher_identity,
-        policy_capabilities: @policy_capabilities.dup
+        policy_capabilities: @policy_capabilities.dup,
+        routed_effort_values: @routed_effort_values&.dup,
+        routing_argument_placement: @routing_argument_placement,
+        routed_model_argument_builder: @routed_model_argument_builder,
+        routed_effort_argument_builder: @routed_effort_argument_builder
       }
+    end
+
+    def append_routing_argument(arguments, builder, value, field)
+      return unless builder && !value.nil?
+
+      normalized = normalize_routed_value(value, "effective routed #{field}")
+      arguments.concat(Array(builder.call(normalized)))
+    end
+
+    def normalize_routed_value(value, path)
+      unless value.is_a?(String) || value.is_a?(Symbol)
+        raise Hive::ConfigError, "#{path} must be a non-blank scalar; got #{value.inspect}"
+      end
+
+      normalized = value.to_s.strip
+      raise Hive::ConfigError, "#{path} must be a non-blank scalar" if normalized.empty?
+
+      normalized
+    end
+
+    def control_path(control, source)
+      key = control.provenance.key || control.stage
+      path = "models.#{key}.#{control.field}"
+      path = "#{path} effective for #{control.stage}" if key.to_s != control.stage.to_s
+      source ? "#{path} in #{source}" : path
     end
 
     class << self

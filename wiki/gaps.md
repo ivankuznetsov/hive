@@ -661,3 +661,18 @@ The project-config loader temporarily promotes a root-level `reviewers` key to
 read-through alias has not been selected. Remove it only after warned projects
 have had a migration window and release notes make the strict boundary
 explicit; no version or publication decision is implied by the source change.
+
+## Workflow-creator protected OpenClaw proof awaits a credentialed run (2026-07-24)
+
+The natural-language workflow creator is covered hermetically through AE1–AE5,
+including real descriptor loading, human approve/reject decisions, minimal-init
+preview, collision refusal, and state-wide task idempotency. The protected
+OpenClaw workflow and fail-closed attestor are source/unit tested, but this
+implementation session had no release-gate OpenAI credential and therefore did
+not produce a trusted live attestation. Keep this gap open until the dedicated
+`live-workflow-creator` job succeeds for an exact protected-main candidate and
+the resulting Check Run binds the prompt, candidate skill digest, ordered Hive
+commands, exact editorial graph, zero task count, secret scan, and cleanup.
+The same proof must also attest one explicitly authorized task, one first-stage
+run, a no-op retry with the same idempotency key, and matching operational
+status.

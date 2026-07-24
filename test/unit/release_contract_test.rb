@@ -101,7 +101,8 @@ class ReleaseContractTest < Minitest::Test
     assert_equal %w[claude codex openclaw pi], matrix.map { |row| row.fetch("platform") }.sort
     assert_equal "live-agent-skills-${{ matrix.platform }}", jobs.fetch("live-agent").fetch("environment")
     assert_equal false, jobs.fetch("live-agent").dig("strategy", "fail-fast")
-    assert_equal [ "validate", "build", "live-agent" ], jobs.fetch("attest").fetch("needs")
+    assert_equal [ "validate", "build", "live-agent", "live-workflow-creator" ],
+                 jobs.fetch("attest").fetch("needs")
     assert_includes body, "retention-days: 7"
     assert_includes body, 'name: "live-agent-skills"'
     assert_includes body, "checks: write"
@@ -127,6 +128,18 @@ class ReleaseContractTest < Minitest::Test
     assert_includes candidate_install_body, "install_candidate_gem.sh"
     assert_includes candidate_install_body, '"$RUNNER_TEMP/proven-gems/bin/hive" --version'
     refute_includes candidate_install_body, 'gem install "$gem_file"'
+
+    creator = jobs.fetch("live-workflow-creator")
+    assert_equal [ "validate", "build" ], creator.fetch("needs")
+    assert_equal "live-agent-skills-openclaw", creator.fetch("environment")
+    creator_step = creator.fetch("steps").find do |step|
+      step["name"] == "Run authenticated workflow-creator proof"
+    end
+    refute_nil creator_step
+    assert_equal "${{ secrets.OPENAI_API_KEY }}", creator_step.dig("env", "OPENAI_API_KEY")
+    assert_includes creator_step.fetch("run"), "live_hive_workflow_creator_smoke_test.rb"
+    assert_includes body, "workflow-creator-evidence-openclaw"
+    assert_includes body, "creator-evidence"
   end
 
   def test_tag_release_builds_and_verifies_offline_exact_candidate

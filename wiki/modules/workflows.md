@@ -3,8 +3,8 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/workflow_package/
 created: 2026-04-26
-updated: 2026-07-21
-tags: [module, workflow, verbs, selection, honeycomb, registry]
+updated: 2026-07-24
+tags: [module, workflow, verbs, selection, human-stage, outcomes, honeycomb, registry]
 ---
 
 **TLDR**: The coding, content, bench, and project-authored workflows are described as ordered `Hive::Workflow` value objects whose stages carry directory names, state files, incoming advance verbs, runner metadata, optional instruction files, optional permission specs, per-stage agent/model/effort overrides, council reviewer configs, and terminal deliverables. `Hive::Workflows::Registry.default` still returns the coding descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for built-in, runtime/test, and active-project registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` / `kind: :council` as fallbacks for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`. Coding's descriptor now uses runtime primitive kinds (`:execute`, `:review_council`, `:finalize`) for the worktree-coupled stages; the old `:marker` descriptor kind is retired.
@@ -259,6 +259,28 @@ Hive::Workflows.all_stage_names            # union across Registry.all
 Hermetic coverage lives in `test/unit/workflows/content_test.rb`,
 `test/integration/content_workflow_stage_test.rb`, and
 `test/integration/content_workflow_e2e_test.rb`.
+
+## Durable human stages
+
+`Hive::Workflow::Stage` accepts `kind: :human` plus immutable named
+`outcomes`. The owner-authored parser exposes only closed directional actions:
+an outcome must either complete the workflow or target another stage, and a
+completing outcome may name an artifact. Unsafe outcome names, unknown keys,
+missing/duplicate actions, unknown targets, and agent-only settings fail while
+the descriptor is loaded.
+
+A human stage has no runner. Entering it leaves the state file `WAITING`, and
+status exposes `NEEDS_INPUT` with the descriptor's allowed outcomes.
+`Hive::Commands::Decide` writes a durable decision record with outcome, note,
+artifact/target, and timestamp. A completing decision verifies its declared
+artifact before archival. A returning decision moves the same task under the
+task/state locks and resets the target state file to `WAITING`, preventing a
+stale completion marker from immediately advancing it again.
+
+The accepted editorial graph is exactly
+`research -> draft -> approval`: `approve` completes with non-empty
+`draft.md` recorded as publish-ready, while `reject` returns to `draft`.
+There is no publish stage or executable outcome action.
 
 ## Backlinks
 

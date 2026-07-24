@@ -3,8 +3,8 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-07-19
-tags: [command, workflow, authoring, honeycomb, registry]
+updated: 2026-07-24
+tags: [command, workflow, authoring, validation, human-stage, honeycomb, registry]
 ---
 
 **TLDR**: `hive workflow` manages two ownership domains: `new` scaffolds trusted project-authored descriptors, while `install`, `list`, `update`, and `remove` manage immutable reviewed Honeycomb generations; `publish` validates an authored descriptor and opens a registry PR whose status is only `pending_review`.
@@ -15,6 +15,7 @@ tags: [command, workflow, authoring, honeycomb, registry]
 hive workflow new my-flow
 hive workflow new my-flow --template research
 hive workflow new my-flow --json
+hive workflow validate my-flow --json
 hive workflow install honeycomb/repo-brief --yes
 hive workflow install honeycomb/repo-brief --yes --allow-escalation \
   --mapping stages.research=codex,model=gpt-5.6-sol,effort=high \
@@ -249,6 +250,45 @@ A multi-stage template prints `edit: <id>/ (N stage instructions to fill in)`
 pointing at the directory of instructions to define (the single-stage blank
 still names its one `work.md`). An unknown `--template` is a USAGE error
 listing the available names; with `--json` they ride the `expected` array.
+
+## Read-only validation and human outcomes
+
+`hive workflow validate ID --json` resolves the workflow through the same
+project overlay and loader used by task creation. It validates descriptor YAML,
+referenced instructions, stage inputs/state files, automatic edges, and
+descriptor-declared human outcomes without creating a task or writing project
+or Hive state. The `hive-workflow-validate.v1` result reports the descriptor
+origin/path, ordered stages, instruction paths, automatic edges, human
+outcomes, and `valid`. Invalid input uses the same envelope with diagnostics.
+
+Project-authored descriptors may declare a durable `kind: human` stage:
+
+```yaml
+- name: approval
+  kind: human
+  state_file: approval.md
+  input: draft.md
+  outcomes:
+    approve:
+      complete: true
+      artifact: draft.md
+    reject:
+      to: draft
+```
+
+Every outcome has exactly one action: `complete: true` or `to: STAGE`.
+Completing outcomes may require a non-empty artifact. Human stages reject
+agent/model/permissions/instruction/runner settings and are never dispatched
+by the daemon. Apply a decision with
+`hive decide TASK OUTCOME --from STAGE [--note TEXT] [--json]`; the expected
+stage and durable decision identity make matching retries no-ops and reject
+stale or conflicting decisions.
+
+Create-only natural-language requests are handled by the canonical `/hive`
+skill's `hive-workflow-creator` route. It gates on the installed version,
+inventories IDs, scaffolds only through this command (or the minimal init path),
+edits only returned new paths, validates here, reports all defaults, and creates
+no task unless the original request explicitly asks for one.
 
 ## Backlinks
 

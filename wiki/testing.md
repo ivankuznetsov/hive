@@ -17,6 +17,26 @@ candidate gate owns release readiness without provider credentials; the live
 agent workflow is an optional diagnostic that directly exercises native
 OpenClaw, Claude, Codex, and Pi discovery/use when credentials are available.
 
+The natural-language workflow creator has a hermetic primary acceptance gate
+in `test/integration/workflow_creator_e2e_test.rb`. It exercises AE1–AE5 through
+the real CLI collaborators: exact editorial approve/reject semantics,
+byte-identical collision refusal, no-write minimal-init preview followed by
+confirmed execution, no-task default behavior, and state-wide idempotent task
+retry after movement. Focused parser, decision, validation, init, task-meta,
+skill projection, schema, package, and release-contract tests own the smaller
+contracts.
+
+`test/smoke/live_hive_workflow_creator_smoke_test.rb` is a separate,
+OpenClaw-only protected proof. The exact candidate projection receives the
+editorial prompt in a disposable initialized project. Its controlled Hive
+surface permits only version, workflow inventory, scaffold, and validation.
+Attestation verifies the prompt digest, native `/hive` discovery, ordered argv,
+created-file digests, exact normalized graph, zero tasks after creation-only,
+then one created-and-run slug plus a no-op retry with the same idempotency key,
+operational status, no external actions, secret scanning, and cleanup. Missing
+provider credentials make this live gate explicitly unavailable; they never
+turn a skipped test into release evidence.
+
 ## Local feedback loop
 
 During implementation, run the smallest relevant test files directly:

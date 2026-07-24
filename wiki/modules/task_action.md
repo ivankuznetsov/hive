@@ -3,8 +3,8 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-07-17
-tags: [module, status, action, classifier, diagnostic]
+updated: 2026-07-24
+tags: [module, status, action, classifier, human-stage, diagnostic]
 ---
 
 **TLDR**: Classifier that turns a `(Hive::Task, Hive::Markers::State)` pair into a user-facing action with a stable key (per `Hive::Schemas::TaskActionKind`), a human label for `hive status` output, a copy-paste-executable shell command, an optional structured `next_action` for row-specific recovery, and (since 2026-05-16) a bounded `diagnostic` payload for red recovery rows. Used by `hive status` (action grouping + `tasks[].action`/`diagnostic` JSON fields), `hive run` (`next_action.command` / `rerun_with`), `hive approve` (`next_action.command` after a successful advance), `hive accept-finding` / `hive reject-finding` (`next_action.command` after a toggle), and `hive status --diagnose` (`#diagnostic` is the local fallback path when no agent-written artifact is fresh).
@@ -140,6 +140,14 @@ For non-coding workflows, command emission bypasses the coding
 emit `hive run <slug>` (plus `--project` when the status snapshot spans multiple
 projects, and `--stage` for run rows only when a stage collision was reported).
 
+Human descriptor stages use the dedicated `human_needs_input` classification:
+their non-complete marker state is `NEEDS_INPUT` with label
+`Awaiting human decision`, no daemon-dispatch command, and a structured
+`outcomes` list. The operator transition is deliberately separate from generic
+approval: `hive decide TASK OUTCOME --from STAGE`. A completed human stage
+classifies as done; its durable record makes an identical decision retry a
+no-op while stale or conflicting decisions fail against the expected stage.
+
 `--project <name>` is appended whenever `project_count > 1` so multi-project status output emits unambiguous commands.
 
 The slug is `Shellwords.shelljoin`-escaped so a slug containing shell metacharacters can't break the suggested command.
@@ -160,6 +168,7 @@ adapter before a baseline; downstream consumers do not invent condition state.
 | `lib/hive/commands/status.rb` | `annotate_actions` calls `TaskAction.for` per row and routes by `action_key` for grouping. JSON `tasks[].action`/`action_label`/`suggested_command`/`next_action` come from this. |
 | `lib/hive/commands/run.rb` | `friendly_command` and `approve_action` delegate; `next_action.command` and `rerun_with` use the workflow form. |
 | `lib/hive/commands/approve.rb` | `json_next_action` builds the post-advance command via `TaskAction.for(post_move_task)` so the user lands on a runnable form for the new stage. |
+| `lib/hive/commands/decide.rb` | Applies a descriptor-declared human outcome and reports the post-decision action/state. |
 | `lib/hive/commands/stage_action.rb` | `success_payload` includes a `next_action` block built from TaskAction. |
 
 ## Why a class, not a hash lookup?

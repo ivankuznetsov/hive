@@ -567,7 +567,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   def test_daily_patrol_quota_exhaustion_backs_off_until_next_utc_day
     %w[
       daily_agent_spawn_limit daily_architecture_unmetered_spawn_limit
-      daily_token_headroom
+      daily_architecture_review_spawn_limit daily_token_headroom daily_token_limit
     ].each do |reason|
       with_project do |_dir, entry, store|
         enqueue(store)

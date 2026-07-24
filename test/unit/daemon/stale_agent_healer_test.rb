@@ -62,6 +62,37 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  AttemptRecord = Data.define(
+    :attempt_id, :state, :outcome, :predecessor_attempt_id,
+    :project, :task_slug, :task_generation
+  ) do
+    def [](key)
+      public_send(key)
+    end
+
+    def live?
+      %w[launching running].include?(state)
+    end
+  end
+
+  class FakeAttemptStore
+    def initialize(records)
+      @records = records
+    end
+
+    def fetch(attempt_id)
+      @records.find { |record| record.attempt_id == attempt_id }
+    end
+  end
+
+  class FakeLostOutcomeStore
+    def initialize(outcomes)
+      @outcomes = outcomes
+    end
+
+    def fetch(attempt_id) = @outcomes[attempt_id]
+  end
+
   def setup
     @logger = FakeLogger.new
     @controller = FakeController.new
@@ -3038,5 +3069,187 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_equal :error, Hive::Markers.current(state_file).name
       refute @logger.events.any? { |name, _attrs| name == :marker_healed }
     end
+  end
+
+  def test_attempt_loss_marker_retries_after_its_successor_terminally_fails
+    with_marker_file do |state_file|
+      marker_attrs = {
+        "reason" => "attempt_lost",
+        "attempt_id" => "lost-1",
+        "marker_id" => "loss-marker"
+      }
+      File.write(
+        state_file,
+        "# task\n\n<!-- ERROR reason=attempt_lost attempt_id=lost-1 marker_id=loss-marker -->\n"
+      )
+      records = [
+        attempt_record("lost-1", state: "lost"),
+        attempt_record(
+          "successor-1", state: "terminal", outcome: "failed",
+          predecessor_attempt_id: "lost-1"
+        )
+      ]
+      @healer = Hive::Daemon::StaleAgentHealer.new(
+        controller: @controller, logger: @logger, grace_sec: 300,
+        request_queue: @request_queue,
+        attempt_store: FakeAttemptStore.new(records),
+        lost_outcome_store: FakeLostOutcomeStore.new(
+          "lost-1" => {
+            "status" => "successor_dispatched",
+            "successor_attempt_id" => "successor-1"
+          }
+        )
+      )
+      row = make_row(
+        state_file, pid_alive: nil, marker: "error",
+        marker_attrs: marker_attrs, live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert Hive::Markers.current(state_file).none?,
+             "a failed durable successor must release the compatibility loss marker"
+      event = @logger.events.find { |name, _attrs| name == :marker_healed }
+      refute_nil event
+      assert_equal "attempt_loss_successor_failed", event[1].fetch(:reason)
+    end
+  end
+
+  def test_attempt_loss_marker_stays_while_its_successor_is_live_or_succeeded
+    %w[running succeeded].each do |successor_state|
+      with_marker_file do |state_file|
+        marker_attrs = {
+          "reason" => "attempt_lost",
+          "attempt_id" => "lost-1",
+          "marker_id" => "loss-marker"
+        }
+        File.write(
+          state_file,
+          "# task\n\n<!-- ERROR reason=attempt_lost attempt_id=lost-1 marker_id=loss-marker -->\n"
+        )
+        state = successor_state == "running" ? "running" : "terminal"
+        outcome = successor_state == "succeeded" ? "succeeded" : nil
+        records = [
+          attempt_record("lost-1", state: "lost"),
+          attempt_record(
+            "successor-1", state: state, outcome: outcome,
+            predecessor_attempt_id: "lost-1"
+          )
+        ]
+        @healer = Hive::Daemon::StaleAgentHealer.new(
+          controller: @controller, logger: @logger, grace_sec: 300,
+          request_queue: @request_queue,
+          attempt_store: FakeAttemptStore.new(records),
+          lost_outcome_store: FakeLostOutcomeStore.new(
+            "lost-1" => {
+              "status" => "successor_dispatched",
+              "successor_attempt_id" => "successor-1"
+            }
+          )
+        )
+        row = make_row(
+          state_file, pid_alive: nil, marker: "error",
+          marker_attrs: marker_attrs, live_task_lock: false
+        )
+
+        heal([ row ])
+
+        assert_equal :error, Hive::Markers.current(state_file).name,
+                     "#{successor_state} successor must retain the compatibility marker"
+      end
+    end
+  end
+
+  def test_attempt_loss_marker_retries_after_lost_successor_chain_terminally_fails
+    with_marker_file do |state_file|
+      marker_attrs = {
+        "reason" => "attempt_lost",
+        "attempt_id" => "lost-1",
+        "marker_id" => "loss-marker"
+      }
+      File.write(
+        state_file,
+        "# task\n\n<!-- ERROR reason=attempt_lost attempt_id=lost-1 marker_id=loss-marker -->\n"
+      )
+      records = [
+        attempt_record("lost-1", state: "lost"),
+        attempt_record(
+          "lost-2", state: "lost",
+          predecessor_attempt_id: "lost-1"
+        ),
+        attempt_record(
+          "successor-2", state: "terminal", outcome: "failed",
+          predecessor_attempt_id: "lost-2"
+        )
+      ]
+      @healer = Hive::Daemon::StaleAgentHealer.new(
+        controller: @controller, logger: @logger, grace_sec: 300,
+        request_queue: @request_queue,
+        attempt_store: FakeAttemptStore.new(records),
+        lost_outcome_store: FakeLostOutcomeStore.new(
+          "lost-1" => {
+            "status" => "successor_dispatched",
+            "successor_attempt_id" => "lost-2"
+          },
+          "lost-2" => {
+            "status" => "successor_dispatched",
+            "successor_attempt_id" => "successor-2"
+          }
+        )
+      )
+      row = make_row(
+        state_file, pid_alive: nil, marker: "error",
+        marker_attrs: marker_attrs, live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert Hive::Markers.current(state_file).none?
+      event = @logger.events.find { |name, _attrs| name == :marker_healed }
+      assert_equal "attempt_loss_successor_failed", event[1].fetch(:reason)
+    end
+  end
+
+  def test_attempt_loss_marker_stays_when_lineage_lookup_raises
+    with_marker_file do |state_file|
+      marker_attrs = {
+        "reason" => "attempt_lost",
+        "attempt_id" => "lost-1",
+        "marker_id" => "loss-marker"
+      }
+      File.write(
+        state_file,
+        "# task\n\n<!-- ERROR reason=attempt_lost attempt_id=lost-1 marker_id=loss-marker -->\n"
+      )
+      attempt_store = Object.new
+      attempt_store.define_singleton_method(:fetch) { |_attempt_id| raise "synthetic read failure" }
+      @healer = Hive::Daemon::StaleAgentHealer.new(
+        controller: @controller, logger: @logger, grace_sec: 300,
+        request_queue: @request_queue,
+        attempt_store: attempt_store,
+        lost_outcome_store: FakeLostOutcomeStore.new({})
+      )
+      row = make_row(
+        state_file, pid_alive: nil, marker: "error",
+        marker_attrs: marker_attrs, live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert_equal :error, Hive::Markers.current(state_file).name
+      refute @logger.events.any? { |name, _attrs| name == :marker_healed }
+    end
+  end
+
+  def attempt_record(attempt_id, state:, outcome: nil, predecessor_attempt_id: nil)
+    AttemptRecord.new(
+      attempt_id: attempt_id,
+      state: state,
+      outcome: outcome,
+      predecessor_attempt_id: predecessor_attempt_id,
+      project: "p",
+      task_slug: "s",
+      task_generation: "generation-1"
+    )
   end
 end

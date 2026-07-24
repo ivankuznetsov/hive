@@ -198,17 +198,22 @@ signals an unverifiable process group. Once the worker is absent,
 hashed untracked metadata without stash/reset/checkout/clean/add/commit.
 
 One `ERROR reason=attempt_lost` compatibility marker is projected. Only the
-lease loss healer consumes it; legacy and generic error-marker discovery skip
-it. `retry_charge` remains durable lineage/accounting evidence but is not an
-exhaustion budget. Unsafe cleanup, temporarily missing task lookup, and lost
-successors remain retryable until the process becomes safely absent or a
-successor is admitted. Unsafe orphan-cleanup inspection itself is paced by the
-shared cooldown, so one unreaped process cannot trigger expensive cleanup on
-every daemon tick. Successor dispatch attempts use the same persisted
-cooldown; a deferred admission records `last_retry_at` so daemon restarts
-cannot collapse the delay into a per-tick loop. Global and per-project
-automatic-retry gates apply to this lease-backed path exactly as they do to
-marker errors. A successor
+lease-aware stale-agent healer consumes it; legacy marker discovery skips it.
+The marker remains while its successor lineage is unresolved, live, lost, or
+successful. Once one unambiguous lineage ends in a terminal failed/cancelled
+successor, the healer releases the marker through the same cooldown, current
+safety check, task lock, and marker-generation guard as every other error so a
+fresh ordinary admission can retry the resolved generation. Unreadable or
+ambiguous lineage evidence fails closed. `retry_charge` remains durable
+lineage/accounting evidence but is not an exhaustion budget. Unsafe cleanup,
+temporarily missing task lookup, and lost successors remain retryable until the
+process becomes safely absent or a successor is admitted. Unsafe
+orphan-cleanup inspection itself is paced by the shared cooldown, so one
+unreaped process cannot trigger expensive cleanup on every daemon tick.
+Successor dispatch attempts use the same persisted cooldown; a deferred
+admission records `last_retry_at` so daemon restarts cannot collapse the delay
+into a per-tick loop. Global and per-project automatic-retry gates apply to
+this lease-backed path exactly as they do to marker errors. A successor
 replays the immutable admitted workflow
 argv and flags; if the command already moved the task, only its locator is
 retargeted and a satisfied `--from` assertion is removed. Queue claims follow

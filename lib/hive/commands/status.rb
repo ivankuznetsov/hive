@@ -1005,7 +1005,9 @@ module Hive
             begin
               begin
                 task = Hive::Task.new(entry)
-              rescue Hive::InvalidTaskPath => e
+              rescue Hive::UnsupportedProjectConfigError
+                raise
+              rescue Hive::InvalidTaskPath, Hive::ConfigError => e
                 # U6 widened this rescue's blast radius: a typo'd
                 # `meta.yml workflow:` / `config.yml default_workflow:` or a
                 # stage-dir/workflow mismatch now raises in Task.new. Silently

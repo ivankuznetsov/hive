@@ -1,9 +1,9 @@
 require "stringio"
+require "digest"
+require "set"
 require "hive"
-require "hive/archive_filter"
 require "hive/commands/status"
 require "hive/config"
-require "hive/stages"
 require "hive/tui/debug"
 require "hive/tui/snapshot"
 
@@ -61,7 +61,7 @@ module Hive
       # idle-path parses.
       LIVENESS_REPARSE_FALLBACK_SECONDS = 3.0
       # Backstop for the archive-set dirty signal, independent of the
-      # liveness fallback above. Even with no `9-done` dir-mtime change
+      # liveness fallback above. Even with no terminal-stage dir-mtime change
       # and no archive-pane open, force a background archived-cache
       # refresh at least this often so a dropped dirty set (any thread may
       # SET it, only the poll thread CLEARS it) or an mtime-granularity
@@ -91,6 +91,8 @@ module Hive
         # to the renderer. `#last_error` returns whichever is set.
         @archive_last_error = nil
         @mtime_fingerprint = nil
+        @policy_fingerprint = nil
+        @file_signature_cache = {}
         @last_full_parse_at = nil
         # Consecutive archive-refresh failures, so a permanent
         # `json_payload` raise backs off to the 30s backstop instead of
@@ -110,7 +112,7 @@ module Hive
         # Consecutive poll ticks the archive refresher has stayed alive. A
         # healthy refresh completes well within one tick, so a climbing count
         # means the thread is blocked (e.g. uninterruptible I/O on a stale-NFS
-        # `9-done` dir), which silently freezes the cache; #note_archive_refresher_liveness
+        # terminal-stage dir), which silently freezes the cache; #note_archive_refresher_liveness
         # leaves a once-fired breadcrumb when it crosses the hang threshold.
         @archive_refresh_alive_ticks = 0
         @stop = false
@@ -198,51 +200,53 @@ module Hive
       end
 
       def refresh_once
+        refresh_now = Time.now.utc
         note_archive_refresher_liveness
-        refresh_archive_signals(@current.projects) if @current
-        request_archive_refresh if archive_refresh_due?
+        policy_unchanged = false
+        if @current
+          refresh_archive_signals(@current.projects)
+          current_policy_fingerprint = policy_fingerprint_for(
+            @current, archived_cache: @archived_cache
+          )
+          policy_unchanged = current_policy_fingerprint == @policy_fingerprint
+          request_archive_refresh unless policy_unchanged
+        end
+        request_archive_refresh if archive_refresh_due?(now: refresh_now)
         start_archive_refresh_if_needed
 
         cache = @archived_cache
         cache_unchanged = cache.equal?(@snapshot_archived_cache)
-        if @current && @mtime_fingerprint && cache_unchanged && mtime_fingerprint_unchanged? && !full_reparse_due?
-          @current_seen_at = Time.now
+        if @current && @mtime_fingerprint && cache_unchanged && policy_unchanged &&
+           mtime_fingerprint_unchanged? && !full_reparse_due?(now: refresh_now)
+          @current_seen_at = refresh_now
           @last_error = nil
           return
         end
 
         projects = Hive::Config.registered_projects
+        admission_context = Hive::DependencySnapshot.admission_context(projects)
         if @current.nil?
-          # Cold full parse: every task lands in exactly one stage, so the
-          # payload IS already the merged active+archived view — publish it
-          # directly instead of stripping archived rows and re-merging them
-          # from a cache derived from this same payload.
-          admission_context = Hive::DependencySnapshot.admission_context(projects)
-          payload = Hive::Commands::Status.new.json_payload(
-            projects, admission_context: admission_context
+          # Cold start publishes the ordinary producer projection and seeds a
+          # separate, explicitly unfiltered archive cache with the same clock.
+          ordinary_payload = Hive::Commands::Status.new.json_payload(
+            projects, admission_context: admission_context, now: refresh_now
+          )
+          archive_payload = Hive::Commands::Status.new(archive: true).json_payload(
+            projects, admission_context: admission_context, now: refresh_now
           )
           @archived_cache = archived_cache_from_payload(
-            payload, admission_context: admission_context, previous: @archived_cache
+            archive_payload, admission_context: admission_context, previous: @archived_cache
           )
-          @archive_last_refresh_at = Time.now
-          publish_snapshot(payload, archived_cache: @archived_cache)
+          @archive_last_refresh_at = refresh_now
+          publish_snapshot(ordinary_payload, archived_cache: @archived_cache)
           @archive_dir_mtimes = archive_dir_mtimes_for(@current.projects)
         else
-          # Steady state: re-parse active stages only and merge the frozen
-          # archived cache back in. `exclude_archived: true` makes Status
-          # subtract the terminal dir from EACH project's own loaded
-          # workflow overlay (computed after `load!`), so a custom-workflow
-          # project's active stages aren't dropped the way a single
-          # pre-computed union would drop them.
-          admission_context = Hive::DependencySnapshot.admission_context(
-            projects,
-            exclude_archived: true,
-            fallback_context: cache.fetch(:admission_context)
+          # Steady state also consumes Status's ordinary projection directly.
+          # The cache is attached only as Snapshot's dedicated archive source.
+          ordinary_payload = Hive::Commands::Status.new.json_payload(
+            projects, admission_context: admission_context, now: refresh_now
           )
-          active_payload = Hive::Commands::Status.new.json_payload(
-            projects, exclude_archived: true, admission_context: admission_context
-          )
-          publish_snapshot(merge_archived_payload(active_payload, cache), archived_cache: cache)
+          publish_snapshot(ordinary_payload, archived_cache: cache)
         end
       rescue StandardError => e
         @last_error = e
@@ -270,10 +274,11 @@ module Hive
         # so without this the gate would never see a project added or
         # removed and the displayed set would go stale indefinitely.
         paths = [ registry_config_path ]
+        archived_folders = snapshot.archive_rows.map(&:folder).compact.to_set
         snapshot.projects.each do |project|
           paths.concat(project_watch_paths(project))
           project.rows.each do |row|
-            next if archived_stage?(row.stage)
+            next if archived_folders.include?(row.folder)
 
             paths << row.state_file
             # A runner can acquire the task lock before it writes
@@ -297,9 +302,8 @@ module Hive
 
       def project_watch_paths(project)
         stages_dir = File.join(project.hive_state_path.to_s, "stages")
-        archive_dir = File.join(stages_dir, Hive::ArchiveFilter::ARCHIVE_STAGE_DIR)
-        # Glob THIS project's on-disk stage dirs (minus the archive dir)
-        # rather than the process-global `all_stage_dirs` union. `load!`
+        # Glob THIS project's on-disk stage dirs rather than the
+        # process-global `all_stage_dirs` union. `load!`
         # leaves only the last-loaded project's workflow overlay
         # registered, so a custom-workflow project that isn't last would
         # have its custom active stage dirs (e.g. `2-work`) absent from a
@@ -307,9 +311,79 @@ module Hive
         # caught only by the 3s liveness fallback, not the ~1s mtime gate.
         # Globbing on disk mirrors the per-project parse fix and is blind to
         # overlay-registration order. Archived state-file cost is still
-        # avoided by `next if archived_stage?` in mtime_fingerprint_for.
+        # avoided by the action check in mtime_fingerprint_for.
         on_disk = Dir.glob(File.join(stages_dir, "*")).select { |path| File.directory?(path) }
-        [ stages_dir, *(on_disk - [ archive_dir ]) ]
+        [ stages_dir, *on_disk ]
+      end
+
+      # Policy inputs are small descriptor/config files plus task metadata
+      # that can change a workflow pin. They use content-aware signatures so
+      # same-size replacements with preserved/coarse mtimes still invalidate
+      # the ordinary projection on the next poll.
+      def policy_fingerprint_for(snapshot, archived_cache:)
+        content_paths = [ registry_config_path ]
+        snapshot.projects.each do |project|
+          content_paths.concat(project_policy_paths(project))
+        end
+        task_meta_paths = snapshot.rows.map { |row| task_meta_path(row.folder) }
+        archived_cache.fetch(:rows_by_path, {}).each_value do |rows|
+          rows.each { |row| task_meta_paths << task_meta_path(row["folder"]) }
+        end
+        fingerprint = content_paths.compact.uniq.sort.to_h do |path|
+          [ path, safe_content_signature(path, always_digest: true) ]
+        end
+        task_meta_paths.compact.uniq.sort.each do |path|
+          fingerprint[path] = safe_content_signature(path)
+        end
+        fingerprint
+      end
+
+      def project_policy_paths(project)
+        hive_state = project.hive_state_path.to_s
+        workflow_dir = File.join(hive_state, "workflows")
+        descriptor_paths = Dir.glob(File.join(workflow_dir, "**", "*.yml")).sort
+        [
+          File.join(project.path.to_s, ".hive-state", "config.yml"),
+          File.join(hive_state, "config.yml"),
+          workflow_dir,
+          *descriptor_paths
+        ]
+      rescue StandardError => e
+        Hive::Tui::Debug.log(
+          "state_source",
+          "policy paths failed for #{project.path}: #{e.class}: #{e.message}"
+        )
+        [ File.join(hive_state, "workflows") ]
+      end
+
+      def task_meta_path(folder)
+        File.join(folder.to_s, "meta.yml") unless folder.to_s.empty?
+      end
+
+      def safe_content_signature(path, always_digest: false)
+        return :absent unless path && File.exist?(path)
+
+        stat = File.stat(path)
+        identity = [
+          stat.ftype, stat.size, stat.mtime.to_r, stat.ctime.to_r,
+          (stat.ino if stat.respond_to?(:ino))
+        ]
+        cached = @file_signature_cache[path]
+        if !always_digest && cached && cached.fetch(:identity) == identity
+          return cached.fetch(:signature)
+        end
+
+        digest =
+          if stat.file?
+            Digest::SHA256.file(path).hexdigest
+          elsif stat.directory?
+            Dir.children(path).sort.join("\0")
+          end
+        signature = [ *identity, digest ].freeze
+        @file_signature_cache[path] = { identity: identity, signature: signature }
+        signature
+      rescue StandardError => e
+        [ :stat_error, e.class.name ].freeze
       end
 
       # nil means the path is genuinely absent (or nil); a stat ERROR
@@ -353,40 +427,29 @@ module Hive
       end
 
       def publish_snapshot(payload, archived_cache:)
-        snapshot = Snapshot.from_payload(payload)
+        snapshot = Snapshot.from_payload(
+          payload,
+          archive_payload: archive_payload_from_cache(payload, archived_cache)
+        )
         @current = snapshot
         @current_seen_at = Time.now
         @last_full_parse_at = @current_seen_at
         @mtime_fingerprint = mtime_fingerprint_for(snapshot)
+        @policy_fingerprint = policy_fingerprint_for(
+          snapshot, archived_cache: archived_cache
+        )
         @snapshot_archived_cache = archived_cache
         @last_error = nil
       end
 
-      def archived_stage?(stage)
-        Hive::ArchiveFilter.archived?(stage)
-      end
-
-      def merge_archived_payload(active_payload, archived_cache)
+      def archive_payload_from_cache(ordinary_payload, archived_cache)
         cached_rows_by_path = archived_cache.fetch(:rows_by_path)
-        copy = active_payload.dup
-        copy["projects"] = Array(active_payload["projects"]).map do |project|
+        copy = ordinary_payload.dup
+        copy["projects"] = Array(ordinary_payload["projects"]).map do |project|
           project_copy = project.dup
-          active_tasks = Array(project["tasks"])
-          active_slugs = active_tasks.to_h { |task| [ task["slug"], true ] }
-          # The `error` guard drops stale cached archived rows for a project
-          # the active parse flagged as broken. It only covers the
-          # explicitly-flagged degradations (`missing_project_path` /
-          # `not_initialised`, which set "error"). A generic StandardError
-          # degrades to `{"tasks"=>[]}` with NO "error"
-          # (Status#project_payload_or_degraded), which is structurally
-          # indistinguishable from a healthy all-tasks-done project, so we
-          # intentionally keep merging the last-known archived rows there
-          # rather than blanking a legitimately-complete project — the
-          # transient mismatch self-heals on the next successful active
-          # parse and is within the plan's accepted archive-staleness model.
           cached_rows = project["error"] ? [] : cached_rows_by_path.fetch(project["path"], [])
-          archived_rows = cached_rows.reject { |task| active_slugs.key?(task["slug"]) }
-          project_copy["tasks"] = active_tasks + archived_rows
+          project_copy["tasks"] = cached_rows
+          project_copy.delete("hidden_archived_task_count")
           project_copy
         end
         copy
@@ -400,15 +463,16 @@ module Hive
       end
 
       # Builds the frozen archived-row cache keyed by project path. `previous`
-      # is the prior cache (if any): when a project's archive-stage payload
-      # comes back EMPTY, retain that project's prior rows ONLY when the
-      # on-disk `9-done` dir still holds task folders. A transient per-project
+      # is the prior cache (if any): when a project's archive payload comes
+      # back EMPTY, retain that project's prior rows ONLY while one of those
+      # workflow-aware archived folders still exists on disk. A transient per-project
       # parse failure degrades to an empty task list with no "error" marker
       # (Status#project_payload_or_degraded), which is structurally
-      # indistinguishable from a legitimate "final `9-done` folder dropped" —
-      # both yield `tasks=[]`. The on-disk check (`archive_dir_has_tasks?`)
-      # supplies the missing discriminator: a still-populated dir means the
-      # empty payload is a degradation (retain), an empty/absent dir means a
+      # indistinguishable from a legitimate final archived folder being dropped —
+      # both yield `tasks=[]`. The on-disk cached-folder check
+      # supplies the missing discriminator: a still-present archived folder
+      # means the empty payload is a degradation (retain), while no prior
+      # folders means a
       # real removal (publish []). Without it, dropping a project's LAST
       # archived task would re-retain the stale rows on every subsequent empty
       # refresh, leaving a permanent ghost in the archive pane (plan Risk #6).
@@ -422,10 +486,12 @@ module Hive
           path = project["path"]
           next unless path
 
-          archived_rows = Array(project["tasks"]).select { |task| archived_stage?(task["stage"]) }
+          # Archive-mode Status already applied workflow/action-aware
+          # membership. Do not reinterpret terminal directory names here.
+          archived_rows = Array(project["tasks"])
           if archived_rows.empty?
             prior = previous_rows && previous_rows[path]
-            if prior && !prior.empty? && archive_dir_has_tasks?(project["hive_state_path"])
+            if prior && !prior.empty? && cached_archive_rows_still_exist?(prior)
               rows_by_path[path] = prior
               retained_paths[File.expand_path(path)] = true
               next
@@ -437,12 +503,16 @@ module Hive
           # across threads.
           rows_by_path[path] = archived_rows.map { |task| task.dup.freeze }.freeze
         end
+        archived_slugs_by_path = rows_by_path.to_h do |path, rows|
+          [ File.expand_path(path), rows.to_h { |row| [ row["slug"], true ] } ]
+        end
         archived_projects = admission_context.projects.map do |project|
           if retained_paths[File.expand_path(project.path)]
             previous&.fetch(:admission_context)&.project_for_path(project.path) ||
-              project.with(tasks: archived_tasks(project))
+              project.with(tasks: [])
           else
-            project.with(tasks: archived_tasks(project))
+            archived_slugs = archived_slugs_by_path.fetch(File.expand_path(project.path), {})
+            project.with(tasks: project.tasks.select { |task| archived_slugs.key?(task.slug) })
           end
         end
         {
@@ -451,27 +521,19 @@ module Hive
         }.freeze
       end
 
-      def archived_tasks(project)
-        project.tasks.select { |task| archived_stage?(task.stage) }
-      end
-
-      # Positive on-disk evidence that a project's `9-done` dir still holds at
-      # least one task folder — the discriminator that lets
+      # Positive on-disk evidence that at least one previously cached archive
+      # task folder still exists — the discriminator that lets
       # `archived_cache_from_payload` tell a transient empty payload (retain)
       # apart from a real last-row drop (publish []). Uses the same
-      # `task_slug?` predicate as `Status#detect_legacy_stage_dirs` so stray
-      # `logs/` / `.gitkeep` siblings don't read as tasks. A stat fault on the
-      # dir is treated as "uncertain → retain" (mirrors `safe_mtime`'s
+      # workflow-aware folders already selected by Status, so custom terminal
+      # directory names need no second classifier. A stat fault is treated as
+      # "uncertain → retain" (mirrors `safe_mtime`'s
       # re-check bias) so a transient EACCES/ESTALE can't blank a project's
       # archived rows.
-      def archive_dir_has_tasks?(hive_state_path)
-        return false unless hive_state_path
-
-        archive_dir = File.join(hive_state_path.to_s, "stages", Hive::ArchiveFilter::ARCHIVE_STAGE_DIR)
-        return false unless File.directory?(archive_dir)
-
-        Dir.children(archive_dir).any? do |child|
-          Hive::Stages.task_slug?(child) && File.directory?(File.join(archive_dir, child))
+      def cached_archive_rows_still_exist?(rows)
+        Array(rows).any? do |row|
+          folder = row["folder"]
+          folder && File.directory?(folder)
         end
       rescue StandardError
         true
@@ -484,10 +546,10 @@ module Hive
         # never-equal `StatError` on a stat fault so the mtime *gate* (the
         # cheap active reparse) biases toward a re-check — but that same
         # never-equal marker, fed straight into this archive *trigger*, reads
-        # as "changed" on EVERY tick for a persistently-stuck `9-done` dir
+        # as "changed" on EVERY tick for a persistently-stuck terminal dir
         # (e.g. stale NFS where `File.exist?` is true but `File.mtime`
-        # raises). That hot-loops the heavyweight `json_payload(stages:
-        # [9-done])` rescan with no backoff: the 30s `#archive_refresh_due?`
+        # raises). That hot-loops the heavyweight archive-mode status rescan
+        # with no backoff: the 30s `#archive_refresh_due?`
         # throttle gates only the time-based re-arm, and the failure backoff
         # only engages when `json_payload` itself raises (here it succeeds).
         # Collapsing `StatError` to one value makes a stuck dir trigger
@@ -504,14 +566,21 @@ module Hive
       end
 
       def archive_dir_mtimes_for(projects)
-        Array(projects).to_h do |project|
-          path = archive_dir_for(project)
-          [ path, safe_mtime(path) ]
+        pairs = Array(projects).flat_map do |project|
+          stages_dir = File.join(project.hive_state_path.to_s, "stages")
+          paths = [
+            stages_dir,
+            *Dir.glob(File.join(stages_dir, "*")).select { |path| File.directory?(path) }
+          ]
+          paths.map { |path| [ path, safe_mtime(path) ] }
+        rescue StandardError => e
+          Hive::Tui::Debug.log(
+            "state_source",
+            "archive signal paths failed for #{project.path}: #{e.class}: #{e.message}"
+          )
+          [ [ stages_dir, StatError.new ] ]
         end
-      end
-
-      def archive_dir_for(project)
-        File.join(project.hive_state_path.to_s, "stages", Hive::ArchiveFilter::ARCHIVE_STAGE_DIR)
+        pairs.to_h
       end
 
       def archive_refresh_due?(now: Time.now)
@@ -570,17 +639,18 @@ module Hive
         # the operator under the alt-screen anyway — can't corrupt the frame
         # (`capture_status_io`, mirroring `BubbleModel#capture_command_io`).
         admission_context = Hive::DependencySnapshot.admission_context(projects)
+        refresh_now = Time.now.utc
         payload = capture_status_io do
-          Hive::Commands::Status.new.json_payload(
+          Hive::Commands::Status.new(archive: true).json_payload(
             projects,
-            stages: [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ],
-            admission_context: admission_context
+            admission_context: admission_context,
+            now: refresh_now
           )
         end
         @archived_cache = archived_cache_from_payload(
           payload, admission_context: admission_context, previous: @archived_cache
         )
-        @archive_last_refresh_at = Time.now
+        @archive_last_refresh_at = refresh_now
         @archive_refresh_failures = 0
         @archive_last_error = nil
       rescue StandardError => e
@@ -604,7 +674,7 @@ module Hive
         else
           # Repeated failure: back off. Stamp the refresh time so the next
           # attempt waits for the 30s backstop instead of respawning a full
-          # `9-done` rescan every ~1s tick. A genuine permanent top-level
+          # archive-mode rescan every ~1s tick. A genuine permanent top-level
           # json_payload raise (unlikely — per-project failures degrade)
           # would otherwise hot-loop the heavyweight scan this PR exists to
           # avoid.
@@ -620,7 +690,7 @@ module Hive
       # Breadcrumb for a refresher thread that never returns. Both
       # `#archive_refresh_due?` and `#start_archive_refresh_if_needed`
       # early-return on `@archive_refresh_thread&.alive?`, so an
-      # uninterruptible I/O hang scoped to a `9-done` dir (e.g. stale NFS)
+      # uninterruptible I/O hang scoped to a terminal dir (e.g. stale NFS)
       # freezes the cache forever with NO `@archive_last_error` and NO
       # Debug.log (a blocked thread raises nothing) while `#stalled?` — which
       # only tracks the active poll — stays false. Count the consecutive poll
@@ -641,7 +711,7 @@ module Hive
         Hive::Tui::Debug.log(
           "state_source",
           "archive refresher alive for #{@archive_refresh_alive_ticks} consecutive poll ticks; " \
-          "archived cache refresh may be stuck (e.g. blocking I/O on a 9-done dir)"
+          "archived cache refresh may be stuck (e.g. blocking I/O on a terminal-stage dir)"
         )
       end
 

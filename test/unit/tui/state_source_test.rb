@@ -100,8 +100,62 @@ class TuiStateSourceTest < Minitest::Test
   def write_state_task(hive_state, stage, slug, marker:, id: nil, depends_on: nil)
     folder = File.join(hive_state, "stages", stage, slug)
     FileUtils.mkdir_p(folder)
-    Hive::TaskMeta.write(folder, id: id, slug: slug, display_name: nil, depends_on: depends_on)
+    Hive::TaskMeta.write(
+      folder, id: id, slug: slug, display_name: nil, depends_on: depends_on,
+      completed_at: (Time.now.utc if stage == "9-done")
+    )
     File.write(File.join(folder, state_file_name(stage)), "<!-- #{marker} -->\n")
+    folder
+  end
+
+  def write_retention_workflow(hive_state, retention)
+    workflows_dir = File.join(hive_state, "workflows")
+    FileUtils.mkdir_p(workflows_dir)
+    path = File.join(workflows_dir, "retained.yml")
+    File.write(path, <<~YAML)
+      id: retained
+      archive_visibility_retention_days: #{retention}
+      stages:
+        - name: one
+          kind: terminal
+          state_file: one.md
+        - name: two
+          kind: terminal
+          state_file: two.md
+        - name: three
+          kind: terminal
+          state_file: three.md
+        - name: four
+          kind: terminal
+          state_file: four.md
+        - name: five
+          kind: terminal
+          state_file: five.md
+        - name: six
+          kind: terminal
+          state_file: six.md
+        - name: seven
+          kind: terminal
+          state_file: seven.md
+        - name: eight
+          kind: terminal
+          state_file: eight.md
+        - name: done
+          kind: terminal
+          state_file: done.md
+    YAML
+    path
+  end
+
+  def write_completed_retention_task(hive_state, completed_at:)
+    slug = "retained-task-260719-abcd"
+    folder = File.join(hive_state, "stages", "9-done", slug)
+    FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(
+      folder, id: 41, slug: slug, display_name: nil,
+      workflow: "retained", completed_at: completed_at
+    )
+    File.write(File.join(folder, "done.md"), "<!-- COMPLETE -->\n")
     folder
   end
 
@@ -147,6 +201,43 @@ class TuiStateSourceTest < Minitest::Test
                       "refresh_now must find at least one row for the seeded project"
       assert_equal project, snapshot.rows.first.project_name
       assert_nil source.last_error
+    end
+  end
+
+  def test_refresh_now_reprojects_same_size_policy_edits_and_keeps_archive_lossless
+    with_direct_project do |_project, hive_state|
+      descriptor = write_retention_workflow(hive_state, 3)
+      completed_at = Time.now.utc - (5 * 86_400)
+      write_completed_retention_task(hive_state, completed_at: completed_at)
+      descriptor_mtime = File.mtime(descriptor)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+
+      hidden = source.refresh_now
+
+      refute_includes hidden.rows.map(&:slug), "retained-task-260719-abcd"
+      assert_includes hidden.archive_rows.map(&:slug), "retained-task-260719-abcd"
+      assert_equal 1, hidden.hidden_archived_task_count
+
+      write_retention_workflow(hive_state, 0)
+      File.utime(descriptor_mtime, descriptor_mtime, descriptor)
+      invalid = source.refresh_now
+
+      error_row = invalid.rows.find { |row| row.slug == "retained-task-260719-abcd" }
+      refute_nil error_row, "an invalid resolved descriptor must surface instead of reusing policy 3"
+      assert_includes %w[error admission_error], error_row.action_key
+      assert_equal 0, invalid.hidden_archived_task_count
+
+      write_retention_workflow(hive_state, 7)
+      File.utime(descriptor_mtime, descriptor_mtime, descriptor)
+      restored = source.refresh_now
+
+      assert_includes restored.rows.map(&:slug), "retained-task-260719-abcd"
+      assert_includes restored.archive_rows.map(&:slug), "retained-task-260719-abcd"
+      assert_equal 0, restored.hidden_archived_task_count
+      assert_nil source.last_error
+    ensure
+      source&.stop
+      Hive::Workflows::Project.reset!
     end
   end
 
@@ -308,7 +399,8 @@ class TuiStateSourceTest < Minitest::Test
       first = source.current
       source.send(:refresh_once)
 
-      assert_equal 1, calls, "unchanged mtimes should reuse the cached snapshot"
+      assert_equal 2, calls,
+                   "cold start reads ordinary and archive payloads; unchanged mtimes reuse both"
       assert_same first, source.current
     end
   end
@@ -330,7 +422,7 @@ class TuiStateSourceTest < Minitest::Test
       File.utime(Time.now + 5, Time.now + 5, state_file)
       source.send(:refresh_once)
 
-      assert_equal 2, calls, "state-file mtime changes must invalidate the cached snapshot"
+      assert_equal 3, calls, "state-file mtime changes must invalidate the ordinary snapshot"
     end
   end
 
@@ -355,7 +447,7 @@ class TuiStateSourceTest < Minitest::Test
       source.send(:refresh_once)
 
       refute_same first, source.current
-      assert_equal 2, calls, "task .lock changes must invalidate the cached snapshot"
+      assert_equal 3, calls, "task .lock changes must invalidate the cached snapshot"
       assert_equal "agent_running", source.current.rows.first.action_key
       assert_equal true, source.current.rows.first.live_task_lock
     end
@@ -384,7 +476,7 @@ class TuiStateSourceTest < Minitest::Test
       source.send(:refresh_once)
 
       refute_same locked, source.current
-      assert_equal 3, calls, "task .lock removal must invalidate the cached snapshot"
+      assert_equal 4, calls, "task .lock removal must invalidate the cached snapshot"
       assert_equal "ready_to_brainstorm", source.current.rows.first.action_key
       assert_equal false, source.current.rows.first.live_task_lock
     end
@@ -414,7 +506,7 @@ class TuiStateSourceTest < Minitest::Test
       source.send(:refresh_once)
 
       refute_same locked, source.current
-      assert_equal 3, calls, "task .lock mtime changes must invalidate the cached snapshot"
+      assert_equal 4, calls, "task .lock mtime changes must invalidate the cached snapshot"
       assert_equal "agent_running", source.current.rows.first.action_key
       assert_equal true, source.current.rows.first.live_task_lock
     end
@@ -426,7 +518,6 @@ class TuiStateSourceTest < Minitest::Test
                                        marker: "EXECUTE_COMPLETE", id: 1)
       archived_folder = write_state_task(hive_state, "9-done", "archived-task-260626-abcd",
                                          marker: "COMPLETE", id: 2)
-      File.write(File.join(archived_folder, ".lock"), Hive::Lock.base_payload.to_yaml)
 
       source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
       source.send(:refresh_once)
@@ -440,7 +531,7 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
-  def test_archive_dir_change_refreshes_cache_without_active_reparse
+  def test_archive_dir_change_reprojects_ordinary_rows_and_refreshes_archive_cache
     with_direct_project do |_project, hive_state|
       write_state_task(hive_state, "4-execute", "active-task-260626-abcd",
                        marker: "EXECUTE_COMPLETE", id: 1)
@@ -449,8 +540,7 @@ class TuiStateSourceTest < Minitest::Test
       archive_calls = 0
       patch = Module.new do
         define_method(:json_payload) do |projects, **kwargs|
-          stages = kwargs[:stages]
-          if stages == [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+          if @archive
             archive_calls += 1
           else
             active_calls += 1
@@ -467,8 +557,10 @@ class TuiStateSourceTest < Minitest::Test
       File.utime(Time.now + 5, Time.now + 5, File.join(hive_state, "stages", "9-done"))
       source.send(:refresh_once)
 
-      assert_equal 1, active_calls, "archive-only changes must not force an active parse"
-      assert_same first, source.current, "current active snapshot is reused while archive cache refreshes"
+      assert_equal 2, active_calls,
+                   "a new completion must enter the ordinary projection immediately"
+      refute_same first, source.current
+      assert_includes source.current.rows.map(&:slug), "archived-task-260626-abcd"
       refreshed = wait_for { archive_calls.positive? && source.instance_variable_get(:@archived_cache) }
       refute_nil refreshed, "archive dir changes should trigger a background archive refresh"
     ensure
@@ -486,12 +578,14 @@ class TuiStateSourceTest < Minitest::Test
       done_folder = File.join(hive_state, "stages", "9-done", File.basename(folder))
       FileUtils.mv(folder, done_folder)
       source.send(:refresh_once)
-      refute_includes source.current.rows.map(&:slug), "moving-task-260626-abcd",
-                      "active parse should drop a row moved out of active stages"
+      immediate = source.current.rows.select { |row| row.slug == "moving-task-260626-abcd" }
+      assert_equal 1, immediate.size,
+                   "a newly completed task remains visible in the ordinary projection"
+      assert_equal "9-done", immediate.first.stage
 
       wait_for { !source.instance_variable_get(:@archive_refresh_thread)&.alive? }
       source.send(:refresh_once)
-      rows = source.current.rows.select { |row| row.slug == "moving-task-260626-abcd" }
+      rows = source.current.archive_rows.select { |row| row.slug == "moving-task-260626-abcd" }
 
       assert_equal 1, rows.size
       assert_equal "9-done", rows.first.stage
@@ -811,7 +905,7 @@ class TuiStateSourceTest < Minitest::Test
       raise_archive_refresh = true
       patch = Module.new do
         define_method(:json_payload) do |projects, **kwargs|
-          if raise_archive_refresh && kwargs[:stages] == [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+          if raise_archive_refresh && @archive
             raise StandardError, "synthetic archive refresh failure"
           end
 
@@ -992,10 +1086,9 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
-  # The merge guard drops a project's cached archived rows only when the
-  # active parse flagged it with an explicit "error" (missing_project_path /
-  # not_initialised).
-  def test_merge_drops_cached_archived_rows_for_errored_active_project
+  # The archive payload guard drops cached rows when the ordinary parse flags
+  # a project with an explicit error (missing_project_path / not_initialised).
+  def test_archive_payload_drops_cached_rows_for_errored_ordinary_project
     source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
     archived_cache = {
       rows_by_path: {
@@ -1006,17 +1099,17 @@ class TuiStateSourceTest < Minitest::Test
       "projects" => [ { "path" => "/p", "error" => "missing_project_path", "tasks" => [] } ]
     }
 
-    merged = source.send(:merge_archived_payload, active_payload, archived_cache)
+    archive_payload = source.send(
+      :archive_payload_from_cache, active_payload, archived_cache
+    )
 
-    assert_empty merged["projects"].first["tasks"],
-                 "an error-flagged active project must drop its stale cached archived rows"
+    assert_empty archive_payload["projects"].first["tasks"],
+                 "an error-flagged project must drop its stale cached archive rows"
   end
 
-  # A healthy project with no active tasks (all-tasks-done, OR a generic
-  # silent degradation that is structurally identical) intentionally KEEPS
-  # its cached archived rows rather than blanking a legitimately-complete
-  # project — aligned with the retain-prior-on-empty discipline.
-  def test_merge_keeps_cached_archived_rows_for_healthy_empty_active_project
+  # A healthy project with no ordinary tasks keeps the dedicated cached
+  # archive rows without merging them into the ordinary payload.
+  def test_archive_payload_keeps_cached_rows_separate_for_healthy_project
     source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
     archived_cache = {
       rows_by_path: {
@@ -1025,10 +1118,13 @@ class TuiStateSourceTest < Minitest::Test
     }.freeze
     active_payload = { "projects" => [ { "path" => "/p", "tasks" => [] } ] }
 
-    merged = source.send(:merge_archived_payload, active_payload, archived_cache)
+    archive_payload = source.send(
+      :archive_payload_from_cache, active_payload, archived_cache
+    )
 
-    assert_equal [ "done-260626-abcd" ], merged["projects"].first["tasks"].map { |t| t["slug"] },
-                 "an all-tasks-done project (empty active, no error) keeps its cached archived rows"
+    assert_empty active_payload["projects"].first["tasks"]
+    assert_equal [ "done-260626-abcd" ],
+                 archive_payload["projects"].first["tasks"].map { |task| task["slug"] }
   end
 
   # A transient empty archive payload for a project (the generic-degradation
@@ -1040,7 +1136,7 @@ class TuiStateSourceTest < Minitest::Test
     source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
     Dir.mktmpdir("state-source-retain") do |dir|
       hive_state = File.join(dir, ".hive-state")
-      archive_dir = File.join(hive_state, "stages", Hive::ArchiveFilter::ARCHIVE_STAGE_DIR)
+      archive_dir = File.join(hive_state, "stages", "9-done")
       # On-disk evidence the empty payload is transient: the 9-done dir still
       # holds a task folder.
       FileUtils.mkdir_p(File.join(archive_dir, "done-260626-abcd"))
@@ -1060,7 +1156,12 @@ class TuiStateSourceTest < Minitest::Test
       good = source.send(:archived_cache_from_payload, {
         "projects" => [
           { "path" => dir, "hive_state_path" => hive_state,
-            "tasks" => [ { "slug" => "done-260626-abcd", "stage" => "9-done" } ] }
+            "tasks" => [
+              {
+                "slug" => "done-260626-abcd", "stage" => "9-done",
+                "folder" => File.join(archive_dir, "done-260626-abcd")
+              }
+            ] }
         ]
       }, admission_context: admission_context)
       assert_equal 1, good.fetch(:rows_by_path).fetch(dir).size
@@ -1089,12 +1190,17 @@ class TuiStateSourceTest < Minitest::Test
     admission_context = Hive::DependencyAdmission::Context.new(projects: [])
     Dir.mktmpdir("state-source-drop") do |dir|
       hive_state = File.join(dir, ".hive-state")
-      archive_dir = File.join(hive_state, "stages", Hive::ArchiveFilter::ARCHIVE_STAGE_DIR)
+      archive_dir = File.join(hive_state, "stages", "9-done")
       FileUtils.mkdir_p(File.join(archive_dir, "done-260626-abcd"))
       good = source.send(:archived_cache_from_payload, {
         "projects" => [
           { "path" => dir, "hive_state_path" => hive_state,
-            "tasks" => [ { "slug" => "done-260626-abcd", "stage" => "9-done" } ] }
+            "tasks" => [
+              {
+                "slug" => "done-260626-abcd", "stage" => "9-done",
+                "folder" => File.join(archive_dir, "done-260626-abcd")
+              }
+            ] }
         ]
       }, admission_context: admission_context)
       assert_equal 1, good.fetch(:rows_by_path).fetch(dir).size
@@ -1114,23 +1220,21 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
-  # A stat fault on the 9-done dir is uncertain, not proof of removal:
-  # archive_dir_has_tasks? must bias toward retaining prior rows (mirrors
-  # safe_mtime's re-check bias) so a transient EACCES/ESTALE can't blank a
-  # project's archived rows.
-  def test_archive_dir_has_tasks_treats_a_stat_fault_as_retain
+  # A stat fault on a cached workflow-aware archive folder is uncertain, not
+  # proof of removal, so the retain check must fail open.
+  def test_cached_archive_folder_stat_fault_is_treated_as_retain
     source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
     Dir.mktmpdir("state-source-archive-stat") do |dir|
-      hive_state = File.join(dir, ".hive-state")
-      archive_dir = File.join(hive_state, "stages", Hive::ArchiveFilter::ARCHIVE_STAGE_DIR)
-      FileUtils.mkdir_p(archive_dir)
-      with_replaced_singleton_method(Dir, :children, lambda { |arg|
-        raise Errno::EACCES, arg if arg == archive_dir
+      folder = File.join(dir, ".hive-state", "stages", "4-published", "done-task")
+      FileUtils.mkdir_p(folder)
+      with_replaced_singleton_method(File, :directory?, lambda { |arg|
+        raise Errno::EACCES, arg if arg == folder
 
-        Dir.entries(arg) - %w[. ..]
+        File.stat(arg).directory?
       }) do
-        assert source.send(:archive_dir_has_tasks?, hive_state),
-               "an unreadable 9-done dir is uncertain — retain prior rows rather than blank them"
+        assert source.send(
+          :cached_archive_rows_still_exist?, [ { "folder" => folder } ]
+        ), "an unreadable archive folder is uncertain, so retain prior rows"
       end
     end
   end
@@ -1147,7 +1251,7 @@ class TuiStateSourceTest < Minitest::Test
       keep_raising = true
       patch = Module.new do
         define_method(:json_payload) do |projects, **kwargs|
-          if keep_raising && kwargs[:stages] == [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+          if keep_raising && @archive
             raise StandardError, "synthetic archive refresh failure"
           end
 
@@ -1207,9 +1311,10 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
-  # Gate iv (archived direction): a newly-registered project's ARCHIVED rows
-  # surface after the follow-up background refresh, not only its active rows.
-  def test_newly_added_project_archived_rows_surface_after_background_refresh
+  # A newly registered project's recent archived rows surface immediately in
+  # the ordinary producer projection and then appear in the dedicated archive
+  # cache after its background refresh.
+  def test_newly_added_project_archived_rows_surface_in_both_projections
     with_tmp_global_config do |home|
       _alpha, state_a = add_direct_project(home, name: "alpha")
       write_state_task(state_a, "4-execute", "alpha-active-260626-abcd",
@@ -1225,15 +1330,14 @@ class TuiStateSourceTest < Minitest::Test
 
       source.send(:refresh_once)
       assert_equal [ "alpha", "beta" ], source.current.projects.map(&:name)
-      refute_includes source.current.rows.map(&:slug), "beta-done-260626-abcd",
-                      "beta's archived rows are not yet in the background cache"
+      assert_includes source.current.rows.map(&:slug), "beta-done-260626-abcd"
 
       surfaced = wait_for do
         source.send(:refresh_once)
-        source.current.rows.map(&:slug).include?("beta-done-260626-abcd")
+        source.current.archive_rows.map(&:slug).include?("beta-done-260626-abcd")
       end
       assert surfaced,
-             "a newly-added project's archived rows must surface after the background refresh"
+             "the unfiltered archive projection must catch up after the background refresh"
     ensure
       source&.stop
     end
@@ -1286,10 +1390,10 @@ class TuiStateSourceTest < Minitest::Test
     with_direct_project do |_project, hive_state|
       write_state_task(hive_state, "4-execute", "active-task-260626-abcd",
                        marker: "EXECUTE_COMPLETE", id: 1)
-      keep_raising = true
+      keep_raising = false
       patch = Module.new do
         define_method(:json_payload) do |projects, **kwargs|
-          if keep_raising && kwargs[:stages] == [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+          if keep_raising && @archive
             raise StandardError, "synthetic archive refresh failure"
           end
 
@@ -1300,6 +1404,7 @@ class TuiStateSourceTest < Minitest::Test
       source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
       source.send(:refresh_once)
 
+      keep_raising = true
       capture_io { source.send(:refresh_archived_cache, Hive::Config.registered_projects) }
       assert_nil source.instance_variable_get(:@last_error),
                  "archive failures must not land on the active @last_error channel"
@@ -1415,7 +1520,7 @@ class TuiStateSourceTest < Minitest::Test
       keep_warning = true
       patch = Module.new do
         define_method(:json_payload) do |projects, **kwargs|
-          if keep_warning && kwargs[:stages] == [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+          if keep_warning && @archive
             warn "hive: status: synthetic degrade-path warn"
             { "projects" => [] }
           else

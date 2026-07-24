@@ -4,6 +4,9 @@ require "json_schemer"
 require "hive/commands/approve"
 require "hive/commands/init"
 require "hive/commands/new"
+# Load the sibling command with the same lexical constant name before task
+# fingerprinting, matching the full-suite command load order.
+require "hive/commands/digest"
 require "hive/task_meta"
 
 class NewIdempotencyTest < Minitest::Test

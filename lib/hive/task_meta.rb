@@ -73,7 +73,7 @@ module Hive
       # are observable instead of failing the gate open in silence.
       warn "hive: task_meta: failed to read #{path(task_folder)} " \
            "(#{e.class}: #{e.message}); treating meta as empty " \
-           "(depends_on, workflow, base_branch, idempotency dropped; managed provenance dropped)"
+           "(depends_on, workflow, base_branch dropped; idempotency dropped; managed provenance dropped)"
       empty
     end
 

@@ -93,7 +93,10 @@ module Hive
         @depends_on = depends_on
         @workflow_name = workflow
         @idempotency_key_raw = idempotency_key
-        @json = json
+        # Machine-readable creation was added for idempotent automation.
+        # Preserve the legacy plain-text contract for a bare `hive new --json`
+        # whose caller did not opt into that side-effect boundary.
+        @json = json && !idempotency_key.nil?
       end
 
       class << self
@@ -272,7 +275,7 @@ module Hive
           path = File.expand_path(source.to_s)
           {
             "destination" => destination.to_s,
-            "sha256" => Digest::SHA256.file(path).hexdigest
+            "sha256" => ::Digest::SHA256.file(path).hexdigest
           }
         end
         input = {
@@ -285,7 +288,7 @@ module Hive
           "workflow_commit" => managed&.fetch("source_commit"),
           "workflow_configuration_digest" => managed&.fetch("configuration_digest")
         }
-        Digest::SHA256.hexdigest(JSON.generate(input))
+        ::Digest::SHA256.hexdigest(JSON.generate(input))
       end
 
       def find_idempotent_task!(hive_state, key, fingerprint, excluding: nil)
@@ -379,7 +382,7 @@ module Hive
       end
 
       def write_task_meta(task_dir, id:, slug:, depends_on:, base_branch:, workflow:, workflow_info:, hive_state:,
-                          idempotency_key:, input_fingerprint:)
+                          idempotency_key: nil, input_fingerprint: nil)
         managed = workflow_info.fetch(:managed)
         managed_cfg = workflow_info.fetch(:managed_cfg, {})
         store = Hive::WorkflowPackage::ManagedStore.new(hive_state)

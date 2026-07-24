@@ -49,7 +49,7 @@ end
 
 JSON_BOOLEAN_OPTIONS = Hive::CliJsonOptions::BOOLEAN_OPTIONS
 STAGE_ACTION_USAGE_COMMANDS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
-NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow].freeze
+NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow --idempotency-key].freeze
 JSON_USAGE_ERROR_CONTRACTS = {
   "run" => { schema: "hive-run", error_kind: "invalid_task_path" },
   "rebase-status" => { schema: "hive-rebase-status", schema_version: 1, error_kind: "invalid_task_path" },

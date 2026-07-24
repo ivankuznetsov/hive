@@ -89,6 +89,7 @@ module Hive
         :action_label,
         :suggested_command,
         :next_action,
+        :outcomes,
         :diagnostic,
         :live_task_lock,
         :task_lock_pid,
@@ -110,6 +111,8 @@ module Hive
         # unanswered_questions defaults to 0 so payloads / test factories
         # that predate issue #270 keep working; production payloads always
         # emit the integer explicitly.
+        # outcomes defaults to [] for pre-human-stage payloads and factories;
+        # current status payloads always emit the descriptor-derived array.
         def initialize(id: nil, display_name: nil, workflow: nil, worktree_path: nil,
                        pr_url: nil, attempt_id: nil, task_generation: nil,
                        condition_task_generation: nil, commit_generation: nil,
@@ -119,7 +122,7 @@ module Hive
                        observation_mtime: nil, folder_mtime: nil, live_task_lock: false,
                        task_lock_pid: nil, task_lock_process_start_time: nil, task_lock_id: nil,
                        implementation_identity: nil,
-                       unanswered_questions: 0, depends_on: nil,
+                       unanswered_questions: 0, outcomes: [], depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
                        blocked: false, admission_error: nil, held: nil, **rest)
           super(id: id, display_name: display_name,
@@ -153,7 +156,8 @@ module Hive
                 task_lock_process_start_time: task_lock_process_start_time,
                 task_lock_id: task_lock_id,
                 implementation_identity: implementation_identity,
-                unanswered_questions: unanswered_questions, **rest)
+                unanswered_questions: unanswered_questions,
+                outcomes: outcomes, **rest)
         end
       end
 
@@ -247,6 +251,7 @@ module Hive
           action_label: payload["action_label"],
           suggested_command: payload["suggested_command"],
           next_action: payload["next_action"],
+          outcomes: Array(payload["outcomes"]).freeze,
           diagnostic: payload["diagnostic"],
           live_task_lock: payload["live_task_lock"] == true,
           task_lock_pid: payload["task_lock_pid"],

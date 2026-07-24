@@ -139,11 +139,13 @@ input_fingerprint: 3f...
 
 Automation may add `--idempotency-key KEY --json`. Hive stores the opaque key
 with a fingerprint of the normalized input, resolved workflow, dependency, and
-base branch under the normal state/commit locks. Before writing, it searches
-all active and completed stage folders. A matching retry returns the original
-slug with `created: false` even after the task has moved; reuse for different
-input/workflow fails without a second task, and duplicate metadata is a
-fail-closed repair error.
+base branch. One commit lock now covers the state-wide key lookup, exclusive
+task-directory creation, metadata write, and commit. Same-slug contenders
+therefore cannot share a candidate directory, report two creations, overwrite
+one another, or remove a directory they did not create. A matching retry
+returns the original slug with `created: false` even after the task has moved;
+reuse for different input/workflow fails without a second task, and duplicate
+metadata is a fail-closed repair error.
 
 The `hive-new.v1` success payload contains `created`, `slug`, `workflow`,
 `current_stage`, `task_folder`, and a structured `next_action`. Callers without

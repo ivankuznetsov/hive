@@ -3,6 +3,7 @@ require "json"
 require "json_schemer"
 require "hive/commands/init"
 require "hive/commands/workflow"
+require "hive/commands/workflow/validate"
 
 class WorkflowCommandTest < Minitest::Test
   include HiveTestHelper
@@ -85,6 +86,23 @@ class WorkflowCommandTest < Minitest::Test
     end
   end
 
+  def test_validate_never_calls_the_production_project_config_loader
+    with_initialized_project do |project_root|
+      write_editorial_workflow(project_root)
+      forbidden = lambda do |_root|
+        raise "strict read-only validation called Config.load"
+      end
+
+      with_replaced_singleton_method(Hive::Config, :load, forbidden) do
+        payload = Hive::Commands::Workflow::Validate.new(
+          "editorial", project_root: project_root, stdout: StringIO.new
+        ).call!
+        assert_equal true, payload.fetch("valid")
+        assert_equal "authored", payload.fetch("origin")
+      end
+    end
+  end
+
   def test_validate_rejects_invalid_id_and_unreadable_instruction
     with_initialized_project do |project_root|
       error = assert_raises(Hive::Commands::Workflow::UsageError) do
@@ -123,6 +141,36 @@ class WorkflowCommandTest < Minitest::Test
       validator.send(:emit, payload)
       assert_includes stdout.string, "managed-flow is valid (managed)"
       assert_includes stdout.string, "stages: work"
+    end
+  end
+
+  def test_validate_resolves_managed_workflow_through_no_write_selection
+    with_initialized_project do |project_root|
+      workflow = Hive::Workflows::Registry.default
+      fake_store = Object.new
+      test = self
+      fake_store.define_singleton_method(:selected_read_only) do |name|
+        test.assert_equal "managed-flow", name
+        {
+          "source_commit" => "a" * 40,
+          "manifest_digest" => "b" * 64,
+          "configuration_digest" => "c" * 64
+        }
+      end
+      fake_store.define_singleton_method(:workflow) do |name, _commit, _manifest, **options|
+        test.assert_equal "managed-flow", name
+        test.assert_equal false, options.fetch(:verify_profiles)
+        workflow
+      end
+
+      with_replaced_singleton_method(
+        Hive::WorkflowPackage::ManagedStore, :new, ->(_state) { fake_store }
+      ) do
+        payload = Hive::Commands::Workflow::Validate.new(
+          "managed-flow", project_root: project_root, stdout: StringIO.new
+        ).call!
+        assert_equal "managed", payload.fetch("origin")
+      end
     end
   end
 

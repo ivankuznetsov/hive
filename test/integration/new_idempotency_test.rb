@@ -138,30 +138,62 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
-  def test_duplicate_found_during_locked_recheck_discards_candidate
+  def test_idempotent_candidate_is_created_while_the_commit_lock_is_held
     with_initialized_project do |project_root, project|
-      existing = create_json(
-        project, "same task", key: "creator:race", slug: "existing-task"
-      ).fetch("task_folder")
       command = Hive::Commands::New.new(
-        project, "same task", slug_override: "racing-task",
+        project, "same task", slug_override: "locked-task",
         idempotency_key: "creator:race", json: true
       )
-      calls = 0
-      command.define_singleton_method(:find_idempotent_task!) do |_state, _key, _fingerprint, excluding: nil|
-        calls += 1
-        excluding ? { folder: existing } : nil
+      original = command.method(:create_task_candidate!)
+      command.define_singleton_method(:create_task_candidate!) do |*args, **kwargs|
+        lock_path = File.join(project_root, ".hive-state", ".commit-lock")
+        reader, writer = IO.pipe
+        pid = fork do
+          reader.close
+          acquired = File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
+            lock.flock(File::LOCK_EX | File::LOCK_NB)
+          end
+          writer.write(acquired ? "acquired" : "blocked")
+          writer.close
+          exit! 0
+        end
+        writer.close
+        lock_state = reader.read
+        Process.wait(pid)
+        reader.close
+        raise "candidate creation ran outside commit lock" unless lock_state == "blocked"
+
+        original.call(*args, **kwargs)
       end
 
       out, = capture_io { command.call! }
       payload = JSON.parse(out)
 
-      assert_equal false, payload.fetch("created")
-      assert_equal "existing-task", payload.fetch("slug")
-      assert_equal 2, calls
-      refute Dir.exist?(
-        File.join(project_root, ".hive-state", "stages", "1-inbox", "racing-task")
+      assert_equal true, payload.fetch("created")
+      assert Dir.exist?(
+        File.join(project_root, ".hive-state", "stages", "1-inbox", "locked-task")
       )
+    end
+  end
+
+  def test_same_slug_with_a_different_key_never_reuses_or_removes_the_first_task
+    with_initialized_project do |project_root, project|
+      first = create_json(
+        project, "first task", key: "creator:first", slug: "shared-slug"
+      )
+
+      error = assert_raises(Hive::Commands::New::SlugCollisionError) do
+        Hive::Commands::New.new(
+          project, "second task", slug_override: "shared-slug",
+          idempotency_key: "creator:second", json: true
+        ).call!
+      end
+
+      assert_includes error.message, "slug collision"
+      assert_includes File.read(File.join(first.fetch("task_folder"), "idea.md")), "first task"
+      metadata = Hive::TaskMeta.read(first.fetch("task_folder"))
+      assert_equal "creator:first", metadata.fetch(:idempotency_key)
+      assert_equal 1, idempotent_tasks(project_root).size
     end
   end
 

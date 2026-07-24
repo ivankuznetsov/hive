@@ -70,9 +70,47 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_initialize_human_destination_refuses_symlinked_state_file
+    with_tmp_dir do |root|
+      source = File.join(root, "source")
+      outside = File.join(root, "outside.md")
+      FileUtils.mkdir_p(source)
+      File.write(outside, "external bytes\n")
+      File.symlink(outside, File.join(source, "approval.md"))
+      current = task(folder: source, workflow: human_workflow)
+
+      error = assert_raises(Hive::InvalidTaskPath) do
+        command.send(:initialize_human_destination!, current, "2-approval")
+      end
+
+      assert_includes error.message, "must be a regular file, not a symlink"
+      assert_equal "external bytes\n", File.read(outside)
+      assert File.symlink?(File.join(source, "approval.md"))
+    end
+  end
+
   def task(folder: "/tmp/task", hive_state_path: "/tmp/state", project_root: "/tmp/project",
            stage_index: 2, stage_name: "brainstorm", workflow: Hive::Workflows::Registry.default)
     FakeTask.new("slug-260522-abcd", stage_index, stage_name, folder, hive_state_path, project_root, workflow)
+  end
+
+  def human_workflow
+    Hive::Workflow.new(
+      id: :editorial,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "draft", index: 1, state_file: "draft.md", kind: :agent
+        ),
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: {
+            "approve" => Hive::Workflow::Outcome.new(
+              name: "approve", complete: true, artifact: "draft.md"
+            )
+          }.freeze
+        )
+      ]
+    )
   end
 
   def failing_status

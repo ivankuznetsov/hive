@@ -79,7 +79,8 @@ module Hive
           marker = Hive::Markers.current(task.state_file)
           if human_stage?(task)
             @rebase_result = human_stage_rebase_result
-            report(task, { commit: nil, status: :needs_input })
+            status = marker.name == :complete ? :complete : :needs_input
+            report(task, { commit: nil, status: status })
             return
           end
           if marker.name == :manual_steering
@@ -251,7 +252,7 @@ module Hive
         if result.is_a?(Hash) && result[:cleanup_instructions]
           payload["cleanup_instructions"] = result[:cleanup_instructions]
         end
-        payload["allowed_outcomes"] = allowed_outcomes(task) if human_stage?(task)
+        payload["allowed_outcomes"] = allowed_outcomes(task) if human_decision_required?(task, marker)
         # The JSON payload is written to stdout *before* the raise. bin/hive
         # rescues Hive::Error and calls `exit(e.exit_code)`; Ruby's normal
         # interpreter shutdown flushes stdout via IO finalizers, so the
@@ -290,11 +291,17 @@ module Hive
       def json_next_action(task, marker)
         kind = Hive::Schemas::NextActionKind
         if human_stage?(task)
+          if marker.name == :complete
+            return { "kind" => kind::NO_OP, "reason" => "human_stage_complete" }
+          end
+
+          decision_id = marker.attrs["decision_id"].to_s
           return {
             "kind" => kind::NO_OP,
             "reason" => "human_decision_required",
             "allowed_outcomes" => allowed_outcomes(task),
-            "decide_with" => "hive decide #{task.slug} <outcome> --from #{task.stage_name}"
+            "decide_with" => "hive decide #{task.slug} <outcome> --from #{task.stage_name} " \
+                             "--decision-id #{decision_id}"
           }
         end
 
@@ -487,8 +494,15 @@ module Hive
         puts "hive: marker=#{marker.name}"
         puts "  state_file: #{task.state_file}"
         if human_stage?(task)
+          if marker.name == :complete
+            puts "  complete: human workflow outcome recorded"
+            return
+          end
+
+          decision_id = marker.attrs["decision_id"].to_s
           puts "  outcomes: #{allowed_outcomes(task).map { |outcome| outcome.fetch('name') }.join(', ')}"
-          puts "  next: hive decide #{task.slug} <outcome> --from #{task.stage_name}"
+          puts "  next: hive decide #{task.slug} <outcome> --from #{task.stage_name} " \
+               "--decision-id #{decision_id}"
           return
         end
         case marker.name
@@ -557,6 +571,10 @@ module Hive
 
       def human_stage?(task)
         task.workflow.stage_named(task.stage_name)&.kind == :human
+      end
+
+      def human_decision_required?(task, marker)
+        human_stage?(task) && marker.name != :complete
       end
 
       def allowed_outcomes(task)

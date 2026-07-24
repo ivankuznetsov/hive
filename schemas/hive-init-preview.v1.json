@@ -3,6 +3,12 @@
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-init-preview.v1.json",
   "title": "hive init minimal preview (v1)",
   "description": "Resolved, no-write plan emitted by hive init --new-workflow ID --minimal --preview --json.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -55,10 +61,12 @@
     "global_registration": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "config_path"],
+      "required": ["enabled", "config_path", "name", "status"],
       "properties": {
         "enabled": { "const": true },
-        "config_path": { "type": "string" }
+        "config_path": { "type": "string" },
+        "name": { "type": "string" },
+        "status": { "const": "available" }
       }
     },
     "services": {
@@ -85,5 +93,40 @@
       }
     },
     "task_creation": { "const": false }
+  }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind", "exit_code",
+        "message", "minimal", "preview", "project", "path", "workflow"
+      ],
+      "properties": {
+        "schema": { "const": "hive-init-preview" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "enum": [
+            "usage", "already_initialized", "project_name_collision",
+            "not_git_repository", "main_checkout_required", "dirty_worktree",
+            "concurrent_run", "config", "git", "internal", "error"
+          ]
+        },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "minimal": { "const": true },
+        "preview": { "const": true },
+        "project": { "type": "string" },
+        "path": { "type": "string" },
+        "workflow": { "type": "string" },
+        "value": { "type": "string" },
+        "suggested_id": { "type": "string" },
+        "existing_path": { "type": "string" },
+        "holder": { "type": "object", "additionalProperties": true },
+        "lock_path": { "type": "string" }
+      }
+    }
   }
 }

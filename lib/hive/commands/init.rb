@@ -23,6 +23,19 @@ require "hive/invoked_binary"
 module Hive
   module Commands
     class Init
+      include Hive::Schemas::EnvelopeEmitter
+
+      class PreconditionError < Hive::Error
+        attr_reader :error_kind
+
+        def initialize(message, error_kind:)
+          super(message)
+          @error_kind = error_kind
+        end
+      end
+
+      ProjectRegistrationCollision = Hive::Config::ProjectRegistrationCollision
+
       INIT_MAIN_CHECKOUT_PATHS = %w[
         .gitignore
         .llm-wiki/config.json
@@ -129,6 +142,50 @@ module Hive
       end
 
       def call
+        return do_call unless minimal_json?
+
+        call_with_envelope { do_call }
+      end
+
+      def envelope_schema
+        @preview ? "hive-init-preview" : "hive-init"
+      end
+
+      def envelope_error_kind(error)
+        case error
+        when PreconditionError then error.error_kind
+        when ProjectRegistrationCollision then "project_name_collision"
+        when Hive::AlreadyInitialized then "already_initialized"
+        when Hive::Commands::Workflow::UsageError then "usage"
+        when Hive::ConcurrentRunError then "concurrent_run"
+        when Hive::ConfigError then "config"
+        when Hive::GitError then "git"
+        when Hive::InternalError then "internal"
+        else "error"
+        end
+      end
+
+      def envelope_extras_for(error)
+        extras = {
+          "minimal" => true,
+          "preview" => @preview,
+          "project" => File.basename(@project_path),
+          "path" => @project_path,
+          "workflow" => @new_workflow.to_s
+        }
+        extras["value"] = error.value if error.respond_to?(:value) && !error.value.nil?
+        if error.respond_to?(:suggested_id) && !error.suggested_id.nil?
+          extras["suggested_id"] = error.suggested_id
+        end
+        if error.is_a?(ProjectRegistrationCollision)
+          extras["existing_path"] = error.existing_path
+        end
+        extras
+      end
+
+      def envelope_serialization_failure_policy = :raise
+
+      def do_call
         validate_git_repo!
         # Argument-level mutual exclusivity is checked before validate_clean_tree!
         # so a dirty repo passing both flags gets the clearer usage error instead
@@ -221,6 +278,7 @@ module Hive
 
       def init_minimal(ops)
         ensure_minimal_target_fresh!(ops)
+        ensure_minimal_registration_available!
         id = Hive::Commands::Workflow.normalize_and_validate_id!(
           @new_workflow, project_root: @project_path
         )
@@ -244,6 +302,19 @@ module Hive
           raise Hive::AlreadyInitialized,
                 "minimal initialization requires a fresh target with no hive/state branch or .hive-state path"
         end
+      end
+
+      def ensure_minimal_registration_available!
+        name = File.basename(@project_path)
+        existing = Hive::Config.registered_projects.find { |project| project["name"] == name }
+        return unless existing
+        return if File.expand_path(existing.fetch("path")) == @project_path
+
+        raise ProjectRegistrationCollision.new(
+          "minimal initialization refuses to replace registered project #{name.inspect} " \
+          "at #{existing.fetch('path')}; rename the target directory or forget the existing project first",
+          name: name, existing_path: existing.fetch("path")
+        )
       end
 
       def scaffold_and_bind_fresh_minimal(ops, id)
@@ -315,7 +386,9 @@ module Hive
           },
           "global_registration" => {
             "enabled" => true,
-            "config_path" => Hive::Config.global_config_path
+            "config_path" => Hive::Config.global_config_path,
+            "name" => File.basename(@project_path),
+            "status" => "available"
           },
           "services" => {
             "daemon_install" => false,
@@ -708,6 +781,7 @@ module Hive
 
       def initialize_project_state(ops, content:, workflow: nil, &after_bootstrap)
         rollback_on_failure = false
+        registration_written = false
         side_effect_snapshot = capture_init_side_effect_snapshot
         begin
           rollback_on_failure = true
@@ -720,10 +794,18 @@ module Hive
           ops.commit_llm_wiki_bootstrap!
           Hive::LlmWikiBootstrap.install_runtime_hooks!(@project_path)
 
-          entry = Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
+          entry = Hive::Config.register_project(
+            name: File.basename(@project_path),
+            path: @project_path,
+            replace_existing: !@minimal
+          )
+          registration_written = true
           after_bootstrap&.call
           entry
         rescue StandardError
+          unless registration_written
+            side_effect_snapshot.fetch(:paths).delete(Hive::Config.global_config_path)
+          end
           rollback_partial_init(ops, side_effect_snapshot: side_effect_snapshot) if rollback_on_failure
           raise
         end
@@ -1211,6 +1293,11 @@ module Hive
       def validate_git_repo!
         out, _err, status = Open3.capture3("git", "-C", @project_path, "rev-parse", "--git-common-dir")
         unless status.success?
+          if minimal_json?
+            raise PreconditionError.new(
+              "not a git repository: #{@project_path}", error_kind: "not_git_repository"
+            )
+          end
           warn "hive: not a git repository: #{@project_path}"
           exit 1
         end
@@ -1219,6 +1306,12 @@ module Hive
         expected = File.join(@project_path, ".git")
         return if File.expand_path(common) == File.expand_path(expected)
 
+        if minimal_json?
+          raise PreconditionError.new(
+            "target appears to be inside a worktree (common dir #{common}); init must run on the main checkout",
+            error_kind: "main_checkout_required"
+          )
+        end
         warn "hive: target appears to be inside a worktree (common dir #{common}); init must run on the main checkout"
         exit 1
       end
@@ -1232,8 +1325,18 @@ module Hive
         modified = out.lines.reject { |l| l.start_with?("??") }
         return if modified.empty?
 
+        if minimal_json?
+          raise PreconditionError.new(
+            "uncommitted modifications to tracked files; commit before minimal init",
+            error_kind: "dirty_worktree"
+          )
+        end
         warn "hive: uncommitted modifications to tracked files; commit or pass --force"
         exit 1
+      end
+
+      def minimal_json?
+        @minimal && @json
       end
 
       def write_per_project_config(ops, content:)

@@ -50,7 +50,8 @@ Pi uses `/skill:hive`. For example:
 The creator checks the installed Hive version, project settings, templates,
 reserved IDs, and existing workflow IDs before it writes anything. In an
 initialized project it scaffolds only new paths with `hive workflow new`, edits
-those generated files, then runs:
+those generated files, validates them, and commits the populated descriptor and
+instruction directory to `hive/state` before reporting success:
 
 ```bash
 hive workflow validate editorial --json
@@ -109,15 +110,16 @@ creation or an explicitly requested first run.
 When the task reaches approval, the only transitions are:
 
 ```bash
-hive decide <task> approve --from approval
-hive decide <task> reject --from approval --note "revise the conclusion"
+hive decide <task> approve --from approval --decision-id <decision-id>
+hive decide <task> reject --from approval --decision-id <decision-id> --note "revise the conclusion"
 ```
 
-Approve requires a non-empty `draft.md`, records it as publish-ready, and
+The waiting `hive run --json` response supplies the visit-specific decision
+ID. Approve requires a non-empty `draft.md`, records it as publish-ready, and
 completes the task. Reject records the decision, returns the same task to
-`draft`, and resets that stage to `WAITING`. Neither outcome publishes,
-deploys, sends, or otherwise acts outside Hive; an external destination and
-separate authorization are always required.
+`draft`, and resets that stage to `WAITING`. Neither outcome publishes, deploys,
+sends, or otherwise acts outside Hive; an external destination and separate
+authorization are always required.
 
 The creator is create-only. Reserved or colliding IDs stop before mutation and
 return an available alternative. Editing or repairing an existing workflow is
@@ -287,7 +289,8 @@ Rules:
 - `kind: agent` spawns the generic stage runner.
 - `kind: council` runs a document review council over an input artifact.
 - `kind: human` persists `WAITING` and exposes only descriptor-declared
-  outcomes through `hive decide TARGET OUTCOME --from STAGE`.
+  outcomes through
+  `hive decide TARGET OUTCOME --from STAGE --decision-id DECISION_ID`.
 - Every agent stage must declare exactly one of `skill:` or `instruction:`.
 - `agent:`, `model:`, and `effort:` are optional on `kind: agent` and
   `kind: council`. Descriptor `agent` overrides the project stage block;
@@ -307,8 +310,8 @@ Rules:
   - Council command reviewers and command revisers also use `timeout_sec`; Hive
     terminates their process group when the limit expires.
 - A human stage declares `input:` plus one or more named `outcomes:`. Every
-  outcome has exactly one action: `complete: true` (optionally requiring a
-  non-empty `artifact:`) or `to: <stage>`. Human stages cannot declare agent,
+  outcome has exactly one action: `complete: true` with a required non-empty
+  `artifact:` basename, or `to: <stage>`. Human stages cannot declare agent,
   model, permission, runner, reviewer, or executable command settings.
 - `skill:`, `instruction:`, `agent:`, `model:`, `effort:`, `budget_usd:`,
   `timeout_sec:`, `permissions:`, `input:`, `reviewers:`, `council:`, and

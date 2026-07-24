@@ -11,9 +11,10 @@ decision with its stage visit identity, note, artifact, and timestamp.
 Operate a waiting checkpoint with:
 
 ```bash
-hive decide TARGET OUTCOME --from STAGE --note "REASON" --json
+hive decide TARGET OUTCOME --from STAGE --decision-id DECISION_ID --note "REASON" --json
 ```
 
-The `--from` observation makes retries safe. Repeating the same decision is a
-no-op; a stale or conflicting decision is rejected. Do not bypass a checkpoint
-with marker edits, a forced move, or an inferred external action.
+Read `DECISION_ID` from the waiting stage's `hive run --json` response. The
+stage and visit observations make retries safe. Repeating the same decision is
+a no-op; a stale or conflicting decision is rejected. Do not bypass a
+checkpoint with marker edits, a forced move, or an inferred external action.

@@ -1,17 +1,16 @@
 require "json"
 require "hive/config"
-require "hive/workflow_selection"
 require "hive/workflows/descriptor_parser"
-require "hive/workflows/loader"
 require "hive/workflows/registry"
+require "hive/workflow_package/managed_store"
 
 module Hive
   module Commands
     class Workflow
-      # Read-only validation through the same project overlay and workflow
-      # resolver used by task creation. It deliberately does not repair or
-      # normalize files on disk; the payload is a projection of the loaded
-      # runtime graph.
+      # Strictly read-only validation through direct authored, built-in, and
+      # managed-store lookups. It deliberately bypasses production selection
+      # reconciliation because even lock creation or journal repair would
+      # violate this command's no-write contract.
       class Validate
         SCHEMA = "hive-workflow-validate".freeze
 
@@ -24,12 +23,7 @@ module Hive
 
         def call!
           validate_id!
-          # Parse an authored target before loading the project overlay. The
-          # general loader isolates broken siblings by warning and skipping;
-          # validation targets one descriptor and must instead return its
-          # diagnostic without an incidental stderr warning.
-          Hive::Workflows::DescriptorParser.parse_file(descriptor_path) if descriptor_path
-          workflow = Hive::WorkflowSelection.fetch!(@id, project_root: @project_root)
+          workflow = resolve_read_only!
           validate_instruction_paths!(workflow)
           payload = payload_for(workflow)
           emit(payload)
@@ -114,7 +108,61 @@ module Hive
         end
 
         def workflows_dir
-          @workflows_dir ||= Hive::Workflows::Loader.workflow_dir(@project_root)
+          @workflows_dir ||= begin
+            source_path, data = Hive::Config.read_project_config(@project_root)
+            data = Hive::Config.normalize_legacy_project_config(
+              data, source_path, emit_warning: false
+            )
+            hive_state_path = data["hive_state_path"]
+            unless hive_state_path.is_a?(String)
+              hive_state_path = Hive::Config::DEFAULTS.fetch("hive_state_path")
+            end
+            File.join(File.expand_path(hive_state_path, @project_root), "workflows")
+          end
+        end
+
+        def resolve_read_only!
+          if descriptor_path
+            workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
+            if Hive::Workflows::Registry::WORKFLOWS.key?(workflow.id)
+              raise Hive::ConfigError,
+                    "workflow descriptor #{descriptor_path} collides with registered workflow #{workflow.id.inspect}"
+            end
+            @origin = "authored"
+            return workflow
+          end
+
+          id = @id.to_sym
+          if Hive::Workflows::Registry::WORKFLOWS.key?(id)
+            @origin = "built_in"
+            return Hive::Workflows::Registry.fetch(id)
+          end
+
+          store = Hive::WorkflowPackage::ManagedStore.new(File.dirname(workflows_dir))
+          selection = store.selected_read_only(@id)
+          if selection
+            @origin = "managed"
+            return store.workflow(
+              @id, selection.fetch("source_commit"), selection.fetch("manifest_digest"),
+              configuration_digest: selection.fetch("configuration_digest"),
+              verify_profiles: false
+            )
+          end
+
+          raise Hive::Workflows::UnknownWorkflow.new(
+            "unknown workflow #{@id.inspect}; valid workflows: #{read_only_workflow_ids.join(', ')}",
+            value: @id, valid: read_only_workflow_ids
+          )
+        end
+
+        def read_only_workflow_ids
+          authored = Dir.glob(File.join(workflows_dir, "*.yml")).map do |path|
+            File.basename(path, ".yml")
+          end
+          managed = Dir.glob(
+            File.join(workflows_dir, "*", Hive::WorkflowPackage::ManagedStore::LOCK_FILE)
+          ).map { |path| File.basename(File.dirname(path)) }
+          (Hive::Workflows::Registry::WORKFLOWS.keys.map(&:to_s) + authored + managed).uniq.sort
         end
 
         def descriptor_path
@@ -125,6 +173,7 @@ module Hive
         end
 
         def origin
+          return @origin if @origin
           return "authored" if descriptor_path
           return "built_in" if Hive::Workflows::Registry::WORKFLOWS.key?(@id.to_sym)
 

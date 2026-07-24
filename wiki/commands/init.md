@@ -190,10 +190,15 @@ The minimal profile creates the core project/state registration and required
 context hooks while disabling patrol/refactor patrol, ad-hoc auto-fix, daemon
 dispatch/autostart, and babysitter/timer installation. It never selects a
 starter template and rejects `--force`, missing `--new-workflow`, an existing
-Hive project/state branch, or a non-fresh target. The natural-language creator
-presents this preview and waits for one explicit confirmation before invoking
-the same command without `--preview`; unanswered or declined confirmation
-therefore leaves the directory unchanged.
+Hive project/state branch, a non-fresh target, or a basename already registered
+to a different project path. The preview discloses the available registration
+name, and execution rechecks that name inside the locked registry write so a
+post-preview contender cannot be replaced. Minimal `--json` precondition,
+collision, already-initialized, and usage failures use the typed
+`hive-init-preview.v1` or `hive-init.v2` error envelope instead of prose. The
+natural-language creator presents this preview and waits for one explicit
+confirmation before invoking the same command without `--preview`; unanswered
+or declined confirmation therefore leaves the directory unchanged.
 
 ## Backlinks
 

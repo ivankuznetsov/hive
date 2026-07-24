@@ -208,6 +208,7 @@ module Hive
       RECOVER_EXECUTE     = "recover_execute".freeze
       RECOVER_REVIEW      = "recover_review".freeze
       AGENT_RUNNING       = "agent_running".freeze
+      HUMAN_COMPLETE      = "human_complete".freeze
       ARCHIVED            = "archived".freeze
       MANUAL_STEERING     = "manual_steering".freeze
       ERROR               = "error".freeze

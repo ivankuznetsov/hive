@@ -62,13 +62,23 @@ class DecideTest < Minitest::Test
     end
 
     assert_raises(Hive::InvalidTaskPath) do
-      Hive::Commands::Decide.new("task", "approve", from: "", note: "ok").send(:validate_arguments!)
+      Hive::Commands::Decide.new(
+        "task", "approve", from: "", decision_id: "a" * 16, note: "ok"
+      ).send(:validate_arguments!)
     end
     assert_raises(Hive::InvalidTaskPath) do
-      Hive::Commands::Decide.new("task", "", from: "approval").send(:validate_arguments!)
+      Hive::Commands::Decide.new(
+        "task", "", from: "approval", decision_id: "a" * 16
+      ).send(:validate_arguments!)
     end
     assert_raises(Hive::InvalidTaskPath) do
-      Hive::Commands::Decide.new("task", "approve", from: "approval", note: 123)
+      Hive::Commands::Decide.new(
+        "task", "approve", from: "approval", decision_id: "a" * 16, note: 123
+      )
+                            .send(:validate_arguments!)
+    end
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::Commands::Decide.new("task", "approve", from: "approval")
                             .send(:validate_arguments!)
     end
   end
@@ -95,6 +105,8 @@ class DecideTest < Minitest::Test
       assert_equal true, payload.fetch("ok")
       assert_equal "waiting", payload.fetch("marker")
       assert_equal "human_decision_required", payload.dig("next_action", "reason")
+      assert_includes payload.dig("next_action", "decide_with"),
+                      "--decision-id #{marker.attrs.fetch('decision_id')}"
       assert_equal %w[approve reject], payload.fetch("allowed_outcomes").map { |entry| entry.fetch("name") }
       assert_schema_valid("hive-run", payload)
     end
@@ -103,7 +115,10 @@ class DecideTest < Minitest::Test
   def test_approve_records_publish_ready_artifact_and_completes_idempotently
     with_editorial_task do |dir, approval, slug|
       out, = capture_io do
-        Hive::Commands::Decide.new(slug, "approve", from: "approval", note: "Ready for the editor", json: true).call
+        Hive::Commands::Decide.new(
+          slug, "approve", from: "approval", decision_id: decision_id_for(approval),
+          note: "Ready for the editor", json: true
+        ).call
       end
       payload = JSON.parse(out)
 
@@ -126,7 +141,10 @@ class DecideTest < Minitest::Test
       refute Dir.exist?(File.join(dir, ".hive-state", "stages", "4-publish"))
 
       retry_out, = capture_io do
-        Hive::Commands::Decide.new(slug, "approve", from: "approval", note: "Ready for the editor", json: true).call
+        Hive::Commands::Decide.new(
+          slug, "approve", from: "approval", decision_id: record.fetch("decision_id"),
+          note: "Ready for the editor", json: true
+        ).call
       end
       retry_payload = JSON.parse(retry_out)
       assert_equal false, retry_payload.fetch("applied")
@@ -134,7 +152,9 @@ class DecideTest < Minitest::Test
       assert_equal record.fetch("decision_id"), retry_payload.fetch("decision_id")
 
       assert_raises(Hive::WrongStage) do
-        Hive::Commands::Decide.new(slug, "reject", from: "approval").call
+        Hive::Commands::Decide.new(
+          slug, "reject", from: "approval", decision_id: record.fetch("decision_id")
+        ).call
       end
     end
   end
@@ -146,7 +166,9 @@ class DecideTest < Minitest::Test
       before = File.binread(File.join(approval, "approval.md"))
 
       error = assert_raises(Hive::WrongStage) do
-        Hive::Commands::Decide.new(slug, "approve", from: "approval").call
+        Hive::Commands::Decide.new(
+          slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+        ).call
       end
 
       assert_includes error.message, "non-empty artifact"
@@ -160,12 +182,16 @@ class DecideTest < Minitest::Test
     with_editorial_task do |_dir, approval, slug|
       Hive::Markers.set(File.join(approval, "approval.md"), :waiting)
       error = assert_raises(Hive::WrongStage) do
-        Hive::Commands::Decide.new(slug, "approve", from: "approval").send(:do_call)
+        Hive::Commands::Decide.new(
+          slug, "approve", from: "approval", decision_id: "a" * 16
+        ).send(:do_call)
       end
-      assert_includes error.message, "not awaiting a decision"
+      assert_includes error.message, "decision observation is stale"
 
       error = assert_raises(Hive::InvalidTaskPath) do
-        Hive::Commands::Decide.new(slug, "approve", from: "draft").send(:do_call)
+        Hive::Commands::Decide.new(
+          slug, "approve", from: "draft", decision_id: "a" * 16
+        ).send(:do_call)
       end
       assert_includes error.message, "not a human stage"
     end
@@ -178,7 +204,9 @@ class DecideTest < Minitest::Test
       File.rename(approval, draft)
 
       error = assert_raises(Hive::WrongStage) do
-        Hive::Commands::Decide.new(slug, "approve", from: "approval").send(:do_call)
+        Hive::Commands::Decide.new(
+          slug, "approve", from: "approval", decision_id: decision_id_for(draft)
+        ).send(:do_call)
       end
       assert_includes error.message, "--from expected 3-approval"
     end
@@ -194,7 +222,9 @@ class DecideTest < Minitest::Test
 
       with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
         error = assert_raises(Hive::GitError) do
-          Hive::Commands::Decide.new(slug, "approve", from: "approval").send(:do_call)
+          Hive::Commands::Decide.new(
+            slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+          ).send(:do_call)
         end
         assert_includes error.message, "commit failed"
       end
@@ -223,7 +253,9 @@ class DecideTest < Minitest::Test
       end
       with_replaced_singleton_method(Hive::Commands::Approve, :new, replacement) do
         error = assert_raises(Hive::GitError) do
-          Hive::Commands::Decide.new(slug, "reject", from: "approval").send(:do_call)
+          Hive::Commands::Decide.new(
+            slug, "reject", from: "approval", decision_id: decision_id_for(approval)
+          ).send(:do_call)
         end
         assert_includes error.message, "move failed"
       end
@@ -248,9 +280,11 @@ class DecideTest < Minitest::Test
   end
 
   def test_plain_success_reports_decision_and_current_stage
-    with_editorial_task do |_dir, _approval, slug|
+    with_editorial_task do |_dir, approval, slug|
       out, = capture_io do
-        Hive::Commands::Decide.new(slug, "approve", from: "approval").call
+        Hive::Commands::Decide.new(
+          slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+        ).call
       end
 
       assert_includes out, "hive: decided #{slug} approval=approve"
@@ -260,9 +294,13 @@ class DecideTest < Minitest::Test
 
   def test_reject_records_decision_returns_to_draft_and_retries_as_noop
     with_editorial_task do |dir, approval, slug|
+      observed_id = decision_id_for(approval)
       out, = capture_io do
         Hive::CLI.start(
-          [ "decide", slug, "reject", "--from", "3-approval", "--note", "Strengthen the lead", "--json" ]
+          [
+            "decide", slug, "reject", "--from", "3-approval",
+            "--decision-id", observed_id, "--note", "Strengthen the lead", "--json"
+          ]
         )
       end
       payload = JSON.parse(out)
@@ -280,7 +318,10 @@ class DecideTest < Minitest::Test
       assert_equal "draft", record.fetch("to")
 
       retry_out, = capture_io do
-        Hive::Commands::Decide.new(slug, "reject", from: "approval", note: "Strengthen the lead", json: true).call
+        Hive::Commands::Decide.new(
+          slug, "reject", from: "approval", decision_id: observed_id,
+          note: "Strengthen the lead", json: true
+        ).call
       end
       retry_payload = JSON.parse(retry_out)
       assert_equal true, retry_payload.fetch("noop")
@@ -288,8 +329,80 @@ class DecideTest < Minitest::Test
       assert_equal "2-draft", retry_payload.fetch("current_stage")
 
       assert_raises(Hive::WrongStage) do
-        Hive::Commands::Decide.new(slug, "approve", from: "approval").call
+        Hive::Commands::Decide.new(
+          slug, "approve", from: "approval", decision_id: observed_id
+        ).call
       end
+    end
+  end
+
+  def test_marker_only_artifact_is_not_publish_ready
+    with_editorial_task do |_dir, approval, slug|
+      draft = File.join(approval, "draft.md")
+      File.write(draft, "<!-- COMPLETE -->\n<!-- WAITING decision_id=aaaaaaaaaaaaaaaa -->\n")
+
+      error = assert_raises(Hive::WrongStage) do
+        Hive::Commands::Decide.new(
+          slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+        ).call
+      end
+
+      assert_includes error.message, "non-empty artifact"
+      assert_equal :waiting, Hive::Markers.current(File.join(approval, "approval.md")).name
+    end
+  end
+
+  def test_artifact_is_rechecked_under_the_decision_lock
+    with_editorial_task do |_dir, approval, slug|
+      draft = File.join(approval, "draft.md")
+      command = Hive::Commands::Decide.new(
+        slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+      )
+      original = command.method(:validate_current_decision!)
+      command.define_singleton_method(:validate_current_decision!) do |task, stage, decision_id|
+        original.call(task, stage, decision_id)
+        File.write(draft, "")
+      end
+
+      assert_raises(Hive::WrongStage) { command.call }
+      assert_equal :waiting, Hive::Markers.current(File.join(approval, "approval.md")).name
+      assert_nil Hive::Commands::Decide.latest_record(File.join(approval, "approval.md"))
+    end
+  end
+
+  def test_decision_from_an_earlier_visit_is_rejected_after_reentry
+    with_editorial_task do |_dir, approval, slug|
+      old_id = decision_id_for(approval)
+      Hive::Markers.set(
+        File.join(approval, "approval.md"), :waiting, "decision_id" => "b" * 16
+      )
+
+      error = assert_raises(Hive::WrongStage) do
+        Hive::Commands::Decide.new(
+          slug, "approve", from: "approval", decision_id: old_id
+        ).call
+      end
+
+      assert_includes error.message, "decision observation is stale"
+      assert_equal "b" * 16, decision_id_for(approval)
+    end
+  end
+
+  def test_completed_human_stage_run_reports_completion_without_outcomes
+    with_editorial_task do |_dir, approval, slug|
+      capture_io do
+        Hive::Commands::Decide.new(
+          slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+        ).call
+      end
+
+      out, = capture_io { Hive::Commands::Run.new(slug, json: true).call }
+      payload = JSON.parse(out)
+      assert_equal "complete", payload.fetch("marker")
+      assert_equal "human_stage_complete", payload.dig("next_action", "reason")
+      refute payload.key?("allowed_outcomes")
+      refute payload.dig("next_action").key?("allowed_outcomes")
+      refute payload.dig("next_action").key?("decide_with")
     end
   end
 
@@ -314,6 +427,10 @@ class DecideTest < Minitest::Test
   end
 
   private
+
+  def decision_id_for(folder)
+    Hive::Markers.current(File.join(folder, "approval.md")).attrs.fetch("decision_id")
+  end
 
   def editorial_workflow
     Hive::Workflow.new(

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-validate.v1.json",
   "title": "hive workflow validate output (v1)",
-  "description": "Read-only validation of a workflow through Hive's production project overlay and resolver.",
+  "description": "Strictly read-only validation through direct authored, built-in, and managed workflow lookups.",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }

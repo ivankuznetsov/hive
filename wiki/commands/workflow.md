@@ -253,13 +253,16 @@ listing the available names; with `--json` they ride the `expected` array.
 
 ## Read-only validation and human outcomes
 
-`hive workflow validate ID --json` resolves the workflow through the same
-project overlay and loader used by task creation. It validates descriptor YAML,
+`hive workflow validate ID --json` resolves authored descriptors, built-ins,
+and the currently selected managed generation through direct read-only
+lookups. It does not acquire the managed mutation lock, reconcile a selected
+pointer, or replay/clear a transaction journal. It validates descriptor YAML,
 referenced instructions, stage inputs/state files, automatic edges, and
 descriptor-declared human outcomes without creating a task or writing project
 or Hive state. The `hive-workflow-validate.v1` result reports the descriptor
 origin/path, ordered stages, instruction paths, automatic edges, human
-outcomes, and `valid`. Invalid input uses the same envelope with diagnostics.
+outcomes, and `valid`. Invalid input uses the same command-specific envelope
+with diagnostics, including malformed `--json` invocations.
 
 Project-authored descriptors may declare a durable `kind: human` stage:
 
@@ -276,19 +279,22 @@ Project-authored descriptors may declare a durable `kind: human` stage:
       to: draft
 ```
 
-Every outcome has exactly one action: `complete: true` or `to: STAGE`.
-Completing outcomes may require a non-empty artifact. Human stages reject
+Every outcome has exactly one action: `complete: true` with a required
+non-empty artifact basename, or `to: STAGE`. Human stages reject
 agent/model/permissions/instruction/runner settings and are never dispatched
 by the daemon. Apply a decision with
-`hive decide TASK OUTCOME --from STAGE [--note TEXT] [--json]`; the expected
-stage and durable decision identity make matching retries no-ops and reject
+`hive decide TASK OUTCOME --from STAGE --decision-id DECISION_ID [--note TEXT] [--json]`.
+The waiting `hive run --json` response supplies that visit-specific ID. The
+expected stage and decision identity make matching retries no-ops and reject
 stale or conflicting decisions.
 
 Create-only natural-language requests are handled by the canonical `/hive`
 skill's `hive-workflow-creator` route. It gates on the installed version,
 inventories IDs, scaffolds only through this command (or the minimal init path),
-edits only returned new paths, validates here, reports all defaults, and creates
-no task unless the original request explicitly asks for one.
+edits only returned new paths, validates here, commits the populated descriptor
+and instruction directory on `hive/state`, reports all defaults, and creates no
+task unless the original request explicitly asks for one. The populated-graph
+commit is required because `workflow new` commits only the initial scaffold.
 
 ## Backlinks
 

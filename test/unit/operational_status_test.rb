@@ -502,6 +502,20 @@ class OperationalStatusTest < Minitest::Test
     assert_nil projected.fetch("action")
   end
 
+  def test_completed_human_stage_remains_active_but_is_not_waiting_for_input
+    human = task(
+      action: "human_complete", slug: "approved", stage: "3-approval", marker: "complete"
+    )
+    result = project(status_payload(human))
+    projected = result.fetch("tasks").first
+
+    assert_equal 1, result.dig("summary", "active")
+    assert_equal 0, result.dig("summary", "archived")
+    assert_equal "idle", projected.fetch("state")
+    assert_equal "none", projected.fetch("blocker_owner")
+    assert_nil projected.fetch("action")
+  end
+
   def test_payload_validates_against_published_schema
     result = project(status_payload(task(action: "ready_to_plan", slug: "valid")))
     schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))

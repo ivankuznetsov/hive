@@ -352,6 +352,8 @@ def json_usage_error_contract(argv)
     return { schema: schema, error_kind: "invalid_arguments" }
   when "digest"
     return { reporter: :prdigest }
+  when "decide"
+    return { schema: "hive-decide", error_kind: "invalid_task_path" }
   when "refactor-patrol"
     if (jobs = refactor_patrol_jobs_argv(option_argv))
       return {
@@ -367,9 +369,18 @@ def json_usage_error_contract(argv)
     when "remove" then "hive-workflow-remove"
     when "update" then "hive-workflow-update"
     when "publish" then "hive-workflow-publish"
+    when "validate" then "hive-workflow-validate"
     else "hive-workflow-new"
     end
-    return { schema: schema, error_kind: "usage" } if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+    if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+      extras = if subcommand == "validate"
+        id = json_usage_positionals(argv, command_index).fetch(1, "")
+        { "valid" => false, "id" => id }
+      else
+        {}
+      end
+      return { schema: schema, error_kind: "usage", extras: extras }
+    end
   end
 
   JSON_USAGE_ERROR_CONTRACTS[command]
@@ -487,6 +498,9 @@ def json_usage_error_payload(contract, error, argv: [])
       error_kind: error_kind,
       extras: extras
     )
+    if schema == "hive-workflow-validate"
+      payload["diagnostics"] = [ { "message" => error.message } ]
+    end
     payload.delete("error_class") if contract[:omit_error_class]
     return payload
   end

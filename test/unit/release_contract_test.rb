@@ -43,7 +43,7 @@ class ReleaseContractTest < Minitest::Test
     assert_includes workflows, "hive workflow install honeycomb/architecture --yes"
     assert_includes workflows, "/hive create a three-stage editorial workflow"
     assert_includes workflows, "hive workflow validate editorial --json"
-    assert_includes workflows, "hive decide <task> approve --from approval"
+    assert_includes workflows, "hive decide <task> approve --from approval --decision-id <decision-id>"
     assert_includes workflows, "The last stage may be `kind: terminal`, `kind: agent`, `kind: council`, or `kind: human`."
     assert_includes workflows, "No task is created by workflow creation alone."
     assert_includes readme, "natural language"

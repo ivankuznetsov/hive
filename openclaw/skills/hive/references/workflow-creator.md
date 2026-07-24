@@ -65,10 +65,24 @@ Success requires `valid: true`, the intended ordered stages and kinds, exact
 automatic edges, exact human outcomes, and every instruction path present.
 On any diagnostic, stop and report it; do not claim success or create a task.
 
+After successful validation, commit the populated graph to the Hive state
+worktree. Retain `ID` and `descriptor_path` from the scaffold response, then
+derive the state root and commit only the new workflow paths:
+
+```bash
+state_root="$(dirname "$(dirname "$descriptor_path")")"
+git -C "$state_root" add -- "workflows/$ID.yml" "workflows/$ID"
+git -C "$state_root" commit -m "feat(workflow): define $ID workflow" -- \
+  "workflows/$ID.yml" "workflows/$ID"
+```
+
+The commit is part of workflow creation. If it fails, stop and report it; do
+not claim success or create a task from an uncommitted graph.
+
 ## Task side-effect boundary
 
-No task by default. A creation-only request ends after validation and prints an
-exact shell-quoted next command:
+No task by default. A creation-only request ends after validation and the
+populated-graph commit, then prints an exact shell-quoted next command:
 
 ```bash
 hive new PROJECT --workflow ID "ORIGINAL REQUEST"

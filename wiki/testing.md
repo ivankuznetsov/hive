@@ -24,7 +24,10 @@ byte-identical collision refusal, no-write minimal-init preview followed by
 confirmed execution, no-task default behavior, and state-wide idempotent task
 retry after movement. Focused parser, decision, validation, init, task-meta,
 skill projection, schema, package, and release-contract tests own the smaller
-contracts.
+contracts, including visit-bound decision IDs, marker-only/concurrently changed
+artifact rejection, no-follow human-state entry, read-only managed validation,
+minimal-init registration collisions and JSON failures, serialized idempotent
+creation, and the distinct completed-human action.
 
 `test/smoke/live_hive_workflow_creator_smoke_test.rb` is a separate,
 OpenClaw-only protected proof. The exact candidate projection receives the

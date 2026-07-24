@@ -385,7 +385,7 @@ class CommandsRunTest < Minitest::Test
     end
 
     assert_includes out, "outcomes: approve, reject"
-    assert_includes out, "hive decide some-slug <outcome> --from approval"
+    assert_includes out, "hive decide some-slug <outcome> --from approval --decision-id"
   end
 
   def test_report_text_review_error_prints_phase_and_reason_before_raising

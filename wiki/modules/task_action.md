@@ -61,6 +61,7 @@ Entries are keyed by an internal symbol resolved by routing on the descriptor st
 | `ready_to_advance` | `READY_TO_ADVANCE` | "Ready to advance" | approve |
 | `generic_ready_to_run` | `READY_TO_RUN` | "Ready to run" | run |
 | `generic_needs_input` | `NEEDS_INPUT` | "Needs your input" | run |
+| `human_complete` | `HUMAN_COMPLETE` | "Human workflow complete" | nil |
 | `agent_running` | `AGENT_RUNNING` | "Agent running" | nil |
 | `done` | `ARCHIVED` | "Archived" | nil |
 | `error` | `ERROR` | "Error" | nil |
@@ -144,9 +145,12 @@ Human descriptor stages use the dedicated `human_needs_input` classification:
 their non-complete marker state is `NEEDS_INPUT` with label
 `Awaiting human decision`, no daemon-dispatch command, and a structured
 `outcomes` list. The operator transition is deliberately separate from generic
-approval: `hive decide TASK OUTCOME --from STAGE`. A completed human stage
-classifies as done; its durable record makes an identical decision retry a
-no-op while stale or conflicting decisions fail against the expected stage.
+approval:
+`hive decide TASK OUTCOME --from STAGE --decision-id DECISION_ID`. A completed human stage
+uses the separate `human_complete` action while its folder remains in the
+active human-stage directory; it is not mislabeled as archived. Its durable
+record makes an identical decision retry a no-op while stale or conflicting
+decisions fail against the expected stage and visit-specific decision ID.
 
 `--project <name>` is appended whenever `project_count > 1` so multi-project status output emits unambiguous commands.
 

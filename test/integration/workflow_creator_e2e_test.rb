@@ -55,6 +55,10 @@ class WorkflowCreatorE2ETest < Minitest::Test
       assert_includes creator, "hive new PROJECT --workflow ID"
       assert_includes creator, "Never publish externally"
       assert_operator creator.index("hive workflow new"), :<, creator.index("hive workflow validate")
+      assert_operator creator.index("hive workflow validate"), :<,
+                      creator.index('git -C "$state_root" commit')
+      assert_operator creator.index('git -C "$state_root" commit'), :<,
+                      creator.index("hive new PROJECT --workflow ID")
     end
   end
 
@@ -269,9 +273,11 @@ class WorkflowCreatorE2ETest < Minitest::Test
   end
 
   def decide(slug, outcome, note:)
+    task = Hive::TaskResolver.new(slug).resolve
+    decision_id = Hive::Markers.current(task.state_file).attrs.fetch("decision_id")
     out, err = capture_io do
       Hive::Commands::Decide.new(
-        slug, outcome, from: "approval", note: note, json: true
+        slug, outcome, from: "approval", decision_id: decision_id, note: note, json: true
       ).call
     end
     assert_empty err

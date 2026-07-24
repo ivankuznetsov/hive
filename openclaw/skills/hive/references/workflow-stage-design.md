@@ -11,8 +11,8 @@ material decisions. A verb phrase in the request is not automatically a stage.
 - Prefer project agent/model inheritance. Specialize only when the request
   materially requires a capability the inherited choice cannot supply.
 - Use safe lowercase-hyphen stage names and distinct state files.
-- A terminal human approval can complete with an artifact; it does not need a
-  synthetic “done” or “publish” stage.
+- A terminal human approval uses `complete: true` with a required non-empty
+  artifact basename; it does not need a synthetic “done” or “publish” stage.
 
 Before writing, restate the inferred ordered graph, artifacts, inheritance,
 permissions, and decision points. Ask only when two plausible interpretations

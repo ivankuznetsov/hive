@@ -21,7 +21,7 @@ This page documents the command surface exposed by `bin/hive` in this checkout. 
 | `hive artifacts TARGET` | Collect the reviewed task's release artifacts. | `hive artifacts <slug> --from 6-review` |
 | `hive finalize TARGET` | Refresh PR body and mark the draft PR ready. | `hive finalize <slug> --from 7-artifacts` |
 | `hive archive TARGET` | Move finalized work to `9-done/`. | `hive archive <slug> --from 8-finalize` |
-| `hive decide TARGET OUTCOME --from STAGE [--note TEXT] [--json]` | Apply one descriptor-declared outcome at a durable human stage. | `hive decide <slug> approve --from approval --json` |
+| `hive decide TARGET OUTCOME --from STAGE --decision-id ID [--note TEXT] [--json]` | Apply one descriptor-declared outcome to the observed visit of a durable human stage. | `hive decide <slug> approve --from approval --decision-id abcdef0123456789 --json` |
 
 The workflow verbs promote then run when the task is at the previous stage. If the task is already at the target stage, they only run that stage.
 

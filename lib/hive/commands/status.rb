@@ -1259,6 +1259,7 @@ module Hive
         "Ad-hoc review complete (parked)",
         "Ready to finalize",
         "Ready to archive",
+        "Human workflow complete",
         "Archived",
         "Manually steered",
         "Error"

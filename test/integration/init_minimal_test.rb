@@ -42,6 +42,8 @@ class InitMinimalTest < Minitest::Test
         assert_equal false, payload.dig("services", "daemon_install")
         assert_equal false, payload.dig("background_automation", "patrol")
         assert_equal true, payload.dig("context_integration", "llm_wiki")
+        assert_equal File.basename(project_root), payload.dig("global_registration", "name")
+        assert_equal "available", payload.dig("global_registration", "status")
         schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-init-preview"))))
         assert_empty schemer.validate(payload).to_a
       end
@@ -97,11 +99,17 @@ class InitMinimalTest < Minitest::Test
             project_root, minimal: true, new_workflow: "editorial", agent_skill_preflight: false
           ).call
         end
-        assert_raises(Hive::AlreadyInitialized) do
-          Hive::Commands::Init.new(
-            project_root, minimal: true, new_workflow: "another", agent_skill_preflight: false
-          ).call
+        out, = capture_io do
+          assert_raises(Hive::AlreadyInitialized) do
+            Hive::Commands::Init.new(
+              project_root, minimal: true, new_workflow: "another",
+              json: true, agent_skill_preflight: false
+            ).call
+          end
         end
+        payload = JSON.parse(out)
+        assert_equal "already_initialized", payload.fetch("error_kind")
+        assert_schema_valid("hive-init", payload)
       end
     end
   end
@@ -134,6 +142,106 @@ class InitMinimalTest < Minitest::Test
             assert_equal "editorial-2", error.suggested_id
           end
         end
+      end
+    end
+  end
+
+  def test_minimal_refuses_to_replace_an_unrelated_same_name_registration
+    with_tmp_global_config do
+      with_tmp_dir do |root|
+        first = File.join(root, "first", "shared")
+        second = File.join(root, "second", "shared")
+        initialize_git_repo(first)
+        initialize_git_repo(second)
+        Hive::Config.register_project(name: "shared", path: first)
+
+        out, = capture_io do
+          assert_raises(Hive::Commands::Init::ProjectRegistrationCollision) do
+            Hive::Commands::Init.new(
+              second, minimal: true, preview: true, new_workflow: "editorial",
+              json: true, agent_skill_preflight: false
+            ).call
+          end
+        end
+        payload = JSON.parse(out)
+
+        assert_equal false, payload.fetch("ok")
+        assert_equal "project_name_collision", payload.fetch("error_kind")
+        assert_equal first, payload.fetch("existing_path")
+        assert_equal first, Hive::Config.find_project("shared").fetch("path")
+        schemer = JSONSchemer.schema(
+          JSON.parse(File.read(Hive::Schemas.schema_path("hive-init-preview")))
+        )
+        assert_empty schemer.validate(payload).to_a
+      end
+    end
+  end
+
+  def test_minimal_rechecks_registration_inside_the_locked_write
+    with_tmp_global_config do
+      with_tmp_dir do |root|
+        existing = File.join(root, "existing", "shared")
+        target = File.join(root, "target", "shared")
+        initialize_git_repo(existing)
+        initialize_git_repo(target)
+
+        command = Hive::Commands::Init.new(
+          target, minimal: true, new_workflow: "editorial",
+          json: true, agent_skill_preflight: false
+        )
+        original = command.method(:ensure_minimal_registration_available!)
+        command.define_singleton_method(:ensure_minimal_registration_available!) do
+          original.call
+          Hive::Config.register_project(name: "shared", path: existing)
+        end
+
+        out, = capture_io do
+          assert_raises(Hive::Commands::Init::ProjectRegistrationCollision) { command.call }
+        end
+        payload = JSON.parse(out)
+
+        assert_equal "project_name_collision", payload.fetch("error_kind")
+        assert_equal existing, payload.fetch("existing_path")
+        assert_equal existing, Hive::Config.find_project("shared").fetch("path")
+        refute File.exist?(File.join(target, ".hive-state"))
+        assert_schema_valid("hive-init", payload)
+      end
+    end
+  end
+
+  def test_minimal_json_failures_use_typed_command_envelopes
+    with_tmp_global_config do
+      with_tmp_git_repo do |project_root|
+        File.write(File.join(project_root, "README.md"), "dirty\n")
+        out, = capture_io do
+          assert_raises(Hive::Commands::Init::PreconditionError) do
+            Hive::Commands::Init.new(
+              project_root, minimal: true, new_workflow: "editorial",
+              json: true, agent_skill_preflight: false
+            ).call
+          end
+        end
+        payload = JSON.parse(out)
+        assert_equal "hive-init", payload.fetch("schema")
+        assert_equal "dirty_worktree", payload.fetch("error_kind")
+        assert_equal false, payload.fetch("preview")
+        assert_schema_valid("hive-init", payload)
+      end
+
+      with_tmp_git_repo do |project_root|
+        out, = capture_io do
+          assert_raises(Hive::Commands::Workflow::UsageError) do
+            Hive::Commands::Init.new(
+              project_root, minimal: true, preview: true, new_workflow: "Bad_ID",
+              json: true, agent_skill_preflight: false
+            ).call
+          end
+        end
+        payload = JSON.parse(out)
+        assert_equal "hive-init-preview", payload.fetch("schema")
+        assert_equal "usage", payload.fetch("error_kind")
+        assert_equal "Bad_ID", payload.fetch("value")
+        assert_schema_valid("hive-init-preview", payload)
       end
     end
   end
@@ -174,6 +282,22 @@ class InitMinimalTest < Minitest::Test
   end
 
   private
+
+  def initialize_git_repo(path)
+    FileUtils.mkdir_p(path)
+    run!("git", "-C", path, "init", "-b", "master", "--quiet")
+    run!("git", "-C", path, "config", "user.email", "test@example.com")
+    run!("git", "-C", path, "config", "user.name", "Test")
+    File.write(File.join(path, "README.md"), "test\n")
+    run!("git", "-C", path, "add", ".")
+    run!("git", "-C", path, "commit", "-m", "initial", "--quiet")
+  end
+
+  def assert_schema_valid(name, payload)
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(name))))
+    errors = schemer.validate(payload).to_a
+    assert_empty errors, "#{name} payload errors: #{errors.map { |error| error['error'] }.inspect}"
+  end
 
   def repository_snapshot(project_root)
     {

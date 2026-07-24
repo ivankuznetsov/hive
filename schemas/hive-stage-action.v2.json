@@ -301,6 +301,7 @@
             "recover_execute",
             "recover_review",
             "agent_running",
+            "human_complete",
             "archived",
             "manual_steering",
             "error",

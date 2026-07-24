@@ -184,76 +184,89 @@ module Hive
         fingerprint = input_fingerprint(
           workflow_info, depends_on: depends_on, base_branch: base_branch
         ) if @idempotency_key
-        if @idempotency_key
-          existing = Hive::Lock.with_commit_lock(hive_state) do
-            find_idempotent_task!(hive_state, @idempotency_key, fingerprint)
-          end
-          return emit_task_result(existing.fetch(:folder), workflow, created: false) if existing
-        end
-
         slug = @slug_override || derive_slug(@text)
         validate_slug!(slug)
         task_dir = File.join(hive_state, "stages", entry_stage.dir, slug)
-        if File.exist?(task_dir)
-          raise SlugCollisionError.new(
-            "slug collision at #{task_dir} (rare; retry the command)",
-            value: slug
-          )
-        end
-        FileUtils.mkdir_p(task_dir)
-
-        idea_path = File.join(task_dir, entry_stage.state_file)
-        id = nil
-        begin
-          File.write(idea_path, render_initial_state(slug, @text, body_override: @body_override, workflow: workflow))
-          if entry_stage.kind == :human
-            Hive::Markers.set(idea_path, :waiting, "decision_id" => SecureRandom.hex(8))
-          end
-          copy_attachments!(task_dir)
-          id = Hive::TaskCounter.next_or_nil
-          write_task_meta(task_dir, id: id, slug: slug, depends_on: depends_on,
-                          base_branch: base_branch, workflow: workflow,
-                          workflow_info: workflow_info, hive_state: hive_state,
-                          idempotency_key: nil, input_fingerprint: nil)
-        rescue StandardError
-          # An idea.md or attachment write failure leaves an orphan
-          # uncommitted task on disk that the snapshot would surface as a
-          # broken entry under the workflow's entry stage dir (`entry_stage.dir`
-          # — `1-inbox` for coding, but different for other workflows). Roll the
-          # directory back so the capture is atomic — either the task is
-          # committed or it never existed.
-          FileUtils.rm_rf(task_dir)
-          raise
-        end
-
         ops = Hive::GitOps.new(project["path"])
-        duplicate = nil
+
+        if @idempotency_key
+          result = Hive::Lock.with_commit_lock(hive_state) do
+            existing = find_idempotent_task!(hive_state, @idempotency_key, fingerprint)
+            next { folder: existing.fetch(:folder), created: false } if existing
+
+            create_task_candidate!(
+              task_dir, slug: slug, entry_stage: entry_stage, workflow: workflow,
+              depends_on: depends_on, base_branch: base_branch,
+              workflow_info: workflow_info, hive_state: hive_state,
+              idempotency_key: @idempotency_key, input_fingerprint: fingerprint
+            )
+            begin
+              ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
+            rescue StandardError
+              FileUtils.rm_rf(task_dir)
+              raise
+            end
+            { folder: task_dir, created: true }
+          end
+          unless result.fetch(:created)
+            return emit_task_result(result.fetch(:folder), workflow, created: false)
+          end
+
+          spawn_name_generator(task_dir)
+          return emit_task_result(task_dir, workflow, created: true)
+        end
+
+        create_task_candidate!(
+          task_dir, slug: slug, entry_stage: entry_stage, workflow: workflow,
+          depends_on: depends_on, base_branch: base_branch,
+          workflow_info: workflow_info, hive_state: hive_state,
+          idempotency_key: nil, input_fingerprint: nil
+        )
         begin
           Hive::Lock.with_commit_lock(hive_state) do
-            duplicate = find_idempotent_task!(
-              hive_state, @idempotency_key, fingerprint, excluding: task_dir
-            ) if @idempotency_key
-            unless duplicate
-              if @idempotency_key
-                Hive::TaskMeta.rewrite(
-                  task_dir,
-                  idempotency_key: @idempotency_key,
-                  input_fingerprint: fingerprint
-                )
-              end
-              ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
-            end
+            ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
           end
         rescue StandardError
           FileUtils.rm_rf(task_dir)
           raise
-        end
-        if duplicate
-          FileUtils.rm_rf(task_dir)
-          return emit_task_result(duplicate.fetch(:folder), workflow, created: false)
         end
         spawn_name_generator(task_dir)
         emit_task_result(task_dir, workflow, created: true)
+      end
+
+      def create_task_candidate!(task_dir, slug:, entry_stage:, workflow:, depends_on:, base_branch:,
+                                 workflow_info:, hive_state:, idempotency_key:, input_fingerprint:)
+        created = false
+        FileUtils.mkdir_p(File.dirname(task_dir))
+        Dir.mkdir(task_dir)
+        created = true
+        idea_path = File.join(task_dir, entry_stage.state_file)
+        File.write(
+          idea_path,
+          render_initial_state(slug, @text, body_override: @body_override, workflow: workflow)
+        )
+        if entry_stage.kind == :human
+          Hive::Markers.set(idea_path, :waiting, "decision_id" => SecureRandom.hex(8))
+        end
+        copy_attachments!(task_dir)
+        id = Hive::TaskCounter.next_or_nil
+        write_task_meta(
+          task_dir, id: id, slug: slug, depends_on: depends_on,
+          base_branch: base_branch, workflow: workflow,
+          workflow_info: workflow_info, hive_state: hive_state,
+          idempotency_key: idempotency_key, input_fingerprint: input_fingerprint
+        )
+      rescue Errno::EEXIST
+        raise SlugCollisionError.new(
+          "slug collision at #{task_dir} (rare; retry the command)",
+          value: slug
+        )
+      rescue StandardError
+        # Once this invocation owns the directory, any idea, attachment, or
+        # metadata failure must remove its uncommitted candidate. An EEXIST
+        # contender never owns the directory and therefore never removes it.
+        FileUtils.rm_rf(task_dir) if created
+        raise
       end
 
       def validate_idempotency_key!
@@ -291,11 +304,9 @@ module Hive
         ::Digest::SHA256.hexdigest(JSON.generate(input))
       end
 
-      def find_idempotent_task!(hive_state, key, fingerprint, excluding: nil)
+      def find_idempotent_task!(hive_state, key, fingerprint)
         matches = Dir.glob(File.join(hive_state, "stages", "*", "*", Hive::TaskMeta::FILENAME)).filter_map do |path|
           folder = File.dirname(path)
-          next if excluding && File.expand_path(folder) == File.expand_path(excluding)
-
           meta = Hive::TaskMeta.read(folder)
           { folder: folder, meta: meta } if meta[:idempotency_key] == key
         end

@@ -14,6 +14,7 @@ require "hive/workflows"
 require "hive/commit_or_rollback"
 require "hive/dependency_snapshot"
 require "hive/attempts/context"
+require "hive/atomic_file"
 require "hive/conditions/transition_guard"
 require "hive/workflow_package/mutation_lock"
 
@@ -294,13 +295,45 @@ module Hive
         return nil unless stage.kind == :human
 
         path = File.join(task.folder, stage.state_file)
-        snapshot = {
-          state_file: stage.state_file,
-          existed: File.exist?(path),
-          body: File.exist?(path) ? File.binread(path) : nil
-        }
-        Hive::Markers.set(path, :waiting, "decision_id" => SecureRandom.hex(8))
+        snapshot = nil
+        Hive::Markers.with_markers_lock(path) do
+          snapshot = read_human_state_snapshot!(path, stage.state_file)
+          marker = Hive::Markers.build_marker(
+            "WAITING", "decision_id" => SecureRandom.hex(8)
+          )
+          body, count = Hive::Markers.replace_last_marker(snapshot.fetch(:body).to_s, marker)
+          if count.zero?
+            separator = body.empty? || body.end_with?("\n") ? "" : "\n"
+            body = "#{body}#{separator}#{marker}\n"
+          end
+          Hive::AtomicFile.write(path, body)
+        end
         snapshot
+      end
+
+      def read_human_state_snapshot!(path, state_file)
+        stat = File.lstat(path)
+        unless stat.file? && !stat.symlink?
+          raise Hive::InvalidTaskPath,
+                "human stage state file #{state_file.inspect} must be a regular file, not a symlink"
+        end
+
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        body = File.open(path, flags) do |file|
+          opened = file.stat
+          unless opened.file? && opened.dev == stat.dev && opened.ino == stat.ino
+            raise Hive::InvalidTaskPath,
+                  "human stage state file #{state_file.inspect} changed while entering the stage"
+          end
+          file.read
+        end
+        { state_file: state_file, existed: true, body: body }
+      rescue Errno::ENOENT
+        { state_file: state_file, existed: false, body: nil }
+      rescue Errno::ELOOP, Errno::EMLINK
+        raise Hive::InvalidTaskPath,
+              "human stage state file #{state_file.inspect} must be a regular file, not a symlink"
       end
 
       def restore_human_destination!(task, new_folder, snapshot)
@@ -311,7 +344,7 @@ module Hive
 
         path = File.join(folder, snapshot.fetch(:state_file))
         if snapshot.fetch(:existed)
-          Hive::Markers.write_atomic(path, snapshot.fetch(:body))
+          Hive::AtomicFile.write(path, snapshot.fetch(:body))
         else
           File.delete(path) if File.exist?(path)
         end

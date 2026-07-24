@@ -36,10 +36,11 @@ module Hive
         end.last
       end
 
-      def initialize(target, outcome, from:, note: nil, project: nil, json: false)
+      def initialize(target, outcome, from:, decision_id: nil, note: nil, project: nil, json: false)
         @target = target
         @outcome_name = outcome.to_s.strip
         @from = from.to_s.strip
+        @decision_id = decision_id.to_s.strip
         @note = note
         @project_filter = project
         @json = json
@@ -82,22 +83,32 @@ module Hive
         end
 
         marker = Hive::Markers.current(task.state_file)
-        decision_id = marker.attrs["decision_id"].to_s
-        if current_record?(record, decision_id)
+        if marker.name == :waiting
+          current_id = marker.attrs["decision_id"].to_s
+          unless current_id.match?(/\A[0-9a-f]{16}\z/) && current_id == @decision_id
+            raise Hive::WrongStage.new(
+              "decision observation is stale; task or decision identity changed",
+              current_stage: actual_dir, target_stage: expected_dir
+            )
+          end
+        elsif current_record?(record, @decision_id)
           return emit_same_or_conflicting!(task, stage, outcome, record)
-        end
-        unless marker.name == :waiting && decision_id.match?(/\A[0-9a-f]{16}\z/)
+        else
           raise Hive::WrongStage.new(
             "task #{task.slug} is not awaiting a decision at #{stage.dir}",
             current_stage: actual_dir, target_stage: expected_dir
           )
         end
 
-        outcome.complete ? complete!(task, stage, outcome, decision_id) : return_to_stage!(task, stage, outcome, decision_id)
+        outcome.complete ? complete!(task, stage, outcome, @decision_id) : return_to_stage!(task, stage, outcome, @decision_id)
       end
 
       def validate_arguments!
         raise Hive::InvalidTaskPath, "--from must name the expected human stage" if @from.empty?
+        unless @decision_id.match?(/\A[0-9a-f]{16}\z/)
+          raise Hive::InvalidTaskPath,
+                "--decision-id must be the 16-character identity reported for this human-stage visit"
+        end
         raise Hive::InvalidTaskPath, "outcome must be a non-empty name" if @outcome_name.empty?
         return if @note.nil? || @note.is_a?(String)
 
@@ -130,7 +141,7 @@ module Hive
       end
 
       def emit_replay_or_stale!(task, stage, outcome, record)
-        if record && record["from"] == stage.name
+        if record && record["from"] == stage.name && record["decision_id"] == @decision_id
           return emit_same_or_conflicting!(task, stage, outcome, record)
         end
 
@@ -153,20 +164,8 @@ module Hive
       end
 
       def complete!(task, stage, outcome, decision_id)
-        artifact_path = File.join(task.folder, outcome.artifact)
-        unless File.file?(artifact_path) && File.size(artifact_path).positive?
-          raise Hive::WrongStage.new(
-            "outcome #{outcome.name.inspect} requires non-empty artifact #{outcome.artifact.inspect}",
-            current_stage: stage.dir, target_stage: stage.dir
-          )
-        end
-
-        record = decision_record(
-          task, stage, outcome, decision_id,
-          artifact_path: artifact_path, artifact_status: "publish_ready"
-        )
-        state_path = task.state_file
-        snapshot = snapshot_files(task.folder, [ stage.state_file ])
+        record = nil
+        snapshot = nil
         ops = Hive::GitOps.new(task.project_root)
 
         Hive::Lock.with_commit_lock(task.hive_state_path) do
@@ -174,18 +173,43 @@ module Hive
             Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "decide") do
               locked = Hive::Task.new(task.folder)
               validate_current_decision!(locked, stage, decision_id)
-              write_decision_record(state_path, record)
+              artifact_path = File.join(locked.folder, outcome.artifact)
+              validate_publishable_artifact!(artifact_path, stage, outcome)
+              record = decision_record(
+                locked, stage, outcome, decision_id,
+                artifact_path: artifact_path, artifact_status: "publish_ready"
+              )
+              snapshot = snapshot_files(locked.folder, [ stage.state_file ])
+              write_decision_record(File.join(locked.folder, stage.state_file), record)
             end
             ops.hive_commit(stage_name: stage.dir, slug: task.slug,
                             action: "decide #{stage.name} #{outcome.name}")
           rescue StandardError
-            restore_files(task.folder, snapshot)
-            restage_restored_files(task, snapshot)
+            if snapshot
+              restore_files(task.folder, snapshot)
+              restage_restored_files(task, snapshot)
+            end
             raise
           end
         end
 
         emit_success(task, stage, outcome, record, applied: true)
+      end
+
+      def validate_publishable_artifact!(artifact_path, stage, outcome)
+        body = File.binread(artifact_path) if File.file?(artifact_path)
+        publishable = body && !Hive::Markers.without_markers(body).strip.empty?
+        return if publishable
+
+        raise Hive::WrongStage.new(
+          "outcome #{outcome.name.inspect} requires non-empty artifact #{outcome.artifact.inspect}",
+          current_stage: stage.dir, target_stage: stage.dir
+        )
+      rescue SystemCallError, IOError
+        raise Hive::WrongStage.new(
+          "outcome #{outcome.name.inspect} requires non-empty artifact #{outcome.artifact.inspect}",
+          current_stage: stage.dir, target_stage: stage.dir
+        )
       end
 
       def return_to_stage!(task, stage, outcome, decision_id)

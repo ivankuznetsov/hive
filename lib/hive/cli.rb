@@ -1186,12 +1186,14 @@ module Hive
       TARGET is a task slug or folder currently waiting at a descriptor-declared
       human stage. OUTCOME must be one of that stage's closed named outcomes.
 
-      --from is required and identifies the expected human stage. Repeating the
-      same decision is a no-op; a conflicting or stale decision fails with
-      WRONG_STAGE instead of changing the moved task.
+      --from and --decision-id are required and identify the expected human-stage
+      visit. Repeating the same decision is a no-op; a conflicting or stale
+      decision fails with WRONG_STAGE instead of changing the moved task.
     DESC
     option :from, type: :string, required: true,
                   desc: "expected human stage, full or short form"
+    option :decision_id, type: :string,
+                         desc: "required decision identity reported by run/status for this visit"
     option :note, type: :string, desc: "optional audit note recorded with the decision"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def decide(target, outcome)
@@ -1200,6 +1202,7 @@ module Hive
         target,
         outcome,
         from: options[:from],
+        decision_id: options[:decision_id],
         note: options[:note],
         project: options[:project],
         json: options[:json]

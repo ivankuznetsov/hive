@@ -165,6 +165,11 @@ module Hive
         label: "Awaiting human decision",
         command: nil
       },
+      human_complete: {
+        key: Hive::Schemas::TaskActionKind::HUMAN_COMPLETE,
+        label: "Human workflow complete",
+        command: nil
+      },
       recover_draft_pr: {
         key: Hive::Schemas::TaskActionKind::RECOVER_DRAFT_PR,
         label: "Retry draft PR handoff manually",
@@ -400,7 +405,7 @@ module Hive
     end
 
     def human_action
-      marker.name == :complete ? ACTIONS.fetch(:done) : ACTIONS.fetch(:human_needs_input)
+      marker.name == :complete ? ACTIONS.fetch(:human_complete) : ACTIONS.fetch(:human_needs_input)
     end
 
     def coding_table_action(stage)

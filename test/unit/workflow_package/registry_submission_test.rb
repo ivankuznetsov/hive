@@ -163,7 +163,11 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
         package_digest: Digest::SHA256.file(File.join(root, "manifest.yml")).hexdigest,
         release_digest: manifest.fetch("release_sha256"), warnings: [], findings: [],
         lint_contract: {
-          "version" => "v1", "upstream_commit" => "a" * 40, "contract_sha256" => "b" * 64
+          "version" => "v1", "upstream_commit" => "a" * 40,
+          "upstream_policy_sha256" => "c" * 64,
+          "fixture_corpus_sha256" => "d" * 64,
+          "expected_output_sha256" => "e" * 64,
+          "contract_sha256" => "b" * 64
         }
       )
       yield package

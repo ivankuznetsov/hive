@@ -146,6 +146,7 @@ module Hive
       end
 
       def read_record(source, package_path:, preserve_executable: false)
+        component_identity = validate_path_components!(source, package_path: package_path)
         flags = File::RDONLY
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
         file = File.open(source, flags)
@@ -156,8 +157,12 @@ module Hive
         bytes = file.read(MAX_FILE_BYTES + 1)
         after = file.stat
         current = File.lstat(source)
+        components_unchanged = component_identity == validate_path_components!(
+          source, package_path: package_path
+        )
         identity = %i[dev ino size mtime ctime].all? { |field| before.public_send(field) == after.public_send(field) } &&
-                   before.dev == current.dev && before.ino == current.ino && !current.symlink?
+                   before.dev == current.dev && before.ino == current.ino && !current.symlink? &&
+                   components_unchanged
         unless identity && bytes.bytesize <= MAX_FILE_BYTES
           raise Hive::ConfigError, "workflow package input #{package_path.inspect} changed while being read"
         end
@@ -169,6 +174,40 @@ module Hive
         raise Hive::ConfigError, "workflow package input #{package_path.inspect} is missing, linked, or unreadable"
       ensure
         file&.close
+      end
+
+      def validate_path_components!(source, package_path:)
+        root =
+          if source.start_with?(@authored_dir + File::SEPARATOR)
+            @authored_dir
+          elsif source.start_with?(@workflows_dir + File::SEPARATOR)
+            @workflows_dir
+          end
+        unless root
+          raise Hive::ConfigError, "workflow package input #{package_path.inspect} escapes the owned workflow root"
+        end
+
+        relative = Pathname.new(source).relative_path_from(Pathname.new(root)).each_filename.to_a
+        cursor = root
+        identities = relative.map.with_index do |component, index|
+          cursor = File.join(cursor, component)
+          stat = File.lstat(cursor)
+          final = index == relative.length - 1
+          valid = !stat.symlink? && (final ? stat.file? : stat.directory?)
+          unless valid
+            raise Hive::ConfigError,
+                  "workflow package input #{package_path.inspect} contains a linked or invalid path component"
+          end
+          [ stat.dev, stat.ino, stat.mode, stat.mtime, stat.ctime ]
+        end
+        real_root = File.realpath(root)
+        real_source = File.realpath(source)
+        unless real_source.start_with?(real_root + File::SEPARATOR)
+          raise Hive::ConfigError, "workflow package input #{package_path.inspect} escapes the owned workflow root"
+        end
+        identities
+      rescue Errno::ELOOP, Errno::ENOENT, Errno::EACCES, IOError
+        raise Hive::ConfigError, "workflow package input #{package_path.inspect} is missing, linked, or unreadable"
       end
 
       def deep_freeze(value)

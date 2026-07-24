@@ -103,7 +103,11 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
       registry: "ivankuznetsov/honeycomb", name: "demo", version: "1.0.0",
       package_digest: "a" * 64, release_digest: "b" * 64,
       lint_contract: {
-        "version" => "v1", "upstream_commit" => "c" * 40, "contract_sha256" => "d" * 64
+        "version" => "v1", "upstream_commit" => "c" * 40,
+        "upstream_policy_sha256" => "e" * 64,
+        "fixture_corpus_sha256" => "f" * 64,
+        "expected_output_sha256" => "0" * 64,
+        "contract_sha256" => "d" * 64
       }
     ).advance(
       "pr_verified", submission_mode: "direct", destination_repository: "ivankuznetsov/honeycomb",

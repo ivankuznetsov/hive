@@ -1,9 +1,8 @@
 {
   "malicious_rules": [
-    "deny.credential-read",
     "deny.pipe-to-shell",
-    "review.command",
-    "review.network",
+    "network.undeclared-host",
+    "permission.broad-declaration",
     "secret.anthropic-key",
     "secret.openai-key"
   ]

@@ -46,6 +46,11 @@ class WorkflowPackagePublishReceiptTest < Minitest::Test
     assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
       Receipt.from_h(data.merge("submission_mode" => "direct", "head_repository" => "other/fork"))
     end
+    assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+      Receipt.from_h(data.merge("lint_contract" => data.fetch("lint_contract").slice(
+        "version", "upstream_commit", "contract_sha256"
+      )))
+    end
   end
 
   private
@@ -56,6 +61,9 @@ class WorkflowPackagePublishReceiptTest < Minitest::Test
       package_digest: "a" * 64, release_digest: "b" * 64,
       lint_contract: {
         "version" => "v1", "upstream_commit" => "c" * 40,
+        "upstream_policy_sha256" => "e" * 64,
+        "fixture_corpus_sha256" => "f" * 64,
+        "expected_output_sha256" => "0" * 64,
         "contract_sha256" => "d" * 64
       }
     }

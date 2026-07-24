@@ -102,6 +102,9 @@ class WorkflowPackagePublishStoreTest < Minitest::Test
         release_digest: document.fetch("release_sha256"), warnings: [], findings: [],
         lint_contract: {
           "version" => "v1", "upstream_commit" => "c" * 40,
+          "upstream_policy_sha256" => "e" * 64,
+          "fixture_corpus_sha256" => "f" * 64,
+          "expected_output_sha256" => "0" * 64,
           "contract_sha256" => "d" * 64
         }
       )

@@ -42,6 +42,25 @@ class WorkflowPackageSourceSnapshotTest < Minitest::Test
     end
   end
 
+  def test_rejects_symlinked_intermediate_directories
+    with_source_tree do |workflows, authored, descriptor, metadata|
+      outside = File.join(File.dirname(workflows), "outside")
+      FileUtils.mkdir_p(outside)
+      File.write(File.join(outside, "context.txt"), "escaped\n")
+      FileUtils.rm_rf(File.join(authored, "assets"))
+      File.symlink(outside, File.join(authored, "assets"))
+
+      error = assert_raises(Hive::ConfigError) do
+        Snapshot.capture(
+          name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+          authored_dir: authored, metadata: metadata
+        )
+      end
+
+      assert_match(/linked|symlink|owned workflow root/, error.message)
+    end
+  end
+
   private
 
   def with_source_tree

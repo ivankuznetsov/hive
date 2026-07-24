@@ -146,9 +146,17 @@ module Hive
 
       def validate_lint_contract!
         contract = data["lint_contract"]
-        unless contract.is_a?(Hash) && contract.keys.sort == %w[contract_sha256 upstream_commit version] &&
+        keys = %w[
+          contract_sha256 expected_output_sha256 fixture_corpus_sha256 upstream_commit
+          upstream_policy_sha256 version
+        ]
+        unless contract.is_a?(Hash) && contract.keys.sort == keys &&
                contract["version"].is_a?(String) && !contract["version"].empty? &&
-               SHA.match?(contract["upstream_commit"].to_s) && SHA256.match?(contract["contract_sha256"].to_s)
+               SHA.match?(contract["upstream_commit"].to_s) &&
+               %w[
+                 upstream_policy_sha256 fixture_corpus_sha256 expected_output_sha256
+                 contract_sha256
+               ].all? { |key| SHA256.match?(contract[key].to_s) }
           fail!("lint contract identity is malformed")
         end
       end

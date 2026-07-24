@@ -45,11 +45,15 @@ module Hive
         end
       end
 
-      def initialize(interval: DEFAULT_INTERVAL,
-                     status_command: Hive::Commands::Status.new(json: true),
-                     clock: -> { Time.now.utc })
+      def initialize(
+        interval: DEFAULT_INTERVAL,
+        status_command: Hive::Commands::Status.new(json: true),
+        archive_status_command: Hive::Commands::Status.new(json: true, archive: true),
+        clock: -> { Time.now.utc }
+      )
         @interval = interval
         @status_command = status_command
+        @archive_status_command = archive_status_command
         @clock = clock
         @monitor = Monitor.new
         @tick = @monitor.new_cond
@@ -70,6 +74,12 @@ module Hive
       # mistaken for a real empty fleet.
       def snapshot
         snapshot_state.payload
+      end
+
+      # Dedicated archive reads are lossless and deliberately stay outside
+      # the ordinary feed's priming, availability, and dedup lifecycle.
+      def archive_snapshot
+        @archive_status_command.json_payload(Hive::Config.registered_projects)
       end
 
       # One fresh scan, coalesced across all callers already waiting for it.

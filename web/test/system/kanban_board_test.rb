@@ -3,6 +3,30 @@ require "application_system_test_case"
 class KanbanBoardTest < ApplicationSystemTestCase
   teardown { StatusBroadcaster.stop! }
 
+  test "operator follows an ordinary hidden summary into the complete archive and task detail" do
+    project = create_hive_project!("kanban-archive-app")
+    slug = create_task!(project, "Keep the complete archive reachable")
+    source = stage_dir(project, "1-inbox").join(slug)
+    archived = stage_dir(project, "9-done").join(slug)
+    FileUtils.mv(source, archived)
+    archived.join("task.md").write("<!-- COMPLETE -->\n")
+    Hive::TaskMeta.rewrite(
+      archived.to_s,
+      completed_at: Time.now.utc - (4 * Hive::ArchiveFilter::SECONDS_PER_DAY)
+    )
+
+    visit dev_login_path(as: "alice")
+
+    assert_no_selector ".kanban-card[data-task-slug='#{slug}']"
+    find(".archive-summary a", text: "… and 1 older archived task (hive archive to view)").click
+    assert_current_path archive_path(project:)
+    assert_selector "#status-archive [data-task-slug='#{slug}']"
+
+    find("[data-task-slug='#{slug}'] a", text: "Keep the complete archive reachable").click
+    assert_current_path task_path(project, slug, source: "archive")
+    assert_selector ".task-header", text: "Keep the complete archive reachable"
+  end
+
   test "operator switches between the live board and grid without losing the preference" do
     project = create_hive_project!("kanban-browser-app")
     slug = create_task!(project, "Move through a native board")

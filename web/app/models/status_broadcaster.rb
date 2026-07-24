@@ -65,6 +65,10 @@ class StatusBroadcaster
       )
     end
 
+    def archive_snapshot
+      feed.archive_snapshot
+    end
+
     def current_version?(candidate)
       feed.current_version?(candidate)
     end

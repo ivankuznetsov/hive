@@ -91,6 +91,47 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  def test_archive_snapshot_uses_the_lossless_status_command_without_priming_the_ordinary_feed
+    with_tmp_global_config do
+      ordinary = CountingStatus.new([ { "projects" => [ { "name" => "ordinary" } ] } ])
+      archive = CountingStatus.new([ { "projects" => [ { "name" => "archive" } ] } ])
+      feed = Hive::Web::StatusFeed.new(
+        status_command: ordinary,
+        archive_status_command: archive
+      )
+
+      assert_equal "archive", feed.archive_snapshot.dig("projects", 0, "name")
+      assert_equal 0, ordinary.calls
+      assert_equal 1, archive.calls
+      refute feed.current_version?("anything"),
+             "an archive read must not claim the ordinary Cable baseline"
+    ensure
+      feed&.stop
+    end
+  end
+
+  def test_hidden_count_only_changes_are_semantic_feed_changes
+    feed = Hive::Web::StatusFeed.new
+    initial = {
+      "projects" => [
+        { "name" => "demo", "tasks" => [], "hidden_archived_task_count" => 1 }
+      ]
+    }
+    changed = {
+      "projects" => [
+        { "name" => "demo", "tasks" => [], "hidden_archived_task_count" => 2 }
+      ]
+    }
+    initial_token = feed.prime(initial)
+
+    feed.send(:publish, changed)
+
+    refute feed.current_version?(initial_token),
+           "the web must refresh when only the hidden archive summary changes"
+  ensure
+    feed&.stop
+  end
+
   def test_default_scan_interval_is_five_seconds
     assert_equal 5.0, Hive::Web::StatusFeed::DEFAULT_INTERVAL
   end

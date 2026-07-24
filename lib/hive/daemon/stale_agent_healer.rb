@@ -394,7 +394,10 @@ module Hive
       end
 
       def heal_error_if_auto_recoverable(row, now:)
-        return if marker_reason(row) == "attempt_lost"
+        marker_reason = marker_reason(row)
+        if marker_reason == "attempt_lost"
+          return unless failed_attempt_loss_successor?(row)
+        end
         return if row.live_task_lock == true
         return unless auto_recoverable_error?(row, now: now)
         # The clear makes a markerless error row take the
@@ -403,7 +406,6 @@ module Hive
         # `record_baseline`.
         return if row.state_file_mtime.nil?
 
-        marker_reason = marker_reason(row)
         heal_label = error_heal_label(row, marker_reason)
         recovery_key = error_recovery_key(row, marker_reason)
         recovery_limit = nil
@@ -479,12 +481,62 @@ module Hive
 
       def error_heal_label(row, reason)
         return "finalize_unpushed_commits" if Hive::Workflows.coding_row?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: finalize unpushed branch recovery
+        return "attempt_loss_successor_failed" if reason == "attempt_lost"
         return "limits_reached" if reason == "limits_reached"
         return "stage_timeout" if reason == "timeout"
         return "clean_exit_residue" if reason == "ensure_clean_on_exit_failed"
         return "agent_loss_retry" if %w[tmux_session_terminated agent_orphaned].include?(reason)
 
         "error_retry"
+      end
+
+      # The first lease-backed successor owns an attempt_lost marker while it
+      # is unresolved or live. If that successor (or a later loss successor)
+      # terminalizes unsuccessfully, the original compatibility marker would
+      # otherwise remain forever: loss recovery sees an existing successor,
+      # while generic marker recovery deliberately skips attempt_lost. Release
+      # only a complete, unambiguous failed lineage so ordinary guarded retry
+      # can admit a fresh request against the now-resolved generation.
+      def failed_attempt_loss_successor?(row)
+        return false unless @attempt_store && @lost_outcome_store
+
+        attempt_id = marker_attrs_for(row)["attempt_id"].to_s
+        return false if attempt_id.empty?
+
+        root = @attempt_store.fetch(attempt_id)
+        return false unless root&.state == "lost"
+        return false unless root["project"].to_s == row.project.to_s
+        return false unless root["task_slug"].to_s == row.slug.to_s
+
+        current = root
+        visited = {}
+
+        loop do
+          return false if visited[current.attempt_id]
+
+          visited[current.attempt_id] = true
+          outcome = @lost_outcome_store.fetch(current.attempt_id)
+          return false unless outcome&.fetch("status", nil) == "successor_dispatched"
+
+          successor_id = outcome["successor_attempt_id"].to_s
+          return false if successor_id.empty?
+
+          successor = @attempt_store.fetch(successor_id)
+          return false unless successor
+          return false unless successor["predecessor_attempt_id"].to_s == current.attempt_id
+          return false unless successor["project"].to_s == root["project"].to_s
+          return false unless successor["task_slug"].to_s == root["task_slug"].to_s
+          return false unless successor.task_generation == root.task_generation
+
+          if successor.state == "terminal"
+            return %w[failed cancelled].include?(successor.outcome)
+          end
+          return false unless successor.state == "lost"
+
+          current = successor
+        end
+      rescue StandardError
+        false
       end
 
       # marker_match_attrs (legacy no-id match semantics),

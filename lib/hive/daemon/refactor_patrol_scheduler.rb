@@ -483,6 +483,7 @@ module Hive
         end
         daily = %w[
           daily_agent_spawn_limit daily_architecture_unmetered_spawn_limit
+          daily_architecture_review_spawn_limit
           daily_token_headroom daily_token_limit
         ]
         return RETRY_BACKOFF_SEC unless errors.any? && reasons.size == errors.size && (reasons - daily).empty?

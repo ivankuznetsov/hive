@@ -115,6 +115,8 @@ provider-owned initial context reserve plus the rendered prompt bytes. If not,
 or consuming another subscription-backed request. It returns the more specific
 `daily_token_headroom` when the shared UTC-day remainder is the binding limit,
 allowing architecture patrol scheduling to sleep until the next UTC window.
+The same next-day pacing applies when the architecture-specific daily review
+launch or unmetered-launch ceiling is exhausted.
 This admission check covers
 ordinary and architecture review/fix launches; neither multiplier can bypass
 the shared daily project cap.

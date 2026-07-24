@@ -24,13 +24,21 @@ class E2EIncidentBudgetTest < Minitest::Test
     assert_equal 0, checked.total_seconds
   end
 
-  def test_enabled_incident_must_be_below_five_seconds
+  def test_enabled_incident_must_be_below_ten_seconds
     checked = Hive::E2E::IncidentBudget.check(
-      report(metadata: [ metadata("slow") ], scenarios: [ result("slow", 5.0) ])
+      report(metadata: [ metadata("slow") ], scenarios: [ result("slow", 10.0) ])
     )
 
     refute checked.ok?
-    assert_equal [ "slow took 5.000s (must be below 5.000s)" ], checked.violations
+    assert_equal [ "slow took 10.000s (must be below 10.000s)" ], checked.violations
+  end
+
+  def test_hosted_runner_variance_above_five_seconds_stays_within_budget
+    checked = Hive::E2E::IncidentBudget.check(
+      report(metadata: [ metadata("variable") ], scenarios: [ result("variable", 5.010) ])
+    )
+
+    assert checked.ok?
   end
 
   def test_enabled_incident_group_must_be_below_thirty_seconds

@@ -283,7 +283,7 @@ remains visible in `report.json#scenario_metadata` with `pending: true`, while
 its steps and ordinary result row remain absent. CI runs
 `bundle exec rake e2e:lib_test` and `bundle exec rake e2e` in a dedicated
 pull-request job, uploads the configured `HIVE_E2E_RUNS_DIR` on success or
-failure, and uses `test/e2e/check_incident_budget.rb` to enforce below five
+failure, and uses `test/e2e/check_incident_budget.rb` to enforce below ten
 seconds per enabled incident (including sandbox bootstrap) and below thirty
 seconds for the group. The #9771 dependency-gate and repository-routing
 incidents are enabled; four sibling-gated fixtures remain pending. The

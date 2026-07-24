@@ -460,7 +460,7 @@ class TaskActionTest < Minitest::Test
     end
   end
 
-  def test_finalize_missing_metadata_error_is_manual_fix_not_retry
+  def test_finalize_missing_metadata_error_is_retryable
     Dir.mktmpdir("task-action-finalize") do |dir|
       folder = File.join(dir, ".hive-state", "stages", "8-finalize", "demo-260426-aaaa")
       FileUtils.mkdir_p(folder)
@@ -478,8 +478,9 @@ class TaskActionTest < Minitest::Test
         diagnostic = Hive::TaskAction.for(task, marker(:error, "reason" => reason)).diagnostic
         suggested = diagnostic.fetch("suggested_next_action")
 
-        assert_equal "manual_fix", suggested.fetch("kind"), "reason=#{reason}"
-        assert_nil suggested["command"], "reason=#{reason}"
+        assert_equal "retry", suggested.fetch("kind"), "reason=#{reason}"
+        assert_includes Shellwords.split(suggested.fetch("command")), "ERROR", "reason=#{reason}"
+        assert_includes Shellwords.split(suggested.fetch("command")), "hive", "reason=#{reason}"
       end
     end
   end
@@ -1523,7 +1524,7 @@ class TaskActionTest < Minitest::Test
     end
   end
 
-  def test_auto_commit_scope_failure_diagnostic_is_manual_fix
+  def test_auto_commit_scope_failure_diagnostic_is_retryable
     with_tmp_dir do |dir|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: dir)
       FileUtils.mkdir_p(File.join(task.folder, "reviews"))
@@ -1543,8 +1544,8 @@ class TaskActionTest < Minitest::Test
         )
       ).diagnostic
 
-      assert_equal "manual_fix", diagnostic.fetch("suggested_next_action").fetch("kind")
-      assert_nil diagnostic.fetch("suggested_next_action")["command"]
+      assert_equal "retry", diagnostic.fetch("suggested_next_action").fetch("kind")
+      assert_includes Shellwords.split(diagnostic.fetch("suggested_next_action").fetch("command")), "REVIEW_ERROR"
       assert_includes diagnostic.fetch("artifact_paths"), artifact
       assert_match(/\A#{Regexp.escape(artifact)}:/, diagnostic.fetch("detail"))
       assert_match(/bin\/pwn/, diagnostic.fetch("detail"))
@@ -1563,16 +1564,7 @@ class TaskActionTest < Minitest::Test
     end
   end
 
-  # CleanExit `:error reason=ensure_clean_on_exit_failed` is the
-  # stage-exit invariant refusing to auto-commit residue. Mirror the
-  # `auto_commit_*_failed` REVIEW_ERROR routing: never emit a retry
-  # command, since operator inspection is required. Without this
-  # branch, `suggested_next_action_payload` would fall through to
-  # `retry_command_string` and emit a clear+rerun recipe — the bot's
-  # manual-only routing already refuses to dispatch it, so consumers
-  # would see contradictory signals between the bot reply and the
-  # CLI envelope.
-  def test_clean_exit_failed_is_manual_fix_with_null_command
+  def test_clean_exit_failed_is_retryable_with_generation_guard
     with_tmp_dir do |dir|
       task = fake_task(stage_name: "finalize", stage_index: 8, project_root: dir)
 
@@ -1584,13 +1576,13 @@ class TaskActionTest < Minitest::Test
                "marker_id" => "abc123")
       ).diagnostic.fetch("suggested_next_action")
 
-      assert_equal "manual_fix", payload.fetch("kind")
-      assert_nil payload["command"],
-                 "ensure_clean_on_exit_failed must carry no shell recipe — operator inspection required"
+      assert_equal "retry", payload.fetch("kind")
+      assert_includes Shellwords.split(payload.fetch("command")),
+                      "marker_id=abc123,reason=ensure_clean_on_exit_failed"
     end
   end
 
-  def test_auto_commit_signing_failures_are_manual_fix
+  def test_auto_commit_signing_failures_are_retryable
     with_tmp_dir do |dir|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: dir)
 
@@ -1600,8 +1592,8 @@ class TaskActionTest < Minitest::Test
           marker(:review_error, "phase" => "fix", "reason" => reason, "pass" => "1")
         ).diagnostic
 
-        assert_equal "manual_fix", diagnostic.fetch("suggested_next_action").fetch("kind")
-        assert_nil diagnostic.fetch("suggested_next_action")["command"]
+        assert_equal "retry", diagnostic.fetch("suggested_next_action").fetch("kind")
+        assert_includes Shellwords.split(diagnostic.fetch("suggested_next_action").fetch("command")), "REVIEW_ERROR"
         assert_match(/signing/, diagnostic.fetch("detail"))
         assert_match(/review\.fix\.auto_commit\.sign_policy/, diagnostic.fetch("detail"))
         assert_match(/commit or revert/, diagnostic.fetch("detail"))
@@ -1609,7 +1601,7 @@ class TaskActionTest < Minitest::Test
     end
   end
 
-  def test_fix_status_check_failure_is_manual_fix
+  def test_fix_status_check_failure_is_retryable
     with_tmp_dir do |dir|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: dir)
 
@@ -1624,8 +1616,8 @@ class TaskActionTest < Minitest::Test
         )
       ).diagnostic
 
-      assert_equal "manual_fix", diagnostic.fetch("suggested_next_action").fetch("kind")
-      assert_nil diagnostic.fetch("suggested_next_action")["command"]
+      assert_equal "retry", diagnostic.fetch("suggested_next_action").fetch("kind")
+      assert_includes Shellwords.split(diagnostic.fetch("suggested_next_action").fetch("command")), "REVIEW_ERROR"
       assert_match(/could not read the task worktree Git status/, diagnostic.fetch("detail"))
       assert_match(/Repair the worktree/, diagnostic.fetch("detail"))
     end

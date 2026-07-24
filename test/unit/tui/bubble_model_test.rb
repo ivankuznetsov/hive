@@ -2517,7 +2517,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal [
       "hive", "markers", "clear", folder,
       "--name", "REVIEW_ERROR",
-      "--match-attr", "pass=2"
+      "--match-attr", "pass=2,phase=triage,reason=merge_conflict"
     ], clear_argv
     assert_equal [ "hive", "run", folder ], run_argv
 
@@ -2847,7 +2847,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
       end
     end
 
-    assert_equal [ "hive", "markers", "clear", folder, "--name", "REVIEW_ERROR", "--match-attr", "pass=2" ],
+    assert_equal [
+      "hive", "markers", "clear", folder,
+      "--name", "REVIEW_ERROR",
+      "--match-attr", "pass=2,reason=merge_conflict"
+    ],
                  clear_argv
     assert_equal [ :clear, :subprocess_exited, :flash ], events
     assert_kind_of Hive::Tui::Messages::SubprocessExited, @messages[-2]
@@ -3144,9 +3148,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "--name", "ERROR",
       "--match-attr", "marker_id=err-123,reason=exit_code"
     ], clear_argv,
-      "argv must clear ERROR with --match-attr marker_id=N,reason=R; the reason= token is the F1 " \
-      "enrichment so RecoverySequence's manual_only? gate can refuse dirty_worktree / " \
-      "ensure_clean_on_exit_failed on the inline-button callback path. markers clear treats the " \
+      "argv must clear ERROR with --match-attr marker_id=N,reason=R. markers clear treats the " \
       "comma list as 'all pairs must match', which is strictly more restrictive but identical " \
       "in practice since marker_id is already unique."
     assert_equal [ "hive", "run", folder ], run_argv
@@ -3431,7 +3433,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/no automatic recovery/, fallback_model.flash)
   end
 
-  def test_red_status_autofix_refuses_fix_status_check_failed_review_error
+  def test_red_status_autofix_retries_fix_status_check_failed_review_error
     calls = []
     @model.define_singleton_method(:recover_review) do |row, force:|
       calls << [ row.slug, force ]
@@ -3450,12 +3452,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
     model, cmd = @model.send(:red_status_autofix, row)
 
     assert_nil cmd
-    assert_empty calls
-    assert_match(/no automatic recovery/, model.flash)
-    assert_match(/Open in agent/, model.flash)
+    assert_equal [ [ "status-check-failed", false ] ], calls
+    refute_match(/no automatic recovery/, model.flash)
   end
 
-  def test_red_status_autofix_refuses_manual_only_error_recovery
+  def test_red_status_autofix_retries_clean_exit_error
     calls = []
     @model.define_singleton_method(:recover_error) do |row|
       calls << row.slug
@@ -3474,9 +3475,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     model, cmd = @model.send(:red_status_autofix, row)
 
     assert_nil cmd
-    assert_empty calls
-    assert_match(/no automatic recovery/, model.flash)
-    assert_match(/Open in agent/, model.flash)
+    assert_equal [ "clean-exit-failed" ], calls
+    refute_match(/no automatic recovery/, model.flash)
   end
 
   def test_red_status_autofix_refuses_shell_composed_diagnostic_retry
@@ -6417,9 +6417,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "--name", "ERROR",
       "--match-attr", "marker_id=kill-123,reason=exit_code"
     ], captured_argv,
-      "heal_marker must scope the clear to the kill-class marker_id AND its reason (F1: the " \
-      "reason= token rides alongside marker_id so the bot callback path can route manual-only " \
-      "without re-reading the state file). marker_id alone would still uniquely identify the " \
+      "heal_marker must scope the clear to the kill-class marker_id AND its reason. " \
+      "marker_id alone would still uniquely identify the " \
       "row; including reason= is redundant but harmless."
   end
 

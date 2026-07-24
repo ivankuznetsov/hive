@@ -945,6 +945,19 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "operator", disposition.fetch(:owner)
   end
 
+  def test_error_retry_publishes_scheduler_owned_cooldown_disposition
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
+    observed = row(marker: "review_error", action: "recover_review")
+
+    dispatcher.send(:handle_row, observed, now: T0)
+
+    assert_empty supervisor.spawned
+    disposition = snapshot.calls.last.last
+    assert_equal :retry_cooldown, disposition.fetch(:decision)
+    assert_equal "scheduler", disposition.fetch(:owner)
+  end
+
   def test_unknown_durable_admission_results_defer_safely
     dispatcher, = make_dispatcher
     deferred = Hive::Attempts::DispatchResult.new(
@@ -2711,37 +2724,18 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  "per-row dispatch must still run after healer crash to avoid StartLimitBurst flapping"
   end
 
-  def test_dispatcher_runs_recoverable_error_healer_after_stale_healer_before_dispatch
+  def test_dispatcher_runs_single_universal_healer_before_dispatch
     advance_row = row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm")
     dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(rows: [ advance_row ])
     order = []
     stale = Object.new
-    recoverable = Object.new
     stale.define_singleton_method(:heal) { |*_args, **_kwargs| order << :stale }
-    recoverable.define_singleton_method(:heal) { |*_args, **_kwargs| order << :recoverable }
     dispatcher.instance_variable_set(:@stale_agent_healer, stale)
-    dispatcher.instance_variable_set(:@recoverable_error_healer, recoverable)
 
     dispatcher.tick(now: T0)
 
-    assert_equal [ :stale, :recoverable ], order
-    assert_equal 1, sup.spawned.size, "dispatch must run after both healer slots"
-  end
-
-  def test_dispatcher_outer_rescue_logs_recoverable_healer_fatal_and_continues_dispatch
-    advance_row = row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm")
-    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: [ advance_row ])
-    healer = dispatcher.instance_variable_get(:@recoverable_error_healer)
-    def healer.heal(*, **)
-      raise NoMethodError, "simulated recoverable healer bug"
-    end
-
-    dispatcher.tick(now: T0)
-
-    fatal = logger.events.find { |(n, attrs)| n == :fatal && attrs[:message].include?("recoverable_error_healer raised") }
-    assert fatal, "outer rescue must log :fatal when recoverable healer raises; events=#{logger.events.inspect}"
-    assert_equal 1, sup.spawned.size,
-                 "per-row dispatch must still run after recoverable healer crash"
+    assert_equal [ :stale ], order
+    assert_equal 1, sup.spawned.size, "dispatch must run after the healer slot"
   end
 
   def test_reload_config_rebuilds_healer_with_new_grace_sec
@@ -2771,10 +2765,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  "rebuilt healer must carry the reloaded grace value"
   end
 
-  def test_reload_config_rebuilds_recoverable_error_healer
+  def test_reload_config_applies_auto_retry_kill_switch_to_universal_healer
     dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
-    original_healer = dispatcher.instance_variable_get(:@recoverable_error_healer)
-    refute_nil original_healer, "dispatcher must construct recoverable error healer at boot"
+    original_healer = dispatcher.instance_variable_get(:@stale_agent_healer)
 
     new_cfg = {
       "agent_marker_grace_sec" => 60,
@@ -2789,9 +2782,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
       Hive::Config.define_singleton_method(:load_global_daemon, &original)
     end
 
-    rebuilt = dispatcher.instance_variable_get(:@recoverable_error_healer)
+    rebuilt = dispatcher.instance_variable_get(:@stale_agent_healer)
     refute_same original_healer, rebuilt,
-                "reload_config! must rebuild recoverable healer so in-memory budgets reset"
+                "reload_config! must rebuild the universal healer"
+    assert_equal false, rebuilt.operational_snapshot.fetch("enabled")
   end
 
 def test_run_forever_reloads_ticks_and_shuts_down_cleanly
@@ -3530,9 +3524,6 @@ end
               .define_singleton_method(:heal) { |*_args, **_kwargs| order << :stale_healer }
     dispatcher.instance_variable_get(:@stale_agent_healer)
               .define_singleton_method(:heal_attempt_losses) { |*_args, **_kwargs| order << :attempt_loss_healer }
-    dispatcher.instance_variable_get(:@recoverable_error_healer)
-              .define_singleton_method(:heal) { |*_args, **_kwargs| order << :recoverable_healer }
-
     dispatcher.tick(now: T0)
 
     assert_equal :reconcile, order.first
@@ -3540,7 +3531,6 @@ end
     assert_operator order.index(:attempt_loss_healer), :<, order.index(:status)
     assert_operator order.index(:reconcile), :<, order.index(:status)
     assert_operator order.index(:reconcile), :<, order.index(:stale_healer)
-    assert_operator order.index(:reconcile), :<, order.index(:recoverable_healer)
   end
 
   def test_lease_backed_status_row_is_not_double_counted_as_legacy_capacity
@@ -3837,7 +3827,7 @@ end
     assert_equal [ "request-failed" ], removed
   end
 
-  def test_manual_lost_delivery_emits_one_failure_result_and_is_removed
+  def test_legacy_manual_lost_delivery_remains_claimed_for_successor_recovery
     Dir.mktmpdir("hive-attempt-manual-delivery") do |state_home|
       request_id = Q.write_request!(
         project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
@@ -3863,13 +3853,9 @@ end
 
       dispatcher.send(:reconcile_lost_attempt_deliveries, now: T0 + 1)
 
-      assert_empty Q.claimed(state_home: state_home)
-      result = Hive::Daemon::DispatchResultQueue.pending(state_home: state_home).first
-      assert_equal Hive::ExitCodes::TEMPFAIL, result.exit_code
-      assert_equal "lost-1", result.attempt_id
-      assert logger.events.any? { |name, attrs|
-        name == :dispatch_request_completed && attrs[:outcome] == "attempt_lost"
-      }
+      assert_equal 1, Q.claimed(state_home: state_home).size
+      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: state_home)
+      refute logger.events.any? { |name, _attrs| name == :dispatch_request_completed }
     end
   end
 
@@ -3912,7 +3898,7 @@ end
   end
 
   def write_request_file(dir, slug:, request_id:, created_at: T0, argv: nil, project: "p1",
-                         trigger: "answer_complete")
+                         requestor: "bot", trigger: "answer_complete")
     argv ||= [ "hive", "run", slug, "--json" ]
     path = File.join(Q.directory(state_home: dir), Q.filename_for(created_at: created_at, request_id: request_id))
     payload = {
@@ -3923,7 +3909,7 @@ end
       "project" => project,
       "slug" => slug,
       "argv" => argv,
-      "requestor" => "bot",
+      "requestor" => requestor,
       "chat_id" => 42,
       "update_id" => 99,
       "trigger" => trigger,
@@ -4559,6 +4545,37 @@ end
         refute_nil rejected
         assert_equal "unknown_project", rejected[1][:reason]
         assert_empty sup.spawned
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_healer_error_retry_stays_queued_when_project_is_temporarily_unknown
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(
+        state_home,
+        slug: "s1",
+        request_id: "HEAL",
+        project: "temporarily-missing",
+        requestor: "healer",
+        trigger: "error_retry"
+      )
+      Hive::Config.singleton_class.alias_method(:__orig_find_project, :find_project) unless Hive::Config.singleton_class.method_defined?(:__orig_find_project)
+      Hive::Config.define_singleton_method(:find_project) { |_| nil }
+      begin
+        dispatcher.tick(now: T0)
+
+        blocked = logger.events.find do |(name, attrs)|
+          name == :dispatch_request_blocked && attrs[:request_id] == "HEAL"
+        end
+        refute_nil blocked
+        assert_equal "unknown_project", blocked[1][:reason]
+        assert_empty sup.spawned
+        assert_equal 1, Dir.glob(File.join(Q.directory(state_home: state_home), "*.json")).size
       ensure
         restore_find_project!
       end

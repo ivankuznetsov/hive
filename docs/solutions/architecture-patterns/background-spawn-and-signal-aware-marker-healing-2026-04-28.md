@@ -88,6 +88,14 @@ Per-folder dedup prevents thrashing. The next snapshot poll picks up the cleared
 
 **Real failures (`exit_code=1`, `reason=timeout`, `reason=secret_in_pr_body`) are NOT auto-healed.** Only kill-class signals get the auto-heal — those reflect "the supervisor or user interrupted me", not "I ran and decided to fail".
 
+> **Refinement (2026-07-24):** that sentence describes only the TUI's
+> immediate, opportunistic marker clear. The daemon now owns a separate
+> universal recovery layer: every durable `ERROR` / `REVIEW_ERROR` waits for
+> the shared cooldown, rechecks project/global enablement and current
+> work-area safety, then retries with marker-generation protection. A repeated
+> failure writes a fresh marker and starts a new cooldown; it does not exhaust
+> into a permanent terminal state.
+
 ## Why This Matters
 
 **The TUI is a supervisor, not a host.** Conflating the two — making the TUI block on every child — wastes the file-system's write-everything-down architecture. The pipeline already encodes every meaningful transition (markers + folder moves), so the supervisor only needs to *display* state, not *own* state.
@@ -171,21 +179,11 @@ Each spawn produces one BEGIN / END pair carrying a shared 8-char correlation ID
 - `Hive::Commands::Markers` — the agent-callable healer the auto-heal dispatches against (`hive markers clear FOLDER --name ERROR --match-attr exit_code=N` after the cross-process race fix).
 - Commits on `feat/hive-tui`: `6eae7e5` (auto-heal + background-spawn), `bd2013f` (running-flash for immediate feedback), `88012bc` (per-pattern diagnostic flashes that build on the per-section log structure), `11db9dd` (auto-heal `--match-attr` cross-process race guard), `e030b24` (per-spawn capture files).
 
-## Refinement (2026-06-15): narrow `reason=timeout` carve-out
+## Refinement history: timeout retries
 
-The "real failures (`exit_code=1`, `reason=timeout`, `reason=secret_in_pr_body`)
-are NOT auto-healed" rule still holds **except** for a deliberately narrow case:
-`reason=timeout` on `5-open-pr` and `7-artifacts` is now cleared-and-re-dispatched
-**exactly once** by `StaleAgentHealer` (`TIMEOUT_RECOVERY_LIMIT = 1`). The
-justification is idempotency, not interruption: in tmux mode these two stages can
-finish their externally-visible work (PR opened / artifacts collected) yet time
-out because the agent returned to idle without stamping the terminal marker. A
-single re-entry is safe — open-pr re-enters `open_pr_already_open` (no second PR)
-and artifacts idempotently re-collects `artifact.md` — and is bounded by the same
-`[project, slug, stage, reason]` budget so it can never loop. All other stages and
-all other timeout cases remain manual-only. See
-`lib/hive/daemon/stale_agent_healer.rb`,
-`test/unit/daemon/stale_agent_healer_test.rb`, and
-`test/integration/daemon_stale_agent_healing_test.rb`; no committed
-`docs/plans/2026-06-15-001-fix-tmux-marker-completion-hardening-plan.md` file
-was present during the 2026-06-15 wiki refresh.
+The 2026-06-15 implementation added a one-shot timeout carve-out for
+`5-open-pr` and `7-artifacts`. The 2026-07-24 universal policy supersedes that
+budget: timeout markers now follow the same cooldown, current-work-area,
+owner/lock, and marker-generation checks as every other `ERROR`. Re-entry still
+depends on each stage's idempotent current-state validation; a repeated timeout
+writes a fresh marker and schedules another cooled retry instead of exhausting.

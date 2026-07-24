@@ -2160,6 +2160,26 @@ class CommandsStatusTest < Minitest::Test
     assert_equal false, context.dig("demo", "daemon_enabled")
   end
 
+  def test_operational_project_context_includes_global_auto_retry_switch
+    project = { "name" => "demo", "path" => "/tmp/demo-hive-project" }
+    context = with_replaced_singleton_method(
+      Hive::Config,
+      :load_global_daemon,
+      -> { { "auto_retry" => { "enabled" => false } } }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Config,
+        :load,
+        ->(_path) { { "daemon" => { "enabled" => true } } }
+      ) do
+        Hive::Commands::Status.new.send(:operational_project_context, [ project ])
+      end
+    end
+
+    assert_equal true, context.dig("demo", "daemon_enabled")
+    assert_equal false, context.dig("demo", "auto_retry_enabled")
+  end
+
   def test_operational_project_context_preserves_unsupported_project_config
     project = { "name" => "demo", "path" => "/tmp/unsupported-hive-project" }
     config_error = Hive::UnsupportedProjectConfigError.new("unsupported root key")

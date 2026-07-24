@@ -51,7 +51,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
-  def test_unverified_orphan_is_manual_and_is_never_captured
+  def test_unverified_orphan_remains_pending_until_identity_becomes_safe
     with_task do |task, _worktree|
       with_tmp_dir do |root|
         store = Hive::Attempts::Store.new(root: root)
@@ -63,13 +63,22 @@ class AttemptsLostOutcomeTest < Minitest::Test
           task_resolver: ->(_attempt) { task }
         )
 
-        outcome = processor.process(lost, now: NOW + 3)
+        pending = processor.process(lost, now: NOW + 3)
+        pending_again = processor.process(lost, now: NOW + 3.5)
 
-        assert_equal "manual", outcome.fetch("status")
-        assert_empty outcome.fetch("capture_references")
-        assert_equal 1, identity.calls.size
+        assert_equal "pending", pending.fetch("status")
+        assert_equal pending, pending_again,
+                     "an unchanged unsafe identity must be rechecked without rewriting the outcome"
+        assert_empty pending.fetch("capture_references")
+        assert_equal 2, identity.calls.size
         assert Hive::Markers.current(task.state_file).none?
-        assert_equal outcome, processor.process(lost, now: NOW + 4)
+
+        identity.result = :absent
+        ready = processor.process(lost, now: NOW + 4)
+
+        assert_equal "ready", ready.fetch("status")
+        assert_nil ready.fetch("diagnostic")
+        assert_equal 3, identity.calls.size
       end
     end
   end
@@ -109,6 +118,32 @@ class AttemptsLostOutcomeTest < Minitest::Test
       assert_equal "ready", outcome.fetch("status")
       assert_equal "no_worker", outcome.fetch("cleanup")
       assert_empty outcome.fetch("capture_references")
+    end
+  end
+
+  def test_legacy_manual_and_exhausted_outcomes_upgrade_back_to_ready
+    %w[manual exhausted].each do |legacy_status|
+      with_tmp_dir do |root|
+        store = Hive::Attempts::Store.new(root: root)
+        lost = lost_without_worker(store)
+        outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+        outcomes.ensure_for(lost, now: NOW)
+        outcomes.update(
+          lost, now: NOW, status: legacy_status,
+          diagnostic: "legacy terminal outcome"
+        )
+        processor = Hive::Attempts::LostOutcomeProcessor.new(
+          store: store,
+          outcome_store: outcomes,
+          process_identity: FakeIdentity.new(:absent, []),
+          task_resolver: ->(_attempt) { nil }
+        )
+
+        upgraded = processor.process(lost, now: NOW + 1)
+
+        assert_equal "ready", upgraded.fetch("status"), "legacy status=#{legacy_status}"
+        assert_nil upgraded.fetch("diagnostic")
+      end
     end
   end
 

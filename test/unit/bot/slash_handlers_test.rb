@@ -503,11 +503,11 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_nil result.text, "a successful autofix dispatch carries no operator reply text"
     assert_equal [
       [ "hive", "markers", "clear", "stuck-260525-abcd", "--name", "REVIEW_ERROR",
-        "--project", "hive", "--match-attr", "pass=2", "--json" ],
+        "--project", "hive", "--match-attr", "pass=2,phase=fix", "--json" ],
       [ "hive", "review", "stuck-260525-abcd", "--from", "6-review", "--project", "hive", "--json" ]
     ], result.commands
     assert_equal({ project: "hive", slug: "stuck-260525-abcd", stage: "6-review",
-                   marker: "review_error", match_attr: "pass=2" }, result.alert_reset)
+                   marker: "review_error", match_attr: "pass=2,phase=fix" }, result.alert_reset)
     refute result.clear_keyboard,
            "slash path must NOT clear keyboard (no inline button was tapped)"
   end
@@ -617,11 +617,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_match(/no automatic recovery/, result.text)
   end
 
-  def test_autofix_refuses_attrs_gated_manual_only_fix_tampered_row
-    # review_error + phase=fix + reason=fix_tampered is manual-only, but that
-    # is gated on attrs, not the marker name. The callback_data doesn't carry
-    # attrs; the slash path does, so a directly-typed /autofix on such a row
-    # must refuse (not dispatch a retry against a tampered fix).
+  def test_autofix_retries_fix_tampered_row_without_diagnostic_hint
     tampered = Row.new(project: "hive", slug: "tampered-260525-abcd", stage: "6-review",
                        marker: "review_error",
                        attrs: { "phase" => "fix", "reason" => "fix_tampered" }, diagnostic: nil)
@@ -629,11 +625,10 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     result = handlers.autofix(Update.new(text: "/autofix tampered-260525-abcd", chat_id: 1))
 
-    assert_equal :reply, result.action
-    assert_match(/no automatic recovery/, result.text)
+    assert_equal :dispatch_commands, result.action
   end
 
-  def test_autofix_refuses_attrs_gated_manual_only_fix_status_check_failed_row
+  def test_autofix_retries_fix_status_check_failed_row
     status_check_failed = Row.new(project: "hive", slug: "status-260530-abcd", stage: "6-review",
                                   marker: "review_error",
                                   attrs: {
@@ -646,8 +641,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     result = handlers.autofix(Update.new(text: "/autofix status-260530-abcd", chat_id: 1))
 
-    assert_equal :reply, result.action
-    assert_match(/no automatic recovery/, result.text)
+    assert_equal :dispatch_commands, result.action
   end
 
   def test_autofix_no_retry_verb_for_stage_replies_cleanly
@@ -670,7 +664,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
     # rather than dispatch markers-clear + a retry verb (the gate the inline
     # button and the /status link already enforce).
     non_retryable = Row.new(project: "hive", slug: "norefry-260525-abcd", stage: "6-review",
-                            marker: "review_error", attrs: { "pass" => "2" }, diagnostic: nil)
+                            marker: "review_stale", attrs: { "pass" => "2" }, diagnostic: nil)
     handlers = autofix_handlers([ non_retryable ])
 
     result = handlers.autofix(Update.new(text: "/autofix norefry-260525-abcd", chat_id: 1))

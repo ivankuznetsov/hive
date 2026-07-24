@@ -13,7 +13,6 @@ require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/operational_snapshot"
 require "hive/daemon/stale_agent_healer"
-require "hive/daemon/recoverable_error_healer"
 require "hive/daemon/display_name_backfiller"
 require "hive/daemon/task_id_backfiller"
 require "hive/daemon/dispatch_request_queue"
@@ -128,12 +127,8 @@ module Hive
           attempt_store: @attempt_reconciler&.respond_to?(:store) ? @attempt_reconciler.store : nil,
           attempt_dispatcher: @attempt_dispatcher,
           lost_outcome_store: @lost_outcome_store,
-          lost_outcome_processor: @lost_outcome_processor
-        )
-        @recoverable_error_healer = RecoverableErrorHealer.new(
-          controller: @controller,
-          logger: @logger,
-          config: @config
+          lost_outcome_processor: @lost_outcome_processor,
+          auto_retry_enabled: auto_retry_enabled?
         )
         # Additive self-heal for tasks whose one-shot name generation at
         # `hive new` never landed (agent/codex outage). Re-spawns
@@ -317,21 +312,14 @@ module Hive
         # StartLimitBurst=3 in the unit's restart-loop cap.
         begin
           @stale_agent_healer.heal(
-            result.rows, now: now, legacy_layout_projects: @legacy_layout_projects
+            result.rows,
+            now: now,
+            legacy_layout_projects: @legacy_layout_projects,
+            auto_retry_projects: enabled_auto_retry_projects(result.rows)
           )
         rescue StandardError => e
           @logger.event(:fatal,
                         message: "stale_agent_healer raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
-
-        begin
-          @recoverable_error_healer.heal(
-            result.rows, now: now, legacy_layout_projects: @legacy_layout_projects
-          )
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "recoverable_error_healer raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
 
@@ -954,6 +942,23 @@ module Hive
           )
           return
         end
+        if auto_retry_error_row?(row)
+          @logger.event(
+            :skipped,
+            project: row.project,
+            slug: row.slug,
+            stage: row.stage,
+            action: row.action,
+            reason: "error_retry_scheduled"
+          )
+          observe_operational_disposition(
+            row,
+            decision: :retry_cooldown,
+            owner: "scheduler",
+            reason: "ERROR retry remains scheduled after the shared cooldown and safety checks"
+          )
+          return
+        end
 
         decision = Policy.decide(
           action: row.action,
@@ -1361,7 +1366,14 @@ module Hive
       def operational_recovery_snapshot
         {
           "stale_agent" => @stale_agent_healer.operational_snapshot,
-          "recoverable_error" => @recoverable_error_healer.operational_snapshot
+          # Compatibility shape for private snapshot readers from the former
+          # probe-specific healer. StaleAgentHealer is now the sole retry owner.
+          "recoverable_error" => {
+            "enabled" => auto_retry_enabled?,
+            "limit" => nil,
+            "retries" => [],
+            "exhausted" => []
+          }
         }
       end
 
@@ -1727,8 +1739,9 @@ module Hive
       #      validates) → remove + `:dispatch_request_rejected`.
       #   3. Expiry (10 min default) → remove +
       #      `:dispatch_request_expired`.
-      #   4. Project dropped (CONFIG=78 from a prior child) → remove +
-      #      `:dispatch_request_rejected reason=project_dropped`.
+      #   4. Unknown project → remove + `:dispatch_request_rejected`, except a
+      #      healer-owned ERROR retry remains blocked on disk because config
+      #      may be restored or reloaded later.
       #   5. Current status-row dependency/admission gate for every
       #      task-advancing request; marker repair is exempt → leave
       #      the file on disk, `:dispatch_request_blocked`.
@@ -1808,7 +1821,13 @@ module Hive
         end
 
         unless Hive::Config.find_project(req.project)
-          reject_request(req, reason: "unknown_project")
+          if durable_error_retry_request?(req)
+            @logger.event(:dispatch_request_blocked,
+                          request_id: req.request_id, project: req.project,
+                          slug: req.slug, reason: "unknown_project")
+          else
+            reject_request(req, reason: "unknown_project")
+          end
           return
         end
 
@@ -1876,6 +1895,13 @@ module Hive
       # must honor the same status-row hold as automatic dispatch.
       def dependency_gated_request?(req)
         req.argv[1] != "markers"
+      end
+
+      # A healer-owned request is the durable continuation of an ERROR marker
+      # clear. Project registration is reloadable operator state, so a missing
+      # project must defer this request rather than deleting it permanently.
+      def durable_error_retry_request?(req)
+        req.requestor.to_s == "healer" && req.trigger.to_s == "error_retry"
       end
 
       # Host-global maintenance request (project == "__global__"): not tied to
@@ -2195,46 +2221,8 @@ module Hive
               state_home: dispatch_request_state_home,
               now: now
             )
-          when "manual", "exhausted"
-            complete_lost_delivery(delivery, outcome, now: now)
           end
         end
-      end
-
-      def complete_lost_delivery(delivery, outcome, now:)
-        request = delivery.request
-        Hive::Daemon::DispatchRequestQueue.discard_sequence(
-          request.request_id, state_home: dispatch_request_state_home
-        )
-        if request.chat_id
-          Hive::Daemon::DispatchResultQueue.write!(
-            chat_id: request.chat_id,
-            update_id: request.update_id,
-            project: request.project,
-            slug: request.slug,
-            request_id: request.request_id,
-            exit_code: Hive::ExitCodes::TEMPFAIL,
-            command: Shellwords.join(request.argv),
-            attempt_id: outcome["attempt_id"],
-            attempt_state: "lost",
-            receipt: nil,
-            state_home: dispatch_result_state_home,
-            now: now
-          )
-        end
-        Hive::Daemon::DispatchRequestQueue.remove(
-          request.request_id, state_home: dispatch_request_state_home
-        )
-        @logger.event(
-          :dispatch_request_completed,
-          request_id: request.request_id,
-          attempt_id: outcome["attempt_id"],
-          project: request.project,
-          slug: request.slug,
-          exit_code: Hive::ExitCodes::TEMPFAIL,
-          outcome: "attempt_lost",
-          recovery_status: outcome["status"]
-        )
       end
 
       def write_attempt_dispatch_result(request, attempt, receipt, now:)
@@ -2564,6 +2552,23 @@ module Hive
         @external_active_agent_counts.fetch(project, 0)
       end
 
+      def auto_retry_enabled?
+        @daemon_cfg.fetch("auto_retry", {}).fetch("enabled", true) == true
+      end
+
+      def auto_retry_error_row?(row)
+        auto_retry_enabled? && %w[error review_error].include?(row.marker.to_s)
+      end
+
+      def enabled_auto_retry_projects(rows)
+        return {} unless auto_retry_enabled?
+
+        Array(rows).each_with_object({}) do |row, enabled|
+          project = row.project.to_s
+          enabled[project] = true if project_enabled?(project)
+        end
+      end
+
       def project_enabled?(project_name)
         return @enabled_cache[project_name] if @enabled_cache.key?(project_name)
 
@@ -2659,12 +2664,8 @@ module Hive
           attempt_store: @attempt_reconciler&.respond_to?(:store) ? @attempt_reconciler.store : nil,
           attempt_dispatcher: @attempt_dispatcher,
           lost_outcome_store: @lost_outcome_store,
-          lost_outcome_processor: @lost_outcome_processor
-        )
-        @recoverable_error_healer = RecoverableErrorHealer.new(
-          controller: @controller,
-          logger: @logger,
-          config: @config
+          lost_outcome_processor: @lost_outcome_processor,
+          auto_retry_enabled: auto_retry_enabled?
         )
         # Rebuild alongside the healer on SIGHUP reload so a future
         # operator-tunable knob (e.g. max_per_tick) would take effect

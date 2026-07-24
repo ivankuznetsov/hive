@@ -60,11 +60,11 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
     end
   end
 
-  def test_execute_missing_worktree_pointer_is_unsafe
+  def test_execute_missing_worktree_pointer_defers_to_runner_validation
     with_tmp_dir do |dir|
       ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "4-execute"))
 
-      assert_equal false, ok
+      assert_equal true, ok
       assert_includes reason, "missing worktree pointer"
     end
   end
@@ -133,12 +133,12 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
     end
   end
 
-  def test_unenumerated_stage_fails_closed
+  def test_unenumerated_stage_defers_to_runner_validation
     with_tmp_dir do |dir|
       ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "7-artifacts"))
 
-      assert_equal false, ok, "a stage with no bespoke work-area check must fail closed"
-      assert_match(/no work-area safety check for stage 7-artifacts/, reason)
+      assert_equal true, ok, "a stage with no mutable-work guard must remain retryable"
+      assert_match(/no mutable work-area guard required for stage 7-artifacts/, reason)
     end
   end
 end

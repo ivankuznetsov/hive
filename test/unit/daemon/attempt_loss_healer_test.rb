@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/agent_limit"
 require "hive/attempts/dispatcher"
 require "hive/attempts/lost_outcome"
 require "hive/daemon/stale_agent_healer"
@@ -7,6 +8,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
+  RETRY_AT = NOW + Hive::AgentLimit.retry_cooldown_sec + 2
   CLAIM_CAPABILITY = "c" * 64
 
   class FakeController
@@ -29,6 +31,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     def process(attempt, now:)
       outcome = @outcomes.ensure_for(attempt, now: now)
       return outcome if Hive::Attempts::LostOutcomeStore::FINAL_STATUSES.include?(outcome["status"])
+      return outcome if outcome["status"] == "ready"
 
       @outcomes.update(
         attempt, now: now, status: "ready", task_folder: @task_folder,
@@ -64,12 +67,17 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         dispatcher = FakeDispatcher.new
         logger = FakeLogger.new
         processor = FakeProcessor.new(outcomes, task.folder)
+        outcomes.ensure_for(lost, now: NOW + 1)
+        outcomes.update(
+          lost, now: NOW + 1, status: "ready", task_folder: task.folder,
+          diagnostic: "task could not be located for successor yet; retrying"
+        )
 
         first = healer(store, outcomes, processor, dispatcher, logger)
-        first.heal_attempt_losses([ lost ], now: NOW + 2)
-        first.heal_attempt_losses([ lost ], now: NOW + 3)
+        first.heal_attempt_losses([ lost ], now: RETRY_AT)
+        first.heal_attempt_losses([ lost ], now: RETRY_AT + 1)
         restarted = healer(store, outcomes, processor, dispatcher, logger)
-        restarted.heal_attempt_losses([ lost ], now: NOW + 4)
+        restarted.heal_attempt_losses([ lost ], now: RETRY_AT + 2)
 
         assert_equal 1, dispatcher.calls.size
         call = dispatcher.calls.first
@@ -80,11 +88,12 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         outcome = outcomes.fetch(lost.attempt_id)
         assert_equal "successor_dispatched", outcome.fetch("status")
         assert_equal "successor-1", outcome.fetch("successor_attempt_id")
+        assert_nil outcome.fetch("diagnostic")
       end
     end
   end
 
-  def test_exhausted_generation_budget_stays_durable_and_does_not_dispatch
+  def test_retry_charge_is_lineage_evidence_not_an_exhaustion_budget
     with_task do |task|
       with_tmp_dir do |root|
         store = Hive::Attempts::Store.new(root: root)
@@ -95,11 +104,50 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         processor = FakeProcessor.new(outcomes, task.folder)
 
         healer(store, outcomes, processor, dispatcher, logger)
-          .heal_attempt_losses([ lost ], now: NOW + 2)
+          .heal_attempt_losses([ lost ], now: RETRY_AT)
 
+        assert_equal 1, dispatcher.calls.size
+        assert_equal 4, dispatcher.calls.first.fetch(:retry_charge)
+        assert_equal "successor_dispatched", outcomes.fetch(lost.attempt_id).fetch("status")
+        refute logger.events.any? { |name, _attrs| name == :marker_heal_exhausted }
+      end
+    end
+  end
+
+  def test_deferred_successor_dispatch_retries_on_persisted_shared_cooldown
+    with_task do |task|
+      with_tmp_dir do |root|
+        store = Hive::Attempts::Store.new(root: root)
+        lost = lost_attempt(store, retry_charge: 0, task_folder: task.folder)
+        outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+        dispatcher = FakeDispatcher.new
+        dispatcher.define_singleton_method(:dispatch_successor) do |**attributes|
+          @calls << attributes
+          Hive::Attempts::DispatchResult.new(
+            status: :deferred, attempt: nil, receipt: nil,
+            attach_descriptor: nil, reason: "capacity"
+          )
+        end
+        service = healer(
+          store, outcomes, FakeProcessor.new(outcomes, task.folder),
+          dispatcher, FakeLogger.new
+        )
+
+        service.heal_attempt_losses([ lost ], now: RETRY_AT - 3)
         assert_empty dispatcher.calls
-        assert_equal "exhausted", outcomes.fetch(lost.attempt_id).fetch("status")
-        assert logger.events.any? { |name, attrs| name == :marker_heal_exhausted && attrs[:reason] == "attempt_lost" }
+
+        service.heal_attempt_losses([ lost ], now: RETRY_AT)
+        assert_equal 1, dispatcher.calls.size
+        first_retry_at = outcomes.fetch(lost.attempt_id).fetch("last_retry_at")
+
+        service.heal_attempt_losses([ lost ], now: RETRY_AT + 30)
+        assert_equal 1, dispatcher.calls.size
+        assert_equal first_retry_at, outcomes.fetch(lost.attempt_id).fetch("last_retry_at")
+
+        service.heal_attempt_losses(
+          [ lost ], now: RETRY_AT + Hive::AgentLimit.retry_cooldown_sec
+        )
+        assert_equal 2, dispatcher.calls.size
       end
     end
   end
@@ -118,7 +166,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
 
         healer(
           store, outcomes, FakeProcessor.new(outcomes, task.folder), dispatcher, FakeLogger.new
-        ).heal_attempt_losses([ lost ], now: NOW + 2)
+        ).heal_attempt_losses([ lost ], now: RETRY_AT)
 
         assert_equal worker_argv, dispatcher.calls.first.fetch(:argv)
       end
@@ -143,7 +191,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
 
         healer(
           store, outcomes, FakeProcessor.new(outcomes, task.folder), dispatcher, FakeLogger.new
-        ).heal_attempt_losses([ lost ], now: NOW + 2)
+        ).heal_attempt_losses([ lost ], now: RETRY_AT)
 
         assert_equal [
           "hive", "brainstorm", task.folder, "--json",
@@ -183,7 +231,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
-  def test_unlocatable_task_becomes_manual_and_processor_errors_are_logged
+  def test_unlocatable_task_stays_ready_and_processor_errors_are_logged
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
       lost = lost_attempt(store, retry_charge: 0, task_folder: "durable-task")
@@ -191,12 +239,19 @@ class DaemonAttemptLossHealerTest < Minitest::Test
       dispatcher = FakeDispatcher.new
       logger = FakeLogger.new
       processor = FakeProcessor.new(outcomes, nil)
+      service = healer(store, outcomes, processor, dispatcher, logger)
 
       with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { raise Hive::InvalidTaskPath }) do
-        healer(store, outcomes, processor, dispatcher, logger)
-          .heal_attempt_losses([ lost ], now: NOW + 2)
+        service.heal_attempt_losses([ lost ], now: NOW + 2)
+        first_updated_at = outcomes.fetch(lost.attempt_id).fetch("updated_at")
+        service.heal_attempt_losses([ lost ], now: NOW + 3)
+        assert_equal first_updated_at, outcomes.fetch(lost.attempt_id).fetch("updated_at"),
+                     "an unchanged missing-task diagnostic must not rewrite the sidecar every tick"
       end
-      assert_equal "manual", outcomes.fetch(lost.attempt_id).fetch("status")
+      outcome = outcomes.fetch(lost.attempt_id)
+      assert_equal "ready", outcome.fetch("status")
+      assert_match(/retrying/, outcome.fetch("diagnostic"))
+      assert_empty dispatcher.calls
 
       broken_processor = Object.new
       broken_processor.define_singleton_method(:process) { |*_args, **_kwargs| raise "capture failed" }

@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-07-22
+updated: 2026-07-24
 tags: [attempts, ownership, leases, daemon, recovery]
 ---
 
@@ -162,19 +162,26 @@ git inventory; commits or a clean worktree never prove stage success.
 ## Definitive loss
 
 A live worker group is signalled only when start fingerprint and session/group
-membership still match. Drift becomes a durable manual outcome. Once absent,
+membership still match. Drift remains pending and is rechecked; Hive never
+signals an unverifiable process group. Once the worker is absent,
 `DirtyStateCapture` records HEAD, porcelain-v2 status, binary patches, and
 hashed untracked metadata without stash/reset/checkout/clean/add/commit.
 
 One `ERROR reason=attempt_lost` compatibility marker is projected. Only the
-lease loss healer consumes it; legacy and recoverable-error discovery skip it.
-Retry budget is durable `retry_charge` (maximum three), so restart or a new ID
-cannot reset it. A successor replays the immutable admitted workflow argv and
-flags; if the command already moved the task, only its locator is retargeted
-and a satisfied `--from` assertion is removed. Queue claims follow an admitted
-successor and later complete from its receipt. If the daemon crashes after
-admission but before stamping the queue claim, restart repairs correlation by
-the immutable request ID before deciding whether the claim is live.
+lease loss healer consumes it; legacy and generic error-marker discovery skip
+it. `retry_charge` remains durable lineage/accounting evidence but is not an
+exhaustion budget. Unsafe cleanup, temporarily missing task lookup, and lost
+successors remain retryable until the process becomes safely absent or a
+successor is admitted. Successor dispatch attempts are paced by the same
+persisted marker-age cooldown; a deferred admission records `last_retry_at` so
+daemon restarts cannot collapse the delay into a per-tick loop. A successor
+replays the immutable admitted workflow
+argv and flags; if the command already moved the task, only its locator is
+retargeted and a satisfied `--from` assertion is removed. Queue claims follow
+an admitted successor and later complete from its receipt. If the daemon
+crashes after admission but before stamping the queue claim, restart repairs
+correlation by the immutable request ID before deciding whether the claim is
+live.
 
 ## Tests
 

@@ -456,7 +456,7 @@ module Hive
         [ "waiting_on_provider_or_scheduler", "provider" ]
       when "global_cap", "project_cap", "daily_cap", "cooldown", "in_flight",
            "dispatched", "wait_for_debounce", "record_baseline", "poll_for_merge",
-           "merge_watch", "blocked_on_dependency"
+           "merge_watch", "blocked_on_dependency", "retry_cooldown"
         [ "waiting_on_provider_or_scheduler", "scheduler" ]
       when "wait_for_answers"
         [ "waiting_on_you", "operator" ]
@@ -472,6 +472,7 @@ module Hive
       return [ "unknown", "unknown" ] if invalid_task?(row)
       return [ "needs_repair", "hive" ] if stale_liveness?(row)
       return [ "running", "agent" ] if running?(row)
+      return [ "waiting_on_provider_or_scheduler", "scheduler" ] if automatic_error_retry?(project, row)
       return [ "needs_repair", "operator" ] if repair?(row)
       return [ "waiting_on_provider_or_scheduler", "provider" ] if row["held"]
       if human_input?(row)
@@ -514,6 +515,17 @@ module Hive
       daemon_enabled?(project["name"]) && row["workflow"] == "coding" && row["stage"] == CODING_PLAN_STAGE
     end
 
+    def automatic_error_retry?(project, row)
+      daemon_enabled?(project["name"]) &&
+        auto_retry_enabled?(project["name"]) &&
+        %w[error review_error].include?(row["marker"].to_s)
+    end
+
+    def auto_retry_enabled?(project_name)
+      @project_context.dig(project_name, "auto_retry_enabled") == true ||
+        @project_context.dig(project_name, :auto_retry_enabled) == true
+    end
+
     def reasons_for(project, row)
       reasons = []
       if invalid_task?(row)
@@ -534,6 +546,13 @@ module Hive
       elsif row["admission_error"]
         error = row.fetch("admission_error")
         reasons << reason(error.fetch("reason_code"), error.fetch("safe_correction"), "dependency")
+      elsif automatic_error_retry?(project, row)
+        marker = row["marker"].to_s.upcase
+        reasons << reason(
+          "error_retry_scheduled",
+          "#{marker} remains scheduled for a guarded retry after the shared cooldown",
+          "scheduler"
+        )
       elsif repair?(row)
         message = row.dig("diagnostic", "summary") || row.dig("attrs", "message") ||
                   row.dig("attrs", "reason") || row["action_label"] || "task needs repair"

@@ -205,38 +205,31 @@ class HiveBotRecoverySequenceTest < Minitest::Test
                  ))
   end
 
-  # `stages.ensure_clean_on_exit` plan: `:error reason=dirty_worktree`
-  # and `:error reason=ensure_clean_on_exit_failed` must short-circuit
-  # the Autofix dispatch with the operator-actionable reply, not the
-  # generic "open it on a laptop" string. Asserting the callback path
-  # specifically (no `attrs:` kwarg) — that's the one that needed the
-  # `match_attr → attrs` resolution.
-  def test_build_short_circuits_on_dirty_worktree_via_match_attr
+  # Every ERROR/REVIEW_ERROR remains retryable from both callback and
+  # slash-handler paths; stage guards re-evaluate the state after the clear.
+  def test_build_retries_dirty_worktree_via_match_attr
     result = Hive::Bot::Handlers::RecoverySequence.build(
       project: "hive", slug: "stuck-260528-aaaa", stage: "8-finalize",
       marker: "error", match_attr: "reason=dirty_worktree",
       result_class: Result, clear_keyboard: true
     )
 
-    assert_equal :reply, result.action
-    assert_match(/Hive can't auto-recover a dirty worktree/, result.text)
-    assert_match(/commit or discard/, result.text)
+    assert_equal :dispatch_commands, result.action
+    assert_equal 2, result.commands.length
   end
 
-  def test_build_short_circuits_on_ensure_clean_on_exit_failed_via_match_attr
+  def test_build_retries_ensure_clean_on_exit_failed_via_match_attr
     result = Hive::Bot::Handlers::RecoverySequence.build(
       project: "hive", slug: "stuck-260528-bbbb", stage: "8-finalize",
       marker: "error", match_attr: "reason=ensure_clean_on_exit_failed",
       result_class: Result, clear_keyboard: false
     )
 
-    assert_equal :reply, result.action
-    assert_match(/Hive can't auto-recover a dirty worktree/, result.text)
+    assert_equal :dispatch_commands, result.action
+    assert_equal 2, result.commands.length
   end
 
-  # Same routing on the slash-handler path that passes the full row.attrs
-  # hash — the attrs-gated rule must fire there too.
-  def test_build_short_circuits_on_ensure_clean_on_exit_failed_via_attrs
+  def test_build_retries_ensure_clean_on_exit_failed_via_attrs
     result = Hive::Bot::Handlers::RecoverySequence.build(
       project: "hive", slug: "stuck-260528-cccc", stage: "8-finalize",
       marker: "error", match_attr: nil,
@@ -244,11 +237,11 @@ class HiveBotRecoverySequenceTest < Minitest::Test
       result_class: Result, clear_keyboard: false
     )
 
-    assert_equal :reply, result.action
-    assert_match(/Hive can't auto-recover a dirty worktree/, result.text)
+    assert_equal :dispatch_commands, result.action
+    assert_equal 2, result.commands.length
   end
 
-  def test_build_short_circuits_on_fix_status_check_failed_via_attrs
+  def test_build_retries_fix_status_check_failed_via_attrs
     result = Hive::Bot::Handlers::RecoverySequence.build(
       project: "hive", slug: "stuck-260530-aaaa", stage: "6-review",
       marker: "review_error", match_attr: nil,
@@ -256,19 +249,11 @@ class HiveBotRecoverySequenceTest < Minitest::Test
       result_class: Result, clear_keyboard: false
     )
 
-    assert_equal :reply, result.action
-    assert_match(/Git status cannot be read/, result.text)
+    assert_equal :dispatch_commands, result.action
+    assert_equal 2, result.commands.length
   end
 
-  # Real-world callback_data carries BOTH `marker_id=<hex>` (the
-  # race-safe clear guard from `Hive::Markers.error_recovery_match_attr`)
-  # AND `reason=<...>` (so manual_only? can route on reason without
-  # re-reading the state file). Before F1, error_recovery_match_attr
-  # returned `marker_id=<hex>` alone, attrs_from_match_attr
-  # reconstructed `{ "marker_id" => "<hex>" }` with no `reason`, and
-  # the manual-only check fell through to the dispatch path — sending
-  # a retry against a dirty worktree.
-  def test_build_short_circuits_on_marker_id_plus_reason_match_attr
+  def test_build_retries_marker_id_plus_reason_match_attr
     result = Hive::Bot::Handlers::RecoverySequence.build(
       project: "hive", slug: "stuck-260528-eeee", stage: "8-finalize",
       marker: "error",
@@ -276,8 +261,8 @@ class HiveBotRecoverySequenceTest < Minitest::Test
       result_class: Result, clear_keyboard: false
     )
 
-    assert_equal :reply, result.action
-    assert_match(/Hive can't auto-recover a dirty worktree/, result.text)
+    assert_equal :dispatch_commands, result.action
+    assert_equal 2, result.commands.length
   end
 
   # Other `:error` reasons keep the existing retry behaviour (clear +

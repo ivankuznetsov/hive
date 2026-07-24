@@ -38,12 +38,7 @@ module Hive
       # frontmatter.
       FRONTMATTER_SCAN_BYTES = Hive::DiagnosticHelpers::FRONTMATTER_SCAN_BYTES
 
-      AUTO_COMMIT_MANUAL_FAILURE_REASONS = %w[
-        fix_auto_commit_scope_failed
-        fix_auto_commit_sign_policy_failed
-        fix_auto_commit_signing_failed
-      ].freeze
-      FIX_STATUS_CHECK_MANUAL_FAILURE_REASON = "fix_status_check_failed".freeze
+      FIX_STATUS_CHECK_REASON = "fix_status_check_failed".freeze
 
       def initialize(task:, marker:, action_key:, rerun_command:,
                      incomplete_plan_artifact:, finalize_missing_pr_md:,
@@ -454,6 +449,16 @@ module Hive
 
         return { "kind" => "retry", "command" => workflow_command("plan") } if incomplete_plan_artifact?
 
+        # ERROR and REVIEW_ERROR are durable retry states, not permanent
+        # workflow terminals. Their generated marker_id makes the command
+        # generation-safe even for reasons that used to be described as
+        # manual-only; the rerun re-evaluates files, configuration, identity,
+        # and publication guards from current state.
+        if %i[error review_error].include?(marker.name)
+          cmd = retry_command_string or return nil
+          return { "kind" => "retry", "command" => cmd }
+        end
+
         return manual_fix if finalize_missing_pr_md? || finalize_missing_metadata_error?
         return manual_fix if finalize_missing_pr_url? || finalize_pr_url_mismatch?
         return manual_fix if max_passes_review_stale_with_escalations?
@@ -465,18 +470,6 @@ module Hive
         # explicit "do not auto-retry" signal rather than the absence of data.
         # See PR #84 review finding #9.
         return manual_fix if marker.name == :execute_stale || legacy_execute_findings?
-        return manual_fix if fix_status_check_failure?
-        return manual_fix if auto_commit_manual_failure?
-
-        # CleanExit's `ensure_clean_on_exit_failed` is operator-resolves-the-
-        # worktree territory: scope-violating or signing-failed residue needs
-        # human inspection. Emit `manual_fix` with `command:null` so polling
-        # agents see the explicit "do not auto-retry" signal (the bot's
-        # manual-only routing in `RecoverySequence` already refuses to dispatch
-        # a retry verb for this reason; the JSON payload mirrors that decision
-        # so CLI-driven consumers don't try to construct one themselves).
-        return manual_fix if clean_exit_manual_failure?
-
         cmd = retry_command_string or return nil
 
         { "kind" => "retry", "command" => cmd }
@@ -499,7 +492,13 @@ module Hive
       def retry_command_string
         attrs = marker.attrs || {}
         case marker.name
-        when :review_error, :review_ci_stale
+        when :review_error
+          match_attr = Hive::Markers.review_error_recovery_match_attr(attrs)
+          attr_pair = match_attr ? [ "--match-attr", match_attr ] : []
+          clear_argv = [ "hive", "markers", "clear", task.folder,
+                         "--name", "REVIEW_ERROR", *attr_pair ]
+          "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
+        when :review_ci_stale
           attr_pair = priority_match_attr(attrs, %w[pass phase reason])
           clear_argv = [ "hive", "markers", "clear", task.folder,
                          "--name", marker.name.to_s.upcase, *attr_pair ]
@@ -601,22 +600,9 @@ module Hive
         ].include?(marker.attrs["reason"].to_s)
       end
 
-      def auto_commit_manual_failure?
-        marker.name == :review_error && AUTO_COMMIT_MANUAL_FAILURE_REASONS.include?(marker.attrs["reason"].to_s)
-      end
-
       def fix_status_check_failure?
         marker.name == :review_error &&
-          marker.attrs["reason"].to_s == FIX_STATUS_CHECK_MANUAL_FAILURE_REASON
-      end
-
-      # `:error reason=ensure_clean_on_exit_failed` is the CleanExit invariant
-      # refusing to auto-commit residue: either the staged paths fell outside
-      # `review.fix.auto_commit.scope_check`, or `git add` / `git commit` /
-      # `git status` failed or timed out. Operator must inspect the worktree
-      # before any retry; there is no safe automated command to dispatch.
-      def clean_exit_manual_failure?
-        marker.name == :error && marker.attrs["reason"].to_s == "ensure_clean_on_exit_failed"
+          marker.attrs["reason"].to_s == FIX_STATUS_CHECK_REASON
       end
 
       def finalize_missing_metadata_error?

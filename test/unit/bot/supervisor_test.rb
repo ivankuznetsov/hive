@@ -1706,8 +1706,8 @@ class HiveBotSupervisorTest < Minitest::Test
                     "generic needs-input rows get a universal run button"
     assert_includes callbacks, "findings:accept_all:hive:review-260624-abcd:6-review",
                     "review waiting rows get an accept-all primary button"
-    assert_includes callbacks, "autofix:hive:stuck-260526-cccc:6-review:review_error:pass=2",
-                    "retryable recovery rows get an autofix button"
+    assert callbacks.any? { |callback| callback.start_with?("#autofix:") },
+           "retryable recovery rows get an alert-backed autofix button when guarded callback data exceeds Telegram's limit"
     assert_includes callbacks, "details:hive:stale-260526-dddd:4-execute",
                     "manual-only recovery rows get a details button"
     assert_equal 9, callbacks.length, "inert agent_running rows produce no button"

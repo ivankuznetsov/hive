@@ -8,6 +8,7 @@ require "hive/babysitter/interval"
 require "hive/permission_scope"
 require "hive/paths"
 require "hive/repository_identity"
+require "hive/model_routing"
 require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
 
@@ -715,7 +716,7 @@ module Hive
     # Project sections supported by consumers but intentionally absent from
     # DEFAULTS. Keep this list explicit so a newly rendered section cannot
     # silently become an unvalidated extension namespace.
-    PROJECT_KEYS_WITHOUT_DEFAULTS = Set.new(%w[gh]).freeze
+    PROJECT_KEYS_WITHOUT_DEFAULTS = Set.new(%w[gh models]).freeze
     @legacy_project_config_warning_lock = Mutex.new
     @legacy_project_config_warned_paths = Set.new
 
@@ -809,8 +810,11 @@ module Hive
 
     def build_project_config(project_root, source_path, data, stage_names: nil)
       project_root = File.expand_path(project_root)
-      data = normalize_legacy_project_config(data, source_path)
+      legacy_reviewers = data.key?("reviewers")
+      data = normalize_legacy_project_config(data, source_path, emit_warning: false)
       validate_project_top_level_keys!(data, source_path, project_root, stage_names: stage_names)
+      data = normalize_models_config(data, source_path, owner: Hive::ModelRouting::PROJECT_OWNER)
+      warn_legacy_root_reviewers_once!(source_path) if legacy_reviewers
       resolve_patrol_mode!(data)
       merged = merge_defaults(data).merge("project_root" => project_root)
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
@@ -820,6 +824,16 @@ module Hive
       inject_bot_runtime_path_defaults!(merged)
       validate!(merged, source_path)
       merged
+    end
+
+    def normalize_models_config(data, source_path, owner:)
+      return data unless data.key?("models")
+
+      normalized = deep_dup(data)
+      normalized["models"] = Hive::ModelRouting.parse(
+        data["models"], owner: owner, source: describe_source(source_path)
+      )
+      normalized
     end
 
     # `reviewers` was never a supported project-root key, but older Hive
@@ -1553,17 +1567,53 @@ module Hive
       merged
     end
 
-    # The `digest` block only (enabled / max_catchup_days), merged over
-    # defaults. Used by the daemon scheduler and the PRDigest CLI adapter.
-    def load_global_digest_block
-      load_global_block("digest", validator: :validate_digest!) do |merged, data, override|
-        # Opt-out beats opt-in: when the operator hasn't pinned digest.enabled
-        # either way, default it ON for anyone who already has the Telegram bot
-        # configured with a deliverable chat. An explicit digest.enabled (true
-        # OR false) is always honored — only the unset case is derived.
-        merged["enabled"] = telegram_digest_default?(data) unless override.key?("enabled")
-        merged
+    # Load the globally owned digest settings and optional `models.digest`
+    # overlay from one raw snapshot. Structural model validation happens
+    # before any digest consumer can schedule work or invoke PRDigest.
+    def load_global_digest_config
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      models =
+        if data.key?("models")
+          Hive::ModelRouting.parse(
+            data["models"],
+            owner: Hive::ModelRouting::GLOBAL_DIGEST_OWNER,
+            source: describe_source(path)
+          )
+        end
+
+      override = data["digest"] || {}
+      unless override.is_a?(Hash)
+        raise ConfigError,
+              "digest in #{describe_source(path)} must be a Hash; got #{override.class}"
       end
+
+      digest = deep_merge(deep_dup(DEFAULTS["digest"]), override)
+      # Opt-out beats opt-in: when the operator hasn't pinned digest.enabled
+      # either way, default it ON for anyone who already has the Telegram bot
+      # configured with a deliverable chat. An explicit digest.enabled (true
+      # OR false) is always honored — only the unset case is derived.
+      digest["enabled"] = telegram_digest_default?(data) unless override.key?("enabled")
+      validate_digest!({ "digest" => digest }, path)
+
+      config = { "digest" => digest }
+      config["models"] = models if models
+      config
+    end
+
+    # The scheduler-facing digest block remains exactly that block; the
+    # combined loader above keeps model routing available without changing
+    # this established return shape.
+    def load_global_digest_block
+      load_global_digest_config.fetch("digest")
+    end
+
+    def load_global_models
+      load_global_digest_config.fetch("models", Hive::ModelRouting::EMPTY_MODELS)
     end
 
     def load_global_answer_digest_block
@@ -1887,6 +1937,7 @@ module Hive
     # ever fails validation.
     def validate!(cfg, source_path)
       validate_hash_shaped_keys!(cfg, source_path)
+      validate_models!(cfg, source_path)
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_review_adhoc!(cfg, source_path)
@@ -1922,6 +1973,7 @@ module Hive
     HASH_SHAPED_KEYS = %w[
       brainstorm
       claude
+      models
       plan
       execute
       conditions
@@ -1956,6 +2008,16 @@ module Hive
               "got #{value.inspect} (#{value.class}). Either remove the key " \
               "(defaults will apply) or supply `#{key}: { ... }` with the right shape."
       end
+    end
+
+    def validate_models!(cfg, source_path)
+      return unless cfg.key?("models")
+
+      cfg["models"] = Hive::ModelRouting.parse(
+        cfg["models"],
+        owner: Hive::ModelRouting::PROJECT_OWNER,
+        source: describe_source(source_path)
+      )
     end
 
     def validate_conditions!(cfg, source_path)

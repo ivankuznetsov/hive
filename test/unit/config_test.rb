@@ -45,7 +45,67 @@ class ConfigTest < Minitest::Test
       assert_nil cfg.dig("open_pr", "agent")
       assert_nil cfg.dig("review", "ci", "agent")
       assert_nil cfg.dig("review", "fix", "agent")
+      refute cfg.key?("models"),
+             "an absent models map must not change the serialized config shape"
       assert_equal dir, cfg["project_root"]
+    end
+  end
+
+  def test_load_parses_project_owned_models_without_collapsing_absent_fields
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          plan:
+            model: " gpt-5.6-sol "
+          review:
+            effort: xhigh
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal({ "model" => "gpt-5.6-sol" }, cfg.dig("models", "plan"))
+      assert_equal({ "effort" => "xhigh" }, cfg.dig("models", "review"))
+      refute cfg.dig("models", "plan").key?("effort")
+      refute cfg.dig("models", "review").key?("model")
+    end
+  end
+
+  def test_load_rejects_project_models_before_emitting_legacy_config_warning
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        reviewers: []
+        models:
+          plan:
+            agent: codex
+      YAML
+
+      _out, err = capture_io do
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match(/models\.plan.*unknown field.*agent/i, error.message)
+      end
+
+      assert_empty err, "structural model validation must run before warnings"
+    end
+  end
+
+  def test_load_rejects_digest_models_in_project_config
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          digest:
+            model: gpt-5.6-sol
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/models\.digest.*global digest/i, error.message)
+      assert_includes error.message, config_path
     end
   end
 
@@ -4180,6 +4240,63 @@ class ConfigTest < Minitest::Test
       assert_equal true, cfg["enabled"]
       assert_equal "codex", cfg["agent"]
       assert_equal 3, cfg["max_catchup_days"]
+    end
+  end
+
+  def test_load_global_digest_config_parses_only_global_digest_models
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        digest:
+          enabled: true
+          max_catchup_days: 3
+        models:
+          digest:
+            model: " gpt-5.6-sol "
+            effort: xhigh
+      YAML
+
+      cfg = Hive::Config.load_global_digest_config
+
+      assert_equal true, cfg.dig("digest", "enabled")
+      assert_equal 3, cfg.dig("digest", "max_catchup_days")
+      assert_equal(
+        { "model" => "gpt-5.6-sol", "effort" => "xhigh" },
+        cfg.dig("models", "digest")
+      )
+      assert_equal cfg.fetch("models"), Hive::Config.load_global_models
+      refute Hive::Config.load_global_digest_block.key?("models"),
+             "the established scheduler block shape must remain unchanged"
+    end
+  end
+
+  def test_load_global_digest_config_rejects_project_owned_and_malformed_models
+    with_tmp_global_config do |home|
+      path = File.join(home, "config.yml")
+      File.write(path, <<~YAML)
+        registered_projects: []
+        models:
+          plan:
+            model: gpt-5.6-sol
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
+      assert_match(/models\.plan.*project config/i, error.message)
+      assert_includes error.message, path
+
+      File.write(path, <<~YAML)
+        registered_projects: []
+        models: []
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
+      assert_match(/models.*mapping/i, error.message)
+    end
+  end
+
+  def test_load_global_models_preserves_absence
+    with_tmp_global_config do
+      assert_same Hive::ModelRouting::EMPTY_MODELS, Hive::Config.load_global_models
     end
   end
 

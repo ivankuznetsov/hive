@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-23
+updated: 2026-07-25
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, digest-owned `models.digest`, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
 ## Strict project root keys
 
@@ -63,6 +63,23 @@ same malformed project config fails consistently in `hive run`, `hive doctor`,
 command-specific fallback behavior. An invalid workflow path cannot pre-empt
 an unsupported-root diagnostic; the legacy reviewers alias is normalized before
 workflow-path resolution.
+
+## Model-routing ownership and structure
+
+`models:` is a strict, no-default section backed by
+[[modules/model_routing]]. Leaving it out therefore leaves the loaded project
+config shape unchanged. Project config may contain every registered public key
+except `digest`; `models.digest` belongs to the global config and is loaded
+with the global digest snapshot. The existing `load_global_digest_block`
+continues to return scheduler settings only.
+
+Structural validation rejects non-mapping roots, unknown or wrong-owner stage
+keys, empty/non-mapping entries, fields other than `model` and `effort`,
+blank/non-scalar models, and efforts outside the shared accepted vocabulary.
+Each entry retains only authored fields, so model-only and effort-only
+overrides stay distinguishable. This structural pass runs before the legacy
+top-level-reviewers warning. Reachable-profile capability validation remains a
+separate, pure routing-domain step after exact/coarse shadowing is known.
 
 ## Condition authority
 

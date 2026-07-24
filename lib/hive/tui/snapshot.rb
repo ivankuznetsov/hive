@@ -379,7 +379,6 @@ module Hive
 
         project_rows[row_idx]
       end
-
     end
   end
 end

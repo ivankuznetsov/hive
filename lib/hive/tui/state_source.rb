@@ -212,12 +212,12 @@ module Hive
           request_archive_refresh unless policy_unchanged
         end
         request_archive_refresh if archive_refresh_due?(now: refresh_now)
-        start_archive_refresh_if_needed
 
         cache = @archived_cache
         cache_unchanged = cache.equal?(@snapshot_archived_cache)
         if @current && @mtime_fingerprint && cache_unchanged && policy_unchanged &&
            mtime_fingerprint_unchanged? && !full_reparse_due?(now: refresh_now)
+          start_archive_refresh_if_needed
           @current_seen_at = refresh_now
           @last_error = nil
           return
@@ -248,7 +248,17 @@ module Hive
           )
           publish_snapshot(ordinary_payload, archived_cache: cache)
         end
+        # Do not overlap the ordinary producer with the heavier unfiltered
+        # archive producer. Both resolve project workflow overlays under the
+        # same process-wide lock, and running them concurrently can starve the
+        # user-facing refresh under Bubble Tea's input loop. Publish ordinary
+        # rows first; the dedicated archive cache catches up in the background.
+        start_archive_refresh_if_needed
       rescue StandardError => e
+        Hive::Tui::Debug.log(
+          "state_source",
+          "refresh failed: #{e.class}: #{e.message}"
+        )
         @last_error = e
       end
 
@@ -568,10 +578,16 @@ module Hive
       def archive_dir_mtimes_for(projects)
         pairs = Array(projects).flat_map do |project|
           stages_dir = File.join(project.hive_state_path.to_s, "stages")
-          paths = [
-            stages_dir,
-            *Dir.glob(File.join(stages_dir, "*")).select { |path| File.directory?(path) }
-          ]
+          terminal_dirs = Hive::Workflows::Project.synchronize do
+            Hive::Workflows::Project.load!(project.path)
+            Hive::Workflows.all_terminal_stage_dirs.dup
+          end
+          # Watch only workflow terminal directories. Active-stage mutations
+          # already invalidate the ordinary mtime fingerprint and must not
+          # launch a redundant full archive scan. Descriptor/pin/default
+          # changes live in policy_fingerprint_for and separately arm the
+          # archive refresh.
+          paths = terminal_dirs.map { |dir| File.join(stages_dir, dir) }
           paths.map { |path| [ path, safe_mtime(path) ] }
         rescue StandardError => e
           Hive::Tui::Debug.log(

@@ -4,7 +4,7 @@ type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
 updated: 2026-07-26
-tags: [command, web, rails, turbo, hivebox-container]
+tags: [command, web, rails, turbo, hivebox-container, archive, retention]
 ---
 
 **TLDR**: `hive web` boots the default native Hive browser UI — a vanilla
@@ -210,7 +210,11 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
   drawer, cursor, transition, or audit subsystem: workflow mutation continues
   through the existing task controllers. Each band scrolls horizontally
   inside the page at narrow widths. `Grid` retains the compact per-project task
-  rows. A TUI-left-pane-parity project rail filters either view through
+  rows. Both ordinary views consume status's workflow-aware archive projection:
+  expired archived rows are absent, and a positive project count renders
+  `… and 1 older archived task (hive archive to view)` or
+  `… and N older archived tasks (hive archive to view)` as a direct link to the
+  project-scoped archive. A TUI-left-pane-parity project rail filters either view through
   ordinary GET links ("All projects" + one link per registered project;
   projects are ordered by descending in-flight task count, preserving registry
   order for ties, and the grid plus permanent composer selector stay in that
@@ -284,6 +288,9 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
   `folder_mtime` as liveness signals. The poller publishes its comparable key
   with the payload and reuses the existing semantic token when that key is
   unchanged, so volatile-only ticks do not repeat canonical JSON hashing.
+  `hidden_archived_task_count` remains in that comparison, making a
+  boundary- or policy-driven count change material even if every active row is
+  unchanged.
   The broadcaster first renders one Turbo Stream
   message containing the refresh plus the server-sorted composer selector,
   then sends that complete message once over solid_cable. The refresh GET
@@ -367,6 +374,15 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
   down, not merely when `service_installed` is false. A
   stopped, otherwise healthy daemon points to `hive daemon start --detach`;
   a missing or drifted service points to `hive daemon install --force`.
+- **Archive (`/archive`)** — requests `StatusFeed#archive_snapshot`, whose
+  separate `Status.new(archive: true)` producer bypasses ordinary retention and
+  is deliberately excluded from the live feed's priming and dedup baseline.
+  It renders every workflow-aware archived task with the existing task
+  attributes, preserves `?project=` in its rail and links, and links task pages
+  with `source=archive`. `TasksController` honors that explicit source by
+  resolving the task from the unfiltered payload, so an expired task opened
+  from the archive cannot become a false 404. Native Hive web and Hivebox use
+  this same Rails route and producer path.
 - **Task page** — state-driven actions (Retry stage for red
   `recover_review` / `recover_execute` / `error` rows; Approve only when the
   marker makes a forward move possible; Run <verb> only when the project daemon
@@ -663,6 +679,8 @@ paths (typed refusal page + confirmed force), Q&A round replacement without a
 lingering old form, typed Q&A preservation across a pushed morph, log-tail
 follow/pause/resume with node-preserving frame morph reloads, artifact
 open-state preservation across pushed morphs with live content refresh, and
+ordinary-board hidden summaries navigating through the lossless Archive route
+to an expired task detail page, plus
 repo setup workflow selection (fresh `content` writes config, re-run lists a
 project-authored workflow and preselects the current default), plus
 real browser workflow scaffolding and exact-permission managed install review,

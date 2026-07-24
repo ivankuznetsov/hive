@@ -531,6 +531,32 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_active_stage_change_refreshes_ordinary_rows_without_arming_archive_scan
+    with_direct_project do |_project, hive_state|
+      write_state_task(hive_state, "4-execute", "active-task-260626-abcd",
+                       marker: "EXECUTE_COMPLETE", id: 1)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      source.instance_variable_set(:@archive_refresh_dirty, false)
+
+      write_state_task(hive_state, "1-inbox", "new-task-260626-efgh",
+                       marker: "COMPLETE", id: 2)
+      inbox_dir = File.join(hive_state, "stages", "1-inbox")
+      File.utime(Time.now + 5, Time.now + 5, inbox_dir)
+
+      source.send(:refresh_archive_signals, source.current.projects)
+      refute source.instance_variable_get(:@archive_refresh_dirty),
+             "an active-stage mutation must not launch the unfiltered archive producer"
+
+      source.send(:refresh_once)
+      assert_includes source.current.rows.map(&:slug), "new-task-260626-efgh",
+                      "the ordinary producer still observes the active-stage mutation"
+      refute source.instance_variable_get(:@archive_refresh_thread)&.alive?
+    ensure
+      source&.stop
+    end
+  end
+
   def test_archive_dir_change_reprojects_ordinary_rows_and_refreshes_archive_cache
     with_direct_project do |_project, hive_state|
       write_state_task(hive_state, "4-execute", "active-task-260626-abcd",

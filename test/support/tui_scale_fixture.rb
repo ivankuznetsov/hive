@@ -1,16 +1,17 @@
 require "fileutils"
 require "time"
 require "yaml"
-require "hive/archive_filter"
 require "hive/commands/status"
 require "hive/config"
 require "hive/lock"
 require "hive/task"
 require "hive/task_meta"
+require "hive/workflows"
 
 module HiveTuiScaleFixture
   DEFAULT_ACTIVE_COUNT = 8
-  ACTIVE_STAGES = (Hive::Stages::DIRS - [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]).freeze
+  CODING_ARCHIVE_STAGE_DIR = Hive::Workflows::Registry.default.stages.last.dir
+  ACTIVE_STAGES = (Hive::Stages::DIRS - [ CODING_ARCHIVE_STAGE_DIR ]).freeze
 
   module_function
 
@@ -45,7 +46,7 @@ module HiveTuiScaleFixture
       archived_total = tasks_per_project - active_counts.fetch(project_index)
       archived_total.times do |task_index|
         slug = slug_for(project_index, task_index, "archived")
-        write_task(hive_state, Hive::ArchiveFilter::ARCHIVE_STAGE_DIR, slug, id: id, marker: "COMPLETE")
+        write_task(hive_state, CODING_ARCHIVE_STAGE_DIR, slug, id: id, marker: "COMPLETE")
         id += 1
       end
     end

@@ -4,7 +4,7 @@ type: command
 source: lib/hive/tui.rb, lib/hive/tui/**
 created: 2026-04-27
 updated: 2026-07-25
-tags: [command, tui, observability, interactive, diagnostics, task-id, archive, pr]
+tags: [command, tui, observability, interactive, diagnostics, task-id, archive, retention, pr]
 ---
 
 **TLDR**: `hive tui` is the human-only, two-pane Charm bubbletea + lipgloss dashboard over `hive status`. v2 (2026-05-01) renders a left pane listing registered projects (with `★ All projects` virtual entry on top) and a right pane showing scoped tasks as a compact table — icon · id · PR · display name · stage · status · age. It polls the same data source at 1 Hz and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
@@ -70,7 +70,7 @@ The dashboard intentionally has no persistent metadata header. Scope and filter 
 | `o` | open the focused row's hive-state task folder in `$VISUAL` / `$EDITOR` / `vi` for read-only browsing — no marker change, no workflow dispatch. Distinct from `Enter` (workflow-contextual) and the verb keys (subprocess dispatch). Useful for revisiting investigation outputs in `9-done` (or any stage). |
 | `i` | open the focused row's in-TUI info panel — no editor handoff, no marker change, no workflow dispatch. |
 | `s` | steer the focused task manually: open the configured `execute.agent` in the feature worktree with every existing stage folder for that slug passed as agent context, mark the row `MANUAL_STEERING`, and archive the slug under `archived-manual/` when the agent exits |
-| `z` | open the Archive pane, listing all `9-done` tasks across projects with no age cutoff |
+| `z` | open the Archive pane, listing every workflow-aware archived task across projects with no retention cutoff |
 | `n` | open the new-idea flow; if scope is `★ All projects`, first show a project picker, then submit with `hive new <project> "<title>"` against the chosen concrete project |
 | `/` | open filter prompt |
 | `1`–`9` | scope the right pane to the Nth registered project (mirrors selection in the left pane) |
@@ -128,17 +128,25 @@ snapshot so the first useful frame shows registered projects/tasks instead of a
 long-lived loading grid. This is necessary because bubbletea-ruby's raw input
 poll can starve Ruby background threads during startup; relying on the first
 background poll alone produced multi-second loading screens even when
-`hive status` itself was fast. After boot, the source calls
+`hive status` itself was fast. At cold boot, the source obtains one ordinary
+status payload and one explicit, unfiltered archive payload using the same
+refresh time and admission context. Steady refreshes obtain the ordinary
 `Hive::Commands::Status#json_payload(Hive::Config.registered_projects)`
-in-process whenever the cached mtime
-fingerprint changes; otherwise it reuses the previous `Snapshot` and
-only refreshes `current_seen_at`. The fingerprint watches the global
-project registry (`Hive::Config.global_config_path`), each visible
-row's state file and `.lock`, plus the project's `.hive-state/stages`
-directory and stage children, so ordinary marker edits, newly-created
-task folders, runner lock acquisition/release, and `hive init`/`forget`
-registry changes all invalidate the cache without reparsing unchanged
-status data. A time-bounded fallback
+projection in-process; the full archive cache is refreshed separately for the
+Archive pane and dependency context. The ordinary producer already includes
+still-visible archived rows and removes only rows whose resolved workflow
+retention has expired, so the TUI never re-evaluates age from public task
+timestamps.
+
+The cached fingerprint watches the global project registry
+(`Hive::Config.global_config_path`), project configuration, workflow descriptor
+contents, task metadata (including workflow pins), all relevant terminal
+directories, each visible row's state file and `.lock`, and the project's
+`.hive-state/stages` directory and children. Content signatures detect
+descriptor creation, deletion, rename, and same-size replacement even when
+mtime is preserved. Policy/default/pin changes therefore publish a complete new
+ordinary projection and hidden count on the next refresh; no last-good policy
+is reused for a malformed currently selected workflow. A time-bounded fallback
 (`LIVENESS_REPARSE_FALLBACK_SECONDS`, 3s) forces a full re-parse even
 when the fingerprint is unchanged, so liveness-derived fields
 (`live_task_lock`, `claude_pid_alive`) that flip without touching any
@@ -166,13 +174,21 @@ JRuby/TruffleRuby would need a `Mutex`/`AtomicReference` upgrade — a
 `SnapshotArrived` message only when `state_source.current` differs from
 the last dispatched snapshot. Identical snapshots do not redraw.
 
-`Hive::Tui::Snapshot::Row` carries `slug`, `id`, `display_name`, `pr_url`, `mtime`, and `folder_mtime` from status JSON. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
+`Hive::Tui::Snapshot::Row` carries `slug`, `id`, `display_name`, `pr_url`, `mtime`, and `folder_mtime` from status JSON. The project snapshot separately carries `hidden_archived_task_count`; no retention or completion fields are added to task rows. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
 
 The task grid has a fixed PR column between id and display name. Rows with no parseable pull-request URL render `—`; rows whose `pr_url` ends in `/pull/<number>` render `#<number>` via [[modules/pr]]. When stdout is a TTY, the number is wrapped in an OSC 8 hyperlink by `Hive::Tui::Views::Hyperlink`; invalid or non-http URLs fall back to the plain label. The PR column does not drop under narrow-width layout branches, so very small terminals first hide stage and status before sacrificing the PR signal.
 
-The grid view derives its visible snapshot through scope, slug/name/id filter, and `Snapshot#without_old_archived`. That drops `9-done` rows older than 3 days by row `mtime` (the same state-file timestamp rendered as task age), falling back to `folder_mtime` only for legacy payloads. Marker state is intentionally ignored: complete, unresolved, and markerless done rows all hide by the same age rule. Rows with neither timestamp fail open and stay visible. Cursor movement and `BubbleModel#current_row` use the same filtered projection, so keystrokes cannot dispatch against a hidden row. The default footer does not surface the hidden-archive count; `z` opens the Archive pane when the operator wants the unfiltered archive list. The Archive pane itself renders directly from the unfiltered snapshot and therefore lists every `9-done` task regardless of age.
+The grid view derives its visible snapshot only through project scope and the
+slug/name/id filter; archive retention has already been applied by status.
+Cursor movement and `BubbleModel#current_row` use that same projection, so
+keystrokes cannot dispatch against a hidden row. When a project has hidden
+rows, the ordinary Tasks pane renders `… and 1 older archived task (hive
+archive to view)` or `… and N older archived tasks (hive archive to view)`.
+`z` opens the Archive pane over the separately cached, unfiltered archive
+payload, which retains every row whose pinned workflow/action classifies it as
+archived regardless of policy or age.
 
-Snapshots carry a `current_seen_at` timestamp; if the last successful refresh is older than 5s, the header renders a `[stalled: Xs]` banner and the `@last_error` message is surfaced in the status line. The previous snapshot stays visible — the loop never crashes on a transient JSON / IO error.
+Snapshots carry a `current_seen_at` timestamp; if the last successful refresh is older than 5s, the header renders a `[stalled: Xs]` banner and the `@last_error` message is surfaced in the status line. The previous complete snapshot stays visible through a transient JSON / IO error, while a malformed or unknown workflow selected by a current task remains an explicit error row rather than silently inheriting stale visibility.
 
 `Update.apply_snapshot_arrived` re-resolves `model.cursor` against the new snapshot by **following the selected slug**, not the prior `[project_idx, row_idx]` coords. On each poll it captures the slug at the cursor in the OLD visible snapshot and looks it up in the NEW visible via `cursor_for_slug(visible, slug, prior_project_idx)`. The helper prefers the prior project — slugs are not globally unique across projects, so an identically-named row in another project must not silently steal the cursor — then falls back to a global scan across all projects so a task that migrates project boundaries (or whose row order shifted because a peer above it advanced a stage) still keeps the highlighted row aligned with the row that `s`/Enter will dispatch against. When the slug is gone from the new visible (archived, filtered out, or finalized) the cursor falls back to coord-preserving `reclamp_cursor`: keep the coords if they are still in bounds, otherwise jump to the first visible row so downstream `apply_cursor_*` handlers do not get wedged on invalid coords. The previous coord-only reclamp (landed 2026-04-28) covered drop/truncate snapshot deltas but missed in-bounds reorderings under the cursor — the silent-wrong-dispatch class that motivated the slug-follow upgrade. See [[log]] 2026-06-03 for the evolution.
 

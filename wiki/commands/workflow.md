@@ -3,8 +3,8 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-07-19
-tags: [command, workflow, authoring, honeycomb, registry]
+updated: 2026-07-24
+tags: [command, workflow, authoring, honeycomb, registry, archive, retention]
 ---
 
 **TLDR**: `hive workflow` manages two ownership domains: `new` scaffolds trusted project-authored descriptors, while `install`, `list`, `update`, and `remove` manage immutable reviewed Honeycomb generations; `publish` validates an authored descriptor and opens a registry PR whose status is only `pending_review`.
@@ -189,6 +189,7 @@ token.
 
 ```yaml
 id: my-flow
+archive_visibility_retention_days: 3
 stages:
   - name: inbox
     kind: terminal
@@ -202,6 +203,13 @@ stages:
     kind: terminal
     state_file: done.md
 ```
+
+Every generated descriptor declares
+`archive_visibility_retention_days: 3`. Authors may replace `3` with another
+positive integer (full 24-hour periods) or exact lowercase `never`. Omitted
+legacy fields also resolve to `3`; explicit `null` and every other form are
+rejected. The setting changes ordinary visibility only and never removes a
+task from the dedicated archive.
 
 The placeholder `work.md` says:
 

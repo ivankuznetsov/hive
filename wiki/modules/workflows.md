@@ -4,14 +4,17 @@ type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/workflow_package/
 created: 2026-04-26
 updated: 2026-07-26
-tags: [module, workflow, verbs, selection, honeycomb, registry]
+tags: [module, workflow, verbs, selection, honeycomb, registry, archive, retention]
 ---
 
-**TLDR**: The coding, content, bench, and project-authored workflows are described as ordered `Hive::Workflow` value objects whose stages carry directory names, state files, incoming advance verbs, runner metadata, optional instruction files, optional permission specs, per-stage agent/model/effort overrides, council reviewer configs, and terminal deliverables. `Hive::Workflows::Registry.default` still returns the coding descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for built-in, runtime/test, and active-project registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` / `kind: :council` as fallbacks for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`. Coding's descriptor now uses runtime primitive kinds (`:execute`, `:review_council`, `:finalize`) for the worktree-coupled stages; the old `:marker` descriptor kind is retired.
+**TLDR**: The coding, content, bench, and project-authored workflows are described as ordered `Hive::Workflow` value objects whose stages carry directory names, state files, incoming advance verbs, runner metadata, optional instruction files, optional permission specs, per-stage agent/model/effort overrides, council reviewer configs, terminal deliverables, and an archive visibility retention policy. `Hive::Workflows::Registry.default` still returns the coding descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for built-in, runtime/test, and active-project registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` / `kind: :council` as fallbacks for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`. Coding's descriptor now uses runtime primitive kinds (`:execute`, `:review_council`, `:finalize`) for the worktree-coupled stages; the old `:marker` descriptor kind is retired.
 
 ## Descriptor and registry
 
-- `Hive::Workflow` — frozen `Data` value object with `id` and ordered `stages`. Read-only lookup helpers:
+- `Hive::Workflow` — frozen `Data` value object with `id`, ordered `stages`,
+  and normalized `archive_visibility_retention_days` (`Integer` or `:never`).
+  `DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS` is the single legacy default
+  (`3`). Read-only lookup helpers:
   - `#stage_named(name)` — soft lookup, returns the `Stage` or nil.
   - `#state_file_for(name)` — hard lookup, raises `KeyError` on an unknown name.
   - `#stage_names` / `#stage_dirs` — frozen lists of the descriptor's stage names / `index-name` dirs.
@@ -42,6 +45,11 @@ tags: [module, workflow, verbs, selection, honeycomb, registry]
 Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulting to `.hive-state/workflows/*.yml`. `Hive::Workflows::DescriptorParser` validates YAML into `Hive::Workflow` objects:
 
 - `id` is required, must match the filename stem, and must match `/\A[a-z0-9][a-z0-9-]*\z/`.
+- `archive_visibility_retention_days` accepts a positive integer or exact
+  lowercase `never`. Key omission normalizes to `3`; key presence is checked
+  separately so explicit `null` fails. Floats, booleans, strings (including
+  numeric strings), zero, negatives, and alternate sentinel casing fail with
+  workflow id, field name, received value, and accepted forms in the error.
 - user-facing `kind: agent` maps to `:agent`; `kind: terminal` maps to `:inert`; `kind: council` maps to the generic document council runner.
 - stage indexes are derived from array order; non-entry stages default their incoming `advance_verb` to the stage name.
 - every user-authored agent stage declares exactly one of `skill:` or `instruction:`.
@@ -56,7 +64,14 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
   validation reject every partial or alternate shape, including workflows
   constructed directly in Ruby rather than parsed from YAML.
 
-`Hive::Workflows::Loader` discovers project descriptors, and `Hive::Workflows::Project.load!(project_root, config: nil)` is the idempotent boundary call. Callers that already resolved the project config may pass it so descriptor discovery does not parse the same file again; legacy callers keep the self-loading behavior. It swaps the active project overlay in `Hive::Workflows::Registry`, rejects collisions with built-in/runtime ids, and resets the memoized cross-workflow stage unions (`all_stage_dirs`, `all_stage_names`, `all_terminal_stage_dirs`). The self-loading path resolves `hive_state_path` from the shared raw project-config reader, installs one fingerprinted overlay, then validates strict root keys against that overlay; it does not call `Config.load` recursively. For command paths that load `Project` without the aggregate `hive/workflows` entrypoint, strict validation derives its stage-name union directly from `Registry.all`, so behavior does not depend on require order. `Config.load` reuses the active overlay when it needs project stage names. `Task`, `WorkflowSelection`, `init`, `new`, `status`, `drop`, and stage-filtered resolver paths call it before resolving workflow ids or stage refs.
+`Hive::Workflows::Loader` discovers project descriptors, and `Hive::Workflows::Project.load!(project_root, config: nil)` is the idempotent boundary call. Callers that already resolved the project config may pass it so descriptor discovery does not parse the same file again; legacy callers keep the self-loading behavior. It swaps the active project overlay in `Hive::Workflows::Registry`, rejects collisions with built-in/runtime ids, and resets the memoized cross-workflow stage unions (`all_stage_dirs`, `all_stage_names`, `all_terminal_stage_dirs`). Descriptor signatures include content, not only mtime/size, so creation, deletion, rename, same-size replacement, and preserved/coarse-mtime replacement are visible on the next load. There is no last-known-good fallback for a currently selected malformed/missing workflow policy. The self-loading path resolves `hive_state_path` from the shared raw project-config reader, installs one fingerprinted overlay, then validates strict root keys against that overlay; it does not call `Config.load` recursively. For command paths that load `Project` without the aggregate `hive/workflows` entrypoint, strict validation derives its stage-name union directly from `Registry.all`, so behavior does not depend on require order. `Config.load` reuses the active overlay when it needs project stage names. `Task`, `WorkflowSelection`, `init`, `new`, `status`, `drop`, and stage-filtered resolver paths call it before resolving workflow ids or stage refs.
+
+Archive visibility resolves the same descriptor order on every refresh:
+explicit task `workflow:` pin, project `default_workflow`, then `coding`.
+Applying a managed workflow configuration preserves the source descriptor's
+retention value. Hive's built-in `coding`, `content`, and `bench` descriptors
+and both local scaffolds explicitly declare `3`; legacy and externally managed
+descriptors may omit it and receive the same value.
 
 The one compatibility exception is an exact semantic match for the project-local
 `bench.yml` shipped before `bench` became built in. Hive temporarily keeps that

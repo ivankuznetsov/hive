@@ -199,11 +199,12 @@ That is enough to understand what Hive does: it turns a rough idea into durable 
 
 ## Digest Reports
 
-`hive digest` sends the complete changelist for pull requests merged during the
-Europe/London day that just ended. It discovers registered GitHub repositories,
-collects every qualifying PR body and diff, and uses the configured digest
-agent to produce project context and concrete change bullets. Hive task and
-stage state never affects inclusion.
+`hive digest` delegates the complete merged-PR digest to the standalone
+[PRDigest](https://github.com/ivankuznetsov/prdigest) CLI. Hive supplies its
+registered `github.com` repositories, existing GitHub authentication, and the
+first allowlisted Telegram chat. PRDigest alone fetches, renders safe Telegram
+HTML, chunks, checkpoints, retries, and sends. Hive task and stage state never
+affects inclusion.
 
 ```bash
 hive digest --dry-run
@@ -211,12 +212,11 @@ hive digest --date 2026-06-13 --repo owner/name --json
 ```
 
 `--repo` is a repeatable, case-insensitive filter over registered repositories,
-not an arbitrary repository selector. Partial GitHub or metric failures are
-shown as scoped warnings; total collection or generation failure sends
-nothing. Dry-run is credential-free, while real delivery uses Telegram. The
-only live JSON identity is `hive-digest` v2. See
-[wiki/commands/digest.md](wiki/commands/digest.md) for the collection, privacy,
-migration, and schema contracts.
+not an arbitrary repository selector. Dry-run needs GitHub authentication but
+not Telegram credentials. `--json` is PRDigest's versioned
+`prdigest-result` document without a Hive wrapper, and its exit status is
+preserved. See [wiki/commands/digest.md](wiki/commands/digest.md) for the
+adapter, delivery, and migration contracts.
 
 ## Manage Hive From Telegram in 2 Minutes
 

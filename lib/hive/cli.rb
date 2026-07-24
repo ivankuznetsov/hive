@@ -867,43 +867,43 @@ module Hive
       ).call
     end
 
-    desc "digest", "Generate and send the daily merged-PR changelist"
+    desc "digest", "Run PRDigest for Hive's registered GitHub repositories"
     # wrap: false so the Examples / Exit codes blocks keep their line breaks
     # instead of being reflowed into one paragraph.
     long_desc <<~DESC, wrap: false
-      Collects every pull request merged during the requested Europe/London
-      calendar day across registered project repositories. It fetches complete
-      PR body and diff evidence, asks the configured digest agent for exhaustive
-      project context and change bullets, and sends one Telegram MarkdownV2
-      changelist. Hive tasks and stage folders never affect inclusion.
+      Delegates the complete merged-PR digest to the standalone `prdigest` CLI.
+      Hive resolves its registered github.com repositories, Telegram destination,
+      and existing GitHub authentication, writes a private temporary config, and
+      invokes PRDigest. PRDigest alone fetches, renders, chunks, checkpoints, and
+      sends the digest. Hive tasks and stage folders never affect inclusion.
 
-      Without --date, uses the Europe/London calendar day that just ended.
+      Without --date, Hive passes the Europe/London calendar day that just ended.
       Repeat --repo owner/name to filter the registered repository set; unknown
       or unregistered repositories fail instead of expanding scope. Use
       --dry-run to print the exact composed message without Telegram credentials.
 
-      Collection failures and incomplete statistics are visible as scoped
-      warnings. An honestly collected day with no qualifying PRs still sends the
-      normal `PRs 0` digest without running the agent. Empty repository scope,
-      total GitHub collection failure, incomplete generation, or delivery
-      failure exits nonzero and sends no successful changelist.
-
-      With --json, emits the sole live hive-digest v2 envelope, including
-      repository/project/PR counts, project descriptions, every PR link and
-      bullet, known metrics, and structured warnings.
+      With --json, emits PRDigest's versioned `prdigest-result` document without
+      a Hive wrapper. Its delivery object carries accepted_chunks, total_chunks,
+      failed_chunk, and status. PRDigest exit codes are preserved.
 
       Examples:
         hive digest                          # yesterday, send to Telegram
         hive digest --date 2026-06-13        # a specific London day
         hive digest --dry-run                # print the composed message, send nothing
-        hive digest --date 2026-06-13 --json # machine-readable hive-digest envelope
+        hive digest --date 2026-06-13 --json # machine-readable prdigest-result
         hive digest --repo owner/name --repo other/repo --json
 
       Exit codes:
-        0  empty / sent (the complete or honestly partial changelist was delivered)
-        78 bad --date/filter or missing chat config (Hive::ConfigError)
+        0  completed or dry-run
+        1  unexpected/render failure
+        2  PRDigest CLI/configuration failure
+        3  GitHub failure
+        4  Telegram/delivery-checkpoint failure
+        5  PRDigest cursor-state failure
+        6  failure after earlier durable progress
+        78 Hive adapter configuration failure (unregistered repo/missing binary/auth)
         64 bad flags / malformed --json (Thor usage error)
-        70 generation or unexpected internal error
+        70 invalid PRDigest output or unexpected adapter error
     DESC
     option :date, type: :string, desc: "Europe/London calendar date to digest (YYYY-MM-DD)"
     option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"

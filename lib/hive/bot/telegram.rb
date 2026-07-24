@@ -1,4 +1,3 @@
-require "cgi"
 require "json"
 require "net/http"
 require "telegram/bot"
@@ -9,7 +8,6 @@ module Hive
   module Bot
     class Telegram
       MAX_MESSAGE_CHARS = 4096
-      MARKDOWN_V2_RESERVED = "_*[]()~`>#+-=|{}.!".freeze
       BENIGN_POLL_ERRORS = [
         Faraday::TimeoutError,
         Faraday::ConnectionFailed,
@@ -60,7 +58,6 @@ module Hive
       end
 
       class DownloadError < Hive::Error; end
-      class MarkdownV2SplitError < Hive::Error; end
 
       attr_reader :client
 
@@ -95,41 +92,14 @@ module Hive
         []
       end
 
-      # Public view of how `send_message` would split `text` into
-      # Telegram-sized chunks, so callers that need per-chunk delivery
-      # visibility (e.g. the digest sender) can drive the loop themselves.
-      def message_chunks(text, parse_mode: nil)
-        split_message(text, parse_mode: parse_mode)
-      end
-
-      # Convert one already-validated MarkdownV2 chunk to equivalent HTML.
-      # Digest delivery uses this only as a single bounded fallback after
-      # Telegram itself rejects a locally valid MarkdownV2 chunk.
-      def markdown_v2_to_html(text)
-        validate_markdown_v2!(text)
-        markdown_v2_html(text)
-      end
-
       def send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
-        chunks = split_message(text, parse_mode: parse_mode)
+        chunks = split_message(text)
         chunks.map.with_index do |chunk, idx|
-          send_message_chunk(
-            chat_id: chat_id,
-            text: chunk,
-            parse_mode: parse_mode,
-            reply_markup: idx == chunks.length - 1 ? reply_markup : nil
-          )
+          params = { chat_id: chat_id, text: chunk }
+          params[:parse_mode] = parse_mode_value(parse_mode) if parse_mode
+          params[:reply_markup] = inline_keyboard(reply_markup) if reply_markup && idx == chunks.length - 1
+          client.api.send_message(params)
         end
-      end
-
-      # Send exactly one already-sized message. Digest delivery checkpoints
-      # map one durable unit to one Telegram API call, so they must bypass the
-      # generic splitter (especially after MarkdownV2 expands into HTML tags).
-      def send_message_chunk(chat_id:, text:, reply_markup: nil, parse_mode: nil)
-        params = { chat_id: chat_id, text: text }
-        params[:parse_mode] = parse_mode_value(parse_mode) if parse_mode
-        params[:reply_markup] = inline_keyboard(reply_markup) if reply_markup
-        client.api.send_message(params)
       end
 
       def edit_message_reply_markup(chat_id:, message_id:, reply_markup: nil)
@@ -303,10 +273,9 @@ module Hive
         "#{@base_url}/file/bot#{@token}/#{escaped_path}"
       end
 
-      def split_message(text, parse_mode: nil)
+      def split_message(text)
         body = text.to_s
         return [ "" ] if body.empty?
-        return split_markdown_v2_message(body) if parse_mode.to_s.casecmp?("markdown_v2")
 
         chunks = []
         remaining = body.dup
@@ -320,287 +289,6 @@ module Hive
         end
         chunks << remaining unless remaining.empty?
         chunks
-      end
-
-      # MarkdownV2 entities are local to one Telegram message. Splitting an
-      # open `*bold*`, `_italic_`, code span, or link across two API calls
-      # makes both chunks invalid even when the original body is valid.
-      # Prefer a balanced newline; if none exists, use the last balanced
-      # character boundary at or below Telegram's limit.
-      def split_markdown_v2_message(body)
-        chunks = []
-        remaining = body.dup
-        while remaining.length > MAX_MESSAGE_CHARS
-          boundary = markdown_v2_boundary(remaining, MAX_MESSAGE_CHARS)
-          unless boundary
-            raise MarkdownV2SplitError,
-                  "MarkdownV2 entity exceeds Telegram's #{MAX_MESSAGE_CHARS}-character limit"
-          end
-
-          chunks << remaining[0, boundary.fetch(:cut)]
-          remaining = remaining[boundary.fetch(:consume)..] || ""
-        end
-        validate_markdown_v2!(remaining)
-        chunks << remaining unless remaining.empty?
-        chunks
-      end
-
-      def markdown_v2_boundary(text, limit)
-        scan = scan_markdown_v2(text, limit: limit, require_complete: false)
-        scan.fetch(:newline) || scan.fetch(:balanced)
-      end
-
-      def validate_markdown_v2!(text)
-        scan_markdown_v2(text, limit: text.length, require_complete: true)
-      end
-
-      # Returns the latest independently valid boundary in the scanned prefix.
-      # This is deliberately a small Telegram MarkdownV2 scanner rather than a
-      # general Markdown parser: Telegram's grammar and escape rules differ
-      # from CommonMark, especially inside code and link targets.
-      def scan_markdown_v2(text, limit:, require_complete:)
-        stack = []
-        balanced = nil
-        newline = nil
-        index = 0
-
-        while index < limit
-          start = index
-          top = stack.last
-
-          if top == :pre
-            if text[index, 3] == "```" && index + 3 <= limit
-              stack.pop
-              index += 3
-            elsif text[index] == "\\"
-              index = consume_markdown_escape(text, index, limit, require_complete)
-              break unless index
-            else
-              index += 1
-            end
-          elsif top == :code
-            if text[index] == "`"
-              stack.pop
-              index += 1
-            elsif text[index] == "\\"
-              index = consume_markdown_escape(text, index, limit, require_complete)
-              break unless index
-            else
-              index += 1
-            end
-          elsif top == :link_target
-            if text[index] == "\\"
-              index = consume_markdown_escape(text, index, limit, require_complete)
-              break unless index
-            elsif text[index] == ")"
-              stack.pop
-              index += 1
-            else
-              index += 1
-            end
-          elsif text[index] == "\\"
-            index = consume_markdown_escape(text, index, limit, require_complete)
-            break unless index
-          elsif text[index, 3] == "```" && index + 3 <= limit
-            push_markdown_entity!(stack, :pre)
-            index += 3
-          elsif text[index] == "`"
-            push_markdown_entity!(stack, :code)
-            index += 1
-          elsif text[index, 2] == "![" && index + 2 <= limit
-            stack << :link_label
-            index += 2
-          elsif text[index] == "["
-            stack << :link_label
-            index += 1
-          elsif text[index, 2] == "](" && index + 2 <= limit
-            unless stack.last == :link_label
-              invalid_markdown_v2!("link label closes out of order", index)
-            end
-
-            stack[-1] = :link_target
-            index += 2
-          elsif text[index] == "]" || text[index] == "(" || text[index] == ")"
-            invalid_markdown_v2!("unescaped #{text[index].inspect}", index)
-          elsif text[index, 2] == "__" && index + 2 <= limit
-            toggle_markdown_entity!(stack, :underline, index)
-            index += 2
-          elsif text[index, 2] == "||" && index + 2 <= limit
-            toggle_markdown_entity!(stack, :spoiler, index)
-            index += 2
-          elsif text[index] == "*"
-            toggle_markdown_entity!(stack, :bold, index)
-            index += 1
-          elsif text[index] == "_"
-            toggle_markdown_entity!(stack, :italic, index)
-            index += 1
-          elsif text[index] == "~"
-            toggle_markdown_entity!(stack, :strikethrough, index)
-            index += 1
-          elsif text[index] == ">" && markdown_line_start?(text, index)
-            index += 1
-          elsif MARKDOWN_V2_RESERVED.include?(text[index])
-            invalid_markdown_v2!("unescaped #{text[index].inspect}", index)
-          else
-            index += 1
-          end
-
-          next unless stack.empty?
-
-          balanced = { cut: index, consume: index }
-          newline = { cut: start, consume: index } if text[start] == "\n"
-        end
-
-        if require_complete && (!stack.empty? || index != limit)
-          detail = stack.empty? ? "dangling escape" : "unclosed #{stack.last}"
-          invalid_markdown_v2!(detail, index)
-        end
-
-        { balanced: balanced, newline: newline }
-      end
-
-      def consume_markdown_escape(text, index, limit, require_complete)
-        return index + 2 if index + 2 <= limit
-        invalid_markdown_v2!("dangling escape", index) if require_complete
-
-        nil
-      end
-
-      def toggle_markdown_entity!(stack, entity, index)
-        if stack.last == entity
-          stack.pop
-        elsif stack.include?(entity)
-          invalid_markdown_v2!("#{entity} closes out of order", index)
-        else
-          push_markdown_entity!(stack, entity)
-        end
-      end
-
-      def push_markdown_entity!(stack, entity)
-        if %i[pre code].include?(entity) && !stack.empty?
-          invalid_markdown_v2!("#{entity} cannot be nested", 0)
-        end
-
-        stack << entity
-      end
-
-      def markdown_line_start?(text, index)
-        index.zero? || text[index - 1] == "\n"
-      end
-
-      def invalid_markdown_v2!(detail, index)
-        raise MarkdownV2SplitError, "invalid MarkdownV2 at character #{index}: #{detail}"
-      end
-
-      def markdown_v2_html(text)
-        output = +""
-        stack = []
-        index = 0
-        while index < text.length
-          entity = stack.last&.fetch(:entity)
-          if entity == :pre
-            if text[index, 3] == "```"
-              output << "</pre>"
-              stack.pop
-              index += 3
-            else
-              index = append_html_character(output, text, index)
-            end
-          elsif entity == :code
-            if text[index] == "`"
-              output << "</code>"
-              stack.pop
-              index += 1
-            else
-              index = append_html_character(output, text, index)
-            end
-          elsif text[index] == "\\"
-            output << CGI.escapeHTML(text[index + 1])
-            index += 2
-          elsif text[index, 3] == "```"
-            output << "<pre>"
-            stack << { entity: :pre }
-            index += 3
-          elsif text[index] == "`"
-            output << "<code>"
-            stack << { entity: :code }
-            index += 1
-          elsif text[index, 2] == "!["
-            stack << { entity: :link_label, output_start: output.length }
-            index += 2
-          elsif text[index] == "["
-            stack << { entity: :link_label, output_start: output.length }
-            index += 1
-          elsif text[index, 2] == "]("
-            link = stack.pop
-            target_end = markdown_link_target_end(text, index + 2)
-            target = unescape_markdown_v2(text[(index + 2)...target_end])
-            label = output.slice!(link.fetch(:output_start)..) || ""
-            output << %(<a href="#{CGI.escapeHTML(target)}">#{label}</a>)
-            index = target_end + 1
-          elsif text[index, 2] == "__"
-            toggle_html_entity!(output, stack, :underline, "u")
-            index += 2
-          elsif text[index, 2] == "||"
-            toggle_html_entity!(output, stack, :spoiler, "tg-spoiler")
-            index += 2
-          elsif text[index] == "*"
-            toggle_html_entity!(output, stack, :bold, "b")
-            index += 1
-          elsif text[index] == "_"
-            toggle_html_entity!(output, stack, :italic, "i")
-            index += 1
-          elsif text[index] == "~"
-            toggle_html_entity!(output, stack, :strikethrough, "s")
-            index += 1
-          elsif text[index] == ">" && markdown_line_start?(text, index)
-            # Digest rendering does not emit blockquotes. Preserve the glyph
-            # as text if a generic caller supplies one.
-            output << "&gt;"
-            index += 1
-          else
-            output << CGI.escapeHTML(text[index])
-            index += 1
-          end
-        end
-        output
-      end
-
-      def append_html_character(output, text, index)
-        if text[index] == "\\"
-          output << CGI.escapeHTML(text[index + 1])
-          index + 2
-        else
-          output << CGI.escapeHTML(text[index])
-          index + 1
-        end
-      end
-
-      def toggle_html_entity!(output, stack, entity, tag)
-        if stack.last&.fetch(:entity) == entity
-          output << "</#{tag}>"
-          stack.pop
-        else
-          output << "<#{tag}>"
-          stack << { entity: entity }
-        end
-      end
-
-      def markdown_link_target_end(text, start)
-        index = start
-        loop do
-          if text[index] == "\\"
-            index += 2
-          elsif text[index] == ")"
-            return index
-          else
-            index += 1
-          end
-        end
-      end
-
-      def unescape_markdown_v2(text)
-        text.gsub(/\\(.)/m, '\1')
       end
 
       def inline_keyboard(rows)

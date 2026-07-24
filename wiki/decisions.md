@@ -543,9 +543,36 @@ Historical schemas (`schemas/hive-status.v1.json`, `schemas/hive-stage-action.v1
 
 **Context:** The predecessor digest was opt-in (`digest.enabled` defaulted to `false`), so an operator who had already set up the Telegram bot with an allowlisted chat still received nothing until they discovered and set `digest.enabled: true` — the most common "why didn't I get a digest" case. The separate `bot.digest_chat_id` override added a second delivery-target knob that nobody needed: `Digest::Sender.resolve_chat_id` already fell back to `bot.chat_id_allowlist[0]`, which is where operators wanted the digest anyway.
 
-**Decision:** Make the digest opt-out instead of opt-in. `Config.load_global_digest_block` now derives `digest.enabled` from the bot config when the operator has not pinned it either way: it is `true` when `bot.enabled == true` and `bot.chat_id_allowlist` has at least one integer chat, else `false`. An explicit `digest.enabled` (true **or** false) is always honored — only the unset case is derived (`override.key?("enabled")` gate). Both scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher's SIGHUP reconfigure) go through `load_global_digest_block`, so the derived value flows everywhere with no second code path. Remove `bot.digest_chat_id` entirely — from `DEFAULTS`, its validator (`validate_bot_digest_chat_id!`), the config template, and the JSON schema description. `Digest::Sender.resolve_chat_id` now resolves to `bot.chat_id_allowlist[0]` only and raises `"bot.chat_id_allowlist[0] must be configured before sending digest"` when absent.
+**Decision:** Make the digest opt-out instead of opt-in. `Config.load_global_digest_block` now derives `digest.enabled` from the bot config when the operator has not pinned it either way: it is `true` when `bot.enabled == true` and `bot.chat_id_allowlist` has at least one integer chat, else `false`. An explicit `digest.enabled` (true **or** false) is always honored — only the unset case is derived (`override.key?("enabled")` gate). Both scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher's SIGHUP reconfigure) go through `load_global_digest_block`, so the derived value flows everywhere with no second code path. Remove `bot.digest_chat_id` entirely — from `DEFAULTS`, its validator (`validate_bot_digest_chat_id!`), the config template, and the JSON schema description. The current shared `Config.telegram_chat_id!` helper resolves `bot.chat_id_allowlist[0]` for PRDigest delegation and the separate answer digest.
 
-**Consequences:** Anyone running the Telegram bot with an allowlisted chat starts getting the digest for each completed Europe/London day (the first enabled tick only initializes `digest_state.json`; it does not back-fill history). The auto-enable requires a deliverable chat so the canonical PR changelist generator is not launched without a recipient. Operators who deliberately want no digest set `digest.enabled: false`. Existing configs that still carry `bot.digest_chat_id` are silently ignored and route to the allowlist instead. See [[modules/digest]], [[commands/digest]], [[modules/config]].
+**Consequences:** Anyone running the Telegram bot with an allowlisted chat starts getting the digest for each completed Europe/London day (the first enabled tick only initializes `digest_state.json`; it does not back-fill history). The auto-enable requires a deliverable chat so PRDigest is not launched without a recipient. Operators who deliberately want no digest set `digest.enabled: false`. Existing configs that still carry `bot.digest_chat_id` are silently ignored and route to the allowlist instead. See [[modules/digest]], [[commands/digest]], [[modules/config]].
+
+## ADR-031: PRDigest is the sole merged-PR digest engine
+
+**Status:** Active
+
+**Context:** Hive and standalone PRDigest both implemented GitHub collection,
+Telegram rendering/chunking, state, and retry policy. A production later-chunk
+Telegram parse failure demonstrated the cost of duplicated delivery boundaries:
+fixing Hive did not automatically fix PRDigest, and future behavior could drift
+again.
+
+**Decision:** Hive retains only registered-project selection, Europe/London
+daemon scheduling, credential/config bridging, child supervision, and result
+parking. It invokes `prdigest run` with an explicit date and repeatable
+registered `--repo` arguments. PRDigest exclusively owns GitHub fetch, digest
+content, Telegram HTML, chunk limits, stable payload persistence, next-unsent
+resume, and permanent/ambiguous classification. Hive removes its old engine,
+prompt, digest-specific GitHub methods, and `hive-digest` schemas instead of
+keeping compatibility aliases.
+
+**Consequences:** Delivery fixes have one owner and `hive digest --json` is the
+`prdigest-result` contract. Hive has a runtime dependency on PRDigest and its
+PR cannot become releasable until the matching PRDigest version is published.
+Legacy in-flight Hive delivery state is reconciled manually rather than guessed,
+because automatic conversion could duplicate a Telegram chunk whose response
+was lost. See [[commands/digest]], [[modules/digest]], [[dependencies]], and
+[[modules/daemon]].
 
 ## Source
 

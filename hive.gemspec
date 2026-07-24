@@ -74,6 +74,9 @@ Gem::Specification.new do |spec|
   # dependency test-only makes installed gems and hivebox crash on daemon boot.
   spec.add_dependency "json_schemer", "~> 2.5"
   spec.add_dependency "lipgloss", "~> 0.2.2"
+  # PRDigest is the sole merged-PR fetch/render/chunk/delivery engine. Hive
+  # invokes its executable and supplies only registered repository/config data.
+  spec.add_dependency "prdigest", "~> 0.1.0"
   # rexml stopped being a default gem in Ruby 3.4, so it is not guaranteed
   # present. The launchd service-installer drift probe parses plists with
   # REXML::Document; without this declaration `hive daemon install/status`

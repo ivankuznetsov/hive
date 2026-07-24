@@ -1,4 +1,5 @@
 require "hive/daemon/digest_scheduler_base"
+require "hive/local_date_window"
 require "hive/paths"
 
 module Hive
@@ -36,7 +37,7 @@ module Hive
         return [] if backed_off?(now)
         return [] if now.getlocal.hour < @hour
 
-        today = Hive::Digest::Window.local_today(now: now)
+        today = Hive::LocalDateWindow.local_today(now: now)
         state = read_state
         last = parse_date(state["last_fired_date"])
         return [] if last && last >= today
@@ -46,7 +47,7 @@ module Hive
       end
 
       def complete(date:, exit_code:, envelope: nil, now: @clock.call)
-        local_date = Hive::Digest::Window.parse_date(date)
+        local_date = Hive::LocalDateWindow.parse_date(date)
         @pending.delete(local_date.iso8601)
 
         # ChildSupervisor reports a nil exit status for a signalled child

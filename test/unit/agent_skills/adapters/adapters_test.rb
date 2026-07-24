@@ -1,5 +1,5 @@
 require "test_helper"
-require "hive/digest"
+require "digest"
 require "hive/agent_skills/adapters/registry"
 
 class AgentSkillAdaptersTest < Minitest::Test

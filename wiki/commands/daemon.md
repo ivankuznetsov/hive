@@ -58,7 +58,6 @@ Daily digest scheduling is global config, not project enrollment:
 ```yaml
 digest:
   enabled: false
-  agent: null
   max_catchup_days: 7
 ```
 
@@ -66,12 +65,12 @@ digest:
 wires `Hive::Daemon::DigestScheduler`. The scheduler stores its cursor in
 `<state_home>/digest_state.json`, initializes to the most recently completed
 Europe/London day on first run without backfilling history, dispatches missed
-days oldest-first one at a time, and advances after empty, full, or
-warning-bearing partial success. Total collection, generation, or delivery
-failure is nonzero and leaves the day owed. Retryable failures use bounded
-backoff; typed permanent Telegram delivery/checkpoint failures persist a
-blocked date and log `digest_permanent_failure` without advancing the cursor or
-redispatching the same deterministic failure. It logs `digest_catchup_skipped`
+days oldest-first one at a time, and advances only after PRDigest exits zero.
+Retryable PRDigest failures use bounded backoff. Result kinds
+`telegram_refused`, `telegram_permanent`, `telegram_ambiguous`, and
+`delivery_checkpoint_permanent` persist a blocked date and log
+`digest_permanent_failure` without advancing or redispatching. It logs
+`digest_catchup_skipped`
 when missed history exceeds
 `digest.max_catchup_days`. The child command is always
 `hive digest --date YYYY-MM-DD --json`; see [[commands/digest]].
@@ -199,7 +198,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | `transient_retry_backoff_sec` | 60 | Base of `60 → 120 → 300 s` backoff schedule. |
 | `shutdown_grace_sec` | 600 | TERM→KILL window for in-flight children on `daemon stop`. |
 | `child_timeout_sec` | 0 | Per-child wall-clock cap (R-02), shared by ancillary children and detached durable task attempts. `0` disables the default cap, preserving the historical unbounded behavior and avoiding surprise kills of long autonomous review loops. Set a positive value to SIGTERM then SIGKILL children past their deadline. Min 0. |
-| `child_verb_timeouts` | `{digest: 3600}` | Per-verb overrides of `child_timeout_sec`, e.g. `{review: 10800, brainstorm: 1800}`. Each value an integer ≥ 0 (0 disables for that verb). Fresh durable attempts resolve this map from the current global daemon config, so reloads affect later launches but not an in-flight wrapper. The `digest` verb ships a non-zero default (3600s) because a wedged digest child holds the single global digest slot (`can_dispatch_digest?`) and would otherwise disable all future digests until restart; user overrides deep-merge, so setting other verbs keeps the digest default. Raise it alongside a raised `timeout_sec.digest` (default 1800), or set `{digest: 0}` to disable. |
+| `child_verb_timeouts` | `{digest: 3600}` | Per-verb overrides of `child_timeout_sec`, e.g. `{review: 10800, brainstorm: 1800}`. Each value an integer ≥ 0 (0 disables for that verb). Fresh durable attempts resolve this map from current global daemon config. The `digest` verb ships a non-zero default because a wedged PRDigest child holds the single global digest slot (`can_dispatch_digest?`) and would otherwise disable later digests until restart; `{digest: 0}` disables the cap. |
 | `child_kill_grace_sec` | 30 | SIGTERM→SIGKILL escalation window for a timed-out child or post-leader durable-attempt drain. Min 0 (0 = immediate escalation in the attempt wrapper; ancillary children escalate on the next timeout tick). |
 | `log_file` | `~/Dev/hive/logs/daemon.log` | Structured-log destination. |
 | `log_max_bytes` | 10485760 | 10 MB rotation threshold. |

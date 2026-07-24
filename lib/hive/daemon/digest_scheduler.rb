@@ -1,5 +1,5 @@
 require "hive/daemon/digest_scheduler_base"
-require "hive/digest/london_window"
+require "hive/london_date"
 require "hive/paths"
 
 module Hive
@@ -43,7 +43,7 @@ module Hive
         return [] if @pending.any?
         return [] if backed_off?(now)
 
-        today = Hive::Digest::LondonWindow.local_today(now: now)
+        today = Hive::LondonDate.today(now: now)
         completed_day = today - 1
         state = read_state
         last = parse_date(state["last_digested_date"])
@@ -69,7 +69,7 @@ module Hive
       end
 
       def complete(date:, exit_code:, envelope: nil, now: @clock.call)
-        local_date = Hive::Digest::LondonWindow.parse_date(date)
+        local_date = Hive::LondonDate.parse(date)
         @pending.delete(local_date.iso8601)
         if permanent_delivery_failure?(exit_code, envelope)
           park_permanent_failure(local_date, envelope, now)
@@ -135,19 +135,19 @@ module Hive
         return false unless envelope.is_a?(Hash)
 
         %w[
-          PermanentDeliveryError
-          AmbiguousDeliveryError
-          PermanentDeliveryCheckpointError
-        ].include?(
-          envelope["error_class"].to_s
-        )
+          telegram_refused
+          telegram_permanent
+          telegram_ambiguous
+          delivery_checkpoint_permanent
+        ].include?(envelope.dig("error", "kind").to_s)
       end
 
       def park_permanent_failure(date, envelope, now)
+        error = envelope.fetch("error")
         state = read_state.merge(
           "blocked_date" => date.iso8601,
-          "blocked_error_class" => envelope.fetch("error_class"),
-          "blocked_message" => envelope["message"].to_s,
+          "blocked_error_kind" => error.fetch("kind"),
+          "blocked_message" => error["message"].to_s,
           "blocked_at" => now.utc.iso8601
         )
         write_state(state)
@@ -155,8 +155,9 @@ module Hive
         @logger&.event(
           :digest_permanent_failure,
           date: date.iso8601,
-          error_class: envelope.fetch("error_class"),
-          error: envelope["message"].to_s
+          error_kind: error.fetch("kind"),
+          error: error["message"].to_s,
+          delivery: envelope["delivery"]
         )
       end
 

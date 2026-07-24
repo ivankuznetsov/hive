@@ -8,6 +8,16 @@ require "hive/workflows/registry"
 class WorkflowsBenchTest < Minitest::Test
   include HiveTestHelper
 
+  def setup
+    super
+    Hive::Workflows::Project.reset!
+  end
+
+  def teardown
+    Hive::Workflows::Project.reset!
+    super
+  end
+
   def descriptor
     Hive::Workflows::Registry.fetch(:bench)
   end

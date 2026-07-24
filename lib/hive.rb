@@ -60,9 +60,6 @@ module Hive
       "hive-workflow-remove" => 1,
       "hive-workflow-update" => 2,
       "hive-workflow-publish" => 1,
-      # Europe/London daily merged-PR changelist (`hive digest --json`). V2
-      # replaces both the shipped-task v1 and the temporary merged-PR identity.
-      "hive-digest" => 2,
       # Daily digest of tasks waiting on human input (`hive answer-digest
       # --json`). The success envelope reports the send outcome plus the full
       # waiting set (count/tasks); the Thor-usage error path emits the shared

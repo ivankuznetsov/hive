@@ -281,18 +281,17 @@ instead of silently dropping that project. See [[commands/refactor-patrol]].
 
 ## Digest config
 
-`Hive::Digest.run` defaults to `Config.load_global_digest_config`, which
-deep-merges the global config with `Config::DEFAULTS`, injects bot runtime
-paths, validates the result, and returns the config-shaped hash the digest
-pipeline needs. Direct callers can still pass `cfg:` explicitly. The relevant
-keys are:
+Hive no longer owns digest generation configuration. `Hive::Prdigest` loads the
+small scheduler block plus the global bot block and writes a private temporary
+PRDigest config. The relevant Hive keys are:
 
-- `digest.agent`, then `patrol.agent`, then `"claude"` for the changelist
-  agent.
-- `budget_usd.digest` and `timeout_sec.digest` for generator limits,
-  defaulting inside `Hive::Digest::ChangelogGenerator` to `50` and `1800`.
-- `bot.chat_id_allowlist[0]` for Telegram delivery.
-- `bot.log_file` for the sender's bot logger path.
+- `digest.enabled` for daemon scheduling;
+- `digest.max_catchup_days` for Hive's scheduler cursor;
+- `bot.chat_id_allowlist[0]` for the delegated Telegram destination.
+
+`digest.agent`, `budget_usd.digest`, and `timeout_sec.digest` were removed with
+the internal LLM/MarkdownV2 engine. Fetch/render/delivery options belong to
+PRDigest.
 
 `load_global_digest_block` returns only the validated `digest` block for
 `Hive::Commands::Daemon`, which wires `DigestScheduler`. Delivery resolves to
@@ -340,8 +339,8 @@ expiry, client id, issuer, MCP resource URL, base URL, and default
 | `unregister_project(name)` | Index-based delete (not `Array#-`, which would clear duplicate-content rows); `to_s`-symmetric name match so an Integer `name:` in YAML still resolves; rewrites under `config.yml.lock`. |
 | `prune_missing_projects!(dry_run:)` | Drops rows whose `path` is not a directory, whose stored valid `real_path` no longer matches the current target, OR whose shape is invalid (non-Hash, missing `path`); reads and, unless `dry_run`, rewrites under `config.yml.lock`. |
 | `load_global_config(path)` | Reads + `YAML.safe_load`; rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` as `ConfigError` (exit 78) so `chmod 000` on the file surfaces as bad-config, not internal-error. |
-| `load_global_digest_block` | Reads global config, deep-merges the `digest` section over defaults, validates `enabled`, `agent`, and `max_catchup_days`, and returns the scheduler-facing digest block. |
-| `load_global_digest_config` | Reads global config, deep-merges full defaults, injects bot runtime paths, validates the result, and returns the config hash used by `Hive::Digest.run`. |
+| `load_global_digest_block` | Reads global config, deep-merges the `digest` section over defaults, validates `enabled` and `max_catchup_days`, and returns the scheduler/PRDigest-adapter block. |
+| `telegram_chat_id!` | Returns the first allowlisted Telegram chat or raises a configuration error; shared by PRDigest delegation and the separate answer digest. |
 | `load_global_web` | Reads global config, deep-merges the `web` section onto web defaults, fills `session_secret_file` with `<state_home>/.web.session_secret` when omitted, validates bind/port/origin/GitHub fields, and returns the merged web config for [[commands/web]]. |
 | `global_web_defaults` | Returns a deep copy of `DEFAULTS["web"]` with the state-home session-secret path injected. |
 | `update_global_config!` | Locks sibling `config.yml.lock`, yields the mutable global config Hash, then writes via tempfile + `fsync` + atomic rename. Use for read-modify-write registry/global-config changes. |

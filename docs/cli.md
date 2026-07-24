@@ -105,6 +105,7 @@ returns every flat patch and supersession receipt.
 | `hive migrate [PROJECT_PATH]` | Rewrite legacy project config, rename in-flight task folders from older stage layouts, and backfill legacy task metadata. |
 | `hive workflow new ID` | Scaffold a blank project workflow descriptor under `<hive_state_path>/workflows/`. |
 | `hive workflow validate ID [--json]` | Read-only load and validate a built-in or project workflow, including instructions and normalized transitions/outcomes. |
+| `hive workflow commit ID` | Validate and commit a populated owner-authored descriptor and instruction directory under Hive's state commit lock. |
 | `hive init --new-workflow ID --minimal --preview --json` | Resolve and disclose creator-safe fresh-project initialization without writing files, registration, hooks, services, or timers. |
 | `hive workflow install honeycomb/NAME[@REF]` | Verify and atomically select a reviewed package. |
 | `hive workflow list` | Show built-in, authored, selected, and retained workflows with integrity/provenance; JSON v2 includes the active managed configuration and redacted input availability. |

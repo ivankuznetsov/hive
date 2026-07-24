@@ -190,23 +190,26 @@ module Hive
         ops = Hive::GitOps.new(project["path"])
 
         if @idempotency_key
-          result = Hive::Lock.with_commit_lock(hive_state) do
-            existing = find_idempotent_task!(hive_state, @idempotency_key, fingerprint)
-            next { folder: existing.fetch(:folder), created: false } if existing
+          result = with_stable_workflow_selection(workflow_info, hive_state) do |stable_selection|
+            Hive::Lock.with_commit_lock(hive_state) do
+              existing = find_idempotent_task!(hive_state, @idempotency_key, fingerprint)
+              next { folder: existing.fetch(:folder), created: false } if existing
 
-            create_task_candidate!(
-              task_dir, slug: slug, entry_stage: entry_stage, workflow: workflow,
-              depends_on: depends_on, base_branch: base_branch,
-              workflow_info: workflow_info, hive_state: hive_state,
-              idempotency_key: @idempotency_key, input_fingerprint: fingerprint
-            )
-            begin
-              ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
-            rescue StandardError
-              FileUtils.rm_rf(task_dir)
-              raise
+              create_task_candidate!(
+                task_dir, slug: slug, entry_stage: entry_stage, workflow: workflow,
+                depends_on: depends_on, base_branch: base_branch,
+                workflow_info: workflow_info, hive_state: hive_state,
+                idempotency_key: @idempotency_key, input_fingerprint: fingerprint,
+                stable_selection: stable_selection
+              )
+              begin
+                ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
+              rescue StandardError
+                cleanup_failed_task_commit!(ops, hive_state, task_dir)
+                raise
+              end
+              { folder: task_dir, created: true }
             end
-            { folder: task_dir, created: true }
           end
           unless result.fetch(:created)
             return emit_task_result(result.fetch(:folder), workflow, created: false)
@@ -222,20 +225,21 @@ module Hive
           workflow_info: workflow_info, hive_state: hive_state,
           idempotency_key: nil, input_fingerprint: nil
         )
-        begin
-          Hive::Lock.with_commit_lock(hive_state) do
+        Hive::Lock.with_commit_lock(hive_state) do
+          begin
             ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
+          rescue StandardError
+            cleanup_failed_task_commit!(ops, hive_state, task_dir)
+            raise
           end
-        rescue StandardError
-          FileUtils.rm_rf(task_dir)
-          raise
         end
         spawn_name_generator(task_dir)
         emit_task_result(task_dir, workflow, created: true)
       end
 
       def create_task_candidate!(task_dir, slug:, entry_stage:, workflow:, depends_on:, base_branch:,
-                                 workflow_info:, hive_state:, idempotency_key:, input_fingerprint:)
+                                 workflow_info:, hive_state:, idempotency_key:, input_fingerprint:,
+                                 stable_selection: :unlocked)
         created = false
         FileUtils.mkdir_p(File.dirname(task_dir))
         Dir.mkdir(task_dir)
@@ -254,9 +258,15 @@ module Hive
           task_dir, id: id, slug: slug, depends_on: depends_on,
           base_branch: base_branch, workflow: workflow,
           workflow_info: workflow_info, hive_state: hive_state,
-          idempotency_key: idempotency_key, input_fingerprint: input_fingerprint
+          idempotency_key: idempotency_key, input_fingerprint: input_fingerprint,
+          stable_selection: stable_selection
         )
       rescue Errno::EEXIST
+        if created
+          FileUtils.rm_rf(task_dir)
+          raise
+        end
+
         raise SlugCollisionError.new(
           "slug collision at #{task_dir} (rare; retry the command)",
           value: slug
@@ -299,7 +309,8 @@ module Hive
           "base_branch" => base_branch,
           "workflow" => workflow_info.fetch(:descriptor).id.to_s,
           "workflow_commit" => managed&.fetch("source_commit"),
-          "workflow_configuration_digest" => managed&.fetch("configuration_digest")
+          "workflow_configuration_digest" => managed&.fetch("configuration_digest"),
+          "workflow_content_digest" => workflow_info[:authored_digest]
         }
         ::Digest::SHA256.hexdigest(JSON.generate(input))
       end
@@ -307,7 +318,15 @@ module Hive
       def find_idempotent_task!(hive_state, key, fingerprint)
         matches = Dir.glob(File.join(hive_state, "stages", "*", "*", Hive::TaskMeta::FILENAME)).filter_map do |path|
           folder = File.dirname(path)
-          meta = Hive::TaskMeta.read(folder)
+          read = Hive::TaskMeta.read_for_admission(folder)
+          unless read.status == :ok
+            raise IdempotencyConflict.new(
+              "cannot prove idempotency while task metadata is unreadable at #{path}: " \
+              "#{read.error || read.status}",
+              value: key
+            )
+          end
+          meta = read.data
           { folder: folder, meta: meta } if meta[:idempotency_key] == key
         end
         return nil if matches.empty?
@@ -388,23 +407,18 @@ module Hive
         managed = store.selected(descriptor.id.to_s) { cfg = managed_project_config(project) }
         {
           descriptor: descriptor, pin: pin,
-          managed: managed, managed_cfg: cfg
+          managed: managed, managed_cfg: cfg,
+          authored_digest: authored_workflow_digest(project, descriptor)
         }
       end
 
       def write_task_meta(task_dir, id:, slug:, depends_on:, base_branch:, workflow:, workflow_info:, hive_state:,
-                          idempotency_key: nil, input_fingerprint: nil)
+                          idempotency_key: nil, input_fingerprint: nil, stable_selection: :unlocked)
         managed = workflow_info.fetch(:managed)
         managed_cfg = workflow_info.fetch(:managed_cfg, {})
         store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
-        store.with_stable_selection(workflow.id.to_s, cfg: managed_cfg) do |current|
-          if managed
-            unless current && current.fetch("source_commit") == managed.fetch("source_commit") &&
-                   current.fetch("manifest_digest") == managed.fetch("manifest_digest") &&
-                   current.fetch("configuration_digest") == managed.fetch("configuration_digest")
-              raise Hive::ConcurrentRunError.new("managed workflow selection changed while creating the task")
-            end
-          end
+        writer = lambda do |current|
+          validate_stable_selection!(managed, current)
           Hive::TaskMeta.write(
             task_dir, id: id, slug: slug, display_name: nil, depends_on: depends_on,
             base_branch: base_branch,
@@ -416,6 +430,54 @@ module Hive
             input_fingerprint: input_fingerprint
           )
         end
+        return writer.call(stable_selection) unless stable_selection == :unlocked
+
+        store.with_stable_selection(workflow.id.to_s, cfg: managed_cfg, &writer)
+      end
+
+      def with_stable_workflow_selection(workflow_info, hive_state)
+        workflow = workflow_info.fetch(:descriptor)
+        store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
+        store.with_stable_selection(
+          workflow.id.to_s, cfg: workflow_info.fetch(:managed_cfg, {})
+        ) do |current|
+          validate_stable_selection!(workflow_info.fetch(:managed), current)
+          yield current
+        end
+      end
+
+      def validate_stable_selection!(managed, current)
+        return unless managed
+        return if current && current.fetch("source_commit") == managed.fetch("source_commit") &&
+          current.fetch("manifest_digest") == managed.fetch("manifest_digest") &&
+          current.fetch("configuration_digest") == managed.fetch("configuration_digest")
+
+        raise Hive::ConcurrentRunError.new("managed workflow selection changed while creating the task")
+      end
+
+      def authored_workflow_digest(project, descriptor)
+        workflows = File.join(project.fetch("hive_state_path"), "workflows")
+        descriptor_path = File.join(workflows, "#{descriptor.id}.yml")
+        return nil unless File.file?(descriptor_path)
+
+        instruction_root = File.join(workflows, descriptor.id.to_s)
+        paths = [ descriptor_path ]
+        if File.directory?(instruction_root)
+          paths.concat(
+            Dir.glob(File.join(instruction_root, "**", "*"), File::FNM_DOTMATCH)
+               .select { |path| File.file?(path) }
+          )
+        end
+        entries = paths.sort.map do |path|
+          [ path.delete_prefix("#{workflows}/"), ::Digest::SHA256.file(path).hexdigest ]
+        end
+        ::Digest::SHA256.hexdigest(JSON.generate(entries))
+      end
+
+      def cleanup_failed_task_commit!(ops, hive_state, task_dir)
+        FileUtils.rm_rf(task_dir)
+        relative = task_dir.delete_prefix("#{File.expand_path(hive_state)}/")
+        ops.run_git!("-C", hive_state, "reset", "-q", "HEAD", "--", relative)
       end
 
       def managed_project_config(project)

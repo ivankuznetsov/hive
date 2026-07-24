@@ -65,15 +65,11 @@ Success requires `valid: true`, the intended ordered stages and kinds, exact
 automatic edges, exact human outcomes, and every instruction path present.
 On any diagnostic, stop and report it; do not claim success or create a task.
 
-After successful validation, commit the populated graph to the Hive state
-worktree. Retain `ID` and `descriptor_path` from the scaffold response, then
-derive the state root and commit only the new workflow paths:
+After successful validation, commit the populated graph through Hive so the
+write shares the project commit lock with daemon and task writers:
 
 ```bash
-state_root="$(dirname "$(dirname "$descriptor_path")")"
-git -C "$state_root" add -- "workflows/$ID.yml" "workflows/$ID"
-git -C "$state_root" commit -m "feat(workflow): define $ID workflow" -- \
-  "workflows/$ID.yml" "workflows/$ID"
+hive workflow commit "$ID"
 ```
 
 The commit is part of workflow creation. If it fails, stop and report it; do
@@ -82,18 +78,34 @@ not claim success or create a task from an uncommitted graph.
 ## Task side-effect boundary
 
 No task by default. A creation-only request ends after validation and the
-populated-graph commit, then prints an exact shell-quoted next command:
+populated-graph commit, then prints an exact shell-quoted next command. Render
+every dynamic argv element with POSIX `Shellwords.escape` semantics. In
+particular, never put the request in double quotes: surround it with single
+quotes and replace each embedded `'` with the exact shell sequence `'"'"'`, so
+`$()`, backticks, variables, glob characters, and newlines
+remain literal bytes:
 
 ```bash
-hive new PROJECT --workflow ID "ORIGINAL REQUEST"
+hive new 'PROJECT' --workflow 'ID' 'ORIGINAL REQUEST'
 ```
 
 Only when the original request explicitly says to create or run a task, derive
-one stable opaque key from project + workflow ID + normalized original request
-and keep it unchanged across retries. Create at most once with:
+one stable opaque key and keep it unchanged across retries. The
+`workflow-creator:v1` derivation is canonical:
+
+1. Project is `File.realpath(PROJECT_PATH)`.
+2. Workflow is Hive's normalized ID from the scaffold result.
+3. Request is valid UTF-8 normalized to Unicode NFC, with CRLF/CR converted to
+   LF, leading/trailing whitespace stripped, and every remaining whitespace run
+   collapsed to one ASCII space.
+4. Hash the UTF-8 bytes of `JSON.generate([project, workflow, request])` with
+   SHA-256 and use `workflow-creator:v1:<64 lowercase hex>` as `KEY`.
+
+Do not add timestamps, random bytes, agent/session IDs, slugs, or retry counts.
+Create at most once with the same POSIX shell-quoting rule:
 
 ```bash
-hive new PROJECT --workflow ID --idempotency-key KEY --json "ORIGINAL REQUEST"
+hive new 'PROJECT' --workflow 'ID' --idempotency-key 'KEY' --json 'ORIGINAL REQUEST'
 ```
 
 If the original request also explicitly said run, invoke the reported first

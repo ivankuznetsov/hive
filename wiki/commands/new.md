@@ -139,13 +139,23 @@ input_fingerprint: 3f...
 
 Automation may add `--idempotency-key KEY --json`. Hive stores the opaque key
 with a fingerprint of the normalized input, resolved workflow, dependency, and
-base branch. One commit lock now covers the state-wide key lookup, exclusive
+base branch. For owner-authored workflows the fingerprint also covers the
+descriptor and complete instruction tree, so changed owner content conflicts
+instead of reusing an older task. Metadata admission fails closed if any
+candidate task metadata is malformed or unreadable. The managed-workflow
+mutation lock is acquired before the state commit lock, matching lifecycle
+writers. One commit lock now covers the state-wide key lookup, exclusive
 task-directory creation, metadata write, and commit. Same-slug contenders
 therefore cannot share a candidate directory, report two creations, overwrite
 one another, or remove a directory they did not create. A matching retry
 returns the original slug with `created: false` even after the task has moved;
 reuse for different input/workflow fails without a second task, and duplicate
 metadata is a fail-closed repair error.
+
+If a capture commit fails after staging, both idempotent and legacy paths
+remove the owned candidate and reset its exact state-index pathspec. Failures
+raised after directory ownership, including `EEXIST`, likewise remove only the
+owned candidate before propagating the original error.
 
 The `hive-new.v1` success payload contains `created`, `slug`, `workflow`,
 `current_stage`, `task_folder`, and a structured `next_action`. Callers without

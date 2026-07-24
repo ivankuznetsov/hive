@@ -188,7 +188,10 @@ background automation, and task creation.
 
 The minimal profile creates the core project/state registration and required
 context hooks while disabling patrol/refactor patrol, ad-hoc auto-fix, daemon
-dispatch/autostart, and babysitter/timer installation. It never selects a
+dispatch/autostart, and babysitter/timer installation, including the llm-wiki
+scheduler timer. Bootstrap refuses pre-existing symlinks anywhere in its
+managed project paths and uses no-follow final writes, preserving outside
+targets and existing project choices. It never selects a
 starter template and rejects `--force`, missing `--new-workflow`, an existing
 Hive project/state branch, a non-fresh target, or a basename already registered
 to a different project path. The preview discloses the available registration

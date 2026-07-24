@@ -16,6 +16,7 @@ hive workflow new my-flow
 hive workflow new my-flow --template research
 hive workflow new my-flow --json
 hive workflow validate my-flow --json
+hive workflow commit my-flow
 hive workflow install honeycomb/repo-brief --yes
 hive workflow install honeycomb/repo-brief --yes --allow-escalation \
   --mapping stages.research=codex,model=gpt-5.6-sol,effort=high \
@@ -286,15 +287,24 @@ by the daemon. Apply a decision with
 `hive decide TASK OUTCOME --from STAGE --decision-id DECISION_ID [--note TEXT] [--json]`.
 The waiting `hive run --json` response supplies that visit-specific ID. The
 expected stage and decision identity make matching retries no-ops and reject
-stale or conflicting decisions.
+stale or conflicting decisions. Matching concurrent retries are rechecked
+under the decision lock and return one apply plus idempotent no-ops. Completing
+outcomes accept only a no-follow regular file inside the task folder. A
+self-targeting outcome records the decision, leaves the task in place, and
+mints a fresh waiting identity instead of reporting a false move.
 
 Create-only natural-language requests are handled by the canonical `/hive`
 skill's `hive-workflow-creator` route. It gates on the installed version,
 inventories IDs, scaffolds only through this command (or the minimal init path),
 edits only returned new paths, validates here, commits the populated descriptor
-and instruction directory on `hive/state`, reports all defaults, and creates no
+and instruction directory with `hive workflow commit ID`, reports all defaults, and creates no
 task unless the original request explicitly asks for one. The populated-graph
 commit is required because `workflow new` commits only the initial scaffold.
+Both `workflow validate` and minimal-init preview bypass startup scheduler
+reconciliation, preserving their strict no-write contract. Scaffold collision
+checks treat dangling descriptor or instruction symlinks as occupied paths.
+If a scaffold commit fails after staging, Hive resets those exact index
+pathspecs under the commit lock before removing the generated files.
 
 ## Backlinks
 

@@ -84,6 +84,53 @@ class InitMinimalTest < Minitest::Test
     end
   end
 
+  def test_execute_does_not_install_the_llm_wiki_scheduler
+    with_tmp_global_config do
+      with_tmp_git_repo do |project_root|
+        installs = []
+        with_replaced_singleton_method(
+          Hive::LlmWikiBootstrap::Scheduler, :install, ->(root) { installs << root }
+        ) do
+          capture_io do
+            Hive::Commands::Init.new(
+              project_root, new_workflow: "editorial", minimal: true,
+              agent_skill_preflight: false
+            ).call
+          end
+        end
+
+        assert_empty installs
+      end
+    end
+  end
+
+  def test_execute_refuses_managed_project_symlinks_without_writing_through_them
+    with_tmp_global_config do
+      with_tmp_git_repo do |project_root|
+        outside = File.join(File.dirname(project_root), "outside-agents.md")
+        File.write(outside, "outside choice\n")
+        managed = File.join(project_root, "AGENTS.md")
+        File.symlink(outside, managed)
+        run!("git", "-C", project_root, "add", "AGENTS.md")
+        run!("git", "-C", project_root, "commit", "-m", "track project choice", "--quiet")
+
+        error = assert_raises(Hive::ConfigError) do
+          capture_io do
+            Hive::Commands::Init.new(
+              project_root, new_workflow: "editorial", minimal: true,
+              agent_skill_preflight: false
+            ).call
+          end
+        end
+
+        assert_includes error.message, "must not be a symlink"
+        assert_equal "outside choice\n", File.read(outside)
+        assert File.symlink?(managed)
+        refute File.exist?(File.join(project_root, ".hive-state"))
+      end
+    end
+  end
+
   def test_minimal_rejects_force_missing_workflow_and_initialized_target
     with_tmp_global_config do
       with_tmp_git_repo do |project_root|

@@ -1,5 +1,6 @@
 require "json"
 require "open3"
+require "securerandom"
 require "time"
 require "hive/commands/approve"
 require "hive/git_ops"
@@ -86,6 +87,9 @@ module Hive
         if marker.name == :waiting
           current_id = marker.attrs["decision_id"].to_s
           unless current_id.match?(/\A[0-9a-f]{16}\z/) && current_id == @decision_id
+            return emit_same_or_conflicting!(task, stage, outcome, record) if
+              current_record?(record, @decision_id)
+
             raise Hive::WrongStage.new(
               "decision observation is stale; task or decision identity changed",
               current_stage: actual_dir, target_stage: expected_dir
@@ -172,9 +176,13 @@ module Hive
           begin
             Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "decide") do
               locked = Hive::Task.new(task.folder)
+              locked_record = self.class.latest_record(File.join(locked.folder, stage.state_file))
+              return emit_same_or_conflicting!(locked, stage, outcome, locked_record) if
+                current_record?(locked_record, decision_id)
+
               validate_current_decision!(locked, stage, decision_id)
               artifact_path = File.join(locked.folder, outcome.artifact)
-              validate_publishable_artifact!(artifact_path, stage, outcome)
+              validate_publishable_artifact!(artifact_path, locked.folder, stage, outcome)
               record = decision_record(
                 locked, stage, outcome, decision_id,
                 artifact_path: artifact_path, artifact_status: "publish_ready"
@@ -196,8 +204,24 @@ module Hive
         emit_success(task, stage, outcome, record, applied: true)
       end
 
-      def validate_publishable_artifact!(artifact_path, stage, outcome)
-        body = File.binread(artifact_path) if File.file?(artifact_path)
+      def validate_publishable_artifact!(artifact_path, task_folder, stage, outcome)
+        expanded = File.expand_path(artifact_path)
+        task_root = "#{File.expand_path(task_folder)}/"
+        raise Hive::WrongStage, "artifact leaves the task folder" unless expanded.start_with?(task_root)
+
+        stat = File.lstat(expanded)
+        raise Hive::WrongStage, "artifact must be a regular task-local file" unless stat.file? && !stat.symlink?
+
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        body = File.open(expanded, flags) do |file|
+          opened = file.stat
+          unless opened.file? && opened.dev == stat.dev && opened.ino == stat.ino
+            raise Hive::WrongStage, "artifact identity changed while opening it"
+          end
+
+          file.read
+        end
         publishable = body && !Hive::Markers.without_markers(body).strip.empty?
         return if publishable
 
@@ -205,7 +229,7 @@ module Hive
           "outcome #{outcome.name.inspect} requires non-empty artifact #{outcome.artifact.inspect}",
           current_stage: stage.dir, target_stage: stage.dir
         )
-      rescue SystemCallError, IOError
+      rescue Hive::WrongStage, SystemCallError, IOError
         raise Hive::WrongStage.new(
           "outcome #{outcome.name.inspect} requires non-empty artifact #{outcome.artifact.inspect}",
           current_stage: stage.dir, target_stage: stage.dir
@@ -214,6 +238,8 @@ module Hive
 
       def return_to_stage!(task, stage, outcome, decision_id)
         target = task.workflow.stage_named(outcome.to)
+        return repeat_stage!(task, stage, outcome, decision_id) if target.dir == stage.dir
+
         record = decision_record(task, stage, outcome, decision_id)
         snapshot = nil
         mutation = lambda do |locked|
@@ -224,10 +250,23 @@ module Hive
         end
 
         begin
-          Hive::Commands::Approve.new(
-            task.folder, to: target.dir, from: stage.dir, force: true, quiet: true,
-            observation_guard: mutation
-          ).call
+          Hive::Lock.with_commit_lock(task.hive_state_path) do
+            Hive::Commands::Approve.new(
+              task.slug, to: target.dir, from: stage.dir, project: task.project_name,
+              force: true, quiet: true, observation_guard: mutation, commit_lock: false
+            ).call
+          end
+        rescue Hive::WrongStage => error
+          folder = File.directory?(task.folder) ? task.folder : File.join(
+            task.hive_state_path, "stages", target.dir, task.slug
+          )
+          restore_files(folder, snapshot) if snapshot
+          replay = resolve_task
+          replay_record = self.class.latest_record(File.join(replay.folder, stage.state_file))
+          return emit_same_or_conflicting!(replay, stage, outcome, replay_record) if
+            current_record?(replay_record, decision_id)
+
+          raise error
         rescue StandardError
           folder = File.directory?(task.folder) ? task.folder : File.join(
             task.hive_state_path, "stages", target.dir, task.slug
@@ -238,6 +277,43 @@ module Hive
 
         moved = Hive::Task.new(File.join(task.hive_state_path, "stages", target.dir, task.slug))
         emit_success(moved, stage, outcome, record, applied: true)
+      end
+
+      def repeat_stage!(task, stage, outcome, decision_id)
+        record = decision_record(task, stage, outcome, decision_id)
+        snapshot = nil
+        ops = Hive::GitOps.new(task.project_root)
+
+        Hive::Lock.with_commit_lock(task.hive_state_path) do
+          begin
+            Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "decide") do
+              locked = Hive::Task.new(task.folder)
+              locked_record = self.class.latest_record(File.join(locked.folder, stage.state_file))
+              return emit_same_or_conflicting!(locked, stage, outcome, locked_record) if
+                current_record?(locked_record, decision_id)
+
+              validate_current_decision!(locked, stage, decision_id)
+              snapshot = snapshot_files(locked.folder, [ stage.state_file ])
+              state_path = File.join(locked.folder, stage.state_file)
+              write_decision_record(state_path, record)
+              Hive::Markers.set(
+                state_path, :waiting, "decision_id" => SecureRandom.hex(8)
+              )
+            end
+            ops.hive_commit(
+              stage_name: stage.dir, slug: task.slug,
+              action: "decide #{stage.name} #{outcome.name}"
+            )
+          rescue StandardError
+            if snapshot
+              restore_files(task.folder, snapshot)
+              restage_restored_files(task, snapshot)
+            end
+            raise
+          end
+        end
+
+        emit_success(Hive::Task.new(task.folder), stage, outcome, record, applied: true)
       end
 
       def validate_current_decision!(task, stage, decision_id)
@@ -314,7 +390,7 @@ module Hive
           { "kind" => Hive::Schemas::NextActionKind::NO_OP, "reason" => "workflow_complete" }
         else
           action = Hive::TaskAction.for(task, Hive::Markers.current(task.state_file))
-          { "kind" => Hive::Schemas::NextActionKind::RUN, "command" => action.command }
+          { "kind" => action.key, "command" => action.command }
         end
         payload = {
           "schema" => "hive-decide",

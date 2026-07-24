@@ -3,6 +3,7 @@ require "fileutils"
 require "json"
 require "pathname"
 require "shellwords"
+require "stringio"
 require "hive"
 require "hive/config"
 require "hive/git_ops"
@@ -20,7 +21,7 @@ module Hive
       HONEYCOMB_TEMPLATES = %w[architecture writing].freeze
       WORKFLOW_ID_RE = Hive::Workflows::DescriptorParser::SAFE_SLUG
       SCHEMA = "hive-workflow-new".freeze
-      SUBCOMMANDS = %w[new validate install list update remove publish].freeze
+      SUBCOMMANDS = %w[new validate commit install list update remove publish].freeze
 
       class UsageError < Hive::Error
         attr_reader :value, :expected, :suggested_id
@@ -147,19 +148,9 @@ module Hive
       end
 
       # Filesystem-only rollback: unwinds the working-tree files write_scaffold!
-      # created, NOT any git side-effects of a partially-run commit. hive_commit
-      # stages by explicit pathspec, so a same-command retry re-stages exactly
-      # these paths and refuse_overwrite! re-checks them — removing the files is
-      # all a retry needs.
-      #
-      # NOTE: the shared-worktree callers commit into the long-lived
-      # `.hive-state` worktree, where a failed commit ALSO leaves these pathspecs
-      # STAGED. `hive init --new-workflow` on an existing project resets the index
-      # for them (Init#reset_hive_state_index); `hive workflow new`'s own
-      # commit_scaffold! (below) shares the SAME pre-existing exposure but
-      # currently relies on this filesystem-only rollback alone — out of scope to
-      # fix here, but `workflow new` is NOT index-safe just because init now is.
-      # Either way this method intentionally leaves git untouched.
+      # created. Callers that attempted a commit own exact-path index rollback
+      # while still holding the commit lock; this helper intentionally leaves
+      # git untouched.
       # remove_scaffold_path tolerates
       # an already-absent target (like rm_f/rm_rf's force) and continues to the
       # next path on a fault, but CAPTURES the errno so warn_failed_scaffold_cleanup
@@ -213,9 +204,14 @@ module Hive
         return true if Hive::Workflows::Registry::WORKFLOWS.key?(id.to_sym)
 
         dir = workflow_dir(project_root)
-        File.exist?(File.join(dir, "#{id}.yml")) || File.exist?(File.join(dir, id))
+        path_present?(File.join(dir, "#{id}.yml")) || path_present?(File.join(dir, id))
       end
       private_class_method :unavailable_id?
+
+      def self.path_present?(path)
+        File.exist?(path) || File.symlink?(path)
+      end
+      private_class_method :path_present?
 
       def self.scaffold_paths(id, project_root:, template_dir:)
         workflows_dir = workflow_dir(project_root)
@@ -266,7 +262,7 @@ module Hive
       # dir, and every per-stage instruction file the template would write.
       def self.scaffold_collisions(paths)
         ([ paths.fetch(:descriptor), paths.fetch(:instruction_dir) ] + paths.fetch(:instructions)).select do |path|
-          File.exist?(path)
+          path_present?(path)
         end
       end
       private_class_method :scaffold_collisions
@@ -309,7 +305,7 @@ module Hive
       # learns WHY cleanup failed (e.g. EACCES on a read-only parent) instead of
       # a bare path list.
       def self.warn_failed_scaffold_cleanup(paths, reasons = {})
-        leftovers = [ paths.fetch(:descriptor), paths.fetch(:instruction_dir) ].select { |path| File.exist?(path) }
+        leftovers = [ paths.fetch(:descriptor), paths.fetch(:instruction_dir) ].select { |path| path_present?(path) }
         return if leftovers.empty?
 
         described = leftovers.map do |path|
@@ -378,6 +374,7 @@ module Hive
           )
         end
 
+        return commit_authored_workflow! if @subcommand == "commit"
         return lifecycle_command.call unless @subcommand == "new"
 
         scaffold = self.class.scaffold_files!(@id, project_root: @project_root, template: @template)
@@ -410,6 +407,48 @@ module Hive
       end
 
       private
+
+      def commit_authored_workflow!
+        raise UsageError.new("workflow commit does not support --json", value: @id) if @json
+
+        id = self.class.normalize_and_validate_id!(@id, project_root: @project_root)
+        require "hive/commands/workflow/validate"
+        validation = Hive::Commands::Workflow::Validate.new(
+          id, project_root: @project_root, stdout: StringIO.new
+        ).call!
+        unless validation.fetch("origin") == "authored"
+          raise UsageError.new(
+            "workflow commit requires an owner-authored workflow, got #{validation.fetch('origin')}",
+            value: id
+          )
+        end
+
+        descriptor = validation.fetch("descriptor_path")
+        instruction_dir = File.join(File.dirname(descriptor), id)
+        pathspecs = [ relative_to_workflows_root(descriptor) ]
+        pathspecs << relative_to_workflows_root(instruction_dir) if File.directory?(instruction_dir)
+        ops = Hive::GitOps.new(@project_root)
+        result = Hive::Lock.with_commit_lock(hive_state_path) do
+          begin
+            ops.hive_commit(
+              stage_name: "workflows", slug: id, action: "defined",
+              pathspecs: pathspecs
+            )
+          rescue StandardError
+            ops.run_git!("-C", hive_state_path, "reset", "-q", "HEAD", "--", *pathspecs)
+            raise
+          end
+        end
+        @stdout.puts(
+          result == :committed ?
+            "hive: committed populated workflow #{id}" :
+            "hive: populated workflow #{id} is already committed"
+        )
+        {
+          "ok" => true, "id" => id, "committed" => result == :committed,
+          "descriptor_path" => descriptor
+        }
+      end
 
       def lifecycle_command
         case @subcommand
@@ -453,11 +492,19 @@ module Hive
 
       def commit_scaffold!(id, paths)
         ops = Hive::GitOps.new(@project_root)
+        pathspecs = [
+          relative_to_workflows_root(paths.fetch(:descriptor)),
+          relative_to_workflows_root(paths.fetch(:instruction_dir))
+        ]
         Hive::Lock.with_commit_lock(hive_state_path) do
-          self.class.commit_workflow_scaffold(ops, slug: id, pathspecs: [
-            relative_to_workflows_root(paths.fetch(:descriptor)),
-            relative_to_workflows_root(paths.fetch(:instruction_dir))
-          ])
+          begin
+            self.class.commit_workflow_scaffold(
+              ops, slug: id, pathspecs: pathspecs
+            )
+          rescue StandardError
+            ops.run_git!("-C", hive_state_path, "reset", "-q", "HEAD", "--", *pathspecs)
+            raise
+          end
         end
       end
 

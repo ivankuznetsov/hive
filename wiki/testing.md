@@ -21,18 +21,22 @@ The natural-language workflow creator has a hermetic primary acceptance gate
 in `test/integration/workflow_creator_e2e_test.rb`. It exercises AE1–AE5 through
 the real CLI collaborators: exact editorial approve/reject semantics,
 byte-identical collision refusal, no-write minimal-init preview followed by
-confirmed execution, no-task default behavior, and state-wide idempotent task
-retry after movement. Focused parser, decision, validation, init, task-meta,
+confirmed execution, explicit old-version and unconfirmed-preview refusals,
+durable populated-graph commit evidence, no-task default behavior, and
+state-wide idempotent task retry after movement. Focused parser, decision, validation, init, task-meta,
 skill projection, schema, package, and release-contract tests own the smaller
 contracts, including visit-bound decision IDs, marker-only/concurrently changed
 artifact rejection, no-follow human-state entry, read-only managed validation,
-minimal-init registration collisions and JSON failures, serialized idempotent
-creation, and the distinct completed-human action.
+minimal-init registration collisions, symlink refusal, timer disablement, and
+JSON failures, serialized idempotent creation with index rollback and authored
+content fingerprints, concurrent/self-target decision behavior, and the
+distinct completed-human action.
 
 `test/smoke/live_hive_workflow_creator_smoke_test.rb` is a separate,
 OpenClaw-only protected proof. The exact candidate projection receives the
 editorial prompt in a disposable initialized project. Its controlled Hive
-surface permits only version, workflow inventory, scaffold, and validation.
+surface permits only version, workflow inventory, scaffold, validation, and
+the populated-graph commit before task creation.
 Attestation verifies the prompt digest, native `/hive` discovery, ordered argv,
 created-file digests, exact normalized graph, zero tasks after creation-only,
 then one created-and-run slug plus a no-op retry with the same idempotency key,

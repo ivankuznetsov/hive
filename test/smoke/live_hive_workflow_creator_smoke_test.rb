@@ -66,7 +66,7 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
              "OpenClaw workflow creator failed: #{redact(stderr, credential).lines.first(12).join}\n" \
              "#{redact(stdout, credential).lines.first(12).join}"
 
-      assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS.first(4),
+      assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS.first(5),
                    read_audited_commands(audit_path)
       validation = JSON.parse(File.read(validation_path))
       assert_equal true, validation.fetch("valid")
@@ -161,6 +161,7 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
       validation = JSON.parse(
         run_controlled!(binary, workspace, "workflow", "validate", "editorial", "--json")
       )
+      run_controlled!(binary, workspace, "workflow", "commit", "editorial")
       first = JSON.parse(
         run_controlled!(binary, workspace, *HiveLiveAgentProof::WORKFLOW_CREATOR_TASK_NEW_ARGV)
       )
@@ -409,6 +410,9 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
         }
         File.write(#{validation_path.dump}, JSON.pretty_generate(payload) + "\\n")
         puts JSON.generate(payload)
+      when ["workflow", "commit", "editorial"]
+        abort "workflow was not validated before commit" unless File.file?(#{validation_path.dump})
+        puts "hive: committed populated workflow editorial"
       when #{HiveLiveAgentProof::WORKFLOW_CREATOR_TASK_NEW_ARGV.inspect}
         created = !File.directory?(task_dir)
         if created

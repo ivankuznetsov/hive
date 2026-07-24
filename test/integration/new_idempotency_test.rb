@@ -4,6 +4,7 @@ require "json_schemer"
 require "hive/commands/approve"
 require "hive/commands/init"
 require "hive/commands/new"
+require "hive/commands/workflow"
 # Load the sibling command with the same lexical constant name before task
 # fingerprinting, matching the full-suite command load order.
 require "hive/commands/digest"
@@ -120,7 +121,16 @@ class NewIdempotencyTest < Minitest::Test
   def test_commit_failure_removes_the_uncommitted_task
     with_initialized_project do |project_root, project|
       fake_ops = Object.new
-      fake_ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
+      runner = method(:run!)
+      hive_state = File.join(project_root, ".hive-state")
+      fake_ops.define_singleton_method(:hive_commit) do |**|
+        runner.call("git", "-C", hive_state, "add", "--",
+                    "stages/1-inbox/failed-task")
+        raise Hive::GitError, "commit failed"
+      end
+      fake_ops.define_singleton_method(:run_git!) do |*args|
+        runner.call("git", *args)
+      end
 
       with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
         error = assert_raises(Hive::GitError) do
@@ -135,33 +145,128 @@ class NewIdempotencyTest < Minitest::Test
       refute Dir.exist?(
         File.join(project_root, ".hive-state", "stages", "1-inbox", "failed-task")
       )
+      assert_empty run!("git", "-C", File.join(project_root, ".hive-state"),
+                        "diff", "--cached", "--name-only")
     end
   end
 
-  def test_idempotent_candidate_is_created_while_the_commit_lock_is_held
+  def test_non_idempotent_commit_failure_also_clears_staged_state
+    with_initialized_project do |project_root, project|
+      fake_ops = Object.new
+      runner = method(:run!)
+      hive_state = File.join(project_root, ".hive-state")
+      fake_ops.define_singleton_method(:hive_commit) do |**|
+        runner.call("git", "-C", hive_state, "add", "--",
+                    "stages/1-inbox/failed-legacy-task")
+        raise Hive::GitError, "commit failed"
+      end
+      fake_ops.define_singleton_method(:run_git!) { |*args| runner.call("git", *args) }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        assert_raises(Hive::GitError) do
+          Hive::Commands::New.new(
+            project, "will fail", slug_override: "failed-legacy-task"
+          ).call!
+        end
+      end
+
+      refute Dir.exist?(
+        File.join(project_root, ".hive-state", "stages", "1-inbox", "failed-legacy-task")
+      )
+      assert_empty run!("git", "-C", File.join(project_root, ".hive-state"),
+                        "diff", "--cached", "--name-only")
+    end
+  end
+
+  def test_owner_authored_workflow_content_participates_in_fingerprint
+    with_initialized_project do |project_root, project|
+      create_authored_workflow(project_root, "editorial")
+      create_json_with(
+        project, "same request", key: "creator:authored-content", slug: "first-authored",
+        workflow: "editorial"
+      )
+      File.write(
+        File.join(project_root, ".hive-state", "workflows", "editorial", "work.md"),
+        "Changed owner instructions.\n"
+      )
+      Hive::Workflows::Project.reset!
+
+      error = assert_raises(Hive::Commands::New::IdempotencyConflict) do
+        Hive::Commands::New.new(
+          project, "same request", slug_override: "second-authored",
+          workflow: "editorial", idempotency_key: "creator:authored-content", json: true
+        ).call!
+      end
+
+      assert_includes error.message, "different input or workflow"
+      assert_equal 1, idempotent_tasks(project_root).size
+    end
+  end
+
+  def test_unreadable_task_metadata_fails_idempotency_closed
+    with_initialized_project do |project_root, project|
+      capture_io do
+        Hive::Commands::New.new(
+          project, "legacy task", slug_override: "legacy-task"
+        ).call!
+      end
+      meta = File.join(
+        project_root, ".hive-state", "stages", "1-inbox", "legacy-task", "meta.yml"
+      )
+      File.write(meta, "id: [\n")
+
+      error = assert_raises(Hive::Commands::New::IdempotencyConflict) do
+        Hive::Commands::New.new(
+          project, "new task", slug_override: "must-not-exist",
+          idempotency_key: "creator:fail-closed", json: true
+        ).call!
+      end
+
+      assert_includes error.message, "cannot prove idempotency"
+      refute Dir.exist?(
+        File.join(project_root, ".hive-state", "stages", "1-inbox", "must-not-exist")
+      )
+    end
+  end
+
+  def test_post_ownership_eexist_cleans_the_candidate
+    with_initialized_project do |project_root, project|
+      replacement = lambda do |*|
+        raise Errno::EEXIST, "metadata collision"
+      end
+
+      with_replaced_singleton_method(Hive::TaskMeta, :write, replacement) do
+        assert_raises(Errno::EEXIST) do
+          Hive::Commands::New.new(
+            project, "candidate", slug_override: "owned-candidate",
+            idempotency_key: "creator:owned-candidate", json: true
+          ).call!
+        end
+      end
+
+      refute Dir.exist?(
+        File.join(project_root, ".hive-state", "stages", "1-inbox", "owned-candidate")
+      )
+    end
+  end
+
+  def test_idempotent_candidate_is_created_with_workflow_then_commit_locks_held
     with_initialized_project do |project_root, project|
       command = Hive::Commands::New.new(
         project, "same task", slug_override: "locked-task",
         idempotency_key: "creator:race", json: true
       )
       original = command.method(:create_task_candidate!)
+      observe_lock = method(:other_process_lock_state)
       command.define_singleton_method(:create_task_candidate!) do |*args, **kwargs|
-        lock_path = File.join(project_root, ".hive-state", ".commit-lock")
-        reader, writer = IO.pipe
-        pid = fork do
-          reader.close
-          acquired = File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
-            lock.flock(File::LOCK_EX | File::LOCK_NB)
-          end
-          writer.write(acquired ? "acquired" : "blocked")
-          writer.close
-          exit! 0
-        end
-        writer.close
-        lock_state = reader.read
-        Process.wait(pid)
-        reader.close
-        raise "candidate creation ran outside commit lock" unless lock_state == "blocked"
+        commit_lock = File.join(project_root, ".hive-state", ".commit-lock")
+        workflow_lock = File.join(
+          project_root, ".hive-state", "workflows", ".mutation.lock"
+        )
+        raise "candidate creation ran outside workflow mutation lock" unless
+          observe_lock.call(workflow_lock) == "blocked"
+        raise "candidate creation ran outside commit lock" unless
+          observe_lock.call(commit_lock) == "blocked"
 
         original.call(*args, **kwargs)
       end
@@ -266,20 +371,44 @@ class NewIdempotencyTest < Minitest::Test
     create_json_with(project, text, key: key, slug: slug)
   end
 
-  def create_json_with(project, text, key:, slug:, attachments: [])
+  def create_json_with(project, text, key:, slug:, attachments: [], workflow: nil)
     out, err = capture_io do
       Hive::Commands::New.new(
         project, text, slug_override: slug, idempotency_key: key, json: true,
-        attachments: attachments
+        attachments: attachments, workflow: workflow
       ).call!
     end
     assert_empty err
     JSON.parse(out)
   end
 
+  def create_authored_workflow(project_root, id)
+    Hive::Commands::Workflow.new!(
+      id, project_root: project_root, stdout: StringIO.new
+    )
+  end
+
   def idempotent_tasks(project_root)
     Dir.glob(File.join(project_root, ".hive-state", "stages", "*", "*", "meta.yml")).select do |path|
       Hive::TaskMeta.read(File.dirname(path))[:idempotency_key]
     end
+  end
+
+  def other_process_lock_state(path)
+    reader, writer = IO.pipe
+    pid = fork do
+      reader.close
+      acquired = File.open(path, File::RDWR | File::CREAT, 0o644) do |lock|
+        lock.flock(File::LOCK_EX | File::LOCK_NB)
+      end
+      writer.write(acquired ? "acquired" : "blocked")
+      writer.close
+      exit! 0
+    end
+    writer.close
+    state = reader.read
+    Process.wait(pid)
+    reader.close
+    state
   end
 end

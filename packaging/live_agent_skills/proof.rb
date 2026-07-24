@@ -57,6 +57,7 @@ module HiveLiveAgentProof
     [ "workflow", "list", "--json" ],
     [ "workflow", "new", "editorial", "--json" ],
     [ "workflow", "validate", "editorial", "--json" ],
+    [ "workflow", "commit", "editorial" ],
     WORKFLOW_CREATOR_TASK_NEW_ARGV,
     [ "run", WORKFLOW_CREATOR_TASK_SLUG ],
     WORKFLOW_CREATOR_TASK_NEW_ARGV,

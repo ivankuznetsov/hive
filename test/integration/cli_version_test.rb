@@ -14,6 +14,25 @@ class CliVersionTest < Minitest::Test
     assert_equal "#{Hive::VERSION}\n", out
   end
 
+  def test_strict_no_write_routes_skip_scheduler_reconciliation
+    with_tmp_global_config do |home|
+      with_tmp_git_repo do |project_root|
+        capture_io { Hive::Commands::Init.new(project_root, agent_skill_preflight: false).call }
+        assert_startup_reconcile(project_root, home, %w[workflow validate coding --json], expected: false)
+      end
+
+      with_tmp_git_repo do |project_root|
+        assert_startup_reconcile(
+          project_root, home,
+          [ "init", "--new-workflow", "editorial", "--minimal", "--preview", "--json" ],
+          expected: false
+        )
+      end
+
+      assert_startup_reconcile(Dir.pwd, home, [ "--version" ], expected: true)
+    end
+  end
+
   def test_bin_hive_help_after_option_value_shows_command_usage
     out, err, status = Open3.capture3(
       RbConfig.ruby, "-Ilib", "bin/hive", "approve", "--from", "2-brainstorm", "--help"
@@ -187,6 +206,32 @@ class CliVersionTest < Minitest::Test
     out, err, status = Open3.capture3(env, RbConfig.ruby, "-Ilib", "bin/hive", *args)
     assert status.success?, "bin/hive #{args.join(" ")} should exit 0, stderr was: #{err}"
     JSON.parse(out)
+  end
+
+  def assert_startup_reconcile(chdir, home, args, expected:)
+    with_tmp_dir do |dir|
+      probe = File.join(dir, "reconciled")
+      preload = File.join(dir, "scheduler_probe.rb")
+      File.write(preload, <<~RUBY)
+        require "hive/llm_wiki_bootstrap"
+        Hive::LlmWikiBootstrap::Scheduler.define_singleton_method(:reconcile_existing!) do |**|
+          File.write(ENV.fetch("HIVE_RECONCILE_PROBE"), "called")
+        end
+      RUBY
+      env = {
+        "HIVE_HOME" => home,
+        "HOME" => home,
+        "PATH" => ENV.fetch("PATH", ""),
+        "HIVE_RECONCILE_PROBE" => probe,
+        "RUBYOPT" => [ ENV["RUBYOPT"], "-r#{preload}" ].compact.join(" ")
+      }
+      bin = File.expand_path("../../bin/hive", __dir__)
+      lib = File.expand_path("../../lib", __dir__)
+      out, err, status = Open3.capture3(env, RbConfig.ruby, "-I#{lib}", bin, *args, chdir: chdir)
+
+      assert status.success?, "#{args.join(' ')} failed: #{out}\n#{err}"
+      assert_equal expected, File.exist?(probe)
+    end
   end
 
   def assert_new_idea_includes(dir, text)

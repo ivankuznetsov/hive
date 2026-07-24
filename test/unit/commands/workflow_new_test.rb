@@ -59,6 +59,66 @@ class WorkflowNewTest < Minitest::Test
     end
   end
 
+  def test_commit_validates_and_commits_populated_authored_workflow
+    with_initialized_project do |project_root|
+      Hive::Commands::Workflow.new!(
+        "my-flow", project_root: project_root, stdout: StringIO.new
+      )
+      instruction = File.join(
+        project_root, ".hive-state", "workflows", "my-flow", "work.md"
+      )
+      File.write(instruction, "Write the owner-defined deliverable.\n")
+      stdout = StringIO.new
+
+      payload = Hive::Commands::Workflow.new(
+        "commit", "my-flow", project_root: project_root, stdout: stdout
+      ).call!
+
+      assert_equal true, payload.fetch("committed")
+      assert_includes stdout.string, "committed populated workflow my-flow"
+      state = File.join(project_root, ".hive-state")
+      assert_equal "hive: workflows/my-flow defined",
+                   run!("git", "-C", state, "log", "-1", "--format=%s").strip
+      assert_equal "Write the owner-defined deliverable.\n",
+                   run!("git", "-C", state, "show", "HEAD:workflows/my-flow/work.md")
+      assert_empty run!(
+        "git", "-C", state, "status", "--porcelain", "--",
+        "workflows/my-flow.yml", "workflows/my-flow"
+      )
+    end
+  end
+
+  def test_failed_populated_workflow_commit_clears_its_staged_entries
+    with_initialized_project do |project_root|
+      Hive::Commands::Workflow.new!(
+        "my-flow", project_root: project_root, stdout: StringIO.new
+      )
+      state = File.join(project_root, ".hive-state")
+      instruction = File.join(state, "workflows", "my-flow", "work.md")
+      File.write(instruction, "Changed owner instructions.\n")
+      runner = method(:run!)
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) do |pathspecs:, **|
+        runner.call("git", "-C", state, "add", "--", *pathspecs)
+        raise Hive::GitError, "commit failed after staging"
+      end
+      fake_ops.define_singleton_method(:run_git!) { |*args| runner.call("git", *args) }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        assert_raises(Hive::GitError) do
+          Hive::Commands::Workflow.new(
+            "commit", "my-flow", project_root: project_root, stdout: StringIO.new
+          ).call!
+        end
+      end
+
+      assert_equal "Changed owner instructions.\n", File.read(instruction)
+      assert_empty run!("git", "-C", state, "diff", "--cached", "--name-only")
+      assert_includes run!("git", "-C", state, "status", "--porcelain"),
+                      "workflows/my-flow/work.md"
+    end
+  end
+
   def test_scaffolds_keyword_like_id_with_quoted_descriptor_so_it_parses
     # `no`/`yes`/`off` are valid SAFE_SLUG ids that YAML.safe_load coerces to
     # booleans when the descriptor's `id:` is emitted unquoted, failing
@@ -179,6 +239,28 @@ class WorkflowNewTest < Minitest::Test
     end
   end
 
+  def test_refuses_dangling_descriptor_and_instruction_symlink_collisions
+    with_initialized_project do |project_root|
+      workflows = File.join(project_root, ".hive-state", "workflows")
+      outside = File.join(project_root, "outside-target")
+      FileUtils.mkdir_p(workflows)
+
+      {
+        "linked-descriptor" => File.join(workflows, "linked-descriptor.yml"),
+        "linked-instructions" => File.join(workflows, "linked-instructions")
+      }.each do |id, collision|
+        File.symlink(outside, collision)
+        error = assert_raises(Hive::Commands::Workflow::UsageError) do
+          Hive::Commands::Workflow.new!(id, project_root: project_root, stdout: StringIO.new)
+        end
+
+        assert_includes error.message, "already exists"
+        assert File.symlink?(collision)
+        refute File.exist?(outside)
+      end
+    end
+  end
+
   def test_json_error_payload
     with_initialized_project do |project_root|
       out, err, status = with_captured_exit do
@@ -238,7 +320,7 @@ class WorkflowNewTest < Minitest::Test
         Hive::Commands::Workflow.new(nil, nil, project_root: project_root, json: true).call
       end
       missing_payload = JSON.parse(missing_out)
-      assert_equal %w[new validate install list update remove publish], missing_payload.fetch("expected")
+      assert_equal %w[new validate commit install list update remove publish], missing_payload.fetch("expected")
       missing_errors = schemer.validate(missing_payload).map { |e| e["error"] }
       assert_empty missing_errors,
                    "hive-workflow-new usage ErrorPayload (with `expected`) must validate " \
@@ -249,7 +331,7 @@ class WorkflowNewTest < Minitest::Test
       end
       unknown_payload = JSON.parse(unknown_out)
       assert_equal "bogus", unknown_payload.fetch("value")
-      assert_equal %w[new validate install list update remove publish], unknown_payload.fetch("expected")
+      assert_equal %w[new validate commit install list update remove publish], unknown_payload.fetch("expected")
       unknown_errors = schemer.validate(unknown_payload).map { |e| e["error"] }
       assert_empty unknown_errors,
                    "hive-workflow-new usage ErrorPayload (with `value` AND `expected`) must " \
@@ -297,6 +379,30 @@ class WorkflowNewTest < Minitest::Test
       # commit_scaffold! is inside the rollback-protected begin: the scaffold
       # files must be removed when the commit fails.
       refute File.exist?(File.join(project_root, ".hive-state", "workflows", "git-flow.yml"))
+    end
+  end
+
+  def test_failed_scaffold_commit_clears_its_staged_index_entries
+    with_initialized_project do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      runner = method(:run!)
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) do |pathspecs:, **|
+        runner.call("git", "-C", hive_state, "add", "--", *pathspecs)
+        raise Hive::GitError, "commit failed after staging"
+      end
+      fake_ops.define_singleton_method(:run_git!) { |*args| runner.call("git", *args) }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        assert_raises(Hive::GitError) do
+          Hive::Commands::Workflow.new!(
+            "failed-flow", project_root: project_root, stdout: StringIO.new
+          )
+        end
+      end
+
+      refute File.exist?(File.join(hive_state, "workflows", "failed-flow.yml"))
+      assert_empty run!("git", "-C", hive_state, "diff", "--cached", "--name-only")
     end
   end
 
@@ -457,7 +563,7 @@ class WorkflowNewTest < Minitest::Test
 
       assert_equal Hive::ExitCodes::USAGE, status
       assert_empty out
-      assert_equal "hive workflow: unknown workflow subcommand \"save\" (expected: new, validate, install, list, update, remove, publish)\n", err
+      assert_equal "hive workflow: unknown workflow subcommand \"save\" (expected: new, validate, commit, install, list, update, remove, publish)\n", err
     end
   end
 
@@ -469,7 +575,7 @@ class WorkflowNewTest < Minitest::Test
 
       assert_equal Hive::ExitCodes::USAGE, status
       assert_empty out
-      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, validate, install, list, update, remove, publish)\n", err
+      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, validate, commit, install, list, update, remove, publish)\n", err
     end
   end
 
@@ -486,8 +592,8 @@ class WorkflowNewTest < Minitest::Test
       assert_equal "UsageError", payload.fetch("error_class")
       assert_equal "usage", payload.fetch("error_kind")
       assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
-      assert_equal "missing SUBCOMMAND (expected: new, validate, install, list, update, remove, publish)", payload.fetch("message")
-      assert_equal %w[new validate install list update remove publish], payload.fetch("expected")
+      assert_equal "missing SUBCOMMAND (expected: new, validate, commit, install, list, update, remove, publish)", payload.fetch("message")
+      assert_equal %w[new validate commit install list update remove publish], payload.fetch("expected")
       refute payload.key?("value")
     end
   end
@@ -505,9 +611,9 @@ class WorkflowNewTest < Minitest::Test
       assert_equal "UsageError", payload.fetch("error_class")
       assert_equal "usage", payload.fetch("error_kind")
       assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
-      assert_equal "unknown workflow subcommand \"bogus\" (expected: new, validate, install, list, update, remove, publish)", payload.fetch("message")
+      assert_equal "unknown workflow subcommand \"bogus\" (expected: new, validate, commit, install, list, update, remove, publish)", payload.fetch("message")
       assert_equal "bogus", payload.fetch("value")
-      assert_equal %w[new validate install list update remove publish], payload.fetch("expected")
+      assert_equal %w[new validate commit install list update remove publish], payload.fetch("expected")
     end
   end
 

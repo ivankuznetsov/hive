@@ -39,7 +39,7 @@
           "additionalProperties": true,
           "required": ["kind"],
           "properties": {
-            "kind": { "enum": ["run", "no_op"] },
+            "kind": { "enum": ["run", "needs_input", "no_op"] },
             "command": { "type": ["string", "null"] },
             "reason": { "type": "string" }
           }

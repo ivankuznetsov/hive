@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "json_schemer"
+require "rubygems/version"
 require "hive/agent_skills/canonical_skill"
 require "hive/commands/approve"
 require "hive/commands/decide"
@@ -32,8 +33,11 @@ class WorkflowCreatorE2ETest < Minitest::Test
       payload = create_editorial(project_root, commands: commands)
 
       assert_equal [
+        [ "version" ],
+        [ "workflow", "list", "--json" ],
         [ "workflow", "new", "editorial" ],
-        [ "workflow", "validate", "editorial", "--json" ]
+        [ "workflow", "validate", "editorial", "--json" ],
+        [ "workflow", "commit", "editorial" ]
       ], commands
       assert_equal %w[research draft approval], payload.fetch("stages").map { |stage| stage.fetch("name") }
       assert_equal [
@@ -48,17 +52,61 @@ class WorkflowCreatorE2ETest < Minitest::Test
       }
       assert_empty task_folders(project_root)
       assert_schema_valid("hive-workflow-validate", payload)
+      committed = run!(
+        "git", "-C", File.join(project_root, ".hive-state"),
+        "show", "--format=", "--name-only", "HEAD"
+      )
+      assert_includes committed, "workflows/editorial.yml"
+      assert_includes committed, "workflows/editorial/research.md"
+      assert_includes committed, "workflows/editorial/draft.md"
 
       creator = Hive::AgentSkills::CanonicalSkill.new.rendered_canonical_files
                                                    .fetch("references/workflow-creator.md")
       assert_includes creator, "No task by default"
-      assert_includes creator, "hive new PROJECT --workflow ID"
+      assert_includes creator, "hive new 'PROJECT' --workflow 'ID'"
       assert_includes creator, "Never publish externally"
       assert_operator creator.index("hive workflow new"), :<, creator.index("hive workflow validate")
       assert_operator creator.index("hive workflow validate"), :<,
-                      creator.index('git -C "$state_root" commit')
-      assert_operator creator.index('git -C "$state_root" commit'), :<,
-                      creator.index("hive new PROJECT --workflow ID")
+                      creator.index('hive workflow commit "$ID"')
+      assert_operator creator.index('hive workflow commit "$ID"'), :<,
+                      creator.index("hive new 'PROJECT' --workflow 'ID'")
+    end
+  end
+
+  def test_creator_refuses_an_old_hive_before_inspection_or_mutation
+    with_initialized_project do |project_root, _project|
+      before = repository_snapshot(project_root)
+      commands = []
+
+      result = create_editorial(
+        project_root, commands: commands, installed_version: "0.0.1"
+      )
+
+      assert_equal :version_refused, result
+      assert_equal [ [ "version" ] ], commands
+      assert_equal before, repository_snapshot(project_root)
+      refute File.exist?(workflow_descriptor(project_root))
+    end
+  end
+
+  def test_creator_refuses_unconfirmed_fresh_init_without_mutation
+    with_tmp_global_config do
+      with_tmp_git_repo do |project_root|
+        before = repository_snapshot(project_root)
+        commands = []
+
+        result = preview_fresh_creator(
+          project_root, confirmed: false, commands: commands
+        )
+
+        assert_equal :confirmation_required, result
+        assert_equal [
+          [ "version" ],
+          [ "init", "--new-workflow", "editorial", "--minimal", "--preview", "--json" ]
+        ], commands
+        assert_equal before, repository_snapshot(project_root)
+        refute File.exist?(workflow_descriptor(project_root))
+      end
     end
   end
 
@@ -141,6 +189,7 @@ class WorkflowCreatorE2ETest < Minitest::Test
 
         author_editorial(project_root)
         validation = validate_editorial(project_root)
+        commit_editorial(project_root)
         assert_equal %w[research draft approval], validation.fetch("stages").map { |stage| stage.fetch("name") }
         assert_empty task_folders(project_root)
       end
@@ -200,14 +249,40 @@ class WorkflowCreatorE2ETest < Minitest::Test
     end
   end
 
-  def create_editorial(project_root, commands: nil)
+  def create_editorial(project_root, commands: nil, installed_version: Hive::VERSION)
+    commands&.push([ "version" ])
+    return :version_refused if Gem::Version.new(installed_version) < Gem::Version.new(Hive::VERSION)
+
+    commands&.push([ "workflow", "list", "--json" ])
+    Hive::Commands::Workflow.new(
+      "list", project_root: project_root, json: true, stdout: StringIO.new
+    ).call!
     commands&.push([ "workflow", "new", "editorial" ])
     Hive::Commands::Workflow.new!(
       "editorial", project_root: project_root, stdout: StringIO.new
     )
     author_editorial(project_root)
     commands&.push([ "workflow", "validate", "editorial", "--json" ])
-    validate_editorial(project_root)
+    validation = validate_editorial(project_root)
+    commands&.push([ "workflow", "commit", "editorial" ])
+    commit_editorial(project_root)
+    validation
+  end
+
+  def preview_fresh_creator(project_root, confirmed:, commands:)
+    commands.push([ "version" ])
+    commands.push(
+      [ "init", "--new-workflow", "editorial", "--minimal", "--preview", "--json" ]
+    )
+    capture_io do
+      Hive::Commands::Init.new(
+        project_root, new_workflow: "editorial", minimal: true, preview: true,
+        json: true, agent_skill_preflight: false
+      ).call
+    end
+    return :confirmation_required unless confirmed
+
+    raise "confirmed fresh creator execution is covered by AE4"
   end
 
   def author_editorial(project_root)
@@ -247,6 +322,12 @@ class WorkflowCreatorE2ETest < Minitest::Test
     Hive::Commands::Workflow.new(
       "validate", "editorial", project_root: project_root,
       json: true, stdout: StringIO.new
+    ).call!
+  end
+
+  def commit_editorial(project_root)
+    Hive::Commands::Workflow.new(
+      "commit", "editorial", project_root: project_root, stdout: StringIO.new
     ).call!
   end
 

@@ -792,7 +792,7 @@ module Hive
           ops.add_hive_state_to_master_gitignore!
           Hive::LlmWikiBootstrap.install!(@project_path, post_commit_hook: false, scheduler: false)
           ops.commit_llm_wiki_bootstrap!
-          Hive::LlmWikiBootstrap.install_runtime_hooks!(@project_path)
+          Hive::LlmWikiBootstrap.install_runtime_hooks!(@project_path, scheduler: !@minimal)
 
           entry = Hive::Config.register_project(
             name: File.basename(@project_path),

@@ -55,6 +55,7 @@ instruction directory to `hive/state` before reporting success:
 
 ```bash
 hive workflow validate editorial --json
+hive workflow commit editorial
 ```
 
 In a fresh project it first renders the no-write
@@ -99,13 +100,17 @@ result. No task is created by workflow creation alone. Its completion summary
 includes the exact opt-in command:
 
 ```bash
-hive new <project> --workflow editorial "<your request>"
+hive new '<project>' --workflow 'editorial' '<your request>'
 ```
 
 If the original request explicitly asks to create or run a task, the creator
 uses `hive new --idempotency-key KEY --json`, so a retry finds the same task
 even after it moves stages. It queries `hive status --operational --json` after
-creation or an explicitly requested first run.
+creation or an explicitly requested first run. It derives that key
+deterministically from the real project path, normalized workflow ID, and
+canonicalized request text. Every dynamic argument uses POSIX shell escaping,
+so quotes, substitutions, variables, glob characters, and newlines remain
+literal request bytes.
 
 When the task reaches approval, the only transitions are:
 
@@ -115,8 +120,8 @@ hive decide <task> reject --from approval --decision-id <decision-id> --note "re
 ```
 
 The waiting `hive run --json` response supplies the visit-specific decision
-ID. Approve requires a non-empty `draft.md`, records it as publish-ready, and
-completes the task. Reject records the decision, returns the same task to
+ID. Approve requires a non-empty, regular task-local `draft.md` (symlinks are
+refused), records it as publish-ready, and completes the task. Reject records the decision, returns the same task to
 `draft`, and resets that stage to `WAITING`. Neither outcome publishes, deploys,
 sends, or otherwise acts outside Hive; an external destination and separate
 authorization are always required.

@@ -5,13 +5,27 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 require "hive"
 require "hive/llm_wiki_bootstrap"
 
+# The workflow creator owns two strict observation routes. They must stay
+# byte-for-byte no-write even when an upgraded binary would otherwise repair
+# scheduler units during process startup.
+strict_no_write_route =
+  if (workflow_index = ARGV.index("workflow"))
+    ARGV[workflow_index + 1] == "validate"
+  elsif ARGV.include?("init")
+    ARGV.any? { |arg| arg == "--preview" || arg.match?(/\A--preview=true\z/i) }
+  else
+    false
+  end
+
 # Repair legacy path-keyed LLM-wiki timers as soon as an upgraded Hive binary
 # is invoked, including `hive --version`. The reconciliation is idempotent and
 # touches only Hive-managed units.
-begin
-  Hive::LlmWikiBootstrap::Scheduler.reconcile_existing!
-rescue StandardError => e
-  warn "hive: warning: could not reconcile LLM-wiki scheduler units: #{e.message}"
+unless strict_no_write_route
+  begin
+    Hive::LlmWikiBootstrap::Scheduler.reconcile_existing!
+  rescue StandardError => e
+    warn "hive: warning: could not reconcile LLM-wiki scheduler units: #{e.message}"
+  end
 end
 
 if ENV["HIVE_ATTEMPT_INTERNAL"] == "1"

@@ -178,6 +178,113 @@ class DecideTest < Minitest::Test
     end
   end
 
+  def test_approve_refuses_an_artifact_symlink_outside_the_task
+    with_editorial_task do |_dir, approval, slug|
+      with_tmp_dir do |outside|
+        external = File.join(outside, "external-draft.md")
+        File.write(external, "# External bytes\n")
+        draft = File.join(approval, "draft.md")
+        File.delete(draft)
+        File.symlink(external, draft)
+
+        error = assert_raises(Hive::WrongStage) do
+          Hive::Commands::Decide.new(
+            slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+          ).call
+        end
+
+        assert_includes error.message, "non-empty artifact"
+        assert_equal "# External bytes\n", File.read(external)
+        assert File.symlink?(draft)
+        assert_equal :waiting, Hive::Markers.current(File.join(approval, "approval.md")).name
+        assert_nil Hive::Commands::Decide.latest_record(File.join(approval, "approval.md"))
+      end
+    end
+  end
+
+  def test_concurrent_identical_completion_returns_one_apply_and_one_noop
+    with_editorial_task do |_dir, approval, slug|
+      decision_id = decision_id_for(approval)
+      ready = Queue.new
+      release = Queue.new
+      commands = 2.times.map do
+        command = Hive::Commands::Decide.new(
+          slug, "approve", from: "approval", decision_id: decision_id
+        )
+        original = command.method(:complete!)
+        command.define_singleton_method(:complete!) do |*args|
+          ready << true
+          release.pop
+          original.call(*args)
+        end
+        command
+      end
+      threads = commands.map do |command|
+        Thread.new do
+          begin
+            command.send(:do_call)
+          rescue StandardError => e
+            e
+          end
+        end
+      end
+      2.times { ready.pop }
+      2.times { release << true }
+      results = threads.map(&:value)
+
+      assert results.none?(Exception), results.inspect
+      assert_equal 1, results.count { |payload| payload.fetch("applied") }
+      assert_equal 1, results.count { |payload| payload.fetch("noop") }
+      assert_equal 1, File.read(File.join(approval, "approval.md")).scan(
+        Hive::Commands::Decide::RECORD_RE
+      ).size
+    end
+  end
+
+  def test_self_target_outcome_records_and_mints_a_fresh_decision
+    with_registered_workflow(revision_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir, agent_skill_preflight: false).call }
+          project = File.basename(dir)
+          capture_io do
+            Hive::Commands::New.new(
+              project, "review this", workflow: "revision", slug_override: "revision-task"
+            ).call!
+          end
+          folder = File.join(dir, ".hive-state", "stages", "1-approval", "revision-task")
+          old_id = decision_id_for(folder)
+          out, = capture_io do
+            Hive::Commands::Decide.new(
+              "revision-task", "revise", from: "approval",
+              decision_id: old_id, json: true
+            ).call
+          end
+          payload = JSON.parse(out)
+          marker = Hive::Markers.current(File.join(folder, "approval.md"))
+
+          assert_equal true, payload.fetch("applied")
+          assert_equal false, payload.fetch("completed")
+          assert_equal "1-approval", payload.fetch("current_stage")
+          assert_equal "needs_input", payload.dig("next_action", "kind")
+          assert_equal :waiting, marker.name
+          refute_equal old_id, marker.attrs.fetch("decision_id")
+          assert_equal old_id, Hive::Commands::Decide.latest_record(
+            File.join(folder, "approval.md")
+          ).fetch("decision_id")
+          assert_schema_valid("hive-decide", payload)
+
+          retry_payload = Hive::Commands::Decide.new(
+            "revision-task", "revise", from: "approval",
+            decision_id: old_id
+          ).send(:do_call)
+          assert_equal false, retry_payload.fetch("applied")
+          assert_equal true, retry_payload.fetch("noop")
+        end
+      end
+    end
+  end
+
   def test_invalid_waiting_identity_and_non_human_from_are_rejected
     with_editorial_task do |_dir, approval, slug|
       Hive::Markers.set(File.join(approval, "approval.md"), :waiting)
@@ -443,6 +550,20 @@ class DecideTest < Minitest::Test
           outcomes: {
             "approve" => Hive::Workflow::Outcome.new(name: "approve", complete: true, artifact: "draft.md"),
             "reject" => Hive::Workflow::Outcome.new(name: "reject", to: "draft")
+          }.freeze
+        )
+      ]
+    )
+  end
+
+  def revision_workflow
+    Hive::Workflow.new(
+      id: :revision,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 1, state_file: "approval.md", kind: :human,
+          outcomes: {
+            "revise" => Hive::Workflow::Outcome.new(name: "revise", to: "approval")
           }.freeze
         )
       ]

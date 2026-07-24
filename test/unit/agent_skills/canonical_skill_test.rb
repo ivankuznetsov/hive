@@ -33,13 +33,18 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_includes creator, "minimum Hive version: #{Hive::VERSION}"
     assert_operator creator.index("hive version"), :<, creator.index("hive workflow list --json")
     assert_operator creator.index("hive workflow list --json"), :<, creator.index("hive workflow new")
-    assert_operator creator.index("hive workflow validate"), :<, creator.index("hive new")
+    assert_operator creator.index("hive workflow validate"), :<, creator.index("hive workflow commit")
+    assert_operator creator.index("hive workflow commit"), :<, creator.index("hive new")
     assert_includes creator, "No task by default"
     assert_includes creator, "created files"
     assert_includes creator, "applied defaults"
     assert_includes creator, "validation result"
     assert_includes creator, "hive update"
     assert_includes creator, "idempotency-key"
+    assert_includes creator, "workflow-creator:v1:<64 lowercase hex>"
+    assert_includes creator, "JSON.generate([project, workflow, request])"
+    assert_includes creator, "POSIX `Shellwords.escape` semantics"
+    assert_includes creator, %q(replace each embedded `'` with the exact shell sequence `'"'"'`)
     assert_includes creator, "Never publish externally"
     refute_match(/hive init[^\n]*--force/, creator)
   end

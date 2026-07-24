@@ -473,6 +473,7 @@ module Hive
                   <hive_state_path>/workflows/ID.yml plus its stage
                   instruction(s) under <hive_state_path>/workflows/ID/.
         validate ID  Read and validate the normalized workflow graph without writes.
+        commit ID    Commit a validated owner-authored graph under Hive's state lock.
         install honeycomb/NAME[@VERSION]  Verify and install a reviewed package.
         list                              Inspect built-in, authored, and managed workflows.
         update NAME                       Diff and advance a managed package.

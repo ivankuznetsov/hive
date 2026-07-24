@@ -60,7 +60,7 @@ module Hive
       end
 
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
-                     observation_guard: nil)
+                     observation_guard: nil, commit_lock: true)
         @target = target
         @to = to
         @from = from
@@ -72,6 +72,7 @@ module Hive
         # State changes and typed exceptions still propagate normally.
         @quiet = quiet
         @observation_guard = observation_guard
+        @commit_lock = commit_lock
       end
 
       def call
@@ -265,7 +266,7 @@ module Hive
         commit_action = nil
         human_state_snapshot = nil
         begin
-          Hive::Lock.with_commit_lock(task.hive_state_path) do
+          with_optional_commit_lock(task.hive_state_path) do
             Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "approve") do
               # Preserve the command's typed collision contract before building
               # a multi-project snapshot: a pre-existing destination necessarily
@@ -288,6 +289,12 @@ module Hive
           raise
         end
         [ new_folder, commit_action ]
+      end
+
+      def with_optional_commit_lock(hive_state_path, &block)
+        return block.call unless @commit_lock
+
+        Hive::Lock.with_commit_lock(hive_state_path, &block)
       end
 
       def initialize_human_destination!(task, dest_stage)

@@ -1355,14 +1355,18 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher, sup, = make_dispatcher(rows: [], with_digest_scheduler: true)
     digest = dispatcher.instance_variable_get(:@digest_scheduler)
     envelope = {
-      "ok" => false,
-      "error_class" => "PermanentDeliveryError",
-      "message" => "Telegram rejected the chunk"
+      "schema" => "prdigest-result",
+      "schema_version" => 1,
+      "status" => "failure",
+      "error" => {
+        "kind" => "telegram_permanent",
+        "message" => "Telegram rejected the chunk"
+      }
     }
     sup.next_exits = [
       ChildExit.new(
         pid: 123,
-        exit_code: Hive::ExitCodes::SOFTWARE,
+        exit_code: 4,
         project: "digest",
         slug: "2026-06-13",
         stage: "digest",
@@ -1379,7 +1383,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal [
       {
         date: "2026-06-13",
-        exit_code: Hive::ExitCodes::SOFTWARE,
+        exit_code: 4,
         envelope: envelope,
         now: T0
       }

@@ -1,7 +1,7 @@
 require "test_helper"
 require "rubygems/package"
 require "zlib"
-require "hive/digest"
+require "digest"
 require "hive/web/app_bundle"
 
 class WebAppBundleTest < Minitest::Test

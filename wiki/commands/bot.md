@@ -212,10 +212,10 @@ with `hive pairing approve telegram <CODE>` (see [[commands/pairing]]). Unknown
 non-`/start` chat IDs are still logged once per bot lifetime and ignored
 silently.
 
-The shipped-digest sender reuses the same Telegram token and bot client. The
-daily digest delivers to `bot.chat_id_allowlist[0]`; there is no separate digest
-chat setting. See [[commands/digest]] and [[modules/digest]]. The allowlist
-remains the bot's chat-auth boundary.
+The delegated PRDigest subprocess receives the same Telegram token and delivers
+the daily digest to `bot.chat_id_allowlist[0]`; there is no separate digest chat
+setting. It does not reuse Hive's bot client. See [[commands/digest]] and
+[[modules/digest]]. The allowlist remains the bot's chat-auth boundary.
 
 Voice transcription uses `bot.transcription.api_key_env` for the OpenAI
 audio API key (default `HIVE_WHISPER_API_KEY`); the key is not persisted.

@@ -1,5 +1,5 @@
 require "test_helper"
-require "hive/digest"
+require "digest"
 require "hive/workflow_package/configuration"
 
 class WorkflowPackageConfigurationTest < Minitest::Test

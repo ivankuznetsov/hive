@@ -62,8 +62,7 @@ module Hive
         "review_triage" => 75,
         "review_fix" => 500,
         "review_browser" => 100,
-        "patrol" => 100,
-        "digest" => 50
+        "patrol" => 100
       },
       "timeout_sec" => {
         "brainstorm" => 1800,
@@ -76,8 +75,7 @@ module Hive
         "review_triage" => 1800,
         "review_fix" => 14400,
         "review_browser" => 3600,
-        "patrol" => 3600,
-        "digest" => 1800
+        "patrol" => 3600
       },
       # Stage-level agents remain for independently owned stages. Execute is
       # captured once per generation; open_pr plus review ci/fix intentionally
@@ -363,12 +361,10 @@ module Hive
         # slot forever, leave the scheduler's in-memory `@pending` marker set,
         # and silently disable ALL future digests/answer-digests until a
         # daemon restart. A reaped child exits non-zero, so the scheduler
-        # retries the date on backoff. 3600s sits well above the changelog generator's
-        # own agent cap (timeout_sec.digest, default 1800) so it never kills a
-        # healthy run; raise it alongside a raised timeout_sec.digest, or set
-        # it to 0 to disable. `answer-digest` shares the same cap: it spawns
-        # no changelog-generator agent (it only fetches status + sends Telegram), so
-        # 3600s is a generous ceiling that still bounds a wedged socket.
+        # retries the date on backoff. 3600s is a generous ceiling above
+        # PRDigest's bounded network work while still bounding a wedged child.
+        # `answer-digest` shares the same cap because its status fetch or
+        # Telegram socket can also wedge.
         "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
         "child_verb_timeouts" => { "digest" => 3600, "answer-digest" => 3600 },
@@ -572,7 +568,6 @@ module Hive
       # GitHub projects.
       "digest" => {
         "enabled" => false,
-        "agent" => nil,
         "max_catchup_days" => 7
       },
       # Daily pending-answer digest. The daemon schedules one global
@@ -1153,11 +1148,10 @@ module Hive
       registered_project_entries(preserve_invalid: false)
     end
 
-    # Digest discovery must account for every persisted registry row. Other
-    # commands retain the tolerant loader contract above, while the digest
-    # receives malformed rows so RepoResolver can emit repository-scoped
-    # partial-discovery warnings instead of silently publishing an incomplete
-    # changelist.
+    # Digest delegation must account for every persisted registry row. Other
+    # commands retain the tolerant loader contract above, while the PRDigest
+    # adapter receives malformed rows and fails closed instead of silently
+    # publishing an incomplete repository set.
     def digest_registered_projects
       registered_project_entries(preserve_invalid: true)
     end
@@ -1559,10 +1553,8 @@ module Hive
       merged
     end
 
-    # The `digest` block only (enabled / agent / max_catchup_days), merged
-    # over defaults. Used by the daemon scheduler. Distinct from
-    # `load_global_digest_config`, which returns the FULL merged config
-    # (incl. `bot`) for the digest runner.
+    # The `digest` block only (enabled / max_catchup_days), merged over
+    # defaults. Used by the daemon scheduler and the PRDigest CLI adapter.
     def load_global_digest_block
       load_global_block("digest", validator: :validate_digest!) do |merged, data, override|
         # Opt-out beats opt-in: when the operator hasn't pinned digest.enabled
@@ -1588,20 +1580,6 @@ module Hive
       return false unless bot.is_a?(Hash) && bot["enabled"] == true
 
       Array(bot["chat_id_allowlist"]).any? { |id| id.is_a?(Integer) }
-    end
-
-    def load_global_digest_config
-      Hive::Paths.ensure_migrated!
-      validate_hive_home!
-      path = global_config_path
-      data = File.exist?(path) ? load_global_config(path) : {}
-      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
-
-      merged = merge_defaults(data)
-      merged["bot"] = deep_merge(global_bot_defaults, data["bot"] || {})
-      inject_bot_runtime_path_defaults!(merged)
-      validate!(merged, path)
-      merged
     end
 
     def load_global_web
@@ -1695,11 +1673,18 @@ module Hive
       merged
     end
 
-    def telegram_bot_token!
-      token = ENV["HIVE_TELEGRAM_BOT_TOKEN"].to_s
+    def telegram_bot_token!(env: ENV)
+      token = env["HIVE_TELEGRAM_BOT_TOKEN"].to_s
       return token unless token.strip.empty?
 
-      raise ConfigError, "HIVE_TELEGRAM_BOT_TOKEN must be set to start hive bot"
+      raise ConfigError, "HIVE_TELEGRAM_BOT_TOKEN must be set for Telegram delivery"
+    end
+
+    def telegram_chat_id!(bot = load_global_bot)
+      chat_id = Array(bot["chat_id_allowlist"]).first
+      return chat_id unless chat_id.nil? || (chat_id.respond_to?(:empty?) && chat_id.empty?)
+
+      raise ConfigError, "bot.chat_id_allowlist[0] must be configured before sending Telegram"
     end
 
     def global_bot_defaults
@@ -3212,18 +3197,13 @@ module Hive
     end
 
     def validate_digest!(cfg, source_path)
-      # budget_usd.digest / timeout_sec.digest feed straight into the
-      # ChangelogGenerator's Hive::Agent. Validate them even when the `digest` block
-      # is absent (they are independent top-level keys).
-      validate_digest_resource!(cfg, "budget_usd", source_path)
-      validate_digest_resource!(cfg, "timeout_sec", source_path)
-
       digest = cfg["digest"]
       return if digest.nil?
 
       if digest.key?("source")
         raise ConfigError,
-              "digest.source was removed in hive-digest v2; remove it from #{describe_source(source_path)}"
+              "digest.source is unsupported; PRDigest always reads registered repositories. " \
+              "Remove it from #{describe_source(source_path)}"
       end
 
       enabled = digest["enabled"]
@@ -3232,8 +3212,6 @@ module Hive
               "digest.enabled in #{describe_source(source_path)} must be a boolean " \
               "(true / false); got #{enabled.inspect} (#{enabled.class})"
       end
-
-      validate_agent_name!(digest["agent"], "digest.agent", source_path)
 
       max_catchup_days = digest["max_catchup_days"]
       return if max_catchup_days.nil?
@@ -3244,24 +3222,6 @@ module Hive
       raise ConfigError,
             "digest.max_catchup_days in #{describe_source(source_path)} must be an integer >= 0 " \
             "(0 = unbounded); got #{max_catchup_days.inspect} (#{max_catchup_days.class})"
-    end
-
-    # ChangelogGenerator reads cfg.dig("budget_usd"|"timeout_sec", "digest") and
-    # passes the value straight to Hive::Agent (max_budget_usd / timeout_sec).
-    # A non-numeric or non-positive value would otherwise pass config load and
-    # crash ChangelogGenerator mid-run instead of producing a handled config error
-    # up front. Both keys are optional — ChangelogGenerator falls back to its
-    # DEFAULT_* constants when absent (a 0 is rejected, not treated as a
-    # fallback, since `value || DEFAULT` keeps 0).
-    def validate_digest_resource!(cfg, group, source_path)
-      value = cfg.dig(group, "digest")
-      return if value.nil?
-
-      unless value.is_a?(Numeric) && value.positive?
-        raise ConfigError,
-              "#{group}.digest in #{describe_source(source_path)} must be a positive number; " \
-              "got #{value.inspect} (#{value.class})"
-      end
     end
 
     def validate_answer_digest!(cfg, source_path)

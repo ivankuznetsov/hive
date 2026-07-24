@@ -1,7 +1,7 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/digest/, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, lib/hive/prdigest.rb, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
 updated: 2026-07-22
 tags: [commands, api, skills, agents, operational, provisioning]
@@ -41,8 +41,7 @@ one ClawHub listing per Hive verb.
 - `skills/hive/`
 - `lib/hive/agent_skills/**/*.rb`
 - `config/agent-skills.yml`
-- `lib/hive/digest.rb`
-- `lib/hive/digest/**/*.rb`
+- `lib/hive/prdigest.rb`
 - `lib/hive/web/**/*.rb`
 - `web/app/views/**`
 - `web/app/assets/**`
@@ -124,12 +123,13 @@ projects, runs a local secret-token preflight, delegates extraction to
 hive-bench's checkout-local `harness/extract.rb`, then opens a GitHub PR from
 the hive-bench checkout. See [[commands/bench-submit]].
 
-`hive digest` is the CLI bridge to `Hive::Digest`: it builds the complete
-changelist for PRs merged during one Europe/London day across registered
-GitHub repositories. Repeatable `--repo` values filter that registered scope;
-Hive task/stage state and pairing state are not read. Dry-run and real delivery
-share the same MarkdownV2 result, and JSON uses only `hive-digest` v2. The
-daemon can schedule it as a global, non-project-scoped child. See
+`hive digest` bridges Hive's registered project scope to the standalone
+PRDigest CLI. Hive supplies an explicit Europe/London date, repository subset,
+and credential/config bridge; PRDigest owns fetch, safe HTML rendering,
+chunking, durable resume, and Telegram delivery. JSON is unchanged
+`prdigest-result` v1 and child exits are preserved. Repeatable `--repo` values
+can narrow but never expand registered scope. The daemon schedules it as a
+global, non-project-scoped child. See
 [[commands/digest]] and [[modules/digest]].
 
 `hive setup` is the local workstation provisioning bridge for installs that

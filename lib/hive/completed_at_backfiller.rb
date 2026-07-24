@@ -13,25 +13,65 @@ module Hive
   # commit both succeed; every failure therefore keeps the row visible.
   class CompletedAtBackfiller
     BATCH_SIZE = 100
+    REFRESH_DEADLINE_SECONDS = 1.0
+    @progress_mutex = Mutex.new
+    @last_folder_by_state = {}
 
-    def initialize(history: Hive::CompletionTime::History.new, batch_size: BATCH_SIZE)
-      @history = history
-      @batch_size = batch_size
-    end
+    class << self
+      attr_reader :progress_mutex, :last_folder_by_state
 
-    def call(tasks)
-      Array(tasks).first(@batch_size).to_h do |task|
-        [ task.folder, completed_at_for(task) ]
+      def rotating_batch(tasks, batch_size)
+        ordered = Array(tasks).sort_by(&:folder)
+        return [] if ordered.empty?
+
+        state = ordered.first.hive_state_path
+        progress_mutex.synchronize do
+          last = last_folder_by_state[state]
+          start = last ? ordered.index { |task| task.folder > last } || 0 : 0
+          selected = ordered.rotate(start).first(batch_size)
+          last_folder_by_state[state] = selected.last.folder if selected.any?
+          selected
+        end
+      end
+
+      def reset_progress!
+        progress_mutex.synchronize { last_folder_by_state.clear }
       end
     end
 
-    def completed_at_for(task)
+    def initialize(history: Hive::CompletionTime::History.new, batch_size: BATCH_SIZE,
+                   deadline_seconds: REFRESH_DEADLINE_SECONDS,
+                   monotonic_clock: -> { Hive::Lock.monotonic_now })
+      @history = history
+      @batch_size = batch_size
+      @deadline_seconds = deadline_seconds
+      @monotonic_clock = monotonic_clock
+    end
+
+    def call(tasks)
+      deadline = @monotonic_clock.call + @deadline_seconds
+      self.class.rotating_batch(tasks, @batch_size).each_with_object({}) do |task, clocks|
+        break clocks if @monotonic_clock.call >= deadline
+
+        clocks[task.folder] = completed_at_for(task, deadline: deadline)
+      end
+    end
+
+    def completed_at_for(task, deadline: nil)
       stored = Hive::CompletionTime.parse(task.completed_at, warn_context: task.folder)
       return stored if stored
       return nil unless File.directory?(task.folder)
+      deadline ||= @monotonic_clock.call + @deadline_seconds
 
-      Hive::Lock.with_commit_lock(task.hive_state_path) do
-        Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "completed_at_backfill") do
+      remaining = [ deadline - @monotonic_clock.call, 0 ].max
+      Hive::Lock.with_commit_lock(task.hive_state_path, timeout: remaining) do
+        return nil unless File.directory?(task.folder)
+
+        Hive::Lock.with_task_lock(
+          task.folder, { slug: task.slug, op: "completed_at_backfill" }, create: false
+        ) do
+          return nil unless File.directory?(task.folder)
+
           fresh = Hive::Task.new(task.folder)
           stored = Hive::CompletionTime.parse(fresh.completed_at, warn_context: fresh.folder)
           return stored if stored

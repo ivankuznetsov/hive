@@ -422,12 +422,14 @@ module Hive
             # external consumers (TUI, daemon, bots) read `diagnostic` off
             # every row. Schema mandates the field.
             config = task_action_config(path)
+            workflow_generation = Hive::Task.capture_workflow_generation(path, config: config)
             rows = annotate_implementation_identities(
               collect_rows(
                 hive_state,
                 stages: stages,
                 exclude_archived: exclude_archived,
                 now: now,
+                workflow_generation: workflow_generation,
                 project_name: project["name"]
               ),
               config
@@ -782,22 +784,29 @@ module Hive
           return
         end
 
-        Hive::Workflows::Project.load!(path)
-        # Text-mode renders icon / state_label / suggested_command / age
-        # only — `diagnostic` is unused here, so skip the bounded file-
-        # I/O that TaskAction#diagnostic performs per red row. JSON path
-        # still pays the full cost via project_payload.
-        config = task_action_config(path)
-        rows = annotate_implementation_identities(
-          collect_rows(hive_state, now: now, project_name: project["name"]),
-          config
-        )
-        rows = annotate_actions(
-          rows, project, project_count,
-          config: config, with_diagnostic: false
-        )
-        rows = annotate_dependencies(rows, project, admission_context: admission_context)
-        projection = Hive::ArchiveFilter.project(rows, now: now)
+        projection = nil
+        Hive::Workflows::Project.synchronize do
+          Hive::Workflows::Project.load!(path)
+          # Text-mode renders icon / state_label / suggested_command / age
+          # only — `diagnostic` is unused here, so skip the bounded file-
+          # I/O that TaskAction#diagnostic performs per red row. JSON path
+          # still pays the full cost via project_payload.
+          config = task_action_config(path)
+          workflow_generation = Hive::Task.capture_workflow_generation(path, config: config)
+          rows = annotate_implementation_identities(
+            collect_rows(
+              hive_state, now: now, workflow_generation: workflow_generation,
+              project_name: project["name"]
+            ),
+            config
+          )
+          rows = annotate_actions(
+            rows, project, project_count,
+            config: config, with_diagnostic: false
+          )
+          rows = annotate_dependencies(rows, project, admission_context: admission_context)
+          projection = Hive::ArchiveFilter.project(rows, now: now)
+        end
         if @archive
           render_archive_project(project, projection.archive_rows)
           return
@@ -984,17 +993,49 @@ module Hive
       # overlay. Archive membership is applied after TaskAction annotation,
       # because one workflow's terminal directory may be another workflow's
       # active directory.
-      def default_stage_dirs(_exclude_archived)
+      def default_stage_dirs(hive_state, _exclude_archived)
         # Archive membership is workflow/action-aware and cannot be inferred
         # from a global terminal-directory union. Scan the full generation and
         # apply exclude_archived only after TaskAction annotation.
+        stages_root = File.join(hive_state, "stages")
+        on_disk = Dir.children(stages_root).select do |entry|
+          entry.match?(/\A\d+-[a-z][a-z0-9-]*\z/) &&
+            File.directory?(File.join(stages_root, entry)) &&
+            (Hive::Workflows.all_stage_dirs.include?(entry) ||
+             orphan_stage_has_workflow_reference?(File.join(stages_root, entry)))
+        end
+        (Hive::Workflows.all_stage_dirs + on_disk).uniq
+      rescue SystemCallError
         Hive::Workflows.all_stage_dirs
       end
 
+      def orphan_stage_has_workflow_reference?(stage_dir)
+        task_folders = Dir.children(stage_dir).filter_map do |child|
+          folder = File.join(stage_dir, child)
+          folder if Hive::Stages.task_slug?(child) && File.directory?(folder)
+        end
+        return false if task_folders.empty?
+        return true if task_folders.any? { |folder| Hive::TaskMeta.read(folder)[:workflow] }
+
+        # Fieldless legacy tasks follow the project default. Keep their orphan
+        # stage visible when that default descriptor was deleted or could not be
+        # registered, just as an explicitly pinned broken workflow remains
+        # visible above.
+        hive_state = File.dirname(File.dirname(stage_dir))
+        project_root = File.dirname(hive_state)
+        _, raw_config = Hive::Config.read_project_config(project_root)
+        default_workflow = raw_config["default_workflow"].to_s.strip
+        !default_workflow.empty? &&
+          !Hive::Workflows::Registry.ids.include?(default_workflow.to_sym)
+      rescue Hive::ConfigError, SystemCallError
+        false
+      end
+
       def collect_rows(hive_state, stages: nil, exclude_archived: false, now: Time.now.utc,
-                       project_name: nil)
+                       workflow_generation: nil, project_name: nil)
         rows = []
-        Array(stages || default_stage_dirs(exclude_archived)).each do |stage|
+        known_stage_dirs = Hive::Workflows.all_stage_dirs
+        Array(stages || default_stage_dirs(hive_state, exclude_archived)).each do |stage|
           stage_dir = File.join(hive_state, "stages", stage)
           next unless File.directory?(stage_dir)
 
@@ -1004,7 +1045,7 @@ module Hive
             slug = File.basename(entry)
             begin
               begin
-                task = Hive::Task.new(entry)
+                task = Hive::Task.new(entry, workflow_generation: workflow_generation)
               rescue Hive::UnsupportedProjectConfigError
                 raise
               rescue Hive::InvalidTaskPath, Hive::ConfigError => e
@@ -1020,7 +1061,8 @@ module Hive
 
                 warn "hive: status: #{entry} failed to load (#{e.message}); surfaced as an Error row"
                 rows << invalid_task_row(
-                  stage: stage, slug: slug, folder: entry, message: e.message, now: now
+                  stage: stage, slug: slug, folder: entry, message: e.message, now: now,
+                  archive_member: !known_stage_dirs.include?(stage)
                 )
                 next
               end
@@ -1186,6 +1228,7 @@ module Hive
       end
 
       def apply_dependency_verdict(row, context, project)
+        row[:archive_member] = Hive::ArchiveFilter.archived_action?(row) unless row.key?(:archive_member)
         verdict = context.verdict(project: project["name"], slug: row[:slug])
         row[:blocked_by] = verdict.wait? ? verdict.blocked_by : nil
         row[:dependency_stage] = verdict.wait? ? verdict.dependency_stage : nil
@@ -1338,7 +1381,8 @@ module Hive
       # annotate_dependencies treats it as unblocked, so the broken task shows
       # in the snapshot instead of being silently dropped. The load error lands
       # in `marker_attrs[:message]` (surfaced in the JSON row's `attrs`).
-      def invalid_task_row(stage:, slug:, folder:, message:, now: Time.now.utc)
+      def invalid_task_row(stage:, slug:, folder:, message:, now: Time.now.utc,
+                           archive_member: false)
         folder_mtime =
           begin
             File.mtime(folder)
@@ -1353,6 +1397,7 @@ module Hive
         icon, state_label = decorate(nil, marker)
         {
           invalid: true,
+          archive_member: archive_member,
           stage: stage,
           slug: slug,
           id: nil,

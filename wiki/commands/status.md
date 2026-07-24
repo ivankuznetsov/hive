@@ -210,8 +210,12 @@ Resolution follows explicit task pin, project default, then `coding`.
 `now - completed_at > days * 86_400`; equality remains visible. Descriptor,
 project-default, and task-pin changes reproject on the next refresh from the
 same first-completion clock without moving the task or changing archive
-membership. A malformed/unknown resolved workflow remains a visible Error row
-and contributes neither an archived row nor the hidden count.
+membership. A policy-only task repin may resolve retention from a descriptor
+with a different stage layout while action/archive classification continues to
+use the terminal descriptor that owns the existing folder. Malformed, deleted,
+or unknown descriptors remain visible Error rows. A task in their unique
+terminal directory remains in the dedicated archive but is never
+retention-hidden or counted as hidden.
 
 `completed_at` is written to `meta.yml` the first time a successful terminal
 transition makes the task archived and is never replaced. Reopening, metadata
@@ -222,7 +226,10 @@ the terminal state-file mtime, then task-folder mtime. The value is eligible
 for hiding only after its atomic metadata write and `hive/state` commit
 succeed. Missing/corrupt evidence, an invalid stored value, or persistence
 failure warns and fails open. Backfill also runs under `never`, so a later
-policy change already has a stable clock.
+policy change already has a stable clock. Each refresh has one shared
+one-second backfill deadline, task locking rechecks that the folder still
+exists without recreating it, and the batch cursor rotates past persistent
+failures so later legacy rows cannot starve.
 
 Ordinary text, `hive status --full`, `hive status --json`, operational status,
 daemon snapshots, TUI, web, and Hivebox omit expired archived rows. Every
@@ -301,7 +308,19 @@ The `legacy_stage_dirs` field was an additive extension of status v2. Task `id` 
 
 ## How tasks are discovered
 
-For each stage in `Hive::Workflows.all_stage_dirs` (the union of every live registered descriptor; coding remains the default source of truth via `Hive::Stages::DIRS`), `collect_rows` globs `<hive_state>/stages/<stage>/*` directories through the `stage_task_entries(stage_dir)` seam. Each entry is parsed via `Hive::Task.new(entry)`; non-conforming directories (no slug match, or a folder whose `workflow` selector does not contain that stage) are silently skipped via `rescue InvalidTaskPath`. Marker is read with `Hive::Markers.current(task.state_file)`. `folder_mtime` is always `File.mtime(entry)`; `mtime` is the state-file mtime when the state file exists and otherwise the directory mtime; `observation_mtime` is the state-file mtime when present, then `meta.yml`, then the directory fallback.
+For each stage in `Hive::Workflows.all_stage_dirs` (the union of every live
+registered descriptor; coding remains the default source of truth via
+`Hive::Stages::DIRS`), plus on-disk stages referenced by an explicit task pin
+or an unavailable project default, `collect_rows` walks
+`<hive_state>/stages/<stage>/*` through the `stage_task_entries(stage_dir)`
+seam. One captured config/default-workflow generation is passed to every
+`Hive::Task` in that project scan, so a descriptor/config edit cannot mix old
+and new policy within one payload. Invalid referenced tasks become visible
+Error rows rather than disappearing. Marker is read with
+`Hive::Markers.current(task.state_file)`. `folder_mtime` is always
+`File.mtime(entry)`; `mtime` is the state-file mtime when the state file exists
+and otherwise the directory mtime; `observation_mtime` is the state-file mtime
+when present, then `meta.yml`, then the directory fallback.
 
 Stage moves are treated as a normal filesystem race. If an entry disappears between the stage glob and any in-folder row read, `collect_rows` rescues `Errno::ENOENT`, re-checks the folder path, and skips it only when the folder is gone. The rescue is deliberately folder-level: an `ENOENT` while the task folder still exists is re-raised as a real status command failure, because in-place state-file writers may truncate content but should not make the state file transiently absent inside a surviving folder. A forward stage move can resurface under the later stage in the same scan; a backward move to an already-scanned stage can disappear for one poll and then reappear on the next refresh. After all stages are scanned, `drop_transient_stage_moves` looks only at duplicate-slug groups and removes every duplicate row whose folder no longer exists. If two live folders still share a slug, both rows remain and `annotate_actions` still passes `stage_collision: true` into `Hive::TaskAction`. This keeps `hive status --json` and TUI snapshots from briefly showing an old-stage and new-stage copy during a normal `mv`, without hiding persistent duplicate state.
 

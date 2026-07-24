@@ -1,4 +1,6 @@
 require "json"
+require "tmpdir"
+require "fileutils"
 require "hive/config"
 require "hive/task"
 require "hive/markers"
@@ -16,6 +18,7 @@ require "hive/conditions/transition_guard"
 require "hive/attempts/command_dispatch"
 require "hive/task_meta"
 require "hive/commit_or_rollback"
+require "hive/completion_time"
 
 module Hive
   module Commands
@@ -37,6 +40,51 @@ module Hive
       # `cleanup_instructions:` from the terminal `done` stage. See
       # schemas/hive-run.v1.json $defs.SuccessPayload.properties.
       OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
+
+      # Exact pre-run task-folder snapshot used only for terminal runners. Lock
+      # artifacts are process-owned and intentionally remain live across a
+      # restore; every other entry is restored byte-for-byte on a failed
+      # completion commit or interrupt.
+      class TerminalStateSnapshot
+        LOCK_ARTIFACT = /\A\.lock(?:\z|\.tmp\.)/.freeze
+
+        def self.capture(folder)
+          root = Dir.mktmpdir("hive-terminal-state-")
+          backup = File.join(root, "task")
+          FileUtils.mkdir_p(backup)
+          Dir.children(folder).each do |name|
+            next if name.match?(LOCK_ARTIFACT)
+
+            FileUtils.copy_entry(
+              File.join(folder, name), File.join(backup, name), true, false, true
+            )
+          end
+          new(folder, root, backup)
+        end
+
+        def initialize(folder, root, backup)
+          @folder = folder
+          @root = root
+          @backup = backup
+        end
+
+        def restore
+          Dir.children(@folder).each do |name|
+            next if name.match?(LOCK_ARTIFACT)
+
+            FileUtils.rm_rf(File.join(@folder, name))
+          end
+          Dir.children(@backup).each do |name|
+            FileUtils.copy_entry(
+              File.join(@backup, name), File.join(@folder, name), true, false, true
+            )
+          end
+        end
+
+        def close
+          FileUtils.rm_rf(@root)
+        end
+      end
 
       def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false,
                      durable: false, attempt_entrypoint: nil, observation_guard: nil,
@@ -89,9 +137,20 @@ module Hive
 
           @rebase_result = perform_rebase(task, cfg)
           runner = pick_runner(task)
-          result = Hive::Stages::Base.with_stage_events(task, cfg: cfg) { runner.call(task, cfg) }
-          commit_after(task, result, config: cfg)
+          terminal_snapshot = terminal_state_snapshot(task)
+          legacy_completed_at = legacy_completed_at_before_run(task, marker, config: cfg)
+          begin
+            result = Hive::Stages::Base.with_stage_events(task, cfg: cfg) { runner.call(task, cfg) }
+          rescue Interrupt => e
+            rollback_terminal_state!(task, terminal_snapshot, Hive::GitOps.new(task.project_root), e) if terminal_snapshot
+          end
+          commit_after(
+            task, result, config: cfg, terminal_snapshot: terminal_snapshot,
+            completion_time: legacy_completed_at
+          )
           report(task, result)
+        ensure
+          terminal_snapshot&.close
         end
       end
 
@@ -184,7 +243,7 @@ module Hive
         Hive::Stages::Resolver.resolve(task, descriptor: task.workflow)
       end
 
-      def commit_after(task, result, config: nil)
+      def commit_after(task, result, config: nil, terminal_snapshot: nil, completion_time: nil)
         marker = Hive::Markers.current(task.state_file)
         archived = Hive::TaskAction.for(task, marker, config: config).key ==
                    Hive::Schemas::TaskActionKind::ARCHIVED
@@ -192,49 +251,67 @@ module Hive
         return unless action || archived
 
         ops = Hive::GitOps.new(task.project_root)
-        completion_snapshot = nil
+        owned_snapshot = archived && terminal_snapshot.nil?
+        terminal_snapshot ||= TerminalStateSnapshot.capture(task.folder) if archived
         Hive::Lock.with_commit_lock(task.hive_state_path) do
-          completion_snapshot = Hive::TaskMeta.snapshot(task.folder) if archived
           begin
-            stamp_completed_at(task) if archived
+            stamp_completed_at(task, completion_time) if archived
             ops.hive_commit(
               stage_name: "#{task.stage_index}-#{task.stage_name}",
               slug: task.slug,
               action: action || "completed"
             )
           rescue Hive::Error, SystemCallError, IOError, ArgumentError, Interrupt => e
-            rollback_completed_at!(task, completion_snapshot, ops, e) if completion_snapshot
+            rollback_terminal_state!(task, terminal_snapshot, ops, e) if archived && terminal_snapshot
             raise
           end
         end
+      ensure
+        terminal_snapshot&.close if owned_snapshot
       end
 
-      def stamp_completed_at(task)
-        Hive::TaskMeta.write_completed_at_once(task.folder, @clock.call)
+      def stamp_completed_at(task, completion_time = nil)
+        Hive::TaskMeta.write_completed_at_once(task.folder, completion_time || @clock.call)
       rescue Hive::TaskMeta::InvalidMetadata => e
         # A malformed legacy clock must not block the runner or be replaced.
         # The visibility projection will fail open and surface the same warning.
         warn "hive: run: #{e.message}; completed_at left unchanged"
       end
 
-      def rollback_completed_at!(task, snapshot, ops, original_error)
+      def rollback_terminal_state!(task, snapshot, ops, original_error)
         Hive::CommitOrRollback.attempt!(
           original_error,
           on_undo: lambda do
-            Hive::TaskMeta.restore(task.folder, snapshot)
-            relative = File.join("stages", "#{task.stage_index}-#{task.stage_name}", task.slug, "meta.yml")
+            snapshot.restore
+            relative = File.join("stages", "#{task.stage_index}-#{task.stage_name}", task.slug)
             ops.run_git!("-C", task.hive_state_path, "add", "-A", "--", relative)
           end,
           rolled_back_message: lambda do |error|
-            "run completion commit aborted; completed_at rolled back. " \
+            "run completion commit aborted; terminal task state rolled back. " \
               "underlying: #{error.class}: #{error.message}"
           end,
           rollback_failed_message: lambda do |commit_error, rollback_error|
-            "run completion commit aborted AND completed_at rollback failed. " \
+            "run completion commit aborted AND terminal task state rollback failed. " \
               "commit error: #{commit_error.class}: #{commit_error.message}. " \
               "rollback error: #{rollback_error.class}: #{rollback_error.message}"
           end
         )
+      end
+
+      def terminal_state_snapshot(task)
+        terminal = task.action_workflow.stages.last
+        return nil unless terminal.dir == "#{task.stage_index}-#{task.stage_name}"
+        return nil unless [ :agent, :council ].include?(terminal.kind)
+
+        TerminalStateSnapshot.capture(task.folder)
+      end
+
+      def legacy_completed_at_before_run(task, marker, config:)
+        return nil if task.completed_at
+        return nil unless Hive::TaskAction.for(task, marker, config: config).key ==
+                          Hive::Schemas::TaskActionKind::ARCHIVED
+
+        Hive::CompletionTime.discover(task)
       end
 
       def report(task, result)

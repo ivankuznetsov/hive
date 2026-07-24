@@ -379,10 +379,12 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
   is deliberately excluded from the live feed's priming and dedup baseline.
   It renders every workflow-aware archived task with the existing task
   attributes, preserves `?project=` in its rail and links, and links task pages
-  with `source=archive`. `TasksController` honors that explicit source by
-  resolving the task from the unfiltered payload, so an expired task opened
-  from the archive cannot become a false 404. Native Hive web and Hivebox use
-  this same Rails route and producer path.
+  with `source=archive`. `Tasks::BaseController` honors that explicit source
+  for the task shell and every child controller, while the shell propagates it
+  to log, media, diff, answer, intervention, run, approval, rejection,
+  recovery, and drop routes. An expired task opened from the archive therefore
+  remains usable instead of its child requests becoming false 404s. Native Hive
+  web and Hivebox use this same Rails route and producer path.
 - **Task page** — state-driven actions (Retry stage for red
   `recover_review` / `recover_execute` / `error` rows; Approve only when the
   marker makes a forward move possible; Run <verb> only when the project daemon

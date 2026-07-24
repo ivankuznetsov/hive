@@ -531,6 +531,62 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_idle_policy_fingerprint_does_not_scan_lossless_archive_metadata
+    with_direct_project do |_project, hive_state|
+      active_folder = write_state_task(
+        hive_state, "4-execute", "active-policy-260626-abcd",
+        marker: "EXECUTE_COMPLETE", id: 1
+      )
+      archived_folder = write_state_task(
+        hive_state, "9-done", "archived-policy-260626-abcd",
+        marker: "COMPLETE", id: 2
+      )
+      Hive::TaskMeta.write(
+        archived_folder, id: 2, slug: File.basename(archived_folder), display_name: nil,
+        completed_at: Time.now.utc - (10 * 86_400)
+      )
+      source = Hive::Tui::StateSource.new
+      source.send(:refresh_once)
+      source.instance_variable_set(
+        :@archived_cache,
+        {
+          rows_by_path: {
+            source.current.projects.first.path => [ { "folder" => archived_folder } ]
+          },
+          admission_context: Hive::DependencyAdmission::Context.new(projects: [])
+        }
+      )
+
+      fingerprint = source.send(:policy_fingerprint_for, source.current)
+
+      assert_includes fingerprint, File.join(active_folder, "meta.yml")
+      refute_includes fingerprint, File.join(archived_folder, "meta.yml")
+    ensure
+      source&.stop
+    end
+  end
+
+  def test_policy_fingerprint_evicts_obsolete_content_signature_paths
+    with_direct_project do |_project, hive_state|
+      write_state_task(
+        hive_state, "4-execute", "active-cache-260626-abcd",
+        marker: "EXECUTE_COMPLETE", id: 1
+      )
+      source = Hive::Tui::StateSource.new
+      source.send(:refresh_once)
+      obsolete = File.join(hive_state, "stages", "9-done", "gone", "meta.yml")
+      source.instance_variable_get(:@file_signature_cache)[obsolete] = {
+        identity: [ :old ], signature: [ :old ]
+      }
+
+      source.send(:policy_fingerprint_for, source.current)
+
+      refute_includes source.instance_variable_get(:@file_signature_cache), obsolete
+    ensure
+      source&.stop
+    end
+  end
+
   def test_active_stage_change_refreshes_ordinary_rows_without_arming_archive_scan
     with_direct_project do |_project, hive_state|
       write_state_task(hive_state, "4-execute", "active-task-260626-abcd",

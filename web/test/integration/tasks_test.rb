@@ -147,6 +147,7 @@ class TasksTest < ActionDispatch::IntegrationTest
 
   test "an archive link resolves a task omitted from the ordinary snapshot" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_fixture!(folder)
     row = {
       "slug" => @slug,
       "folder" => folder.to_s,
@@ -180,6 +181,22 @@ class TasksTest < ActionDispatch::IntegrationTest
         assert_response :success
         assert_select "#status-stream-owner[data-status-version='ordinary-version']"
         assert_select ".task-header", text: /#{Regexp.escape(@slug.sub(/-\d{6}-\h{4}\z/, "").tr("-", " "))}/i
+        assert_select "img[src*='source=archive']", minimum: 1
+        assert_select "form[action*='source=archive']", minimum: 1
+
+        get task_log_path(@project, @slug)
+        assert_response :not_found
+        get task_log_path(@project, @slug, source: "archive")
+        assert_response :success
+
+        get task_media_path(@project, @slug, "01-home.png")
+        assert_response :not_found
+        get task_media_path(@project, @slug, "01-home.png", source: "archive")
+        assert_response :success
+
+        get task_diff_path(@project, @slug, source: "archive")
+        assert_response :not_found
+        assert_match "no worktree", response.body
       end
     end
   end

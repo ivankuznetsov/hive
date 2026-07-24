@@ -205,9 +205,7 @@ module Hive
         policy_unchanged = false
         if @current
           refresh_archive_signals(@current.projects)
-          current_policy_fingerprint = policy_fingerprint_for(
-            @current, archived_cache: @archived_cache
-          )
+          current_policy_fingerprint = policy_fingerprint_for(@current)
           policy_unchanged = current_policy_fingerprint == @policy_fingerprint
           request_archive_refresh unless policy_unchanged
         end
@@ -330,21 +328,19 @@ module Hive
       # that can change a workflow pin. They use content-aware signatures so
       # same-size replacements with preserved/coarse mtimes still invalidate
       # the ordinary projection on the next poll.
-      def policy_fingerprint_for(snapshot, archived_cache:)
+      def policy_fingerprint_for(snapshot)
         content_paths = [ registry_config_path ]
         snapshot.projects.each do |project|
           content_paths.concat(project_policy_paths(project))
         end
         task_meta_paths = snapshot.rows.map { |row| task_meta_path(row.folder) }
-        archived_cache.fetch(:rows_by_path, {}).each_value do |rows|
-          rows.each { |row| task_meta_paths << task_meta_path(row["folder"]) }
-        end
         fingerprint = content_paths.compact.uniq.sort.to_h do |path|
           [ path, safe_content_signature(path, always_digest: true) ]
         end
         task_meta_paths.compact.uniq.sort.each do |path|
           fingerprint[path] = safe_content_signature(path)
         end
+        @file_signature_cache.delete_if { |path, _entry| !fingerprint.key?(path) }
         fingerprint
       end
 
@@ -371,7 +367,10 @@ module Hive
       end
 
       def safe_content_signature(path, always_digest: false)
-        return :absent unless path && File.exist?(path)
+        unless path && File.exist?(path)
+          @file_signature_cache.delete(path) if path
+          return :absent
+        end
 
         stat = File.stat(path)
         identity = [
@@ -445,9 +444,7 @@ module Hive
         @current_seen_at = Time.now
         @last_full_parse_at = @current_seen_at
         @mtime_fingerprint = mtime_fingerprint_for(snapshot)
-        @policy_fingerprint = policy_fingerprint_for(
-          snapshot, archived_cache: archived_cache
-        )
+        @policy_fingerprint = policy_fingerprint_for(snapshot)
         @snapshot_archived_cache = archived_cache
         @last_error = nil
       end

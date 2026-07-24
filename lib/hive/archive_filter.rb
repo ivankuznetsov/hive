@@ -18,11 +18,11 @@ module Hive
     def project(rows, now: Time.now.utc, backfiller: Hive::CompletedAtBackfiller.new)
       rows = Array(rows)
       archive_rows = rows.select { |row| archive_row?(row) }
-      archived_rows = archive_rows.select { |row| archived_action?(row) }
+      archived_rows = archive_rows.select { |row| archive_member?(row) }
       clocks = completion_clocks(archived_rows, backfiller: backfiller)
       hidden_rows = archived_rows.select do |row|
         hide?(
-          action: row[:action_key],
+          action: "archived",
           retention: row.dig(:task)&.workflow&.archive_visibility_retention_days,
           completed_at: clocks[row.dig(:task)&.folder],
           now: now
@@ -38,7 +38,11 @@ module Hive
     end
 
     def archive_row?(row)
-      archived_action?(row) || invalid_terminal_row?(row)
+      archive_member?(row) || invalid_terminal_row?(row)
+    end
+
+    def archive_member?(row)
+      row[:archive_member] == true || archived_action?(row)
     end
 
     def archived_action?(row)
@@ -74,7 +78,8 @@ module Hive
     # synthetic Error row in the dedicated archive so the defect is observable;
     # it is never eligible for retention hiding or the hidden count.
     def invalid_terminal_row?(row)
-      row[:invalid] == true && Hive::Workflows.all_terminal_stage_dirs.include?(row[:stage])
+      row[:invalid] == true &&
+        (row[:archive_member] == true || Hive::Workflows.all_terminal_stage_dirs.include?(row[:stage]))
     end
   end
 end

@@ -58,6 +58,33 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_inert_terminal_entry_preserves_legacy_first_completion_time
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "1-work", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 1, stage_name: "work", workflow: terminal_workflow
+      )
+      first_completion = Time.utc(2026, 7, 20, 9, 0, 0)
+      cmd = command(clock: -> { Time.utc(2026, 7, 24, 10, 0, 0) })
+      cmd.define_singleton_method(:record_hive_commit) { |*| nil }
+      observed_task = nil
+
+      with_replaced_singleton_method(Hive::CompletionTime, :from_history, ->(task) {
+        observed_task = task
+        first_completion
+      }) do
+        folder, = cmd.send(:perform_move_and_commit, current, "2-done")
+
+        assert_same current, observed_task
+        assert_equal "2026-07-20T09:00:00Z", Hive::TaskMeta.read(folder)[:completed_at]
+      end
+    end
+  end
+
   def test_terminal_commit_failure_rolls_back_move_and_completed_at
     with_tmp_dir do |root|
       state = File.join(root, ".hive-state")

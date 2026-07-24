@@ -3,7 +3,7 @@ title: Hive::Task
 type: module
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_counter.rb
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-24
 tags: [model, task, parsing, task-id, dependencies, workflows]
 ---
 
@@ -24,7 +24,12 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
    Managed task resolution keeps the same strict exception; it converts other
    managed configuration failures to `InvalidTaskPath` but never converts an
    unsupported project root key to exit 64.
-5. Validate the parsed stage name and numeric prefix against the selected descriptor. A descriptor without the stage, or a directory like `3-brainstorm` when the descriptor says `2-brainstorm`, raises `InvalidTaskPath`.
+5. Validate the parsed stage name and numeric prefix against the selected
+   descriptor. A policy-only repin may retain an existing directory when that
+   directory is the exact terminal stage of another registered descriptor.
+   In that case `#workflow` remains the newly selected policy source and
+   `#action_workflow` supplies state-file/action/archive classification from
+   the folder-owning descriptor. Other mismatches raise `InvalidTaskPath`.
 
 `@hive_state_path` is the *project-rooted* hive-state path: `<project_root>/<state_dir_basename>` — always `<project_root>/.hive-state` in MVP.
 
@@ -34,8 +39,9 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
 |--------|---------|
 | `#project_name` | `File.basename(@project_root)` |
 | `#workflow` | Selected `Hive::Workflow` descriptor |
+| `#action_workflow` | Descriptor that owns the current folder for state/action classification; normally identical to `#workflow` |
 | `#stage_names` | Stage names from `#workflow`, not necessarily `Task::STAGE_NAMES` |
-| `#state_file` | `File.join(folder, workflow.state_file_for(stage_name))` |
+| `#state_file` | `File.join(folder, action_workflow.state_file_for(stage_name))` |
 | `#reviews_dir` | `File.join(folder, "reviews")` |
 | `#worktree_yml_path` | `File.join(folder, "worktree.yml")` |
 | `#meta_yml_path` | `Hive::TaskMeta.path(folder)` |

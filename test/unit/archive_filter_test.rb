@@ -94,6 +94,20 @@ class ArchiveFilterTest < Minitest::Test
     assert_equal 1, projection.hidden_count
   end
 
+  def test_archive_membership_survives_presentation_action_errors
+    now = Time.utc(2026, 6, 4, 12, 0, 0)
+    archived = row(
+      "/archived", action: Hive::Schemas::TaskActionKind::ADMISSION_ERROR,
+      retention: 3, completed_at: now - (10 * 86_400)
+    ).merge(archive_member: true)
+
+    projection = Hive::ArchiveFilter.project([ archived ], now: now)
+
+    assert_equal [ archived ], projection.archive_rows
+    assert_equal [ archived ], projection.hidden_rows
+    assert_empty projection.ordinary_rows
+  end
+
   private
 
   def workflow_with_retention(retention)

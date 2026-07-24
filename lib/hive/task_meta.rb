@@ -325,7 +325,10 @@ module Hive
 
     def with_rewrite_lock(task_folder)
       FileUtils.mkdir_p(task_folder)
-      guard_path = File.join(task_folder, ".#{FILENAME}.tmp.guard")
+      # Reuse the task-lock tempfile namespace already ignored by every
+      # hive/state worktree. A persistent stable inode is required for flock
+      # correctness, but it must never enter task-wide state commits.
+      guard_path = File.join(task_folder, ".lock.tmp.meta-guard")
       File.open(guard_path, File::RDWR | File::CREAT, 0o644) do |guard|
         guard.flock(File::LOCK_EX)
         yield

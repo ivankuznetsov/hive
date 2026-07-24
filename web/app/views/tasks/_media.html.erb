@@ -16,9 +16,11 @@
   <section class="demo" aria-labelledby="demo-heading">
     <h2 id="demo-heading">Demo</h2>
     <div class="demo-gallery">
-      <% media["items"].each do |item| %>
-        <figure class="demo-item">
-          <% media_url = task_media_path(project.name, task["slug"], item["file"]) %>
+        <% media["items"].each do |item| %>
+          <figure class="demo-item">
+          <% media_url = task_media_path(
+               project.name, task["slug"], item["file"], source: @task_source
+             ) %>
           <% if item["type"] == "video" %>
             <video src="<%= media_url %>"
                    controls

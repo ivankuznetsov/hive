@@ -3,6 +3,7 @@ require "hive/completed_at_backfiller"
 
 class CompletedAtBackfillerTest < Minitest::Test
   include HiveTestHelper
+  BackfillTask = Data.define(:folder, :hive_state_path)
 
   def test_backfills_once_from_terminal_transition_history
     with_archived_task do |task, state|
@@ -31,6 +32,56 @@ class CompletedAtBackfillerTest < Minitest::Test
       refute Hive::TaskMeta.read(task.folder).key?(:completed_at)
       assert_includes err, "keeping task visible"
     end
+  end
+
+  def test_task_deleted_while_waiting_for_commit_lock_is_not_recreated
+    with_archived_task do |task, _state|
+      observed_timeout = nil
+      replacement = lambda do |_path, timeout:, &block|
+        observed_timeout = timeout
+        FileUtils.rm_rf(task.folder)
+        block.call
+      end
+
+      with_replaced_singleton_method(Hive::Lock, :with_commit_lock, replacement) do
+        assert_nil Hive::CompletedAtBackfiller.new.completed_at_for(task)
+      end
+
+      assert_operator observed_timeout, :<=, Hive::CompletedAtBackfiller::REFRESH_DEADLINE_SECONDS
+      refute File.exist?(task.folder)
+    end
+  end
+
+  def test_call_stops_attempting_tasks_at_the_refresh_deadline
+    now = 0.0
+    tasks = 5.times.map { |index| BackfillTask.new("/task-#{index}", "/state") }
+    backfiller = Hive::CompletedAtBackfiller.new(
+      batch_size: 5, deadline_seconds: 1.0, monotonic_clock: -> { now }
+    )
+    attempted = []
+    backfiller.define_singleton_method(:completed_at_for) do |task, deadline:|
+      attempted << [ task.folder, deadline ]
+      now += 0.6
+      nil
+    end
+
+    backfiller.call(tasks)
+
+    assert_equal %w[/task-0 /task-1], attempted.map(&:first)
+    assert attempted.all? { |_folder, deadline| deadline == 1.0 }
+  end
+
+  def test_rotating_batches_advance_past_persistent_failures
+    tasks = 3.times.map { |index| BackfillTask.new("/task-#{index}", "/state") }
+    Hive::CompletedAtBackfiller.reset_progress!
+
+    first = Hive::CompletedAtBackfiller.rotating_batch(tasks, 2)
+    second = Hive::CompletedAtBackfiller.rotating_batch(tasks, 2)
+
+    assert_equal %w[/task-0 /task-1], first.map(&:folder)
+    assert_equal %w[/task-2 /task-0], second.map(&:folder)
+  ensure
+    Hive::CompletedAtBackfiller.reset_progress!
   end
 
   private

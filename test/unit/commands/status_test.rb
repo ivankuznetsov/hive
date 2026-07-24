@@ -1974,6 +1974,184 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_malformed_descriptor_unique_terminal_directory_stays_visible_in_archive
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      workflows = File.join(hive_state, "workflows")
+      folder = File.join(hive_state, "stages", "2-finished", "broken-custom-260610-abcd")
+      FileUtils.mkdir_p([ workflows, folder ])
+      File.write(File.join(workflows, "broken.yml"), "id: broken\nstages: [\n")
+      File.write(File.join(folder, "finished.md"), "<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(
+        folder, id: 8, slug: File.basename(folder), display_name: nil,
+        workflow: "broken", completed_at: Time.utc(2026, 1, 1)
+      )
+      project = status_project(project_root, hive_state)
+
+      ordinary = Hive::Commands::Status.new.json_payload([ project ]).fetch("projects").first
+      archived = Hive::Commands::Status.new(archive: true).json_payload([ project ])
+        .fetch("projects").first
+
+      assert_equal [ File.basename(folder) ], ordinary.fetch("tasks").map { |row| row["slug"] }
+      assert_includes %w[error admission_error], ordinary.dig("tasks", 0, "action")
+      assert_equal [ File.basename(folder) ], archived.fetch("tasks").map { |row| row["slug"] }
+    ensure
+      Hive::Workflows::Project.reset!
+    end
+  end
+
+  def test_deleted_default_descriptor_unique_terminal_directory_stays_visible_in_archive
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(hive_state, "stages", "2-finished", "deleted-default-260610-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(hive_state, "config.yml"), "default_workflow: deleted\n")
+      File.write(File.join(folder, "finished.md"), "<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(
+        folder, id: 9, slug: File.basename(folder), display_name: nil,
+        completed_at: Time.utc(2026, 1, 1)
+      )
+      project = status_project(project_root, hive_state)
+
+      ordinary = Hive::Commands::Status.new.json_payload([ project ]).fetch("projects").first
+      archived = Hive::Commands::Status.new(archive: true).json_payload([ project ])
+        .fetch("projects").first
+
+      assert_equal [ File.basename(folder) ], ordinary.fetch("tasks").map { |row| row["slug"] }
+      assert_includes %w[error admission_error], ordinary.dig("tasks", 0, "action")
+      assert_equal [ File.basename(folder) ], archived.fetch("tasks").map { |row| row["slug"] }
+    ensure
+      Hive::Workflows::Project.reset!
+    end
+  end
+
+  def test_policy_repin_with_a_different_layout_preserves_archive_membership
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      workflows = File.join(hive_state, "workflows")
+      FileUtils.mkdir_p(workflows)
+      File.write(File.join(workflows, "original.yml"), <<~YAML)
+        id: original
+        archive_visibility_retention_days: 3
+        stages:
+          - name: work
+            kind: terminal
+            state_file: work.md
+          - name: done
+            kind: terminal
+            state_file: done.md
+      YAML
+      File.write(File.join(workflows, "repinned.yml"), <<~YAML)
+        id: repinned
+        archive_visibility_retention_days: never
+        stages:
+          - name: draft
+            kind: terminal
+            state_file: draft.md
+          - name: review
+            kind: terminal
+            state_file: review.md
+          - name: published
+            kind: terminal
+            state_file: published.md
+      YAML
+      folder = File.join(hive_state, "stages", "2-done", "repinned-archive-260610-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "done.md"), "<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(
+        folder, id: 9, slug: File.basename(folder), display_name: nil,
+        workflow: "repinned", completed_at: Time.utc(2026, 1, 1)
+      )
+      project = status_project(project_root, hive_state)
+
+      ordinary = Hive::Commands::Status.new.json_payload([ project ]).fetch("projects").first
+      archived = Hive::Commands::Status.new(archive: true).json_payload([ project ])
+        .fetch("projects").first
+
+      row = ordinary.fetch("tasks").fetch(0)
+      assert_equal "repinned", row.fetch("workflow")
+      assert_equal "archived", row.fetch("action")
+      assert_equal [ row.fetch("slug") ], archived.fetch("tasks").map { |entry| entry["slug"] }
+    ensure
+      Hive::Workflows::Project.reset!
+    end
+  end
+
+  def test_status_scan_freezes_one_descriptor_generation_until_next_refresh
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      workflows = File.join(hive_state, "workflows")
+      FileUtils.mkdir_p(workflows)
+      descriptor = File.join(workflows, "retained.yml")
+      write_retention_workflow(workflows, "retained", 3)
+      now = Time.utc(2026, 7, 24, 12, 0, 0)
+      2.times do |index|
+        write_completed_status_task(
+          hive_state, "2-done", "generation-#{index}-260724-abcd",
+          state_file: "done.md", completed_at: now - (4 * 86_400), workflow: "retained"
+        )
+      end
+      project = status_project(project_root, hive_state)
+      admission = Hive::DependencySnapshot.admission_context([ project ])
+      original_new = Hive::Task.method(:new)
+      calls = 0
+      replacement = lambda do |folder, **kwargs|
+        task = original_new.call(folder, **kwargs)
+        calls += 1
+        File.write(descriptor, File.read(descriptor).sub(/retention_days: 3/, "retention_days: never")) if calls == 1
+        task
+      end
+
+      first = with_replaced_singleton_method(Hive::Task, :new, replacement) do
+        Hive::Commands::Status.new.json_payload(
+          [ project ], admission_context: admission, now: now
+        ).fetch("projects").first
+      end
+      second = Hive::Commands::Status.new.json_payload(
+        [ project ], admission_context: admission, now: now
+      ).fetch("projects").first
+
+      assert_empty first.fetch("tasks")
+      assert_equal 2, first.fetch("hidden_archived_task_count")
+      assert_equal 2, second.fetch("tasks").size
+      assert_equal 0, second.fetch("hidden_archived_task_count")
+    ensure
+      Hive::Workflows::Project.reset!
+    end
+  end
+
+  def test_project_default_cache_detects_same_size_preserved_mtime_rewrite
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      workflows = File.join(hive_state, "workflows")
+      FileUtils.mkdir_p(workflows)
+      %w[alpha bravo].each do |id|
+        File.write(File.join(workflows, "#{id}.yml"), <<~YAML)
+          id: #{id}
+          stages:
+            - name: done
+              kind: terminal
+              state_file: done.md
+        YAML
+      end
+      config = File.join(hive_state, "config.yml")
+      File.write(config, "default_workflow: alpha\n")
+      original_mtime = File.mtime(config)
+      folder = File.join(hive_state, "stages", "1-done", "default-cache-260724-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "done.md"), "<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(folder, id: 10, slug: File.basename(folder), display_name: nil)
+
+      assert_equal :alpha, Hive::Task.new(folder).workflow.id
+      File.write(config, "default_workflow: bravo\n")
+      File.utime(original_mtime, original_mtime, config)
+
+      assert_equal :bravo, Hive::Task.new(folder).workflow.id
+    ensure
+      Hive::Workflows::Project.reset!
+    end
+  end
+
   def test_archive_mode_empty_project_prints_friendly_message
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

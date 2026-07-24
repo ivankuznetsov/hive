@@ -97,7 +97,9 @@
       <%# The id is round-keyed for tests/inspection; typing survival across
         morphs is the answers controller's job (see its header for why
         data-turbo-permanent must NOT be used here). %>
-    <%= form_with url: task_answers_path(@project.name, @task["slug"]),
+    <%= form_with url: task_answers_path(
+          @project.name, @task["slug"], source: @task_source
+        ),
           id: "qa-form-#{@questions.map(&:n).join("-")}" do |f| %>
         <% @questions.each do |question| %>
           <div class="qa-item">
@@ -119,7 +121,9 @@
         arbitrary stages, and without an open question it always fails. %>
     <details class="intervene">
       <summary class="muted">Reply free-form instead (fills Q<%= @questions.first.n %>)</summary>
-      <%= form_with url: task_intervene_path(@project.name, @task["slug"]),
+      <%= form_with url: task_intervene_path(
+            @project.name, @task["slug"], source: @task_source
+          ),
             id: "intervene-form" do |f| %>
         <%= f.text_area :message, required: true, disabled: !@status_fresh,
               placeholder: "Written verbatim as the answer to Q#{@questions.first.n}…" %>

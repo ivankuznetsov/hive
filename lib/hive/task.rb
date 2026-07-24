@@ -1,4 +1,5 @@
 require "yaml"
+require "digest"
 require "hive/config"
 require "hive/stages"
 require "hive/task_meta"
@@ -9,6 +10,8 @@ require "hive/workflow_package/managed_store"
 
 module Hive
   class Task
+    WorkflowGeneration = Data.define(:config, :default_workflow)
+
     # Coding-default only: pinned to Registry.default. Prefer the
     # descriptor-driven Task#stage_names instance accessor for workflow-aware
     # callers — these constants diverge for non-coding workflows (full consumer
@@ -31,10 +34,17 @@ module Hive
 
     class << self
       attr_reader :project_default_workflow_cache
+
+      def capture_workflow_generation(project_root, config: Hive::Config.load(project_root))
+        config ||= Hive::Config::DEFAULTS
+        configured = config["default_workflow"].to_s.strip
+        configured = Hive::Config::DEFAULTS["default_workflow"] if configured.empty?
+        WorkflowGeneration.new(config: config, default_workflow: configured)
+      end
     end
 
     attr_reader :folder, :project_root, :hive_state_path, :stage_index,
-                :stage_name, :slug, :state_dir_basename, :workflow
+                :stage_name, :slug, :state_dir_basename, :workflow, :action_workflow
 
     def workflow_commit = meta[:workflow_commit]
     def workflow_manifest_digest = meta[:workflow_manifest_digest]
@@ -90,7 +100,7 @@ module Hive
       preamble ? "#{preamble}\n\n#{body}" : body
     end
 
-    def initialize(folder)
+    def initialize(folder, workflow_generation: nil)
       folder = File.expand_path(folder)
       m = PATH_RE.match(folder)
       raise InvalidTaskPath, "task path must match <project>/.hive-state/stages/<N>-<name>/<slug>/: #{folder}" unless m
@@ -102,8 +112,9 @@ module Hive
       @stage_index = m[:stage_idx].to_i
       @stage_name = m[:stage_name]
       @slug = m[:slug]
+      @workflow_generation = workflow_generation
       @workflow = resolve_workflow
-      validate_workflow_stage!(m[:stage_dir], @workflow)
+      @action_workflow = validate_workflow_stage!(m[:stage_dir], @workflow)
     end
 
     def project_name
@@ -111,7 +122,7 @@ module Hive
     end
 
     def state_file
-      File.join(@folder, workflow.state_file_for(@stage_name))
+      File.join(@folder, action_workflow.state_file_for(@stage_name))
     end
 
     def stage_names
@@ -206,7 +217,7 @@ module Hive
           return store.workflow(
             meta[:workflow], meta[:workflow_commit], meta[:workflow_manifest_digest],
             configuration_digest: meta[:workflow_configuration_digest],
-            cfg: Hive::Config.load(@project_root)
+            cfg: @workflow_generation&.config || Hive::Config.load(@project_root)
           )
         rescue Hive::UnsupportedProjectConfigError
           raise
@@ -216,10 +227,14 @@ module Hive
       end
 
       Hive::Workflows::Project.synchronize do
-        Hive::Workflows::Project.load!(@project_root)
+        Hive::Workflows::Project.load!(@project_root) unless @workflow_generation
         selector = meta[:workflow]
         # TaskMeta.read normalizes blank → nil, so a missing/blank selector is
         # always nil here (no .empty? branch needed).
+        if selector.nil? && @workflow_generation
+          selector = @workflow_generation.default_workflow
+          warn_if_unregistered_project_default(selector)
+        end
         selector ||= project_default_workflow
         # A per-task `workflow:` pin to a descriptor that was SKIPPED at load
         # (bad YAML, invalid stage, id collision) must surface its REAL
@@ -236,11 +251,12 @@ module Hive
 
     def project_default_workflow
       config_path = File.join(@hive_state_path, "config.yml")
-      # Stamp on (mtime, size) so a coarse-mtime filesystem can't serve a stale
-      # default after a same-second rewrite that changed the file's length.
+      # The digest closes the same-size + preserved/coarse-mtime rewrite window.
+      # Status captures this once per refresh, so ordinary scans do not pay this
+      # read once per task.
       stamp = begin
         stat = File.stat(config_path)
-        [ stat.mtime, stat.size ]
+        [ stat.mtime, stat.size, Digest::SHA256.file(config_path).hexdigest ]
       rescue SystemCallError
         nil
       end
@@ -287,15 +303,25 @@ module Hive
     # site, not an implicit ctor-ordering invariant.
     def validate_workflow_stage!(stage_dir, workflow)
       stage = workflow.stage_named(@stage_name)
-      unless stage
-        raise InvalidTaskPath,
-              "unknown stage name: #{stage_dir} for workflow #{workflow.id.inspect}; " \
-              "run `hive migrate` if this task uses pre-open-pr stage names"
+      return workflow if stage&.dir == stage_dir
+
+      # A workflow repin changes policy resolution, not the task's existing
+      # filesystem/archive membership. Retain the descriptor whose exact
+      # terminal directory owns the folder solely for action/state-file
+      # classification; `workflow` remains the newly pinned policy source.
+      membership_workflow = Hive::Workflows::Registry.all.find do |candidate|
+        candidate.stages.last.dir == stage_dir
       end
-      return if stage.dir == stage_dir
+      return membership_workflow if membership_workflow
+
+      if stage
+        raise InvalidTaskPath,
+              "stage directory #{stage_dir} does not match workflow #{workflow.id.inspect}; expected #{stage.dir}"
+      end
 
       raise InvalidTaskPath,
-            "stage directory #{stage_dir} does not match workflow #{workflow.id.inspect}; expected #{stage.dir}"
+            "unknown stage name: #{stage_dir} for workflow #{workflow.id.inspect}; " \
+            "run `hive migrate` if this task uses pre-open-pr stage names"
     end
   end
 end

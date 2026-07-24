@@ -209,6 +209,17 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_rewrite_guard_uses_the_existing_ignored_task_lock_namespace
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo")
+      Hive::TaskMeta.update_display_name(dir, "Updated")
+
+      assert File.exist?(File.join(dir, ".lock.tmp.meta-guard"))
+      refute File.exist?(File.join(dir, ".meta.yml.tmp.guard"))
+      assert_includes Hive::GitOps::HIVE_STATE_GITIGNORE, "stages/*/*/.lock.tmp.*"
+    end
+  end
+
   def test_write_and_read_round_trip_with_dependency
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: "base-task")

@@ -146,7 +146,11 @@ directories, each visible row's state file and `.lock`, and the project's
 descriptor creation, deletion, rename, and same-size replacement even when
 mtime is preserved. Policy/default/pin changes therefore publish a complete new
 ordinary projection and hidden count on the next refresh; no last-good policy
-is reused for a malformed currently selected workflow. A time-bounded fallback
+is reused for a malformed currently selected workflow. The one-second idle
+fingerprint covers only ordinary visible rows and policy inputs, not every row
+in the permanent archive cache, and evicts signatures for paths that moved or
+disappeared. Idle work and cache size therefore remain independent of archive
+history. A time-bounded fallback
 (`LIVENESS_REPARSE_FALLBACK_SECONDS`, 3s) forces a full re-parse even
 when the fingerprint is unchanged, so liveness-derived fields
 (`live_task_lock`, `claude_pid_alive`) that flip without touching any

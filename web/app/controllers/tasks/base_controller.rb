@@ -19,11 +19,19 @@ class Tasks::BaseController < ApplicationController
     @status_last_success_at = page_snapshot&.last_success_at
     @status_error = page_snapshot&.error
     @status_fresh = @status_availability == "fresh"
-    result = Hive::Web::TaskTargetResolver.new(
-      project: @project.attributes,
-      slug: params[:slug],
-      cached_payload: page_snapshot&.payload
-    ).call
-    @task = Task.new(project: @project, attributes: result.attributes)
+    @task_source = "archive" if params[:source] == "archive"
+    if @task_source
+      @task = Task.find!(
+        project: @project, slug: params[:slug],
+        snapshot: StatusBroadcaster.archive_snapshot
+      )
+    else
+      result = Hive::Web::TaskTargetResolver.new(
+        project: @project.attributes,
+        slug: params[:slug],
+        cached_payload: page_snapshot&.payload
+      ).call
+      @task = Task.new(project: @project, attributes: result.attributes)
+    end
   end
 end

@@ -201,6 +201,100 @@ class CommandsRunTest < Minitest::Test
     end
   end
 
+  def test_active_terminal_commit_failure_restores_marker_deliverable_and_new_files
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      snapshot = Hive::Commands::Run::TerminalStateSnapshot.capture(folder)
+      File.write(state_file, "# Final\n<!-- COMPLETE -->\n")
+      File.write(File.join(folder, "generated.txt"), "runner output\n")
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        assert_raises(Hive::GitError) do
+          command.send(
+            :commit_after, t, { commit: "complete" }, config: {},
+            terminal_snapshot: snapshot
+          )
+        end
+      end
+
+      assert_equal "# Before\n", File.read(state_file)
+      refute File.exist?(File.join(folder, "generated.txt"))
+      refute Hive::TaskMeta.read(folder).key?(:completed_at)
+    ensure
+      snapshot&.close
+    end
+  end
+
+  def test_active_terminal_interrupt_restores_marker_deliverable_and_new_files
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      snapshot = Hive::Commands::Run::TerminalStateSnapshot.capture(folder)
+      File.write(state_file, "# Interrupted\n<!-- COMPLETE -->\n")
+      File.write(File.join(folder, "partial.txt"), "partial runner output\n")
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      staged = []
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:run_git!) { |*args| staged << args }
+
+      assert_raises(Interrupt) do
+        command.send(:rollback_terminal_state!, t, snapshot, fake_ops, Interrupt.new)
+      end
+
+      assert_equal "# Before\n", File.read(state_file)
+      refute File.exist?(File.join(folder, "partial.txt"))
+      assert_equal "stages/1-publish/some-slug", staged.dig(0, -1)
+    ensure
+      snapshot&.close
+    end
+  end
+
+  def test_legacy_terminal_completion_uses_discovered_time_before_current_clock
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Final\n<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| nil }
+      discovered = Time.utc(2026, 7, 1, 8, 0, 0)
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        command(clock: -> { Time.utc(2026, 7, 24) }).send(
+          :commit_after, t, { commit: "complete" }, config: {},
+          completion_time: discovered
+        )
+      end
+
+      assert_equal discovered.iso8601, Hive::TaskMeta.read(folder)[:completed_at]
+    end
+  end
+
   def test_quiet_report_still_raises_for_error_markers
     with_tmp_dir do |dir|
       t = task(folder: dir)

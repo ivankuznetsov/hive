@@ -819,7 +819,8 @@ module Hive
     end
 
     def task_workflow
-      workflow = task.respond_to?(:workflow) ? task.workflow : nil
+      workflow = task.respond_to?(:action_workflow) ? task.action_workflow : nil
+      workflow ||= task.respond_to?(:workflow) ? task.workflow : nil
       workflow || Hive::Workflows::Registry.default
     end
   end

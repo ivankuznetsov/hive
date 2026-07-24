@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-22
+updated: 2026-07-23
 tags: [command, web, rails, turbo, hivebox-container]
 ---
 
@@ -103,8 +103,9 @@ resolved settings so foreground and service-manager launches agree.
 
 ## Access and GitHub connection
 
-Hivebox uses an owner-only GitHub **device flow** (RFC 8628, see [[decisions]]
-ADR-036). An ownerless box is CLAIMABLE: the first successful device-flow login writes
+Owner-gated access uses a GitHub **device flow** (RFC 8628, see [[decisions]]
+ADR-036). This includes Hivebox and native Hive web reached through any
+non-loopback hostname. An ownerless instance is CLAIMABLE: the first successful device-flow login writes
 itself into `web.github.owner` (config-lock-guarded so concurrent first
 logins race safely; the claim is logged loudly) — the install path has no
 config-editing step.
@@ -130,30 +131,38 @@ and `web.local_loopback` is not `false`, foreground launches export
 explicit non-loopback service bind always persists `0`, even when an inherited
 canonical or legacy environment setting enables local loopback mode, so service
 and foreground launches share the same bind safety boundary.
-Rails checks both the actual socket peer in `REMOTE_ADDR` and the authorized
-normalized Host before skipping login; it deliberately ignores proxy-expanded
-`remote_ip`, and an attacker-controlled Host is rejected even over a loopback
-socket. A local reverse proxy such as Tailscale Serve therefore retains local
-access when it connects over loopback. The proxy is part of the security
-boundary: restrict and authenticate clients, because an unrestricted forwarder
-exposes the no-auth local UI. That connection-authenticated operator sees the
+Rails checks both the actual socket peer in `REMOTE_ADDR` and the normalized
+Host before skipping login; both must be literal loopback values.
+It deliberately ignores proxy-expanded `remote_ip` and `X-Forwarded-Host`,
+classifying only the literal `HTTP_HOST` authority. Rails accepts every other
+syntactically valid hostname so arbitrary VPN, tunnel, and reverse-proxy names
+need no Hive allowlist entry, but those requests redirect through the GitHub
+owner login even when the proxy's socket peer is loopback. Proxies should
+preserve the incoming Host. A proxy or TCP forwarder that lets an untrusted
+client send `Host: localhost` enters the local trust boundary and must
+authenticate or restrict clients. If `web.github.owner` is empty, the first
+successful owner-gated login claims the instance; use the intended owner before
+sharing the URL.
+A locally authenticated operator sees the
 complete primary navigation under the `hive` product identity and is labelled
 `Local`; GitHub-dependent repository browsing stays behind an explicit
 **Connect GitHub** action. Navigation state is grouped by the first segment of
 Rails `controller_path`, so namespaced task, workflow, and Telegram resource
 controllers retain their parent section's active link when they render a
-complete page. Completing the optional GitHub connection stores the login and
-token in the browser session but never claims or changes `web.github.owner`.
+complete page. Completing the optional GitHub connection from verified
+literal-loopback access stores the login and token in the browser session but
+never claims or changes `web.github.owner`. The same native service reached
+through a non-loopback Host presents owner sign-in instead, and an ownerless
+instance is claimable.
 Outside loopback mode, native installs use the `Hive web` product identity;
 the container-only `HIVEBOX_PRECOMPILED_ASSETS=1` marker preserves the
 `hivebox` identity for the Docker distribution.
 Non-loopback binds require either `--unsafe` or a configured `web.github.owner`;
 when an owner gate authorizes a non-loopback bind, the CLI warns that
 `web.github.owner` is the only login gate, and `0.0.0.0` without an HTTPS
-origin also prints the Host-header/reverse-proxy warning.
-The production loopback allowlist is active only with the local bypass;
-deliberately non-loopback owner-gated launches accept LAN hosts and machine IPs
-so the login gate can run.
+origin also prints the TLS/reverse-proxy warning.
+Production accepts arbitrary Host values in both modes so the controller-level
+login gate can run; Host never grants the no-auth bypass unless it is loopback.
 
 ## Surfaces
 
@@ -550,7 +559,7 @@ with the freshly loaded row, refuses stale forms, and wraps queue-writer
 instead of surfacing an opaque 500. Idea creation likewise enters
 `Project#add_idea!`, and `POST /daemon/repair` is the conventional create action
 on `DaemonRepairsController`, backed by `Daemon#repair!`. CSRF is Rails-default (per-form
-tokens). In Hivebox mode every route except `/health`, `/up`, `/login`,
+tokens). Outside verified local-loopback access every route except `/health`, `/up`, `/login`,
 `/logout`, `/auth/github*`, and the dev/test-only `/dev_login` is behind the
 owner gate; a verified local loopback request bypasses that gate for the
 complete local UI.
@@ -566,9 +575,10 @@ against a sandboxed `HIVE_HOME` (the suite NEVER touches the developer's real
 config — `test_helper.rb` sets the sandbox before the app loads). It pins that
 a loopback-authenticated local operator gets the full navigation and an
 explicit GitHub connection action. It also covers Tailscale-style forwarded
-client addresses over a loopback socket, local `hive` branding, optional
-GitHub connection without owner claim, and local logout returning to the
-usable dashboard. Managed-bundle tests pin staged dependency/asset preparation,
+client addresses over a loopback socket, arbitrary proxy hostnames reaching
+the GitHub login instead of a Host-authorization 403, mutation rejection before
+side effects, local `hive` branding, optional GitHub connection without owner
+claim, and local logout returning to the usable dashboard. Managed-bundle tests pin staged dependency/asset preparation,
 same-version missing-asset repair, and preservation of the previous bundle on
 precompile failure. Repository setup always invokes the CLI init adapter with
 non-TTY provisioning input. It also pins that

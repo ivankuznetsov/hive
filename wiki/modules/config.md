@@ -415,10 +415,11 @@ Global web settings are validated separately for [[commands/web]]:
 `web.github` must be a hash, optional `web.github.owner` and
 `web.github.client_id` must be non-empty strings when set, and
 `web.session_secret_file` must be a non-empty string when set. A blank/missing
-`web.github.owner` is valid and means the first successful Hivebox GitHub
-device-flow login claims the box by writing that owner under the global config
-lock; a local Hive Web GitHub connection never claims it. Pre-setting the owner
-keeps the older pinned-owner gate. GitHub sign-in
+`web.github.owner` is valid and means the first successful owner-gated GitHub
+device-flow login claims the instance by writing that owner under the global
+config lock. This includes native Hive web reached through a non-loopback Host;
+only the optional connection from verified literal-loopback access does not
+claim. Pre-setting the owner keeps the older pinned-owner gate. GitHub sign-in
 uses the OAuth device flow (see [[decisions]] ADR-036), so no client secret
 exists anywhere; `web.github.client_id` defaults to the shared Hive web OAuth
 app — public by design, since device flow is a public-client grant.
@@ -426,12 +427,15 @@ app — public by design, since device flow is a public-client grant.
 binds `localhost`, `::1`, or `127.0.0.0/8`, the CLI exports
 `HIVE_WEB_LOCAL_LOOPBACK=1` and Rails skips GitHub login only for requests whose
 actual socket peer (`REMOTE_ADDR`, not proxy-expanded `remote_ip`) is also
-loopback and whose normalized Host is authorized. This preserves local mode
-through Tailscale Serve and similar localhost reverse proxies without trusting
-arbitrary forwarded headers. The proxy must authenticate and restrict its
-clients because Rails trusts its loopback socket connection; use `false` when
-that boundary cannot be guaranteed. Setting it to `false` forces the normal
-GitHub owner gate even on a loopback bind.
+loopback and whose normalized Host is a literal loopback address. Any other
+hostname is accepted without configuration but uses the GitHub owner gate,
+even through a localhost reverse proxy. Proxies should preserve the incoming
+Host; the trust check ignores `X-Forwarded-Host` and parses the literal
+`HTTP_HOST` authority, including bracketed IPv6. A proxy or TCP forwarder that
+lets an untrusted client send `Host: localhost` becomes part of the local trust
+boundary and must authenticate or restrict clients. Setting
+`web.local_loopback` to `false` forces the GitHub owner gate even on literal
+loopback.
 
 Shared Rails environment input is resolved centrally by
 `Hive::Web::Environment`. The canonical keys are `HIVE_WEB_APP_DIR`,

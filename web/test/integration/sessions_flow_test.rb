@@ -166,7 +166,7 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
 
   test "optional GitHub connection from local mode does not claim ownership" do
     ENV["HIVE_WEB_LOCAL_LOOPBACK"] = "1"
-    ENV["HIVE_WEB_ORIGIN"] = "http://www.example.com"
+    host! "localhost"
     configure_owner!(owner: "")
     install_auth(login: "local-user")
     begin_device_flow
@@ -178,6 +178,40 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     assert_nil config.dig("web", "github", "owner"),
                "connecting GitHub locally must not change future access policy"
     assert_equal "gho_test", session[:github_token]
+  end
+
+  test "GitHub login through a proxy hostname claims an owner in local service mode" do
+    ENV["HIVE_WEB_LOCAL_LOOPBACK"] = "1"
+    host! "hivebox.any-tailnet-name.ts.net"
+    configure_owner!(owner: "")
+    install_auth(login: "remote-owner", token_body: JSON.generate("error" => "authorization_pending"))
+
+    get "/login"
+    assert_response :success
+    assert_select "title", text: "hive — sign in"
+    assert_select "h1", text: "hive"
+    assert_match "first GitHub sign-in becomes its owner", response.body
+    refute_match(/optional/i, response.body)
+
+    begin_device_flow
+    get "/auth/github/wait"
+    assert_response :success
+    assert_select "h1", text: "Finish signing in"
+    refute_match(/optional/i, response.body)
+
+    install_auth(login: "remote-owner")
+    get "/auth/github/wait"
+
+    assert_redirected_to "/"
+    config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
+    assert_equal "remote-owner", config.dig("web", "github", "owner"),
+                 "a non-loopback Host must use and establish the owner gate"
+    get "/"
+    assert_response :success
+
+    post "/logout"
+    assert_redirected_to "/login",
+                         "logging out through an owner-gated proxy Host must return to sign-in"
   end
 
   test "a claimed Hive web instance refuses every later non-owner login" do

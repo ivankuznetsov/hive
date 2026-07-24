@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-07-22
+updated: 2026-07-23
 tags: [architecture, overview]
 ---
 
@@ -312,19 +312,24 @@ buttons — has been retired; see [[modules/bot]] and [[state-model]].
 `hive web` serves the shared vanilla Rails 8 + Turbo app from `web/` (ADR-037;
 the original Sinatra/Puma + SSE tier is gone). Native Hive web is the default
 browser control plane over the same registry and workflow state as the CLI/TUI;
-loopback requests use the `hive` identity without mandatory sign-in, including
-through a local reverse proxy whose socket peer is loopback. GitHub is an
-optional connection for repository listing and cloning and does not claim
-ownership. Hivebox is the distinct owner-gated container distribution. Its
-auth is the GitHub device flow (ADR-036): a configured `web.github.owner` gates
-entry, while an ownerless fresh box is claimable and the first successful login
-writes
+requests whose socket peer and normalized Host are both loopback use the `hive`
+identity without mandatory sign-in. Any non-loopback hostname is accepted
+without per-host configuration and enters the GitHub device-flow owner gate,
+even when a reverse proxy connects over loopback. The trust check uses the
+literal Host authority rather than `X-Forwarded-Host`; a TCP forwarder that
+allows an untrusted client to send `Host: localhost` joins the local trust
+boundary. A configured
+`web.github.owner` gates entry, while an ownerless instance is claimable and
+the first successful remote login writes
 `web.github.owner` under the global config lock. Owner-gated requests re-check
 the current owner on every request and evict old sessions when
 `web.github.owner` changes, so a repo-scoped session token cannot survive an
-ownership rotation. Managed local installs stage `bundle install` plus a
-production asset precompile and verify the CSS/JavaScript manifest before the
-atomic bundle swap; same-version installs with missing assets are repaired.
+ownership rotation. A local GitHub connection remains optional for repository
+listing and cloning and does not claim ownership. Hivebox is the distinct
+container distribution of the same owner-gated surface. Managed local installs
+stage `bundle install` plus a production asset precompile and verify the
+CSS/JavaScript manifest before the atomic bundle swap; same-version installs
+with missing assets are repaired.
 Reads render
 `Commands::Status#json_payload` snapshots; live updates flow over Turbo
 Streams, with production Action Cable accepting same-origin-as-host and

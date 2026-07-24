@@ -430,7 +430,7 @@ terminal reason. The harness deliberately does not infer those formats or string
 Close this gap one fixture at a time after the corresponding sibling lands:
 replace its activation guard with real CLI reconciliation and exact
 state/reason assertions, remove `pending: true`, and keep the report-measured
-runtime below five seconds. Full incident coverage is not complete until the
+runtime below ten seconds. Full incident coverage is not complete until the
 incident report contains six ordinary green results and zero pending entries.
 
 ## Rails-native kanban live-update proof (2026-07-21)

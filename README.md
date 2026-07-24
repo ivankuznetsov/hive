@@ -85,11 +85,18 @@ in the foreground. Explicit repair remains `hive web install --force`.
 
 Bare `hive web` uses loopback-only no-auth mode over the same local project
 registry and workflow state as the TUI. GitHub is an optional connection for
-repository browsing and cloning, not a prerequisite or ownership claim. A
-local reverse proxy such as Tailscale Serve remains part of the access boundary
-because Hive sees its loopback connection; authenticate and restrict its
-clients, and never expose an unrestricted forwarder. Set
-`web.local_loopback: false` to require GitHub login even there. See
+repository browsing and cloning, not a prerequisite or ownership claim.
+Access through any non-loopback hostname is accepted without per-host
+configuration and uses Hive's GitHub device-flow owner gate, even when a
+reverse proxy connects to Hive over loopback. Only a request with both a
+loopback socket peer and a literal loopback Host receives local no-auth access.
+The trust check reads the actual Host header and ignores `X-Forwarded-Host`.
+Proxies should preserve the browser-facing Host; a proxy or TCP forwarder that
+allows an untrusted client to send `Host: localhost` becomes part of the local
+trust boundary. An ownerless instance reached through a non-loopback Host is
+claimable, so the first successful GitHub login becomes its owner; sign in with
+the intended owner before sharing that URL. Set
+`web.local_loopback: false` to require GitHub login even on literal loopback. See
 [wiki/commands/web.md](wiki/commands/web.md).
 
 Windows users should run the native path inside WSL with systemd enabled, or

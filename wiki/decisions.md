@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-07-20
+updated: 2026-07-23
 tags: [decisions, adr]
 ---
 
@@ -11,7 +11,7 @@ tags: [decisions, adr]
 
 ## ADR-037: Hive web is the shared vanilla Rails 8 + Turbo app for native Hive and Hivebox
 
-**Status:** Active (replaced the Sinatra/Puma tier during PR #300, 2026-06-10; amended for the managed local runtime during PR #622 and its 2026-07-20 follow-up).
+**Status:** Active (replaced the Sinatra/Puma tier during PR #300, 2026-06-10; amended for the managed local runtime during PR #622 and for proxy-host authentication on 2026-07-23).
 
 **Context:** The first web tier was Sinatra + hand-rolled SSE + hand-written
 DOM-reconciliation JS. It worked, but live updates needed a bespoke
@@ -46,12 +46,15 @@ route/view tree are gone (−sinatra, −rack-protection, −puma gem deps). The
 image gains a second bundle + asset precompile. Browser-level coverage moved
 to Capybara + Playwright system tests with a dev/test-only login seam.
 Authorization, device flow, and the no-new-pipeline-logic constraint are
-unchanged for Hivebox (ADR-036 still applies). The local listener trusts the
-actual loopback socket peer rather than a reverse proxy's forwarded client IP,
-so localhost proxies do not accidentally switch the application into Hivebox.
-That makes the proxy part of the access boundary: Tailscale Serve must remain
-tailnet-restricted, and a generic forwarder must authenticate/restrict clients
-or local no-auth mode must be disabled.
+unchanged for Hivebox (ADR-036 still applies). The local no-auth boundary
+requires both the actual socket peer and normalized Host to be loopback. Rails
+admits arbitrary non-loopback hostnames so vendor-neutral tunnels and reverse
+proxies need no per-host Hive configuration, while the controller routes those
+requests through the GitHub owner gate. Proxy-expanded client-IP headers do not
+affect either decision, and `X-Forwarded-Host` is ignored in favor of the
+literal Host authority. A proxy or TCP forwarder that lets an untrusted client
+send `Host: localhost` joins the local trust boundary and must authenticate or
+restrict clients.
 
 ## ADR-036: Hive web operator sign-in uses GitHub OAuth device flow, not the callback web flow
 
@@ -93,9 +96,12 @@ github.com/login/device) — symmetrical with the agent relay. Operators
 overriding `client_id` must check "Enable Device Flow" on their app. Route
 behavior and tests: [[commands/web]].
 
-This owner-claim decision applies only to Hivebox. Local `hive web` loopback
-access requires no GitHub identity, and its optional repository connection
-must not write `web.github.owner`.
+This owner-claim decision applies to every owner-gated request, including
+native `hive web` reached through a non-loopback proxy Host. Only a request
+whose socket peer and literal Host are both loopback receives native no-auth
+access; its optional repository connection must not write
+`web.github.owner`. Operators exposing an ownerless instance should complete
+the first remote sign-in with the intended owner before sharing the URL.
 
 ## ADR-035: Hive web agent OAuth uses a PTY login relay, not provider-page proxying
 

@@ -1,8 +1,8 @@
-<% content_for(:title, "#{web_product_name} — #{local_web_mode? ? "finish connecting GitHub" : "finish signing in"}") %>
+<% content_for(:title, "#{web_product_name} — #{local_loopback_request? ? "finish connecting GitHub" : "finish signing in"}") %>
 <%# Native timed refresh — each render polls GitHub at most once. %>
 <% content_for(:head) { tag.meta("http-equiv": "refresh", content: @device["interval"].to_i.clamp(1, 60)) } %>
 <div class="card auth-card">
-  <h1><%= local_web_mode? ? "Finish connecting GitHub" : "Finish signing in" %></h1>
+  <h1><%= local_loopback_request? ? "Finish connecting GitHub" : "Finish signing in" %></h1>
   <p>
     Open <%= link_to @device["verification_uri"], @device["verification_uri"],
           target: "_blank", rel: "noopener" %> and enter this code:
@@ -10,7 +10,7 @@
   <p class="device-code"><%= @device["user_code"] %></p>
   <p class="muted">
     Waiting for GitHub to confirm — this page refreshes itself.
-    <% if local_web_mode? %>
+    <% if local_loopback_request? %>
       This optional connection only unlocks GitHub-backed repository actions.
     <% else %>
       Approve as the configured owner account.

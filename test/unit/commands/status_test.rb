@@ -886,14 +886,31 @@ class CommandsStatusTest < Minitest::Test
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       FileUtils.mkdir_p(hive_state)
-      File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
+      File.write(File.join(hive_state, "config.yml"), "reviewres: []\n")
       project = { "name" => "bad", "path" => project_root, "hive_state_path" => hive_state }
 
       error = assert_raises(Hive::UnsupportedProjectConfigError) do
         capture_io { Hive::Commands::Status.new.json_payload([ project ]) }
       end
 
-      assert_includes error.message, "move it to `review.reviewers`"
+      assert_includes error.message, "Unknown top-level key `reviewres`"
+    end
+  end
+
+  def test_json_status_keeps_legacy_root_reviewers_operational_during_migration_window
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(File.join(hive_state, "stages"))
+      File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
+      project = { "name" => "legacy", "path" => project_root, "hive_state_path" => hive_state }
+
+      payload = nil
+      _out, err = capture_io do
+        payload = Hive::Commands::Status.new.json_payload([ project ])
+      end
+
+      assert_equal [ "legacy" ], payload.fetch("projects").map { |entry| entry.fetch("name") }
+      assert_includes err, "run `hive migrate`"
     end
   end
 
@@ -901,7 +918,7 @@ class CommandsStatusTest < Minitest::Test
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       FileUtils.mkdir_p(hive_state)
-      File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
+      File.write(File.join(hive_state, "config.yml"), "reviewres: []\n")
       project = { "name" => "bad", "path" => project_root, "hive_state_path" => hive_state }
 
       error = with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ project ] }) do
@@ -910,7 +927,7 @@ class CommandsStatusTest < Minitest::Test
         end
       end
 
-      assert_includes error.message, "move it to `review.reviewers`"
+      assert_includes error.message, "Unknown top-level key `reviewres`"
     end
   end
 

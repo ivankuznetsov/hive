@@ -3,11 +3,13 @@ title: hive migrate
 type: command
 source: lib/hive/commands/migrate.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-06-05
-tags: [command, migration, stages, task-id, display-name]
+updated: 2026-07-23
+tags: [command, migration, config, reviewers, stages, task-id, display-name]
 ---
 
-**TLDR**: `hive migrate [PROJECT_PATH]` is the explicit, idempotent upgrade path for tasks and config keys created before the PR-first layout, later 7-artifacts insertion, and task-id/display-name sidecar additions.
+**TLDR**: `hive migrate [PROJECT_PATH]` is the explicit, idempotent upgrade
+path for legacy project config, tasks created before the PR-first layout and
+later 7-artifacts insertion, and task-id/display-name sidecar additions.
 
 ## Usage
 
@@ -35,7 +37,24 @@ Before moving anything, migrate preflights every destination and raises `Hive::D
 
 ## Config-key rewrite
 
-For one compatibility window, `Stages::Finalize` reads legacy `budget_usd.pr` / `timeout_sec.pr` as fallbacks. `hive migrate` rewrites those keys to `budget_usd.finalize` / `timeout_sec.finalize`; canonical keys win when both are present.
+For one compatibility window, `Config.load` treats a root-level `reviewers`
+value as `review.reviewers` and warns instead of making an upgraded project
+unusable. `hive migrate` moves the complete YAML block under `review`, retains
+its comments, and removes the root key. If both locations are present, the
+command fails before writing and asks the operator to choose which value to
+keep. Generated Hive configs use a block-form `review:` mapping; a hand-written
+flow mapping must be converted manually before the comment-preserving rewrite
+can run.
+
+`hive update` replaces the installed CLI through its package channel and does
+not mutate or commit every registered project's tracked state. The compatibility
+alias is what makes that binary update safe; run `hive migrate` in each warned
+project to persist the correction.
+
+`Stages::Finalize` likewise reads legacy `budget_usd.pr` /
+`timeout_sec.pr` as fallbacks. `hive migrate` rewrites those keys to
+`budget_usd.finalize` / `timeout_sec.finalize`; canonical keys win when both are
+present.
 
 ## Task metadata backfill
 
@@ -62,7 +81,10 @@ A rerun after successful migration prints that there is nothing to move and keep
 ## Tests
 
 - `test/unit/commands/migrate_renames_consistency_test.rb` pins the stage rename map against `Hive::Stages::DIRS`.
-- `test/integration/migrate_test.rb` covers stage-dir moves, config rewrites, task-id backfill order, display-name backfill, idempotency, null-id repair, and counter seeding.
+- `test/integration/migrate_test.rb` covers stage-dir moves, the legacy
+  reviewers relocation/conflict boundary, other config rewrites, task-id
+  backfill order, display-name backfill, idempotency, null-id repair, and
+  counter seeding.
 - Status integration scenarios prove hidden legacy tasks surface before migrate and disappear after migration.
 
 ## Backlinks

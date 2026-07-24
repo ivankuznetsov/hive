@@ -103,11 +103,20 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
       assert_equal "2026-06-13", scheduler.tick(now: T0).first.fetch(:slug)
       scheduler.complete(
         date: "2026-06-13",
-        exit_code: Hive::ExitCodes::SOFTWARE,
+        exit_code: 4,
         envelope: {
-          "ok" => false,
-          "error_class" => "PermanentDeliveryError",
-          "message" => "Telegram rejected MarkdownV2"
+          "schema" => "prdigest-result",
+          "schema_version" => 1,
+          "error" => {
+            "kind" => "telegram_permanent",
+            "message" => "Telegram rejected HTML"
+          },
+          "delivery" => {
+            "accepted_chunks" => 1,
+            "total_chunks" => 2,
+            "failed_chunk" => 1,
+            "status" => "blocked"
+          }
         },
         now: T0 + 1
       )
@@ -115,7 +124,7 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
       persisted = state(dir)
       assert_equal "2026-06-12", persisted.fetch("last_digested_date")
       assert_equal "2026-06-13", persisted.fetch("blocked_date")
-      assert_equal "PermanentDeliveryError", persisted.fetch("blocked_error_class")
+      assert_equal "telegram_permanent", persisted.fetch("blocked_error_kind")
       assert_empty scheduler.tick(now: T0 + 86_400),
                    "a deterministic parse rejection must not enter the 900-second retry loop"
       event = logger.events.find { |name, _| name == :digest_permanent_failure }
@@ -126,7 +135,7 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
   end
 
   def test_all_typed_non_replayable_delivery_failures_park_the_date
-    %w[AmbiguousDeliveryError PermanentDeliveryCheckpointError].each do |error_class|
+    %w[telegram_refused telegram_ambiguous delivery_checkpoint_permanent].each do |error_kind|
       with_tmp_dir do |dir|
         write_state(dir, "last_digested_date" => "2026-06-12")
         scheduler = scheduler(dir, enabled: true)
@@ -134,15 +143,17 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
         assert_equal "2026-06-13", scheduler.tick(now: T0).first.fetch(:slug)
         scheduler.complete(
           date: "2026-06-13",
-          exit_code: Hive::ExitCodes::SOFTWARE,
+          exit_code: 4,
           envelope: {
-            "error_class" => error_class,
-            "message" => "delivery must not be replayed"
+            "error" => {
+              "kind" => error_kind,
+              "message" => "delivery must not be replayed"
+            }
           },
           now: T0 + 1
         )
 
-        assert_equal error_class, state(dir).fetch("blocked_error_class")
+        assert_equal error_kind, state(dir).fetch("blocked_error_kind")
         assert_empty scheduler.tick(now: T0 + 86_400)
       end
     end
@@ -156,10 +167,12 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
       assert_equal "2026-06-13", scheduler.tick(now: T0).first.fetch(:slug)
       scheduler.complete(
         date: "2026-06-13",
-        exit_code: Hive::ExitCodes::SOFTWARE,
+        exit_code: 4,
         envelope: {
-          "error_class" => "DeliveryCheckpointError",
-          "message" => "temporary checkpoint disk outage"
+          "error" => {
+            "kind" => "delivery_checkpoint",
+            "message" => "temporary checkpoint disk outage"
+          }
         },
         now: T0 + 1
       )

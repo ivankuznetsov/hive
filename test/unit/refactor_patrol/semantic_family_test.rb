@@ -1,5 +1,5 @@
 require "test_helper"
-require "hive/digest"
+require "digest"
 require "hive/refactor_patrol/semantic_family"
 
 class RefactorPatrolSemanticFamilyTest < Minitest::Test

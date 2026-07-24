@@ -351,7 +351,7 @@ def json_usage_error_contract(argv)
     schema = subcommand == "approve" ? "hive-pairing-approve" : "hive-pairing-list"
     return { schema: schema, error_kind: "invalid_arguments" }
   when "digest"
-    return { schema: "hive-digest", error_kind: "usage" }
+    return { reporter: :prdigest }
   when "refactor-patrol"
     if (jobs = refactor_patrol_jobs_argv(option_argv))
       return {
@@ -456,6 +456,11 @@ def native_web_error_context(schema, argv)
 end
 
 def json_usage_error_payload(contract, error, argv: [])
+  if contract[:reporter] == :prdigest
+    require "hive/prdigest"
+    return Hive::Prdigest.failure_payload(kind: "cli", message: error.message)
+  end
+
   if contract[:reporter] == :refactor_patrol
     version = if refactor_patrol_pr_scoped_argv?(argv)
       Hive::RefactorPatrol::Reporter::V3_SCHEMA_VERSION

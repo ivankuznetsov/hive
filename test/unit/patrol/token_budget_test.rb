@@ -1,5 +1,5 @@
 require "test_helper"
-require "hive/digest"
+require "digest"
 require "hive/patrol/token_budget"
 
 class PatrolTokenBudgetTest < Minitest::Test

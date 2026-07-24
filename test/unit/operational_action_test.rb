@@ -1,7 +1,7 @@
 require "test_helper"
 require "hive/commands/init"
 require "hive/commands/status"
-require "hive/digest"
+require "digest"
 require "hive/operational_action"
 require "hive/stages/base"
 require "hive/task_meta"

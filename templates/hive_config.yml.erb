@@ -31,14 +31,12 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 
 # Daily merged-PR changelist for the previous Europe/London calendar day.
 # Defaults ON whenever the Telegram bot is enabled with at least one allowlisted
-# chat. The daemon schedules the canonical `hive digest` command, collects
-# complete GitHub PR body/diff evidence from registered repositories, and sends
-# a chunk-safe Telegram MarkdownV2 message to the first allowlisted chat. Set
+# chat. The daemon schedules `hive digest`, which passes the registered GitHub
+# repositories and Telegram destination to the standalone PRDigest CLI. Set
 # enabled: false to opt out. There is no source selector or task-based mode.
 #
 # digest:
 #   enabled: false         # only needed to opt OUT; otherwise auto-on with the bot
-#   agent: ~               # defaults to patrol.agent, then claude
 #   max_catchup_days: 7
 
 # Daily pending-answer digest. When enabled, the daemon schedules one global

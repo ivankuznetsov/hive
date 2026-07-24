@@ -169,28 +169,24 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
-  def test_digest_json_usage_errors_use_the_canonical_v2_schema
-    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-digest"))))
+  def test_digest_thor_errors_use_the_prdigest_result_contract
     cases = [
-      %w[digest --source merged-prs --bad --json],
-      %w[digest --repo owner/repo --bad --json]
+      %w[digest --bad --json],
+      %w[digest extra --json]
     ]
 
     with_tmp_global_config do |home|
       cases.each do |argv|
         out, _err, status = run_hive(home, *argv)
 
-        refute status.success?, "#{argv.join(' ')} should fail"
         assert_equal Hive::ExitCodes::USAGE, status.exitstatus
         payload = JSON.parse(out)
-        assert_equal "hive-digest", payload["schema"]
-        assert_equal 2, payload["schema_version"]
-        assert_equal false, payload["ok"]
-        assert_equal "UsageError", payload["error_class"]
-        assert_equal "usage", payload["error_kind"]
-        assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
-        assert_empty schemer.validate(payload).map { |e| e["error"] },
-                     "#{argv.join(' ')} envelope must validate against hive-digest v2"
+        assert_equal "prdigest-result", payload.fetch("schema")
+        assert_equal 1, payload.fetch("schema_version")
+        assert_equal "failure", payload.fetch("status")
+        assert_equal "cli", payload.dig("error", "kind")
+        assert_nil payload.fetch("delivery")
+        refute payload.key?("ok")
       end
     end
   end
@@ -448,10 +444,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       [ %w[metrics rollback-rate extra --json], "hive-metrics-rollback-rate", "error" ],
       [ %w[web status extra --json], "hive-web-status", "invalid_task_path" ],
       [ %w[web install extra --json], "hive-web-install", "invalid_task_path" ],
-      [ %w[web --bind install status extra --json], "hive-web-status", "invalid_task_path" ],
-      [ %w[digest extra --json], "hive-digest", "usage" ],
-      [ %w[digest --json -- extra --source merged-prs], "hive-digest", "usage" ],
-      [ %w[digest --source merged-prs extra --json], "hive-digest", "usage" ]
+      [ %w[web --bind install status extra --json], "hive-web-status", "invalid_task_path" ]
     ]
 
     with_tmp_global_config do |home|
@@ -519,11 +512,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       [ [ "pairing", "unknown", "approve", "--json", invalid ],
         "hive-pairing-list", "invalid_arguments" ],
       [ [ "pairing", "approve", "telegram", "CODE", "--json", invalid ],
-        "hive-pairing-approve", "invalid_arguments" ],
-      [ [ "digest", "--json", invalid ], "hive-digest", "usage" ],
-      [ [ "digest", "--source", invalid, "--json" ], "hive-digest", "usage" ],
-      [ [ "digest", "--source", "merged-prs", "--json", invalid ],
-        "hive-digest", "usage" ]
+        "hive-pairing-approve", "invalid_arguments" ]
     ]
 
     with_tmp_global_config do |home|

@@ -136,7 +136,6 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 | `reviewer_claude_ce_code_review.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | `project_name`, `worktree_path`, `task_folder`, `default_branch`, `pass`, `output_path`, `skill_invocation`, `user_supplied_tag` |
 | `reviewer_codex_ce_code_review.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | same as above |
 | `reviewer_pr_review_toolkit.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | same as above |
-| `digest_prompt.md.erb` | `Digest::ChangelogGenerator#render_prompt` | `date`, `manifest_path`, `output_path`, `user_supplied_tag` |
 | `finalize_prompt.md.erb` | `Stages::Finalize.run!` | `project_name`, `task_folder`, `worktree_path`, `slug`, `pr_url`, `plan_text`, `reviews_summary`, `user_supplied_tag` |
 | `finalize_summary.md.erb` | `Stages::Finalize.run!` fallback summary renderer | `summary`, `pr_url`, `commits`, `review`, `open_escalations` |
 | `pr_body.md.erb` | legacy body-shape helper retained for compatibility | `summary`, `test_plan`, `task_folder` |

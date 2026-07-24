@@ -344,9 +344,6 @@ module Hive
       end
 
       def verify_digest!(path, expected)
-        # Hive also defines Hive::Digest. Qualify the stdlib namespace so this
-        # verification is load-order independent when the digest feature has
-        # already been loaded by a long-lived process or the full test suite.
         actual = ::Digest::SHA256.file(path).hexdigest
         return true if actual == expected
 

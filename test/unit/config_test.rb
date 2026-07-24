@@ -31,8 +31,8 @@ class ConfigTest < Minitest::Test
                  "deprecated execute_review key must be absent from DEFAULTS"
       assert_equal 100, cfg["budget_usd"]["patrol"]
       assert_equal 3600, cfg["timeout_sec"]["patrol"]
-      assert_equal 50, cfg["budget_usd"]["digest"]
-      assert_equal 1800, cfg["timeout_sec"]["digest"]
+      refute cfg["budget_usd"].key?("digest")
+      refute cfg["timeout_sec"].key?("digest")
       assert_equal "8-finalize", cfg["dependency_gate_stage"]
       assert_equal "coding", cfg["default_workflow"]
       assert_equal true, cfg.dig("daemon", "auto_retry", "enabled")
@@ -4103,7 +4103,7 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
 
       assert_equal false, cfg.dig("digest", "enabled")
-      assert_nil cfg.dig("digest", "agent")
+      refute cfg.fetch("digest").key?("agent")
       assert_equal 7, cfg.dig("digest", "max_catchup_days")
       assert_equal false, cfg.dig("answer_digest", "enabled")
       assert_equal 9, cfg.dig("answer_digest", "hour")
@@ -4302,71 +4302,45 @@ class ConfigTest < Minitest::Test
         ))
 
         error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
-        assert_match(/digest\.source was removed/, error.message)
-        error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
-        assert_match(/digest\.source was removed/, error.message)
+        assert_match(/digest\.source is unsupported/, error.message)
       end
     end
   end
 
-  def test_load_global_digest_config_merges_bot_and_agent_limits
+  def test_digest_block_contains_only_scheduler_settings
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)
         registered_projects: []
         digest:
           enabled: true
-        budget_usd:
-          digest: 12
-        timeout_sec:
-          digest: 34
-        bot:
-          chat_id_allowlist:
-            - 12345
+          max_catchup_days: 12
       YAML
 
-      cfg = Hive::Config.load_global_digest_config
+      cfg = Hive::Config.load_global_digest_block
 
-      assert_equal true, cfg.dig("digest", "enabled")
-      assert_equal 12, cfg.dig("budget_usd", "digest")
-      assert_equal 34, cfg.dig("timeout_sec", "digest")
-      assert_equal [ 12_345 ], cfg.dig("bot", "chat_id_allowlist")
-      assert_equal File.join(home, "logs", "bot.log"), cfg.dig("bot", "log_file")
-    end
-  end
-
-  def test_load_global_digest_config_rejects_non_positive_budget_and_timeout
-    {
-      "budget_usd" => "budget_usd.digest",
-      "timeout_sec" => "timeout_sec.digest"
-    }.each do |group, label|
-      with_tmp_global_config do |home|
-        File.write(File.join(home, "config.yml"), <<~YAML)
-          registered_projects: []
-          digest:
-            enabled: true
-          #{group}:
-            digest: 0
-        YAML
-
-        err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
-        assert_match(/#{Regexp.escape(label)}.*positive number/, err.message,
-                     "a non-positive #{label} must be rejected at config load, not crash ChangelogGenerator")
-      end
-
-      with_tmp_global_config do |home|
-        File.write(File.join(home, "config.yml"), <<~YAML)
-          registered_projects: []
-          #{group}:
-            digest: "lots"
-        YAML
-
-        err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
-        assert_match(/#{Regexp.escape(label)}.*positive number/, err.message)
-      end
+      assert_equal true, cfg.fetch("enabled")
+      assert_equal 12, cfg.fetch("max_catchup_days")
+      refute cfg.key?("agent")
     end
   end
 
   # ── Telegram bot global settings ──────────────────────────────────────
+
+  def test_telegram_recipient_uses_first_allowlisted_chat
+    assert_equal 123, Hive::Config.telegram_chat_id!("chat_id_allowlist" => [ 123, 456 ])
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Config.telegram_chat_id!("chat_id_allowlist" => [])
+    end
+    assert_match(/chat_id_allowlist\[0\]/, error.message)
+  end
+
+  def test_telegram_token_can_be_resolved_from_an_explicit_environment
+    assert_equal "secret", Hive::Config.telegram_bot_token!(
+      env: { "HIVE_TELEGRAM_BOT_TOKEN" => "secret" }
+    )
+    assert_raises(Hive::ConfigError) { Hive::Config.telegram_bot_token!(env: {}) }
+  end
 
   def test_load_returns_documented_bot_defaults_when_key_absent
     with_tmp_dir do |dir|

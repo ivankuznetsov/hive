@@ -5,7 +5,7 @@ class CompletionTimeTest < Minitest::Test
   include HiveTestHelper
 
   TaskDouble = Struct.new(
-    :state_file, :folder, :workflow, :hive_state_path, :slug,
+    :state_file, :folder, :workflow, :action_workflow, :hive_state_path, :slug,
     keyword_init: true
   )
 
@@ -56,5 +56,47 @@ class CompletionTimeTest < Minitest::Test
 
     assert_equal Time.utc(2026, 7, 20, 10, 0, 0),
                  Hive::CompletionTime.from_history(task, history: history)
+  end
+
+  def test_history_uses_membership_workflow_after_policy_repin
+    membership_stage = Hive::Workflow::Stage.new(
+      name: "done", index: 1, state_file: "done.md", kind: :inert
+    )
+    policy_stage = Hive::Workflow::Stage.new(
+      name: "published", index: 1, state_file: "published.md", kind: :inert
+    )
+    task = TaskDouble.new(
+      state_file: "/tmp/done.md", folder: "/tmp/task",
+      workflow: Hive::Workflow.new(id: :policy, stages: [ policy_stage ]),
+      action_workflow: Hive::Workflow.new(id: :membership, stages: [ membership_stage ]),
+      hive_state_path: "/tmp/state", slug: "repinned"
+    )
+    history = Object.new
+    history.define_singleton_method(:commits) do |**|
+      [
+        {
+          sha: "arrival", committed_at: "2026-07-20T10:00:00Z",
+          subject: "hive: 0-work/repinned approve 0-work -> 1-done"
+        }
+      ]
+    end
+
+    assert_equal Time.utc(2026, 7, 20, 10, 0, 0),
+                 Hive::CompletionTime.from_history(task, history: history)
+  end
+
+  def test_history_command_runner_kills_work_at_deadline
+    runner = Hive::CompletionTime::CommandRunner.new
+    clock = -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+    started = clock.call
+
+    assert_raises(Hive::CompletionTime::DeadlineExceeded) do
+      runner.capture(
+        [ RbConfig.ruby, "-e", "sleep 5" ],
+        deadline: started + 0.05, monotonic_clock: clock
+      )
+    end
+
+    assert_operator clock.call - started, :<, 0.5
   end
 end

@@ -9,7 +9,9 @@ module Hive
   module ArchiveFilter
     SECONDS_PER_DAY = 24 * 60 * 60
 
-    Projection = Data.define(:ordinary_rows, :archive_rows, :hidden_rows) do
+    Projection = Data.define(
+      :ordinary_rows, :archive_rows, :hidden_rows, :next_retention_boundary
+    ) do
       def hidden_count = hidden_rows.length
     end
 
@@ -33,7 +35,10 @@ module Hive
       Projection.new(
         ordinary_rows: rows.reject { |row| hidden_ids.key?(row.object_id) },
         archive_rows: archive_rows,
-        hidden_rows: hidden_rows
+        hidden_rows: hidden_rows,
+        next_retention_boundary: next_retention_boundary(
+          archived_rows, clocks: clocks, hidden_ids: hidden_ids, now: now
+        )
       )
     end
 
@@ -71,6 +76,20 @@ module Hive
       return stored if missing.empty?
 
       stored.merge(backfiller.call(missing))
+    end
+
+    def next_retention_boundary(rows, clocks:, hidden_ids:, now:)
+      rows.filter_map do |row|
+        next if hidden_ids.key?(row.object_id)
+
+        task = row[:task]
+        retention = task&.workflow&.archive_visibility_retention_days
+        completed_at = Hive::CompletionTime.parse(clocks[task&.folder])
+        next unless retention.is_a?(Integer) && retention.positive? && completed_at
+
+        boundary = completed_at + (retention * SECONDS_PER_DAY)
+        boundary if now.utc <= boundary
+      end.min
     end
 
     # A malformed/unknown workflow cannot be action-classified. If its folder

@@ -2120,6 +2120,56 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_multi_project_status_captures_all_workflow_generations_before_scanning
+    with_tmp_dir do |first_root|
+      with_tmp_dir do |second_root|
+        now = Time.utc(2026, 7, 24, 12, 0, 0)
+        projects = [ first_root, second_root ].each_with_index.map do |root, index|
+          hive_state = File.join(root, ".hive-state")
+          workflows = File.join(hive_state, "workflows")
+          FileUtils.mkdir_p(workflows)
+          write_retention_workflow(workflows, "retained", 3)
+          write_completed_status_task(
+            hive_state, "2-done", "project-#{index}-260724-abcd",
+            state_file: "done.md", completed_at: now - (4 * 86_400),
+            workflow: "retained"
+          )
+          status_project(root, hive_state)
+        end
+        second_descriptor = File.join(
+          second_root, ".hive-state", "workflows", "retained.yml"
+        )
+        original_new = Hive::Task.method(:new)
+        mutated = false
+        replacement = lambda do |folder, **kwargs|
+          task = original_new.call(folder, **kwargs)
+          if !mutated && folder.start_with?(first_root)
+            File.write(
+              second_descriptor,
+              File.read(second_descriptor).sub(/retention_days: 3/, "retention_days: never")
+            )
+            mutated = true
+          end
+          task
+        end
+
+        first = with_replaced_singleton_method(Hive::Task, :new, replacement) do
+          Hive::Commands::Status.new.json_payload(projects, now: now)
+        end
+        second = Hive::Commands::Status.new.json_payload(projects, now: now)
+
+        assert first.fetch("projects").all? { |project| project.fetch("tasks").empty? }
+        assert_equal [ 1, 1 ], first.fetch("projects").map { |project|
+          project.fetch("hidden_archived_task_count")
+        }
+        assert_empty second.fetch("projects").first.fetch("tasks")
+        assert_equal 1, second.fetch("projects").last.fetch("tasks").size
+      ensure
+        Hive::Workflows::Project.reset!
+      end
+    end
+  end
+
   def test_project_default_cache_detects_same_size_preserved_mtime_rewrite
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

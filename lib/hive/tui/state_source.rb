@@ -94,6 +94,7 @@ module Hive
         @policy_fingerprint = nil
         @file_signature_cache = {}
         @last_full_parse_at = nil
+        @next_retention_boundary = nil
         # Consecutive archive-refresh failures, so a permanent
         # `json_payload` raise backs off to the 30s backstop instead of
         # hot-looping a full archive rescan every poll tick (see
@@ -214,7 +215,8 @@ module Hive
         cache = @archived_cache
         cache_unchanged = cache.equal?(@snapshot_archived_cache)
         if @current && @mtime_fingerprint && cache_unchanged && policy_unchanged &&
-           mtime_fingerprint_unchanged? && !full_reparse_due?(now: refresh_now)
+           mtime_fingerprint_unchanged? && !full_reparse_due?(now: refresh_now) &&
+           !retention_reparse_due?(now: refresh_now)
           start_archive_refresh_if_needed
           @current_seen_at = refresh_now
           @last_error = nil
@@ -226,7 +228,8 @@ module Hive
         if @current.nil?
           # Cold start publishes the ordinary producer projection and seeds a
           # separate, explicitly unfiltered archive cache with the same clock.
-          ordinary_payload = Hive::Commands::Status.new.json_payload(
+          ordinary_status = Hive::Commands::Status.new
+          ordinary_payload = ordinary_status.json_payload(
             projects, admission_context: admission_context, now: refresh_now
           )
           archive_payload = Hive::Commands::Status.new(archive: true).json_payload(
@@ -236,15 +239,22 @@ module Hive
             archive_payload, admission_context: admission_context, previous: @archived_cache
           )
           @archive_last_refresh_at = refresh_now
-          publish_snapshot(ordinary_payload, archived_cache: @archived_cache)
+          publish_snapshot(
+            ordinary_payload, archived_cache: @archived_cache,
+            next_retention_boundary: ordinary_status.next_retention_boundary
+          )
           @archive_dir_mtimes = archive_dir_mtimes_for(@current.projects)
         else
           # Steady state also consumes Status's ordinary projection directly.
           # The cache is attached only as Snapshot's dedicated archive source.
-          ordinary_payload = Hive::Commands::Status.new.json_payload(
+          ordinary_status = Hive::Commands::Status.new
+          ordinary_payload = ordinary_status.json_payload(
             projects, admission_context: admission_context, now: refresh_now
           )
-          publish_snapshot(ordinary_payload, archived_cache: cache)
+          publish_snapshot(
+            ordinary_payload, archived_cache: cache,
+            next_retention_boundary: ordinary_status.next_retention_boundary
+          )
         end
         # Do not overlap the ordinary producer with the heavier unfiltered
         # archive producer. Both resolve project workflow overlays under the
@@ -266,6 +276,10 @@ module Hive
         return true if @last_full_parse_at.nil?
 
         (now - @last_full_parse_at) >= LIVENESS_REPARSE_FALLBACK_SECONDS
+      end
+
+      def retention_reparse_due?(now: Time.now)
+        @next_retention_boundary && now > @next_retention_boundary
       end
 
       def mtime_fingerprint_unchanged?
@@ -333,7 +347,9 @@ module Hive
         snapshot.projects.each do |project|
           content_paths.concat(project_policy_paths(project))
         end
-        task_meta_paths = snapshot.rows.map { |row| task_meta_path(row.folder) }
+        task_meta_paths = (snapshot.rows + snapshot.archive_rows).map do |row|
+          task_meta_path(row.folder)
+        end
         fingerprint = content_paths.compact.uniq.sort.to_h do |path|
           [ path, safe_content_signature(path, always_digest: true) ]
         end
@@ -435,7 +451,7 @@ module Hive
         )
       end
 
-      def publish_snapshot(payload, archived_cache:)
+      def publish_snapshot(payload, archived_cache:, next_retention_boundary: nil)
         snapshot = Snapshot.from_payload(
           payload,
           archive_payload: archive_payload_from_cache(payload, archived_cache)
@@ -443,6 +459,7 @@ module Hive
         @current = snapshot
         @current_seen_at = Time.now
         @last_full_parse_at = @current_seen_at
+        @next_retention_boundary = next_retention_boundary
         @mtime_fingerprint = mtime_fingerprint_for(snapshot)
         @policy_fingerprint = policy_fingerprint_for(snapshot)
         @snapshot_archived_cache = archived_cache

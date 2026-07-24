@@ -105,9 +105,10 @@ so daemon dispatch baselines still observe stage moves. Real-command tests
 cover workflow stage actions plus generic `run` and `approve` branches from
 status-issued tokens.
 
-Status scans the complete on-disk graph, resolves one workflow/config
-generation and one UTC `now`, and then publishes either the ordinary or
-dedicated archive projection. Dependency admission is built from the complete
+Status captures every registered project's workflow/config generation before
+scanning any project's rows, captures one UTC `now`, and then publishes either
+the ordinary or dedicated archive projection. Dependency admission uses those
+same captured generations and is built from the complete
 graph before presentation filtering, so an expired completed dependency still
 satisfies its dependants. Daemon, bot, TUI, and web consume the ordinary
 projection. The TUI separately caches a fresh archive-mode payload for its
@@ -227,9 +228,11 @@ for hiding only after its atomic metadata write and `hive/state` commit
 succeed. Missing/corrupt evidence, an invalid stored value, or persistence
 failure warns and fails open. Backfill also runs under `never`, so a later
 policy change already has a stable clock. Each refresh has one shared
-one-second backfill deadline, task locking rechecks that the folder still
-exists without recreating it, and the batch cursor rotates past persistent
-failures so later legacy rows cannot starve.
+one-second backfill deadline that also bounds history and commit subprocesses.
+Task locking rechecks that the folder still exists without recreating it, the
+durable per-project cursor under Hive's state home rotates past persistent
+failures across one-shot CLI processes, and the path-only backfill commit
+preserves unrelated staged operator changes.
 
 Ordinary text, `hive status --full`, `hive status --json`, operational status,
 daemon snapshots, TUI, web, and Hivebox omit expired archived rows. Every
@@ -313,9 +316,10 @@ registered descriptor; coding remains the default source of truth via
 `Hive::Stages::DIRS`), plus on-disk stages referenced by an explicit task pin
 or an unavailable project default, `collect_rows` walks
 `<hive_state>/stages/<stage>/*` through the `stage_task_entries(stage_dir)`
-seam. One captured config/default-workflow generation is passed to every
-`Hive::Task` in that project scan, so a descriptor/config edit cannot mix old
-and new policy within one payload. Invalid referenced tasks become visible
+seam. All project config/default-workflow/descriptor generations are captured
+before the first project scan and passed to every `Hive::Task` and dependency
+snapshot, so a descriptor/config edit cannot mix old and new policy within one
+multi-project payload. Invalid referenced tasks become visible
 Error rows rather than disappearing. Marker is read with
 `Hive::Markers.current(task.state_file)`. `folder_mtime` is always
 `File.mtime(entry)`; `mtime` is the state-file mtime when the state file exists

@@ -531,7 +531,7 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
-  def test_idle_policy_fingerprint_does_not_scan_lossless_archive_metadata
+  def test_idle_policy_fingerprint_includes_hidden_archive_metadata
     with_direct_project do |_project, hive_state|
       active_folder = write_state_task(
         hive_state, "4-execute", "active-policy-260626-abcd",
@@ -547,22 +547,72 @@ class TuiStateSourceTest < Minitest::Test
       )
       source = Hive::Tui::StateSource.new
       source.send(:refresh_once)
-      source.instance_variable_set(
-        :@archived_cache,
-        {
-          rows_by_path: {
-            source.current.projects.first.path => [ { "folder" => archived_folder } ]
-          },
-          admission_context: Hive::DependencyAdmission::Context.new(projects: [])
-        }
-      )
-
       fingerprint = source.send(:policy_fingerprint_for, source.current)
 
       assert_includes fingerprint, File.join(active_folder, "meta.yml")
-      refute_includes fingerprint, File.join(archived_folder, "meta.yml")
+      assert_includes fingerprint, File.join(archived_folder, "meta.yml")
     ensure
       source&.stop
+    end
+  end
+
+  def test_hidden_task_workflow_repin_reprojects_on_next_poll
+    with_direct_project do |_project, hive_state|
+      write_retention_workflow(hive_state, 3)
+      File.write(File.join(hive_state, "workflows", "forever.yml"), <<~YAML)
+        id: forever
+        archive_visibility_retention_days: never
+        stages:
+          - name: done
+            kind: terminal
+            state_file: done.md
+      YAML
+      folder = write_completed_retention_task(
+        hive_state, completed_at: Time.now.utc - (5 * 86_400)
+      )
+      source = Hive::Tui::StateSource.new
+      source.send(:refresh_once)
+      refute_includes source.current.rows.map(&:slug), File.basename(folder)
+
+      metadata = Hive::TaskMeta.read(folder)
+      Hive::TaskMeta.write(
+        folder, **metadata.slice(*Hive::TaskMeta::WRITABLE_FIELDS).merge(workflow: "forever")
+      )
+      source.send(:refresh_once)
+
+      assert_includes source.current.rows.map(&:slug), File.basename(folder)
+      assert_equal 0, source.current.hidden_archived_task_count
+    ensure
+      source&.stop
+      Hive::Workflows::Project.reset!
+    end
+  end
+
+  def test_retention_boundary_reprojects_without_file_change_on_next_poll
+    with_direct_project do |_project, hive_state|
+      write_retention_workflow(hive_state, 3)
+      completed_at = Time.utc(2026, 7, 21, 12, 0, 0)
+      folder = write_completed_retention_task(hive_state, completed_at: completed_at)
+      before_boundary = Time.at(
+        (completed_at + (3 * 86_400)).to_r - Rational(1, 2)
+      ).utc
+      after_boundary = before_boundary + 1
+      source = Hive::Tui::StateSource.new
+
+      with_replaced_singleton_method(Time, :now, -> { before_boundary }) do
+        source.send(:refresh_once)
+      end
+      assert_includes source.current.rows.map(&:slug), File.basename(folder)
+
+      with_replaced_singleton_method(Time, :now, -> { after_boundary }) do
+        source.send(:refresh_once)
+      end
+
+      refute_includes source.current.rows.map(&:slug), File.basename(folder)
+      assert_equal 1, source.current.hidden_archived_task_count
+    ensure
+      source&.stop
+      Hive::Workflows::Project.reset!
     end
   end
 

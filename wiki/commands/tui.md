@@ -141,16 +141,19 @@ timestamps.
 The cached fingerprint watches the global project registry
 (`Hive::Config.global_config_path`), project configuration, workflow descriptor
 contents, task metadata (including workflow pins), all relevant terminal
-directories, each visible row's state file and `.lock`, and the project's
+directories, every ordinary or archived row's metadata, each visible row's
+state file and `.lock`, and the project's
 `.hive-state/stages` directory and children. Content signatures detect
 descriptor creation, deletion, rename, and same-size replacement even when
 mtime is preserved. Policy/default/pin changes therefore publish a complete new
 ordinary projection and hidden count on the next refresh; no last-good policy
-is reused for a malformed currently selected workflow. The one-second idle
-fingerprint covers only ordinary visible rows and policy inputs, not every row
-in the permanent archive cache, and evicts signatures for paths that moved or
-disappeared. Idle work and cache size therefore remain independent of archive
-history. A time-bounded fallback
+is reused for a malformed currently selected workflow. Hidden archived metadata
+stays in the policy fingerprint so a hidden task repinned to `never` or a longer
+policy reappears on the next poll; archived state files and locks remain
+excluded. The fingerprint evicts signatures for paths that moved or
+disappeared. `Status` also supplies the earliest upcoming retention boundary,
+which bypasses the idle gate on the first poll after expiry even when no file
+changed. A separate time-bounded fallback
 (`LIVENESS_REPARSE_FALLBACK_SECONDS`, 3s) forces a full re-parse even
 when the fingerprint is unchanged, so liveness-derived fields
 (`live_task_lock`, `claude_pid_alive`) that flip without touching any

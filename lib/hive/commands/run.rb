@@ -51,13 +51,18 @@ module Hive
         def self.capture(folder)
           root = Dir.mktmpdir("hive-terminal-state-")
           backup = File.join(root, "task")
-          FileUtils.mkdir_p(backup)
-          Dir.children(folder).each do |name|
-            next if name.match?(LOCK_ARTIFACT)
+          begin
+            FileUtils.mkdir_p(backup)
+            Dir.children(folder).each do |name|
+              next if name.match?(LOCK_ARTIFACT)
 
-            FileUtils.copy_entry(
-              File.join(folder, name), File.join(backup, name), true, false, true
-            )
+              FileUtils.copy_entry(
+                File.join(folder, name), File.join(backup, name), true, false, true
+              )
+            end
+          rescue Exception
+            FileUtils.rm_rf(root)
+            raise
           end
           new(folder, root, backup)
         end
@@ -141,8 +146,12 @@ module Hive
           legacy_completed_at = legacy_completed_at_before_run(task, marker, config: cfg)
           begin
             result = Hive::Stages::Base.with_stage_events(task, cfg: cfg) { runner.call(task, cfg) }
-          rescue Interrupt => e
-            rollback_terminal_state!(task, terminal_snapshot, Hive::GitOps.new(task.project_root), e) if terminal_snapshot
+          rescue Exception => e
+            if terminal_snapshot
+              rollback_terminal_state!(
+                task, terminal_snapshot, Hive::GitOps.new(task.project_root), e
+              )
+            end
           end
           commit_after(
             task, result, config: cfg, terminal_snapshot: terminal_snapshot,
@@ -261,7 +270,8 @@ module Hive
               slug: task.slug,
               action: action || "completed"
             )
-          rescue Hive::Error, SystemCallError, IOError, ArgumentError, Interrupt => e
+          rescue Hive::Error, Hive::TaskMeta::InvalidMetadata,
+                 SystemCallError, IOError, ArgumentError, Interrupt => e
             rollback_terminal_state!(task, terminal_snapshot, ops, e) if archived && terminal_snapshot
             raise
           end
@@ -272,10 +282,6 @@ module Hive
 
       def stamp_completed_at(task, completion_time = nil)
         Hive::TaskMeta.write_completed_at_once(task.folder, completion_time || @clock.call)
-      rescue Hive::TaskMeta::InvalidMetadata => e
-        # A malformed legacy clock must not block the runner or be replaced.
-        # The visibility projection will fail open and surface the same warning.
-        warn "hive: run: #{e.message}; completed_at left unchanged"
       end
 
       def rollback_terminal_state!(task, snapshot, ops, original_error)

@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/config"
 require "hive/task"
+require "hive/workflows"
 
 class TaskTest < Minitest::Test
   include HiveTestHelper
@@ -198,6 +199,120 @@ class TaskTest < Minitest::Test
         assert_equal :research, task.workflow.id
         assert_equal %w[intake gather report], task.stage_names
         assert_equal File.join(folder, "notes.md"), task.state_file
+      end
+    end
+  end
+
+  def test_policy_repin_to_overlapping_nonterminal_stage_preserves_terminal_membership
+    original = Hive::Workflow.new(
+      id: :original_membership,
+      stages: [
+        Hive::Workflow::Stage.new(name: "work", index: 1, state_file: "work.md", kind: :agent),
+        Hive::Workflow::Stage.new(name: "shared", index: 2, state_file: "done.md", kind: :inert)
+      ]
+    )
+    policy = Hive::Workflow.new(
+      id: :repinned_policy,
+      stages: [
+        Hive::Workflow::Stage.new(name: "draft", index: 1, state_file: "draft.md", kind: :agent),
+        Hive::Workflow::Stage.new(name: "shared", index: 2, state_file: "shared.md", kind: :agent),
+        Hive::Workflow::Stage.new(name: "published", index: 3, state_file: "published.md", kind: :inert)
+      ]
+    )
+
+    with_registered_workflow(original) do
+      with_registered_workflow(policy) do
+        with_tmp_dir do |dir|
+          folder = File.join(
+            dir, ".hive-state", "stages", "2-shared", "repinned-260724-abcd"
+          )
+          FileUtils.mkdir_p(folder)
+          File.write(File.join(folder, "done.md"), "<!-- COMPLETE -->\n")
+          File.write(File.join(folder, "meta.yml"), "workflow: repinned_policy\n")
+
+          task = Hive::Task.new(folder)
+
+          assert_equal :repinned_policy, task.workflow.id
+          assert_equal :original_membership, task.action_workflow.id
+          assert_equal File.join(folder, "done.md"), task.state_file
+        end
+      end
+    end
+  end
+
+  def test_duplicate_terminal_directories_use_state_file_evidence_not_registration_order
+    first = Hive::Workflow.new(
+      id: :alpha_terminal,
+      stages: [
+        Hive::Workflow::Stage.new(name: "shared", index: 1, state_file: "alpha.md", kind: :inert)
+      ]
+    )
+    second = Hive::Workflow.new(
+      id: :zeta_terminal,
+      stages: [
+        Hive::Workflow::Stage.new(name: "shared", index: 1, state_file: "zeta.md", kind: :inert)
+      ]
+    )
+    policy = Hive::Workflow.new(
+      id: :repinned_elsewhere,
+      stages: [
+        Hive::Workflow::Stage.new(name: "other", index: 1, state_file: "other.md", kind: :inert)
+      ]
+    )
+
+    with_registered_workflow(second) do
+      with_registered_workflow(first) do
+        with_registered_workflow(policy) do
+          with_tmp_dir do |dir|
+            folder = File.join(
+              dir, ".hive-state", "stages", "1-shared", "duplicate-260724-abcd"
+            )
+            FileUtils.mkdir_p(folder)
+            File.write(File.join(folder, "zeta.md"), "<!-- COMPLETE -->\n")
+            File.write(File.join(folder, "meta.yml"), "workflow: repinned_elsewhere\n")
+
+            task = Hive::Task.new(folder)
+
+            assert_equal :zeta_terminal, task.action_workflow.id
+            assert_equal File.join(folder, "zeta.md"), task.state_file
+          end
+        end
+      end
+    end
+  end
+
+  def test_terminal_repin_with_shared_directory_keeps_membership_deterministic
+    alpha = Hive::Workflow.new(
+      id: :alpha_terminal,
+      stages: [
+        Hive::Workflow::Stage.new(name: "shared", index: 1, state_file: "done.md", kind: :inert)
+      ]
+    )
+    zeta = Hive::Workflow.new(
+      id: :zeta_terminal,
+      stages: [
+        Hive::Workflow::Stage.new(name: "shared", index: 1, state_file: "done.md", kind: :inert)
+      ]
+    )
+
+    with_registered_workflow(zeta) do
+      with_registered_workflow(alpha) do
+        with_tmp_dir do |dir|
+          folder = File.join(
+            dir, ".hive-state", "stages", "1-shared", "repinned-terminal-260724-abcd"
+          )
+          FileUtils.mkdir_p(folder)
+          File.write(File.join(folder, "done.md"), "<!-- COMPLETE -->\n")
+          File.write(
+            File.join(folder, "meta.yml"),
+            "workflow: zeta_terminal\ncompleted_at: '2026-07-24T12:00:00Z'\n"
+          )
+
+          task = Hive::Task.new(folder)
+
+          assert_equal :zeta_terminal, task.workflow.id
+          assert_equal :alpha_terminal, task.action_workflow.id
+        end
       end
     end
   end

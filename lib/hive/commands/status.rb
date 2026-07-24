@@ -34,6 +34,7 @@ module Hive
   module Commands
     class Status
       include Hive::Schemas::EnvelopeEmitter
+      attr_reader :next_retention_boundary
 
       AUTO_SCHEDULER_SNAPSHOT = Object.new.freeze
 
@@ -104,6 +105,7 @@ module Hive
         @archive = archive
         @operational = operational
         @full = full
+        @next_retention_boundary = nil
       end
 
       def call
@@ -164,11 +166,15 @@ module Hive
           return
         end
 
-        admission_context = build_admission_context(projects)
+        workflow_generations = capture_workflow_generations(projects)
+        admission_context = build_admission_context(
+          projects, workflow_generations: workflow_generations
+        )
         projects.each do |project|
           render_project(
             project, project_count: projects.size,
-            admission_context: admission_context, now: refresh_now
+            admission_context: admission_context, now: refresh_now,
+            workflow_generation: workflow_generation_for(project, workflow_generations)
           )
         rescue Hive::UnsupportedProjectConfigError
           raise
@@ -336,12 +342,16 @@ module Hive
       # version. `tasks[].marker` is the lowercased symbol name as a string;
       # `tasks[].attrs` is the marker's attribute map.
       def json_payload(projects, stages: nil, exclude_archived: false, admission_context: nil,
-                       now: Time.now.utc)
+                       now: Time.now.utc, workflow_generations: nil)
         now = now.utc
+        @next_retention_boundary = nil
+        workflow_generations ||= capture_workflow_generations(projects)
         # Dependency admission always sees the complete graph. Archive
         # retention is presentation-only: an expired completed prerequisite
         # must continue satisfying its dependants.
-        admission_context ||= build_admission_context(projects)
+        admission_context ||= build_admission_context(
+          projects, workflow_generations: workflow_generations
+        )
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
@@ -354,7 +364,8 @@ module Hive
               stages: stages,
               exclude_archived: exclude_archived,
               admission_context: admission_context,
-              now: now
+              now: now,
+              workflow_generation: workflow_generation_for(p, workflow_generations)
             )
           end
         }
@@ -369,14 +380,16 @@ module Hive
       # daemon.log) so the rest of the fleet keeps advancing. The fallback
       # entry still validates against the published hive-status schema.
       def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false,
-                                      admission_context: nil, now: Time.now.utc)
+                                      admission_context: nil, now: Time.now.utc,
+                                      workflow_generation: nil)
         project_payload(
           project,
           project_count: project_count,
           stages: stages,
           exclude_archived: exclude_archived,
           admission_context: admission_context,
-          now: now
+          now: now,
+          workflow_generation: workflow_generation
         )
       rescue Hive::UnsupportedProjectConfigError
         raise
@@ -397,7 +410,8 @@ module Hive
       end
 
       def project_payload(project, project_count:, stages: nil, exclude_archived: false,
-                          admission_context: nil, now: Time.now.utc)
+                          admission_context: nil, now: Time.now.utc,
+                          workflow_generation: nil)
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {
@@ -417,12 +431,13 @@ module Hive
           # raise UnknownWorkflow and degrade the whole project). See
           # Hive::Workflows::Project::LOCK.
           Hive::Workflows::Project.synchronize do
-            Hive::Workflows::Project.load!(path)
+            raise workflow_generation if workflow_generation.is_a?(Exception)
+            Hive::Workflows::Project.load!(path) unless workflow_generation
             # JSON path: pay the diagnostic-extraction cost because
             # external consumers (TUI, daemon, bots) read `diagnostic` off
             # every row. Schema mandates the field.
-            config = task_action_config(path)
-            workflow_generation = Hive::Task.capture_workflow_generation(path, config: config)
+            config = workflow_generation&.config || task_action_config(path)
+            workflow_generation ||= Hive::Task.capture_workflow_generation(path, config: config)
             rows = annotate_implementation_identities(
               collect_rows(
                 hive_state,
@@ -442,6 +457,7 @@ module Hive
               rows, project, admission_context: admission_context
             )
             projection = Hive::ArchiveFilter.project(rows, now: now)
+            note_retention_boundary(projection.next_retention_boundary) unless @archive
             rows =
               if @archive
                 projection.archive_rows
@@ -455,7 +471,9 @@ module Hive
             # Always emit `legacy_stage_dirs` (default empty array) so
             # consumers can branch on `.empty?` without a `key?` probe and
             # the schema's optional-but-never-undefined contract holds.
-            legacy_stage_dirs = detect_legacy_stage_dirs(hive_state)
+            legacy_stage_dirs = detect_legacy_stage_dirs(
+              hive_state, workflow_generation: workflow_generation
+            )
             out["legacy_stage_dirs"] = legacy_stage_dirs
             # `legacy_migrate_command` is the machine-readable parity of the
             # text-mode "run `hive migrate`" recovery hint. Agents reading
@@ -491,12 +509,12 @@ module Hive
       # `hive migrate` would actually move.
       STATUS_PRIVATE_STAGE_DIRS = %w[archived-manual].freeze
 
-      def detect_legacy_stage_dirs(hive_state)
+      def detect_legacy_stage_dirs(hive_state, workflow_generation: nil)
         stages_root = File.join(hive_state, "stages")
         return [] unless File.directory?(stages_root)
 
         Dir.children(stages_root).filter_map do |basename|
-          next if Hive::Workflows.all_stage_dirs.include?(basename)
+          next if workflow_stage_dirs(workflow_generation).include?(basename)
           next if STATUS_PRIVATE_STAGE_DIRS.include?(basename)
 
           dir = File.join(stages_root, basename)
@@ -772,7 +790,8 @@ module Hive
         project ? project["name"] : File.basename(task.project_root)
       end
 
-      def render_project(project, project_count:, admission_context: nil, now: Time.now.utc)
+      def render_project(project, project_count:, admission_context: nil, now: Time.now.utc,
+                         workflow_generation: nil)
         path = project["path"]
         unless File.directory?(path)
           puts "#{project['name']}: missing project path #{path}"
@@ -786,13 +805,14 @@ module Hive
 
         projection = nil
         Hive::Workflows::Project.synchronize do
-          Hive::Workflows::Project.load!(path)
+          raise workflow_generation if workflow_generation.is_a?(Exception)
+          Hive::Workflows::Project.load!(path) unless workflow_generation
           # Text-mode renders icon / state_label / suggested_command / age
           # only — `diagnostic` is unused here, so skip the bounded file-
           # I/O that TaskAction#diagnostic performs per red row. JSON path
           # still pays the full cost via project_payload.
-          config = task_action_config(path)
-          workflow_generation = Hive::Task.capture_workflow_generation(path, config: config)
+          config = workflow_generation&.config || task_action_config(path)
+          workflow_generation ||= Hive::Task.capture_workflow_generation(path, config: config)
           rows = annotate_implementation_identities(
             collect_rows(
               hive_state, now: now, workflow_generation: workflow_generation,
@@ -814,7 +834,7 @@ module Hive
 
         visible_rows = projection.ordinary_rows
         hidden_count = projection.hidden_count
-        legacy = detect_legacy_stage_dirs(hive_state)
+        legacy = detect_legacy_stage_dirs(hive_state, workflow_generation: workflow_generation)
         puts project["name"]
         render_legacy_stage_warning(legacy) unless legacy.empty?
         if visible_rows.empty? && hidden_count.zero?
@@ -993,7 +1013,7 @@ module Hive
       # overlay. Archive membership is applied after TaskAction annotation,
       # because one workflow's terminal directory may be another workflow's
       # active directory.
-      def default_stage_dirs(hive_state, _exclude_archived)
+      def default_stage_dirs(hive_state, _exclude_archived, workflow_generation: nil)
         # Archive membership is workflow/action-aware and cannot be inferred
         # from a global terminal-directory union. Scan the full generation and
         # apply exclude_archived only after TaskAction annotation.
@@ -1001,15 +1021,17 @@ module Hive
         on_disk = Dir.children(stages_root).select do |entry|
           entry.match?(/\A\d+-[a-z][a-z0-9-]*\z/) &&
             File.directory?(File.join(stages_root, entry)) &&
-            (Hive::Workflows.all_stage_dirs.include?(entry) ||
-             orphan_stage_has_workflow_reference?(File.join(stages_root, entry)))
+            (workflow_stage_dirs(workflow_generation).include?(entry) ||
+             orphan_stage_has_workflow_reference?(
+               File.join(stages_root, entry), workflow_generation: workflow_generation
+             ))
         end
-        (Hive::Workflows.all_stage_dirs + on_disk).uniq
+        (workflow_stage_dirs(workflow_generation) + on_disk).uniq
       rescue SystemCallError
-        Hive::Workflows.all_stage_dirs
+        workflow_stage_dirs(workflow_generation)
       end
 
-      def orphan_stage_has_workflow_reference?(stage_dir)
+      def orphan_stage_has_workflow_reference?(stage_dir, workflow_generation: nil)
         task_folders = Dir.children(stage_dir).filter_map do |child|
           folder = File.join(stage_dir, child)
           folder if Hive::Stages.task_slug?(child) && File.directory?(folder)
@@ -1026,7 +1048,7 @@ module Hive
         _, raw_config = Hive::Config.read_project_config(project_root)
         default_workflow = raw_config["default_workflow"].to_s.strip
         !default_workflow.empty? &&
-          !Hive::Workflows::Registry.ids.include?(default_workflow.to_sym)
+          !workflow_ids(workflow_generation).include?(default_workflow.to_sym)
       rescue Hive::ConfigError, SystemCallError
         false
       end
@@ -1034,8 +1056,13 @@ module Hive
       def collect_rows(hive_state, stages: nil, exclude_archived: false, now: Time.now.utc,
                        workflow_generation: nil, project_name: nil)
         rows = []
-        known_stage_dirs = Hive::Workflows.all_stage_dirs
-        Array(stages || default_stage_dirs(hive_state, exclude_archived)).each do |stage|
+        known_stage_dirs = workflow_stage_dirs(workflow_generation)
+        terminal_stage_dirs = workflow_terminal_stage_dirs(workflow_generation)
+        Array(
+          stages || default_stage_dirs(
+            hive_state, exclude_archived, workflow_generation: workflow_generation
+          )
+        ).each do |stage|
           stage_dir = File.join(hive_state, "stages", stage)
           next unless File.directory?(stage_dir)
 
@@ -1062,7 +1089,8 @@ module Hive
                 warn "hive: status: #{entry} failed to load (#{e.message}); surfaced as an Error row"
                 rows << invalid_task_row(
                   stage: stage, slug: slug, folder: entry, message: e.message, now: now,
-                  archive_member: !known_stage_dirs.include?(stage)
+                  archive_member: terminal_stage_dirs.include?(stage) ||
+                    !known_stage_dirs.include?(stage)
                 )
                 next
               end
@@ -1204,9 +1232,10 @@ module Hive
         rows
       end
 
-      def build_admission_context(projects, exclude_archived: false)
+      def build_admission_context(projects, exclude_archived: false, workflow_generations: nil)
         Hive::DependencySnapshot.admission_context(
-          projects, exclude_archived: exclude_archived
+          projects, exclude_archived: exclude_archived,
+          workflow_generations: workflow_generations
         )
       rescue Hive::UnsupportedProjectConfigError
         raise
@@ -1225,6 +1254,54 @@ module Hive
           )
         end
         Hive::DependencyAdmission::Context.new(projects: snapshots)
+      end
+
+      def capture_workflow_generations(projects)
+        Array(projects).each_with_object({}) do |project, generations|
+          path = project["path"]
+          next unless path && File.directory?(path) && File.directory?(project["hive_state_path"])
+
+          key = File.expand_path(path)
+          generations[key] = Hive::Workflows::Project.synchronize do
+            Hive::Workflows::Project.load!(path)
+            config = task_action_config(path)
+            admission_config, admission_config_error =
+              Hive::DependencySnapshot.admission_project_config(path)
+            Hive::Task.capture_workflow_generation(
+              path, config: config,
+              admission_config: admission_config,
+              admission_config_error: admission_config_error
+            )
+          end
+        rescue Hive::UnsupportedProjectConfigError
+          raise
+        rescue StandardError => e
+          generations[key] = e if key
+        end
+      end
+
+      def workflow_generation_for(project, workflow_generations)
+        workflow_generations[File.expand_path(project.fetch("path"))]
+      rescue KeyError, TypeError
+        nil
+      end
+
+      def workflow_stage_dirs(generation)
+        generation ? generation.stage_dirs : Hive::Workflows.all_stage_dirs
+      end
+
+      def workflow_terminal_stage_dirs(generation)
+        generation ? generation.terminal_stage_dirs : Hive::Workflows.all_terminal_stage_dirs
+      end
+
+      def workflow_ids(generation)
+        generation ? generation.workflows.keys : Hive::Workflows::Registry.ids
+      end
+
+      def note_retention_boundary(boundary)
+        return unless boundary
+
+        @next_retention_boundary = [ @next_retention_boundary, boundary ].compact.min
       end
 
       def apply_dependency_verdict(row, context, project)

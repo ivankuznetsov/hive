@@ -4,6 +4,10 @@ require "hive/completed_at_backfiller"
 class CompletedAtBackfillerTest < Minitest::Test
   include HiveTestHelper
   BackfillTask = Data.define(:folder, :hive_state_path)
+  MemoryCursor = Struct.new(:values) do
+    def read(state) = values[state]
+    def write(state, folder) = values[state] = folder
+  end
 
   def test_backfills_once_from_terminal_transition_history
     with_archived_task do |task, state|
@@ -56,7 +60,8 @@ class CompletedAtBackfillerTest < Minitest::Test
     now = 0.0
     tasks = 5.times.map { |index| BackfillTask.new("/task-#{index}", "/state") }
     backfiller = Hive::CompletedAtBackfiller.new(
-      batch_size: 5, deadline_seconds: 1.0, monotonic_clock: -> { now }
+      batch_size: 5, deadline_seconds: 1.0, monotonic_clock: -> { now },
+      cursor_store: MemoryCursor.new({})
     )
     attempted = []
     backfiller.define_singleton_method(:completed_at_for) do |task, deadline:|
@@ -73,15 +78,94 @@ class CompletedAtBackfillerTest < Minitest::Test
 
   def test_rotating_batches_advance_past_persistent_failures
     tasks = 3.times.map { |index| BackfillTask.new("/task-#{index}", "/state") }
-    Hive::CompletedAtBackfiller.reset_progress!
+    cursor = MemoryCursor.new({})
 
-    first = Hive::CompletedAtBackfiller.rotating_batch(tasks, 2)
-    second = Hive::CompletedAtBackfiller.rotating_batch(tasks, 2)
+    first = Hive::CompletedAtBackfiller.rotating_batch(tasks, 2, cursor_store: cursor)
+    second = Hive::CompletedAtBackfiller.rotating_batch(tasks, 2, cursor_store: cursor)
 
     assert_equal %w[/task-0 /task-1], first.map(&:folder)
     assert_equal %w[/task-2 /task-0], second.map(&:folder)
-  ensure
-    Hive::CompletedAtBackfiller.reset_progress!
+  end
+
+  def test_cursor_rotation_survives_new_store_instances
+    with_tmp_dir do |root|
+      tasks = 3.times.map { |index| BackfillTask.new("/task-#{index}", "/state") }
+
+      first = Hive::CompletedAtBackfiller.rotating_batch(
+        tasks, 2, cursor_store: Hive::CompletedAtBackfiller::CursorStore.new(root: root)
+      )
+      second = Hive::CompletedAtBackfiller.rotating_batch(
+        tasks, 2, cursor_store: Hive::CompletedAtBackfiller::CursorStore.new(root: root)
+      )
+
+      assert_equal %w[/task-0 /task-1], first.map(&:folder)
+      assert_equal %w[/task-2 /task-0], second.map(&:folder)
+    end
+  end
+
+  def test_backfill_commit_preserves_unrelated_staged_changes
+    with_archived_task do |task, state|
+      unrelated = File.join(state, "operator.txt")
+      File.write(unrelated, "before\n")
+      run!("git", "-C", state, "add", "operator.txt")
+      run!("git", "-C", state, "commit", "-m", "operator seed", "--quiet")
+      File.write(unrelated, "staged operator change\n")
+      run!("git", "-C", state, "add", "operator.txt")
+
+      assert Hive::CompletedAtBackfiller.new.completed_at_for(task)
+
+      changed = run!("git", "-C", state, "show", "--format=", "--name-only", "HEAD").lines.map(&:strip)
+      staged = run!("git", "-C", state, "diff", "--cached", "--name-only").lines.map(&:strip)
+      assert_equal [ "stages/9-done/archive-me-260719-abcd/meta.yml" ], changed.reject(&:empty?)
+      assert_equal [ "operator.txt" ], staged.reject(&:empty?)
+    end
+  end
+
+  def test_backfill_reuses_captured_workflow_generation_after_descriptor_change
+    with_tmp_dir do |project|
+      state = File.join(project, ".hive-state")
+      workflows = File.join(state, "workflows")
+      folder = File.join(state, "stages", "1-done", "captured-generation-260724-abcd")
+      FileUtils.mkdir_p([ workflows, folder ])
+      descriptor = File.join(workflows, "custom.yml")
+      File.write(descriptor, <<~YAML)
+        id: custom
+        stages:
+          - name: done
+            kind: terminal
+            state_file: done.md
+      YAML
+      File.write(File.join(folder, "done.md"), "<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(
+        folder, id: 1, slug: File.basename(folder), display_name: nil, workflow: "custom"
+      )
+      run!("git", "-C", state, "init", "-b", "hive/state", "--quiet")
+      run!("git", "-C", state, "config", "user.email", "test@example.com")
+      run!("git", "-C", state, "config", "user.name", "Test")
+      run!("git", "-C", state, "config", "commit.gpgsign", "false")
+      run!("git", "-C", state, "add", ".")
+      run!("git", "-C", state, "commit", "-m", "hive: 0-work/#{File.basename(folder)} approve 0-work -> 1-done", "--quiet")
+      Hive::Workflows::Project.load!(project)
+      generation = Hive::Task.capture_workflow_generation(project)
+      task = Hive::Task.new(folder, workflow_generation: generation)
+      File.write(descriptor, <<~YAML)
+        id: custom
+        stages:
+          - name: done
+            kind: terminal
+            state_file: done.md
+          - name: published
+            kind: terminal
+            state_file: published.md
+      YAML
+
+      value = Hive::CompletedAtBackfiller.new.completed_at_for(task)
+
+      assert value
+      assert Hive::TaskMeta.read(folder)[:completed_at]
+    ensure
+      Hive::Workflows::Project.reset!
+    end
   end
 
   private

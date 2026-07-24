@@ -6,7 +6,7 @@ class CommandsRunTest < Minitest::Test
   TaskDouble = Struct.new(
     :slug, :stage_name, :stage_index, :folder, :state_file,
     :hive_state_path, :project_root, :project_name, :worktree_path,
-    :workflow,
+    :workflow, :action_workflow,
     keyword_init: true
   )
   MarkerDouble = Struct.new(:name, :attrs, keyword_init: true)
@@ -54,7 +54,8 @@ class CommandsRunTest < Minitest::Test
       project_root: "/tmp/project",
       project_name: "project",
       worktree_path: "/tmp/worktree",
-      workflow: workflow
+      workflow: workflow,
+      action_workflow: workflow
     )
   end
 
@@ -263,6 +264,102 @@ class CommandsRunTest < Minitest::Test
       assert_equal "# Before\n", File.read(state_file)
       refute File.exist?(File.join(folder, "partial.txt"))
       assert_equal "stages/1-publish/some-slug", staged.dig(0, -1)
+    ensure
+      snapshot&.close
+    end
+  end
+
+  def test_terminal_runner_failure_restores_all_runner_mutations
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      workflow = active_terminal_workflow
+      current = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: workflow
+      )
+      current.project_root = dir
+      runner_error = Class.new(Exception)
+      runner = lambda do |_task, _config|
+        File.write(state_file, "# Partial\n<!-- COMPLETE -->\n")
+        File.write(File.join(folder, "partial.txt"), "partial\n")
+        raise runner_error, "runner exploded"
+      end
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+      run = command
+      completed_rebase = rebase_result
+      run.define_singleton_method(:resolve_task) { current }
+      run.define_singleton_method(:perform_rebase) { |*| completed_rebase }
+      run.define_singleton_method(:pick_runner) { |_task| runner }
+      run.define_singleton_method(:legacy_completed_at_before_run) { |*| nil }
+
+      error = with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(*) {}) do
+        with_replaced_singleton_method(Hive::Config, :load, ->(*) { {} }) do
+          with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+            assert_raises(Hive::Error) { run.send(:do_call) }
+          end
+        end
+      end
+
+      assert_includes error.message, "runner exploded"
+      assert_equal "# Before\n", File.read(state_file)
+      refute File.exist?(File.join(folder, "partial.txt"))
+    end
+  end
+
+  def test_terminal_snapshot_capture_removes_partial_backup_when_copy_fails
+    with_tmp_dir do |dir|
+      folder = File.join(dir, "task")
+      root = File.join(dir, "snapshot")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "state.md"), "state\n")
+
+      with_replaced_singleton_method(Dir, :mktmpdir, ->(*) { FileUtils.mkdir_p(root); root }) do
+        with_replaced_singleton_method(FileUtils, :copy_entry, ->(*) { raise IOError, "copy failed" }) do
+          assert_raises(IOError) { Hive::Commands::Run::TerminalStateSnapshot.capture(folder) }
+        end
+      end
+
+      refute File.exist?(root)
+    end
+  end
+
+  def test_malformed_completed_at_aborts_terminal_commit_and_restores_snapshot
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Before\n")
+      File.write(File.join(folder, "meta.yml"), "slug: some-slug\ncompleted_at: yesterday\n")
+      snapshot = Hive::Commands::Run::TerminalStateSnapshot.capture(folder)
+      File.write(state_file, "# Final\n<!-- COMPLETE -->\n")
+      current = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      committed = false
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| committed = true }
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+        assert_raises(Hive::Error) do
+          command.send(
+            :commit_after, current, { commit: "complete" }, config: {},
+            terminal_snapshot: snapshot
+          )
+        end
+      end
+
+      refute committed
+      assert_equal "# Before\n", File.read(state_file)
+      assert_includes File.read(File.join(folder, "meta.yml")), "completed_at: yesterday"
     ensure
       snapshot&.close
     end

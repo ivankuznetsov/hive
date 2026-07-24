@@ -1,6 +1,7 @@
 require "fileutils"
 require "json"
 require "open3"
+require "pathname"
 require "hive/config"
 require "hive/task"
 require "hive/task_resolver"
@@ -437,6 +438,13 @@ module Hive
           on_undo: lambda do
             FileUtils.mv(new_folder, task.folder)
             Hive::TaskMeta.restore(task.folder, completion_snapshot) if completion_snapshot
+            source_rel = File.join("stages", "#{task.stage_index}-#{task.stage_name}", task.slug)
+            destination_rel = Pathname.new(new_folder).relative_path_from(
+              Pathname.new(task.hive_state_path)
+            ).to_s
+            Hive::GitOps.new(task.project_root).run_git!(
+              "-C", task.hive_state_path, "add", "-A", "--", source_rel, destination_rel
+            )
           end,
           rolled_back_message: lambda do |e|
             "approve aborted; mv rolled back to #{task.folder}. " \
@@ -460,9 +468,7 @@ module Hive
         stored = task.completed_at if task.respond_to?(:completed_at)
         return stored if stored
 
-        Hive::CompletionTime.from_history(task)
-      rescue Hive::GitError
-        nil
+        Hive::CompletionTime.discover(task)
       end
 
       # ── Reporting ───────────────────────────────────────────────────────

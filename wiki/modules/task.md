@@ -29,7 +29,12 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
    directory is the exact terminal stage of another registered descriptor.
    In that case `#workflow` remains the newly selected policy source and
    `#action_workflow` supplies state-file/action/archive classification from
-   the folder-owning descriptor. Other mismatches raise `InvalidTaskPath`.
+   the folder-owning descriptor. A durable completion clock or distinct
+   terminal state-file evidence preserves terminal ownership across an
+   overlapping nonterminal policy stage without reclassifying a genuine active
+   task whose layout is identical. When terminal directories overlap, existing
+   state-file evidence selects the owner and the workflow id supplies a
+   deterministic fallback. Other mismatches raise `InvalidTaskPath`.
 
 `@hive_state_path` is the *project-rooted* hive-state path: `<project_root>/<state_dir_basename>` — always `<project_root>/.hive-state` in MVP.
 

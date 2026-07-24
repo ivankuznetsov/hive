@@ -187,7 +187,11 @@ the resolved terminal stage archived, then the terminal state-file mtime, then
 the task-folder mtime. A value is eligible for hiding only after its metadata
 write and `hive/state` commit both succeed. Missing/corrupt sources or failed
 persistence warn and keep the task visible; a successful first write is
-idempotent, including while policy is `never`.
+idempotent, including while policy is `never`. Each refresh reuses the status
+producer's captured workflow/config generation, bounds Git history and commit
+subprocesses by the shared deadline, commits only the metadata path without
+consuming unrelated index entries, and advances a durable per-project cursor so
+daemonless status calls remain fair across process restarts.
 
 `ArchiveFilter` captures one UTC `now` for a refresh and applies the currently
 resolved task pin, project default, or `coding` workflow policy. Positive

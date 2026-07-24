@@ -57,6 +57,10 @@ class InitDoctorPreflightTest < Minitest::Test
     File.write(path, content)
   end
 
+  def run_init_with_preflight(dir)
+    Hive::Commands::Init.new(dir, agent_skill_preflight: true).call
+  end
+
   # Installs a complete skill set so the preflight reports all-green
   # (matches the recommended-default config that `hive init` writes).
   # See `templates/project_config.yml.erb` for the reviewer roster.
@@ -90,7 +94,7 @@ class InitDoctorPreflightTest < Minitest::Test
       install_all_default_skills(home)
       with_tmp_global_config(home: home) do
         with_tmp_git_repo do |dir|
-          out, err = capture_io { Hive::Commands::Init.new(dir).call }
+          out, err = capture_io { run_init_with_preflight(dir) }
           assert_includes out, "hive: initialized"
           refute_match(/doctor pre-flight/, err,
             "all-green preflight must emit nothing on stderr")
@@ -107,7 +111,7 @@ class InitDoctorPreflightTest < Minitest::Test
 
       with_tmp_global_config(home: home) do
         with_tmp_git_repo do |dir|
-          out, err = capture_io { Hive::Commands::Init.new(dir).call }
+          out, err = capture_io { run_init_with_preflight(dir) }
           assert_includes out, "hive: initialized"
           assert_match(/hive: doctor pre-flight — found \d+ issue/, err)
           assert_match(%r{\[brainstorm/claude\]}, err,
@@ -125,7 +129,7 @@ class InitDoctorPreflightTest < Minitest::Test
 
       with_tmp_global_config(home: home) do
         with_tmp_git_repo do |dir|
-          _, err = capture_io { Hive::Commands::Init.new(dir).call }
+          _, err = capture_io { run_init_with_preflight(dir) }
           assert_match(/found \d+ issue/, err)
           assert_match(%r{\[brainstorm/claude\]}, err)
           assert_match(%r{\[6-review/claude-ce-code-review/claude\]}, err,
@@ -143,7 +147,7 @@ class InitDoctorPreflightTest < Minitest::Test
           # Init relies on `exit` for failure paths; a successful init
           # returns normally. capture_io will just observe stdout/stderr;
           # if init blew up, the test would error.
-          out, err = capture_io { Hive::Commands::Init.new(dir).call }
+          out, err = capture_io { run_init_with_preflight(dir) }
           assert_includes out, "hive: initialized"
           assert_match(/found \d+ issue/, err)
           # No exception, no exit — init returned normally despite the
@@ -166,7 +170,7 @@ class InitDoctorPreflightTest < Minitest::Test
           Hive::Config.define_singleton_method(:load) do |_path|
             raise NoMethodError, "boom"
           end
-          out, err = capture_io { Hive::Commands::Init.new(dir).call }
+          out, err = capture_io { run_init_with_preflight(dir) }
           assert_includes out, "hive: initialized", "init must complete successfully"
           assert_match(/doctor pre-flight failed: NoMethodError: boom/, err)
           assert_match(/this may be a hive bug/, err)
@@ -189,7 +193,7 @@ class InitDoctorPreflightTest < Minitest::Test
           Hive::Config.define_singleton_method(:load) do |_path|
             raise Hive::ConfigError, "intentional malformed config"
           end
-          out, err = capture_io { Hive::Commands::Init.new(dir).call }
+          out, err = capture_io { run_init_with_preflight(dir) }
           assert_includes out, "hive: initialized"
           assert_match(/doctor pre-flight — config issue detected/, err)
           assert_match(/run `hive doctor` for details/, err)

@@ -120,6 +120,18 @@ class HiveTestCoverageTest < Minitest::Test
     assert HiveTestCoverage.coverage_ok?(report)
   end
 
+  def test_coverage_gate_keeps_non_percentage_failures_at_full_line_coverage
+    report = {
+      "line_total" => 3,
+      "line_covered" => 3,
+      "unloaded_files" => [],
+      "result_errors" => []
+    }
+
+    refute HiveTestCoverage.coverage_ok?(report.merge("unloaded_files" => [ "lib/demo.rb" ]))
+    refute HiveTestCoverage.coverage_ok?(report.merge("result_errors" => [ { "file" => "bad.marshal" } ]))
+  end
+
   def test_coverage_gate_defaults_to_full_line_coverage
     report = {
       "line_total" => 4,
@@ -133,18 +145,38 @@ class HiveTestCoverageTest < Minitest::Test
     assert_includes HiveTestCoverage.failure_message(report), "below minimum 100.00%"
   end
 
-  def test_coverage_gate_honors_min_line_threshold_env
+  def test_coverage_gate_rejects_near_full_line_coverage_that_rounds_to_100_percent
     report = {
+      "line_total" => 54_790,
+      "line_covered" => 54_789,
+      "line_percent" => 100.0,
+      "unloaded_files" => [],
+      "result_errors" => []
+    }
+
+    refute HiveTestCoverage.coverage_ok?(report)
+    message = HiveTestCoverage.failure_message(report)
+    assert_includes message, "100.00% (54789/54790)"
+    assert_includes message, "below minimum 100.00%"
+  end
+
+  def test_coverage_gate_honors_min_line_threshold_env
+    failing_report = {
       "line_total" => 4,
       "line_covered" => 2,
       "line_percent" => 50.0,
       "unloaded_files" => [],
       "result_errors" => []
     }
+    passing_report = failing_report.merge(
+      "line_covered" => 3,
+      "line_percent" => 75.0
+    )
 
     with_env("HIVE_COVERAGE_MIN_LINE" => "75") do
-      refute HiveTestCoverage.coverage_ok?(report)
-      assert_includes HiveTestCoverage.failure_message(report), "below minimum 75.00%"
+      refute HiveTestCoverage.coverage_ok?(failing_report)
+      assert_includes HiveTestCoverage.failure_message(failing_report), "below minimum 75.00%"
+      assert HiveTestCoverage.coverage_ok?(passing_report)
     end
   end
 

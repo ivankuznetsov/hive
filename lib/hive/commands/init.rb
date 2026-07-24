@@ -85,7 +85,7 @@ module Hive
                      workflow_input: $stdin, workflow_output: $stderr,
                      provisioning_input: $stdin, provisioning_output: $stdout,
                      provisioning_error: $stderr, preflight_inspector: nil,
-                     setup_agents_factory: nil, agent_skill_preflight: true)
+                     setup_agents_factory: nil, agent_skill_preflight: !defined?(Minitest))
         @project_path = File.expand_path(project_path)
         @force = force
         @json = json
@@ -101,6 +101,11 @@ module Hive
         @provisioning_output = provisioning_output
         @provisioning_error = provisioning_error
         @preflight_inspector = preflight_inspector
+        # Direct in-process tests create hundreds of disposable projects whose
+        # assertions do not concern optional post-init agent-skill diagnosis.
+        # Skip that native/filesystem inspection by default under Minitest;
+        # focused preflight tests opt in explicitly, while real CLI subprocesses
+        # do not load Minitest and therefore retain the production default.
         unless [ true, false ].include?(agent_skill_preflight)
           raise ArgumentError, "agent_skill_preflight must be true or false"
         end

@@ -40,10 +40,26 @@ class HivePrdigestTest < Minitest::Test
                  registry.repositories(filters: [ "owner/two", "OWNER/ONE", "owner/two" ])
   end
 
-  def test_registry_fails_closed_for_malformed_and_unregistered_scope
+  def test_registry_ignores_registered_projects_that_are_not_github_repositories
+    with_tmp_git_repo do |no_origin|
+      entries = [
+        { "name" => "GitHub", "repository_identity" => "github.com/owner/one" },
+        { "name" => "Local", "repository_identity" => "local:/tmp/repo" },
+        { "name" => "GitLab", "repository_identity" => "gitlab.com/owner/two" },
+        { "name" => "No origin", "path" => no_origin, "repository_identity" => nil }
+      ]
+
+      assert_equal [ "owner/one" ], Hive::Prdigest::Registry.new(entries: entries).repositories
+    end
+  end
+
+  def test_registry_fails_closed_for_malformed_and_invalid_github_scope
     [
       [ [ "broken" ], /entry is malformed/ ],
-      [ [ { "name" => "Local", "repository_identity" => "local:/tmp/repo" } ], /does not resolve/ ]
+      [
+        [ { "name" => "Invalid", "repository_identity" => "github.com/owner/repo/extra" } ],
+        /does not resolve/
+      ]
     ].each do |entries, message|
       error = assert_raises(Hive::ConfigError) do
         Hive::Prdigest::Registry.new(entries: entries).repositories
@@ -332,6 +348,43 @@ class HivePrdigestTest < Minitest::Test
       ->(*, **) { raise Hive::GhError, "missing gh" }
     ) do
       assert_equal "", runner.send(:resolve_github_token, {})
+    end
+  end
+
+  def test_binary_resolver_falls_back_to_the_installed_prdigest_gem
+    runner = build_runner
+    with_tmp_dir do |dir|
+      executable = File.join(dir, "prdigest")
+      File.write(executable, "#!/bin/sh\nexit 0\n")
+      File.chmod(0o755, executable)
+
+      gem_bin_calls = []
+      with_replaced_singleton_method(Hive::InvokedBinary, :which, ->(*) { nil }) do
+        with_replaced_singleton_method(
+          Gem,
+          :bin_path,
+          lambda do |gem_name, executable_name, requirement|
+            gem_bin_calls << [ gem_name, executable_name, requirement ]
+            executable
+          end
+        ) do
+          assert_equal executable, runner.send(:resolve_binary, { "PATH" => "/bin" })
+        end
+      end
+      assert_equal [ [ "prdigest", "prdigest", "~> 0.1.0" ] ], gem_bin_calls
+
+      with_replaced_singleton_method(Hive::InvokedBinary, :which, ->(*) { nil }) do
+        with_replaced_singleton_method(Gem, :bin_path, ->(*) { File.join(dir, "missing") }) do
+          assert_nil runner.send(:resolve_binary, { "PATH" => "/bin" })
+        end
+        with_replaced_singleton_method(
+          Gem,
+          :bin_path,
+          ->(*) { raise Gem::GemNotFoundException, "missing" }
+        ) do
+          assert_nil runner.send(:resolve_binary, { "PATH" => "/bin" })
+        end
+      end
     end
   end
 

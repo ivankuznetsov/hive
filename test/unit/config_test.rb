@@ -3042,7 +3042,7 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_digest_registered_projects_preserves_malformed_rows_for_discovery_warnings
+  def test_digest_registered_projects_preserves_malformed_rows_for_adapter_validation
     with_tmp_global_config do
       malformed = { "name" => "Broken", "path" => 123 }
       valid = { "name" => "Working", "path" => "/tmp/working" }

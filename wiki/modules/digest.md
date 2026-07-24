@@ -3,7 +3,7 @@ title: Hive::Digest
 type: module
 source: lib/hive/digest.rb, lib/hive/digest/, templates/digest_prompt.md.erb
 created: 2026-06-14
-updated: 2026-07-22
+updated: 2026-07-24
 tags: [digest, github, telegram, module]
 ---
 
@@ -25,7 +25,8 @@ Hive task, stage, completion, ship-time, matcher, or pairing state.
 | `Digest::ChangelogGenerator#generate(repositories, date:)` | Builds private evidence chunks, runs one bounded agent, validates the fact ledger and exact project/PR/material-fact coverage, redacts generated text, and returns `Changelog`. |
 | `Digest::Stats#for_repositories(repositories)` | Produces per-repository and overall `Aggregate` values with independently optional additions, deletions, and commits plus incomplete-statistics warnings. |
 | `Digest::Renderer.render(changelog:, date:, stats:, warnings:)` | Produces deterministic MarkdownV2 project sections, PR links/bullets, warnings, and divider/middle-dot statistics. |
-| `Digest::Sender#preflight!` / `#deliver(text, dry_run:)` | Validates Telegram credentials before paid generation, or returns a credential-free dry-run. Real sends use safe chunks and report partial-send context on failure. |
+| `Digest::Sender#preflight!` / `#deliver(text, dry_run:, digest_date:)` | Validates Telegram credentials before paid generation, or returns a credential-free dry-run. Real sends persist one stable redacted payload and exact MarkdownV2-safe chunks per date, then resume at the durable next-unsent chunk. |
+| `Digest::DeliveryCheckpointStore` | Owns the owner-private, atomically written `<state_home>/digest-deliveries/YYYY-MM-DD.json` delivery transaction, including payload checksum, exact chunks, next-unsent cursor, completion, and a parked permanent failure. |
 
 ## Data And Outcome Model
 
@@ -61,7 +62,7 @@ registered project Git origins
   -> ChangelogGenerator (evidence IDs -> fact ledger -> project/PR bullets)
   -> Stats (known totals + explicit incomplete warnings)
   -> Renderer (deterministic MarkdownV2)
-  -> Sender (dry-run or Telegram chunks)
+  -> Sender (dry-run or durable Telegram chunk transaction)
 ```
 
 Resolution fails closed when no registered GitHub target survives. Collection
@@ -159,8 +160,13 @@ The renderer owns all deterministic evidence: order, repository headings,
 project/PR counts, PR numbers and links, warnings, and metric labels. Generated
 text supplies only project significance and bullets and is always escaped as
 untrusted MarkdownV2 text. Long plain-text lines are split on grapheme-safe
-boundaries before Telegram performs message chunking, so an escape or link
-entity is never hard-cut. The footer retains:
+boundaries before Telegram performs message chunking. The Telegram adapter
+then scans MarkdownV2 escapes, links, bold/italic/underline/strike/spoiler,
+inline code, preformatted blocks, custom emoji labels, and blockquote markers,
+choosing only a boundary at which every entity is closed. Every resulting
+message is therefore independently parseable and no escape or entity is
+hard-cut. An entity that cannot fit within Telegram's 4096-character limit
+fails before any API call. The footer retains:
 
 ```text
 ──────────
@@ -169,6 +175,33 @@ Lines +A/-D · PRs P · Commits C
 
 Partial known values carry `(partial)`. Entirely unknown metrics are omitted;
 an empty digest shows only `PRs 0`.
+
+## Delivery Transaction
+
+Before the first real Telegram call, `Sender` performs its final secret
+redaction, computes the exact MarkdownV2-aware chunks, and atomically persists
+the stable payload and `next_chunk: 0` under
+`<state_home>/digest-deliveries/YYYY-MM-DD.json`. The directory and files are
+owner-only (0700/0600), and one per-date lock serializes concurrent attempts.
+After each accepted Telegram response, the sender atomically advances
+`next_chunk`. A safe process retry loads that same payload and sends only the
+remaining suffix; newly generated prose cannot replace it, and chunks already
+recorded as accepted are not replayed. A completed checkpoint also makes a
+retry a no-op, covering a crash after complete delivery but before the daemon
+advances its date cursor.
+
+Telegram HTTP 400 `can't parse entities` responses are treated as
+deterministic. For the one failed chunk, Hive makes one bounded retry using a
+locally converted equivalent HTML representation. If Telegram accepts it,
+delivery advances normally. If Telegram rejects the fallback as malformed, or
+the locally rendered MarkdownV2 cannot be safely split, the checkpoint records
+a permanent failure and the command exits nonzero. Every send first persists an
+`in_flight` unit. A structured Telegram rejection clears that marker and can
+retry safely from the same next-unsent chunk; an unknown transport outcome or
+a post-send checkpoint failure leaves it parked so Hive cannot blindly replay
+a message Telegram may already have accepted. Failure logs retain
+`accepted_chunks`, `total_chunks`, and `failed_chunk`, with fallback outcome
+fields when applicable.
 
 ## JSON And Daemon Contract
 
@@ -180,10 +213,14 @@ former merged-PR schema/registry identity has been removed.
 `Hive::Daemon::DigestScheduler` uses `LondonWindow`, persists
 `last_digested_date`, and emits the canonical bare command
 `hive digest --date D --json`. Exit 0 advances empty, full, and honest partial
-success. Nonzero total-collection, generation, delivery, or cursor-write
-failure leaves the day owed under bounded 60/300/900-second backoff. First run,
-oldest-first catch-up, cap, one global slot, SIGHUP reconfiguration, dry-run
-pseudo-child completion, and the 3600-second child timeout are unchanged.
+success. Retryable total-collection, generation, pre-send cursor-write, or
+definitively rejected Telegram failure leaves the day owed under bounded
+60/300/900-second backoff. A typed permanent or ambiguous delivery/checkpoint
+error leaves the cursor unchanged but persists `blocked_date` and its error
+details, preventing deterministic redispatch or a blind replay until an
+operator remediates that date. First run, oldest-first catch-up, cap, one global
+slot, SIGHUP reconfiguration, dry-run pseudo-child completion, and the
+3600-second child timeout are unchanged.
 
 ## Tests
 
@@ -191,7 +228,8 @@ pseudo-child completion, and the 3600-second child timeout are unchanged.
 - `test/unit/gh_digest_test.rb`, `digest/collector_test.rb`, and
   `digest/stats_test.rb`
 - `test/unit/digest/changelog_generator_test.rb`
-- `test/unit/digest/run_test.rb`, `renderer_test.rb`, and `sender_test.rb`
+- `test/unit/digest/run_test.rb`, `renderer_test.rb`, `sender_test.rb`, and
+  `delivery_checkpoint_store_test.rb`
 - `test/unit/commands/digest_test.rb`, schema/CLI integration tests, and
   `test/unit/daemon/digest_scheduler_test.rb`
 

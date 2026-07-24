@@ -32,8 +32,8 @@ class HiveDigestRunTest < Minitest::Test
   FakeSender = Struct.new(:calls, :chat_id) do
     def preflight! = calls << :preflight
 
-    def deliver(text, dry_run:)
-      calls << { text: text, dry_run: dry_run }
+    def deliver(text, dry_run:, digest_date:)
+      calls << { text: text, dry_run: dry_run, digest_date: digest_date }
       Hive::Digest::Sender::SendResult.new(
         chat_id: dry_run ? nil : chat_id, responses: [], dry_run: dry_run, text: text
       )
@@ -80,6 +80,7 @@ class HiveDigestRunTest < Minitest::Test
     assert_equal [ warning ], result.warnings
     assert_equal [ collected ], generator.calls.first.fetch(:repositories)
     assert_equal true, sender.calls.last.fetch(:dry_run)
+    assert_equal Date.new(2026, 6, 13), sender.calls.last.fetch(:digest_date)
     assert_equal [ warning ], renderer.calls.first.fetch(:warnings)
   end
 
@@ -155,8 +156,9 @@ class HiveDigestRunTest < Minitest::Test
     order = []
     sender = Object.new
     sender.define_singleton_method(:preflight!) { order << :preflight }
-    sender.define_singleton_method(:deliver) do |text, dry_run:|
+    sender.define_singleton_method(:deliver) do |text, dry_run:, digest_date:|
       order << :deliver
+      raise "wrong date" unless digest_date == Date.new(2026, 6, 13)
       Hive::Digest::Sender::SendResult.new(
         chat_id: 123, responses: [], dry_run: dry_run, text: text
       )
@@ -217,7 +219,8 @@ class HiveDigestRunTest < Minitest::Test
     empty_repository = repository_collection(pull_requests: [])
     sender = Object.new
     sender.define_singleton_method(:preflight!) { calls << :preflight }
-    sender.define_singleton_method(:deliver) do |text, dry_run:|
+    sender.define_singleton_method(:deliver) do |text, dry_run:, digest_date:|
+      raise "wrong date" unless digest_date == Date.new(2026, 6, 13)
       Hive::Digest::Sender::SendResult.new(chat_id: 1, responses: [], dry_run: dry_run, text: text)
     end
 

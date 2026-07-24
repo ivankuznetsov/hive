@@ -1,10 +1,14 @@
 require "test_helper"
+require "json"
 require "hive/bot/telegram"
 require "hive/digest/changelog_generator"
 require "hive/digest/renderer"
+require "hive/digest/sender"
 require "hive/digest/stats"
 
 class HiveDigestRendererTest < Minitest::Test
+  include HiveTestHelper
+
   DATE = Date.new(2026, 6, 13)
 
   def test_renders_project_context_every_pr_bullet_link_counts_and_footer
@@ -102,7 +106,7 @@ class HiveDigestRendererTest < Minitest::Test
       changelog: changelog_for([ repo ]), date: DATE,
       stats: Hive::Digest::Stats.new.for_repositories([ repo ])
     )
-    chunks = Hive::Bot::Telegram.allocate.send(:split_message, message)
+    chunks = Hive::Bot::Telegram.allocate.send(:split_message, message, parse_mode: :markdown_v2)
 
     assert_operator chunks.size, :>, 1
     assert chunks.all? { |chunk| chunk.length <= Hive::Bot::Telegram::MAX_MESSAGE_CHARS }
@@ -112,6 +116,92 @@ class HiveDigestRendererTest < Minitest::Test
     assert_equal 3_000, chunks.join.scan("\\_").size
     assert_equal 3_000, chunks.join.scan("\\*").size
     assert_includes chunks.join, "END"
+  end
+
+  def test_two_project_five_pr_digest_delivers_all_sections_and_footer_once
+    first = repository("org/hive", 1, bullets: [ long_bullet("hive-1") ])
+    first = with_pull_requests(
+      first,
+      pull_request(first.target, 2),
+      pull_request(first.target, 3)
+    )
+    second = repository("org/honeycomb", 35, bullets: [ long_bullet("honeycomb-35") ])
+    second = with_pull_requests(second, pull_request(second.target, 36))
+    repositories = [ first, second ]
+    message = Hive::Digest::Renderer.render(
+      changelog: changelog_for(repositories), date: DATE,
+      stats: Hive::Digest::Stats.new.for_repositories(repositories)
+    )
+
+    chunks = Hive::Bot::Telegram.allocate.send(
+      :split_message, message, parse_mode: :markdown_v2
+    )
+
+    assert_operator chunks.size, :>, 1
+    assert chunks.all? { |chunk| chunk.length <= Hive::Bot::Telegram::MAX_MESSAGE_CHARS }
+    assert_equal 1, chunks.join("\n").scan("*org/hive*").size
+    assert_equal 1, chunks.join("\n").scan("*org/honeycomb*").size
+    [ 1, 2, 3, 35, 36 ].each do |number|
+      assert_equal 1, chunks.join("\n").scan("[PR \\##{number}]").size
+    end
+    assert_equal 1, chunks.join("\n").scan(Hive::Digest::Renderer::FOOTER_DIVIDER).size
+    assert chunks.last.include?(Hive::Digest::Renderer::FOOTER_DIVIDER),
+           "the complete digest, including its footer, must survive chunking"
+
+    with_tmp_dir do |dir|
+      accepted = []
+      failed_once = false
+      transient_error = telegram_response_error(
+        500, "Internal Server Error while accepting chunk"
+      )
+      api = Object.new
+      api.define_singleton_method(:send_message) do |params|
+        if params.fetch(:text) == chunks.fetch(1) && !failed_once
+          failed_once = true
+          raise transient_error
+        end
+
+        accepted << params.fetch(:text)
+        { "message_id" => accepted.size }
+      end
+      logger = Hive::Bot::Logger.new(path: File.join(dir, "bot.log"))
+      telegram = Hive::Bot::Telegram.new(
+        token: "token",
+        logger: logger,
+        client: Struct.new(:api).new(api)
+      )
+      checkpoint_root = File.join(dir, "deliveries")
+      build_sender = lambda do
+        Hive::Digest::Sender.new(
+          cfg: { "bot" => { "chat_id_allowlist" => [ 123 ] } },
+          telegram_factory: ->(**) { telegram },
+          logger: logger,
+          checkpoint_root: checkpoint_root
+        )
+      end
+
+      with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") do
+        assert_raises(::Telegram::Bot::Exceptions::ResponseError) do
+          build_sender.call.deliver(message, dry_run: false, digest_date: DATE)
+        end
+        assert_equal [ chunks.first ], accepted
+
+        build_sender.call.deliver(
+          "different regenerated prose must not replace the checkpoint",
+          dry_run: false,
+          digest_date: DATE
+        )
+        build_sender.call.deliver(
+          "a completed checkpoint must be a no-op",
+          dry_run: false,
+          digest_date: DATE
+        )
+      end
+      logger.close
+
+      assert_equal chunks, accepted
+      assert accepted.last.include?(Hive::Digest::Renderer::FOOTER_DIVIDER)
+    end
   end
 
   def test_escape_helpers_match_telegram_markdown_v2_contract
@@ -156,6 +246,26 @@ class HiveDigestRendererTest < Minitest::Test
       deletions: metrics.fetch(:deletions, number * 2),
       commits: metrics.fetch(:commits, 1)
     )
+  end
+
+  def with_pull_requests(repository, *pull_requests)
+    Hive::Digest::RepositoryCollection.new(
+      target: repository.target,
+      metadata: repository.metadata,
+      pull_requests: repository.pull_requests + pull_requests
+    )
+  end
+
+  def long_bullet(label)
+    "#{label}: #{'substantial escaped digest prose ' * 90}"
+  end
+
+  def telegram_response_error(code, description)
+    response = Struct.new(:body, :status).new(
+      JSON.generate(error_code: code, description: description),
+      code
+    )
+    ::Telegram::Bot::Exceptions::ResponseError.new(response: response)
   end
 
   def changelog_for(repositories)

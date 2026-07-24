@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-07-20
+updated: 2026-07-24
 tags: [command, daemon, automation, json]
 ---
 
@@ -67,8 +67,11 @@ wires `Hive::Daemon::DigestScheduler`. The scheduler stores its cursor in
 Europe/London day on first run without backfilling history, dispatches missed
 days oldest-first one at a time, and advances after empty, full, or
 warning-bearing partial success. Total collection, generation, or delivery
-failure is nonzero and leaves the day owed under bounded backoff. It logs
-`digest_catchup_skipped` when missed history exceeds
+failure is nonzero and leaves the day owed. Retryable failures use bounded
+backoff; typed permanent Telegram delivery/checkpoint failures persist a
+blocked date and log `digest_permanent_failure` without advancing the cursor or
+redispatching the same deterministic failure. It logs `digest_catchup_skipped`
+when missed history exceeds
 `digest.max_catchup_days`. The child command is always
 `hive digest --date YYYY-MM-DD --json`; see [[commands/digest]].
 

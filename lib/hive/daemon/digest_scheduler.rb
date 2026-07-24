@@ -55,6 +55,8 @@ module Hive
 
         owed = owed_days(last, completed_day)
         return [] if owed.empty?
+        blocked = parse_date(state["blocked_date"])
+        return [] if blocked == owed.first
 
         # apply_catchup_cap returns `owed` unchanged or its non-empty tail
         # (max_catchup_days >= 1 on the capping branch), so the post-cap result
@@ -66,9 +68,14 @@ module Hive
         [ dispatch_for(date) ]
       end
 
-      def complete(date:, exit_code:, now: @clock.call)
+      def complete(date:, exit_code:, envelope: nil, now: @clock.call)
         local_date = Hive::Digest::LondonWindow.parse_date(date)
         @pending.delete(local_date.iso8601)
+        if permanent_delivery_failure?(exit_code, envelope)
+          park_permanent_failure(local_date, envelope, now)
+          return
+        end
+
         # ChildSupervisor reports a nil exit status for a signalled child
         # (killed by SIGTERM/SIGKILL on shutdown or timeout). `nil.to_i` is
         # 0, so a bare `exit_code.to_i.zero?` would treat a killed digest as
@@ -121,6 +128,36 @@ module Hive
         value && Date.iso8601(value.to_s)
       rescue ArgumentError
         nil
+      end
+
+      def permanent_delivery_failure?(exit_code, envelope)
+        return false unless exit_code && !exit_code.to_i.zero?
+        return false unless envelope.is_a?(Hash)
+
+        %w[
+          PermanentDeliveryError
+          AmbiguousDeliveryError
+          PermanentDeliveryCheckpointError
+        ].include?(
+          envelope["error_class"].to_s
+        )
+      end
+
+      def park_permanent_failure(date, envelope, now)
+        state = read_state.merge(
+          "blocked_date" => date.iso8601,
+          "blocked_error_class" => envelope.fetch("error_class"),
+          "blocked_message" => envelope["message"].to_s,
+          "blocked_at" => now.utc.iso8601
+        )
+        write_state(state)
+        @failure = nil
+        @logger&.event(
+          :digest_permanent_failure,
+          date: date.iso8601,
+          error_class: envelope.fetch("error_class"),
+          error: envelope["message"].to_s
+        )
       end
 
       def scheduler_contract

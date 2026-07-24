@@ -41,14 +41,19 @@ module Hive
 
     class Registry
       def initialize(entries: nil, entries_loader: Hive::Config.method(:digest_registered_projects),
-                     identity_resolver: Hive::RepositoryIdentity.method(:current))
+                     identity_resolver: Hive::RepositoryIdentity.method(:current),
+                     origin_absence_resolver: Hive::RepositoryIdentity.method(:origin_absent?))
         @entries = entries
         @entries_loader = entries_loader
         @identity_resolver = identity_resolver
+        @origin_absence_resolver = origin_absence_resolver
       end
 
       def repositories(filters: [])
-        available = entries.map { |entry| repository_for(entry) }
+        # Hive may also register local workspaces or repositories on another
+        # host. They are valid registry rows, but cannot belong to PRDigest's
+        # GitHub scope.
+        available = entries.filter_map { |entry| repository_for(entry) }
                            .each_with_object({}) { |repo, dedup| dedup[repo.downcase] ||= repo }
                            .values
         raise Hive::ConfigError, "hive digest: no registered GitHub repositories" if available.empty?
@@ -79,6 +84,13 @@ module Hive
 
         identity = entry["repository_identity"].to_s.strip
         identity = @identity_resolver.call(entry["path"]) if identity.empty? && entry["path"].is_a?(String)
+        return nil if non_github_identity?(identity)
+        if identity.to_s.empty? &&
+            entry["path"].is_a?(String) &&
+            @origin_absence_resolver.call(entry["path"])
+          return nil
+        end
+
         match = identity.to_s.match(%r{\Agithub\.com/([^/]+)/([^/]+)\z}i)
         repository = match && "#{match[1]}/#{match[2]}"
         return repository if valid_repository?(repository)
@@ -87,6 +99,14 @@ module Hive
         label = "(unnamed)" if label.empty?
         raise Hive::ConfigError,
               "hive digest: registered project #{label.inspect} does not resolve to github.com/owner/name"
+      end
+
+      def non_github_identity?(identity)
+        value = identity.to_s
+        return true if value.start_with?("local:")
+
+        match = value.match(%r{\A([^/\s]+)/[^\s]+\z})
+        match && !match[1].casecmp?("github.com")
       end
 
       def normalize_filters(filters)
@@ -178,7 +198,9 @@ module Hive
 
       def resolve_binary(env)
         configured = env["PRDIGEST_BIN"].to_s
-        return Hive::InvokedBinary.which("prdigest", env: env) if configured.empty?
+        if configured.empty?
+          return Hive::InvokedBinary.which("prdigest", env: env) || installed_prdigest_binary
+        end
 
         if configured.include?(File::SEPARATOR)
           path = File.expand_path(configured)
@@ -186,6 +208,13 @@ module Hive
           return nil
         end
         Hive::InvokedBinary.which(configured, env: env)
+      end
+
+      def installed_prdigest_binary
+        path = Gem.bin_path("prdigest", "prdigest", "~> 0.1.0")
+        path if File.file?(path) && File.executable?(path)
+      rescue Gem::Exception
+        nil
       end
 
       def resolve_github_token(env)

@@ -35,9 +35,13 @@ hive digest --date 2026-06-13 --json
 | `--dry-run` | Fetch and render through PRDigest, print its chunks, and omit Telegram credentials/delivery. |
 | `--json` | Emit PRDigest's `prdigest-result` v1 document without a Hive wrapper. |
 
-Every registry row must resolve to `github.com/owner/name`, either from its
-persisted `repository_identity` or its checkout's `origin`. Malformed,
-non-GitHub, empty, or unregistered scope fails closed before PRDigest starts.
+Every GitHub-backed registry row must resolve to `github.com/owner/name`,
+either from its persisted `repository_identity` or its checkout's `origin`.
+Well-formed projects that are demonstrably outside that scope—a local remote,
+another Git host, or an existing Git repository with no `origin`—are ignored.
+Malformed rows, invalid GitHub identities, unavailable identity lookups, empty
+GitHub scope, and unregistered `--repo` filters fail closed before PRDigest
+starts.
 
 ## Configuration and credentials
 
@@ -56,9 +60,10 @@ Real delivery loads Hive's private `.env` and forwards
 non-deliverable placeholder chat when Telegram is not configured.
 
 `PRDIGEST_BIN` can point at an explicit development executable. Normal packaged
-installs receive PRDigest through Hive's `prdigest ~> 0.1.0` runtime dependency.
-Missing binary or authentication is a Hive adapter configuration error; Hive
-never falls back to an internal engine.
+installs receive PRDigest through Hive's `prdigest ~> 0.1.0` runtime dependency;
+when its executable is not on `PATH`, Hive resolves the installed gem's
+executable directly. Missing binary or authentication is a Hive adapter
+configuration error; Hive never falls back to an internal engine.
 
 ## Results and exits
 

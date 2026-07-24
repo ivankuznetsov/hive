@@ -15,7 +15,7 @@ an adapter, not a second digest engine.
 |---|---|
 | `Hive::Prdigest.run(date:, dry_run:, repos:, **options)` | Convenience entry point that constructs `Runner` and returns its result. |
 | `Hive::Prdigest::Runner` | Resolves registry scope, credentials, executable, private YAML, array argv, child process, and result validation. |
-| `Hive::Prdigest::Registry` | Converts every registered project to a strict `github.com/owner/name`, deduplicates case-insensitively, and enforces filter subset. |
+| `Hive::Prdigest::Registry` | Selects registered `github.com/owner/name` identities, excludes demonstrably non-GitHub projects, deduplicates case-insensitively, and enforces filter subset. Malformed or unresolved rows still fail closed. |
 | `Hive::Prdigest::Result` | Holds the parsed PRDigest payload, exact exit, repository scope, and argv. |
 | `Hive::Prdigest::InvocationError` | Carries a nonzero PRDigest payload and preserves its exact exit status through Hive's top-level rescue. |
 | `Hive::Prdigest.failure_payload` | Produces the small PRDigest-compatible envelope used only when Hive fails before a child result exists. |

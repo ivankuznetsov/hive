@@ -41,6 +41,20 @@ class RepositoryIdentityTest < Minitest::Test
     end
   end
 
+  def test_origin_absent_distinguishes_a_repository_without_origin_from_lookup_failure
+    with_tmp_git_repo do |repo|
+      assert Hive::RepositoryIdentity.origin_absent?(repo)
+
+      system("git", "-C", repo, "remote", "add", "origin", "https://github.com/acme/widgets.git",
+             exception: true)
+      refute Hive::RepositoryIdentity.origin_absent?(repo)
+    end
+
+    with_tmp_dir do |dir|
+      refute with_env("PATH" => dir) { Hive::RepositoryIdentity.origin_absent?(dir) }
+    end
+  end
+
   def test_current_returns_nil_when_git_cannot_be_spawned
     with_tmp_dir do |dir|
       assert_nil with_env("PATH" => dir) { Hive::RepositoryIdentity.current(dir) }

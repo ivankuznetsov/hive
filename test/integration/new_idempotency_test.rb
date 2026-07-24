@@ -12,6 +12,22 @@ require "hive/task_meta"
 class NewIdempotencyTest < Minitest::Test
   include HiveTestHelper
 
+  def test_error_kind_maps_config_concurrency_and_internal_failures
+    command = Hive::Commands::New.new("project", "task", idempotency_key: "key", json: true)
+    cases = [
+      [ Hive::ConfigError.new("config"), "config" ],
+      [ Hive::Commands::New::ProjectConfigUnreadable.new("config"), "config" ],
+      [ Hive::Commands::New::UnregisteredProjectWorkflow.new("config"), "config" ],
+      [ Hive::ConcurrentRunError.new("busy"), "concurrent_run" ],
+      [ Hive::InternalError.new("internal"), "internal" ],
+      [ RuntimeError.new("other"), "error" ]
+    ]
+
+    cases.each do |error, kind|
+      assert_equal kind, command.envelope_error_kind(error)
+    end
+  end
+
   def test_retry_returns_original_task_after_it_moves
     with_initialized_project do |project_root, project|
       first = create_json(
@@ -66,6 +82,130 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
+  def test_invalid_idempotency_keys_are_rejected
+    with_initialized_project do |_project_root, project|
+      [ "", " ", "x" * 513 ].each do |key|
+        error = assert_raises(Hive::Commands::New::IdempotencyConflict) do
+          Hive::Commands::New.new(
+            project, "task", slug_override: "invalid-key-task",
+            idempotency_key: key, json: true
+          ).call!
+        end
+        assert_includes error.message, "idempotency key must be"
+      end
+    end
+  end
+
+  def test_attachment_content_participates_in_the_fingerprint
+    with_initialized_project do |project_root, project|
+      with_tmp_dir do |dir|
+        source = File.join(dir, "source.png")
+        File.binwrite(source, "png-bytes")
+
+        payload = create_json_with(
+          project, "task with image", key: "creator:attachment", slug: "attachment-task",
+          attachments: [ [ source, "source.png" ] ]
+        )
+        metadata = Hive::TaskMeta.read(payload.fetch("task_folder"))
+
+        assert_equal true, payload.fetch("created")
+        assert_match(/\A[0-9a-f]{64}\z/, metadata.fetch(:input_fingerprint))
+        assert_equal "png-bytes",
+                     File.binread(File.join(project_root, ".hive-state", "stages", "1-inbox",
+                                            "attachment-task", "assets", "source.png"))
+      end
+    end
+  end
+
+  def test_commit_failure_removes_the_uncommitted_task
+    with_initialized_project do |project_root, project|
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        error = assert_raises(Hive::GitError) do
+          Hive::Commands::New.new(
+            project, "will fail", slug_override: "failed-task",
+            idempotency_key: "creator:commit-failure", json: true
+          ).call!
+        end
+        assert_includes error.message, "commit failed"
+      end
+
+      refute Dir.exist?(
+        File.join(project_root, ".hive-state", "stages", "1-inbox", "failed-task")
+      )
+    end
+  end
+
+  def test_duplicate_found_during_locked_recheck_discards_candidate
+    with_initialized_project do |project_root, project|
+      existing = create_json(
+        project, "same task", key: "creator:race", slug: "existing-task"
+      ).fetch("task_folder")
+      command = Hive::Commands::New.new(
+        project, "same task", slug_override: "racing-task",
+        idempotency_key: "creator:race", json: true
+      )
+      calls = 0
+      command.define_singleton_method(:find_idempotent_task!) do |_state, _key, _fingerprint, excluding: nil|
+        calls += 1
+        excluding ? { folder: existing } : nil
+      end
+
+      out, = capture_io { command.call! }
+      payload = JSON.parse(out)
+
+      assert_equal false, payload.fetch("created")
+      assert_equal "existing-task", payload.fetch("slug")
+      assert_equal 2, calls
+      refute Dir.exist?(
+        File.join(project_root, ".hive-state", "stages", "1-inbox", "racing-task")
+      )
+    end
+  end
+
+  def test_multiple_tasks_with_the_same_key_fail_closed
+    with_initialized_project do |project_root, project|
+      %w[first second].each do |slug|
+        capture_io do
+          Hive::Commands::New.new(
+            project, "#{slug} task", slug_override: "#{slug}-task"
+          ).call!
+        end
+        folder = File.join(project_root, ".hive-state", "stages", "1-inbox", "#{slug}-task")
+        Hive::TaskMeta.rewrite(
+          folder, idempotency_key: "creator:duplicate", input_fingerprint: "fingerprint"
+        )
+      end
+
+      error = assert_raises(Hive::Commands::New::IdempotencyConflict) do
+        Hive::Commands::New.new(
+          project, "third task", slug_override: "third-task",
+          idempotency_key: "creator:duplicate", json: true
+        ).call!
+      end
+      assert_includes error.message, "multiple tasks"
+      assert_equal 2, idempotent_tasks(project_root).size
+    end
+  end
+
+  def test_plain_retry_reports_existing_task_and_next_command
+    with_initialized_project do |_project_root, project|
+      create_json(project, "plain retry", key: "creator:plain", slug: "plain-task")
+
+      out, = capture_io do
+        Hive::Commands::New.new(
+          project, "plain retry", slug_override: "ignored-task",
+          idempotency_key: "creator:plain"
+        ).call!
+      end
+
+      assert_includes out, "idempotent task already exists"
+      assert_includes out, "next: hive brainstorm"
+    end
+  end
+
   def test_legacy_creation_does_not_write_idempotency_metadata
     with_initialized_project do |project_root, project|
       capture_io { Hive::Commands::New.new(project, "ordinary task", slug_override: "ordinary-task").call! }
@@ -91,9 +231,14 @@ class NewIdempotencyTest < Minitest::Test
   end
 
   def create_json(project, text, key:, slug:)
+    create_json_with(project, text, key: key, slug: slug)
+  end
+
+  def create_json_with(project, text, key:, slug:, attachments: [])
     out, err = capture_io do
       Hive::Commands::New.new(
-        project, text, slug_override: slug, idempotency_key: key, json: true
+        project, text, slug_override: slug, idempotency_key: key, json: true,
+        attachments: attachments
       ).call!
     end
     assert_empty err

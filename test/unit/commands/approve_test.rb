@@ -36,6 +36,40 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_restore_human_destination_handles_existing_new_and_missing_folders
+    with_tmp_dir do |root|
+      source = File.join(root, "source")
+      destination = File.join(root, "destination")
+      FileUtils.mkdir_p(source)
+      FileUtils.mkdir_p(destination)
+      current = task(folder: source)
+      state = File.join(source, "approval.md")
+      File.write(state, "changed")
+
+      command.send(
+        :restore_human_destination!, current, destination,
+        { state_file: "approval.md", existed: true, body: "original" }
+      )
+      assert_equal "original", File.read(state)
+
+      FileUtils.rm_rf(source)
+      destination_state = File.join(destination, "approval.md")
+      File.write(destination_state, "created")
+      command.send(
+        :restore_human_destination!, current, destination,
+        { state_file: "approval.md", existed: false, body: nil }
+      )
+      refute File.exist?(destination_state)
+
+      FileUtils.rm_rf(destination)
+      assert_nil command.send(
+        :restore_human_destination!, current, destination,
+        { state_file: "approval.md", existed: false, body: nil }
+      )
+      assert_nil command.send(:restore_human_destination!, current, destination, nil)
+    end
+  end
+
   def task(folder: "/tmp/task", hive_state_path: "/tmp/state", project_root: "/tmp/project",
            stage_index: 2, stage_name: "brainstorm", workflow: Hive::Workflows::Registry.default)
     FakeTask.new("slug-260522-abcd", stage_index, stage_name, folder, hive_state_path, project_root, workflow)

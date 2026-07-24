@@ -15,6 +15,64 @@ class DecideTest < Minitest::Test
 
   SLUG_PATTERN = "editorial-probe-*".freeze
 
+  def test_latest_record_ignores_malformed_audit_lines
+    with_tmp_dir do |dir|
+      path = File.join(dir, "approval.md")
+      File.write(path, <<~TEXT)
+        <!-- HIVE_DECISION_V1 {not-json} -->
+        <!-- HIVE_DECISION_V1 {"decision_id":"valid","outcome":"approve"} -->
+      TEXT
+
+      assert_equal "valid", Hive::Commands::Decide.latest_record(path).fetch("decision_id")
+      assert_nil Hive::Commands::Decide.latest_record(File.join(dir, "missing.md"))
+    end
+  end
+
+  def test_restore_files_removes_a_path_created_after_snapshot
+    with_tmp_dir do |dir|
+      path = File.join(dir, "created.md")
+      File.write(path, "created")
+
+      Hive::Commands::Decide.new("task", "approve", from: "approval").send(
+        :restore_files, dir,
+        { "created.md" => { existed: false, body: nil } }
+      )
+
+      refute File.exist?(path)
+    end
+  end
+
+  def test_error_kinds_and_argument_guards_are_typed
+    command = Hive::Commands::Decide.new("task", "approve", from: "approval")
+    cases = [
+      [ Hive::WrongStage.new("wrong"), "wrong_stage" ],
+      [
+        Hive::AmbiguousSlug.new("ambiguous", slug: "task", candidates: []),
+        "ambiguous_slug"
+      ],
+      [ Hive::InvalidTaskPath.new("bad"), "invalid_task_path" ],
+      [ Hive::ConcurrentRunError.new("busy"), "concurrent_run" ],
+      [ Hive::ConfigError.new("config"), "config" ],
+      [ Hive::GitError.new("git"), "git" ],
+      [ Hive::InternalError.new("internal"), "internal" ],
+      [ RuntimeError.new("other"), "error" ]
+    ]
+    cases.each do |error, kind|
+      assert_equal kind, command.envelope_error_kind(error)
+    end
+
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::Commands::Decide.new("task", "approve", from: "", note: "ok").send(:validate_arguments!)
+    end
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::Commands::Decide.new("task", "", from: "approval").send(:validate_arguments!)
+    end
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::Commands::Decide.new("task", "approve", from: "approval", note: 123)
+                            .send(:validate_arguments!)
+    end
+  end
+
   def test_entering_human_stage_waits_without_dispatch_and_surfaces_outcomes
     with_editorial_task do |_dir, approval, slug|
       task = Hive::Task.new(approval)
@@ -95,6 +153,108 @@ class DecideTest < Minitest::Test
       assert_equal before, File.binread(File.join(approval, "approval.md"))
       assert_equal :waiting, Hive::Markers.current(File.join(approval, "approval.md")).name
       assert File.directory?(approval)
+    end
+  end
+
+  def test_invalid_waiting_identity_and_non_human_from_are_rejected
+    with_editorial_task do |_dir, approval, slug|
+      Hive::Markers.set(File.join(approval, "approval.md"), :waiting)
+      error = assert_raises(Hive::WrongStage) do
+        Hive::Commands::Decide.new(slug, "approve", from: "approval").send(:do_call)
+      end
+      assert_includes error.message, "not awaiting a decision"
+
+      error = assert_raises(Hive::InvalidTaskPath) do
+        Hive::Commands::Decide.new(slug, "approve", from: "draft").send(:do_call)
+      end
+      assert_includes error.message, "not a human stage"
+    end
+  end
+
+  def test_decision_from_a_moved_task_without_a_record_is_stale
+    with_editorial_task do |dir, approval, slug|
+      draft = File.join(dir, ".hive-state", "stages", "2-draft", slug)
+      FileUtils.mkdir_p(File.dirname(draft))
+      File.rename(approval, draft)
+
+      error = assert_raises(Hive::WrongStage) do
+        Hive::Commands::Decide.new(slug, "approve", from: "approval").send(:do_call)
+      end
+      assert_includes error.message, "--from expected 3-approval"
+    end
+  end
+
+  def test_approve_rolls_back_decision_file_when_commit_fails
+    with_editorial_task do |_dir, approval, slug|
+      state = File.join(approval, "approval.md")
+      before = File.binread(state)
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
+      fake_ops.define_singleton_method(:run_git!) { |*| raise Hive::GitError, "restage failed" }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        error = assert_raises(Hive::GitError) do
+          Hive::Commands::Decide.new(slug, "approve", from: "approval").send(:do_call)
+        end
+        assert_includes error.message, "commit failed"
+      end
+
+      assert_equal before, File.binread(state)
+      assert_nil Hive::Commands::Decide.latest_record(state)
+      assert_equal :waiting, Hive::Markers.current(state).name
+    end
+  end
+
+  def test_reject_rolls_back_both_state_files_when_move_fails
+    with_editorial_task do |dir, approval, slug|
+      approval_before = File.binread(File.join(approval, "approval.md"))
+      draft_before = File.binread(File.join(approval, "draft.md"))
+      destination = File.join(dir, ".hive-state", "stages", "2-draft", slug)
+
+      replacement = lambda do |_target, **kwargs|
+        fake = Object.new
+        fake.define_singleton_method(:call) do
+          kwargs.fetch(:observation_guard).call(Hive::Task.new(approval))
+          FileUtils.mkdir_p(File.dirname(destination))
+          File.rename(approval, destination)
+          raise Hive::GitError, "move failed"
+        end
+        fake
+      end
+      with_replaced_singleton_method(Hive::Commands::Approve, :new, replacement) do
+        error = assert_raises(Hive::GitError) do
+          Hive::Commands::Decide.new(slug, "reject", from: "approval").send(:do_call)
+        end
+        assert_includes error.message, "move failed"
+      end
+
+      assert_equal approval_before, File.binread(File.join(destination, "approval.md"))
+      assert_equal draft_before, File.binread(File.join(destination, "draft.md"))
+      assert_nil Hive::Commands::Decide.latest_record(File.join(destination, "approval.md"))
+    end
+  end
+
+  def test_stale_decision_identity_is_rejected_under_lock
+    with_editorial_task do |_dir, approval, _slug|
+      task = Hive::Task.new(approval)
+      stage = task.workflow.stage_named("approval")
+
+      error = assert_raises(Hive::WrongStage) do
+        Hive::Commands::Decide.new("unused", "approve", from: "approval")
+                              .send(:validate_current_decision!, task, stage, "rotated")
+      end
+      assert_includes error.message, "decision observation is stale"
+    end
+  end
+
+  def test_plain_success_reports_decision_and_current_stage
+    with_editorial_task do |_dir, _approval, slug|
+      out, = capture_io do
+        Hive::Commands::Decide.new(slug, "approve", from: "approval").call
+      end
+
+      assert_includes out, "hive: decided #{slug} approval=approve"
+      assert_includes out, "current_stage: 3-approval"
     end
   end
 

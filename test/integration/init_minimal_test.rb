@@ -106,6 +106,73 @@ class InitMinimalTest < Minitest::Test
     end
   end
 
+  def test_minimal_rejects_invalid_flag_combinations_and_collisions
+    assert_raises(ArgumentError) do
+      Hive::Commands::Init.new(".", minimal: :yes)
+    end
+    assert_raises(Hive::Commands::Workflow::UsageError) do
+      Hive::Commands::Init.new(".", preview: true).send(:validate_minimal_arguments!)
+    end
+    assert_raises(Hive::Commands::Workflow::UsageError) do
+      Hive::Commands::Init.new(
+        ".", minimal: true, new_workflow: "editorial", refactor_patrol: true
+      ).send(:validate_minimal_arguments!)
+    end
+
+    with_tmp_global_config do
+      with_tmp_git_repo do |project_root|
+        collision = ->(_id, project_root:) { project_root == File.expand_path(project_root) }
+        suggestion = ->(_id, project_root:) { "editorial-2" }
+        with_replaced_singleton_method(Hive::Commands::Workflow, :scaffold_collision?, collision) do
+          with_replaced_singleton_method(Hive::Commands::Workflow, :available_id, suggestion) do
+            error = assert_raises(Hive::Commands::Workflow::UsageError) do
+              Hive::Commands::Init.new(
+                project_root, minimal: true, new_workflow: "editorial",
+                agent_skill_preflight: false
+              ).call
+            end
+            assert_equal "editorial-2", error.suggested_id
+          end
+        end
+      end
+    end
+  end
+
+  def test_plain_preview_reports_plan_and_broken_pipe_is_harmless
+    with_tmp_global_config do
+      with_tmp_git_repo do |project_root|
+        out, = capture_io do
+          Hive::Commands::Init.new(
+            project_root, new_workflow: "editorial", minimal: true, preview: true,
+            agent_skill_preflight: false
+          ).call
+        end
+        assert_includes out, "minimal init preview"
+        assert_includes out, "workflow: editorial"
+        assert_includes out, "automation: disabled"
+
+        command = Hive::Commands::Init.new(
+          project_root, new_workflow: "editorial", minimal: true, preview: true,
+          agent_skill_preflight: false
+        )
+        command.define_singleton_method(:minimal_preview_payload) do |_ops, _id|
+          { "project_files" => [], "workflow" => "editorial" }
+        end
+        broken = Object.new
+        broken.define_singleton_method(:write) { |_body| raise Errno::EPIPE }
+        original = $stdout
+        begin
+          $stdout = broken
+          assert_nil command.send(
+            :emit_minimal_preview, Hive::GitOps.new(project_root), "editorial"
+          )
+        ensure
+          $stdout = original
+        end
+      end
+    end
+  end
+
   private
 
   def repository_snapshot(project_root)

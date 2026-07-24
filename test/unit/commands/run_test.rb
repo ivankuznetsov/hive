@@ -361,6 +361,33 @@ class CommandsRunTest < Minitest::Test
     assert_includes out, "manual steering active"
   end
 
+  def test_report_text_human_stage_lists_decision_outcomes
+    outcomes = {
+      "approve" => Hive::Workflow::Outcome.new(name: "approve", complete: true, artifact: "draft.md"),
+      "reject" => Hive::Workflow::Outcome.new(name: "reject", to: "draft")
+    }.freeze
+    workflow = Hive::Workflow.new(
+      id: :editorial,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "draft", index: 1, state_file: "draft.md", kind: :agent
+        ),
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: outcomes
+        )
+      ]
+    )
+    t = task(stage_name: "approval", stage_index: 2, workflow: workflow)
+
+    out, = capture_io do
+      command.send(:report_text, t, {}, marker(:waiting))
+    end
+
+    assert_includes out, "outcomes: approve, reject"
+    assert_includes out, "hive decide some-slug <outcome> --from approval"
+  end
+
   def test_report_text_review_error_prints_phase_and_reason_before_raising
     run = command
     t = task

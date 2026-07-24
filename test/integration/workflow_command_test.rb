@@ -85,6 +85,57 @@ class WorkflowCommandTest < Minitest::Test
     end
   end
 
+  def test_validate_rejects_invalid_id_and_unreadable_instruction
+    with_initialized_project do |project_root|
+      error = assert_raises(Hive::Commands::Workflow::UsageError) do
+        Hive::Commands::Workflow::Validate.new(
+          "Not Valid", project_root: project_root
+        ).call!
+      end
+      assert_includes error.message, "invalid workflow id"
+
+      instruction = File.join(project_root, "missing.md")
+      stage = Struct.new(:instruction, :name).new(instruction, "draft")
+      workflow = [ stage ]
+      workflow.define_singleton_method(:id) { :editorial }
+      validator = Hive::Commands::Workflow::Validate.new(
+        "editorial", project_root: project_root
+      )
+      error = assert_raises(Hive::ConfigError) do
+        validator.send(:validate_instruction_paths!, workflow)
+      end
+      assert_includes error.message, "missing instruction"
+    end
+  end
+
+  def test_validate_reports_managed_origin_and_plain_summary
+    with_initialized_project do |project_root|
+      stdout = StringIO.new
+      validator = Hive::Commands::Workflow::Validate.new(
+        "managed-flow", project_root: project_root, stdout: stdout
+      )
+      validator.instance_variable_set(:@descriptor_path, nil)
+      assert_equal "managed", validator.send(:origin)
+
+      payload = {
+        "stages" => [ { "name" => "work" } ]
+      }
+      validator.send(:emit, payload)
+      assert_includes stdout.string, "managed-flow is valid (managed)"
+      assert_includes stdout.string, "stages: work"
+    end
+  end
+
+  def test_workflow_maps_unknown_workflow_to_usage
+    command = Hive::Commands::Workflow.new(
+      "validate", "missing", project_root: ".", stdout: StringIO.new
+    )
+    error = Hive::Workflows::UnknownWorkflow.new("missing")
+
+    assert_equal Hive::Schemas::WorkflowNewErrorKind::USAGE,
+                 command.send(:error_kind_for, error)
+  end
+
   def test_new_collision_proposes_deterministic_available_id
     with_initialized_project do |project_root|
       Hive::Commands::Workflow.new!("editorial", project_root: project_root, stdout: StringIO.new)

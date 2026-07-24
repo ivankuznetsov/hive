@@ -89,6 +89,72 @@ class WorkflowTest < Minitest::Test
     assert_includes error.message, 'stage "approval" outcome "reject" targets unknown stage "draft"'
   end
 
+  def test_workflow_defensively_rejects_invalid_runtime_human_outcome_shapes
+    valid = Hive::Workflow::Stage.new(
+      name: "draft", index: 1, state_file: "draft.md", kind: :agent
+    )
+    cases = [
+      [
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human, outcomes: nil
+        ),
+        "must declare at least one outcome"
+      ],
+      [
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: { "approve" => Object.new }.freeze
+        ),
+        'outcome "approve" is invalid'
+      ],
+      [
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: {
+            "approve" => Hive::Workflow::Outcome.new(name: "approve", complete: true, to: "draft")
+          }.freeze
+        ),
+        "must declare exactly one of complete or to"
+      ],
+      [
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: {
+            "approve" => Hive::Workflow::Outcome.new(name: "approve", complete: true)
+          }.freeze
+        ),
+        "must declare an artifact when complete"
+      ],
+      [
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: {
+            "reject" => Hive::Workflow::Outcome.new(name: "reject", to: "draft", artifact: "draft.md")
+          }.freeze
+        ),
+        "artifact is only valid for a completing outcome"
+      ]
+    ]
+
+    cases.each do |stage, message|
+      error = assert_raises(ArgumentError) do
+        Hive::Workflow.new(id: :editorial, stages: [ valid, stage ])
+      end
+      assert_includes error.message, message
+    end
+
+    non_human = Hive::Workflow::Stage.new(
+      name: "draft", index: 1, state_file: "draft.md", kind: :agent,
+      outcomes: {
+        "approve" => Hive::Workflow::Outcome.new(name: "approve", complete: true, artifact: "draft.md")
+      }.freeze
+    )
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(id: :editorial, stages: [ non_human ])
+    end
+    assert_includes error.message, "non-human stage"
+  end
+
   def test_stage_carries_user_descriptor_instruction_and_permissions
     stage = Hive::Workflow::Stage.new(
       name: "work",

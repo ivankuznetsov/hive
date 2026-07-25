@@ -3,11 +3,33 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-07-23
+updated: 2026-07-25
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records Hive web's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records Hive web's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit).
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records Hive web's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records Hive web's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit); ADR-038 keeps reusable components in the Hive monorepo, establishes Hive-first internal boundaries before packaging, and makes standalone gem publication conditional on real external demand and an explicit release decision.
+
+## ADR-038: Reusable components stay in the monorepo and earn packaging after Hive-first boundaries
+
+**Status:** Active (strategy recorded 2026-07-25; the component catalog and enforcement harness are implemented, with component refactors following incrementally).
+
+**Context:** Repo-grounded extraction analysis found seven mechanisms with plausible standalone value: RunReceipt, UserService, Agent Artifact Firewall, Agent ABI, Skillpack, Safe Agent Git Gate, and WorkLedger. Splitting them into separate repositories would weaken Hive's most useful maintenance property for humans and agents: one checkout exposes the callers, durable state, compatibility fixtures, integration tests, release machinery, and implementation together. Packaging them immediately inside the monorepo would preserve navigation but still freeze accidental Hive dependencies and create version/release obligations before an external consumer exists.
+
+**Decision:** Hive remains the canonical monorepo and the first and primary consumer of every reusable component. Establish and enforce internal Ruby boundaries first: one supported entry point or facade, structured public values and errors, an acyclic dependency direction, explicit state/schema/lock ownership, clean-process loading, and all Hive production consumers routed through the boundary. Existing module wiki pages plus one component catalog are the canonical agent context; do not add a parallel `.context.md` hierarchy.
+
+Implementation readiness and standalone product value are different rankings. `Hive::Attempts::API` is the existing admission slice, but U1 records Attempts as a candidate while daemon lifecycle code still constructs durable internals directly; U2 owns reconciling that construction before promotion. UserService is the next low-coupling boundary; Agent ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger follow in readiness order and may each terminate as deferred when a policy-light seam cannot be proven. RunReceipt remains the strongest standalone opportunity without forcing the largest refactor first. Operational status/Statewatch, layout migration, standalone capability probes, separate lease/capsule products, generic status rendering, and a new local-agent framework remain rejected or folded ideas rather than package commitments.
+
+A component becomes package-eligible only after its internal boundary is stable, a named non-Hive adopter or maintained integration proves demand, the component loads and tests independently without an upward Hive dependency, compatibility and maintenance ownership are explicit, and an exact built gem installs cleanly. A qualifying package stays in this repository under `components/<gem-name>/`, uses independent SemVer, and remains a path dependency for source development while released `hive-cli` declares a normal compatible dependency. Package publication is explicit and component-scoped; path changes may select tests but never publish.
+
+**Consequences:** The immediate work changes module ownership and dependency discipline, not repository layout or release topology. Each component lands in its own reviewable PR with focused tests, a full Hive integration checkpoint, hosted CI, and wiki updates. No gem name, namespace, version, package directory, tag, or publication is implied by reaching an internal boundary.
+
+`config/component-boundaries.yml` is the canonical machine-readable inventory,
+and [[component-boundaries]] explains its states and enforcement. A test-only
+contract validates path ownership, the dependency DAG, bounded exceptions,
+selected forbidden Ruby edges, and clean-process loading without presenting
+source scanning as a security sandbox.
+
+Future package work uses a package-first, publish-first, Hive-cutover-last sequence so protected `main` never releases a Hive gem that depends on an unavailable component. Component release tags or manually approved workflows must be disjoint from Hive's root `v*.*.*` release trigger, build once, install and verify the exact artifact, and require an explicit release decision. The detailed implementation contracts are `docs/plans/2026-07-25-001-refactor-internal-component-boundaries-plan.md` and `docs/plans/2026-07-25-002-feat-standalone-component-gems-plan.md`.
 
 ## ADR-037: Hive web is the shared vanilla Rails 8 + Turbo app for native Hive and Hivebox
 

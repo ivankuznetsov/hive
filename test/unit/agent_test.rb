@@ -659,6 +659,94 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_classifies_structured_claude_max_budget_result_without_result_text
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "result",
+        "subtype" => "error_max_budget_usd",
+        "is_error" => true,
+        "total_cost_usd" => 1.047936,
+        "errors" => [ "Reached maximum budget ($1)" ]
+      )
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1.0, timeout_sec: 5
+      ).run!
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "budget_exhausted", result.fetch(:failure_origin)
+      assert_equal(
+        {
+          provider: "claude",
+          subtype: "error_max_budget_usd",
+          configured_cap_usd: 1.0,
+          observed_cost_usd: 1.047936,
+          diagnostic: "Reached maximum budget ($1)",
+          remedy: "raise_stage_budget"
+        },
+        result.fetch(:failure_details)
+      )
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal "budget_exhausted", marker.attrs.fetch("reason")
+      assert_equal "claude", marker.attrs.fetch("provider")
+      assert_equal "error_max_budget_usd", marker.attrs.fetch("subtype")
+      assert_equal "1.0", marker.attrs.fetch("max_budget_usd")
+      assert_equal "1.047936", marker.attrs.fetch("observed_cost_usd")
+      assert_equal "raise_stage_budget", marker.attrs.fetch("remedy")
+      refute Hive::AgentLimit.held?(marker.name, marker.attrs)
+    end
+  end
+
+  def test_successful_structured_result_that_mentions_budget_is_not_budget_exhaustion
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "result",
+        "subtype" => "success",
+        "result" => "The project budget is documented."
+      )
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n### Q1. Scope?\n### A1.\n<!-- WAITING -->\n"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1.0, timeout_sec: 5
+      ).run!
+
+      assert_equal :waiting, result.fetch(:status)
+      refute result.key?(:failure_origin)
+      assert_equal :waiting, Hive::Markers.current(task.state_file).name
+    end
+  end
+
+  def test_current_terminal_marker_wins_over_trailing_structured_budget_diagnostic
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "result",
+        "subtype" => "error_max_budget_usd",
+        "is_error" => true,
+        "total_cost_usd" => 1.047936,
+        "errors" => [ "Reached maximum budget ($1)" ]
+      )
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n### Q1. Scope?\n### A1.\n<!-- WAITING -->\n"
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1.0, timeout_sec: 5
+      ).run!
+
+      assert_equal :waiting, result.fetch(:status)
+      assert_equal "budget_exhausted", result.fetch(:failure_origin)
+      assert_equal :waiting, Hive::Markers.current(task.state_file).name
+    end
+  end
+
   def test_oversized_structured_result_is_reported_without_a_corrupt_prefix
     with_tmp_dir do |dir|
       task = make_task(dir)

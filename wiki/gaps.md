@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-24
+updated: 2026-07-25
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -665,3 +665,16 @@ The project-config loader temporarily promotes a root-level `reviewers` key to
 read-through alias has not been selected. Remove it only after warned projects
 have had a migration window and release notes make the strict boundary
 explicit; no version or publication decision is implied by the source change.
+
+## Typed budget and Brainstorm artifact repair need live dogfood (2026-07-25)
+
+Focused source tests pin Claude's structured `error_max_budget_usd` result as a
+per-run `budget_exhausted` outcome, keep it separate from provider quota
+recovery, and prove that a changed valid Brainstorm artifact can outrank a
+trailing diagnostic. They also pin structural WAITING/COMPLETE validation,
+failed-spawn rejection of unchanged stale output, and one repair admission for
+a successful Brainstorm receipt whose artifact is absent. No installed-main
+dogfood artifact yet shows the affected Content writing task rerun with the
+fixed stage caps, nor a real detached Brainstorm attempt recovering a terminal
+receipt with missing output and then replaying the repaired artifact. Keep
+those live checks separate from this source-level contract.

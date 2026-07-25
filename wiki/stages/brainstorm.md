@@ -1,13 +1,13 @@
 ---
 title: 2-brainstorm stage
 type: stage
-source: lib/hive/stages/brainstorm.rb, lib/hive/stages/brainstorm_tmux.rb, lib/hive/tmux_runner.rb, templates/brainstorm_prompt.md.erb
+source: lib/hive/stages/brainstorm.rb, lib/hive/stages/brainstorm_tmux.rb, lib/hive/attempts/dispatcher.rb, lib/hive/tmux_runner.rb, templates/brainstorm_prompt.md.erb
 created: 2026-04-25
-updated: 2026-06-30
+updated: 2026-07-25
 tags: [stage, brainstorm, qa, tmux]
 ---
 
-**TLDR**: Round-by-round Q&A. Agent reads `idea.md`, writes `brainstorm.md` with `## Round N` questions and a `<!-- WAITING -->` marker. User answers inline. Re-running the stage parses answers and either appends `## Round N+1` or finalises with `## Requirements` and `<!-- COMPLETE -->`. When the resolved `brainstorm.agent` is Claude, launch shape comes from project-global `claude.mode`: `tmux` runs Claude inside a managed attachable tmux session via `Hive::ClaudeLauncher`, while `headless` uses the normal non-interactive profile path. Legacy `brainstorm.runtime` is still read only when `claude.mode` is absent, and `hive doctor` advises migrating it.
+**TLDR**: Round-by-round Q&A. Agent reads `idea.md`, writes `brainstorm.md` with `## Round N` questions and a `<!-- WAITING -->` marker. User answers inline. Re-running the stage parses answers and either appends `## Round N+1` or finalises with `## Requirements` and `<!-- COMPLETE -->`. Process exit and attempt receipts are not completion evidence by themselves: WAITING must contain a numbered Round, COMPLETE must contain non-empty Requirements, and a failed spawn cannot reuse an unchanged stale artifact. When the resolved `brainstorm.agent` is Claude, launch shape comes from project-global `claude.mode`: `tmux` runs Claude inside a managed attachable tmux session via `Hive::ClaudeLauncher`, while `headless` uses the normal non-interactive profile path. Legacy `brainstorm.runtime` is still read only when `claude.mode` is absent, and `hive doctor` advises migrating it.
 
 ## Setup
 
@@ -20,6 +20,22 @@ tags: [stage, brainstorm, qa, tmux]
 - **Tmux cleanup/orphan sweep**: cleanup is shared in `Hive::ClaudeLauncher`. After `/quit` and `kill_session`, the launcher sweeps leftover Claude processes by this task's `--add-dir <task.folder>` while skipping matched `tmux` commands and logging killed/skipped entries to `claude-tmux-orphan-sweep.log`. The skip is load-bearing because the tmux server can keep the first session's full argv and would otherwise match the task-specific sweep pattern.
 - **Profile**: `Hive::Stages::Base.stage_profile(cfg, "brainstorm")` — reads `cfg.dig("brainstorm", "agent")` with `|| "claude"` fallback so legacy configs keep working. Spawn pins `status_mode: :state_file_marker` regardless of profile, because brainstorm's lifecycle contract is the WAITING/COMPLETE marker the agent writes to `brainstorm.md` — codex's profile default `:output_file_exists` would never satisfy that.
 - **Budgets**: `cfg["budget_usd"]["brainstorm"]` (default 50), `cfg["timeout_sec"]["brainstorm"]` (default 1800). Bumped ~5× in plan 2026-05-04-001 — generous sanity caps for runaway agents, not cost targets.
+- **Outcome reconciliation**: both headless and tmux launches snapshot
+  `brainstorm.md` before spawning and consume the launch result afterward.
+  `WAITING` is valid only with a numbered `## Round N` section; `COMPLETE` is
+  valid only with a non-empty `## Requirements` section. A changed valid
+  artifact wins over a trailing launch error (for example Claude emitting its
+  structured max-budget result while unwinding), while an unchanged
+  pre-existing artifact cannot hide a failed spawn. Missing/invalid output is
+  stamped `ERROR reason=brainstorm_artifact_invalid` or
+  `brainstorm_agent_failed`; an already-specific launcher/agent `ERROR`,
+  including `budget_exhausted`, is retained.
+- **Attempt replay repair**: the durable dispatcher does not treat a successful
+  `2-brainstorm` receipt as replayable unless `brainstorm.md` currently passes
+  the same structural validation. One legacy successful receipt without its
+  artifact admits one repair attempt for that task generation, regardless of
+  which request ID observes it. Once that repair terminalizes, its newest
+  receipt is replayed instead of admitting an unbounded repair loop.
 
 ## Agent behaviour (per `templates/brainstorm_prompt.md.erb`)
 
@@ -52,6 +68,8 @@ The runner returns `{commit: action, status: marker.name}` so `Commands::Run` wr
 
 - `test/integration/run_brainstorm_test.rb` exercises the prompt shape and marker transitions using the fake-claude fixture.
 - `test/integration/run_brainstorm_tmux_test.rb` exercises the tmux launcher path.
+- `test/unit/stages/brainstorm_runtime_test.rb` pins headless/tmux failure reconciliation, structural artifact validation, changed-artifact precedence, and stale-artifact rejection.
+- `test/unit/attempts/dispatcher_test.rb` pins one repair admission for a successful Brainstorm receipt whose required artifact is absent.
 - `test/unit/stages/brainstorm_tmux_sentinel_test.rb` pins the tmux readiness/sentinel helpers and the orphan-sweep invariant that matched Claude PIDs are terminated individually while the tmux server is skipped and logged.
 - `test/unit/tmux_runner_test.rb` pins prompt-buffer cleanup, tmux command timeouts, and paste-settle behavior before the final Enter submit.
 

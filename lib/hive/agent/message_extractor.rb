@@ -3,6 +3,8 @@ require "json"
 module Hive
   class Agent
     module MessageExtractor
+      MAX_FAILURE_DIAGNOSTIC_BYTES = 200
+
       class Accumulator
         attr_reader :source
 
@@ -74,6 +76,25 @@ module Hive
 
       module_function
 
+      # Claude reports a per-invocation `--max-budget-usd` stop as a
+      # structured result event whose `result` field is absent. Keep this
+      # protocol signal separate from prose and from provider account quota:
+      # ordinary assistant text is not authoritative failure metadata.
+      def extract_failure(data)
+        data = parse_json_line(data) if data.is_a?(String)
+        return nil unless data.is_a?(Hash)
+        return nil unless data["type"] == "result"
+        return nil unless data["subtype"] == "error_max_budget_usd"
+
+        {
+          origin: "budget_exhausted",
+          subtype: data["subtype"],
+          observed_cost_usd: finite_number(data["total_cost_usd"]),
+          diagnostic: bounded_diagnostic(Array(data["errors"]).first),
+          remedy: "raise_stage_budget"
+        }.compact
+      end
+
       def extract(data)
         data = parse_json_line(data) if data.is_a?(String)
         return nil unless data.is_a?(Hash)
@@ -131,6 +152,20 @@ module Hive
       def text_chunk(value)
         text = value.to_s
         text.empty? ? nil : text
+      end
+
+      def finite_number(value)
+        number = Float(value)
+        number.finite? ? number : nil
+      rescue ArgumentError, TypeError
+        nil
+      end
+
+      def bounded_diagnostic(value)
+        text = value.to_s.strip
+        return nil if text.empty?
+
+        text.byteslice(0, MAX_FAILURE_DIAGNOSTIC_BYTES).to_s.scrub
       end
     end
   end

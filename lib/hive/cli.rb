@@ -1,6 +1,7 @@
 require "thor"
 require "hive/stages"
 require "hive/workflows/registry"
+require "hive/task_closure_contract"
 
 module Hive
   class CLI < Thor
@@ -717,6 +718,14 @@ module Hive
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :recover_merged_error_reason, type: :string,
                                           desc: "internal: archive a merged PR despite this finalize ERROR reason"
+    option :reason, type: :string, enum: Hive::TaskClosureContract::REASONS,
+                    desc: "operator closure reason: already_delivered or superseded"
+    option :evidence, type: :array,
+                      desc: "immutable GitHub PR/commit evidence (repeat values after the flag)"
+    option :successor, type: :string,
+                       desc: "registered project:slug that supersedes this task"
+    option :attestation, type: :string,
+                         desc: "operator statement for superseded/cross-repository delivery"
     def archive(target = nil)
       if target.nil?
         if options[:from]
@@ -725,6 +734,8 @@ module Hive
         require "hive/commands/status"
         return Hive::Commands::Status.new(json: options[:json], project: options[:project], archive: true).call
       end
+
+      return close_task_interactively(target) if closure_options?
 
       run_stage_action("archive", target)
     end
@@ -1788,6 +1799,60 @@ module Hive
     end
 
     no_commands do
+      def closure_options?
+        options[:reason] || options[:evidence] || options[:successor] || options[:attestation]
+      end
+
+      def close_task_interactively(target)
+        require "hive/task_closure"
+        require "hive/task_resolver"
+        if options[:json]
+          raise Hive::TaskClosure::Unauthorized,
+                "evidence closure requires an interactive review; --json cannot confirm it"
+        end
+        unless $stdin.tty?
+          raise Hive::TaskClosure::Unauthorized,
+                "evidence closure requires an interactive terminal and explicit confirmation"
+        end
+        task = Hive::TaskResolver.new(
+          target, project_filter: options[:project], stage_filter: options[:from]
+        ).resolve
+        project = options[:project] || Hive::Config.registered_projects.find do |entry|
+          File.expand_path(entry.fetch("path")) == task.project_root
+        end&.fetch("name")
+        raise Hive::TaskClosure::Unauthorized, "task is not in a registered project" unless project
+
+        input = {
+          "reason" => options[:reason],
+          "evidence" => Array(options[:evidence]),
+          "successor" => options[:successor],
+          "attestation" => options[:attestation]
+        }
+        preview = Hive::TaskClosure.preview(task: task, project: project, input: input)
+        puts JSON.pretty_generate(preview.to_h)
+        unless preview.valid?
+          raise Hive::TaskClosure::VerificationFailed,
+                "closure preview failed; correct its field errors and blockers"
+        end
+
+        $stdout.print "Type CLOSE #{preview.preview_digest[0, 12]} to archive this task: "
+        $stdout.flush
+        confirmation = $stdin.gets.to_s.strip
+        unless confirmation == "CLOSE #{preview.preview_digest[0, 12]}"
+          raise Hive::TaskClosure::Unauthorized, "closure confirmation did not match; task left active"
+        end
+        operator = ENV["USER"].to_s.strip
+        operator = "local-operator" if operator.empty?
+        receipt = Hive::TaskClosure.confirm!(
+          task: task, project: project, input: input,
+          preview_digest: preview.preview_digest,
+          operator: operator, channel: "cli", authorized: true
+        )
+        puts "hive: archived #{task.slug} as #{receipt.fetch('reason')}"
+        puts "  receipt: #{receipt.fetch('receipt_digest')}"
+        receipt
+      end
+
       def run_stage_action(verb, target)
         require "hive/commands/stage_action"
         kwargs = {

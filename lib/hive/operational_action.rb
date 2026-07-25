@@ -2,6 +2,7 @@ require "digest"
 require "time"
 require "hive/recovery/api"
 require "hive/workflow_package/canonical_json"
+require "hive/task_closure"
 
 module Hive
   # Closed, non-shell recommendations emitted by the operational status
@@ -11,7 +12,8 @@ module Hive
   class OperationalAction
     ACTION_ID = "workflow.advance".freeze
     RETRY_ACTION_ID = "workflow.retry".freeze
-    ACTION_IDS = [ ACTION_ID, RETRY_ACTION_ID ].freeze
+    CLOSURE_ACTION_ID = "workflow.close_with_evidence".freeze
+    EXECUTABLE_ACTION_IDS = [ ACTION_ID, RETRY_ACTION_ID ].freeze
     RISK_CLASS = "routine_idempotent".freeze
 
     SAFE_TASK_ACTIONS = %w[
@@ -54,6 +56,26 @@ module Hive
           "observation_token" => token(project: project, row: row),
           "risk_class" => RISK_CLASS,
           "confirmation_required" => false,
+          "provenance" => {
+            "source" => "hive-operational-status",
+            "task_action" => row.fetch("action")
+          }
+        }
+      end
+
+      # This is an advertisement only. Executor deliberately does not include
+      # CLOSURE_ACTION_ID in EXECUTABLE_ACTION_IDS, so an observation token can never
+      # become closure authorization. Operators must use TaskClosure's
+      # preview/confirm flow through an authenticated channel.
+      def closure_descriptor(project:, row:)
+        return nil if row["action"] == "archived"
+
+        {
+          "action_id" => CLOSURE_ACTION_ID,
+          "target" => "#{project}:#{row.fetch('slug')}",
+          "risk_class" => "operator_attested",
+          "confirmation_required" => true,
+          "supported_reasons" => Hive::TaskClosure::REASONS,
           "provenance" => {
             "source" => "hive-operational-status",
             "task_action" => row.fetch("action")
@@ -231,7 +253,7 @@ module Hive
       private
 
       def validate_action_id!(action_id)
-        return if OperationalAction::ACTION_IDS.include?(action_id)
+        return if OperationalAction::EXECUTABLE_ACTION_IDS.include?(action_id)
 
         raise Hive::OperationalActionUsageError,
               "unknown operational action #{action_id.inspect}; take a fresh operational snapshot"

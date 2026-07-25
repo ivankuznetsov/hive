@@ -280,6 +280,125 @@ module Hive
       raise Hive::GhError, "`gh pr view #{pr_url}` returned unparseable JSON: #{e.message}"
     end
 
+    # Bounded, repository-scoped transport for TaskClosure. The closure
+    # service canonicalizes every identity before it reaches this boundary;
+    # these helpers still validate the host/repository/OID so no caller can
+    # turn an evidence reference into an arbitrary URL fetch or gh argv.
+    def closure_pr_facts(host:, repository:, number:, default_branch: nil, cfg: nil)
+      host = RepositoryIdentity.validated_github_host(host)
+      repository = RepositoryIdentity.validated_repository_slug(repository)
+      number = Integer(number)
+      raise Hive::GhError, "pull request number must be positive" unless number.positive?
+
+      target = RepositoryIdentity.github_repository_target(repository, host)
+      fields = "number,url,state,mergedAt,mergeCommit,baseRefName"
+      out, err, status = capture3(
+        "gh", "pr", "view", number.to_s, "--repo", target, "--json", fields,
+        cfg: cfg, max_stdout_bytes: 128 * 1024
+      )
+      unless status.success?
+        raise Hive::GhError,
+              "`gh pr view #{repository}##{number}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+      doc = JSON.parse(out)
+      raise Hive::GhError, "pull request lookup returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+      unless doc["number"].to_i == number
+        raise Hive::GhError, "pull request lookup returned a different number"
+      end
+      merge_oid = if doc["mergeCommit"].is_a?(Hash)
+        doc["mergeCommit"]["oid"]
+      else
+        doc["mergeCommit"]
+      end
+      default_branch ||= closure_default_branch(
+        host: host, repository: repository, cfg: cfg
+      )
+      reachable = !merge_oid.to_s.empty? && closure_commit_facts(
+        host: host, repository: repository, oid: merge_oid,
+        default_branch: default_branch, cfg: cfg
+      ).fetch("reachable_from_default")
+      {
+        "repository" => repository,
+        "number" => number,
+        "url" => doc["url"].to_s,
+        "state" => doc["state"].to_s,
+        "merged_at" => doc["mergedAt"].to_s,
+        "merge_oid" => merge_oid.to_s.downcase,
+        "base_ref_name" => doc["baseRefName"].to_s,
+        "reachable_from_default" => reachable
+      }
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "pull request lookup returned unparseable JSON: #{e.message}"
+    rescue ArgumentError, TypeError
+      raise Hive::GhError, "pull request number must be positive"
+    end
+
+    def closure_default_branch(host:, repository:, cfg: nil)
+      host = RepositoryIdentity.validated_github_host(host)
+      repository = RepositoryIdentity.validated_repository_slug(repository)
+      endpoint = "repos/#{repository}"
+      out, err, status = capture3(
+        "gh", "api", "--hostname", host, endpoint, "--jq", ".default_branch",
+        cfg: cfg, max_stdout_bytes: 4 * 1024
+      )
+      unless status.success?
+        raise Hive::GhError,
+              "`gh api #{endpoint}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+      branch = out.to_s.strip
+      if branch.empty? || branch.start_with?("-") || branch.match?(/[\0\r\n\s]/)
+        raise Hive::GhError, "repository default branch is invalid"
+      end
+      branch
+    end
+
+    def closure_commit_facts(host:, repository:, oid:, default_branch:, cfg: nil)
+      host = RepositoryIdentity.validated_github_host(host)
+      repository = RepositoryIdentity.validated_repository_slug(repository)
+      oid = oid.to_s.downcase
+      unless oid.match?(/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/)
+        raise Hive::GhError, "closure evidence requires a full immutable commit OID"
+      end
+      branch = default_branch.to_s
+      if branch.empty? || branch.start_with?("-") || branch.match?(/[\0\r\n\s]/)
+        raise Hive::GhError, "repository default branch is invalid"
+      end
+
+      commit_endpoint = "repos/#{repository}/commits/#{oid}"
+      out, err, status = capture3(
+        "gh", "api", "--hostname", host, commit_endpoint, "--jq", ".sha",
+        cfg: cfg, max_stdout_bytes: 4 * 1024
+      )
+      unless status.success?
+        raise Hive::GhError,
+              "`gh api #{commit_endpoint}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+      observed_oid = out.to_s.strip.downcase
+      unless observed_oid == oid
+        raise Hive::GhError, "commit lookup returned a different immutable OID"
+      end
+
+      compare_endpoint = "repos/#{repository}/compare/#{oid}...#{branch}"
+      comparison, compare_err, compare_status = capture3(
+        "gh", "api", "--hostname", host, compare_endpoint, "--jq", ".status",
+        cfg: cfg, max_stdout_bytes: 4 * 1024
+      )
+      unless compare_status.success?
+        raise Hive::GhError,
+              "`gh api #{compare_endpoint}` failed: " \
+              "#{compare_err.to_s.strip.empty? ? comparison : compare_err.strip}"
+      end
+      compare_state = comparison.to_s.strip.downcase
+      {
+        "oid" => observed_oid,
+        "default_branch" => branch,
+        "comparison" => compare_state,
+        # Comparing base=OID to head=default means `ahead` or `identical`
+        # proves the immutable commit is reachable from current default.
+        "reachable_from_default" => %w[ahead identical].include?(compare_state)
+      }
+    end
+
     def list_open_prs(worktree_path, cfg: nil)
       fields = %w[
         number

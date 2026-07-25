@@ -240,6 +240,8 @@ integrity.
 
 54. **Drop's descendant cleanup still has a snapshot/concurrent-fork race.** `Hive::ProcessKill` can terminate the agent and every descendant whose parent, process group, and start-time identity agree across two successful process-tree snapshots, and it reports `process_tree_unavailable` when discovery cannot support that claim. The second snapshot closes the PID-reuse window between ancestry and identity reads, but a child created after confirmation can still escape before the captured processes are stopped. Fully closing this race requires durable OS-level containment such as a cgroup (or an equivalent cross-platform process-lifetime boundary); repeated best-effort snapshots can narrow but cannot remove the race.
 
+55. **Evidence-bound task closure is source/focused-test pinned but not yet live-dogfooded.** `Hive::TaskClosure` now verifies merged PR/full commit evidence, default-branch reachability, registered repository identity, live attempts/locks, owned-worktree safety, two-step operator authorization, receipt quarantine, crash resume, status projection, and CLI/web/bot adapters. Focused tests use real local task/state/worktree transitions with an injected GitHub transport plus Rails authentication/CSRF coverage. The remaining uncertainty is the planned U9 dogfood against `fix-and-ship-github-merged-260719-0878`: its real Hive and PRDigest delivery PRs/OIDs must be reverified through the installed GitHub CLI, the exact receipt confirmed by an operator, and the archived closure observed on every live surface.
+
 ## 2026-06-16/17 refresh uncertainty
 
 The 2026-06-17 audit rechecked recent source, tests, git history, project wiki

@@ -1,10 +1,10 @@
 ---
 title: 8-finalize stage
 type: stage
-source: lib/hive/stages/finalize.rb, templates/finalize_prompt.md.erb, templates/finalize_summary.md.erb
+source: lib/hive/stages/finalize.rb, lib/hive/task_closure.rb, templates/finalize_prompt.md.erb, templates/finalize_summary.md.erb
 created: 2026-05-13
 updated: 2026-07-25
-tags: [stage, finalize, pr, github, clean-exit]
+tags: [stage, finalize, pr, github, clean-exit, closure]
 ---
 
 **TLDR**: Wraps up an already-open draft PR after 7-artifacts completes. If GitHub already reports the PR as merged, finalize short-circuits to `COMPLETE merged=true` without refreshing the body or touching the stale local branch. Otherwise it self-heals worktree residue via the `CleanExit` backstop (auto-commits in-scope edits, surfaces scope violations as `:error reason=ensure_clean_on_exit_failed`), refreshes the PR body, writes `summary.md`, and flips the PR from draft to ready-for-review. Auto-rebase now safely publishes rewritten PR branches at the rebase boundary; finalize's patch-identical force path remains a recovery backstop for older or externally produced stale histories.
@@ -18,6 +18,14 @@ tags: [stage, finalize, pr, github, clean-exit]
 5. The branch must be pushed to its upstream. Auto-rebase publishes a successfully rewritten PR branch immediately with an exact pre-rebase remote-OID lease, so later stage commits normally remain fast-forward pushable. Finalize still attempts one push before writing `<!-- ERROR reason=unpushed_commits -->`. If that push fails because the local worktree is the stale side of older or externally produced remote auto-rebase history, `resync_stale_rebase!` runs `git cherry <branch>@{u} HEAD`; only when every local commit is patch-identical upstream (`-` lines, no `+` lines) does it `git reset --hard <branch>@{u}` and continue. A genuinely unpushed local change still writes `ERROR reason=unpushed_commits` and is not discarded. Like every finalize error, it remains eligible for the unbounded shared-cooldown retry when no task lock is live and current safety evidence passes. The scheduler submits the observation; `RecoveryCoordinator` owns the marker-id guard and workflow-derived finalize request, so re-entry still runs the ordinary clean-exit, auth, secret, and push checks. Once GitHub reports the PR as `MERGED`, the daemon may archive stale `git_status_failed` or `claude_launch_failed` finalize errors through the internal `hive archive --recover-merged-error-reason` path; that path re-checks the current marker reason and PR state before moving the task to `9-done`.
 
 The worktree precondition is enforced by `Hive::Stages::Base.worktree_pointer_or_exit`, shared with [[stages/open-pr]] so both stages preserve the same missing-pointer and missing-directory UX.
+
+Tasks delivered by a later or replacement PR do not fabricate an empty PR or
+weaken this stage's preconditions. An authenticated operator instead uses the
+evidence-bound closure flow documented in [[commands/stage_action]]. It
+verifies immutable GitHub evidence, writes a task-bound `closure.json`, and
+invokes the centralized archive transition through a receipt-only guard.
+Ordinary `hive archive <slug>` still requires a valid completed
+`8-finalize` task.
 
 ## Steps performed (`Stages::Finalize.run!`)
 

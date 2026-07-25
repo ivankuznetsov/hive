@@ -1,0 +1,80 @@
+<% content_for(:title, "#{web_product_name} — close #{@task.title}") %>
+
+<div class="task-header">
+  <h1>Close with delivery evidence</h1>
+</div>
+<p class="task-slug"><%= @project.name %> · <%= @task.slug %></p>
+
+<% if @preview %>
+  <section class="closure-preview" aria-labelledby="closure-review-title">
+    <h2 id="closure-review-title">Review verified closure</h2>
+    <% unless @preview.valid? %>
+      <div class="flash alert" role="alert">
+        <p>Closure cannot be confirmed yet.</p>
+        <ul>
+          <% (@preview.errors + @preview.blockers).each do |entry| %>
+            <li><%= entry["field"].present? ? "#{entry["field"]}: " : "" %><%= entry.fetch("message") %></li>
+          <% end %>
+        </ul>
+      </div>
+    <% end %>
+    <dl>
+      <dt>Reason</dt>
+      <dd><%= @preview.input["reason"].to_s.tr("_", " ") %></dd>
+      <dt>Task repository</dt>
+      <dd><%= @preview.task_repository&.fetch("identity", "unavailable") %></dd>
+      <dt>Authority</dt>
+      <dd><%= @preview.authority || "unavailable" %></dd>
+      <dt>Evidence digest</dt>
+      <dd><code><%= @preview.evidence_digest %></code></dd>
+    </dl>
+    <ul class="closure-evidence">
+      <% @preview.evidence.each do |item| %>
+        <li>
+          <%= link_to "#{item.fetch("repository")} #{item.fetch("kind").tr("_", " ")} #{item["number"] || item.fetch("oid")[0, 12]}",
+                item.fetch("url"), rel: "noopener noreferrer" %>
+          <code><%= item.fetch("oid") %></code>
+        </li>
+      <% end %>
+    </ul>
+
+    <% if @preview.valid? %>
+      <%= form_with url: task_closure_path(@project.name, @task.slug), method: :post do |form| %>
+        <%= hidden_field_tag :reason, @preview.input["reason"] %>
+        <% @preview.input.fetch("evidence").each do |reference| %>
+          <%= hidden_field_tag "evidence[]", reference %>
+        <% end %>
+        <%= hidden_field_tag :successor, @preview.input["successor"] %>
+        <%= hidden_field_tag :attestation, @preview.input["attestation"] %>
+        <%= hidden_field_tag :preview_digest, @preview.preview_digest %>
+        <%= form.submit "Confirm and archive",
+              data: { turbo_confirm: "Archive #{@task.slug} with this exact verified evidence?" } %>
+      <% end %>
+    <% end %>
+  </section>
+<% end %>
+
+<%= form_with url: task_closure_path(@project.name, @task.slug), method: :post,
+      class: "closure-form" do |form| %>
+  <div>
+    <%= form.label :reason, "Closure reason" %>
+    <%= form.select :reason,
+          [["Already delivered", "already_delivered"], ["Superseded", "superseded"]],
+          selected: @closure_input["reason"] %>
+  </div>
+  <div>
+    <%= form.label :evidence, "Immutable GitHub PR or commit evidence (one per line)" %>
+    <%= text_area_tag "evidence[]", Array(@closure_input["evidence"]).join("\n"),
+          rows: 6, required: true %>
+  </div>
+  <div>
+    <%= form.label :successor, "Successor project:slug (required for superseded)" %>
+    <%= form.text_field :successor, value: @closure_input["successor"] %>
+  </div>
+  <div>
+    <%= form.label :attestation, "Operator attestation (required for superseded or cross-repository evidence)" %>
+    <%= form.text_area :attestation, value: @closure_input["attestation"],
+          maxlength: Hive::TaskClosure::MAX_ATTESTATION_BYTES, rows: 4 %>
+  </div>
+  <%= form.submit "Verify evidence" %>
+<% end %>

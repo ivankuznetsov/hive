@@ -18,6 +18,132 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "#status-grid", 1
   end
 
+  test "closure entry requires authentication" do
+    post "/logout"
+
+    get "/tasks/#{@project}/#{@slug}/closure"
+
+    assert_redirected_to "/login"
+  end
+
+  test "closure preview normalizes evidence and renders exact verified facts" do
+    input = {
+      "reason" => "already_delivered",
+      "evidence" => [ "acme/app#42", "b" * 40 ],
+      "successor" => nil,
+      "attestation" => nil
+    }
+    preview = Hive::TaskClosure::Preview.new(
+      input: input,
+      task: { "project" => @project, "slug" => @slug },
+      task_repository: {
+        "identity" => "github.com/acme/app",
+        "host" => "github.com",
+        "repository" => "acme/app",
+        "default_branch" => "main"
+      },
+      evidence: [
+        {
+          "kind" => "pull_request",
+          "repository" => "acme/app",
+          "number" => 42,
+          "oid" => "a" * 40,
+          "url" => "https://github.com/acme/app/pull/42"
+        }
+      ],
+      successor: nil,
+      authority: "remote_merge",
+      evidence_digest: "e" * 64,
+      preview_digest: "d" * 64,
+      errors: [],
+      blockers: []
+    )
+    calls = []
+
+    with_replaced_singleton_method(
+      Hive::TaskClosure, :preview, lambda { |**kwargs|
+        calls << kwargs
+        preview
+      }
+    ) do
+      post "/tasks/#{@project}/#{@slug}/closure", params: {
+        reason: "already_delivered",
+        evidence: [ "acme/app#42\n#{'b' * 40}\n" ]
+      }
+    end
+
+    assert_response :success
+    assert_select ".closure-preview", 1
+    assert_select "form input[name=preview_digest][value=?]", "d" * 64
+    assert_select "a[href='https://github.com/acme/app/pull/42']", text: /42/
+    assert_equal input, calls.first.fetch(:input)
+  end
+
+  test "closure confirmation uses the authenticated web operator" do
+    calls = []
+    confirmer = lambda do |**kwargs|
+      calls << kwargs
+      { "reason" => "already_delivered", "receipt_digest" => "e" * 64 }
+    end
+
+    with_replaced_singleton_method(Hive::TaskClosure, :confirm!, confirmer) do
+      post "/tasks/#{@project}/#{@slug}/closure", params: {
+        reason: "already_delivered",
+        evidence: [ "acme/app#42" ],
+        preview_digest: "d" * 64
+      }
+    end
+
+    assert_redirected_to "/tasks/#{@project}/#{@slug}"
+    assert_equal true, calls.first.fetch(:authorized)
+    assert_equal "web", calls.first.fetch(:channel)
+    assert_equal "alice", calls.first.fetch(:operator)
+    assert_equal "d" * 64, calls.first.fetch(:preview_digest)
+  end
+
+  test "closure confirmation is CSRF protected" do
+    previous = ActionController::Base.allow_forgery_protection
+    ActionController::Base.allow_forgery_protection = true
+
+    post "/tasks/#{@project}/#{@slug}/closure", params: {
+      reason: "already_delivered",
+      evidence: [ "acme/app#42" ],
+      preview_digest: "d" * 64
+    }
+
+    assert_response :unprocessable_entity
+  ensure
+    ActionController::Base.allow_forgery_protection = previous
+  end
+
+  test "task detail renders canonical closure evidence" do
+    receipt = {
+      "schema" => Hive::TaskClosure::SCHEMA,
+      "schema_version" => 1,
+      "reason" => "already_delivered",
+      "authority" => "remote_merge",
+      "receipt_digest" => "d" * 64,
+      "evidence" => [
+        {
+          "repository" => "acme/app",
+          "number" => 42,
+          "oid" => "a" * 40,
+          "url" => "https://github.com/acme/app/pull/42"
+        }
+      ]
+    }
+
+    with_replaced_singleton_method(Hive::TaskClosure, :projection, ->(*, **) { receipt }) do
+      get "/tasks/#{@project}/#{@slug}"
+    end
+
+    assert_response :success
+    assert_select ".task-closure", text: /already delivered/
+    assert_select ".task-closure a[href='https://github.com/acme/app/pull/42']",
+                  text: /42/
+    assert_select ".task-closure code", text: "d" * 64
+  end
+
   test "task state renders implementation ownership as pending without mutating legacy state" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
 

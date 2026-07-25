@@ -514,6 +514,24 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_archive_closure_rejects_json_and_noninteractive_confirmation
+    json_error = assert_raises(Hive::TaskClosure::Unauthorized) do
+      Hive::CLI.start([
+        "archive", "task", "--reason", "already_delivered",
+        "--evidence", "acme/app#42", "--json"
+      ])
+    end
+    assert_match(/--json cannot confirm/, json_error.message)
+
+    noninteractive_error = assert_raises(Hive::TaskClosure::Unauthorized) do
+      Hive::CLI.start([
+        "archive", "task", "--reason", "already_delivered",
+        "--evidence", "acme/app#42"
+      ])
+    end
+    assert_match(/interactive terminal/, noninteractive_error.message)
+  end
+
   def test_status_approve_findings_and_finding_toggles_pass_options
     with_command_new_stub(Hive::Commands::Status) do |calls|
       Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "2-gather", "--write", "--force", "--json" ])

@@ -1,6 +1,7 @@
 require "time"
 require "hive/operational_action"
 require "hive/workflows"
+require "hive/task_closure"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
@@ -340,6 +341,7 @@ module Hive
         "provider" => provider_payload(row),
         "retry" => retry_payload(scheduler_disposition),
         "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
+        "closure" => closure_payload(project, row),
         "dependency" => {
           "blocked" => row["blocked"] == true,
           "blocked_by" => row["blocked_by"],
@@ -643,6 +645,41 @@ module Hive
       { "retry_after" => retry_after.to_s, "display_only" => true }
     end
 
+    def closure_payload(project, row)
+      projected = row["closure"]
+      if projected.is_a?(Hash) && projected["schema"] == Hive::TaskClosure::SCHEMA
+        return {
+          "status" => "confirmed_pending_transition",
+          "reason" => projected["reason"],
+          "authority" => projected["authority"],
+          "receipt_digest" => projected["receipt_digest"],
+          "evidence" => Array(projected["evidence"]),
+          "action" => nil
+        }
+      end
+      if projected.is_a?(Hash) && projected["status"] == "invalid"
+        return {
+          "status" => "blocked",
+          "reason" => projected["reason"],
+          "authority" => nil,
+          "receipt_digest" => nil,
+          "evidence" => [],
+          "action" => nil
+        }
+      end
+
+      {
+        "status" => "operator_required",
+        "reason" => nil,
+        "authority" => nil,
+        "receipt_digest" => nil,
+        "evidence" => [],
+        "action" => Hive::OperationalAction.closure_descriptor(
+          project: project.fetch("name"), row: row
+        )
+      }
+    end
+
     def invalid_task?(row)
       row["action"] == "error" && row.dig("attrs", "reason") == "invalid_task"
     end
@@ -765,11 +802,25 @@ module Hive
 
     def archive_payload(archived)
       grouped = archived.group_by { |project, _| project.fetch("name") }
+      closures = archived.filter_map do |project, row|
+        receipt = row["closure"]
+        next unless receipt.is_a?(Hash) && receipt["schema"] == Hive::TaskClosure::SCHEMA
+
+        {
+          "project" => project.fetch("name"),
+          "slug" => row.fetch("slug"),
+          "reason" => receipt.fetch("reason"),
+          "authority" => receipt.fetch("authority"),
+          "receipt_digest" => receipt.fetch("receipt_digest"),
+          "evidence" => Array(receipt["evidence"])
+        }
+      end
       {
         "count" => archived.size,
         "by_project" => grouped.keys.sort.map do |project|
           { "project" => project, "count" => grouped.fetch(project).size }
-        end
+        end,
+        "closures" => closures
       }
     end
 

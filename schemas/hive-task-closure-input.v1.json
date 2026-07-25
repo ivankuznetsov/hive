@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:task-closure-input:v1",
+  "title": "Hive task closure verification preview",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "ok", "input", "task", "task_repository",
+    "evidence", "successor", "authority", "evidence_digest",
+    "preview_digest", "errors", "blockers"
+  ],
+  "properties": {
+    "schema": { "const": "hive-task-closure-input" },
+    "schema_version": { "const": 1 },
+    "ok": { "type": "boolean" },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "evidence", "successor", "attestation"],
+      "properties": {
+        "reason": { "type": ["string", "null"], "enum": ["already_delivered", "superseded", null] },
+        "evidence": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "type": "string", "maxLength": 512 }
+        },
+        "successor": { "type": ["string", "null"], "maxLength": 256 },
+        "attestation": { "type": ["string", "null"], "maxLength": 2048 }
+      }
+    },
+    "task": { "type": "object", "additionalProperties": true },
+    "task_repository": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "object", "additionalProperties": false,
+          "required": ["host", "repository", "identity", "default_branch"],
+          "properties": {
+            "host": { "type": "string" },
+            "repository": { "type": "string" },
+            "identity": { "type": "string" },
+            "default_branch": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 16,
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "successor": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "object", "additionalProperties": true }
+      ]
+    },
+    "authority": {
+      "type": ["string", "null"],
+      "enum": ["remote_merge", "operator_attestation", null]
+    },
+    "evidence_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "preview_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "errors": { "type": "array", "items": { "$ref": "#/$defs/Diagnostic" } },
+    "blockers": { "type": "array", "items": { "$ref": "#/$defs/Diagnostic" } }
+  },
+  "$defs": {
+    "Diagnostic": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["code", "message"],
+      "properties": {
+        "field": { "type": "string" },
+        "code": { "type": "string" },
+        "message": { "type": "string", "maxLength": 500 },
+        "owner": { "type": "string" }
+      }
+    }
+  }
+}

@@ -17,4 +17,9 @@
   <% if task.worktree? %>
     <%= link_to "Diff", task_diff_path(task.project.name, task.slug), class: "btn btn-secondary" %>
   <% end %>
+  <% unless task.terminal? %>
+    <%= link_to "Close with evidence",
+          new_task_closure_path(task.project.name, task.slug),
+          class: "btn btn-secondary" %>
+  <% end %>
 </div>

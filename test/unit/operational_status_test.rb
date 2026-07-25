@@ -36,6 +36,46 @@ class OperationalStatusTest < Minitest::Test
     refute result.fetch("tasks").any? { |row| row.dig("identity", "slug") == "archived" }
   end
 
+  def test_closure_projection_advertises_operator_confirmation_and_retains_archived_receipt
+    receipt = {
+      "schema" => Hive::TaskClosure::SCHEMA,
+      "schema_version" => 1,
+      "reason" => "already_delivered",
+      "authority" => "remote_merge",
+      "receipt_digest" => "d" * 64,
+      "evidence" => [
+        {
+          "repository" => "acme/app",
+          "url" => "https://github.com/acme/app/pull/42",
+          "oid" => "a" * 40
+        }
+      ]
+    }
+    result = project(status_payload(
+      task(action: "error", slug: "candidate"),
+      task(
+        action: "archived", slug: "delivered", stage: "9-done",
+        marker: "complete", closure: receipt
+      )
+    ))
+
+    candidate = result.fetch("tasks").find do |row|
+      row.dig("identity", "slug") == "candidate"
+    end
+    assert_equal "operator_required", candidate.dig("closure", "status")
+    assert_equal "workflow.close_with_evidence",
+                 candidate.dig("closure", "action", "action_id")
+    assert candidate.dig("closure", "action", "confirmation_required")
+    refute candidate.dig("closure", "action").key?("observation_token")
+
+    closures = result.dig("archive", "closures")
+    assert_equal 1, closures.size
+    archived = closures.first
+    assert_equal "delivered", archived.fetch("slug")
+    assert_equal "already_delivered", archived.fetch("reason")
+    assert_equal "d" * 64, archived.fetch("receipt_digest")
+  end
+
   def test_running_precedence_retains_provider_hold_as_secondary_reason
     row = task(
       action: "agent_running", slug: "overlap", live_task_lock: true,
@@ -770,7 +810,7 @@ class OperationalStatusTest < Minitest::Test
   def task(action:, slug:, stage: "1-inbox", marker: "waiting", attrs: {}, held: nil,
            live_task_lock: false, task_lock_pid: nil, unanswered_questions: 0,
            blocked: false, depends_on: nil, blocked_by: nil, dependency_stage: nil,
-           admission_error: nil)
+           admission_error: nil, closure: nil)
     attrs = attrs.dup
     if Hive::Recovery.recoverable_marker?(marker) && !attrs.key?("marker_id")
       attrs["marker_id"] = "marker-#{slug}"
@@ -809,6 +849,7 @@ class OperationalStatusTest < Minitest::Test
       "conditions" => [],
       "condition_history" => [],
       "evidence" => [],
+      "closure" => closure,
       "condition_overrides" => [],
       "condition_gate" => nil,
       "condition_migration" => nil,

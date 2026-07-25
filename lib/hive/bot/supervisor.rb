@@ -472,6 +472,25 @@ module Hive
         nil
       end
 
+      def safe_edit_message(update, text:, reply_markup: nil)
+        return safe_send_message(
+          chat_id: update.chat_id, text: text, reply_markup: reply_markup
+        ) unless update.respond_to?(:message_id) && update.message_id
+
+        @telegram.edit_message_text(
+          chat_id: update.chat_id,
+          message_id: update.message_id,
+          text: text,
+          reply_markup: reply_markup
+        )
+      rescue StandardError => e
+        @logger.event(
+          :send_failure, source: "edit_message_text",
+          chat_id: update.chat_id, error_class: e.class.name, message: e.message
+        )
+        nil
+      end
+
       def execute_result(result, update)
         case result.action
         when :noop
@@ -479,6 +498,8 @@ module Hive
         when :reply
           safe_send_message(chat_id: update.chat_id, text: result.text,
                             reply_markup: result.reply_markup)
+        when :edit_reply
+          safe_edit_message(update, text: result.text, reply_markup: result.reply_markup)
         when :dispatch_then_reply
           execute_dispatch(result, update)
         when :dispatch_commands

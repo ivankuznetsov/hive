@@ -4,7 +4,7 @@ type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
 updated: 2026-07-25
-tags: [command, bot, telegram, mobile, json]
+tags: [command, bot, telegram, mobile, json, closure]
 ---
 
 **TLDR**: `hive bot SUBCOMMAND` runs the Telegram mobile surface for
@@ -158,6 +158,14 @@ Push notifications use callback data that routes to:
 - Legacy stage-directory warnings are text-only project-level alerts. They tell the operator to run `hive migrate <project_path>`, have no inline action, dedupe while the project remains legacy-dirty, and re-alert after the project reports clean then regresses.
 - Idea project pickers use `idea_project:<project>:<token>`. Current drafts enter attachment collection instead of immediately spawning `hive new`; the follow-up keyboard emits `idea_done:<token>` and `idea_skip:<token>`, both of which finalize the current draft. `idea_project_new:<token>` clears the draft/picker token and replies that registering a new project from Telegram is out of MVP scope.
 - Legacy Path-A buttons (`path_a_yes:` / `path_a_type:`) from messages sent before Codex draft-assist retirement do not start a draft flow; they reply with instructions to tap **Answer in chat** or send `/answer <id|slug>`. Retired `codex_write:` / `codex_edit:` / `codex_cancel:` data is unknown callback data.
+- Evidence closure: `closure_preview:` decodes one bounded task/input payload,
+  resolves the exact registered task, and calls `Hive::TaskClosure.preview`.
+  A valid preview edits the message with normalized immutable facts plus one
+  compacted `closure_confirm:` button. Confirmation rechecks the current chat
+  allowlist, records `telegram:<from_id>` as operator, calls the shared
+  confirm service, and edits the same message with the archived receipt.
+  Non-allowlisted chats never reach dispatch; malformed/expired callbacks and
+  stale evidence fail closed without invoking a workflow command.
 - `Open laptop` is an explicit no-op reply for disagreements that do not fit the MVP button set.
 
 ## Config

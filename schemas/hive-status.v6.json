@@ -117,7 +117,7 @@
         "task_lock_pid", "task_lock_process_start_time", "task_lock_id",
         "condition_task_generation",
          "commit_generation", "current_attempt", "conditions", "condition_history",
-         "evidence", "condition_overrides", "condition_gate", "condition_migration", "condition_provenance",
+         "evidence", "closure", "condition_overrides", "condition_gate", "condition_migration", "condition_provenance",
          "shadow_audit", "condition_warning", "unanswered_questions", "action",
          "action_label", "suggested_command",
         "next_action", "diagnostic"
@@ -211,6 +211,11 @@
           "description": "Typed evidence referenced by current condition facts.",
           "type": "array",
           "items": { "type": "object", "additionalProperties": true }
+        },
+        "closure": {
+          "description": "Validated evidence-bound closure receipt, invalid-receipt blocker, or null.",
+          "type": ["object", "null"],
+          "additionalProperties": true
         },
         "condition_overrides": {
           "description": "Latest durable forced condition-gate overrides, retained in full in the journal.",

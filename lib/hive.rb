@@ -83,7 +83,11 @@ module Hive
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
       "hive-dispatch-result" => 2,
       # Internal source-of-truth record for durable task-stage ownership.
-      "hive-attempt" => 2
+      "hive-attempt" => 2,
+      # Dedicated operator-confirmed task closure input/receipt. These are
+      # task-local authorities, not agent-callable command envelopes.
+      "hive-task-closure-input" => 1,
+      "hive-task-closure" => 1
     }.freeze
 
     # Closed enum of Diagnostic.generated_by values accepted by the

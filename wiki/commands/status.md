@@ -1,10 +1,10 @@
 ---
 title: hive status
 type: command
-source: lib/hive/commands/status.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
+source: lib/hive/commands/status.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
 updated: 2026-07-25
-tags: [command, status, operational, agents, observability, json, diagnostics, archive, dependencies, scheduler]
+tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, dependencies, scheduler]
 ---
 
 **TLDR**: `hive status` now defaults to a compact operational snapshot for
@@ -202,6 +202,21 @@ does not emit archived task rows; it reports archive totals by project in
 its `archive` summary. Use `hive archive` for archived row details.
 
 `hive archive` with no target reuses Status in archive mode (`Hive::Commands::Status.new(archive: true)`): it lists only `9-done` tasks, with no age cutoff and no hidden-count summary. Empty archive projects print `no archived tasks`. Text rows are sorted newest-first by `mtime` and use the same id/PR/display-name identity column as daily status. `hive archive --json` emits a focused `hive-status` payload whose project task arrays contain only `9-done` rows. `hive archive <slug>` still runs the workflow verb that advances a completed finalize task into done.
+
+Every compatibility JSON task row has a nullable `closure` field. A validated
+receipt exposes the exact reason, authority, digest, successor, and canonical
+evidence links; an invalid receipt exposes a bounded quarantine blocker and
+never overrides the current task state. Archived rows retain that same receipt,
+so a missing worktree or empty diff remains explainable.
+
+Operational active rows include a typed closure block. With no receipt its
+status is `operator_required` and it advertises
+`workflow.close_with_evidence` as `confirmation_required: true`. That
+descriptor deliberately has no observation token and is absent from
+`OperationalAction::ACTION_IDS`; `hive act` cannot execute it. A receipt
+written before a crash appears as `confirmed_pending_transition`. The archive
+summary includes compact closure receipts for delivered/superseded tasks while
+continuing to omit ordinary archived rows.
 
 ## Legacy stage directories (`legacy_stage_dirs`)
 

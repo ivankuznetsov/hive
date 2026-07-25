@@ -83,7 +83,7 @@
     "archive": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["count", "by_project"],
+      "required": ["count", "by_project", "closures"],
       "properties": {
         "count": { "type": "integer", "minimum": 0 },
         "by_project": {
@@ -95,6 +95,25 @@
             "properties": {
               "project": { "type": "string" },
               "count": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "closures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "project", "slug", "reason", "authority",
+              "receipt_digest", "evidence"
+            ],
+            "properties": {
+              "project": { "type": "string" },
+              "slug": { "type": "string" },
+              "reason": { "type": "string", "enum": ["already_delivered", "superseded"] },
+              "authority": { "type": "string", "enum": ["remote_merge", "operator_attestation"] },
+              "receipt_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "evidence": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
             }
           }
         }
@@ -183,7 +202,8 @@
       "additionalProperties": false,
       "required": [
         "identity", "workflow", "position", "liveness", "state", "blocker_owner",
-        "reason", "reasons", "provider", "retry", "recovery", "dependency", "freshness", "evidence", "action"
+        "reason", "reasons", "provider", "retry", "recovery", "closure",
+        "dependency", "freshness", "evidence", "action"
       ],
       "properties": {
         "identity": {
@@ -262,6 +282,7 @@
             { "$ref": "#/$defs/Recovery" }
           ]
         },
+        "closure": { "$ref": "#/$defs/Closure" },
         "dependency": {
           "type": "object",
           "additionalProperties": false,
@@ -357,6 +378,69 @@
               }
             }
           ]
+        }
+      }
+    },
+    "Closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "reason", "authority", "receipt_digest", "evidence", "action"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["operator_required", "confirmed_pending_transition", "blocked"]
+        },
+        "reason": {
+          "type": ["string", "null"],
+          "enum": ["already_delivered", "superseded", null]
+        },
+        "authority": {
+          "type": ["string", "null"],
+          "enum": ["remote_merge", "operator_attestation", null]
+        },
+        "receipt_digest": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "action": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/ClosureAction" }
+          ]
+        }
+      }
+    },
+    "ClosureAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_id", "target", "risk_class", "confirmation_required",
+        "supported_reasons", "provenance"
+      ],
+      "properties": {
+        "action_id": { "const": "workflow.close_with_evidence" },
+        "target": { "type": "string", "pattern": "^.+:.+$" },
+        "risk_class": { "const": "operator_attested" },
+        "confirmation_required": { "const": true },
+        "supported_reasons": {
+          "type": "array",
+          "const": ["already_delivered", "superseded"]
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "task_action"],
+          "properties": {
+            "source": { "const": "hive-operational-status" },
+            "task_action": { "type": "string" }
+          }
         }
       }
     },

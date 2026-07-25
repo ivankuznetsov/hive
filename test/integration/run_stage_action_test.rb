@@ -162,6 +162,88 @@ class RunStageActionTest < Minitest::Test
 
   # ── archive idempotency ────────────────────────────────────────────────
 
+  def test_evidence_receipt_path_can_archive_from_an_active_stage_only_after_guard
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _inbox, slug = seed_inbox(dir)
+        project = File.basename(dir)
+        calls = []
+        guard = lambda do |task, receipt_digest:, project:|
+          calls << [ task.slug, receipt_digest, project ]
+          true
+        end
+
+        with_replaced_singleton_method(
+          Hive::Conditions::TransitionGuard, :validate_closure!, guard
+        ) do
+          capture_io do
+            Hive::Commands::StageAction.new(
+              "archive", slug, project: project,
+              closure_receipt_digest: "a" * 64
+            ).call
+          end
+        end
+
+        done = File.join(dir, ".hive-state", "stages", "9-done", slug)
+        assert File.directory?(done)
+        assert_equal :complete, Hive::Markers.current(File.join(done, "task.md")).name
+        assert_equal [
+          [ slug, "a" * 64, project ],
+          [ slug, "a" * 64, project ]
+        ], calls
+      end
+    end
+  end
+
+  def test_ordinary_archive_still_refuses_an_active_non_finalize_task
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        inbox, slug = seed_inbox(dir)
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::StageAction.new("archive", slug).call
+        end
+
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        assert_includes err, "archive expects"
+        assert File.directory?(inbox)
+      end
+    end
+  end
+
+  def test_evidence_receipt_is_rechecked_inside_the_atomic_task_move_lock
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        inbox, slug = seed_inbox(dir)
+        project = File.basename(dir)
+        calls = 0
+        guard = lambda do |_task, **_kwargs|
+          calls += 1
+          raise Hive::TaskClosure::InvalidReceipt, "generation changed" if calls == 2
+          true
+        end
+
+        with_replaced_singleton_method(
+          Hive::Conditions::TransitionGuard, :validate_closure!, guard
+        ) do
+          error = assert_raises(Hive::TaskClosure::InvalidReceipt) do
+            Hive::Commands::StageAction.new(
+              "archive", slug, project: project,
+              closure_receipt_digest: "a" * 64
+            ).call
+          end
+          assert_match(/generation changed/, error.message)
+        end
+
+        assert_equal 2, calls
+        assert File.directory?(inbox)
+        refute File.exist?(
+          File.join(dir, ".hive-state", "stages", "9-done", slug)
+        )
+      end
+    end
+  end
+
   def test_archive_on_already_archived_task_is_noop
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

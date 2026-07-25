@@ -118,6 +118,7 @@ module Hive
       end
 
       def run!(task, cfg)
+        pre_effect_routing_validation = false
         # Track the current phase in a module-instance variable so the
         # top-level rescue at the end of this method can record it on
         # REVIEW_ERROR. The hive runner is single-task per process, so
@@ -542,6 +543,9 @@ module Hive
           end
 
           # --- Phase 4: fix ---
+          pre_effect_routing_validation = true
+          fix_identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
+          pre_effect_routing_validation = false
           @current_phase = :fix
           mark_working(task, phase: :fix, pass: pass)
           pre_fix_status = prepare_worktree_for_fix(task, cfg, worktree_path)
@@ -593,7 +597,6 @@ module Hive
             "reviews/suppressed.md",
             fix_success_relative_path(pass)
           ]
-          fix_identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
           protected_capture = Hive::ProtectedFiles.capture(task.folder, protected_set)
           before_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
           before_fix_head = git_head(worktree_path)
@@ -739,6 +742,8 @@ module Hive
         # `reason=runner_exception exception_class=Hive::ConfigError`,
         # discarding the message. Surface it as a config-phase error
         # marker that preserves the message in the `reason` attr.
+        raise if pre_effect_routing_validation
+
         Hive::Markers.set(task.state_file, :review_error,
                           phase: @current_phase || :pre_flight,
                           reason: "config_error",

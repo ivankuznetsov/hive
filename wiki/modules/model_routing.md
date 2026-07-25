@@ -65,4 +65,8 @@ respectively. Exact/coarse fields override the current implementation
 identity; absent routed fields fall back through the existing current/legacy
 chain. The selected provider never changes. The effective values and their
 provenance are frozen in the journal before launch, so later reconstruction
-does not reread live `models:` configuration.
+does not reread live `models:` configuration. Execute resolves before creating
+its reviews directory, worktree, pointer, or task marker. Review Phase 4
+resolves before its working marker, phase event, Git preparation, or residue
+auto-commit. Unsupported effective controls therefore leave those stage
+surfaces unchanged.

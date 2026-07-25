@@ -29,11 +29,13 @@ module Hive
       TERM_GRACE_SEC = 0.5
       REAP_GRACE_SEC = 0.2
 
-      def call(argv, env: {}, timeout: 10)
+      def call(argv, env: {}, timeout: 10, chdir: nil)
         timeout = Float(timeout)
         raise ArgumentError, "command timeout must be positive" unless timeout.finite? && timeout.positive?
 
-        stdin, stdout, stderr, waiter = Open3.popen3(env, *argv, pgroup: true)
+        options = { pgroup: true }
+        options[:chdir] = chdir if chdir
+        stdin, stdout, stderr, waiter = Open3.popen3(env, *argv, **options)
         stdin.close
         readers = [ capture_reader(stdout), capture_reader(stderr) ]
         deadline = monotonic_now + timeout

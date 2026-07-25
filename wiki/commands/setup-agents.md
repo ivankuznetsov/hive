@@ -92,10 +92,14 @@ install but keep individual verification rows.
   owns config and cache population.
 - Pi uses native package list/install/update commands.
 - Grok uses native `plugin list`, `inspect`, install-with-trust, enable, and
-  update commands. Durable doctor inspection cross-checks
+  update commands. Runtime inspection executes from the target project and
+  requires the requested skill's reported `source.path` to match the
+  realpath-jailed skill under the expected installed plugin. Durable doctor
+  inspection cross-checks
   `installed-plugins/registry.json` with `[plugins] enabled`/`disabled` in
-  `config.toml`; an installed but disabled plugin is repaired with
-  `grok plugin enable`, not mistaken for a healthy runtime skill.
+  `config.toml`; a stale, disabled plugin is updated and then enabled in one
+  repair plan, rather than being mistaken for a healthy runtime skill or
+  requiring a second setup run.
 - The bundled Hive capability for Claude, Codex, and Pi uses
   `DirectoryPublisher` against each agent's private user root. It verifies the
   projection manifest and file digests, stages every file in a private sibling,

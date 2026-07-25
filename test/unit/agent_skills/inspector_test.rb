@@ -13,8 +13,8 @@ class AgentSkillsInspectorTest < Minitest::Test
       @calls = []
     end
 
-    def call(argv, env: {}, timeout: 10)
-      @calls << { argv: argv, env: env, timeout: timeout }
+    def call(argv, env: {}, timeout: 10, chdir: nil)
+      @calls << { argv: argv, env: env, timeout: timeout, chdir: chdir }
       response = @responses.fetch(argv) do
         Hive::AgentSkills::CommandResult.new(stdout: "", stderr: "unexpected argv", exit_status: 127,
                                               error: nil, timed_out: false)
@@ -60,12 +60,12 @@ class AgentSkillsInspectorTest < Minitest::Test
     }
   end
 
-  def grok_responses(bin:, plugins:, loaded_plugins:, version: "0.2.102")
+  def grok_responses(bin:, plugins:, loaded_plugins:, skills: [], version: "0.2.102")
     {
       [ bin, "--version" ] => result(stdout: "grok #{version}\n"),
       [ bin, "plugin", "list", "--json" ] => result(stdout: JSON.generate(plugins)),
       [ bin, "inspect", "--json" ] => result(
-        stdout: JSON.generate("plugins" => loaded_plugins, "skills" => [])
+        stdout: JSON.generate("plugins" => loaded_plugins, "skills" => skills)
       )
     }
   end
@@ -477,6 +477,15 @@ class AgentSkillsInspectorTest < Minitest::Test
     assert_match(/ENOENT/, result.error)
   end
 
+  def test_command_runner_uses_requested_working_directory
+    with_tmp_dir do |dir|
+      result = Hive::AgentSkills::CommandRunner.new.call([ "pwd" ], chdir: dir)
+
+      assert result.success?
+      assert_equal dir, result.stdout.strip
+    end
+  end
+
   def test_command_runner_defensive_io_and_process_group_errors_are_bounded
     runner = Hive::AgentSkills::CommandRunner.new
     stdin = StringIO.new
@@ -650,6 +659,16 @@ class AgentSkillsInspectorTest < Minitest::Test
           ],
           loaded_plugins: [
             { "name" => "compound-engineering", "path" => install, "enabled" => true }
+          ],
+          skills: [
+            {
+              "name" => "ce-code-review",
+              "source" => {
+                "type" => "plugin",
+                "plugin_name" => "compound-engineering",
+                "path" => File.join(install, "skills", "ce-code-review", "SKILL.md")
+              }
+            }
           ]
         )
       )
@@ -665,6 +684,100 @@ class AgentSkillsInspectorTest < Minitest::Test
       assert_equal "present", row.resolution.fetch("status")
       assert_equal install, row.native.dig("package", "install_path")
       assert_equal "hive setup-agents --agent grok --skill ce-code-review", row.remediation
+      inspect_call = runner.calls.find { |call| call.fetch(:argv) == [ bin, "inspect", "--json" ] }
+      assert_equal dir, inspect_call.fetch(:chdir)
+    end
+  end
+
+  def test_grok_runtime_skill_shadow_is_a_conflict
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "grok")
+      executable(bin)
+      grok_home = File.join(dir, ".grok")
+      install = File.join(grok_home, "installed-plugins", "compound-engineering-plugin-abc123")
+      native_skill = File.join(install, "skills", "ce-code-review", "SKILL.md")
+      shadow = File.join(dir, "compat", "ce-code-review", "SKILL.md")
+      write(native_skill)
+      write(shadow)
+      write(
+        File.join(grok_home, "installed-plugins", "registry.json"),
+        JSON.generate(
+          "repos" => {
+            "compound-engineering-plugin-abc123" => {
+              "path" => install,
+              "plugins" => { "compound-engineering" => { "version" => "3.20.0" } }
+            }
+          }
+        )
+      )
+      write(File.join(grok_home, "config.toml"), "[plugins]\nenabled = [\"compound-engineering\"]\n")
+      reviewer = {
+        "name" => "grok-ce", "kind" => "agent",
+        "agent" => "grok", "skill" => "ce-code-review"
+      }
+      cfg = config(reviewers: [ reviewer ])
+      cfg["agents"]["grok"]["bin"] = bin
+      runner = FakeRunner.new(
+        grok_responses(
+          bin: bin,
+          plugins: [ {
+            "status" => "installed", "name" => "compound-engineering",
+            "version" => "3.20.0", "path" => install,
+            "source" => "https://github.com/EveryInc/compound-engineering-plugin"
+          } ],
+          loaded_plugins: [ {
+            "name" => "compound-engineering", "path" => install, "enabled" => true
+          } ],
+          skills: [ {
+            "name" => "ce-code-review",
+            "source" => { "type" => "user", "path" => shadow }
+          } ]
+        )
+      )
+
+      row = Hive::AgentSkills::Inspector.new(
+        config: cfg, project_root: dir, runner: runner,
+        environment: { "HOME" => dir, "PATH" => "", "GROK_HOME" => grok_home }
+      ).inspect(skills: [ "ce-code-review" ]).first
+
+      assert_equal "conflicting", row.health
+      assert_match(/runtime skill .* resolves from/, row.explanation)
+    end
+  end
+
+  def test_grok_runtime_skill_provenance_requires_reported_exact_skill_path
+    with_tmp_dir do |dir|
+      install = File.join(dir, ".grok", "installed-plugins", "compound-engineering-plugin-abc123")
+      expected = File.join(install, "skills", "ce-code-review", "SKILL.md")
+      other = File.join(install, "skills", "other-review", "SKILL.md")
+      write(expected)
+      write(other)
+      target = Hive::AgentSkills::Target.new(
+        surfaces: [ "review" ], kind: "agent", agent: "grok",
+        configured_skill: "ce-code-review", invocation: "/ce-code-review",
+        capability_id: "ce-code-review", package_id: "compound-engineering", managed: true
+      )
+      inspector = Hive::AgentSkills::Inspector.new(
+        config: config(agent: "grok"),
+        project_root: dir,
+        runner: FakeRunner.new,
+        environment: { "HOME" => dir, "PATH" => "" }
+      )
+      native = {
+        "package" => { "install_path" => install },
+        "runtime_skills" => []
+      }
+
+      missing = inspector.send(
+        :grok_runtime_skill_issues, "/ce-code-review", expected, target, native
+      )
+      assert_match(/does not report skill/, missing.first.last)
+
+      native["runtime_skills"] = [ { "name" => "ce-code-review", "source_path" => other } ]
+      mismatched = inspector.send(
+        :grok_runtime_skill_issues, "/ce-code-review", expected, target, native
+      )
+      assert_match(/expected/, mismatched.first.last)
     end
   end
 
@@ -708,6 +821,37 @@ class AgentSkillsInspectorTest < Minitest::Test
       )
 
       assert_match(/runtime plugin .* resolves from/, evidence.fetch("issues").first.last)
+    end
+  end
+
+  def test_grok_malformed_inventory_entries_are_incompatible
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "grok")
+      executable(bin)
+      native = Hive::AgentSkills::Manifest.load.package("compound-engineering").native_for("grok")
+      cfg = config(agent: "grok", bin: bin)
+      cases = [
+        { plugins: [ nil ], loaded_plugins: [], skills: [] },
+        { plugins: [], loaded_plugins: [ nil ], skills: [] },
+        { plugins: [], loaded_plugins: [], skills: [ nil ] }
+      ]
+
+      cases.each do |inventory|
+        inspector = Hive::AgentSkills::Inspector.new(
+          config: cfg,
+          project_root: dir,
+          runner: FakeRunner.new(grok_responses(bin: bin, **inventory)),
+          environment: { "HOME" => dir, "PATH" => "" }
+        )
+        evidence = inspector.send(
+          :inspect_native,
+          profile: Hive::AgentProfiles.lookup("grok", cfg: cfg),
+          bin: bin,
+          native_spec: native
+        )
+
+        assert_match(/entries must be objects/, evidence.fetch("issues").first.last)
+      end
     end
   end
 

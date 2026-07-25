@@ -313,7 +313,9 @@ module Hive
           Dir[File.join(config_dir, "plugins", plugin, "skills", name, "SKILL.md")]
         )
         installed_plugin_roots(config_dir, plugin: inv.plugin, parse_errors: parse_errors).each do |root|
-          paths << File.join(root, "skills", inv.name, "SKILL.md")
+          candidate = File.join(root, "skills", inv.name, "SKILL.md")
+          path = jailed_skill_path(candidate, root, parse_errors: parse_errors)
+          paths << path if path
         end
         paths
       end
@@ -380,10 +382,23 @@ module Hive
       def jailed_install_root(path, config_dir, parse_errors: [])
         root = resolved_path(File.join(config_dir, "installed-plugins"))
         candidate = resolved_path(path)
-        return candidate if candidate.start_with?(root + File::SEPARATOR)
+        return candidate if path_within?(candidate, root)
 
         parse_errors << "grok plugin path #{candidate.inspect} escapes #{root}"
         nil
+      end
+
+      def jailed_skill_path(path, install_root, parse_errors: [])
+        root = resolved_path(install_root)
+        candidate = resolved_path(path)
+        return candidate if path_within?(candidate, root)
+
+        parse_errors << "grok skill path #{candidate.inspect} escapes #{root}"
+        nil
+      end
+
+      def path_within?(path, root)
+        path == root || path.start_with?(root + File::SEPARATOR)
       end
 
       def resolved_path(path)

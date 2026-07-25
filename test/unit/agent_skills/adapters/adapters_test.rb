@@ -135,6 +135,19 @@ class AgentSkillAdaptersTest < Minitest::Test
       update = adapter(Hive::AgentSkills::Adapters::Grok, dir: dir).plan([ stale ]).operations.fetch(0)
       assert_equal [ "/fake/grok", "plugin", "update", "compound-engineering" ], update.argv
 
+      stale_and_disabled = inspection(
+        agent: "grok", capability: "ce-code-review", package: "compound-engineering",
+        health: "stale", bin: "/fake/grok",
+        native_package: {
+          "id" => "compound-engineering", "version" => "2.9.0", "enabled" => false
+        }
+      )
+      combined = adapter(
+        Hive::AgentSkills::Adapters::Grok, dir: dir
+      ).plan([ stale_and_disabled ]).operations
+      assert_equal %w[plugin_update plugin_enable], combined.map(&:kind)
+      assert_equal [ combined.first.id ], combined.last.depends_on
+
       unresolved = inspection(
         agent: "grok", capability: "ce-code-review", package: "compound-engineering",
         health: "missing", bin: "/fake/grok",

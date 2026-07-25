@@ -17,27 +17,39 @@ module Hive
             File.join(config_root(native_spec), "installed-plugins")
           ]
 
-          kind, argv =
-            if installed.nil?
-              [
-                "plugin_install",
-                [ bin, "plugin", "install", native_spec.source, "--trust" ]
-              ]
-            elsif installed["enabled"] == false
-              [
-                "plugin_enable",
-                [ bin, "plugin", "enable", native_spec.package ]
-              ]
-            elsif rows.any? { |row| row.health == "stale" } ||
-                  rows.any? { |row| row.resolution["path"].nil? }
-              [
-                "plugin_update",
-                [ bin, "plugin", "update", native_spec.package ]
-              ]
-            end
-          return [] unless kind
+          if installed.nil?
+            return [ operation(
+              package: package,
+              rows: rows,
+              kind: "plugin_install",
+              argv: [ bin, "plugin", "install", native_spec.source, "--trust" ],
+              files: files
+            ) ]
+          end
 
-          [ operation(package: package, rows: rows, kind: kind, argv: argv, files: files) ]
+          operations = []
+          needs_update = rows.any? { |row| row.health == "stale" } ||
+            (installed["enabled"] != false && rows.any? { |row| row.resolution["path"].nil? })
+          if needs_update
+            operations << operation(
+              package: package,
+              rows: rows,
+              kind: "plugin_update",
+              argv: [ bin, "plugin", "update", native_spec.package ],
+              files: files
+            )
+          end
+          if installed["enabled"] == false
+            operations << operation(
+              package: package,
+              rows: rows,
+              kind: "plugin_enable",
+              argv: [ bin, "plugin", "enable", native_spec.package ],
+              files: files,
+              depends_on: [ operations.last&.id ]
+            )
+          end
+          operations
         end
       end
     end

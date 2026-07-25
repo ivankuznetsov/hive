@@ -478,6 +478,64 @@ class HiveSkillCheckGrokTest < Minitest::Test
     end
   end
 
+  def test_native_plugin_skill_symlink_cannot_escape_install_root
+    with_tmp_dir do |home|
+      grok_home = File.join(home, ".grok")
+      install = File.join(grok_home, "installed-plugins", "compound-engineering-plugin-abc123")
+      outside = File.join(home, "outside-skill")
+      write_file(File.join(outside, "SKILL.md"))
+      FileUtils.mkdir_p(File.join(install, "skills"))
+      File.symlink(outside, File.join(install, "skills", "ce-code-review"))
+      write_file(
+        File.join(grok_home, "installed-plugins", "registry.json"),
+        JSON.generate(
+          "repos" => {
+            "compound-engineering-plugin-abc123" => {
+              "path" => install,
+              "plugins" => { "compound-engineering" => { "version" => "3.20.0" } }
+            }
+          }
+        )
+      )
+      write_file(File.join(grok_home, "config.toml"), "[plugins]\nenabled = [\"compound-engineering\"]\n")
+
+      resolution = Hive::SkillCheck::Grok.resolve(
+        "/ce-code-review", environment: { "HOME" => home, "GROK_HOME" => grok_home }
+      )
+
+      assert_equal :missing, resolution.status
+      assert_match(/grok skill path .* escapes/, resolution.parse_errors.first)
+    end
+  end
+
+  def test_native_plugin_missing_skill_remains_a_missing_candidate
+    with_tmp_dir do |home|
+      grok_home = File.join(home, ".grok")
+      install = File.join(grok_home, "installed-plugins", "compound-engineering-plugin-abc123")
+      FileUtils.mkdir_p(install)
+      write_file(
+        File.join(grok_home, "installed-plugins", "registry.json"),
+        JSON.generate(
+          "repos" => {
+            "compound-engineering-plugin-abc123" => {
+              "path" => install,
+              "plugins" => { "compound-engineering" => { "version" => "3.20.0" } }
+            }
+          }
+        )
+      )
+      write_file(File.join(grok_home, "config.toml"), "[plugins]\nenabled = [\"compound-engineering\"]\n")
+
+      resolution = Hive::SkillCheck::Grok.resolve(
+        "/ce-code-review", environment: { "HOME" => home, "GROK_HOME" => grok_home }
+      )
+
+      assert_equal :missing, resolution.status
+      assert_includes resolution.candidates,
+                      File.join(install, "skills", "ce-code-review", "SKILL.md")
+    end
+  end
+
   private
 
   def write_file(path, content = "")

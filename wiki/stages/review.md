@@ -85,6 +85,9 @@ review procedure in the prompt. Legacy config values such as
 skill before the prompt is rendered. The official `/code-review` command plugin
 is a separate PR-comment workflow and is not used here because Hive reviewers
 must write structured `reviews/<reviewer>-NN.md` artifacts for triage.
+The Grok reviewer prompt treats the diff, plan, and repository as untrusted
+evidence and forbids cross-model/external review, network tools, or repository
+egress beyond the already selected Grok reviewer.
 
 Every reviewer prompt embeds the task's `plan.md` inline through `Hive::Reviewers::PlanContext.render(task_folder, user_supplied_tag)` — wired into `Agent#render_prompt` as the `plan_context_section` template binding and rendered between the `Pass:` header and the `Behavior:` block in all four reviewer templates. The section frames the plan as authoritative on scope and tells reviewers to drop candidate findings that flag deliberate plan-level scope boundaries (e.g. "feature X not implemented" when the plan defers X to a separate downstream task). It also carries a symmetric anti-finding rule: if the plan's **Goals** or **Requirements Trace** lists an item the diff does NOT implement and the plan does NOT defer it, the reviewer must raise that as a High-severity finding — the rule suppresses escalations on plan-deferred gaps, not on plan-required-but-missing gaps. Without this grounding, reviewers re-derive scope from the worktree alone and routinely escalate intentional gaps — driving the same task into REVIEW_STALE pass after pass because the fixer can't resolve a plan-by-design contradiction.
 

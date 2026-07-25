@@ -148,7 +148,7 @@ module Hive
         build_inspection(
           target: target,
           expected: expected,
-          native: native.reject { |key, _| key == "issues" }.freeze,
+          native: native.reject { |key, _| %w[issues runtime_skills].include?(key) }.freeze,
           resolution: resolution.reject { |key, _| key == "issues" }.freeze,
           issues: issues
         )
@@ -382,7 +382,7 @@ module Hive
           { "package" => nil, "marketplace" => nil }
         end
 
-        {
+        evidence = {
           "available" => true,
           "bin" => bin,
           "cli_version" => version,
@@ -391,6 +391,8 @@ module Hive
           "marketplace" => inventory.fetch("marketplace"),
           "issues" => issues.freeze
         }
+        evidence["runtime_skills"] = inventory.fetch("runtime_skills") if inventory.key?("runtime_skills")
+        evidence
       rescue JSON::ParserError, TypeError, KeyError => e
         {
           "available" => true,
@@ -479,21 +481,26 @@ module Hive
 
       def grok_inventory(bin, native_spec, commands, issues)
         plugins_result = run([ bin, "plugin", "list", "--json" ], commands)
-        inspect_result = run([ bin, "inspect", "--json" ], commands)
+        inspect_result = run([ bin, "inspect", "--json" ], commands, chdir: @project_root)
         issues << [ "incompatible", "grok plugin inventory failed: #{command_failure(plugins_result)}" ] unless plugins_result.success?
         issues << [ "incompatible", "grok runtime inspection failed: #{command_failure(inspect_result)}" ] unless inspect_result.success?
         plugins = JSON.parse(plugins_result.stdout)
         runtime = JSON.parse(inspect_result.stdout)
         runtime_plugins = runtime.fetch("plugins")
+        runtime_skills = runtime.fetch("skills")
         raise TypeError, "grok plugin list must be an Array" unless plugins.is_a?(Array)
         raise TypeError, "grok runtime plugins must be an Array" unless runtime_plugins.is_a?(Array)
+        raise TypeError, "grok runtime skills must be an Array" unless runtime_skills.is_a?(Array)
+        validate_object_entries!(plugins, "grok plugin list")
+        validate_object_entries!(runtime_plugins, "grok runtime plugins")
+        validate_object_entries!(runtime_skills, "grok runtime skills")
 
         plugin = plugins.find do |entry|
           entry["status"] == "installed" && entry["name"] == native_spec.package
         end
         runtime_plugin = runtime_plugins.find { |entry| entry["name"] == native_spec.package }
         if plugin && runtime_plugin && plugin["path"] && runtime_plugin["path"] &&
-           File.expand_path(plugin["path"]) != File.expand_path(runtime_plugin["path"])
+           canonical_path(plugin["path"]) != canonical_path(runtime_plugin["path"])
           issues << [
             "conflicting",
             "grok runtime plugin #{native_spec.package} resolves from #{runtime_plugin['path'].inspect}, " \
@@ -508,7 +515,16 @@ module Hive
             "install_path" => plugin["path"],
             "source" => plugin["source"]
           }.freeze,
-          "marketplace" => nil
+          "marketplace" => nil,
+          "runtime_skills" => runtime_skills.map do |entry|
+            source = entry["source"]
+            raise TypeError, "grok runtime skill source must be an object" unless source.is_a?(Hash)
+
+            {
+              "name" => entry["name"],
+              "source_path" => source["path"]
+            }.freeze
+          end.freeze
         }
       end
 
@@ -536,6 +552,7 @@ module Hive
         if path && !expected_resolution_path?(path, target, native)
           issues << [ "conflicting", "unexpected higher-precedence skill #{path} wins #{target.invocation}" ]
         end
+        issues.concat(grok_runtime_skill_issues(invocation, path, target, native)) if target.agent == "grok"
         resolution_hash(resolved).merge(
           "invocation" => invocation,
           "alias_path" => alias_path,
@@ -614,11 +631,48 @@ module Hive
           roots << File.join(config_root, "plugins", "marketplaces", native_spec.marketplace, "plugins", plugin)
           roots << File.join(config_root, ".tmp", "marketplaces", native_spec.marketplace, "plugins", plugin)
         end
-        expanded_path = File.expand_path(path)
+        expanded_path = canonical_path(path)
         roots.compact.any? do |root|
-          expanded_root = File.expand_path(root)
+          expanded_root = canonical_path(root)
           expanded_path == expanded_root || expanded_path.start_with?(expanded_root + File::SEPARATOR)
         end
+      end
+
+      def grok_runtime_skill_issues(invocation, resolved_path, target, native)
+        runtime_skills = native["runtime_skills"]
+        return [] unless runtime_skills
+
+        skill_name = Hive::SkillCheck.parse(invocation).name
+        runtime_skill = runtime_skills.find { |entry| entry["name"] == skill_name }
+        unless runtime_skill
+          return [ [ "conflicting", "grok runtime does not report skill #{skill_name.inspect}" ] ]
+        end
+
+        source_path = runtime_skill["source_path"]
+        unless source_path && expected_resolution_path?(source_path, target, native)
+          return [ [
+            "conflicting",
+            "grok runtime skill #{skill_name} resolves from #{source_path.inspect}, outside the expected installed package"
+          ] ]
+        end
+        return [] unless resolved_path && canonical_path(source_path) != canonical_path(resolved_path)
+
+        [ [
+          "conflicting",
+          "grok runtime skill #{skill_name} resolves from #{source_path.inspect}, expected #{resolved_path.inspect}"
+        ] ]
+      end
+
+      def validate_object_entries!(entries, label)
+        return if entries.all? { |entry| entry.is_a?(Hash) }
+
+        raise TypeError, "#{label} entries must be objects"
+      end
+
+      def canonical_path(path)
+        File.realpath(path)
+      rescue SystemCallError
+        File.expand_path(path)
       end
 
       def build_inspection(target:, expected:, native:, resolution:, issues:, remediation: nil)
@@ -671,9 +725,11 @@ module Hive
         nil
       end
 
-      def run(argv, commands)
+      def run(argv, commands, chdir: nil)
         commands << argv.freeze
-        @runner.call(argv, env: runner_environment, timeout: INVENTORY_TIMEOUT_SEC)
+        options = { env: runner_environment, timeout: INVENTORY_TIMEOUT_SEC }
+        options[:chdir] = chdir if chdir
+        @runner.call(argv, **options)
       end
 
       def runner_environment

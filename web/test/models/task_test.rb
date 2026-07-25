@@ -97,6 +97,26 @@ class TaskTest < ActiveSupport::TestCase
     assert fresh.recovery_action_enabled?
   end
 
+  test "max pass review escalation is visible but not directly retryable" do
+    folder = Pathname(Dir.mktmpdir("hive-web-review-escalation"))
+    folder.join("reviews").mkpath
+    folder.join("reviews/escalations-02.md").write("# Questions\n")
+    task = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: {
+        "action" => "recover_review",
+        "marker" => "review_stale",
+        "attrs" => { "pass" => "2", "marker_id" => "marker-2" },
+        "folder" => folder.to_s
+      }
+    )
+
+    assert task.recovery_action_visible?
+    refute task.recovery_action_enabled?
+  ensure
+    FileUtils.remove_entry(folder) if folder&.exist?
+  end
+
   test "resolves only plain media filenames inside the real task folder" do
     root = Pathname(Dir.mktmpdir("hive-web-task-model"))
     folder = root.join("task")

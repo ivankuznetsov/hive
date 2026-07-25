@@ -693,12 +693,9 @@ module Hive
     # drift would silently desync producer + consumers. See PR #84
     # review finding #17.
     def self.max_passes_review_stale_with_escalations?(folder:, marker_name:, attrs:)
-      return false unless marker_name.to_s == "review_stale"
-
-      pass = (attrs || {})["pass"].to_s
-      return false unless pass.match?(/\A[1-9]\d*\z/)
-
-      File.exist?(File.join(folder.to_s, "reviews", "escalations-#{format('%02d', pass.to_i)}.md"))
+      Hive::Recovery.intervention_required?(
+        marker: marker_name, attrs: attrs || {}, folder: folder
+      )
     end
 
     # Shared prefix for every `hive <verb> <slug>` builder: the verb, the

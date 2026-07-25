@@ -694,28 +694,14 @@ class HiveBotRouterTest < Minitest::Test
                    "--project", "hive", "--json" ], result.command_argv
   end
 
-  def test_clear_retry_callback_dispatches_guarded_recovery_for_current_row
-    row = Hive::Bot::StatusWatcher::Row.new(
-      project: "hive",
-      slug: "slug-260514-abcd",
-      stage: "5-review",
-      workflow: "coding",
-      marker: "review_error",
-      attrs: {},
-      folder: "/tmp/slug-260514-abcd"
-    )
-    router = build_test_router(
-      bot_config: { "chat_id_allowlist" => [ 12345 ] },
-      status_snapshot_provider: -> { [ row ] }
-    )
-
-    result = router.handle(
+  def test_removed_clear_retry_callback_is_unknown
+    result = @router.handle(
       update(callback_data: "clear_retry:hive:slug-260514-abcd:5-review:review_error")
     )
 
-    assert_equal :dispatch_recovery, result.action
-    assert_same row, result.recovery
-    assert_nil result.commands
+    assert_equal :reply, result.action
+    assert_equal :unknown, result.intent
+    assert_match(/did not understand/, result.text)
   end
 
   def test_default_projects_provider_reads_registered_projects

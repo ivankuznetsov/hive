@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-07-24
+updated: 2026-07-25
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, dependencies, scheduler]
 ---
 
@@ -84,6 +84,12 @@ contract. `hive-act.v2` returns the canonical queued/cooldown/running/blocked/
 terminal recovery receipt. The one-off recovery-contract migration moved every
 in-repository producer, consumer, fixture, and operating skill to v2; v1 is no
 longer published or supported.
+
+Recovery recommendations bind to the exact current `marker_id`. A task carrying
+an old id-less recoverable marker reports `recovery_migration_required` and
+remains operator-owned until `hive migrate <project>` performs the one-off
+identity upgrade. Status and act never derive a recovery identity from marker
+mtime, reason, or another low-cardinality attr.
 
 `hive act` resolves and locks the task again, recomputes the permitted verb,
 and rejects stale tokens or recommendations that are no longer routine. It is

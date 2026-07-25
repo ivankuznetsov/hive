@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-07-23
+updated: 2026-07-25
 tags: [architecture, overview]
 ---
 
@@ -289,8 +289,8 @@ hive bot start  →  Hive::Commands::Bot
 
 The trust boundary matches the daemon: the bot is a thin command/draft
 surface, not an alternate approval engine. Stage approvals call workflow
-verbs with `--from <stage> --json`; recovery buttons call
-`hive markers clear`; triage buttons call `hive accept-finding` /
+verbs with `--from <stage> --json`; recovery buttons submit the observed row
+through `Hive::Recovery::API`; triage buttons call `hive accept-finding` /
 `reject-finding`; text-only idea capture calls `hive new`. Two
 in-process writes are intentionally scoped: brainstorm answer insertion,
 which is limited to `### A<N>.` blocks under
@@ -408,8 +408,8 @@ loading. `Hive::StageLabel` gives web and bot surfaces one acronym-aware stage
 formatter. Mutations reuse gem
 primitives: `Commands::Approve` in-process, `Commands::Drop` in-process for
 Advanced hard deletes, daemon dispatch queue for stage runs, the bot's
-`RecoverySequence` for task-page Retry recovery (`markers clear` plus the
-stage rerun as one queued request sequence), `BrainstormAnswerWriter` for Q&A
+recovery-shape helper plus `Hive::Recovery::API` for task-page Retry,
+`BrainstormAnswerWriter` for Q&A
 answers, and `Commands::New` (with the TUI's `attachments:` contract) for the
 idea composer. Repo setup clones via `gh`, reuses the `hive init` prompt seam,
 and normalizes GitHub SSH origins to https so later daemon-owned `5-open-pr`
@@ -488,8 +488,10 @@ removed.
 
 Every task-stage producer resolves through one semantic admission protocol.
 CLI calls admit locally and attach. Bot/web requests remain file-backed
-deliveries, consumed by the daemon when present. Daemon auto-advance and loss
-healing call the same dispatcher. A daemon is optional after acceptance.
+deliveries, consumed by the daemon when present. Daemon auto-advance and
+coordinator-owned recovery call the same dispatcher. Attempt-loss healing is a
+separate ledger successor admission and never projects a recovery marker. A
+daemon is optional after acceptance.
 
 ```text
 CLI ───────────────────────────────┐

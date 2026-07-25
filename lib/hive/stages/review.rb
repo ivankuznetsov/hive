@@ -1136,7 +1136,7 @@ module Hive
       # phase already does — not sit terminally red until a human retries.
       # When the captured error text reads as a limit, stamp
       # `reason: limits_reached` plus a `retry_after` cooldown the daemon
-      # healer honors (StaleAgentHealer#auto_recoverable_review_error?);
+      # healer honors through the shared coordinator assessment;
       # otherwise write a closed-enum terminal reason classified from the
       # captured output (`unknown` when no specific signal is present).
       # A timeout (no limit text) stays terminal — only an actual limit

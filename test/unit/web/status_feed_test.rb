@@ -174,17 +174,15 @@ class StatusFeedTest < Minitest::Test
         "attempt_id" => nil,
         "phase" => "admitted"
       }
-      status.define_singleton_method(:operational_payload) do |_projects, status_payload:|
+      status.define_singleton_method(:operational_recoveries) do |_projects, status_payload:|
         raise "status payload was rescanned" unless status_payload.equal?(base)
 
-        {
-          "tasks" => [
-            {
-              "identity" => { "project" => "demo", "slug" => "failed-task" },
-              "recovery" => receipt
-            }
-          ]
-        }
+        [
+          {
+            "identity" => { "project" => "demo", "slug" => "failed-task" },
+            "recovery" => receipt
+          }
+        ]
       end
       feed = Hive::Web::StatusFeed.new(status_command: status)
 

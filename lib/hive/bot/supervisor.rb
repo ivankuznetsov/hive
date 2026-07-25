@@ -841,10 +841,10 @@ module Hive
         commands = Array(result.commands)
         reset_pending = !@dry_run && needs_alert_reset?(result)
 
-        # If every command in the sequence is queue-routable, write only
-        # the first request and keep the rest as a daemon-promoted
-        # continuation. The retry command is not visible to the daemon until
-        # `markers clear` exits 0.
+        # If every command in the sequence is queue-routable, write only the
+        # first request and keep the rest as a daemon-promoted continuation.
+        # This is used for ordinary multi-command workflows such as findings
+        # disposition; recovery uses execute_recovery instead.
         if commands.all? { |argv| queue_routable?(argv) }
           return enqueue_command_sequence(commands, result, update)
         end
@@ -859,7 +859,10 @@ module Hive
           )
           last_pid = execute_dispatch(per_command, update)
           if idx < commands.length - 1 && last_pid.is_a?(Integer)
-            unless wait_for_child_success(last_pid, deadline: Time.now + (@config.fetch("clear_retry_grace_sec", 30)))
+            unless wait_for_child_success(
+              last_pid,
+              deadline: Time.now + (@config.fetch("command_sequence_grace_sec", 30))
+            )
               safe_send_message(chat_id: update.chat_id, text: "Stopped because the previous command failed.")
               failed = true
               break
@@ -915,8 +918,7 @@ module Hive
       # Queue path for `dispatch_command_sequence`: write only the FIRST
       # request and store the remaining argv list as a continuation sidecar.
       # The daemon promotes that continuation only after the current request
-      # exits 0, preserving the old `markers clear` -> retry dependency while
-      # keeping the daemon as the sole process spawner.
+      # exits 0. Recovery never uses this generic sequence path.
       def enqueue_command_sequence(commands, result, update)
         first, *remaining = commands
         request_id = @dispatch_request_writer.generate_request_id
@@ -1203,7 +1205,7 @@ module Hive
         intent = result.respond_to?(:intent) ? result.intent : nil
         case intent
         when :slash_done then "slash_done"
-        when :callback_autofix, :callback_clear_and_retry then "autofix"
+        when :callback_autofix then "autofix"
         when :callback_approve, :callback_approve_plan then "callback_approve"
         when :callback_rerun then "callback_rerun"
         when :callback_findings_accept_all then "findings_accept"

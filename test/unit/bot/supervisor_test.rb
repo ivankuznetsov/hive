@@ -187,7 +187,7 @@ class HiveBotSupervisorTest < Minitest::Test
     # touch disk or the network.
     @config = {
       "chat_id_allowlist" => [ 42, 43 ],
-      "clear_retry_grace_sec" => 1,
+      "command_sequence_grace_sec" => 1,
       "conversation_ttl_sec" => 60,
       "poll_interval_sec" => 1,
       "idea_attachment_max_bytes" => 20 * 1024 * 1024,
@@ -1317,7 +1317,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
   def test_trigger_for_result_maps_intents_for_telemetry
     %i[
-      slash_done callback_autofix callback_clear_and_retry callback_approve
+      slash_done callback_autofix callback_approve
       callback_approve_plan callback_rerun
       callback_findings_accept_all callback_findings_reject_all callback_show_details
     ].each do |intent|
@@ -1685,7 +1685,10 @@ class HiveBotSupervisorTest < Minitest::Test
                          action: "needs_input", marker: "review_waiting")
     retryable_recovery = row(slug: "stuck-260526-cccc", stage: "6-review",
                              action: "recover_review", marker: "review_error",
-                             attrs: { "phase" => "fix", "pass" => "2" },
+                             attrs: {
+                               "phase" => "fix", "pass" => "2",
+                               "marker_id" => "0123456789abcdef"
+                             },
                              diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
     manual_recovery = row(slug: "stale-260526-dddd", stage: "4-execute",
                           action: "recover_review", marker: "execute_stale",
@@ -2217,7 +2220,7 @@ class HiveBotSupervisorTest < Minitest::Test
   # Mixed sequence: `accept-finding` (not queue-routable, spawns) +
   # retry verb (queue-routable, writes a request). The findings
   # callbacks are the one remaining mixed surface in the codebase
-  # — `RecoverySequence` is now all-queue. The bot waits on the
+  # — `RecoveryResultBuilder` is now all-queue. The bot waits on the
   # accept-finding child like before; the retry verb lands in the
   # queue with no wait.
   def test_dispatch_command_sequence_mixed_spawn_and_queue_waits_then_enqueues

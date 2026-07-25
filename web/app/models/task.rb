@@ -179,7 +179,7 @@ class Task
   end
 
   def recovery_action_enabled?
-    recovery_action? && recovery.nil?
+    recovery_action? && recovery.nil? && !recovery_intervention_required?
   end
 
   def recovery_primary_label
@@ -275,6 +275,12 @@ class Task
   end
 
   private
+
+  def recovery_intervention_required?
+    Hive::Recovery.intervention_required?(
+      marker: self["marker"], attrs: self["attrs"] || {}, folder: folder
+    )
+  end
 
   def recovery_terminal_success?
     %w[succeeded success completed terminal_replay].include?(

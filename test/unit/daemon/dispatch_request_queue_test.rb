@@ -84,36 +84,38 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
-  def test_error_retry_identity_round_trips_and_duplicate_write_is_idempotent
+  def test_recovery_identity_round_trips_and_duplicate_write_is_idempotent
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       at = Time.utc(2026, 7, 24, 10, 0, 0)
       request_id = Q.write_request!(
         project: "hive",
         slug: "plan-task",
-        argv: %w[hive plan plan-task],
+        argv: %w[hive run plan-task --stage 3-plan --project hive --json],
         requestor: "healer",
-        trigger: "error_retry",
+        trigger: "recovery",
         request_id: "stable-plan-retry",
         task_generation: "generation-a",
         task_id: 817,
         expected_stage: "3-plan",
         expected_marker_name: "error",
         expected_marker_id: "marker-a",
+        recovery: recovery_payload,
         state_home: dir,
         now: at
       )
       duplicate = Q.write_request!(
         project: "hive",
         slug: "plan-task",
-        argv: %w[hive plan plan-task],
+        argv: %w[hive run plan-task --stage 3-plan --project hive --json],
         requestor: "healer",
-        trigger: "error_retry",
+        trigger: "recovery",
         request_id: "stable-plan-retry",
         task_generation: "generation-b",
         task_id: 999,
         expected_stage: "8-finalize",
         expected_marker_name: "review_error",
         expected_marker_id: "marker-b",
+        recovery: recovery_payload(phase: "cleared"),
         state_home: dir,
         now: at + 1
       )
@@ -402,6 +404,37 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       reasons = []
       Q.pending(state_home: dir, bad_handler: ->(path:, reason:) { reasons << reason })
       assert_equal [ "unknown_schema_version" ], reasons
+    end
+  end
+
+  def test_requestor_is_a_closed_contract_at_write_and_read_boundaries
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      assert_raises(ArgumentError) do
+        Q.write_request!(
+          project: "hive", slug: "safe-task",
+          argv: %w[hive run safe-task],
+          requestor: "invented", state_home: dir
+        )
+      end
+
+      path = write_request(
+        dir, request_id: "badrequestor",
+        created_at: Time.utc(2026, 5, 28, 18, 0, 0),
+        requestor: "invented"
+      )
+      reasons = []
+      assert_empty Q.pending(
+        state_home: dir,
+        bad_handler: ->(path:, reason:) { reasons << [ path, reason ] }
+      )
+      assert_equal [ [ path, "invalid_requestor" ] ], reasons
+
+      id = Q.write_request!(
+        project: "hive", slug: "safe-task",
+        argv: %w[hive run safe-task],
+        requestor: "operator", state_home: dir
+      )
+      assert_equal "operator", Q.fetch(id, state_home: dir).requestor
     end
   end
 
@@ -709,20 +742,6 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
 
     assert Q.expired?(request, now: later, expiry_sec: 600)
     refute Q.expired?(request, now: later, expiry_sec: 7200)
-  end
-
-  def test_healer_plan_retry_does_not_expire_before_admission
-    request = Q::Request.new(
-      request_id: "H", created_at: Time.utc(2026, 5, 28, 18, 0, 0),
-      project: "p", slug: "s", argv: [ "hive", "plan", "s" ],
-      requestor: "healer", trigger: "error_retry"
-    )
-
-    refute Q.expired?(
-      request,
-      now: Time.utc(2026, 5, 29, 18, 0, 0),
-      expiry_sec: 600
-    )
   end
 
   # ── C3: atomic claim + restart recovery ───────────────────────────────

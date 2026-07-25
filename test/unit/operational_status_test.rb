@@ -439,6 +439,109 @@ class OperationalStatusTest < Minitest::Test
     end
   end
 
+  def test_retry_eligibility_without_a_durable_request_does_not_claim_queued
+    source_task = task(
+      action: "error", slug: "eligible", stage: "4-execute",
+      marker: "error", attrs: {
+        "reason" => "implementer_failed", "marker_id" => "marker-1"
+      }
+    )
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "retry_pending",
+      reason: "eligible for guarded transition"
+    )
+
+    projected = project(
+      status_payload(source_task),
+      project_context: {
+        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+      },
+      scheduler_snapshot: snapshot
+    ).fetch("tasks").first
+
+    assert_nil projected.fetch("recovery")
+    assert_equal "workflow.retry", projected.dig("action", "action_id")
+  end
+
+  def test_malformed_queued_projection_without_request_id_stays_actionable
+    source_task = task(
+      action: "error", slug: "eligible-canonical", stage: "4-execute",
+      marker: "error", attrs: {
+        "reason" => "implementer_failed", "marker_id" => "marker-1"
+      }
+    )
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "retry_pending",
+      reason: "eligible for guarded transition"
+    )
+    snapshot.dig("tasks", 0, "disposition")["recovery"] = {
+      "status" => "queued", "request_id" => nil
+    }
+
+    projected = project(
+      status_payload(source_task),
+      project_context: {
+        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+      },
+      scheduler_snapshot: snapshot
+    ).fetch("tasks").first
+
+    assert_nil projected.fetch("recovery")
+    assert_equal "workflow.retry", projected.dig("action", "action_id")
+  end
+
+  def test_idless_recovery_marker_projects_the_one_off_migration_blocker
+    source_task = task(
+      action: "error", slug: "legacy", stage: "4-execute",
+      marker: "error", attrs: { "reason" => "implementer_failed", "marker_id" => nil }
+    )
+
+    projected = project(status_payload(source_task)).fetch("tasks").first
+
+    assert_equal "blocked", projected.dig("recovery", "status")
+    assert_equal "recovery_migration_required", projected.dig("recovery", "reason")
+    assert_includes projected.dig("recovery", "remediation"), "hive migrate"
+  end
+
+  def test_lean_recovery_projection_only_joins_recovery_candidates
+    ordinary = 20.times.map do |index|
+      task(action: "ready_to_plan", slug: "ordinary-#{index}", marker: "complete")
+    end
+    failure = task(
+      action: "error", slug: "failure", stage: "4-execute",
+      marker: "error", attrs: { "reason" => "timeout", "marker_id" => "marker-1" }
+    )
+    snapshot_tasks = (ordinary + [ failure ]).map do |row|
+      scheduler_snapshot_for(
+        row, decision: row.equal?(failure) ? "retry_cooldown" : "global_cap",
+        reason: "observed"
+      ).fetch("tasks").first
+    end
+    snapshot = scheduler_snapshot_for(
+      failure, decision: "retry_cooldown", reason: "observed"
+    ).merge("tasks" => snapshot_tasks)
+    status = Hive::OperationalStatus.new(
+      status_payload: status_payload(*(ordinary + [ failure ])),
+      project_context: {
+        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+      },
+      scheduler_snapshot: snapshot
+    )
+    matches = 0
+    original = status.method(:scheduler_task_matches?)
+    status.define_singleton_method(:scheduler_task_matches?) do |observed, row|
+      matches += 1
+      original.call(observed, row)
+    end
+
+    rows = status.recovery_rows
+
+    assert_equal 1, matches
+    assert_equal [ "failure" ], rows.map { |row| row.dig("identity", "slug") }
+  end
+
   def test_matching_complete_daemon_observation_explains_scheduler_gate
     source_task = task(action: "ready_to_plan", slug: "capacity-wait")
     snapshot = scheduler_snapshot_for(
@@ -624,6 +727,10 @@ class OperationalStatusTest < Minitest::Test
            live_task_lock: false, task_lock_pid: nil, unanswered_questions: 0,
            blocked: false, depends_on: nil, blocked_by: nil, dependency_stage: nil,
            admission_error: nil)
+    attrs = attrs.dup
+    if Hive::Recovery.recoverable_marker?(marker) && !attrs.key?("marker_id")
+      attrs["marker_id"] = "marker-#{slug}"
+    end
     row = {
       "stage" => stage,
       "slug" => slug,

@@ -17,7 +17,6 @@ module Hive
       DispatchReference = Data.define(:request_id, :attempt_id, :state, :status, :argv) do
         def queued? = status == :queued
       end
-      RecoveryObservation = Hive::Recovery::API::Observation
 
       def generate_request_id
         Hive::Daemon::DispatchRequestQueue.generate_request_id
@@ -147,22 +146,6 @@ module Hive
         return "#{task.stage_index}-#{task.stage_name}" if verb == "run"
 
         Hive::Workflows.for_verb(verb).fetch(:target)
-      end
-
-      def recovery_observation(row, project: nil)
-        Hive::Recovery::API.observation(row, project: project)
-      end
-
-      def row_value(row, key)
-        Hive::Recovery::API.row_value(row, key)
-      end
-
-      def normalized_marker_attrs(row)
-        Hive::Recovery::API.normalized_marker_attrs(row)
-      end
-
-      def observed_mtime(row, state_file)
-        Hive::Recovery::API.observed_mtime(row, state_file)
       end
     end
   end

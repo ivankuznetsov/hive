@@ -85,7 +85,8 @@ step and submits eligible `ERROR` / `REVIEW_ERROR` observations to
 marker-age cooldown, rejects live ownership or unsafe current-work evidence,
 persists the canonical task/marker/generation identity, and owns the guarded
 clear plus restart replay. Set
-`daemon.auto_retry.enabled: false` to disable all durable-error clears.
+`daemon.auto_retry.enabled: false` to disable automatic coordinator submissions;
+explicit operator recovery through the shared API remains available.
 The deterministic v4 request does not expire behind admission gates; a crash
 before or after clear resumes its persisted phase, while stale identity is
 blocked instead of crossing into a replacement task generation.
@@ -112,7 +113,8 @@ stage.
 | `error` at `8-finalize` with `reason=git_status_failed` or `reason=claude_launch_failed` | **Hand off to PrMergeWatcher before normal policy.** If the PR later reports `MERGED`, dispatch `hive archive <slug> --from 8-finalize --recover-merged-error-reason <reason>`; the archive command re-checks marker reason and PR state before moving the task. |
 | `needs_input` at `3-plan` | **Auto-dispatch immediately.** Plan-stage `:waiting` is an approval pause, not a Q&A wait — `daemon.enabled: true` is the durable consent. `Hive::Daemon::PlanApproval.prepare` rewrites the row's `hive plan ...` command to `hive develop ...` and flips the `:waiting` marker to `:complete` before dispatch so the workflow verb's terminal-marker gate (`VALID_TERMINAL_MARKERS`) accepts the advance. Logged as `:dispatched` with `trigger: "plan_approval"`. |
 | `needs_input` (any other stage) | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. Brainstorm/execute/review WAITING represent actual user-authored answers; auto-dispatch without an edit would either spam the agent or skip real user input. The `[project, slug] → mtime` baseline this compares against is **persisted** (`daemon_dispatch_baselines.json` under the state home, beside `.daemon.pid`), so a daemon restart no longer re-strands a task answered while it was down — see [[modules/daemon]] "Persisted dispatch baselines". **Brainstorm Q&A gate:** mtime-debounce alone can't tell "answered 1 of 3, still going" from "done" — each Telegram answer bumps the file mtime — so a `2-brainstorm` `needs_input` row whose `brainstorm.md` still has unanswered `### Q{n}.` slots is **held** (`Policy :wait_for_answers`, logged `:skipped reason=answers_pending`) until every question is answered, whether they arrive one-at-a-time via the bot or in one editor save. See [[modules/daemon]] "Brainstorm answers-pending gate". |
-| `recover_execute`, `recover_review` | Skip — recovery markers are explicit human-input gates. |
+| `recover_execute` | Skip — `EXECUTE_STALE` / waiting findings are explicit human-input gates. |
+| `recover_review` | Policy skips the row. `REVIEW_ERROR` is handled earlier by the universal recovery scheduler; `REVIEW_STALE` / `REVIEW_CI_STALE` remain explicit operator submissions after inspection or edits. |
 | `agent_running`       | Skip — task is in flight; per-task `.lock` would block double-spawn anyway. |
 | `archived`            | Skip — terminal. |
 | `error`               | Keep durable `ERROR` / `REVIEW_ERROR` rows scheduler-owned while the universal healer waits for its shared cooldown and temporary safety gates. The merged-finalize-error exception is handled by `PrMergeWatcher` before this policy table. |
@@ -205,7 +207,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | Exit | Constant | Action |
 |------|----------|--------|
 | 0 | `SUCCESS` | No cooldown; daily counter +1 and the next stage may dispatch immediately |
-| 3 | `TASK_IN_ERROR` | No retry; marker now classifies row as `recover_*` → Policy returns `:skip` |
+| 3 | `TASK_IN_ERROR` | No immediate controller retry. The durable failure marker remains visible; `ERROR` / `REVIEW_ERROR` enter the shared cooldown and coordinator lifecycle, while manual recovery markers remain parked. |
 | 4 | `WRONG_STAGE` | 60s protective backoff (race or classifier bug) |
 | 64 | `USAGE` | Quarantine `(project, slug)` for daemon lifetime |
 | 70 / 1 | `SOFTWARE` / `GENERIC` | Transient: 60→120→300 s backoff, then quarantine |

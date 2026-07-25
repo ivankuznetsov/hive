@@ -436,6 +436,102 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_migrate_upgrades_idless_recovery_markers_once
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        error_folder = write_task_folder(
+          stages, "4-execute", "old-error-260725-aaaa"
+        )
+        review_folder = write_task_folder(
+          stages, "6-review", "old-review-error-260725-bbbb"
+        )
+        Hive::TaskMeta.write(
+          error_folder, id: 101, slug: File.basename(error_folder),
+          display_name: "Old error"
+        )
+        Hive::TaskMeta.write(
+          review_folder, id: 102, slug: File.basename(review_folder),
+          display_name: "Old review error"
+        )
+        File.write(
+          File.join(error_folder, "task.md"),
+          "# Task\n\n<!-- ERROR reason=timeout -->\n"
+        )
+        File.write(
+          File.join(review_folder, "task.md"),
+          "# Task\n\n<!-- REVIEW_ERROR reason=all_failed -->\n"
+        )
+        historical_plan = File.join(error_folder, "plan.md")
+        File.write(
+          historical_plan,
+          "# Historical plan failure\n\n<!-- ERROR reason=old_plan_failure -->\n"
+        )
+
+        out, _err = capture_io { migrate_command(dir).call }
+        error_marker = Hive::Markers.current(File.join(error_folder, "task.md"))
+        review_marker = Hive::Markers.current(File.join(review_folder, "task.md"))
+
+        assert_includes out, "upgraded 2 recovery markers"
+        refute_empty error_marker.attrs.fetch("marker_id")
+        refute_empty review_marker.attrs.fetch("marker_id")
+        assert_equal "timeout", error_marker.attrs.fetch("reason")
+        assert_equal "all_failed", review_marker.attrs.fetch("reason")
+        assert_empty Hive::Markers.current(historical_plan).attrs.fetch("marker_id", ""),
+                     "migration must not rewrite a marker-shaped comment in a non-current artifact"
+
+        ids = [
+          error_marker.attrs.fetch("marker_id"),
+          review_marker.attrs.fetch("marker_id")
+        ]
+        second_out, _err = capture_io { migrate_command(dir).call }
+
+        assert_includes second_out, "target stage directories look already-migrated"
+        assert_equal ids.fetch(0),
+                     Hive::Markers.current(File.join(error_folder, "task.md")).attrs.fetch("marker_id")
+        assert_equal ids.fetch(1),
+                     Hive::Markers.current(File.join(review_folder, "task.md")).attrs.fetch("marker_id")
+      end
+    end
+  end
+
+  def test_migrate_upgrades_the_authoritative_state_file_for_a_custom_workflow
+    with_registered_workflow(research_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir).call }
+          stages = File.join(dir, ".hive-state", "stages")
+          folder = write_task_folder(
+            stages, "2-gather", "custom-recovery-260725-aaaa"
+          )
+          Hive::TaskMeta.write(
+            folder, id: 103, slug: File.basename(folder),
+            display_name: "Custom recovery", workflow: "research"
+          )
+          File.write(
+            File.join(folder, "notes.md"),
+            "# Notes\n\n<!-- ERROR reason=timeout -->\n"
+          )
+          File.write(
+            File.join(folder, "task.md"),
+            "# Historical coding-shaped file\n\n<!-- ERROR reason=historical -->\n"
+          )
+
+          out, _err = capture_io { migrate_command(dir).call }
+
+          assert_includes out, "upgraded 1 recovery marker"
+          refute_empty Hive::Markers.current(
+            File.join(folder, "notes.md")
+          ).attrs.fetch("marker_id")
+          assert_empty Hive::Markers.current(
+            File.join(folder, "task.md")
+          ).attrs.fetch("marker_id", "")
+        end
+      end
+    end
+  end
+
   def test_migrate_backfill_is_idempotent
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

@@ -9,9 +9,9 @@ require "hive/daemon/dispatch_request_queue"
 require "hive/lock"
 require "hive/markers"
 require "hive/recovery"
+require "hive/recovery/retry_policy"
 require "hive/task"
 require "hive/task_resolver"
-require "hive/workflows"
 
 module Hive
   module Daemon
@@ -81,24 +81,6 @@ module Hive
       )
 
       class << self
-        # Keep the destructive edge physically owned by this class even for
-        # the healer's compatibility path. Production adapters never clear a
-        # recoverable marker themselves: they submit an observation and the
-        # coordinator performs the generation-guarded transition.
-        def clear_recoverable_marker(state_file, expected_name:, match_attrs:)
-          marker_name = expected_name.to_s
-          unless Hive::Recovery.recoverable_marker?(marker_name)
-            raise ArgumentError, "not a recoverable marker: #{marker_name}"
-          end
-
-          Hive::Markers.clear_current(
-            state_file,
-            expected_name: marker_name.to_sym,
-            match_attrs: match_attrs,
-            purge_history: true
-          )
-        end
-
         # Recovery action tokens use the same canonical observation at the
         # status edge and again under the coordinator's task lock. This makes
         # the token a real freshness guard rather than an adapter-only precheck.
@@ -172,9 +154,10 @@ module Hive
 
       def request(row:, requestor:, request_id: nil, observation_token: nil,
                   chat_id: nil, update_id: nil,
-                  now: Time.now.utc, retry_count: 0)
+                  now: Time.now.utc)
         now = now.utc
         failure_origin = marker_attrs(row)["reason"].to_s
+        retry_count = durable_retry_count(row)
         assessment = assessment(row, now: now)
         unless assessment[:retry_at]
           return receipt(
@@ -216,12 +199,25 @@ module Hive
           end
 
           current = Hive::Markers.current(locked_task.state_file)
+          unless recoverable_marker?(current)
+            return receipt(
+              "blocked", failure_origin: failure_origin, owner: "operator",
+              reason: "generation_conflict",
+              remediation: "refresh status; the failure marker changed before recovery admission",
+              retry_count: retry_count, provider_hint: provider_hint(row)
+            )
+          end
+          if current.attrs["marker_id"].to_s.empty?
+            return receipt(
+              "blocked", failure_origin: failure_origin, owner: "operator",
+              reason: "recovery_migration_required",
+              remediation: "run `hive migrate` in the task project and retry from fresh status",
+              retry_count: retry_count, provider_hint: provider_hint(row)
+            )
+          end
+
           expected_generation = observed_marker_generation(row)
-          unless recoverable_marker?(current) &&
-                 marker_generation(
-                   current,
-                   occurrence_time: File.mtime(locked_task.state_file).utc
-                 ) == expected_generation
+          unless marker_generation(current) == expected_generation
             return receipt(
               "blocked", failure_origin: failure_origin, owner: "operator",
               reason: "generation_conflict",
@@ -291,10 +287,7 @@ module Hive
             row, locked_task, expected_generation, generation.task_generation
           ) if canonical_request_id.empty?
           attrs = current.attrs.to_h.transform_keys(&:to_s)
-          marker_id = marker_identity(
-            current,
-            occurrence_time: File.mtime(locked_task.state_file).utc
-          )
+          marker_id = marker_identity(current)
           next_eligible_at = assessment[:retry_at].utc.iso8601(6)
           recovery = {
             "phase" => "admitted",
@@ -421,10 +414,7 @@ module Hive
                   owner: "operator", request_locked: true
                 ) unless
                   marker.name.to_s == current_request.expected_marker_name.to_s &&
-                  marker_generation(
-                    marker,
-                    occurrence_time: File.mtime(locked_task.state_file).utc
-                  ) == recovery["observed_marker_generation"].to_s &&
+                  marker_generation(marker) == recovery["observed_marker_generation"].to_s &&
                   expected_attrs_match?(marker, recovery.fetch("expected_marker_attrs"))
 
                 markerless = Hive::Markers.without_markers(File.binread(locked_task.state_file))
@@ -439,7 +429,7 @@ module Hive
                   owner: "operator", request_locked: true
                 ) unless generation_matches?(predicted, recovery)
 
-                cleared = self.class.clear_recoverable_marker(
+                cleared = clear_recoverable_marker(
                   locked_task.state_file,
                   expected_name: current_request.expected_marker_name,
                   match_attrs: recovery.fetch("expected_marker_attrs")
@@ -572,7 +562,7 @@ module Hive
         end
       end
 
-      def receipt_for_request(request, retry_count: nil, attempt_id: nil, replay: false,
+      def receipt_for_request(request, attempt_id: nil, replay: false,
                               now: Time.now.utc)
         recovery = request.recovery || {}
         blocked = recovery["blocked_reason"].to_s
@@ -603,7 +593,7 @@ module Hive
           reason: blocked.empty? ? (replay ? "terminal_replay" : nil) : blocked,
           remediation: blocked.empty? ? nil :
             (recovery["blocked_remediation"] || remediation_for(blocked)),
-          retry_count: retry_count || recovery["retry_count"],
+          retry_count: recovery["retry_count"],
           provider_hint: recovery["provider_hint"],
           terminal_outcome: recovery["terminal_outcome"],
           terminal_at: recovery["terminal_at"]
@@ -620,6 +610,28 @@ module Hive
       end
 
       private
+
+      def durable_retry_count(row)
+        @request_queue.recovery_retry_count(
+          project: value(row, :project),
+          slug: value(row, :slug),
+          state_home: @state_home
+        )
+      end
+
+      def clear_recoverable_marker(state_file, expected_name:, match_attrs:)
+        marker_name = expected_name.to_s
+        unless Hive::Recovery.recoverable_marker?(marker_name)
+          raise ArgumentError, "not a recoverable marker: #{marker_name}"
+        end
+
+        Hive::Markers.clear_current(
+          state_file,
+          expected_name: marker_name.to_sym,
+          match_attrs: match_attrs,
+          purge_history: true
+        )
+      end
 
       def receipt(status, request_id: nil, attempt_id: nil, phase: nil,
                   failure_origin: nil, next_eligible_at: nil, owner: nil,
@@ -651,37 +663,31 @@ module Hive
       end
 
       def observed_marker_generation(row)
-        observed_at = value(row, :state_file_mtime) ||
-                      value(row, :observation_mtime) ||
-                      value(row, :mtime)
         marker_generation(
           Hive::Markers::State.new(
             name: value(row, :marker).to_s.downcase.to_sym,
             attrs: marker_attrs(row),
             raw: nil
-          ),
-          occurrence_time: observed_at
+          )
         )
       end
 
-      def marker_generation(marker, occurrence_time: nil)
+      def marker_generation(marker)
         attrs = marker.attrs.to_h.transform_keys(&:to_s)
+        return nil if attrs["marker_id"].to_s.empty?
+
         canonical = attrs.keys.sort.to_h { |key| [ key, attrs[key] ] }
-        identity = {
+        ::Digest::SHA256.hexdigest(JSON.generate(
           "name" => marker.name.to_s,
           "attrs" => canonical
-        }
-        if attrs["marker_id"].to_s.empty?
-          identity["legacy_occurrence_at"] = normalized_occurrence_time(occurrence_time)
-        end
-        ::Digest::SHA256.hexdigest(JSON.generate(identity))
+        ))
       end
 
-      def marker_identity(marker, occurrence_time: nil)
+      def marker_identity(marker)
         marker_id = marker.attrs["marker_id"].to_s
-        return marker_id unless marker_id.empty?
+        raise ArgumentError, "recoverable marker_id is required" if marker_id.empty?
 
-        "legacy-#{marker_generation(marker, occurrence_time: occurrence_time)[0, 16]}"
+        marker_id
       end
 
       def recoverable_marker?(marker)
@@ -821,17 +827,19 @@ module Hive
       end
 
       def retry_argv(row)
+        stage = value(row, :stage).to_s
+        project = value(row, :project).to_s
+        slug = value(row, :slug).to_s
+        verb = Hive::Recovery::RetryPolicy.verb_for(
+          stage, workflow: value(row, :workflow), project: project
+        )
+        raise Hive::Error, "no retry verb for stage #{stage}" unless verb
+
         command = value(row, :suggested_command).to_s
         argv = Shellwords.split(command)
         return argv if @request_queue.valid_argv?(argv) && argv[1] != "markers"
 
-        stage = value(row, :stage).to_s
-        project = value(row, :project).to_s
-        slug = value(row, :slug).to_s
-        if Hive::Workflows.coding_id?(value(row, :workflow))
-          verb = Hive::Workflows.verb_arriving_at(stage)
-          raise Hive::Error, "no retry verb for stage #{stage}" unless verb
-
+        if verb != "run"
           [ "hive", verb, slug, "--project", project, "--from", stage, "--json" ]
         else
           [ "hive", "run", slug, "--project", project, "--stage", stage, "--json" ]
@@ -843,7 +851,7 @@ module Hive
       def deterministic_request_id(row, task, marker_generation, dispatch_generation)
         ::Digest::SHA256.hexdigest(
           [
-            "hive-recovery-request-v1", value(row, :project), task.id || task.slug,
+            "hive-recovery-request-v2", value(row, :project), task.id || task.slug,
             value(row, :stage), marker_generation, dispatch_generation
           ].join("\0")
         )[0, 32]
@@ -915,15 +923,6 @@ module Hive
         now.utc >= eligible_at.utc
       rescue ArgumentError, TypeError
         true
-      end
-
-      def normalized_occurrence_time(value)
-        return value.utc.iso8601(6) if value.respond_to?(:utc)
-        return Time.parse(value.to_s).utc.iso8601(6) unless value.to_s.empty?
-
-        nil
-      rescue ArgumentError, TypeError
-        value.to_s
       end
 
       def unavailable_request(request, reason)

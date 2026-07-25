@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-30
+updated: 2026-07-25
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -154,7 +154,7 @@ Push notifications use callback data that routes to:
 - Stage approvals: `Approve` dispatches `hive brainstorm|plan|develop|review|pr|archive <slug> --from <stage> --project <project> --json`.
 - Brainstorm waits: `Answer in chat` starts the same `/answer` conversation.
 - Review triage: `Accept all` / `Reject all` dispatch `hive accept-finding` or `hive reject-finding` with `--all`.
-- Recovery markers: every `ERROR` and `REVIEW_ERROR` exposes `Autofix`, even when no diagnostic suggested action was recorded. It submits the cached row plus current observation token to the durable recovery coordinator, which re-resolves task identity and safety before any mutation and returns queued, cooldown, running, blocked, or terminal state. Current markers bind `marker_id`; legacy markers bind observed attrs plus state-file mtime. `EXECUTE_STALE` remains manual-only and shows `Show details`, which renders the cached row summary plus manual-repair hint and any cached diagnostic; legacy `Clear and retry` buttons from older messages delegate directly to the current Autofix handler and therefore enter the same coordinator lifecycle. Callback data is generation-checked: every encoded stage, marker, and attr must still match the fresh row before the request is accepted.
+- Recovery markers: every `ERROR` and `REVIEW_ERROR` exposes `Autofix`, even when no diagnostic suggested action was recorded. It submits the cached row plus current observation token to the durable recovery coordinator, which re-resolves task identity and safety before any mutation and returns queued, cooldown, running, blocked, or terminal state. Every recoverable occurrence must bind `marker_id`; an old id-less row returns `recovery_migration_required` until `hive migrate` upgrades it once. `EXECUTE_STALE` remains manual-only and shows `Show details`, which renders the cached row summary plus manual-repair hint and any cached diagnostic; legacy `Clear and retry` buttons from older messages delegate directly to the current Autofix handler and therefore enter the same coordinator lifecycle. Callback data is generation-checked: every encoded stage, marker, and attr must still match the fresh row before the request is accepted.
 - Legacy stage-directory warnings are text-only project-level alerts. They tell the operator to run `hive migrate <project_path>`, have no inline action, dedupe while the project remains legacy-dirty, and re-alert after the project reports clean then regresses.
 - Idea project pickers use `idea_project:<project>:<token>`. Current drafts enter attachment collection instead of immediately spawning `hive new`; the follow-up keyboard emits `idea_done:<token>` and `idea_skip:<token>`, both of which finalize the current draft. `idea_project_new:<token>` clears the draft/picker token and replies that registering a new project from Telegram is out of MVP scope.
 - Legacy Path-A buttons (`path_a_yes:` / `path_a_type:`) from messages sent before Codex draft-assist retirement do not start a draft flow; they reply with instructions to tap **Answer in chat** or send `/answer <id|slug>`. Retired `codex_write:` / `codex_edit:` / `codex_cancel:` data is unknown callback data.

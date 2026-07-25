@@ -241,7 +241,6 @@ class DaemonAutoRetryTest < Minitest::Test
 
     recoveries = @logger.events.select { |name, _attrs| name == :recovery_requested }
     assert_equal 2, recoveries.size
-    refute @logger.events.any? { |name, _attrs| name == :auto_retry_skipped }
   end
 
   def test_current_work_area_safety_defers_without_making_error_terminal
@@ -284,8 +283,6 @@ class DaemonAutoRetryTest < Minitest::Test
           now: third_at + Hive::AgentLimit.retry_cooldown_sec
         )
       end
-
-      refute @logger.events.any? { |name, _attrs| name == :auto_retry_exhausted }
     end
   end
 

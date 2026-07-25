@@ -65,11 +65,63 @@ class HiveRecoveryAuthorityTest < Minitest::Test
       source = File.read(File.join(ROOT, relative_path))
       assert_match(/\.recover!\(/, source,
                    "#{surface} recovery must use the canonical API")
-      next if surface == "bot" # bot keeps the combined queue-writer compatibility adapter
+      next if surface == "bot" # bot uses its queue-writer adapter to reach the same API
 
       assert_includes source, "Hive::Recovery::API",
                       "#{surface} must not depend on the Telegram queue writer"
     end
+  end
+
+  def test_retry_policy_is_neutral_and_the_legacy_sequence_is_removed
+    rails_source = File.read(
+      File.join(ROOT, "web/app/models/concerns/task_mutations.rb")
+    )
+    coordinator_source = File.read(
+      File.join(ROOT, "lib/hive/daemon/recovery_coordinator.rb")
+    )
+
+    refute_includes rails_source, "RecoveryResultBuilder"
+    refute_includes rails_source, "NotificationBuilders"
+    assert_includes coordinator_source, "Hive::Recovery::RetryPolicy"
+    refute File.exist?(
+      File.join(ROOT, "lib/hive/bot/handlers/recovery_sequence.rb")
+    )
+  end
+
+  def test_user_adapters_do_not_own_an_automatic_recovery_scheduler
+    forbidden = {
+      "snapshot-triggered recovery" => /SnapshotArrived[\s\S]{0,240}\.recover!\(/,
+      "adapter retry timer" => /HEAL_REPEAT_INTERVAL|AUTO_RETRY_INTERVAL/,
+      "adapter retry cache" => /@healed_folders|@auto_retry_attempts/,
+      "retired clear-and-retry route" => /clear_retry|clear_and_retry/
+    }
+    violations = adapter_paths.flat_map do |path|
+      source = File.read(path)
+      forbidden.filter_map do |label, pattern|
+        "#{relative(path)}: #{label}" if source.match?(pattern)
+      end
+    end
+
+    assert_empty violations,
+                 "only the daemon scheduler may initiate automatic recovery:\n" \
+                 "#{violations.join("\n")}"
+  end
+
+  def test_attempt_loss_does_not_project_a_second_marker_recovery_lifecycle
+    loss_source = File.read(File.join(ROOT, "lib/hive/attempts/lost_outcome.rb"))
+    healer_source = File.read(File.join(ROOT, "lib/hive/daemon/stale_agent_healer.rb"))
+
+    refute_match(/project_marker|reason:\s*["']attempt_lost["']/, loss_source)
+    refute_match(/failed_attempt_loss_successor\?/, healer_source)
+  end
+
+  def test_recovery_coordinator_contains_no_v1_identity_fallback
+    coordinator_source = File.read(
+      File.join(ROOT, "lib/hive/daemon/recovery_coordinator.rb")
+    )
+
+    refute_includes coordinator_source, "hive-recovery-request-v1"
+    refute_match(/legacy_occurrence_at|legacy-\#\{marker_generation/, coordinator_source)
   end
 
   private

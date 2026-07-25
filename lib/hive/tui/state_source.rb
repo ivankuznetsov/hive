@@ -41,9 +41,7 @@ module Hive
     # and the refresher re-arms it on a first failure), but only the poll
     # thread CLEARS it (at refresher spawn). A set dropped under that race
     # is recovered by the `ARCHIVE_REFRESH_FALLBACK_SECONDS` backstop. This
-    # is a lock-free, single-writer-once-booted-plus-backstop discipline —
-    # the OPPOSITE of `BubbleModel`'s `@healed_folders`, which is a
-    # mutex-guarded multi-writer field.
+    # is a lock-free, single-writer-once-booted-plus-backstop discipline.
     # `@archive_refresh_thread` is also touched across threads: the poll
     # thread spawns it and reads `&.alive?` (here, in `#archive_refresh_due?`
     # and `#start_archive_refresh_if_needed`), while `#stop` (any thread)

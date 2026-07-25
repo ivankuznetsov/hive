@@ -107,57 +107,6 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
-  def test_recovery_exhaustion_matches_current_stage_and_marker_reason
-    with_tmp_dir do |dir|
-      path = File.join(dir, "private", "operational-snapshot.json")
-      _store, assembler, reader = build(path)
-      stage_changed = row(
-        slug: "stage-changed", stage: "5-open-pr", marker: "error",
-        marker_attrs: { "reason" => "old_failure" }
-      )
-      reason_changed = row(
-        slug: "reason-changed", stage: "4-execute", marker: "error",
-        marker_attrs: { "reason" => "current_failure" }
-      )
-      matching = row(
-        slug: "matching", stage: "4-execute", marker: "error",
-        marker_attrs: { "reason" => "old_failure" }
-      )
-      recoveries = {
-        "recoverable_error" => {
-          "exhausted" => [
-            {
-              "project" => "demo", "slug" => "stage-changed",
-              "stage" => "4-execute", "reason" => "old_failure"
-            },
-            {
-              "project" => "demo", "slug" => "reason-changed",
-              "stage" => "4-execute", "reason" => "old_failure"
-            },
-            {
-              "project" => "demo", "slug" => "matching",
-              "stage" => "4-execute", "reason" => "old_failure"
-            }
-          ]
-        }
-      }
-
-      assembler.begin_tick(now: T0)
-      assembler.complete(
-        initial_rows: [ stage_changed, reason_changed, matching ],
-        final_rows: [ stage_changed, reason_changed, matching ],
-        controller: {}, queue: {}, recoveries: recoveries, now: T0 + 1
-      )
-
-      decisions = reader.read(now: T0 + 2).fetch("tasks").to_h do |task|
-        [ task.dig("identity", "slug"), task.dig("disposition", "decision") ]
-      end
-      assert_equal "not_evaluated", decisions.fetch("stage-changed")
-      assert_equal "not_evaluated", decisions.fetch("reason-changed")
-      assert_equal "recovery_exhausted", decisions.fetch("matching")
-    end
-  end
-
   def test_terminal_recovery_does_not_hide_a_fresh_failure_marker
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")
@@ -174,7 +123,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         "terminal_outcome" => "failed"
       }
       recoveries = {
-        "stale_agent" => {
+        "coordinator" => {
           "receipts" => [
             {
               "project" => "demo",
@@ -228,7 +177,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         "terminal_outcome" => "succeeded"
       }
       recoveries = {
-        "stale_agent" => {
+        "coordinator" => {
           "receipts" => [
             {
               "project" => "demo",

@@ -25,9 +25,12 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       "marker_id" => "marker-1",
       "retry_after" => (NOW + 3 * 3600).iso8601
     }, mtime: NOW - 3600) do |coordinator, row, state_home|
+      write_terminal_recovery_history(
+        row: row, state_home: state_home, retry_count: 25
+      )
       receipt = coordinator.request(
         row: row, requestor: "healer", request_id: "auto-26",
-        now: NOW, retry_count: 25
+        now: NOW
       )
 
       assert_equal "queued", receipt.status
@@ -454,44 +457,60 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
-  def test_repeated_legacy_failure_with_same_attrs_is_a_new_occurrence
+  def test_idless_recovery_marker_requires_one_off_migration
     attrs = { "reason" => "timeout" }
-    initial_mtime = NOW - 3_600
-    with_fixture(marker_attrs: attrs, mtime: initial_mtime) do |coordinator, row, state_home|
-      first = coordinator.request(
-        row: row, requestor: "healer", request_id: "legacy-first", now: NOW
-      )
-      request = Q.fetch(first.request_id, state_home: state_home)
-      coordinator.resume(request: request, row: row, now: NOW)
-      request = Q.fetch(first.request_id, state_home: state_home)
-      coordinator.mark_dispatched(
-        request, attempt_id: "attempt-first", terminal: true,
-        outcome: "failed", now: NOW + 1
+    with_fixture(marker_attrs: attrs) do |coordinator, row, state_home|
+      receipt = coordinator.request(
+        row: row, requestor: "healer", request_id: "old-marker", now: NOW
       )
 
-      recurrence_at = NOW + 10
-      body = Hive::Markers.without_markers(File.binread(row.state_file))
-      File.write(
-        row.state_file,
-        "#{body.rstrip}\n\n#{Hive::Markers.build_marker("ERROR", attrs)}\n"
-      )
-      File.utime(recurrence_at, recurrence_at, row.state_file)
-      repeated = row.with(state_file_mtime: recurrence_at, marker_attrs: attrs)
-
-      second = coordinator.request(
-        row: repeated, requestor: "healer", request_id: "legacy-second",
-        now: recurrence_at + 3_600
-      )
-
-      assert_equal "queued", second.status
-      assert_equal "legacy-second", second.request_id
-      refute_equal first.request_id, second.request_id
-      assert_nil Q.fetch(first.request_id, state_home: state_home),
-                 "the superseded terminal receipt is removed after new admission"
+      assert_equal "blocked", receipt.status
+      assert_equal "recovery_migration_required", receipt.reason
+      assert_equal "operator", receipt.owner
+      assert_includes receipt.remediation, "hive migrate"
+      assert_empty Q.pending(state_home: state_home)
     end
   end
 
   private
+
+  def write_terminal_recovery_history(row:, state_home:, retry_count:)
+    Q.write_request!(
+      project: row.project,
+      slug: row.slug,
+      argv: [ "hive", "run", row.slug, "--stage", row.stage,
+              "--project", row.project, "--json" ],
+      requestor: "healer",
+      trigger: "recovery",
+      request_id: "previous-terminal",
+      task_generation: "c" * 64,
+      task_id: 817,
+      expected_stage: row.stage,
+      expected_marker_name: "error",
+      expected_marker_id: "previous-marker",
+      recovery: {
+        "phase" => "terminal",
+        "observed_marker_generation" => "d" * 64,
+        "expected_marker_attrs" => {
+          "marker_id" => "previous-marker", "reason" => "timeout"
+        },
+        "canonical_task_folder" => row.folder,
+        "expected_post_clear_progress_fingerprint" => "e" * 64,
+        "dispatch_generation" => "c" * 64,
+        "failure_origin" => "timeout",
+        "next_eligible_at" => NOW.iso8601(6),
+        "owner" => "none",
+        "blocked_reason" => nil,
+        "blocked_remediation" => nil,
+        "retry_count" => retry_count,
+        "attempt_id" => "attempt-previous",
+        "terminal_outcome" => "failed",
+        "terminal_at" => (NOW - 60).iso8601(6)
+      },
+      state_home: state_home,
+      now: NOW - 60
+    )
+  end
 
   def with_fixture(marker_attrs: nil, mtime: NOW - 3600, safety: nil,
                    task_resolver_builder: nil, task_id: 817)

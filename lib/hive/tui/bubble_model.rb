@@ -5,6 +5,7 @@ require "fileutils"
 require "set"
 require "shellwords"
 require "stringio"
+require "thread"
 require "time"
 require "yaml"
 require "hive"
@@ -70,15 +71,6 @@ module Hive
 
       attr_reader :hive_model
 
-      # Tasks left with `:error reason=exit_code exit_code=<kill-class>`
-      # markers are interrupted, not broken — the file-system state is
-      # intact, just the marker says "stopped". The auto-healer in
-      # `auto_heal_kill_class_errors` clears these markers in the
-      # background so the TUI doesn't permanently display "Error" rows
-      # the user can resume by simply re-running. The exact code list
-      # lives on `Hive::Markers::KILL_CLASS_EXIT_CODES` so KeyMap's
-      # Enter-routing predicate and this auto-healer never drift.
-      KILL_CLASS_EXIT_CODES = Hive::Markers::KILL_CLASS_EXIT_CODES
       HELP_WHEEL_SCROLL_LINES = 3
       # Sized for ~32 lines of recent agent output — bounds render-time memory on large logs.
       INFO_PANEL_EXECUTE_TAIL_BYTES = 4 * 1024
@@ -117,35 +109,21 @@ module Hive
         @update_state = update_state
         @update_nudge_cache = nil
         @update_nudge_checked_at = nil
-        # `@healed_folders` is touched from the main runner thread
-        # (`auto_heal_kill_class_errors` registers folders before
-        # spawning heals) AND from heal Threads (which refresh the
-        # failure-backoff timestamp). The mutex serializes both —
-        # Hash reads/writes are not GVL-atomic across multiple writers
-        # under MRI.
-        @healed_folders = {} # folder path → Time.now
-        @healed_folders_mutex = Mutex.new
-        # F8: track in-flight heal Threads so App.run_charm's ensure
-        # block can join-with-timeout-then-kill at TUI exit. Without
-        # this, heal threads quitting mid-flight became zombies after
-        # the runner tore down. Same mutex covers both fields — both
-        # are touched from the same paths.
-        @heal_threads = []
+        # Track operator-triggered recovery workers so App.run_charm's
+        # ensure block can reap them at TUI exit. Automatic recovery is
+        # daemon-owned; the TUI only submits explicit operator requests.
+        @recovery_mutex = Mutex.new
+        @recovery_threads = []
         # Per-folder dedup for review recovery: a second Enter while the first
         # coordinator request is in flight receives a local progress flash.
         # The durable coordinator remains the cross-process dedup authority.
-        # Same mutex as @healed_folders / @heal_threads — they all
-        # gate background-thread bookkeeping on the same lock.
         @review_recovery_inflight = Set.new
         # Per-folder dedup for ERROR-marker recovery. Same shape as
         # @review_recovery_inflight: a second Enter on an `error` row
         # whose first coordinator request is still in flight receives a
         # progress flash instead of starting a duplicate worker. Cleared
         # in the spawn-thread's `ensure` so retries unblock once the
-        # first pass settles. Reuses @healed_folders_mutex so all
-        # background-thread bookkeeping fields (@healed_folders,
-        # @heal_threads, @review_recovery_inflight,
-        # @error_recovery_inflight) share a single lock.
+        # first pass settles.
         @error_recovery_inflight = Set.new
         # Once-per-session latch (reset in #stage_image on success).
         @clipboard_tool_hint_shown = false
@@ -382,17 +360,8 @@ module Hive
       # Returns [new_hive_model, cmd] for the side-effect-bearing
       # messages, or nil to indicate "delegate to Update.apply".
       #
-      # `SnapshotArrived` is special-cased here for the kill-class
-      # auto-healer (signal-killed tasks shouldn't display as "Error"
-      # forever — the file state IS intact, the marker is just stale).
-      # We return nil after kicking off the heal so `Update.apply`
-      # still applies the snapshot; the next poll picks up the cleared
-      # state.
       def handle_side_effect(message)
         case message
-        when Hive::Tui::Messages::SnapshotArrived
-          auto_heal_kill_class_errors(message.snapshot)
-          nil
         when Hive::Tui::Messages::SubprocessExited
           diagnose_subprocess_exit(message)
         when Hive::Tui::Messages::DispatchCommand
@@ -681,97 +650,17 @@ module Hive
         [ @hive_model.with(flash: diagnostic, flash_set_at: Time.now), nil ]
       end
 
-      # Scan a fresh snapshot for tasks whose `:error` marker came from
-      # a signal kill (130 / 137 / 143) and submit recovery in the
-      # background. Each folder can claim one heal attempt per
-      # HEAL_REPEAT_INTERVAL_SECONDS (`@healed_folders` repeat window),
-      # so the loop never thrashes if the background heal is slow or a
-      # persistent coordinator block survives across snapshots.
-      # The next snapshot poll picks up the canonical lifecycle.
-      def auto_heal_kill_class_errors(snapshot)
-        return if snapshot.nil?
-
-        snapshot.rows.each do |row|
-          next unless kill_class_error?(row)
-          next unless register_heal_attempt(row.folder)
-
-          spawn_heal_thread(row)
-        end
-      end
-
-      def kill_class_error?(row)
-        return false unless row.action_key == "error"
-
-        attrs = row.attrs
-        return false if attrs.nil?
-        return false unless attrs["reason"] == "exit_code"
-
-        KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
-      end
-
-      # Time-bounded repeat window: a previous heal attempt blocks
-      # re-heals of the same folder for `HEAL_REPEAT_INTERVAL_SECONDS`,
-      # then the slot becomes available again. Without the bound, a
-      # later kill-class error on the same folder (theoretically: the
-      # same folder/slug pair could be re-killed in the same session)
-      # would never re-heal because the cache permanently held the
-      # entry. F11 fix.
-      HEAL_REPEAT_INTERVAL_SECONDS = 60
-
-      # Atomic claim-or-skip on `@healed_folders`. Returns true when
-      # this caller wins the slot (must spawn the heal); false when a
-      # prior call claimed it within the last
-      # HEAL_REPEAT_INTERVAL_SECONDS.
-      def register_heal_attempt(folder)
-        @healed_folders_mutex.synchronize do
-          claimed_at = @healed_folders[folder]
-          return false if claimed_at && (Time.now - claimed_at) <= HEAL_REPEAT_INTERVAL_SECONDS
-
-          @healed_folders[folder] = Time.now
-          true
-        end
-      end
-
-      # On heal failure, refresh the folder timestamp so retries are
-      # throttled by HEAL_REPEAT_INTERVAL_SECONDS instead of spawning
-      # one new heal thread per snapshot. Transient failures still retry
-      # after the same bounded window used for successful heals.
-      def record_heal_failure(folder)
-        @healed_folders_mutex.synchronize { @healed_folders[folder] = Time.now }
-      end
-
-      # Override-able for tests so they can capture the coordinator request.
-      # F8: tracks the spawned Thread on `@heal_threads` so
-      # `kill_inflight_heals!` can reap stragglers at TUI exit; the
-      # Thread prunes itself once the heal returns to bound the
-      # tracking list under long sessions.
-      def spawn_heal_thread(row)
-        thread = Thread.new do
-          heal_marker(row)
-        ensure
-          @healed_folders_mutex.synchronize { @heal_threads.delete(Thread.current) }
-        end
-        @healed_folders_mutex.synchronize { @heal_threads << thread }
-        thread
-      end
-
       # Reaping protocol for the App.run_charm ensure block. Two
-      # phases share a single wall-clock deadline so a long-running
-      # heal can't bottleneck the whole batch: phase 1 joins every
-      # thread under one collective timeout (well-behaved heals
-      # finish here); phase 2 force-kills stragglers and joins each
-      # briefly to let their `ensure` block run. Snapshot/join is
-      # done outside the mutex (Thread#join releases the GVL so
-      # blocking under the lock would freeze the lifecycle); the
-      # mutator path (`spawn_heal_thread`'s `ensure`) is still safe
-      # to run against an already-empty list. Public because
-      # App.run_charm calls it from outside the class on TUI
-      # shutdown.
+      # phases share a single wall-clock deadline so one slow
+      # operator-triggered recovery cannot bottleneck the whole batch.
+      # Snapshot/join is done outside the mutex because Thread#join
+      # releases the GVL. Public because App.run_charm calls it during
+      # TUI shutdown.
       JOIN_TIMEOUT_SECONDS = 2.0
       KILL_GRACE_SECONDS = 0.1
 
-      public def kill_inflight_heals!
-        threads = @healed_folders_mutex.synchronize { @heal_threads.dup }
+      public def kill_inflight_recoveries!
+        threads = @recovery_mutex.synchronize { @recovery_threads.dup }
         deadline = Time.now + JOIN_TIMEOUT_SECONDS
         threads.each do |t|
           remaining = deadline - Time.now
@@ -788,22 +677,18 @@ module Hive
       end
 
       # @api private (test-only)
-      # Block until every currently-tracked background thread (auto-heal
-      # or review-recovery worker) finishes naturally, with a per-test
-      # safety timeout. Tests that dispatch `RecoverReview` (or rely on
-      # the auto-healer's spawned threads) need this to assert on
-      # async-dispatched `Messages::Flash` payloads or on subprocess
-      # stub captures populated inside the worker.
+      # Block until every currently-tracked operator recovery worker
+      # finishes naturally, with a per-test safety timeout.
       #
       # Exceptions raised inside a worker (Thread#join re-raises them)
       # are swallowed: the helper's contract is "wait for the work to
       # settle so my assertions can run." Tests that need to verify a
       # programmer-error crashed the worker assert on the absence of a
       # dispatched flash instead of the join's re-raise. Production
-      # callers use `kill_inflight_heals!` for shutdown; that path has
+      # callers use `kill_inflight_recoveries!` for shutdown; that path has
       # force-kill semantics this helper deliberately omits.
       public def wait_for_background_threads(timeout: 2.0)
-        threads = @healed_folders_mutex.synchronize { @heal_threads.dup }
+        threads = @recovery_mutex.synchronize { @recovery_threads.dup }
         deadline = Time.now + timeout
         threads.each do |t|
           remaining = deadline - Time.now
@@ -816,22 +701,6 @@ module Hive
             # detect this via the absence of an expected flash.
           end
         end
-      end
-
-      # Automatic TUI healing is only a caller of the shared recovery
-      # coordinator. The coordinator re-resolves the row under the task lock
-      # and owns marker-generation comparison, durable admission, and marker
-      # transition. This keeps a background snapshot from becoming another
-      # recovery authority.
-      def heal_marker(row)
-        receipt = request_recovery(row)
-        return if %w[queued running terminal].include?(receipt.status)
-
-        Hive::Tui::Debug.log("auto_heal", "#{row.slug}: #{receipt.human_summary}")
-        record_heal_failure(row.folder)
-      rescue StandardError => e
-        Hive::Tui::Debug.log("auto_heal", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
-        record_heal_failure(row.folder)
       end
 
       def red_status_autofix(row)
@@ -973,7 +842,7 @@ module Hive
       # responsiveness guard; durable request identity is enforced below this
       # adapter by RecoveryCoordinator.
       def register_review_recovery_attempt(folder)
-        @healed_folders_mutex.synchronize do
+        @recovery_mutex.synchronize do
           return false if @review_recovery_inflight.include?(folder)
 
           @review_recovery_inflight.add(folder)
@@ -982,24 +851,14 @@ module Hive
       end
 
       def evict_review_recovery_attempt(folder)
-        @healed_folders_mutex.synchronize { @review_recovery_inflight.delete(folder) }
+        @recovery_mutex.synchronize { @review_recovery_inflight.delete(folder) }
       end
 
-      # Tracked on @heal_threads alongside auto-heal threads so
-      # `kill_inflight_heals!` (called from App.run_charm's ensure
-      # block on TUI exit) reaps inflight recovery workers under the
-      # same join-with-timeout-then-kill discipline. The eviction +
-      # thread-list cleanup runs in `ensure` so a programmer-error
-      # crash inside the worker still releases the dedup slot.
+      # Tracked so App.run_charm's ensure block can reap inflight
+      # operator recovery workers. The eviction and thread-list cleanup
+      # run in `ensure`, so a worker crash still releases the dedup slot.
       def spawn_review_recovery_thread(row)
-        thread = Thread.new do
-          perform_review_recovery(row)
-        ensure
-          evict_review_recovery_attempt(row.folder)
-          @healed_folders_mutex.synchronize { @heal_threads.delete(Thread.current) }
-        end
-        @healed_folders_mutex.synchronize { @heal_threads << thread }
-        thread
+        spawn_tracked_recovery_thread(row) { perform_review_recovery(row) }
       end
 
       # Worker body. The durable coordinator returns the canonical lifecycle
@@ -1088,25 +947,14 @@ module Hive
       # operator wants to see in the recovery receipt.
       ERROR_RECOVERY_DETAIL_ATTRS = %w[reason exit_code phase elapsed].freeze
 
-      # Enter-driven ERROR-marker recovery. Mirrors `recover_review` but
-      # targets the generic ERROR marker any stage emits when the agent
-      # is not in the explicit signal-kill shape
-      # (`reason=exit_code exit_code=130|137|143`). Auto-heal owns that
-      # interrupted-task shape; other structured reasons remain
-      # recoverable even when they carry the same numeric code. Before
-      # this gesture existed those rows sat in "Error" forever. The worker
-      # now submits the observed row to the durable coordinator.
+      # Enter-driven ERROR-marker recovery. All structured ERROR shapes,
+      # including signal kills, use the same durable coordinator request.
       def recover_error(row)
         if row.folder.to_s.strip.empty?
           return [ flashed("error recovery unavailable: task folder missing"), nil ]
         end
         unless row.action_key.to_s == "error"
           return [ flashed("error recovery unavailable: action=#{row.action_key}"), nil ]
-        end
-
-        attrs = row.attrs || {}
-        if kill_class_error?(row)
-          return [ flashed("error recovery: kill-class exit_code=#{attrs['exit_code']} auto-heals"), nil ]
         end
 
         unless register_error_recovery_attempt(row.folder)
@@ -1119,7 +967,7 @@ module Hive
       end
 
       def register_error_recovery_attempt(folder)
-        @healed_folders_mutex.synchronize do
+        @recovery_mutex.synchronize do
           return false if @error_recovery_inflight.include?(folder)
 
           @error_recovery_inflight.add(folder)
@@ -1128,11 +976,11 @@ module Hive
       end
 
       def evict_error_recovery_attempt(folder)
-        @healed_folders_mutex.synchronize { @error_recovery_inflight.delete(folder) }
+        @recovery_mutex.synchronize { @error_recovery_inflight.delete(folder) }
       end
 
       def spawn_error_recovery_thread(row)
-        thread = Thread.new do
+        spawn_tracked_recovery_thread(row) do
           # Ruby's default `Thread.report_on_exception = true` would
           # dump a programmer-error backtrace (NoMethodError, NameError)
           # to stderr while the TUI's alt-screen is active, corrupting
@@ -1151,12 +999,32 @@ module Hive
             )
             raise
           end
-        ensure
-          evict_error_recovery_attempt(row.folder)
-          @healed_folders_mutex.synchronize { @heal_threads.delete(Thread.current) }
         end
-        @healed_folders_mutex.synchronize { @heal_threads << thread }
+      end
+
+      # Register each worker before it can run. Without the gate, a fast
+      # coordinator receipt can complete and self-delete before the creating
+      # thread appends it, leaving a dead worker retained for the TUI session.
+      def spawn_tracked_recovery_thread(row, &work)
+        start = Queue.new
+        thread = Thread.new do
+          start.pop
+          work.call
+        ensure
+          evict_recovery_attempt(row)
+          @recovery_mutex.synchronize { @recovery_threads.delete(Thread.current) }
+        end
+        @recovery_mutex.synchronize { @recovery_threads << thread }
+        start << true
         thread
+      end
+
+      def evict_recovery_attempt(row)
+        if row.marker.to_s.downcase == "error"
+          evict_error_recovery_attempt(row.folder)
+        else
+          evict_review_recovery_attempt(row.folder)
+        end
       end
 
       # Same canonical receipt path as review recovery.
@@ -1832,8 +1700,8 @@ module Hive
       # differs only in the resolved path (focal escalations file
       # instead of the task folder). Pure browse contract: no marker
       # mutation, no auto-continue dispatch — the editor's `:wq` is
-      # the operator's last word, and clearing REVIEW_STALE remains
-      # a deliberate `hive markers clear` round-trip.
+      # the operator's last word. The explicit retry gesture then
+      # submits the observed REVIEW_STALE marker to the coordinator.
       def open_review_stale_file(row)
         path = review_stale_editor_path(row)
         return [ flashed("no review files for #{row.slug}"), nil ] if path.empty?

@@ -3,7 +3,7 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-06-22
+updated: 2026-07-25
 tags: [stage, artifacts, release]
 ---
 
@@ -54,7 +54,11 @@ The agent writes `<task>/media/manifest.json`:
 
 - Markerless or non-complete `7-artifacts` rows surface as `ready_to_artifacts` with `hive artifacts <slug> --from 7-artifacts`.
 - `:complete` rows surface as `ready_to_finalize` with `hive finalize <slug> --from 7-artifacts`.
-- `ERROR reason=tmux_session_terminated` and `ERROR reason=agent_orphaned` are daemon-retryable when no live task lock exists. `ERROR reason=timeout` is also retryable for this stage, but only once: if a tmux-backed artifacts agent wrote or can safely rewrite `artifact.md` yet failed to stamp `<!-- COMPLETE -->` before the wait timed out, `Hive::Daemon::StaleAgentHealer` clears the marker with the shared marker-id guard and the timeout-specific one-shot budget, then the normal daemon dispatch reruns artifact collection. Other timeout stages stay manual unless separately documented.
+- Every persisted `ERROR`, including `tmux_session_terminated`,
+  `agent_orphaned`, and `timeout`, follows the universal recovery lifecycle.
+  After the shared cooldown and safety checks, `RecoveryCoordinator` admits the
+  exact marker generation and reruns artifact collection. There is no
+  artifacts-only timeout budget or healer clear path.
 
 ## Backlinks
 

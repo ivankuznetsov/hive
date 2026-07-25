@@ -179,18 +179,22 @@ module Hive
       end
 
       def operational_payload(projects, scheduler_snapshot: AUTO_SCHEDULER_SNAPSHOT, status_payload: nil)
-        source = status_payload || json_payload(projects)
-        project_context = operational_project_context(projects)
-        if scheduler_snapshot.equal?(AUTO_SCHEDULER_SNAPSHOT)
-          scheduler_snapshot = if project_context.any? { |_name, context| context["daemon_enabled"] == true }
-            Hive::Daemon::OperationalSnapshot::Reader.new.read
-          end
-        end
-        Hive::OperationalStatus.new(
-          status_payload: source,
-          project_context: project_context,
-          scheduler_snapshot: scheduler_snapshot
+        operational_status(
+          projects,
+          scheduler_snapshot: scheduler_snapshot,
+          status_payload: status_payload
         ).to_h
+      end
+
+      # Canonical recovery receipts for adapters that already hold a v6
+      # status graph. Unlike #operational_payload, this does not build task
+      # classifications, reasons, actions, summaries, or archive metadata.
+      def operational_recoveries(projects, scheduler_snapshot: AUTO_SCHEDULER_SNAPSHOT, status_payload: nil)
+        operational_status(
+          projects,
+          scheduler_snapshot: scheduler_snapshot,
+          status_payload: status_payload
+        ).recovery_rows
       end
 
       def render_operational(payload)
@@ -300,6 +304,21 @@ module Hive
             }
           ]
         end
+      end
+
+      def operational_status(projects, scheduler_snapshot:, status_payload:)
+        source = status_payload || json_payload(projects)
+        project_context = operational_project_context(projects)
+        if scheduler_snapshot.equal?(AUTO_SCHEDULER_SNAPSHOT)
+          scheduler_snapshot = if project_context.any? { |_name, context| context["daemon_enabled"] == true }
+            Hive::Daemon::OperationalSnapshot::Reader.new.read
+          end
+        end
+        Hive::OperationalStatus.new(
+          status_payload: source,
+          project_context: project_context,
+          scheduler_snapshot: scheduler_snapshot
+        )
       end
 
       # Stable schema for agent / wrapper consumption. Adding new keys is

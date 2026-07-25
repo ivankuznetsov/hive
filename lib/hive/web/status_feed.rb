@@ -139,15 +139,16 @@ module Hive
       # exact payload when asking the status producer to join the daemon's
       # owner-private snapshot, then copy only canonical recovery receipts
       # onto the matching task rows. This is a file read + in-memory join, not
-      # a second fleet scan, and keeps Rails from interpreting queue files.
+      # a second fleet scan. The lean projection also avoids building the
+      # complete operational envelope on every five-second web poll.
       def overlay_operational_recoveries(payload, projects)
-        return payload unless @status_command.respond_to?(:operational_payload)
+        return payload unless @status_command.respond_to?(:operational_recoveries)
 
-        operational = @status_command.operational_payload(
+        recovery_rows = @status_command.operational_recoveries(
           projects,
           status_payload: payload
         )
-        recoveries = Array(operational["tasks"]).to_h do |task|
+        recoveries = Array(recovery_rows).to_h do |task|
           identity = task["identity"] || {}
           [ [ identity["project"].to_s, identity["slug"].to_s ], task["recovery"] ]
         end

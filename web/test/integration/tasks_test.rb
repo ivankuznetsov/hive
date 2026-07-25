@@ -357,12 +357,20 @@ class TasksTest < ActionDispatch::IntegrationTest
                   message: "a captured manifest with no items must not render a bare Demo heading"
   end
 
-  test "a red task offers Retry which queues the clear-then-rerun pair" do
+  test "a red task offers Retry which queues one identity-bound recovery request" do
     FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
                  stage_dir(@project, "6-review").join(@slug))
     folder = stage_dir(@project, "6-review").join(@slug)
     state_file = folder.join("task.md")
-    state_file.write("# t\n\n<!-- REVIEW_ERROR phase=triage reason=merge_conflict pass=1 -->\n")
+    state_file.write("# t\n")
+    Hive::Markers.set(
+      state_file,
+      :review_error,
+      phase: "triage",
+      reason: "merge_conflict",
+      pass: 1
+    )
+    marker_id = Hive::Markers.current(state_file).attrs.fetch("marker_id")
     File.utime(Time.now - 3600, Time.now - 3600, state_file)
 
     get "/tasks/#{@project}/#{@slug}"
@@ -385,6 +393,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     refute_nil payload
     assert_equal "web", payload.fetch("requestor")
     assert_equal "admitted", payload.dig("recovery", "phase")
+    assert_equal marker_id, payload.fetch("expected_marker_id")
     refute_equal "markers", payload.fetch("argv")[1],
                  "the web surface must not recreate marker-clear authority"
   end

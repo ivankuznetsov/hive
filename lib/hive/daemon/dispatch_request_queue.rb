@@ -20,6 +20,9 @@ module Hive
       SCHEMA = "hive-dispatch-request".freeze
       SCHEMA_VERSION = 4
       SUPPORTED_SCHEMA_VERSIONS = [ 2, 3, 4 ].freeze
+      REQUESTORS = %w[
+        bot healer web tui cli action daemon recorder operator
+      ].freeze
 
       ALLOWED_VERBS = %w[
         run develop brainstorm plan review open-pr artifacts finalize
@@ -96,6 +99,7 @@ module Hive
         end
         raise ArgumentError, "project is required for dispatch requests" if project.to_s.empty?
         raise ArgumentError, "slug is required for dispatch requests" if slug.to_s.empty?
+        validate_requestor!(requestor)
         validate_request_id!(request_id)
         Array(inherited_outputs).each do |reference|
           Hive::Attempts::OutputReference.validate_shape!(reference)
@@ -516,6 +520,22 @@ module Hive
         nil
       end
 
+      # Highest durable retry count already recorded for this task. The
+      # coordinator uses this ledger value when admitting a fresh marker
+      # generation; adapters cannot supply or reset recovery history.
+      def recovery_retry_count(project:, slug:, state_home: Hive::Paths.state_home)
+        request_files(directory(state_home: state_home)).filter_map do |path|
+          parsed = parse_file(path)
+          next if parsed.is_a?(Symbol) || !parsed.recovery.is_a?(Hash)
+          next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
+
+          count = parsed.recovery["retry_count"]
+          count if count.is_a?(Integer) && count >= 0
+        end.max || 0
+      rescue Errno::ENOENT
+        0
+      end
+
       def fetch(request_id, state_home: Hive::Paths.state_home)
         request_files(directory(state_home: state_home)).each do |path|
           parsed = parse_file(path)
@@ -651,16 +671,6 @@ module Hive
         # A recovery request is the durable half of the marker transition.
         # Expiring it could strand a task after the marker's atomic rewrite.
         return false if request.respond_to?(:recovery) && request.recovery.is_a?(Hash)
-
-        # A healer's 3-plan request is the durable continuation of a marker
-        # clear. Expiring it could leave an empty markerless plan permanently
-        # undispatchable, so it remains pending until admitted. A temporarily
-        # missing or disabled project blocks in the dispatcher and can recover
-        # after config reload.
-        return false if request.respond_to?(:requestor) &&
-                        request.requestor.to_s == "healer" &&
-                        request.respond_to?(:trigger) &&
-                        request.trigger.to_s == "error_retry"
 
         created = request.created_at
         return false unless created.is_a?(Time)
@@ -810,6 +820,7 @@ module Hive
 
           created_at = parse_time(data["created_at"])
           return :invalid_created_at if created_at.nil?
+          return :invalid_requestor unless REQUESTORS.include?(data["requestor"].to_s)
 
           if schema_version >= 3
             required_v3 = %w[task_generation predecessor_attempt_id inherited_outputs]
@@ -863,6 +874,12 @@ module Hive
           nil
         end
 
+        def validate_requestor!(requestor)
+          return requestor.to_s if REQUESTORS.include?(requestor.to_s)
+
+          raise ArgumentError, "requestor must be one of #{REQUESTORS.join(', ')}"
+        end
+
         def validate_recovery!(recovery)
           return if recovery.nil?
           raise ArgumentError, "recovery must be an object" unless recovery.is_a?(Hash)
@@ -890,6 +907,10 @@ module Hive
                      value == true || value == false
                  }
             raise ArgumentError, "expected_marker_attrs must contain JSON scalar values"
+          end
+          marker_id = recovery["expected_marker_attrs"]["marker_id"]
+          unless marker_id.is_a?(String) && !marker_id.empty?
+            raise ArgumentError, "expected_marker_attrs.marker_id must be a non-empty string"
           end
           %w[
             observed_marker_generation expected_post_clear_progress_fingerprint

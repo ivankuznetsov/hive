@@ -148,7 +148,10 @@ class HiveBotSlashHandlersTest < Minitest::Test
     stage: "6-review",
     workflow: "coding",
     marker: "review_error",
-    attrs: { "phase" => "fix", "pass" => "2" },
+    attrs: {
+      "phase" => "fix", "pass" => "2", "reason" => "fix_failed",
+      "marker_id" => "review-generation-1"
+    },
     folder: "/tmp/stuck-260525-abcd",
     action: "recover_review",
     action_label: "Needs recovery",
@@ -504,13 +507,15 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_equal REVIEW_ERROR_ROW, result.recovery
     assert_nil result.commands
     assert_equal({ project: "hive", slug: "stuck-260525-abcd", stage: "6-review",
-                   marker: "review_error", match_attr: "pass=2,phase=fix" }, result.alert_reset)
+                   marker: "review_error",
+                   match_attr: "marker_id=review-generation-1,reason=fix_failed" },
+                 result.alert_reset)
     refute result.clear_keyboard,
            "slash path must NOT clear keyboard (no inline button was tapped)"
   end
 
   def test_autofix_slash_and_inline_button_dispatch_byte_identical_argv
-    # The whole point of RecoverySequence is that the /autofix slash command
+    # The whole point of RecoveryResultBuilder is that the /autofix slash command
     # and the inline 🔧 Autofix button produce IDENTICAL dispatches for the
     # same row. Drive BOTH surfaces from the same Row and compare — without
     # this, the two surfaces could silently diverge (the prior test only
@@ -643,7 +648,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
   def test_autofix_no_retry_verb_for_stage_replies_cleanly
     # A retryable 9-done row passes the retryable gate but has no retry verb,
-    # so RecoverySequence.build's stage check produces the clean refusal.
+    # so RecoveryResultBuilder.build's stage check produces the clean refusal.
     done_retryable = Row.new(project: "hive", slug: "done-260525-abcd", stage: "9-done",
                              marker: "review_error", attrs: {},
                              diagnostic: { "suggested_next_action" => { "kind" => "retry" } })

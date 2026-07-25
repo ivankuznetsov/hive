@@ -23,7 +23,7 @@
     "argv": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } },
     "requestor": {
       "type": "string",
-      "enum": ["bot", "healer", "web", "tui", "cli", "action", "daemon", "recorder"]
+      "enum": ["bot", "healer", "web", "tui", "cli", "action", "daemon", "recorder", "operator"]
     },
     "chat_id": { "type": ["integer", "null"] },
     "update_id": { "type": ["integer", "null"] },
@@ -79,6 +79,10 @@
         },
         "expected_marker_attrs": {
           "type": "object",
+          "required": ["marker_id"],
+          "properties": {
+            "marker_id": { "type": "string", "minLength": 1 }
+          },
           "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
         },
         "canonical_task_folder": { "type": "string", "minLength": 1 },

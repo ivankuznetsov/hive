@@ -70,6 +70,9 @@ module Hive
       def recoverable?(row)
         Hive::Recovery::API.recoverable_marker?(row["marker"]) &&
           row.dig("attrs", "reason").to_s != "invalid_task" &&
+          !Hive::Recovery.intervention_required?(
+            marker: row["marker"], attrs: row["attrs"] || {}, folder: row["folder"]
+          ) &&
           row["marker"] != "manual_steering"
       end
 

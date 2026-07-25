@@ -12,9 +12,11 @@
   but before attempt admission requeues the recovery transition instead of
   deleting the only durable path out of a markerless state. Reobserving an
   unchanged blocked transition is read-only, avoiding a per-tick queue rewrite.
-  Legacy marker occurrences also bind state-file mtime, task IDs are backfilled
-  before healer admission, post-clear launch failures defer for one hour, and
-  malformed claims are quarantined with byte-preserving evidence.
+  Recoverable marker occurrences require a durable `marker_id`; `hive migrate`
+  upgrades old id-less rows once and runtime has no mtime/reason fallback. Task
+  IDs are backfilled before healer admission, post-clear launch failures defer
+  for one hour, and malformed claims are quarantined with byte-preserving
+  evidence.
 - **Surfaces**: Operational status exposes one canonical
   queued/cooldown/running/blocked/terminal/unavailable receipt. Rails overlays
   it without a second fleet scan and disables or hides Retry according to that
@@ -24,6 +26,11 @@
   updated every in-repository producer, consumer, fixture, and operating skill;
   the obsolete v1 recovery contracts were removed rather than retained as
   compatibility code.
+- **Simplification**: The TUI signal-exit auto-healer, Telegram `clear_retry`
+  route, healer counters/exhaustion, and bespoke `3-plan` requeue path were
+  removed. Attempt loss is ledger-owned and no longer projects a compatibility
+  `ERROR`; a successor's ordinary failure enters the same coordinator only if
+  it writes a fresh recoverable marker.
 - **Verification**: Focused coordinator, queue, dispatcher, operational,
   adapter-authority, bot, TUI, Rails, status-feed, schema, and recorder syntax
   coverage pins the shared behavior.

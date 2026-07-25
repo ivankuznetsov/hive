@@ -120,6 +120,26 @@ class TaskMutationsTest < ActiveSupport::TestCase
     assert_empty queue_files
   end
 
+  test "routes max pass review recovery through the explicit intervention flow" do
+    folder = Pathname(Dir.mktmpdir("hive-web-review-escalation"))
+    folder.join("reviews").mkpath
+    folder.join("reviews/escalations-02.md").write("# Questions\n")
+    subject = task(
+      "stage" => "6-review",
+      "workflow" => "coding",
+      "marker" => "review_stale",
+      "attrs" => { "pass" => "2", "marker_id" => "marker-2" },
+      "folder" => folder.to_s
+    )
+
+    error = assert_raises(Hive::Error) { subject.recover! }
+
+    assert_match(/edit the current review escalation/, error.message)
+    assert_empty queue_files
+  ensure
+    FileUtils.remove_entry(folder) if folder&.exist?
+  end
+
   test "routes a generic workflow recovery through the same writer" do
     subject = task(
       "stage" => "2-gather", "workflow" => "research", "marker" => "error", "attrs" => {}

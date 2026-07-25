@@ -1,8 +1,6 @@
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
 require "hive/bot/dispatch_request_writer"
-require "hive/bot/handlers/recovery_sequence"
-require "hive/bot/notification_builders"
 require "hive/commands/approve"
 require "hive/commands/drop"
 require "hive/daemon/dispatch_request_queue"
@@ -70,19 +68,19 @@ module TaskMutations
 
   def recover!
     marker = self["marker"]
-    attrs = (self["attrs"] || {}).to_h.transform_keys(&:to_s)
     marker_name = marker.to_s.downcase
     if marker_name.empty? || %w[none agent_working].include?(marker_name)
       raise Hive::Error, "nothing to recover: #{slug} has no failure marker (its state changed — reload the page)"
     end
-    if Hive::Bot::Handlers::RecoverySequence.manual_only?(marker, attrs)
-      raise Hive::Error, Hive::Bot::Handlers::RecoverySequence.manual_only_text(marker, attrs)
+    unless Hive::Recovery::API.recoverable_marker?(marker)
+      raise Hive::Error, "Hive has no automatic recovery for this state - open it on a laptop."
     end
-
-    verb = Hive::Bot::Handlers::RecoverySequence.retry_verb_for_stage(
-      self["stage"], workflow: self["workflow"], project: project.name
+    if Hive::Recovery.intervention_required?(
+      marker: marker, attrs: self["attrs"] || {}, folder: folder
     )
-    raise Hive::Error, "no retry verb for stage #{self["stage"].inspect}" unless verb
+      raise Hive::Error,
+            "edit the current review escalation, then confirm the retry from the TUI with `r`"
+    end
 
     Hive::Recovery::API.recover!(
       row: self,

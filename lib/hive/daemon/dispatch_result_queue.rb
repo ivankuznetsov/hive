@@ -34,7 +34,7 @@ module Hive
     #     "slug": "explore-...",
     #     "request_id": "<hex>",
     #     "exit_code": 4,
-    #     "command": "hive markers clear ..."
+    #     "command": "hive review ..."
     #   }
     module DispatchResultQueue
       module_function

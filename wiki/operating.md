@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-07-20
+updated: 2026-07-25
 tags: [operating, daemon, bot, systemd, launchd, install, skills]
 ---
 
@@ -193,9 +193,10 @@ aggregate-changelog verification path and tells agents to reserve mutating
 `hive wiki compile-log` runs for merge/rebase cleanup or explicit user requests.
 Its marker-recovery guidance mirrors [[modules/daemon]]: inspect first with
 `hive status --operational --json` and `hive daemon status --json`, wait for known
-healer-managed cooldown/retry signatures, start a stopped daemon with
-`hive daemon start --detach`, and treat manual `hive markers clear` as guarded
-mutation under the skill's Safety Boundaries.
+coordinator cooldown/retry receipts, start a stopped daemon with
+`hive daemon start --detach`, run `hive migrate` when an old marker lacks an
+identity, and use the guarded `workflow.retry` action instead of composing
+marker-clear and stage-run commands.
 Host mutations remain reviewable: package-manager confirmation is never
 suppressed; direct installed-runtime patches and service-manager override
 writes are prohibited; Hive-native diagnosis, dry-run, preview, and repair

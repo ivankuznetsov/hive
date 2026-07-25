@@ -43,6 +43,45 @@ class CommandsStatusOperationalTest < Minitest::Test
     end
   end
 
+  def test_operational_recoveries_uses_the_same_canonical_recovery_projection
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(hive_state, "stages", "4-review", "failed-260725-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(
+        File.join(folder, "review.md"),
+        <<~MARKDOWN
+          # Review
+          <!-- REVIEW_ERROR marker_id=recovery-1 reason=review_failed phase=review pass=1 -->
+        MARKDOWN
+      )
+      project = { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      command = Hive::Commands::Status.new(json: true)
+      source = command.json_payload([ project ])
+
+      full = command.operational_payload(
+        [ project ],
+        status_payload: source,
+        scheduler_snapshot: nil
+      )
+      lean = command.operational_recoveries(
+        [ project ],
+        status_payload: source,
+        scheduler_snapshot: nil
+      )
+
+      expected = full.fetch("tasks").filter_map do |row|
+        next unless row["recovery"]
+
+        {
+          "identity" => row.fetch("identity").slice("project", "slug"),
+          "recovery" => row.fetch("recovery")
+        }
+      end
+      assert_equal expected, lean
+    end
+  end
+
   def test_operational_call_uses_its_own_error_schema
     command = Hive::Commands::Status.new(json: true, operational: true)
 

@@ -280,8 +280,8 @@ module Hive
         end
 
         def overlay_recovery_dispositions!(task_index, recoveries)
-          stale = recoveries.fetch("stale_agent", {})
-          Array(stale["receipts"]).each do |entry|
+          coordinator = recoveries.fetch("coordinator", {})
+          Array(coordinator["receipts"]).each do |entry|
             task = find_recovery_task(task_index, entry)
             next unless task
 
@@ -302,21 +302,6 @@ module Hive
               "owner" => receipt["owner"] || "hive",
               "reason" => receipt["reason"] || status.tr("_", " "),
               "recovery" => receipt
-            }
-          end
-          generic = recoveries.fetch("recoverable_error", {})
-          exhausted = Array(stale["error_exhausted"]) +
-                      Array(stale["review_exhausted"]) +
-                      Array(generic["exhausted"])
-          exhausted.each do |entry|
-            task = find_task(task_index, entry)
-            next unless task && task.dig("disposition", "status") == "available"
-
-            task["disposition"] = {
-              "status" => "available",
-              "decision" => "recovery_exhausted",
-              "owner" => "operator",
-              "reason" => "automatic recovery budget is exhausted"
             }
           end
         end

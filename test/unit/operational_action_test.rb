@@ -93,6 +93,28 @@ class OperationalActionTest < Minitest::Test
                  assertions.fetch(0).fetch(:observation_token)
   end
 
+  def test_max_pass_review_escalation_is_not_a_confirmation_free_retry
+    with_tmp_dir do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "escalations-02.md"), "# Edit me\n")
+      row = {
+        "project" => "demo",
+        "slug" => "review-task",
+        "folder" => folder,
+        "stage" => "6-review",
+        "marker" => "review_stale",
+        "attrs" => { "pass" => "2", "marker_id" => "marker-2" },
+        "mtime" => "2026-07-20T09:00:00.000000Z",
+        "action" => "recover_review",
+        "blocked" => false,
+        "held" => nil
+      }
+
+      assert_nil Hive::OperationalAction.descriptor(project: "demo", row: row)
+    end
+  end
+
   def test_task_recheck_reproduces_status_token_and_rejects_marker_rotation
     with_tmp_global_config do
       with_tmp_dir do |project_root|

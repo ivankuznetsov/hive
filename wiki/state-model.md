@@ -116,9 +116,10 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 
 New `REVIEW_WORKING` and `REVIEW_ERROR` writes carry a generated `marker_id`,
 just like generic `ERROR` writes. Review healers match the id observed in the
-status row and claim the per-task lock before clearing; a legacy row without an
-id can clear only another legacy no-id marker. If an external run acquired the
-lock after the status snapshot, healing leaves its lock and marker untouched.
+status row and claim the per-task lock before clearing. Runtime recovery rejects
+an id-less recoverable marker with `recovery_migration_required`; `hive migrate`
+performs the one-off identity backfill. If an external run acquired the lock
+after the status snapshot, healing leaves its lock and marker untouched.
 For a live-but-wedged review holder, status also snapshots the lock PID,
 process start time, and generated lock id. The healer rechecks that exact
 identity before signaling, claims its own lock generation after termination,
@@ -127,9 +128,18 @@ healer tick from disrupting a newer review or runner generation.
 
 `5-open-pr`, `7-artifacts`, and `8-finalize` reuse the generic `COMPLETE` / `ERROR` marker names with stage-specific attrs such as `pr_url=...`, `is_draft=true|false`, `idempotent=true`, and `reason=...`. No `ERROR` or `REVIEW_ERROR` is a permanent terminal. The daemon preserves the marker between attempts, waits for the shared cooldown, then clears only the observed generation when the project/global retry gates permit it, no live owner exists, and current work-area evidence is safe. A fresh failure restarts the schedule; retries never exhaust. `3-plan` clears enqueue a non-expiring `hive plan ... --from 3-plan` continuation because an empty markerless `plan.md` otherwise classifies back to `:error`; enqueue failure restores a fresh error generation. See [[daemon]].
 
-Marker name allowlist: `Hive::Markers::KNOWN_NAMES`. Regex: `Hive::Markers::MARKER_RE`. Adding a marker requires updating BOTH (two sources of truth). Attributes are `key=value` (or `key="quoted value"`). New `ERROR` markers get a generated `marker_id` attr; human labels hide it, but recovery surfaces use it as the preferred `hive markers clear --match-attr marker_id=...` guard. Legacy `ERROR` rows without `marker_id` fall back to observed attrs such as `reason=exit_code,exit_code=143`. U9 dropped `EXECUTE_STALE` from the live grammar (review iteration moved out of 4-execute); the name remains in `KNOWN_NAMES` for back-compat parsing of historical state files but is never written by current code. `EXECUTE_WAITING` remains live for implementation-output pauses, not review iteration.
+Marker name allowlist: `Hive::Markers::KNOWN_NAMES`. Regex: `Hive::Markers::MARKER_RE`. Adding a marker requires updating BOTH (two sources of truth). Attributes are `key=value` (or `key="quoted value"`). New recoverable markers get a generated `marker_id` attr; human labels hide it, but every recovery request binds to it as the canonical generation identity. Reason, mtime, pass, and phase are diagnostics only and are never identity fallbacks. U9 dropped `EXECUTE_STALE` from the live grammar (review iteration moved out of 4-execute); the name remains in `KNOWN_NAMES` for parsing historical state files but is never written by current code. `EXECUTE_WAITING` remains live for implementation-output pauses, not review iteration.
 
-Recovery from a stale or error marker is agent-callable via `hive markers clear FOLDER --name <NAME>` (LFG-4, see [[commands/markers]]). The clear allowlist is `REVIEW_STALE`, `REVIEW_CI_STALE`, `REVIEW_ERROR`, `EXECUTE_STALE`, `ERROR`; terminal-success markers (`REVIEW_COMPLETE`, `EXECUTE_COMPLETE`, `COMPLETE`) are refused. Race-sensitive callers should pass `--match-attr`: `ERROR` and `REVIEW_ERROR` prefer `marker_id`, while legacy review markers fall back to pass/phase/reason attrs. The `Stages::Review` pre-flight warn text now embeds the concrete `hive markers clear …` command for each stale-marker case.
+Normal recovery from a stale or error marker is submitted by TUI, Rails,
+Telegram, recorder, CLI/action, healer, or operator adapters through
+`Hive::Recovery::API`; `RecoveryCoordinator` owns the guarded clear and retry
+admission. The low-level `hive markers clear FOLDER --name <NAME>` command
+remains only as an explicit operator repair primitive. Its clear allowlist is
+`REVIEW_STALE`, `REVIEW_CI_STALE`, `REVIEW_ERROR`, `EXECUTE_STALE`, `ERROR`;
+terminal-success markers (`REVIEW_COMPLETE`, `EXECUTE_COMPLETE`, `COMPLETE`)
+are refused. A max-pass `REVIEW_STALE` with a current escalation artifact
+requires the operator to edit that input and use the TUI's explicit `r`
+gesture; ordinary action, web, and bot retry surfaces cannot bypass it.
 
 `Markers.set` writes via tempfile + `File.rename` for atomicity, holding `LOCK_EX` on a `.markers-lock` sidecar (not the data file) so readers never see partial writes. UTF-8 is pinned. See [[modules/markers]].
 
@@ -203,37 +213,45 @@ The identity stores only provider, concrete model, profile/launcher label, sourc
 ## Runtime dispatch queue and web snapshots
 
 The daemon's producer queue lives under `$HIVE_HOME/dispatch_requests/`
-(`Hive::Paths.state_home`, not inside a project `.hive-state/`). Producers are
-the Telegram bot, hivebox web, and the `3-plan` error-retry healer.
-Web paths currently write through `Hive::Bot::DispatchRequestWriter`, so the
-JSON `requestor` field is commonly `bot`; `trigger` values such as `web` and
-`web_recover` distinguish the web-originated requests, while the healer writes
-`requestor=healer`.
+(`Hive::Paths.state_home`, not inside a project `.hive-state/`). Ordinary
+producers include Telegram and hivebox web. Every recoverable-marker surface
+(TUI, Rails, Telegram, recorder, CLI/action, and automatic healer scheduling)
+submits through `Hive::Recovery::API`; `RecoveryCoordinator` is the only
+producer of a recovery transition. The `requestor` field records the actual
+adapter rather than disguising web or TUI requests as bot traffic.
 Each pending request is one JSON file:
 
 ```yaml
 schema: hive-dispatch-request
-schema_version: 3
+schema_version: 4
 request_id: <hex16>
 created_at: <UTC-ISO8601>
 project: <registered project name>
 slug: <task slug>
 argv: ["hive", "<allowlisted verb>", ...]
-requestor: bot|healer
+requestor: bot|healer|web|tui|cli|action|daemon|recorder|operator
 chat_id:
 update_id:
 trigger:
 task_generation:
 predecessor_attempt_id:
 inherited_outputs: []
+task_id:
+expected_stage:
+expected_marker_name:
+expected_marker_id:
+recovery: null
 ```
 
-Current producers write `hive-dispatch-request.v3`, adding generation intent,
-predecessor, and inherited outputs. Consumers continue accepting pending v2
-files and infer their generation under the same admission lock. Queue and
-claim sidecars remain delivery records: after admission the claim stores the
-attempt ID/generation, follows a loss successor, and completes from its
-terminal receipt.
+Current producers write `hive-dispatch-request.v4`. Ordinary requests leave
+`recovery` null. Coordinator requests persist canonical task/marker/generation
+identity, owner/remediation, retry count, terminal outcome/time, and the
+`admitted → cleared → dispatched → terminal` phase. Consumers continue
+accepting pending v2/v3 delivery records and infer their generation under the
+same admission lock; no current producer emits them. Queue and claim sidecars
+remain delivery records: after admission the claim stores the attempt
+ID/generation, follows a loss successor, and completes from its terminal
+receipt.
 
 `Hive::Daemon::DispatchRequestQueue.valid_argv?` requires `argv[0] == "hive"`
 and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,

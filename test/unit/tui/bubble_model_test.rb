@@ -56,6 +56,24 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
   end
 
+  def make_error_row(slug:, folder:, exit_code:, reason: "exit_code", marker_id: nil)
+    attrs = { "reason" => reason, "exit_code" => exit_code.to_s }
+    attrs["marker_id"] = marker_id if marker_id
+    make_task_row(
+      action_key: "error", action_label: "Error", slug: slug,
+      stage: "6-review", folder: folder, marker: "error",
+      attrs: attrs, suggested_command: nil
+    )
+  end
+
+  def snapshot_with(rows)
+    project = Hive::Tui::Snapshot::ProjectView.new(
+      name: "demo", path: "/x", hive_state_path: "/x/.hive-state",
+      error: nil, rows: rows.freeze
+    ).freeze
+    Hive::Tui::Snapshot.new(generated_at: nil, projects: [ project ])
+  end
+
   def with_editor_env(visual:, editor:)
     old_visual = ENV["VISUAL"]
     old_editor = ENV["EDITOR"]
@@ -3469,12 +3487,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/task folder missing/, @model.hive_model.flash.to_s)
   end
 
-  # Kill-class signal kills (130/137/143) are auto-healed in the
-  # background by `auto_heal_kill_class_errors`. RecoverError refuses
-  # those rows synchronously so the Enter-driven recovery doesn't race
-  # the auto-heal on the same markers-lock.
-  def test_recover_error_skips_kill_class_exit_codes
-    %w[130 137 143].each do |code|
+  def test_recover_error_submits_kill_class_exit_codes_to_coordinator
+    %w[130 137 143].each_with_index do |code, index|
       row = make_task_row(
         action_key: "error", action_label: "Error",
         slug: "killed-#{code}", stage: "3-plan",
@@ -3482,16 +3496,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
         marker: "error", attrs: { "reason" => "exit_code", "exit_code" => code },
         suggested_command: nil
       )
-      ran_clear = false
-      with_run_quiet_stub(->(_argv) { ran_clear = true; [ 0, "", "" ] }) do
-        with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
-          @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
-          @model.wait_for_background_threads
-        end
-      end
-      refute ran_clear, "RecoverError must not clear kill-class markers (auto-heal owns them)"
-      assert_match(/kill-class.*auto-heals/, @model.hive_model.flash.to_s,
-                   "flash must explain why exit_code=#{code} was refused")
+
+      @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+      @model.wait_for_background_threads
+
+      call = @recovery_writer.calls.fetch(index)
+      assert_same row, call.fetch(:row)
+      assert_equal "tui", call.fetch(:requestor)
     end
   end
 
@@ -6026,276 +6037,19 @@ class HiveTuiBubbleModelTest < Minitest::Test
   # `LogTail::FileResolver.latest` raise `Hive::NoLogFiles`, which
   # wasn't in `open_log_tail`'s rescue list, killing the TUI.
 
-  # ---- Auto-heal: kill-class error markers (SIGINT/SIGKILL/SIGTERM) ----
-  #
-  # When `hive pr` (or any takeover) gets killed mid-spawn — pgroup
-  # forwards SIGTERM, the agent writes `:error reason=exit_code
-  # exit_code=143`, and the task folder is left intact — the file
-  # state IS recoverable but the marker says "Error". Auto-heal
-  # clears those markers in the background so the TUI doesn't strand
-  # interrupted tasks in a stuck "Error" classification the user has
-  # to manually escape from.
+  # ---- Snapshot delivery has no recovery side effects ----
 
-  def make_error_row(slug:, folder:, exit_code:, reason: "exit_code", marker_id: nil)
-    Hive::Tui::Snapshot::Row.new(
-      project_name: "demo", stage: "6-review", slug: slug, folder: folder,
-      state_file: nil, marker: "error",
-      attrs: { "reason" => reason, "exit_code" => exit_code.to_s }.tap { |attrs| attrs["marker_id"] = marker_id if marker_id },
-      mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-      action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil,
-      diagnostic: nil
-    )
-  end
-
-  def stub_heal_capture(model)
-    captured = []
-    model.define_singleton_method(:spawn_heal_thread) { |row| captured << row.folder }
-    captured
-  end
-
-  def snapshot_with(rows)
-    project = Hive::Tui::Snapshot::ProjectView.new(
-      name: "demo", path: "/x", hive_state_path: "/x/.hive-state",
-      error: nil, rows: rows.freeze
-    ).freeze
-    Hive::Tui::Snapshot.new(generated_at: nil, projects: [ project ])
-  end
-
-  def test_snapshot_with_sigterm_error_triggers_heal
-    captured = stub_heal_capture(@model)
-    snap = snapshot_with([ make_error_row(slug: "killed", folder: "/x/.hive-state/stages/6-review/killed", exit_code: 143) ])
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_equal [ "/x/.hive-state/stages/6-review/killed" ], captured,
-      "sigterm-killed task must trigger one heal"
-  end
-
-  def test_snapshot_with_sigint_error_triggers_heal
-    captured = stub_heal_capture(@model)
-    snap = snapshot_with([ make_error_row(slug: "ctrlc", folder: "/x/.hive-state/stages/4-execute/ctrlc", exit_code: 130) ])
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_equal [ "/x/.hive-state/stages/4-execute/ctrlc" ], captured
-  end
-
-  def test_snapshot_with_sigkill_error_triggers_heal
-    captured = stub_heal_capture(@model)
-    snap = snapshot_with([ make_error_row(slug: "killed9", folder: "/x/.hive-state/stages/4-execute/killed9", exit_code: 137) ])
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_equal [ "/x/.hive-state/stages/4-execute/killed9" ], captured
-  end
-
-  def test_snapshot_with_real_failure_does_not_heal
-    # exit_code=1 is a normal program exit, not a signal kill — the
-    # agent decided to fail. Auto-heal MUST NOT clear these; the
-    # error reflects a real condition the user needs to inspect.
-    captured = stub_heal_capture(@model)
-    snap = snapshot_with([ make_error_row(slug: "real-fail", folder: "/x/y", exit_code: 1) ])
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_empty captured, "exit_code=1 is a real failure, must not auto-heal"
-  end
-
-  def test_snapshot_with_non_exit_code_error_does_not_heal
-    # `:error reason=timeout` or `:error reason=secret_in_pr_body`
-    # are real, structured errors — clearing them silently would
-    # mask actual problems.
-    captured = stub_heal_capture(@model)
-    snap = snapshot_with([ make_error_row(slug: "timeout", folder: "/x/y", exit_code: nil, reason: "timeout") ])
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_empty captured
-  end
-
-  def test_snapshot_with_kill_class_code_but_non_exit_code_reason_does_not_heal
-    captured = stub_heal_capture(@model)
-    row = make_error_row(
-      slug: "shutdown", folder: "/x/.hive-state/stages/6-review/shutdown",
-      exit_code: 143, reason: "shutdown"
-    )
-    snap = snapshot_with([ row ])
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_empty captured,
-                 "auto-heal is reserved for reason=exit_code signal kills; other reasons need RecoverError"
-  end
-
-  def test_snapshot_with_multiple_kill_class_rows_triggers_heal_for_each
-    captured = stub_heal_capture(@model)
+  def test_snapshot_arrived_only_updates_the_model
     snap = snapshot_with([
-      make_error_row(slug: "a", folder: "/x/.hive-state/stages/6-review/a", exit_code: 143),
-      make_error_row(slug: "b", folder: "/x/.hive-state/stages/4-execute/b", exit_code: 137),
-      make_error_row(slug: "c", folder: "/x/.hive-state/stages/3-plan/c", exit_code: 130)
+      make_error_row(slug: "killed", folder: "/x/y", exit_code: 143)
     ])
+
     @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_equal(
-      [ "/x/.hive-state/stages/3-plan/c",
-        "/x/.hive-state/stages/4-execute/b",
-        "/x/.hive-state/stages/6-review/a" ],
-      captured.sort,
-      "every kill-class row in the snapshot must trigger its own heal — not just the first"
-    )
+
+    assert_same snap, @model.hive_model.snapshot
+    assert_empty @recovery_writer.calls,
+                 "automatic recovery belongs to the daemon, not snapshot rendering"
   end
-
-  def test_snapshot_mixing_kill_class_and_real_failures_only_heals_kill_class
-    captured = stub_heal_capture(@model)
-    snap = snapshot_with([
-      make_error_row(slug: "killed", folder: "/x/k", exit_code: 143),  # SIGTERM, heal
-      make_error_row(slug: "failed", folder: "/x/f", exit_code: 1),    # real failure, skip
-      make_error_row(slug: "timed",  folder: "/x/t", exit_code: nil, reason: "timeout") # skip
-    ])
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_equal [ "/x/k" ], captured,
-      "only kill-class signals heal; real failures and timeouts must reach the user untouched"
-  end
-
-  def test_heal_dedup_only_fires_once_per_folder
-    captured = stub_heal_capture(@model)
-    row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/6-review/killed", exit_code: 143)
-    snap = snapshot_with([ row ])
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_equal 1, captured.length,
-      "repeated snapshots with the same kill-class error must trigger ONE heal, not N"
-  end
-
-  # F11: the dedup cache used to be permanent; a folder that got
-  # re-killed later in the session would never re-heal. Bound the
-  # window so re-heals after HEAL_REPEAT_INTERVAL_SECONDS go through.
-  def test_heal_cache_re_permits_after_interval_elapses
-    captured = stub_heal_capture(@model)
-    folder = "/x/.hive-state/stages/4-execute/killed"
-    row = make_error_row(slug: "killed", folder: folder, exit_code: 143)
-    snap = snapshot_with([ row ])
-
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_equal 1, captured.length, "first kill-class error fires one heal"
-
-    # Re-permit by backdating the cache entry past the interval.
-    interval = Hive::Tui::BubbleModel::HEAL_REPEAT_INTERVAL_SECONDS
-    cache = @model.instance_variable_get(:@healed_folders)
-    cache[folder] = Time.now - (interval + 1)
-
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_equal 2, captured.length,
-      "after HEAL_REPEAT_INTERVAL_SECONDS the slot must re-permit so a fresh kill on " \
-      "the same folder/slug pair gets re-healed instead of stranded"
-  end
-
-  def test_heal_cache_keeps_blocking_within_interval_window
-    captured = stub_heal_capture(@model)
-    folder = "/x/.hive-state/stages/4-execute/killed"
-    row = make_error_row(slug: "killed", folder: folder, exit_code: 143)
-    snap = snapshot_with([ row ])
-
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_equal 1, captured.length
-
-    # Backdate by half the interval — still within the dedup window.
-    interval = Hive::Tui::BubbleModel::HEAL_REPEAT_INTERVAL_SECONDS
-    cache = @model.instance_variable_get(:@healed_folders)
-    cache[folder] = Time.now - (interval / 2.0)
-
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_equal 1, captured.length,
-      "within the interval window a repeated snapshot must NOT re-heal — that's the dedup contract"
-  end
-
-  def test_snapshot_arrived_still_updates_the_model_after_auto_heal
-    stub_heal_capture(@model)
-    snap = snapshot_with([ make_error_row(slug: "k", folder: "/x/y", exit_code: 143) ])
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_same snap, @model.hive_model.snapshot,
-      "auto-heal must not block the regular Update.apply path — the model still updates"
-  end
-
-  def test_heal_marker_forwards_observed_marker_id_to_coordinator
-    row = make_error_row(
-      slug: "killed", folder: "/x/.hive-state/stages/4-execute/killed",
-      exit_code: 143, marker_id: "kill-123"
-    )
-
-    @model.send(:heal_marker, row)
-
-    forwarded = @recovery_writer.calls.fetch(0).fetch(:row)
-    assert_equal "kill-123", forwarded.attrs.fetch("marker_id")
-    assert_equal "exit_code", forwarded.attrs.fetch("reason")
-    assert_equal "tui", @recovery_writer.calls.fetch(0).fetch(:requestor)
-  end
-
-  def test_heal_marker_forwards_observed_attrs_for_legacy_rows
-    row = make_error_row(
-      slug: "killed", folder: "/x/.hive-state/stages/4-execute/killed",
-      exit_code: 143
-    )
-
-    @model.send(:heal_marker, row)
-
-    assert_equal(
-      { "reason" => "exit_code", "exit_code" => "143" },
-      @recovery_writer.calls.fetch(0).fetch(:row).attrs
-    )
-  end
-
-  def test_heal_marker_keeps_backoff_window_when_coordinator_blocks
-    row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/6-review/killed", exit_code: 143)
-    cache = @model.instance_variable_get(:@healed_folders)
-    cache[row.folder] = Time.now - (Hive::Tui::BubbleModel::HEAL_REPEAT_INTERVAL_SECONDS + 1)
-    logs = []
-    before = Time.now
-
-    @recovery_writer.handler = lambda do |**|
-      RecoveryReceipt.new(status: "blocked", summary: "Recovery blocked — generation conflict")
-    end
-    with_singleton_method_stub(Hive::Tui::Debug, :log, lambda { |tag, message = nil|
-      logs << [ tag, message ]
-    }) do
-      @model.send(:heal_marker, row)
-    end
-
-    assert cache.key?(row.folder)
-    assert_operator cache[row.folder], :>=, before
-    assert_equal "auto_heal", logs.dig(0, 0)
-    assert_match(/Recovery blocked/, logs.dig(0, 1))
-  end
-
-  def test_heal_marker_keeps_backoff_window_when_coordinator_raises
-    row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/6-review/killed", exit_code: 143)
-    cache = @model.instance_variable_get(:@healed_folders)
-    cache[row.folder] = Time.now - (Hive::Tui::BubbleModel::HEAL_REPEAT_INTERVAL_SECONDS + 1)
-    logs = []
-    before = Time.now
-
-    @recovery_writer.handler = ->(**) { raise RuntimeError, "boom" }
-    with_singleton_method_stub(Hive::Tui::Debug, :log, lambda { |tag, message = nil|
-      logs << [ tag, message ]
-    }) do
-      @model.send(:heal_marker, row)
-    end
-
-    assert cache.key?(row.folder)
-    assert_operator cache[row.folder], :>=, before
-    assert_equal "auto_heal", logs.dig(0, 0)
-    assert_match(/RuntimeError: boom/, logs.dig(0, 1))
-  end
-
-  def test_blocked_heal_attempt_throttles_retries_until_interval_elapses
-    row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/6-review/killed", exit_code: 143)
-    snap = snapshot_with([ row ])
-    @recovery_writer.handler = lambda do |**|
-      RecoveryReceipt.new(status: "blocked", summary: "Recovery blocked")
-    end
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    @model.wait_for_background_threads
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    @model.wait_for_background_threads
-
-    assert_equal 1, @recovery_writer.calls.size
-
-    @model.instance_variable_get(:@healed_folders)[row.folder] =
-      Time.now - (Hive::Tui::BubbleModel::HEAL_REPEAT_INTERVAL_SECONDS + 1)
-    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    @model.wait_for_background_threads
-
-    assert_equal 2, @recovery_writer.calls.size
-  end
-
 
   # ---- SubprocessExited diagnostic interception ----
   #
@@ -6679,48 +6433,37 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal :grid, @model.hive_model.mode
   end
 
-  # F8: heal Threads must be tracked so App.run_charm's ensure block
-  # can reap them at TUI exit. Pre-F8 the threads were unreferenced
-  # after spawn — quitting mid-flight left zombies whose dispatch
-  # eventually crashed against a dead runner.
-  def test_kill_inflight_heals_joins_or_kills_in_flight_threads
-    # Stub heal_marker with a slow stand-in so we can observe the
-    # join-then-kill behavior under a deterministic deadline.
-    @model.define_singleton_method(:heal_marker) do |_row|
-      sleep 5 # well past JOIN_TIMEOUT_SECONDS
-    end
-
+  def test_kill_inflight_recoveries_joins_or_kills_in_flight_threads
+    @recovery_writer.handler = ->(**) { sleep 5 }
     rows = 3.times.map { |i| make_error_row(slug: "k#{i}", folder: "/x/k#{i}", exit_code: 143) }
-    threads = rows.map { |r| @model.send(:spawn_heal_thread, r) }
+    threads = rows.map { |row| @model.send(:spawn_error_recovery_thread, row) }
     assert_equal 3, threads.size
     threads.each { |t| assert t.alive?, "fixture sanity: stub thread should still be alive" }
 
     started = Time.now
-    @model.kill_inflight_heals!
+    @model.kill_inflight_recoveries!
     elapsed = Time.now - started
 
     threads.each do |t|
-      refute t.alive?, "kill_inflight_heals! must reap every tracked Thread"
+      refute t.alive?, "kill_inflight_recoveries! must reap every tracked Thread"
     end
     assert elapsed < Hive::Tui::BubbleModel::JOIN_TIMEOUT_SECONDS + 1.0,
       "kill must respect the join timeout — got #{elapsed}s; deadline is " \
       "JOIN_TIMEOUT_SECONDS (#{Hive::Tui::BubbleModel::JOIN_TIMEOUT_SECONDS}s) plus a small buffer"
   end
 
-  def test_spawn_heal_thread_self_prunes_when_heal_completes
-    @model.define_singleton_method(:heal_marker) { |_row| nil }
+  def test_recovery_thread_self_prunes_when_recovery_completes
     row = make_error_row(slug: "fast", folder: "/x/fast", exit_code: 143)
-    t = @model.send(:spawn_heal_thread, row)
+    t = @model.send(:spawn_error_recovery_thread, row)
     t.join(2)
 
-    tracked = @model.instance_variable_get(:@heal_threads)
+    tracked = @model.instance_variable_get(:@recovery_threads)
     refute_includes tracked, t,
-      "completed heal Thread must remove itself from @heal_threads to bound the list under long sessions"
+      "completed recovery Thread must remove itself from the tracked list"
   end
 
-  def test_kill_inflight_heals_is_safe_when_no_threads_tracked
-    # Common shape: TUI quits before any kill-class error arrived.
-    @model.kill_inflight_heals!
+  def test_kill_inflight_recoveries_is_safe_when_no_threads_tracked
+    @model.kill_inflight_recoveries!
     # Must not raise; nothing to assert beyond the absence of exception.
   end
 

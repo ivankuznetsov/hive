@@ -696,20 +696,14 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same row, msg.row
   end
 
-  # Kill-class signal kills (130/137/143) are auto-healed in the
-  # background by BubbleModel; while the heal is in flight, KeyMap falls
-  # back to OpenLogTail so the user can read the kill context. An
-  # Enter-driven RecoverError on those rows would race the auto-healer
-  # for the same markers-lock and is intentionally avoided.
-  def test_enter_on_error_with_kill_class_exit_code_returns_open_log_tail
+  def test_enter_on_error_with_kill_class_exit_code_opens_red_status_detail
     %w[130 137 143].each do |code|
       row = make_row(action_key: "error", action_label: "Error",
                      marker: "error", attrs: { "reason" => "exit_code", "exit_code" => code },
                      suggested_command: nil)
       msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
-      assert_kind_of Hive::Tui::Messages::OpenLogTail, msg,
-        "Enter on a kill-class (exit_code=#{code}) error row must defer to log tail; " \
-        "the auto-healer owns the markers-clear and Enter would race it"
+      assert_kind_of Hive::Tui::Messages::OpenRedStatusDetail, msg,
+        "all ERROR shapes must expose the same coordinator recovery path"
       assert_same row, msg.row
     end
   end
@@ -720,7 +714,7 @@ class TuiKeyMapMessageForTest < Minitest::Test
                    suggested_command: nil)
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
     assert_kind_of Hive::Tui::Messages::OpenRedStatusDetail, msg,
-                   "non-exit_code kill-class rows are not auto-healed, so Enter must expose recovery"
+                   "all ERROR shapes must expose recovery"
     assert_same row, msg.row
   end
 
@@ -729,8 +723,7 @@ class TuiKeyMapMessageForTest < Minitest::Test
                    marker: "error", attrs: { "reason" => "shutdown", "exit_code" => "143" },
                    suggested_command: nil)
     msg = Hive::Tui::KeyMap.error_message(row)
-    assert_kind_of Hive::Tui::Messages::RecoverError, msg,
-                   "only reason=exit_code kill-class rows belong to the auto-healer"
+    assert_kind_of Hive::Tui::Messages::RecoverError, msg
     assert_same row, msg.row
   end
 

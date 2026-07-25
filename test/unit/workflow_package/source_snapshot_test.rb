@@ -61,6 +61,152 @@ class WorkflowPackageSourceSnapshotTest < Minitest::Test
     end
   end
 
+  def test_rejects_identity_root_reference_and_dependency_drift
+    with_source_tree do |workflows, authored, descriptor, metadata|
+      original = File.read(descriptor)
+      File.write(descriptor, original.sub("id: demo", "id: other"))
+      assert_raises(Hive::ConfigError) do
+        Snapshot.capture(name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+                         authored_dir: authored, metadata: metadata)
+      end
+
+      File.write(descriptor, original.sub("./demo/work.md", "../outside.md"))
+      assert_raises(Hive::ConfigError) do
+        Snapshot.capture(name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+                         authored_dir: authored, metadata: metadata)
+      end
+
+      File.write(descriptor, original.sub("external/reviewer", "bad skill"))
+      assert_raises(Hive::ConfigError) do
+        Snapshot.capture(name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+                         authored_dir: authored, metadata: metadata)
+      end
+    end
+  end
+
+  def test_rejects_invalid_or_missing_owned_roots
+    with_source_tree do |workflows, authored, descriptor, metadata|
+      outside_descriptor = File.join(File.dirname(workflows), "outside.yml")
+      FileUtils.cp(descriptor, outside_descriptor)
+      assert_raises(Hive::ConfigError) do
+        Snapshot.capture(name: "demo", workflows_dir: workflows, descriptor_path: outside_descriptor,
+                         authored_dir: authored, metadata: metadata)
+      end
+
+      real = File.join(File.dirname(workflows), "real-authored")
+      FileUtils.mv(authored, real)
+      File.symlink(real, authored)
+      assert_raises(Hive::ConfigError) do
+        Snapshot.capture(name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+                         authored_dir: authored, metadata: metadata)
+      end
+    end
+
+    with_tmp_dir do |root|
+      missing = File.join(root, "missing")
+      assert_raises(Hive::ConfigError) do
+        Snapshot.capture(
+          name: "demo", workflows_dir: missing, descriptor_path: File.join(missing, "demo.yml"),
+          authored_dir: File.join(missing, "demo"), metadata: Data.define(:assets).new(assets: [])
+        )
+      end
+    end
+  end
+
+  def test_private_path_guards_reject_collisions_escape_and_realpath_drift
+    with_source_tree do |workflows, authored, descriptor, metadata|
+      instance = Snapshot.new(
+        name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+        authored_dir: authored, metadata: metadata
+      )
+      assert_equal "scalar", instance.send(:transform_descriptor, "scalar") { flunk }
+      assert_raises(Hive::ConfigError) do
+        instance.send(:resolve_owned_path, nil, kind: "instruction")
+      end
+      assert_raises(Hive::ConfigError) do
+        instance.send(:add_unique!, { "instructions/work.md" => "/one" },
+                      "instructions/work.md", "/two")
+      end
+      assert_raises(Hive::ConfigError) { instance.send(:validate_skill!, "bad skill") }
+      assert_raises(Hive::ConfigError) do
+        instance.send(:validate_path_components!, File.join(File.dirname(workflows), "outside"),
+                      package_path: "outside")
+      end
+
+      source = File.join(authored, "work.md")
+      original = File.method(:realpath)
+      replacement = lambda do |path|
+        path == source ? File.join(File.dirname(workflows), "outside") : original.call(path)
+      end
+      with_replaced_singleton_method(File, :realpath, replacement) do
+        assert_raises(Hive::ConfigError) do
+          instance.send(:validate_path_components!, source, package_path: "instructions/work.md")
+        end
+      end
+    end
+  end
+
+  def test_rejects_hardlinks_read_races_and_missing_records
+    with_source_tree do |workflows, authored, descriptor, metadata|
+      context = File.join(authored, "assets", "context.txt")
+      File.link(context, File.join(authored, "assets", "context-copy.txt"))
+      assert_raises(Hive::ConfigError) do
+        Snapshot.capture(name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+                         authored_dir: authored, metadata: metadata)
+      end
+    end
+
+    with_source_tree do |workflows, authored, descriptor, metadata|
+      target = File.join(authored, "work.md")
+      original = File.method(:open)
+      replacement = lambda do |*args, &block|
+        file = original.call(*args, &block)
+        next file unless args.first == target && block.nil?
+
+        reads = 0
+        wrapper = Object.new
+        wrapper.define_singleton_method(:read) { |*values| file.read(*values) }
+        wrapper.define_singleton_method(:close) { file.close }
+        wrapper.define_singleton_method(:stat) do
+          reads += 1
+          stat = file.stat
+          next stat if reads == 1
+
+          changed = Object.new
+          %i[dev ino size ctime mode nlink].each do |field|
+            value = stat.public_send(field)
+            changed.define_singleton_method(field) { value }
+          end
+          changed.define_singleton_method(:mtime) { stat.mtime + 1 }
+          changed.define_singleton_method(:file?) { true }
+          changed
+        end
+        wrapper
+      end
+      with_replaced_singleton_method(File, :open, replacement) do
+        assert_raises(Hive::ConfigError) do
+          Snapshot.capture(name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+                           authored_dir: authored, metadata: metadata)
+        end
+      end
+
+      instance = Snapshot.new(
+        name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+        authored_dir: authored, metadata: metadata
+      )
+      denied = lambda do |*args, &block|
+        raise Errno::EACCES, target if args.first == target
+
+        original.call(*args, &block)
+      end
+      with_replaced_singleton_method(File, :open, denied) do
+        assert_raises(Hive::ConfigError) do
+          instance.send(:read_record, target, package_path: "instructions/work.md")
+        end
+      end
+    end
+  end
+
   private
 
   def with_source_tree

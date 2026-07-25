@@ -5,6 +5,10 @@ class WorkflowPackagePublisherTest < Minitest::Test
   include HiveTestHelper
 
   Package = Hive::WorkflowPackage::Publisher::Package
+  RetainedReceipt = Data.define(
+    :name, :version, :package_digest, :release_digest, :lint_contract
+  )
+
   def test_builds_only_the_canonical_immutable_version_payload_deterministically
     with_authored_workflow do |project, authored_dir|
       File.write(File.join(authored_dir, "ignored.txt"), "do not publish\n")
@@ -196,6 +200,110 @@ class WorkflowPackagePublisherTest < Minitest::Test
     end
   end
 
+  def test_prepare_revalidates_a_retained_bundle_and_asserts_authored_bytes
+    with_authored_workflow do |project, authored_dir|
+      with_retained_package(project) do |retained, receipt|
+        store = retained_store(receipt, retained)
+        instance = recovery_publisher(project, store)
+
+        Dir.mktmpdir("publisher-rebuild-") do |destination|
+          package = instance.prepare(destination: destination)
+
+          assert_equal retained, package.root
+          assert_equal receipt.package_digest, package.package_digest
+          assert_equal receipt.release_digest, package.release_digest
+          assert_equal receipt, instance.receipt_for(package)
+        end
+
+        FileUtils.rm_f(File.join(authored_dir, "README.md"))
+        Dir.mktmpdir("publisher-no-inputs-") do |destination|
+          package = instance.prepare(destination: destination)
+
+          assert_equal retained, package.root
+          assert_empty Dir.children(destination)
+        end
+      end
+    end
+  end
+
+  def test_prepare_fails_closed_when_retained_recovery_evidence_changes
+    with_authored_workflow do |project, authored_dir|
+      with_retained_package(project) do |retained, receipt|
+        missing_store = retained_store(nil, retained)
+        error = assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          recovery_publisher(project, missing_store).prepare(destination: File.join(project, "missing"))
+        end
+        assert_match(/receipt disappeared/, error.message)
+
+        changed_contract = receipt.lint_contract.merge("contract_sha256" => "f" * 64).freeze
+        changed_receipt = receipt.with(lint_contract: changed_contract)
+        error = assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          recovery_publisher(project, retained_store(changed_receipt, retained))
+            .prepare(destination: File.join(project, "policy"))
+        end
+        assert_match(/policy evidence/, error.message)
+
+        invalid_lint = Object.new
+        invalid_lint.define_singleton_method(:valid?) { false }
+        with_replaced_singleton_method(
+          Hive::WorkflowPackage::AuthoringLint,
+          :verify,
+          ->(_root, manifest:, policy:) { invalid_lint }
+        ) do
+          error = assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+            recovery_publisher(project, retained_store(receipt, retained))
+              .prepare(destination: File.join(project, "lint"))
+          end
+          assert_match(/recorded lint evidence/, error.message)
+        end
+
+        File.write(File.join(authored_dir, "work.md"), "Inspect the changed task safely.\n")
+        error = assert_raises(Hive::WorkflowPackage::PublishConflict) do
+          recovery_publisher(project, retained_store(receipt, retained))
+            .prepare(destination: File.join(project, "changed"))
+        end
+        assert_match(/authored workflow bytes conflict/, error.message)
+      end
+    end
+  end
+
+  def test_registry_configuration_is_closed_and_trusted
+    valid = Hive::WorkflowPackage::Publisher.new(
+      "demo", project_root: Dir.pwd, version: "1.2.3",
+      config: { "honeycomb" => { "repository" => "owner/registry", "base_branch" => "release/v1" } }
+    )
+    assert_equal [ "owner/registry", "release/v1" ], valid.send(:publication_destination)
+
+    [
+      { "honeycomb" => { "repository" => "https://example.test/registry" } },
+      { "honeycomb" => { "base_branch" => "bad..branch" } },
+      { "honeycomb" => [] }
+    ].each do |config|
+      instance = Hive::WorkflowPackage::Publisher.new(
+        "demo", project_root: Dir.pwd, version: "1.2.3", config: config
+      )
+      assert_raises(Hive::WorkflowPackage::PublishConfigurationError) do
+        instance.send(:publication_destination)
+      end
+    end
+  end
+
+  def test_publication_findings_are_normalized_for_the_result_contract
+    diagnostic = Hive::WorkflowPackage::Diagnostic.new(
+      rule_id: "permissions.warning", severity: :warning, path: "workflow.yml",
+      line: 3, column: 5, message: "review disclosure"
+    )
+
+    assert_equal(
+      {
+        "rule_id" => "permissions.warning", "severity" => "warning",
+        "path" => "workflow.yml", "line" => 3, "column" => 5,
+        "message" => "review disclosure"
+      },
+      publisher(Dir.pwd).send(:publication_finding, diagnostic)
+    )
+  end
+
   private
 
   def valid_descriptor
@@ -220,6 +328,37 @@ class WorkflowPackagePublisherTest < Minitest::Test
 
   def publisher(project)
     Hive::WorkflowPackage::Publisher.new("demo", project_root: project, version: "1.2.3")
+  end
+
+  def with_retained_package(project)
+    Dir.mktmpdir("publisher-retained-") do |retained|
+      package = publisher(project).package(destination: retained)
+      receipt = RetainedReceipt.new(
+        name: package.name, version: package.version,
+        package_digest: package.package_digest, release_digest: package.release_digest,
+        lint_contract: package.lint_contract
+      )
+      yield retained, receipt
+    end
+  end
+
+  def retained_store(receipt, retained)
+    Object.new.tap do |store|
+      store.define_singleton_method(:load) { |_registry, _name, _version| receipt }
+      store.define_singleton_method(:verify_bundle) { |_value| retained }
+    end
+  end
+
+  def recovery_publisher(project, store)
+    publisher = Hive::WorkflowPackage::Publisher.new(
+      "demo", project_root: project, version: "1.2.3", store: store
+    )
+    publisher.instance_variable_set(
+      :@publication_components,
+      { registry: "ivankuznetsov/honeycomb", store: store, submission: nil, resolver: nil }.freeze
+    )
+    publisher.define_singleton_method(:retained_receipt_path?) { |_registry| true }
+    publisher
   end
 
   def with_authored_workflow(instruction: "Inspect the task and write a concise result.\n")

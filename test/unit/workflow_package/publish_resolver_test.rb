@@ -32,9 +32,10 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
   end
 
   class Gateway
-    def initialize(pr:, error: nil)
+    def initialize(pr:, error: nil, parent_oid: "b" * 40)
       @pr = pr
       @error = error
+      @parent_oid = parent_oid
     end
 
     def pull_requests(_registry)
@@ -43,7 +44,7 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
     end
 
     def branch_oid(_repository, _branch) = @pr.head_oid
-    def commit_parent_oid(_repository, _oid) = "b" * 40
+    def commit_parent_oid(_repository, _oid) = @parent_oid
     def verify_remote_package!(_repository, _ref, _package) = true
   end
 
@@ -120,6 +121,23 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
 
     assert_equal "merged_pending_listing", result.state
     assert_equal "2026-07-21T11:30:00Z", result.observed_at
+  end
+
+  def test_unsupported_remote_state_and_commit_parent_drift_fail_closed
+    receipt = receipt_for("OPEN")
+    unsupported = pr("OPEN").with(state: "UNKNOWN")
+    assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+      resolver(
+        receipt, catalogue: Catalogue.new, gateway: Gateway.new(pr: unsupported)
+      ).resolve(receipt)
+    end
+
+    assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+      resolver(
+        receipt, catalogue: Catalogue.new,
+        gateway: Gateway.new(pr: pr("OPEN"), parent_oid: "e" * 40)
+      ).resolve(receipt)
+    end
   end
 
   private

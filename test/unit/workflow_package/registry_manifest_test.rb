@@ -3,7 +3,9 @@ require "test_helper"
 require "hive/agent_profiles"
 require "hive/workflow_package/canonical_yaml"
 require "hive/workflow_package/registry_manifest"
+require "hive/workflow_package/registry_manifest_builder"
 require "hive/workflow_package/runtime_policy"
+require "hive/workflow_package/source_snapshot"
 require "hive/workflow_package/validator"
 
 class WorkflowPackageRegistryManifestTest < Minitest::Test
@@ -172,6 +174,114 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
     end
   end
 
+  def test_manifest_builder_rejects_unsafe_destination_and_snapshot_writes
+    with_tmp_dir do |root|
+      occupied = File.join(root, "occupied")
+      FileUtils.mkdir_p(occupied)
+      File.write(File.join(occupied, "existing"), "keep")
+      assert_raises(Hive::ConfigError) do
+        build_registry_manifest(occupied, builder_snapshot)
+      end
+
+      unavailable = File.join(root, "unavailable")
+      with_replaced_singleton_method(FileUtils, :mkdir_p, ->(*_args, **_kwargs) { raise Errno::EACCES }) do
+        assert_raises(Hive::ConfigError) do
+          build_registry_manifest(unavailable, builder_snapshot)
+        end
+      end
+
+      unsafe = builder_snapshot(files: {
+        "../outside" => Hive::WorkflowPackage::SourceSnapshot::FileRecord.new(
+          path: "../outside", bytes: "bad", mode: 0o644, source: "/source"
+        )
+      })
+      assert_raises(Hive::ConfigError) do
+        build_registry_manifest(File.join(root, "unsafe"), unsafe)
+      end
+
+      overwrite = File.join(root, "overwrite")
+      FileUtils.mkdir_p(overwrite)
+      File.write(File.join(overwrite, "README.md"), "existing")
+      builder = Hive::WorkflowPackage::RegistryManifestBuilder.new(
+        destination: overwrite, name: "demo", version: "1.0.0",
+        metadata: builder_metadata, snapshot: builder_snapshot
+      )
+      assert_raises(Hive::ConfigError) { builder.send(:write_snapshot!) }
+    end
+  end
+
+  def test_manifest_builder_creates_destination_and_declares_executable_tools
+    with_tmp_dir do |root|
+      destination = File.join(root, "new-package")
+      snapshot = builder_snapshot(files: {
+        "README.md" => Hive::WorkflowPackage::SourceSnapshot::FileRecord.new(
+          path: "README.md", bytes: "# Demo\n", mode: 0o644, source: "/README.md"
+        ),
+        "workflow.yml" => Hive::WorkflowPackage::SourceSnapshot::FileRecord.new(
+          path: "workflow.yml", bytes: YAML.dump(builder_descriptor), mode: 0o644, source: "/workflow.yml"
+        ),
+        "tools/check.sh" => Hive::WorkflowPackage::SourceSnapshot::FileRecord.new(
+          path: "tools/check.sh", bytes: "#!/bin/sh\n", mode: 0o755, source: "/check.sh"
+        )
+      })
+
+      build = build_registry_manifest(destination, snapshot)
+
+      assert File.directory?(destination)
+      assert_equal [ { "path" => "tools/check.sh" } ],
+                   build.manifest.data.dig("x-hive", "tools")
+    end
+  end
+
+  def test_validator_checks_external_skill_extension_shape_and_exactness
+    [
+      [ [ "bad skill" ], "x-hive.invalid_external_skills" ],
+      [ [ "external/reviewer" ], "x-hive.external_skill_mismatch" ]
+    ].each do |skills, rule|
+      with_registry_package do |root, document|
+        document["x-hive"] = {
+          "tools" => [], "optional_inputs" => [], "external_skills" => skills
+        }
+        rewrite_manifest(root, document)
+
+        result = Hive::WorkflowPackage::Validator.validate(root)
+
+        assert_includes result.errors.map(&:rule_id), rule
+      end
+    end
+  end
+
+  def test_validator_reports_unbounded_write_even_with_exact_coarse_projection
+    with_registry_package do |root, document|
+      workflow_path = File.join(root, "workflow.yml")
+      File.write(
+        workflow_path,
+        File.read(workflow_path).sub(
+          "permissions: read-only",
+          "permissions: { preset: scoped, tools: [Write] }"
+        )
+      )
+      descriptor = YAML.safe_load(File.read(workflow_path))
+      document["permissions"] = Hive::WorkflowPackage::PermissionProjection.derive!(descriptor)
+      rewrite_manifest(root, document)
+
+      result = Hive::WorkflowPackage::Validator.validate(root)
+
+      assert_includes result.errors.map(&:rule_id), "policy.disclosure_mismatch"
+    end
+  end
+
+  def test_permission_projection_yaml_read_failure_is_typed
+    with_tmp_dir do |root|
+      File.write(File.join(root, "workflow.yml"), "stages: [\n")
+      validator = Hive::WorkflowPackage::Validator.new(
+        root, expected_name: nil, expected_manifest_digest: nil, managed: true
+      )
+
+      assert_raises(Hive::ConfigError) { validator.send(:manifest_descriptor_hash) }
+    end
+  end
+
   private
 
   def assert_package_rule(expected)
@@ -235,5 +345,45 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
       Hive::WorkflowPackage::CanonicalYAML.dump_manifest(document, include_release: false)
     )
     File.binwrite(File.join(root, "manifest.yml"), Hive::WorkflowPackage::CanonicalYAML.dump_manifest(document))
+  end
+
+  def build_registry_manifest(destination, snapshot)
+    Hive::WorkflowPackage::RegistryManifestBuilder.build!(
+      destination: destination, name: "demo", version: "1.0.0",
+      metadata: builder_metadata, snapshot: snapshot
+    )
+  end
+
+  def builder_metadata
+    Data.define(:description, :author, :license, :hive_min_version, :source).new(
+      description: "Demo", author: { "name" => "Test", "url" => "https://example.test/test" },
+      license: "MIT", hive_min_version: Hive::VERSION,
+      source: { "url" => "https://example.test/source", "revision" => "c" * 40 }
+    )
+  end
+
+  def builder_descriptor
+    {
+      "id" => "demo",
+      "stages" => [ {
+        "name" => "work", "kind" => "agent", "state_file" => "work.md",
+        "instruction" => "instructions/work.md", "permissions" => "read-only",
+        "mapping_role" => "development", "mapping_contract" => "demo-work-v1"
+      } ]
+    }
+  end
+
+  def builder_snapshot(files: nil)
+    files ||= {
+      "README.md" => Hive::WorkflowPackage::SourceSnapshot::FileRecord.new(
+        path: "README.md", bytes: "# Demo\n", mode: 0o644, source: "/README.md"
+      ),
+      "workflow.yml" => Hive::WorkflowPackage::SourceSnapshot::FileRecord.new(
+        path: "workflow.yml", bytes: YAML.dump(builder_descriptor), mode: 0o644, source: "/workflow.yml"
+      )
+    }
+    Hive::WorkflowPackage::SourceSnapshot::Snapshot.new(
+      name: "demo", descriptor: builder_descriptor, files: files, external_skills: []
+    )
   end
 end

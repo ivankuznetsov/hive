@@ -55,6 +55,21 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
     end
   end
 
+  def test_catalogue_observation_separates_invalid_identity_from_transport_unavailability
+    client = Hive::WorkflowPackage::RegistryClient.new
+    assert_raises(Hive::WorkflowPackage::RegistryError) do
+      client.observe(name: "Bad Name", version: "latest", release_digest: "short")
+    end
+
+    client.define_singleton_method(:git!) do |*_args, **_kwargs|
+      raise Hive::WorkflowPackage::RegistryError, "offline"
+    end
+    error = assert_raises(Hive::WorkflowPackage::CatalogueUnavailable) do
+      client.observe(name: "demo", version: "1.0.0", release_digest: "a" * 64)
+    end
+    assert_equal "offline", error.message
+  end
+
   def test_rejects_external_namespace_mutable_and_unlisted_refs
     with_registry do |repository, _source_revision, _catalog_commit|
       client = Hive::WorkflowPackage::RegistryClient.new(repository: repository)

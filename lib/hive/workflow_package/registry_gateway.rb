@@ -189,7 +189,7 @@ module Hive
         FileUtils.cp_r(package.root, target)
         git!(checkout, "checkout", "-b", branch)
         git!(checkout, "add", "--", package.registry_path)
-        status = git!(checkout, "status", "--porcelain=v1").lines.map(&:strip)
+        status = git!(checkout, "status", "--porcelain=v1").lines.map(&:strip).reject(&:empty?)
         unless status.any? && status.all? { |line| line.split.last.start_with?(package.registry_path) }
           raise PublishRecoveryError, "publication commit contains files outside the immutable package path"
         end
@@ -306,7 +306,8 @@ module Hive
           end
           path.delete_prefix(prefix)
         end.sort
-        expected = Manifest.inventory(package.root, exclude: [], require_utf8: false).keys.sort
+        expected = Manifest.inventory(package.root, exclude: [], require_utf8: false)
+                           .map { |entry| entry.fetch("path") }.sort
         raise PublishConflict, "remote package tree does not match the complete package inventory" unless actual == expected
       end
 

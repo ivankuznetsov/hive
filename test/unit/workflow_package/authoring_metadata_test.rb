@@ -48,6 +48,57 @@ class WorkflowPackageAuthoringMetadataTest < Minitest::Test
     end
   end
 
+  def test_rejects_each_closed_metadata_field_boundary
+    variants = {
+      "compound license" => valid_metadata_yaml.sub("license: MIT", "license: MIT OR Apache-2.0"),
+      "invalid minimum" => valid_metadata_yaml.sub("hive_min_version: 0.6.5", "hive_min_version: latest"),
+      "author shape" => valid_metadata_yaml.sub(
+        "author:\n  name: Test Author\n  url: https://example.test/authors/test\n",
+        "author:\n  name: Test Author\n"
+      ),
+      "source shape" => valid_metadata_yaml.sub(
+        "source:\n  url: https://example.test/source/demo\n  revision: #{'a' * 40}\n",
+        "source:\n  url: https://example.test/source/demo\n"
+      ),
+      "asset type" => valid_metadata_yaml.sub("assets:\n", "assets: value\n"),
+      "asset path" => valid_metadata_yaml.sub("  - assets/context.md", "  - ../outside"),
+      "credential URL" => valid_metadata_yaml.sub("https://example.test/authors/test", "https://user@example.test/author"),
+      "invalid URL" => valid_metadata_yaml.sub("https://example.test/authors/test", "http://[")
+    }
+
+    variants.each do |label, bytes|
+      with_tmp_dir do |dir|
+        path = File.join(dir, "honeycomb.yml")
+        File.write(path, bytes)
+        assert_raises(Hive::ConfigError, label) { Metadata.load(path) }
+      end
+    end
+  end
+
+  def test_safe_yaml_and_bounded_file_edges_fail_closed
+    [
+      "",
+      "---\na: b\n---\nc: d\n",
+      "1: value\n",
+      "? [a, b]\n: value\n",
+      "a: [\n"
+    ].each do |bytes|
+      assert_raises(Hive::ConfigError) do
+        Metadata.parse_yaml_map(bytes, label: "fixture")
+      end
+    end
+
+    with_tmp_dir do |dir|
+      assert_raises(Hive::ConfigError) { Metadata.load(File.join(dir, "missing.yml")) }
+      assert_raises(Hive::ConfigError) { Metadata.load(dir) }
+      link = File.join(dir, "honeycomb.yml")
+      target = File.join(dir, "target.yml")
+      File.write(target, valid_metadata_yaml)
+      File.symlink(target, link)
+      assert_raises(Hive::ConfigError) { Metadata.load(link) }
+    end
+  end
+
   private
 
   def valid_metadata_yaml

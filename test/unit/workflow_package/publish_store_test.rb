@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/workflow_package/canonical_yaml"
+require "hive/workflow_package/publish_lock"
 require "hive/workflow_package/publish_store"
 require "hive/workflow_package/publisher"
 
@@ -86,6 +87,110 @@ class WorkflowPackagePublishStoreTest < Minitest::Test
         assert_equal "2026-07-21T13:00:00Z", loaded.observation.fetch("observed_at")
         assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
           store.update("owner/registry", "demo", "1.2.3") { receipt }
+        end
+      end
+    end
+  end
+
+  def test_retained_bundle_rejects_version_payload_and_state_file_drift
+    with_package do |package|
+      with_tmp_dir do |state|
+        store = Hive::WorkflowPackage::PublishStore.new(root: File.join(state, "publish"))
+        receipt = store.create_or_load(package, registry: "owner/registry")
+
+        wrong_version = Hive::WorkflowPackage::PublishReceipt.from_h(
+          receipt.to_h.merge("version" => "9.9.9")
+        )
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          store.verify_bundle(wrong_version)
+        end
+
+        readme = File.join(store.bundle_path(receipt.package_digest), "README.md")
+        File.write(readme, "changed")
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          store.verify_bundle(receipt)
+        end
+      end
+    end
+  end
+
+  def test_retention_rechecks_manifest_and_reuses_only_verified_bundle
+    with_package do |package|
+      with_tmp_dir do |state|
+        store = Hive::WorkflowPackage::PublishStore.new(root: File.join(state, "publish"))
+        receipt = store.create_or_load(package, registry: "owner/registry")
+        assert_equal store.bundle_path(receipt.package_digest),
+                     store.send(:persist_bundle, package)
+
+        File.open(File.join(package.root, "manifest.yml"), "ab") { |file| file.write("changed") }
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          store.send(:persist_bundle, package)
+        end
+
+        missing = package.with(root: File.join(state, "missing"))
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          store.send(:persist_bundle, missing)
+        end
+      end
+    end
+  end
+
+  def test_receipt_and_bundle_files_fail_closed_on_canonical_link_and_missing_edges
+    with_package do |package|
+      with_tmp_dir do |state|
+        store = Hive::WorkflowPackage::PublishStore.new(root: File.join(state, "publish"))
+        receipt = store.create_or_load(package, registry: "owner/registry")
+        receipt_path = store.receipt_path("owner/registry", "demo", "1.2.3")
+
+        data = JSON.parse(File.read(receipt_path))
+        File.write(receipt_path, JSON.pretty_generate(data))
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          store.load("owner/registry", "demo", "1.2.3")
+        end
+        File.write(receipt_path, "{not-json")
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          store.load("owner/registry", "demo", "1.2.3")
+        end
+
+        bundle = store.bundle_path(receipt.package_digest)
+        File.chmod(0o755, bundle)
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          store.verify_bundle(receipt)
+        end
+        File.chmod(0o700, bundle)
+        manifest = File.join(bundle, "manifest.yml")
+        File.link(manifest, File.join(bundle, "manifest-copy.yml"))
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          store.verify_bundle(receipt)
+        end
+        FileUtils.rm_f(File.join(bundle, "manifest-copy.yml"))
+        FileUtils.rm_rf(bundle)
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          store.verify_bundle(receipt)
+        end
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          store.send(:secure_file!, File.join(state, "missing-state"))
+        end
+
+        assert_equal receipt.identity.transform_keys(&:to_sym), store.send(:symbol_identity, receipt)
+      end
+    end
+  end
+
+  def test_publish_lock_rejects_insecure_state_and_wraps_open_failures
+    with_tmp_dir do |root|
+      insecure = File.join(root, "insecure")
+      FileUtils.mkdir_p(insecure)
+      File.chmod(0o755, insecure)
+      assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+        Hive::WorkflowPackage::PublishLock.ensure_private_directory!(insecure)
+      end
+
+      private_root = File.join(root, "private")
+      replacement = ->(*_args, &_block) { raise Errno::ENOSPC, "full" }
+      with_replaced_singleton_method(File, :open, replacement) do
+        assert_raises(Hive::ConcurrentRunError) do
+          Hive::WorkflowPackage::PublishLock.with_lock(private_root, "identity") { flunk }
         end
       end
     end

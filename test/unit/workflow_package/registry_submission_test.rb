@@ -76,11 +76,11 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
       @pr.url
     end
 
-    def seed_pull_request(package, owner: "bob", branch: "contribution/demo")
+    def seed_pull_request(package, owner: "bob", branch: "contribution/demo", state: "OPEN")
       @pushed = true
       @pr = PullRequest.new(
         number: 41, url: "https://github.com/ivankuznetsov/honeycomb/pull/41",
-        state: "OPEN", draft: false, merged_at: nil,
+        state: state, draft: false, merged_at: state == "MERGED" ? "2026-07-21T12:00:00Z" : nil,
         head_repository: "#{owner}/honeycomb", head_branch: branch,
         head_oid: "c" * 40, base_branch: "main",
         body: Hive::WorkflowPackage::RegistryGateway.pr_body(package)
@@ -222,6 +222,127 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
     end
   end
 
+  def test_rejects_invalid_registry_and_base_configuration
+    assert_raises(Hive::ConfigError) do
+      Hive::WorkflowPackage::RegistrySubmission.new(registry: "invalid", base_branch: "main")
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::WorkflowPackage::RegistrySubmission.new(
+        registry: "owner/registry", base_branch: "invalid..branch"
+      )
+    end
+  end
+
+  def test_fork_failures_preserve_conflicts_and_classify_unknown_outcomes
+    with_package do |package|
+      [
+        [ Hive::WorkflowPackage::PublishConflict.new("wrong fork"),
+          Hive::WorkflowPackage::PublishConflict ],
+        [ IOError.new("lost fork response"),
+          Hive::WorkflowPackage::PublishAmbiguousError ]
+      ].each do |raised, expected|
+        with_tmp_dir do |state|
+          gateway = FakeGateway.new(package)
+          gateway.define_singleton_method(:ensure_fork) { |_repository, _login| raise raised }
+
+          error = assert_raises(expected) { submission_for(state, gateway).submit(package) }
+          assert_match(expected == raised.class ? /wrong fork/ : /outcome is unknown/, error.message)
+        end
+      end
+    end
+  end
+
+  def test_retained_destination_changes_and_deleted_verified_branches_fail_closed
+    with_package do |package|
+      with_tmp_dir do |state|
+        store = Hive::WorkflowPackage::PublishStore.new(root: state)
+        receipt = seed_prepared_receipt(store, package, owner: "bob")
+        assert_equal "prepared", receipt.last_completed_step
+
+        error = assert_raises(Hive::WorkflowPackage::PublishConflict) do
+          submission_for(state, FakeGateway.new(package, direct: true)).submit(package)
+        end
+        assert_match(/destination or authenticated owner changed/, error.message)
+      end
+
+      with_tmp_dir do |state|
+        store = Hive::WorkflowPackage::PublishStore.new(root: state)
+        receipt = seed_prepared_receipt(store, package)
+        receipt = store.save(receipt.advance("push_intent", commit_oid: "c" * 40))
+        store.save(receipt.advance("pushed", commit_oid: "c" * 40))
+
+        error = assert_raises(Hive::WorkflowPackage::PublishConflict) do
+          submission_for(state, FakeGateway.new(package, direct: true)).submit(package)
+        end
+        assert_match(/previously verified publication branch was removed/, error.message)
+      end
+    end
+  end
+
+  def test_adoption_records_merged_and_closed_lifecycle_states
+    with_package do |package|
+      {
+        "MERGED" => "merged_pending_listing",
+        "CLOSED" => "closed_unmerged"
+      }.each do |remote_state, lifecycle|
+        with_tmp_dir do |state|
+          gateway = FakeGateway.new(package)
+          gateway.seed_pull_request(package, state: remote_state)
+
+          result = submission_for(state, gateway).submit(package)
+
+          assert_equal lifecycle, result.receipt.observation.fetch("state")
+        end
+      end
+    end
+  end
+
+  def test_adoption_translates_receipt_inconsistency_into_immutable_conflict
+    with_package do |package|
+      with_tmp_dir do |state|
+        store = Hive::WorkflowPackage::PublishStore.new(root: state)
+        receipt = seed_prepared_receipt(store, package)
+        gateway = FakeGateway.new(package)
+        gateway.seed_pull_request(package, owner: "bob")
+        pr = gateway.pull_requests("ivankuznetsov/honeycomb").first
+        candidate = Hive::WorkflowPackage::RegistrySubmission::VerifiedCandidate.new(
+          pull_request: pr, base_oid: "b" * 40
+        )
+        submission = submission_for(state, gateway)
+
+        error = assert_raises(Hive::WorkflowPackage::PublishConflict) do
+          submission.send(:adopt, receipt, candidate, package, login: "alice")
+        end
+        assert_match(/identity conflicts/, error.message)
+      end
+    end
+  end
+
+  def test_exact_merged_identity_and_malformed_pr_metadata_are_explicit_conflicts
+    with_package do |package|
+      with_tmp_dir do |state|
+        submission = submission_for(state, FakeGateway.new(package))
+
+        error = assert_raises(Hive::WorkflowPackage::PublishConflict) do
+          submission.send(
+            :raise_immutable_version!,
+            { package_digest: package.package_digest, release_digest: package.release_digest },
+            package
+          )
+        end
+        assert_match(/already merged/, error.message)
+
+        error = assert_raises(Hive::WorkflowPackage::PublishConflict) do
+          submission.send(
+            :parse_metadata,
+            "<!-- hive-workflow-publish:v1 {not-json} -->"
+          )
+        end
+        assert_match(/malformed Hive publication metadata/, error.message)
+      end
+    end
+  end
+
   private
 
   def submission_for(root, gateway)
@@ -229,6 +350,17 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
       registry: "ivankuznetsov/honeycomb", base_branch: "main", gateway: gateway,
       store: Hive::WorkflowPackage::PublishStore.new(root: root)
     )
+  end
+
+  def seed_prepared_receipt(store, package, owner: "alice")
+    branch = "honeycomb-demo-1.0.0-#{package.release_digest[0, 12]}"
+    receipt = store.create_or_load(package, registry: "ivankuznetsov/honeycomb")
+    store.save(receipt.advance(
+      "prepared",
+      submission_mode: "direct", destination_repository: "ivankuznetsov/honeycomb",
+      base_branch: "main", base_sha: "b" * 40,
+      head_repository: "ivankuznetsov/honeycomb", head_branch: branch, owner: owner
+    ))
   end
 
   def with_package

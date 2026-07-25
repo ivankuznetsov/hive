@@ -41,6 +41,22 @@ class WorkflowPublishCommandTest < Minitest::Test
     assert_equal [ :prepare ], calls
   end
 
+  def test_expected_digest_must_be_lowercase_sha256_and_is_not_accepted_for_dry_run
+    publisher, calls = publisher_double
+
+    error = assert_raises(Hive::Commands::Workflow::Publish::ValidationError) do
+      command(publisher, expected_release_digest: "B" * 64).call!
+    end
+    assert_match(/lowercase SHA-256/, error.message)
+    assert_empty calls
+
+    error = assert_raises(Hive::Commands::Workflow::Publish::ValidationError) do
+      command(publisher, dry_run: true, expected_release_digest: "b" * 64).call!
+    end
+    assert_match(/confirmed real publication/, error.message)
+    assert_empty calls
+  end
+
   def test_validation_error_is_closed_retry_safe_schema_payload
     publisher = Object.new
     publisher.define_singleton_method(:package) { |destination:| raise Hive::ConfigError, "bad authored metadata" }
@@ -93,11 +109,53 @@ class WorkflowPublishCommandTest < Minitest::Test
     assert publish_schemer.valid?(payload)
   end
 
+  def test_unexpected_human_error_is_redacted
+    stdout = StringIO.new
+
+    _, stderr = capture_io do
+      error = assert_raises(SystemExit) do
+        command(
+          erroring_publisher(RuntimeError.new("raw secret detail")),
+          stdout: stdout,
+          json: false
+        ).call
+      end
+      assert_equal Hive::ExitCodes::SOFTWARE, error.status
+    end
+
+    assert_empty stdout.string
+    assert_match(/workflow publication failed unexpectedly \(RuntimeError\)/, stderr)
+    refute_includes stderr, "raw secret detail"
+  end
+
+  def test_error_envelope_falls_back_when_receipt_context_cannot_be_loaded
+    publisher, = publisher_double
+    publisher.define_singleton_method(:receipt_for) { |_package| raise IOError, "receipt unavailable" }
+    command = command(publisher)
+    command.instance_variable_set(:@last_package, publisher.prepare(destination: Dir.pwd))
+    error = Hive::WorkflowPackage::PublishOfflineError.new("offline")
+
+    payload = command.send(:error_payload, error)
+
+    assert_equal "offline", payload.fetch("error_kind")
+    assert_equal true, payload.fetch("retryable")
+    refute payload.key?("package_digest")
+  end
+
+  def test_config_errors_have_the_configuration_error_kind
+    publisher, = publisher_double
+
+    assert_equal(
+      "configuration",
+      command(publisher).send(:error_kind, Hive::ConfigError.new("bad config"))
+    )
+  end
+
   private
 
-  def command(publisher, stdout: StringIO.new, dry_run: false, expected_release_digest: nil)
+  def command(publisher, stdout: StringIO.new, dry_run: false, expected_release_digest: nil, json: true)
     Hive::Commands::Workflow::Publish.new(
-      "demo", project_root: Dir.pwd, version: "1.2.3", json: true,
+      "demo", project_root: Dir.pwd, version: "1.2.3", json: json,
       dry_run: dry_run, expected_release_digest: expected_release_digest,
       stdout: stdout, publisher: publisher,
       clock: -> { Time.iso8601("2026-07-21T12:00:00Z") }

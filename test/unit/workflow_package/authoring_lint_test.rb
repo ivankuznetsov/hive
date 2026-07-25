@@ -118,6 +118,292 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
     end
   end
 
+  def test_policy_loader_rejects_version_shape_and_fixture_drift
+    policy_class = Hive::WorkflowPackage::LintPolicy
+    policy = policy_class.load_version("v1")
+    assert_equal "v1", policy.version
+    assert_raises(Hive::ConfigError) { policy_class.load_version("v2") }
+    assert_raises(Hive::ConfigError) do
+      policy_class.load(path: File.join(Dir.tmpdir, "missing-hive-lint-policy.yml"))
+    end
+
+    data = YAML.safe_load(File.binread(policy_class::PATH))
+    [
+      data.merge("schema" => "future"),
+      data.merge("limits" => data.fetch("limits").merge("max_files" => 0)),
+      data.merge("known_rules" => [ "duplicate", "duplicate" ])
+    ].each do |candidate|
+      assert_raises(Hive::ConfigError) { policy_class.send(:validate!, candidate) }
+    end
+
+    with_tmp_dir do |fixtures|
+      policy_class::FIXTURE_FILES.each do |name|
+        FileUtils.cp(fixture(name), File.join(fixtures, name))
+      end
+      FileUtils.cp(fixture("expected.json"), File.join(fixtures, policy_class::EXPECTED_FILE))
+      File.open(File.join(fixtures, "benign.md"), "ab") { |file| file.write("changed") }
+      assert_raises(Hive::ConfigError) do
+        policy_class.send(:verify_fixture_contract!, data, fixtures)
+      end
+      FileUtils.rm_f(File.join(fixtures, "malicious.md"))
+      assert_raises(Hive::ConfigError) do
+        policy_class.send(:verify_fixture_contract!, data, fixtures)
+      end
+    end
+  end
+
+  def test_verify_bang_and_unexpected_scanner_failures_are_closed
+    with_lint_package("safe\n") do |root, manifest|
+      assert Lint.verify!(root, manifest: manifest).valid?
+    end
+
+    with_lint_package("sk-ant-#{'x' * 30}\n") do |root, manifest|
+      error = assert_raises(Lint::LintError) { Lint.verify!(root, manifest: manifest) }
+      assert_instance_of Lint::Result, error.result
+    end
+
+    manifest = Object.new
+    manifest.define_singleton_method(:data) { raise RuntimeError, "scanner exploded" }
+    manifest.define_singleton_method(:permissions) { {} }
+    with_tmp_dir do |root|
+      result = Lint.verify(root, manifest: manifest)
+      assert_equal [ "policy.scanner-error" ], result.findings.map(&:rule_id)
+      refute result.valid?
+    end
+  end
+
+  def test_file_collection_rejects_links_limits_races_and_invalid_text
+    with_lint_package("safe\n") do |root, manifest|
+      File.symlink("README.md", File.join(root, "linked.md"))
+      assert_includes Lint.verify(root, manifest: manifest).findings.map(&:rule_id), "policy.invalid-file"
+    end
+
+    with_lint_package("safe\n") do |root, manifest|
+      result = Lint.verify(root, manifest: manifest, policy: policy_with("max_files" => 1))
+      assert_includes result.findings.map(&:rule_id), "policy.file-limit"
+    end
+
+    with_lint_package("safe\n") do |root, manifest|
+      result = Lint.verify(root, manifest: manifest, policy: policy_with("max_total_bytes" => 1))
+      assert_includes result.findings.map(&:rule_id), "policy.total-limit"
+    end
+
+    with_lint_package("safe\n") do |root, manifest|
+      File.binwrite(File.join(root, "invalid.txt"), "\xFF".b)
+      assert_includes Lint.verify(root, manifest: manifest).findings.map(&:rule_id),
+                      "policy.invalid-encoding"
+    end
+
+    with_lint_package("safe\n") do |root, manifest|
+      target = File.join(root, "README.md")
+      original = File.method(:lstat)
+      reads = 0
+      replacement = lambda do |path|
+        stat = original.call(path)
+        next stat unless path == target
+        reads += 1
+        next stat unless reads == 2
+
+        changed = Object.new
+        {
+          file?: true, symlink?: false, directory?: false,
+          dev: stat.dev, ino: stat.ino, size: stat.size + 1
+        }.each { |name, value| changed.define_singleton_method(name) { value } }
+        changed
+      end
+      with_replaced_singleton_method(File, :lstat, replacement) do
+        assert_includes Lint.verify(root, manifest: manifest).findings.map(&:rule_id),
+                        "policy.invalid-file"
+      end
+    end
+
+    missing = File.join(Dir.tmpdir, "missing-hive-lint-root-#{Process.pid}")
+    result = Lint.verify(missing, manifest: lint_manifest)
+    assert_includes result.findings.map(&:rule_id), "policy.invalid-file"
+  end
+
+  def test_extracts_commands_from_all_supported_authored_surfaces
+    data = {
+      "x-hive" => {
+        "tools" => [
+          { "path" => "tools/check.rb" },
+          { "path" => "tools/run.sh" },
+          { "path" => "tools/unsupported.exe" },
+          { "path" => "tools/binary" }
+        ],
+        "prompt_assets" => [ { "path" => "prompts/broken.yml" } ]
+      }
+    }
+    files = {
+      "tools/check.rb" => "system(\"echo ruby\")\nFile.read(\"/tmp/input\")\n",
+      "tools/run.sh" => "#!/bin/sh\ncat /tmp/input\n",
+      "tools/unsupported.exe" => "curl https://unsupported.example\n",
+      "tools/binary" => "binary\0payload".b,
+      "prompts/broken.yml" => "steps: [\n"
+    }
+    instruction = <<~MARKDOWN
+      Run `cat /tmp/inline`.
+
+      ```
+      curl https://inline.example
+      ```
+    MARKDOWN
+
+    with_lint_package(instruction, permissions: empty_permissions, data: data, files: files) do |root, manifest|
+      File.write(File.join(root, "workflow.yml"), <<~YAML)
+        id: demo
+        stages:
+          - name: work
+            permissions:
+              preset: scoped
+              tools:
+                - Read
+        command: curl https://scalar.example
+        script: |
+          cat /tmp/multiline
+          echo second-command
+      YAML
+      result = Lint.verify(root, manifest: manifest)
+      rules = result.findings.map(&:rule_id)
+
+      assert_includes rules, "instruction.malformed-yaml"
+      assert_includes rules, "policy.invalid-file"
+      assert_includes rules, "permission.shell"
+      assert_includes rules, "permission.filesystem-read"
+      assert_includes rules, "permission.network"
+      assert_includes rules, "permission.absolute-path"
+    end
+  end
+
+  def test_command_observation_and_finding_limits_fail_closed
+    instruction = <<~MARKDOWN
+      curl https://one.example
+      curl https://two.example
+      cat /tmp/three
+    MARKDOWN
+    with_lint_package(instruction, permissions: empty_permissions) do |root, manifest|
+      result = Lint.verify(
+        root, manifest: manifest,
+        policy: policy_with("max_commands" => 1, "max_observations" => 1, "max_findings" => 2)
+      )
+      assert_includes result.findings.map(&:rule_id), "policy.finding-limit"
+    end
+
+    with_lint_package("curl https://one.example\ncurl https://two.example\n",
+                      permissions: empty_permissions) do |root, manifest|
+      result = Lint.verify(root, manifest: manifest, policy: policy_with("max_observations" => 1))
+      assert_includes result.findings.map(&:rule_id), "policy.observation-limit"
+    end
+
+    with_lint_package("cat /tmp/one\ncat /tmp/two\n", permissions: empty_permissions) do |root, manifest|
+      result = Lint.verify(root, manifest: manifest, policy: policy_with("max_commands" => 1))
+      assert_includes result.findings.map(&:rule_id), "policy.command-limit"
+    end
+  end
+
+  def test_network_parser_handles_dynamic_options_invalid_shell_and_ip_literals
+    instruction = <<~MARKDOWN
+      curl --url "$API_URL"
+      curl --url https://static.example
+      wget --header Value "$WGET_URL"
+      iwr -Headers Value -Uri %API_URL%
+      curl 'unterminated
+      curl http://127.0.0.1/resource
+      curl http://[invalid]
+    MARKDOWN
+    permissions = empty_permissions.merge(
+      "capabilities" => %w[network shell],
+      "network_hosts" => [ "127.0.0.1" ]
+    )
+    with_lint_package(instruction, permissions: permissions) do |root, manifest|
+      lint = Lint.new(root, manifest: manifest, policy: Hive::WorkflowPackage::LintPolicy.load)
+      refute lint.send(:value_option?, "unknown", "--value")
+      rules = lint.verify.findings.map(&:rule_id)
+      assert_includes rules, "network.dynamic-destination"
+      assert_includes rules, "network.ip-literal"
+    end
+  end
+
+  def test_security_extension_validates_reasons_and_suppression_requests
+    permissions = unbounded.merge("network_hosts" => [ "api.example.test" ])
+    base_data = {
+      "x-security" => {
+        "network_host_reasons" => { "api.example.test" => "Required API access" },
+        "suppressions" => []
+      }
+    }
+    with_lint_package("curl https://api.example.test/data\n",
+                      permissions: permissions, data: base_data) do |root, manifest|
+      first = Lint.verify(root, manifest: manifest)
+      broad = first.findings.find { |finding| finding.rule_id == "permission.broad-declaration" }
+      manifest.data.fetch("x-security")["suppressions"] = [
+        { "fingerprint" => broad.fingerprint, "reason" => "Reviewed broad access" }
+      ]
+      requested = Lint.verify(root, manifest: manifest)
+      finding = requested.findings.find { |item| item.fingerprint == broad.fingerprint }
+      assert finding.suppression_requested
+      assert finding.review_required
+    end
+
+    with_lint_package("safe\n", data: {
+      "x-security" => {
+        "network_host_reasons" => {},
+        "suppressions" => [ { "fingerprint" => "a" * 64, "reason" => "No match" } ]
+      }
+    }) do |root, manifest|
+      assert_includes Lint.verify(root, manifest: manifest).findings.map(&:rule_id),
+                      "suppression.orphaned-request"
+    end
+
+    secret = "sk-ant-#{'x' * 30}"
+    with_lint_package(secret, data: {
+      "x-security" => { "network_host_reasons" => {}, "suppressions" => [] }
+    }) do |root, manifest|
+      fingerprint = Lint.verify(root, manifest: manifest).findings
+                        .find { |finding| finding.rule_id == "secret.anthropic-key" }.fingerprint
+      manifest.data.fetch("x-security")["suppressions"] = [
+        { "fingerprint" => fingerprint, "reason" => "Cannot suppress secrets" }
+      ]
+      assert_includes Lint.verify(root, manifest: manifest).findings.map(&:rule_id),
+                      "manifest.invalid-security-extension"
+    end
+
+    invalid_extensions = [
+      [],
+      { "network_host_reasons" => [], "suppressions" => [] },
+      {
+        "network_host_reasons" => { "API.EXAMPLE.TEST." => "Reason" },
+        "suppressions" => []
+      },
+      {
+        "network_host_reasons" => { "api.example.test:70000" => "Reason" },
+        "suppressions" => []
+      },
+      {
+        "network_host_reasons" => {},
+        "suppressions" => [
+          { "fingerprint" => "a" * 64, "reason" => "one" },
+          { "fingerprint" => "a" * 64, "reason" => "two" }
+        ]
+      }
+    ]
+    invalid_extensions.each do |extension|
+      with_lint_package("safe\n", data: { "x-security" => extension }) do |root, manifest|
+        assert_includes Lint.verify(root, manifest: manifest).findings.map(&:rule_id),
+                        "manifest.invalid-security-extension"
+      end
+    end
+  end
+
+  def test_unknown_rule_emission_fails_closed
+    with_lint_package("person@example.test\n") do |root, manifest|
+      policy = Hive::WorkflowPackage::LintPolicy.load
+      policy = policy.with(known_rules: (policy.known_rules - [ "pii.email" ]).freeze)
+      result = Lint.verify(root, manifest: manifest, policy: policy)
+      assert_equal [ "policy.unknown-rule" ], result.findings.map(&:rule_id)
+    end
+  end
+
   private
 
   def fixture(name) = File.expand_path("../../fixtures/honeycomb_security_lint/#{name}", __dir__)
@@ -138,19 +424,38 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
     }
   end
 
-  def with_lint_package(instruction, permissions: nil)
+  def empty_permissions
+    {
+      "risk" => "low", "capabilities" => [], "network_hosts" => [],
+      "filesystem_read" => [], "filesystem_write" => [], "secrets" => []
+    }
+  end
+
+  def lint_manifest(permissions: nil, data: {})
+    permissions ||= {
+      "risk" => "low", "capabilities" => [ "filesystem-read" ], "network_hosts" => [],
+      "filesystem_read" => %w[repository task], "filesystem_write" => [], "secrets" => []
+    }
+    Struct.new(:data, :permissions).new({ "permissions" => permissions }.merge(data), permissions)
+  end
+
+  def policy_with(limits)
+    policy = Hive::WorkflowPackage::LintPolicy.load
+    policy.with(limits: policy.limits.merge(limits).freeze)
+  end
+
+  def with_lint_package(instruction, permissions: nil, data: {}, files: {})
     with_tmp_dir do |root|
       FileUtils.mkdir_p(File.join(root, "instructions"))
       File.write(File.join(root, "README.md"), "# Demo\n")
       File.write(File.join(root, "workflow.yml"), "id: demo\nstages: []\n")
       File.binwrite(File.join(root, "instructions", "work.md"), instruction)
-      data = {
-        "permissions" => permissions || {
-          "risk" => "low", "capabilities" => [ "filesystem-read" ], "network_hosts" => [],
-          "filesystem_read" => %w[repository task], "filesystem_write" => [], "secrets" => []
-        }
-      }
-      manifest = Struct.new(:data, :permissions).new(data, data.fetch("permissions"))
+      files.each do |relative, bytes|
+        path = File.join(root, relative)
+        FileUtils.mkdir_p(File.dirname(path))
+        File.binwrite(path, bytes)
+      end
+      manifest = lint_manifest(permissions: permissions, data: data)
       yield root, manifest
     end
   end

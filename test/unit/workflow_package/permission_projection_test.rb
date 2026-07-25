@@ -52,4 +52,38 @@ class WorkflowPackagePermissionProjectionTest < Minitest::Test
       end
     end
   end
+
+  def test_rejects_malformed_descriptor_and_scoped_shapes
+    [
+      nil,
+      { "stages" => "not-an-array" },
+      { "stages" => [ { "kind" => "agent", "permissions" => 7 } ] },
+      { "stages" => [ { "kind" => "agent", "permissions" => { "preset" => "scoped" } } ] },
+      {
+        "stages" => [
+          { "kind" => "agent", "permissions" => { "preset" => "scoped", "tools" => [], "bash" => false } }
+        ]
+      },
+      {
+        "stages" => [
+          { "kind" => "agent", "permissions" => { "preset" => "scoped", "tools" => [] } }
+        ]
+      }
+    ].each do |descriptor|
+      assert_raises(Hive::ConfigError) { Projection.derive!(descriptor) }
+    end
+  end
+
+  def test_projects_path_scoped_read_without_granting_other_capabilities
+    permissions = Projection.derive!({
+      "stages" => [ {
+        "kind" => "agent",
+        "permissions" => { "preset" => "scoped", "tools" => [ "Read(../../../../docs)" ] }
+      } ]
+    })
+
+    assert_equal [ "filesystem-read" ], permissions.fetch("capabilities")
+    assert_equal [ "repository/docs" ], permissions.fetch("filesystem_read")
+    assert_empty permissions.fetch("filesystem_write")
+  end
 end

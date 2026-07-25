@@ -68,6 +68,82 @@ class WorkflowPackagePublishReceiptTest < Minitest::Test
     end
   end
 
+  def test_continuation_rejects_invalid_backwards_and_changed_authority
+    validated = Receipt.build(**identity)
+    prepared = validated.advance("prepared", direct_submission_fields)
+    pushed = prepared.advance("push_intent", "commit_oid" => "c" * 40)
+
+    assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+      pushed.assert_continuation!(Object.new)
+    end
+    assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+      pushed.assert_continuation!(prepared)
+    end
+
+    changed = validated.advance(
+      "prepared", direct_submission_fields.merge("owner" => "different")
+    )
+    assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+      prepared.assert_continuation!(changed)
+    end
+
+    current = submitted_receipt.observe(
+      state: "pending_review", observed_at: "2026-07-21T13:00:00Z",
+      pr_url: "https://github.com/owner/registry/pull/1", pr_number: 1
+    )
+    older = submitted_receipt.observe(
+      state: "pending_review", observed_at: "2026-07-21T12:00:00Z",
+      pr_url: "https://github.com/owner/registry/pull/1", pr_number: 1
+    )
+    assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+      current.assert_continuation!(older)
+    end
+  end
+
+  def test_step_and_observation_shape_invariants_fail_closed
+    prepared = Receipt.build(**identity).advance("prepared", direct_submission_fields)
+    cases = [
+      prepared.data.merge("last_completed_step" => "fork_create_intent"),
+      prepared.data.merge(
+        "pr_number" => 1, "pr_url" => "https://github.com/owner/registry/pull/1"
+      ),
+      prepared.data.merge(
+        "observation" => {
+          "state" => "pending_review", "freshness" => "current",
+          "observed_at" => "2026-07-21T12:00:00Z"
+        }
+      )
+    ]
+    cases.each do |data|
+      assert_raises(Hive::WorkflowPackage::PublishRecoveryError) { Receipt.from_h(data) }
+    end
+
+    base = submitted_receipt.data
+    malformed_observations = [
+      { "state" => "unknown", "freshness" => "current", "observed_at" => "2026-07-21T12:00:00Z" },
+      {
+        "state" => "pending_review", "freshness" => "current",
+        "observed_at" => "2026-07-21T12:00:00Z", "pr_number" => 0
+      },
+      { "state" => "pending_review", "freshness" => "current", "observed_at" => "not-time" }
+    ]
+    malformed_observations.each do |observation|
+      assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+        Receipt.from_h(base.merge("observation" => observation))
+      end
+    end
+  end
+
+  def test_receipt_copy_and_freeze_helpers_recurse_through_arrays
+    receipt = Receipt.build(**identity)
+    copied = receipt.send(:deep_copy, [ { symbol: [ "value" ] } ])
+    assert_equal [ { "symbol" => [ "value" ] } ], copied
+
+    frozen = receipt.send(:deep_freeze, copied)
+    assert_predicate frozen, :frozen?
+    assert_predicate frozen.first.fetch("symbol"), :frozen?
+  end
+
   private
 
   def submitted_receipt

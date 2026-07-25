@@ -583,6 +583,33 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
+  def test_unmanaged_agent_without_a_skill_resolver_is_reported_as_unsupported
+    with_tmp_dir do |dir|
+      bin_dir = File.join(dir, "bin")
+      executable(File.join(bin_dir, "grok"))
+      inspector_class = Class.new(Hive::AgentSkills::Inspector) do
+        def skill_module(agent)
+          raise Hive::ConfigError, "unsupported skill resolver for #{agent.inspect}"
+        end
+      end
+      inspector = inspector_class.new(
+        config: config, project_root: dir, runner: FakeRunner.new,
+        environment: { "HOME" => dir, "PATH" => bin_dir }
+      )
+      target = Hive::AgentSkills::Target.new(
+        surfaces: [ "review" ], kind: "agent", agent: "grok",
+        configured_skill: "private-review", invocation: "/private-review",
+        capability_id: "private-review", package_id: nil, managed: false
+      )
+
+      row = inspector.send(:inspect_unmanaged, target)
+
+      assert_equal "unavailable", row.health
+      assert_equal "unsupported", row.resolution.fetch("status")
+      assert_match(/unsupported skill resolver/, row.resolution.fetch("message"))
+    end
+  end
+
   def test_grok_native_compound_engineering_reviewer_is_managed_and_healthy
     with_tmp_dir do |dir|
       bin = File.join(dir, "bin", "grok")
@@ -629,7 +656,7 @@ class AgentSkillsInspectorTest < Minitest::Test
 
       row = Hive::AgentSkills::Inspector.new(
         config: cfg, project_root: dir, runner: runner,
-        environment: { "HOME" => dir, "PATH" => "", "GROK_HOME" => grok_home }
+        environment: { "HOME" => dir, "PATH" => "" }
       ).inspect(skills: [ "ce-code-review" ]).first
 
       assert_equal true, row.managed

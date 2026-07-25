@@ -194,6 +194,39 @@ class AgentSkillsFilesystemInventoryTest < Minitest::Test
     end
   end
 
+  def test_grok_missing_and_malformed_plugin_entries_are_typed
+    spec = native_spec(
+      provider: "grok",
+      package: "compound-engineering",
+      marketplace: nil,
+      source: "EveryInc/compound-engineering-plugin"
+    )
+
+    with_tmp_dir do |root|
+      write_json(File.join(root, "installed-plugins", "registry.json"), "repos" => {})
+
+      missing = inspect_provider(spec, root)
+
+      assert_empty missing.fetch("issues")
+      assert_nil missing.fetch("package")
+    end
+
+    with_tmp_dir do |root|
+      write_json(
+        File.join(root, "installed-plugins", "registry.json"),
+        "repos" => {
+          "compound-engineering-plugin-abc123" => {
+            "plugins" => { "compound-engineering" => "not-an-object" }
+          }
+        }
+      )
+
+      malformed = inspect_provider(spec, root)
+
+      assert_match(/plugin "compound-engineering" must be an object/, malformed.fetch("issues").first.last)
+    end
+  end
+
   private
 
   def inventory

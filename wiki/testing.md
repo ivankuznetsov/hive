@@ -63,12 +63,18 @@ otherwise it deliberately tests the previously committed tree.
 `config/component-boundaries.yml` is checked by
 `test/unit/component_boundaries_test.rb`. The test validates catalog shape,
 repository-local paths, unique ownership, an acyclic component graph, bounded
-migration exceptions, selected source-level dependency/construction rules, and
-fresh-process loading for every `boundary-ready` component:
+migration exceptions, selected source-level dependency/construction rules,
+exact authorized internal-construction sites, and fresh-process loading for
+every `boundary-ready` component:
 
 ```bash
 bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
 ```
+
+Ready components cannot depend on candidates. Forbidden-construction rules
+also apply to guarded candidates, and the helper can run a named focused
+clean-load proof for a candidate such as Attempts without representing the
+whole component graph as ready.
 
 The helper uses Ruby syntax rather than comments or string examples for literal
 `require`, `require_relative`, and `Constant.new` checks. It remains an

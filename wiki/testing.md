@@ -3,8 +3,8 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release}.yml, packaging/live_agent_skills/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-24
-tags: [test, minitest, fixtures, honeycomb, agent-skills, release-proof]
+updated: 2026-07-25
+tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, release-proof]
 ---
 
 **TLDR**: Minitest covers unit/integration behavior; opt-in layers cover outer
@@ -57,6 +57,23 @@ bundle exec rake test:babysitter_dry_run_security_matrix
 The packaged-web gate is commit-bound: it archives `HEAD:web` to reproduce the
 release artifact. Commit relevant web changes before using that task locally;
 otherwise it deliberately tests the previously committed tree.
+
+## Component boundary contract
+
+`config/component-boundaries.yml` is checked by
+`test/unit/component_boundaries_test.rb`. The test validates catalog shape,
+repository-local paths, unique ownership, an acyclic component graph, bounded
+migration exceptions, selected source-level dependency/construction rules, and
+fresh-process loading for every `boundary-ready` component:
+
+```bash
+bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
+```
+
+The helper uses Ruby syntax rather than comments or string examples for literal
+`require`, `require_relative`, and `Constant.new` checks. It remains an
+architecture guard, not a security sandbox; see [[component-boundaries]] for
+the enforced contract and its limits.
 
 ## Coverage
 

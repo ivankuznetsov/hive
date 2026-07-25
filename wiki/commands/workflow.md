@@ -153,12 +153,24 @@ and Risks`, and `Recovery` sections. Only referenced local instructions and
 declared regular assets are snapshotted; named `skill:` dependencies become
 `x-hive.external_skills` and are never copied.
 
+Optional top-level descriptor `x-hive` authoring metadata owns `tools`,
+`prompt_assets`, and `optional_inputs`. Tool and prompt-asset paths must also
+appear in `honeycomb.yml`'s closed asset list; only explicitly declared tools
+retain executable mode. Optional inputs carry sorted portable names and sorted
+authorized executable-slot IDs. Hive removes this authoring block from the
+packaged `workflow.yml` and projects its validated values into generated
+manifest `x-hive` metadata. Authoring-only `honeycomb.yml` and generated
+`manifest.yml`/`workflow.yml` paths cannot enter the package as assets.
+
 The canonical builder emits only `packages/NAME/VERSION/` with generated
 `manifest.yml`, packaged `workflow.yml`, authored `README.md`, referenced
 instructions, and declared assets. The manifest owns normalized permissions,
 the complete registry-relative hash map, and `release_sha256`; the final
 manifest byte hash is `package_digest`. The current consumer validator and
-pinned Honeycomb lint contract run before remote access. The lint receipt
+pinned Honeycomb lint contract run before remote access. The installed gem
+ships the pinned Markdown corpus and upstream SafeYAML parity cases as runtime
+contract data, so packaged Hive does not depend on the source checkout's test
+tree. The lint receipt
 identity binds the upstream policy, fixture corpus, expected output, and local
 contract checksums. Dry-run returns
 `state: validated`, both digests, and `freshness: not_checked` without durable
@@ -173,9 +185,18 @@ name, version, and full release digest; a different digest is an immutable
 conflict. The same digest verifies exact fork parent/owner, head
 repository/branch, commit parent/OID, package bytes, and non-draft PR head/base
 before reuse. A branch name is only a locator, so a matching external PR can be
-adopted after those authority checks. Receipt steps and observations are
-monotonic under the per-version lock. No force, merge,
+adopted after those authority checks. PR-body metadata is likewise only a
+locator: discovery paginates the complete PR set and derives same-version
+identity from exact remote package bytes and Git modes. Receipt steps and
+observations are monotonic under one per-version lock spanning discovery
+through PR verification. Expected-absent pushes use an atomic absent-ref lease;
+they never replace an existing branch. No merge,
 approval, close, branch/fork deletion, or catalogue edit path exists.
+
+Once a PR has been verified, its disposable retained Git checkout is removed
+best-effort; cleanup failure becomes a warning without changing the lifecycle
+result. Exact `listed` observation marks the digest bundle GC-eligible while
+retaining the compact receipt indefinitely.
 
 Schema v2 reports `pending_review`, `merged_pending_listing`, `listed`, or
 `closed_unmerged`, separately from `freshness: current|cached`. Only a current

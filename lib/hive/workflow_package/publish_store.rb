@@ -8,6 +8,7 @@ require "hive/paths"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/publish_lock"
 require "hive/workflow_package/publish_receipt"
+require "hive/workflow_package/safe_file"
 require "hive/workflow_package/validator"
 
 module Hive
@@ -24,7 +25,7 @@ module Hive
 
       def create_or_load(package, registry:)
         key = identity_key(registry, package.name, package.version)
-        PublishLock.with_lock(root, key) do
+        with_identity_lock(registry, package.name, package.version) do
           path = receipt_path(registry, package.name, package.version)
           if File.exist?(path) || File.symlink?(path)
             receipt = read_receipt(path)
@@ -56,7 +57,7 @@ module Hive
 
       def save(receipt)
         path = receipt_path(receipt.registry, receipt.name, receipt.version)
-        PublishLock.with_lock(root, identity_key(receipt.registry, receipt.name, receipt.version)) do
+        with_identity_lock(receipt.registry, receipt.name, receipt.version) do
           current = read_receipt(path)
           current.assert_continuation!(receipt)
           write_receipt(path, receipt)
@@ -66,7 +67,7 @@ module Hive
 
       def update(registry, name, version)
         path = receipt_path(registry, name, version)
-        PublishLock.with_lock(root, identity_key(registry, name, version)) do
+        with_identity_lock(registry, name, version) do
           current = read_receipt(path)
           updated = yield current
           raise PublishRecoveryError, "publication receipt update returned an invalid value" unless updated.is_a?(PublishReceipt)
@@ -80,6 +81,20 @@ module Hive
         File.join(receipts_root, "#{identity_key(registry, name, version)}.json")
       end
 
+      def with_identity_lock(registry, name, version)
+        key = identity_key(registry, name, version)
+        held = (Thread.current[:hive_publish_store_locks] ||= {})
+        token = [ object_id, key ]
+        return yield if held[token]
+
+        PublishLock.with_lock(root, key) do
+          held[token] = true
+          yield
+        ensure
+          held.delete(token)
+        end
+      end
+
       def bundle_path(package_digest)
         raise PublishRecoveryError, "bundle digest is malformed" unless PublishReceipt::SHA256.match?(package_digest.to_s)
         File.join(bundles_root, package_digest)
@@ -89,11 +104,19 @@ module Hive
         path = bundle_path(receipt.package_digest)
         secure_directory!(path)
         manifest_path = File.join(path, "manifest.yml")
-        stat = secure_file!(manifest_path)
-        raise PublishRecoveryError, "retained manifest is oversized" if stat.size > MAX_RECEIPT_BYTES
-        package_digest = ::Digest::SHA256.file(manifest_path).hexdigest
+        manifest_bytes, = read_secure_file(
+          manifest_path, max_bytes: MAX_RECEIPT_BYTES,
+          message: "retained manifest is oversized, linked, or unreadable"
+        )
+        package_digest = ::Digest::SHA256.hexdigest(manifest_bytes)
         unless secure_equal?(package_digest, receipt.package_digest)
           raise PublishRecoveryError, "retained bundle manifest digest does not match its receipt"
+        end
+        manifest = RegistryManifest.load_bytes(manifest_bytes)
+        unless manifest.data.fetch("version") == receipt.version &&
+               manifest.data.fetch("name") == receipt.name &&
+               manifest.data.fetch("release_sha256") == receipt.release_digest
+          raise PublishRecoveryError, "retained bundle manifest identity does not match its receipt"
         end
         result = Validator.validate!(
           path, expected_name: receipt.name,
@@ -108,17 +131,41 @@ module Hive
         raise PublishRecoveryError, "retained publication bundle failed validation"
       end
 
+      def mark_bundle_gc_eligible(receipt)
+        path = File.join(gc_eligible_root, "#{receipt.package_digest}.json")
+        bytes = CanonicalJSON.generate(
+          "schema" => "hive.workflow-publish-gc/v1",
+          "package_digest" => receipt.package_digest,
+          "registry" => receipt.registry,
+          "name" => receipt.name,
+          "version" => receipt.version
+        )
+        Hive::AtomicFile.write(path, bytes, mode: 0o600)
+        File.chmod(0o600, path)
+        Hive::AtomicFile.fsync_directory(gc_eligible_root)
+        path
+      rescue SystemCallError, IOError
+        raise PublishRecoveryError, "publication bundle could not be marked GC-eligible"
+      end
+
+      def bundle_gc_eligible?(package_digest)
+        path = File.join(gc_eligible_root, "#{package_digest}.json")
+        File.file?(path) && !File.symlink?(path)
+      end
+
       private
 
       def ensure_layout!
         PublishLock.ensure_private_directory!(root)
         PublishLock.ensure_private_directory!(receipts_root)
         PublishLock.ensure_private_directory!(bundles_root)
+        PublishLock.ensure_private_directory!(gc_eligible_root)
         PublishLock.ensure_private_directory!(File.join(root, "locks"))
       end
 
       def receipts_root = File.join(root, "receipts")
       def bundles_root = File.join(root, "bundles")
+      def gc_eligible_root = File.join(root, "gc-eligible")
 
       def identity_key(registry, name, version)
         ::Digest::SHA256.hexdigest([ registry, name, version ].join("\0"))
@@ -126,7 +173,11 @@ module Hive
 
       def persist_bundle(package)
         source_manifest = File.join(package.root, "manifest.yml")
-        source_digest = ::Digest::SHA256.file(source_manifest).hexdigest
+        source_bytes = SafeFile.read(
+          source_manifest, max_bytes: MAX_RECEIPT_BYTES, error_class: PublishRecoveryError,
+          message: "validated package manifest changed before retention"
+        ).first
+        source_digest = ::Digest::SHA256.hexdigest(source_bytes)
         unless secure_equal?(source_digest, package.package_digest)
           raise PublishRecoveryError, "validated package manifest changed before retention"
         end
@@ -172,8 +223,14 @@ module Hive
             FileUtils.mkdir_p(target, mode: 0o700)
             File.chmod(0o700, target)
           else
-            bytes = File.binread(path)
-            mode = (stat.mode & 0o111).positive? ? 0o700 : 0o600
+            bytes, current = SafeFile.read(
+              path, max_bytes: Manifest::MAX_FILE_BYTES, error_class: PublishRecoveryError,
+              message: "validated package contains an unreadable or changing file"
+            )
+            unless current.dev == stat.dev && current.ino == stat.ino
+              raise PublishRecoveryError, "validated package changed while being retained"
+            end
+            mode = (current.mode & 0o111).positive? ? 0o700 : 0o600
             File.open(target, File::WRONLY | File::CREAT | File::EXCL, mode) { |file| file.binmode; file.write(bytes) }
             File.chmod(mode, target)
           end
@@ -189,11 +246,10 @@ module Hive
       end
 
       def read_receipt(path)
-        stat = secure_file!(path)
-        unless stat.size <= MAX_RECEIPT_BYTES && (stat.mode & 0o777) == 0o600
-          raise PublishRecoveryError, "publication receipt is oversized or not owner-private"
-        end
-        bytes = File.binread(path)
+        bytes, = read_secure_file(
+          path, max_bytes: MAX_RECEIPT_BYTES, mode: 0o600,
+          message: "publication receipt is oversized, linked, or not owner-private"
+        )
         data = JSON.parse(bytes)
         unless bytes == CanonicalJSON.generate(data)
           raise PublishRecoveryError, "publication receipt is not canonical JSON"
@@ -214,13 +270,17 @@ module Hive
       end
 
       def secure_file!(path)
-        stat = File.lstat(path)
-        unless stat.file? && !stat.symlink? && stat.uid == Process.uid && stat.nlink == 1
-          raise PublishRecoveryError, "publication state file is linked, special, or not owned by the current user"
-        end
-        stat
-      rescue Errno::ENOENT, Errno::EACCES, IOError
-        raise PublishRecoveryError, "publication state file is missing or unreadable"
+        read_secure_file(
+          path, max_bytes: Manifest::MAX_FILE_BYTES,
+          message: "publication state file is linked, special, or not owned by the current user"
+        ).last
+      end
+
+      def read_secure_file(path, max_bytes:, message:, mode: nil)
+        SafeFile.read(
+          path, max_bytes: max_bytes, error_class: PublishRecoveryError,
+          message: message, mode: mode, owner_uid: Process.uid
+        )
       end
 
       def symbol_identity(receipt)

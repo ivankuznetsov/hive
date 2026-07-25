@@ -6,7 +6,7 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
   Observation = Hive::WorkflowPackage::RegistryClient::CatalogueObservation
 
   class Store
-    attr_reader :saved
+    attr_reader :saved, :gc_receipt
 
     def verify_bundle(_receipt) = "/retained/package"
 
@@ -16,6 +16,10 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
 
     def receipt=(receipt)
       @receipt = receipt
+    end
+
+    def mark_bundle_gc_eligible(receipt)
+      @gc_receipt = receipt
     end
   end
 
@@ -32,10 +36,13 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
   end
 
   class Gateway
-    def initialize(pr:, error: nil, parent_oid: "b" * 40)
+    attr_reader :cleaned
+
+    def initialize(pr:, error: nil, parent_oid: "b" * 40, cleanup_error: nil)
       @pr = pr
       @error = error
       @parent_oid = parent_oid
+      @cleanup_error = cleanup_error
     end
 
     def pull_requests(_registry)
@@ -46,6 +53,11 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
     def branch_oid(_repository, _branch) = @pr.head_oid
     def commit_parent_oid(_repository, _oid) = @parent_oid
     def verify_remote_package!(_repository, _ref, _package) = true
+
+    def cleanup_commit(_package, repository:)
+      raise @cleanup_error if @cleanup_error
+      @cleaned = repository
+    end
   end
 
   def test_maps_open_merged_and_closed_pr_states
@@ -64,6 +76,21 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
     result = resolver(receipt, catalogue: Catalogue.new(listed: true), gateway: gateway).resolve(receipt)
     assert_equal "listed", result.state
     assert_equal "current", result.freshness
+    assert_empty result.warnings
+  end
+
+  def test_cleanup_failures_are_warning_only_after_current_observation
+    receipt = receipt_for("MERGED")
+    gateway = Gateway.new(
+      pr: pr("MERGED"), cleanup_error: Errno::EACCES.new("denied")
+    )
+    result = resolver(
+      receipt, catalogue: Catalogue.new(listed: true), gateway: gateway
+    ).resolve(receipt)
+
+    assert_equal "listed", result.state
+    assert_equal "current", result.freshness
+    assert_equal "publish.object_cleanup_failed", result.warnings.first.fetch("rule_id")
   end
 
   def test_exact_catalogue_advances_even_a_prior_closed_observation

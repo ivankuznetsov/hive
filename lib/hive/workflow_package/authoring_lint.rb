@@ -5,6 +5,7 @@ require "psych"
 require "shellwords"
 require "uri"
 require "hive/workflow_package/lint_policy"
+require "hive/workflow_package/safe_file"
 
 module Hive
   module WorkflowPackage
@@ -46,6 +47,7 @@ module Hive
       FileEntry = Data.define(:path, :bytes, :text)
       Command = Data.define(:path, :line, :column, :raw)
       Observation = Data.define(:host, :dynamic, :path, :line, :column, :raw)
+      class UnsafeYAML < StandardError; end
 
       SECRET_PATTERNS = [
         [ "secret.private-key", /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/, "Private key material detected" ],
@@ -168,10 +170,12 @@ module Hive
             add("policy.file-limit", :error, relative, nil, nil, "package file exceeds lint byte limit")
             next
           end
-          bytes = File.binread(path)
-          current = File.lstat(path)
-          unless current.file? && !current.symlink? && current.dev == stat.dev &&
-                 current.ino == stat.ino && current.size == bytes.bytesize
+          bytes, current = SafeFile.read(
+            path, max_bytes: @policy.limits.fetch("max_file_bytes"),
+            error_class: UnsafeYAML, message: "package file changed while being scanned"
+          )
+          unless current.dev == stat.dev && current.ino == stat.ino &&
+                 current.size == bytes.bytesize
             add("policy.invalid-file", :error, relative, nil, nil, "package file changed while being scanned")
             next
           end
@@ -184,7 +188,7 @@ module Hive
           entries << FileEntry.new(path: relative.freeze, bytes: bytes.freeze, text: text&.freeze).freeze
         end
         entries.sort_by(&:path)
-      rescue SystemCallError, IOError
+      rescue SystemCallError, IOError, UnsafeYAML
         add("policy.invalid-file", :error, "", nil, nil, "package files could not be read safely")
         []
       end
@@ -339,16 +343,70 @@ module Hive
       end
 
       def extract_yaml(entry)
-        stream = Psych.parse_stream(entry.text, filename: entry.path)
+        stream = safe_yaml_stream!(entry)
         commands = []
         walk_yaml(stream, entry.path, commands, mapping_key: false, yaml_path: [])
         commands
-      rescue Psych::Exception
+      rescue Psych::Exception, UnsafeYAML
         add(
           "instruction.malformed-yaml", :error, entry.path, nil, nil,
           "instruction YAML could not be parsed safely"
         )
         []
+      end
+
+      def safe_yaml_stream!(entry)
+        stream = Psych.parse_stream(entry.text, filename: entry.path)
+        unless stream.children.length == 1 && stream.children.first&.root
+          raise UnsafeYAML, "YAML must contain one non-empty document"
+        end
+        inspect_yaml_node!(stream.children.first.root)
+        value = Psych.safe_load(
+          entry.text, permitted_classes: [], permitted_symbols: [], aliases: false,
+          filename: entry.path, fallback: nil
+        )
+        inspect_json_value!(value)
+        stream
+      rescue Psych::DisallowedClass
+        raise UnsafeYAML, "YAML contains a non-JSON value"
+      end
+
+      def inspect_yaml_node!(node)
+        raise UnsafeYAML, "YAML aliases are not allowed" if node.is_a?(Psych::Nodes::Alias)
+        if node.respond_to?(:tag) && node.tag && !node.tag.start_with?("tag:yaml.org,2002:")
+          raise UnsafeYAML, "custom YAML tags are not allowed"
+        end
+        case node
+        when Psych::Nodes::Mapping
+          seen = {}
+          node.children.each_slice(2) do |key, value|
+            raise UnsafeYAML, "YAML mapping keys must be strings" unless key.is_a?(Psych::Nodes::Scalar)
+            raise UnsafeYAML, "YAML mapping keys must be unique" if seen[key.value]
+            seen[key.value] = true
+            inspect_yaml_node!(key)
+            inspect_yaml_node!(value)
+          end
+        when Psych::Nodes::Sequence
+          node.children.each { |child| inspect_yaml_node!(child) }
+        end
+      end
+
+      def inspect_json_value!(value)
+        case value
+        when Hash
+          value.each do |key, child|
+            raise UnsafeYAML, "YAML mapping keys must be strings" unless key.is_a?(String)
+            inspect_json_value!(child)
+          end
+        when Array
+          value.each { |child| inspect_json_value!(child) }
+        when String, Integer, TrueClass, FalseClass, NilClass
+          nil
+        when Float
+          raise UnsafeYAML, "YAML numbers must be finite" unless value.finite?
+        else
+          raise UnsafeYAML, "YAML contains a non-JSON value"
+        end
       end
 
       def walk_yaml(node, path, commands, mapping_key:, yaml_path:)

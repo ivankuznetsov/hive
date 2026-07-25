@@ -98,12 +98,10 @@ module Hive
       end
 
       def hive_extension
-        tools = @snapshot.files.values.select { |record| record.mode == 0o755 }
-                         .map { |record| { "path" => record.path } }.sort_by { |entry| entry.fetch("path") }
         {
-          "tools" => tools,
-          "prompt_assets" => [],
-          "optional_inputs" => [],
+          "tools" => @snapshot.tools.map { |path| { "path" => path } },
+          "prompt_assets" => @snapshot.prompt_assets.map { |path| { "path" => path } },
+          "optional_inputs" => @snapshot.optional_inputs,
           "external_skills" => @snapshot.external_skills
         }
       end

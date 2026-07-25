@@ -223,7 +223,7 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
         "tools/check.sh" => Hive::WorkflowPackage::SourceSnapshot::FileRecord.new(
           path: "tools/check.sh", bytes: "#!/bin/sh\n", mode: 0o755, source: "/check.sh"
         )
-      })
+      }, tools: [ "tools/check.sh" ])
 
       build = build_registry_manifest(destination, snapshot)
 
@@ -373,7 +373,7 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
     }
   end
 
-  def builder_snapshot(files: nil)
+  def builder_snapshot(files: nil, tools: [])
     files ||= {
       "README.md" => Hive::WorkflowPackage::SourceSnapshot::FileRecord.new(
         path: "README.md", bytes: "# Demo\n", mode: 0o644, source: "/README.md"
@@ -383,7 +383,8 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
       )
     }
     Hive::WorkflowPackage::SourceSnapshot::Snapshot.new(
-      name: "demo", descriptor: builder_descriptor, files: files, external_skills: []
+      name: "demo", descriptor: builder_descriptor, files: files, tools: tools,
+      external_skills: []
     )
   end
 end

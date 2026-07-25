@@ -8,6 +8,7 @@ require "hive/paths"
 require "hive/workflow_package/manifest"
 require "hive/workflow_package/publish_receipt"
 require "hive/workflow_package/registry_manifest"
+require "hive/workflow_package/safe_file"
 
 module Hive
   module WorkflowPackage
@@ -94,14 +95,15 @@ module Hive
       end
 
       def pull_requests(repository)
-        fields = "number,url,state,isDraft,mergedAt,headRepository,headRefName,headRefOid,baseRefName,body"
         data = json!(
-          [ "gh", "pr", "list", "--repo", repository, "--state", "all", "--limit", "100", "--json", fields ],
+          [ "gh", "api", "--paginate", "--slurp",
+            "repos/#{repository}/pulls?state=all&per_page=100" ],
           "registry pull-request lookup"
         )
         raise PublishOfflineError, "registry pull-request lookup returned invalid data" unless data.is_a?(Array)
 
-        data.map { |entry| pull_request(entry) }
+        entries = data.all? { |page| page.is_a?(Array) } ? data.flatten(1) : data
+        entries.map { |entry| pull_request(normalize_pull_request_entry(entry)) }
       end
 
       def commit_parent_oid(repository, oid)
@@ -169,10 +171,14 @@ module Hive
         File.chmod(0o700, @objects_root)
         if File.directory?(File.join(checkout, ".git"))
           oid = git!(checkout, "rev-parse", "HEAD").strip
-          retained_branch = git!(checkout, "rev-parse", branch).strip
+          retained_branch = git!(checkout, "rev-parse", "refs/heads/#{branch}").strip
           parent = git!(checkout, "rev-parse", "#{oid}^").strip
-          return [ checkout, oid ] if SHA.match?(oid) && oid == retained_branch && parent == base_oid
-          raise PublishRecoveryError, "retained publication commit is inconsistent"
+          unless SHA.match?(oid) && oid == retained_branch && parent == base_oid
+            raise PublishRecoveryError, "retained publication commit is inconsistent"
+          end
+          verify_commit_tree!(checkout, oid, package)
+          git!(checkout, "remote", "set-url", "origin", "https://github.com/#{head_repository}.git")
+          return [ checkout, oid ]
         end
 
         raise PublishRecoveryError, "retained publication object path is not a repository" if File.exist?(checkout)
@@ -197,6 +203,7 @@ module Hive
              "commit", "--quiet", "-m", "workflow: publish #{package.name} #{package.version}")
         oid = git!(checkout, "rev-parse", "HEAD").strip
         raise PublishRecoveryError, "publication commit identity is invalid" unless SHA.match?(oid)
+        verify_commit_tree!(checkout, oid, package)
         git!(checkout, "remote", "set-url", "origin", "https://github.com/#{head_repository}.git")
         [ checkout, oid ]
       rescue SystemCallError, IOError => e
@@ -204,9 +211,32 @@ module Hive
       end
 
       def push_expected_absent(checkout, branch, oid)
-        _out, _err, status = run([ "git", "-C", checkout, "push", "origin", "#{oid}:refs/heads/#{branch}" ])
+        ref = "refs/heads/#{branch}"
+        _out, _err, status = run(
+          [ "git", "-C", checkout, "push", "--force-with-lease=#{ref}:",
+            "origin", "#{oid}:#{ref}" ]
+        )
         raise PublishAmbiguousError, "registry branch push outcome is unknown" unless status.success?
         true
+      end
+
+      def cleanup_commit(package, repository:)
+        key = ::Digest::SHA256.hexdigest(
+          [ repository, package.name, package.version, package.release_digest ].join("\0")
+        )
+        checkout = File.join(@objects_root, key)
+        return false unless File.exist?(checkout) || File.symlink?(checkout)
+
+        root = File.lstat(@objects_root)
+        target = File.lstat(checkout)
+        unless root.directory? && !root.symlink? && root.uid == Process.uid &&
+               (root.mode & 0o077).zero? && target.directory? && !target.symlink?
+          raise PublishRecoveryError, "retained publication object path is unsafe to clean"
+        end
+        FileUtils.remove_entry_secure(checkout)
+        true
+      rescue SystemCallError, IOError
+        raise PublishRecoveryError, "retained publication object cleanup failed"
       end
 
       def create_pull_request(repository:, base_branch:, head_repository:, branch:, package:)
@@ -260,15 +290,29 @@ module Hive
         unless entry.is_a?(Hash) && entry["number"].is_a?(Integer) && PR_URL.match?(entry["url"].to_s) &&
                %w[OPEN CLOSED MERGED].include?(entry["state"]) && REPOSITORY.match?(repository) &&
                SHA.match?(oid) &&
+               [ true, false ].include?(entry["isDraft"]) &&
                PublishReceipt::BRANCH.match?(entry["headRefName"].to_s) &&
                PublishReceipt::BRANCH.match?(entry["baseRefName"].to_s)
           raise PublishOfflineError, "registry pull-request lookup returned malformed evidence"
         end
         PullRequest.new(
-          number: entry["number"], url: entry["url"], state: entry["state"], draft: entry["isDraft"] != false,
+          number: entry["number"], url: entry["url"], state: entry["state"], draft: entry["isDraft"],
           merged_at: entry["mergedAt"], head_repository: repository, head_branch: entry["headRefName"].to_s,
           head_oid: oid, base_branch: entry["baseRefName"].to_s, body: entry["body"].to_s
         ).freeze
+      end
+
+      def normalize_pull_request_entry(entry)
+        return entry unless entry.is_a?(Hash) && entry.key?("html_url")
+
+        state = entry["merged_at"] ? "MERGED" : entry["state"].to_s.upcase
+        {
+          "number" => entry["number"], "url" => entry["html_url"], "state" => state,
+          "isDraft" => entry["draft"], "mergedAt" => entry["merged_at"],
+          "headRepository" => { "nameWithOwner" => entry.dig("head", "repo", "full_name") },
+          "headRefName" => entry.dig("head", "ref"), "headRefOid" => entry.dig("head", "sha"),
+          "baseRefName" => entry.dig("base", "ref"), "body" => entry["body"]
+        }
       end
 
       def validate_fork_data!(data, repository, parent, owner)
@@ -301,14 +345,61 @@ module Hive
         actual = data.fetch("tree").filter_map do |entry|
           path = entry["path"].to_s
           next unless path.start_with?(prefix)
-          unless entry["type"] == "blob" && %w[100644 100755].include?(entry["mode"])
+          unless entry["type"] == "blob" && %w[100644 100755].include?(entry["mode"]) &&
+                 SHA.match?(entry["sha"].to_s)
             raise PublishConflict, "remote package tree contains a linked or special entry"
           end
-          path.delete_prefix(prefix)
-        end.sort
-        expected = Manifest.inventory(package.root, exclude: [], require_utf8: false)
-                           .map { |entry| entry.fetch("path") }.sort
+          {
+            path: path.delete_prefix(prefix), mode: entry["mode"],
+            oid: entry["sha"].downcase
+          }
+        end.sort_by { |entry| entry.fetch(:path) }
+        expected = expected_git_tree(package)
         raise PublishConflict, "remote package tree does not match the complete package inventory" unless actual == expected
+      end
+
+      def verify_commit_tree!(checkout, oid, package)
+        changed = git!(
+          checkout, "diff-tree", "--no-commit-id", "--name-only", "-r", oid
+        ).lines.map(&:strip).reject(&:empty?).sort
+        expected = expected_git_tree(package).map do |entry|
+          "#{package.registry_path}/#{entry.fetch(:path)}"
+        end
+        unless changed == expected
+          raise PublishRecoveryError, "publication commit changes files outside the immutable package"
+        end
+
+        tree = git!(checkout, "ls-tree", "-r", oid, "--", package.registry_path)
+        actual = tree.lines.filter_map do |line|
+          match = /\A(100644|100755) blob ([0-9a-f]{40})\t(.+)\z/.match(line.strip)
+          unless match
+            raise PublishRecoveryError, "publication commit tree is malformed"
+          end
+          {
+            path: match[3].delete_prefix("#{package.registry_path}/"),
+            mode: match[1], oid: match[2]
+          }
+        end.sort_by { |entry| entry.fetch(:path) }
+        unless actual == expected_git_tree(package)
+          raise PublishRecoveryError, "retained publication commit tree does not match the validated package"
+        end
+      end
+
+      def expected_git_tree(package)
+        Manifest.inventory(package.root, exclude: [], require_utf8: false).map do |entry|
+          path = entry.fetch("path")
+          bytes, stat = SafeFile.read(
+            File.join(package.root, path), max_bytes: Manifest::MAX_FILE_BYTES,
+            error_class: PublishRecoveryError,
+            message: "validated package changed while deriving its commit tree"
+          )
+          {
+            path: path, mode: (stat.mode & 0o111).positive? ? "100755" : "100644",
+            oid: ::Digest::SHA1.hexdigest("blob #{bytes.bytesize}\0#{bytes}")
+          }
+        end.sort_by { |entry| entry.fetch(:path) }
+      rescue PackageError
+        raise PublishRecoveryError, "validated package tree is unavailable"
       end
 
       def git!(checkout, *args)

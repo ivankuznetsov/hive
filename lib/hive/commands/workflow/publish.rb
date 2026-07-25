@@ -1,5 +1,6 @@
 require "time"
 require "tmpdir"
+require "fileutils"
 require "hive/commands/workflow/base"
 require "hive/workflow_package/publisher"
 
@@ -33,14 +34,27 @@ module Hive
 
         def call!
           validate_expected_digest!
-          Dir.mktmpdir("hive-workflow-package-") do |root|
+          root = Dir.mktmpdir("hive-workflow-package-")
+          lifecycle = nil
+          begin
             @last_package = build_package(root)
             assert_expected_digest!(@last_package)
-            return emit_validated(@last_package) if @dry_run
-
-            result = @publisher.publish(@last_package)
-            emit_lifecycle(@last_package, result)
+            @receipt_context_available = !@dry_run
+            lifecycle = @publisher.publish(@last_package) unless @dry_run
+          ensure
+            warning = cleanup_tempdir(root)
+            if warning
+              @cleanup_warnings = [ warning ].freeze
+              if @last_package
+                @last_package = @last_package.with(
+                  warnings: (@last_package.warnings + @cleanup_warnings).uniq.freeze
+                )
+              end
+            end
           end
+          return emit_validated(@last_package) if @dry_run
+
+          emit_lifecycle(@last_package, lifecycle)
         end
 
         def call
@@ -127,23 +141,26 @@ module Hive
 
         def error_payload(error)
           extras = { "retryable" => retryable?(error) }
+          extras["warnings"] = @cleanup_warnings if @cleanup_warnings&.any?
           if @last_package
             extras["package_digest"] = @last_package.package_digest
             extras["release_digest"] = @last_package.release_digest
-            receipt = @publisher.receipt_for(@last_package) if @publisher.respond_to?(:receipt_for)
-            if receipt
-              extras["last_completed_step"] = receipt.last_completed_step
-              extras["last_observed_state"] = receipt.observation["state"] if receipt.observation
-              extras["pr_url"] = receipt.data["pr_url"] if receipt.data["pr_url"]
+            if @receipt_context_available
+              extras["last_completed_step"] = "validated"
+              begin
+                receipt = @publisher.receipt_for(@last_package) if @publisher.respond_to?(:receipt_for)
+                if receipt
+                  extras["last_completed_step"] = receipt.last_completed_step
+                  extras["last_observed_state"] = receipt.observation["state"] if receipt.observation
+                  extras["pr_url"] = receipt.data["pr_url"] if receipt.data["pr_url"]
+                end
+              rescue StandardError
+                nil
+              end
             end
           end
           Hive::Schemas::ErrorEnvelope.build(
             schema: SCHEMA, error: error, error_kind: error_kind(error), extras: extras
-          )
-        rescue StandardError
-          Hive::Schemas::ErrorEnvelope.build(
-            schema: SCHEMA, error: error, error_kind: error_kind(error),
-            extras: { "retryable" => retryable?(error) }
           )
         end
 
@@ -155,7 +172,9 @@ module Hive
           when Hive::WorkflowPackage::PublishConfigurationError then "configuration"
           when Hive::WorkflowPackage::PublishOfflineError, Hive::WorkflowPackage::CatalogueUnavailable then "offline"
           when Hive::WorkflowPackage::PublishConflict then "immutable_conflict"
-          when Hive::WorkflowPackage::PublishAmbiguousError then "remote_ambiguous"
+          when Hive::WorkflowPackage::PublishAmbiguousError, Hive::ConcurrentRunError then "remote_ambiguous"
+          when Hive::WorkflowPackage::PublishRecoveryError then "internal"
+          when Hive::WorkflowPackage::RegistryError then "offline"
           when Hive::ConfigError then "configuration"
           else "internal"
           end
@@ -164,7 +183,20 @@ module Hive
         def retryable?(error)
           error.is_a?(Hive::WorkflowPackage::PublishOfflineError) ||
             error.is_a?(Hive::WorkflowPackage::CatalogueUnavailable) ||
-            error.is_a?(Hive::WorkflowPackage::PublishAmbiguousError)
+            error.is_a?(Hive::WorkflowPackage::PublishAmbiguousError) ||
+            error.is_a?(Hive::WorkflowPackage::RegistryError) ||
+            error.is_a?(Hive::ConcurrentRunError)
+        end
+
+        def cleanup_tempdir(root)
+          FileUtils.remove_entry(root)
+          nil
+        rescue StandardError => error
+          {
+            "rule_id" => "publish.cleanup_failed", "path" => "temporary-package",
+            "message" => "temporary package cleanup failed; publication outcome is unchanged",
+            "detail" => error.class.name.split("::").last
+          }.freeze
         end
 
         def secure_equal?(left, right)

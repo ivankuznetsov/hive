@@ -64,6 +64,41 @@ class WorkflowPackageRegistryGatewayTest < Minitest::Test
     assert_equal "b" * 40, gateway.commit_parent_oid(pr.head_repository, pr.head_oid)
   end
 
+  def test_pull_request_discovery_paginates_all_rest_pages_and_requires_boolean_draft
+    calls = []
+    rest = lambda do |number, draft: false|
+      {
+        "number" => number,
+        "html_url" => "https://github.com/owner/registry/pull/#{number}",
+        "state" => "open", "draft" => draft, "merged_at" => nil, "body" => "",
+        "head" => {
+          "ref" => "contribution/demo-#{number}", "sha" => "a" * 40,
+          "repo" => { "full_name" => "alice/registry" }
+        },
+        "base" => { "ref" => "main" }
+      }
+    end
+    runner = lambda do |args, chdir:|
+      calls << args
+      raise "unexpected chdir" unless chdir.nil?
+      [ JSON.generate([ [ rest.call(1) ], [ rest.call(101) ] ]), "", OK ]
+    end
+    prs = Hive::WorkflowPackage::RegistryGateway.new(runner: runner)
+                                                .pull_requests("owner/registry")
+    assert_equal [ 1, 101 ], prs.map(&:number)
+    assert_equal(
+      [ "gh", "api", "--paginate", "--slurp",
+        "repos/owner/registry/pulls?state=all&per_page=100" ],
+      calls.first
+    )
+
+    malformed = rest.call(2)
+    malformed.delete("draft")
+    assert_raises(Hive::WorkflowPackage::PublishOfflineError) do
+      gateway_returning(JSON.generate([ [ malformed ] ])).pull_requests("owner/registry")
+    end
+  end
+
   def test_authentication_base_permission_and_branch_observations
     calls = []
     runner = lambda do |args, chdir:|
@@ -215,6 +250,27 @@ class WorkflowPackageRegistryGatewayTest < Minitest::Test
         gateway.version_present?("owner/registry", "main", package)
       )
       assert gateway.verify_remote_package!("owner/registry", "topic", package)
+      correct_tree = JSON.parse(
+        package_observation_runner(package, manifest_bytes).call(
+          [ "gh", "api", "repos/owner/registry/git/trees/topic?recursive=1" ],
+          chdir: nil
+        ).first
+      )
+      changed_sha = Marshal.load(Marshal.dump(correct_tree))
+      changed_sha.fetch("tree").first["sha"] = "f" * 40
+      assert_raises(Hive::WorkflowPackage::PublishConflict) do
+        Hive::WorkflowPackage::RegistryGateway.new(
+          runner: package_observation_runner(package, manifest_bytes, tree: changed_sha)
+        ).verify_remote_package!("owner/registry", "topic", package)
+      end
+      changed_mode = Marshal.load(Marshal.dump(correct_tree))
+      changed_mode.fetch("tree").first["mode"] =
+        changed_mode.fetch("tree").first.fetch("mode") == "100644" ? "100755" : "100644"
+      assert_raises(Hive::WorkflowPackage::PublishConflict) do
+        Hive::WorkflowPackage::RegistryGateway.new(
+          runner: package_observation_runner(package, manifest_bytes, tree: changed_mode)
+        ).verify_remote_package!("owner/registry", "topic", package)
+      end
       assert_raises(Hive::WorkflowPackage::PublishConflict) do
         gateway.verify_remote_package!(
           "owner/registry", "topic", package.with(package_digest: "f" * 64)
@@ -302,6 +358,17 @@ class WorkflowPackageRegistryGatewayTest < Minitest::Test
         )
         assert_equal [ checkout, commit_oid ], [ retained_checkout, retained_oid ]
         assert_equal 1, calls.count { |args| args[0, 2] == [ "git", "clone" ] }
+        set_urls = calls.select { |args| args.include?("set-url") }
+        assert_operator set_urls.length, :>=, 2
+        assert set_urls.all? { |args| args.last == "https://github.com/alice/registry.git" }
+
+        File.write(File.join(checkout, package.registry_path, "README.md"), "tampered\n")
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          gateway.prepare_commit(
+            package, repository: "owner/registry", base_branch: "main", base_oid: base_oid,
+            head_repository: "alice/registry", branch: branch
+          )
+        end
       end
     end
   end
@@ -380,6 +447,8 @@ class WorkflowPackageRegistryGatewayTest < Minitest::Test
       gateway = Hive::WorkflowPackage::RegistryGateway.new(runner: runner)
 
       assert gateway.push_expected_absent("/checkout", "contribution/demo", "a" * 40)
+      push = calls.map(&:first).find { |args| args.include?("push") }
+      assert_includes push, "--force-with-lease=refs/heads/contribution/demo:"
       assert_equal(
         "https://github.com/owner/registry/pull/9",
         gateway.create_pull_request(
@@ -441,9 +510,12 @@ class WorkflowPackageRegistryGatewayTest < Minitest::Test
       "tree" => Hive::WorkflowPackage::Manifest.inventory(
         package.root, exclude: [], require_utf8: false
       ).map { |entry| entry.fetch("path") }.map do |relative|
+        bytes = File.binread(File.join(package.root, relative))
         {
           "path" => "#{package.registry_path}/#{relative}",
-          "type" => "blob", "mode" => "100644"
+          "type" => "blob",
+          "mode" => File.executable?(File.join(package.root, relative)) ? "100755" : "100644",
+          "sha" => Digest::SHA1.hexdigest("blob #{bytes.bytesize}\0#{bytes}")
         }
       end,
       "truncated" => false
@@ -480,6 +552,10 @@ class WorkflowPackageRegistryGatewayTest < Minitest::Test
       output =
         if args.include?("status")
           status_output
+        elsif args.include?("diff-tree")
+          commit_tree_paths(args.fetch(2))
+        elsif args.include?("ls-tree")
+          commit_tree_lines(args.fetch(2))
         elsif args.include?("rev-parse")
           ref = args.last
           if ref == "HEAD"
@@ -495,6 +571,25 @@ class WorkflowPackageRegistryGatewayTest < Minitest::Test
       [ "#{output}\n", "", OK ]
     end
     [ runner, calls ]
+  end
+
+  def commit_tree_paths(checkout)
+    root = File.join(checkout, "packages", "demo", "1.0.0")
+    return "" unless File.directory?(root)
+    Dir.glob(File.join(root, "**", "*")).select { |path| File.file?(path) }.sort.map do |path|
+      path.delete_prefix("#{checkout}/")
+    end.join("\n")
+  end
+
+  def commit_tree_lines(checkout)
+    root = File.join(checkout, "packages", "demo", "1.0.0")
+    return "" unless File.directory?(root)
+    Dir.glob(File.join(root, "**", "*")).select { |path| File.file?(path) }.sort.map do |path|
+      bytes = File.binread(path)
+      mode = File.executable?(path) ? "100755" : "100644"
+      relative = path.delete_prefix("#{checkout}/")
+      "#{mode} blob #{Digest::SHA1.hexdigest("blob #{bytes.bytesize}\0#{bytes}")}\t#{relative}"
+    end.join("\n")
   end
 
   def prepare_commit(gateway, package)

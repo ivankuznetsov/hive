@@ -26,7 +26,13 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
     def authenticate! = "alice"
     def pull_requests(_repository) = @pr ? [ @pr ] : []
 
-    def version_present?(_repository, _ref, _package)
+    def version_present?(_repository, ref, _package)
+      if @pr && ref == @pr.head_oid
+        return {
+          package_digest: @package.package_digest,
+          release_digest: @package.release_digest
+        }
+      end
       @version_checks += 1
       @version_after_prepare if @version_checks > 1
     end
@@ -193,6 +199,86 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
     end
   end
 
+  def test_pr_metadata_is_only_a_locator_for_verified_package_evidence
+    with_package do |package|
+      with_tmp_dir do |state|
+        gateway = FakeGateway.new(package)
+        gateway.seed_pull_request(package)
+        pr = gateway.pull_requests("ivankuznetsov/honeycomb").first
+        gateway.instance_variable_set(:@pr, pr.with(body: "metadata intentionally absent"))
+
+        result = submission_for(state, gateway).submit(package)
+        assert_equal pr.url, result.pull_request.url
+        assert_empty gateway.mutations
+      end
+
+      with_tmp_dir do |state|
+        gateway = FakeGateway.new(package)
+        conflicting_marker = Hive::WorkflowPackage::RegistryGateway.pr_body(
+          package.with(package_digest: "f" * 64, release_digest: "e" * 64)
+        )
+        gateway.seed_pull_request(package)
+        pr = gateway.pull_requests("ivankuznetsov/honeycomb").first
+        gateway.instance_variable_set(:@pr, pr.with(body: conflicting_marker))
+
+        result = submission_for(state, gateway).submit(package)
+        assert_equal pr.url, result.pull_request.url
+        assert_empty gateway.mutations
+      end
+    end
+  end
+
+  def test_post_effect_verification_outages_are_remote_ambiguous
+    with_package do |package|
+      with_tmp_dir do |state|
+        gateway = FakeGateway.new(package, direct: true)
+        reads = 0
+        original = gateway.method(:branch_oid)
+        gateway.define_singleton_method(:branch_oid) do |repository, branch|
+          reads += 1
+          raise Hive::WorkflowPackage::PublishOfflineError, "offline" if reads == 2
+          original.call(repository, branch)
+        end
+        error = assert_raises(Hive::WorkflowPackage::PublishAmbiguousError) do
+          submission_for(state, gateway).submit(package)
+        end
+        assert_match(/after a remote effect/, error.message)
+        assert_includes gateway.mutations, :push
+      end
+
+      with_tmp_dir do |state|
+        gateway = FakeGateway.new(package, direct: true)
+        reads = 0
+        original = gateway.method(:pull_requests)
+        gateway.define_singleton_method(:pull_requests) do |repository|
+          reads += 1
+          raise Hive::WorkflowPackage::PublishOfflineError, "offline" if reads == 2
+          original.call(repository)
+        end
+        error = assert_raises(Hive::WorkflowPackage::PublishAmbiguousError) do
+          submission_for(state, gateway).submit(package)
+        end
+        assert_match(/after a remote effect/, error.message)
+        assert_includes gateway.mutations, :pr
+      end
+    end
+  end
+
+  def test_concurrent_same_digest_callers_hold_one_identity_transaction_lock
+    with_package do |package|
+      with_tmp_dir do |state|
+        gateway = FakeGateway.new(package)
+        submissions = 2.times.map { submission_for(state, gateway) }
+        results = submissions.map do |submission|
+          Thread.new { submission.submit(package) }
+        end.map(&:value)
+
+        assert_equal 1, results.map { |result| result.pull_request.url }.uniq.length
+        assert_equal %i[fork push pr], gateway.mutations
+      end
+    end
+  end
+
   def test_policy_block_allows_discovery_but_stops_new_remote_mutations
     with_package do |package|
       with_tmp_dir do |state|
@@ -318,7 +404,7 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
     end
   end
 
-  def test_exact_merged_identity_and_malformed_pr_metadata_are_explicit_conflicts
+  def test_exact_merged_identity_conflicts_and_malformed_pr_metadata_is_only_a_locator
     with_package do |package|
       with_tmp_dir do |state|
         submission = submission_for(state, FakeGateway.new(package))
@@ -332,13 +418,10 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
         end
         assert_match(/already merged/, error.message)
 
-        error = assert_raises(Hive::WorkflowPackage::PublishConflict) do
-          submission.send(
-            :parse_metadata,
-            "<!-- hive-workflow-publish:v1 {not-json} -->"
-          )
-        end
-        assert_match(/malformed Hive publication metadata/, error.message)
+        assert_nil submission.send(
+          :parse_metadata,
+          "<!-- hive-workflow-publish:v1 {not-json} -->"
+        )
       end
     end
   end

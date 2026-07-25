@@ -30,6 +30,14 @@ module Hive
       end
 
       def submit(package, allow_mutation: true)
+        @store.with_identity_lock(@registry, package.name, package.version) do
+          submit_locked(package, allow_mutation: allow_mutation)
+        end
+      end
+
+      private
+
+      def submit_locked(package, allow_mutation:)
         receipt = @store.create_or_load(package, registry: @registry)
         @store.verify_bundle(receipt)
         login = @gateway.authenticate!
@@ -94,8 +102,10 @@ module Hive
           current_identity = @gateway.version_present?(@registry, @base_branch, package)
           raise_immutable_version!(current_identity, package) if current_identity
           @gateway.push_expected_absent(checkout, branch, commit_oid)
-          remote_oid = @gateway.branch_oid(head_repository, branch)
-          verify_branch!(remote_oid, commit_oid, head_repository, branch, package)
+          verify_after_effect!("registry branch verification") do
+            remote_oid = @gateway.branch_oid(head_repository, branch)
+            verify_branch!(remote_oid, commit_oid, head_repository, branch, package)
+          end
         end
         receipt = save(receipt.advance("pushed", commit_oid: commit_oid)) unless at_least?(receipt, "pushed")
 
@@ -104,9 +114,11 @@ module Hive
           repository: @registry, base_branch: @base_branch,
           head_repository: head_repository, branch: branch, package: package
         )
-        candidate = reconcile_candidates!(
-          @gateway.pull_requests(@registry), package, receipt: receipt, login: login
-        )
+        candidate = verify_after_effect!("registry pull-request verification") do
+          reconcile_candidates!(
+            @gateway.pull_requests(@registry), package, receipt: receipt, login: login
+          )
+        end
         raise PublishAmbiguousError, "registry pull-request outcome is unknown" unless candidate
 
         Result.new(
@@ -114,8 +126,6 @@ module Hive
           pull_request: candidate.pull_request
         )
       end
-
-      private
 
       def at_least?(receipt, step)
         PublishReceipt::STEPS.index(receipt.last_completed_step) >= PublishReceipt::STEPS.index(step)
@@ -143,21 +153,29 @@ module Hive
       def reconcile_candidates!(pull_requests, package, receipt:, login:)
         same_version = pull_requests.filter_map do |pr|
           metadata = parse_metadata(pr.body)
-          next unless metadata && metadata["name"] == package.name && metadata["version"] == package.version
-          [ pr, metadata ]
+          identity = @gateway.version_present?(pr.head_repository, pr.head_oid, package)
+          next unless identity
+          [ pr, identity, metadata ]
         end
-        conflicts = same_version.reject do |_pr, metadata|
-          metadata["release_digest"] == package.release_digest && metadata["package_digest"] == package.package_digest
+        conflicts = same_version.reject do |_pr, identity, _metadata|
+          identity[:release_digest] == package.release_digest &&
+            identity[:package_digest] == package.package_digest
         end
         raise PublishConflict, "workflow version already has a different immutable submission" unless conflicts.empty?
-        matches = same_version.select do |pr, metadata|
-          metadata["release_digest"] == package.release_digest &&
-            metadata["package_digest"] == package.package_digest
+        matches = same_version.select do |_pr, identity, _metadata|
+          identity[:release_digest] == package.release_digest &&
+            identity[:package_digest] == package.package_digest
         end
         raise PublishConflict, "multiple pull requests claim the same immutable submission" if matches.length > 1
         return nil if matches.empty?
 
-        pr = matches.first.first
+        pr = matches.sort_by do |candidate, _identity, metadata|
+          [
+            candidate.number == receipt.data["pr_number"] ? 0 : 1,
+            metadata_locator?(metadata, package) ? 0 : 1,
+            candidate.number
+          ]
+        end.first.first
         raise PublishConflict, "registry pull request is draft or targets the wrong base" if pr.draft || pr.base_branch != @base_branch
         base_oid = @gateway.commit_parent_oid(pr.head_repository, pr.head_oid)
         verify_candidate_authority!(pr, base_oid, receipt, login)
@@ -231,7 +249,18 @@ module Hive
         value = JSON.parse(match[1])
         value if value.is_a?(Hash)
       rescue JSON::ParserError
-        raise PublishConflict, "registry pull request carries malformed Hive publication metadata"
+        nil
+      end
+
+      def metadata_locator?(metadata, package)
+        metadata.is_a?(Hash) &&
+          metadata["name"] == package.name && metadata["version"] == package.version
+      end
+
+      def verify_after_effect!(label)
+        yield
+      rescue PublishOfflineError
+        raise PublishAmbiguousError, "#{label} outcome is unknown after a remote effect"
       end
 
       def save(receipt) = @store.save(receipt)

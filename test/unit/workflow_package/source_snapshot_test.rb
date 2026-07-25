@@ -23,6 +23,58 @@ class WorkflowPackageSourceSnapshotTest < Minitest::Test
     end
   end
 
+  def test_descriptor_owned_x_hive_projects_declared_assets_without_implicit_tools
+    with_source_tree do |workflows, authored, descriptor, metadata|
+      File.write(File.join(authored, "assets", "tool.sh"), "#!/bin/sh\n")
+      File.chmod(0o755, File.join(authored, "assets", "tool.sh"))
+      metadata = metadata.with(assets: [ "assets/context.txt", "assets/tool.sh" ])
+      source = File.read(descriptor).sub(
+        "id: demo\n",
+        <<~YAML
+          id: demo
+          x-hive:
+            tools:
+              - assets/tool.sh
+            prompt_assets:
+              - assets/context.txt
+            optional_inputs:
+              - name: API_TOKEN
+                authorized_slots:
+                  - stages.work
+        YAML
+      )
+      File.write(descriptor, source)
+
+      snapshot = Snapshot.capture(
+        name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+        authored_dir: authored, metadata: metadata
+      )
+
+      assert_equal [ "assets/tool.sh" ], snapshot.tools
+      assert_equal [ "assets/context.txt" ], snapshot.prompt_assets
+      assert_equal(
+        [ { "name" => "API_TOKEN", "authorized_slots" => [ "stages.work" ] } ],
+        snapshot.optional_inputs
+      )
+      assert_equal 0o755, snapshot.files.fetch("assets/tool.sh").mode
+      assert_equal 0o644, snapshot.files.fetch("assets/context.txt").mode
+      refute YAML.safe_load(snapshot.files.fetch("workflow.yml").bytes).key?("x-hive")
+    end
+  end
+
+  def test_rejects_reserved_authoring_metadata_as_an_asset
+    with_source_tree do |workflows, authored, descriptor, metadata|
+      File.write(File.join(authored, "honeycomb.yml"), "authoring only\n")
+      error = assert_raises(Hive::ConfigError) do
+        Snapshot.capture(
+          name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+          authored_dir: authored, metadata: metadata.with(assets: [ "honeycomb.yml" ])
+        )
+      end
+      assert_match(/reserved authoring/, error.message)
+    end
+  end
+
   def test_rejects_symlinks_traversal_and_undeclared_missing_files
     with_source_tree do |workflows, authored, descriptor, metadata|
       FileUtils.rm_f(File.join(authored, "work.md"))

@@ -1,5 +1,6 @@
 require "digest"
 require "yaml"
+require "hive/workflow_package/safe_file"
 
 module Hive
   module WorkflowPackage
@@ -8,10 +9,12 @@ module Hive
       PINNED_COMMIT = "ada805d0d8c94dc236a0673a22232a0440843cf0".freeze
       UPSTREAM_POLICY_SHA256 = "abb0d43bf30e683413e38060f5416e9ece370b98eba9c836a7c56ebbcdd765fa".freeze
       PATH = File.expand_path("../../../config/honeycomb-security-lint/v1.yml", __dir__).freeze
-      FIXTURE_ROOT = File.expand_path("../../../test/fixtures/honeycomb_security_lint", __dir__).freeze
-      FIXTURE_FILES = %w[benign.md malicious.md].freeze
+      FIXTURE_ROOT = File.expand_path(
+        "../../../config/honeycomb-security-lint/v1/fixtures", __dir__
+      ).freeze
+      FIXTURE_FILES = %w[benign.md malicious.md safe_yaml_cases.json].freeze
       EXPECTED_FILE = "expected.json".freeze
-      CONTRACT_SHA256 = "dbf2152344e328927f606b073845cb0c24110759eaab790f397619a13e49621d".freeze
+      CONTRACT_SHA256 = "c132a3d494d83f3376a53bdaff8841a86e63078824d72b8386f0736718defcc7".freeze
       KEYS = %w[
         schema version upstream_commit upstream_policy_sha256 fixture_corpus_sha256
         expected_output_sha256 baseline_network_hosts limits known_rules
@@ -39,7 +42,10 @@ module Hive
       end
 
       def self.load(path: PATH, expected_sha256: CONTRACT_SHA256, fixture_root: FIXTURE_ROOT)
-        bytes = File.binread(path)
+        bytes = SafeFile.read(
+          path, max_bytes: 256 * 1024, error_class: Hive::ConfigError,
+          message: "Honeycomb lint policy is missing, unreadable, or malformed"
+        ).first
         digest = ::Digest::SHA256.hexdigest(bytes)
         unless SHA256.match?(expected_sha256.to_s) && secure_equal?(digest, expected_sha256)
           raise Hive::ConfigError, "Honeycomb lint policy integrity check failed"
@@ -93,9 +99,19 @@ module Hive
       def self.verify_fixture_contract!(data, fixture_root)
         digest = ::Digest::SHA256.new
         FIXTURE_FILES.each do |name|
-          digest << name << "\0" << File.binread(File.join(fixture_root, name))
+          bytes = SafeFile.read(
+            File.join(fixture_root, name), max_bytes: 1024 * 1024,
+            error_class: Hive::ConfigError,
+            message: "Honeycomb lint fixture contract is missing or unreadable"
+          ).first
+          digest << name << "\0" << bytes
         end
-        expected_digest = ::Digest::SHA256.file(File.join(fixture_root, EXPECTED_FILE)).hexdigest
+        expected = SafeFile.read(
+          File.join(fixture_root, EXPECTED_FILE), max_bytes: 1024 * 1024,
+          error_class: Hive::ConfigError,
+          message: "Honeycomb lint fixture contract is missing or unreadable"
+        ).first
+        expected_digest = ::Digest::SHA256.hexdigest(expected)
         unless secure_equal?(digest.hexdigest, data.fetch("fixture_corpus_sha256")) &&
                secure_equal?(expected_digest, data.fetch("expected_output_sha256"))
           raise Hive::ConfigError, "Honeycomb lint fixture contract integrity check failed"

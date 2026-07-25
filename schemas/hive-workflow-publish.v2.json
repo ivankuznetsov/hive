@@ -10,6 +10,10 @@
   ],
   "$defs": {
     "Digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "PRUrl": {
+      "type": "string",
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*$"
+    },
     "Warning": {
       "type": "object",
       "additionalProperties": false,
@@ -62,6 +66,13 @@
     "CurrentLifecyclePayload": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"state": {"const": "listed"}}, "required": ["state"]},
+          "then": {"properties": {"pr_url": {"oneOf": [{"$ref": "#/$defs/PRUrl"}, {"type": "null"}]}}},
+          "else": {"properties": {"pr_url": {"$ref": "#/$defs/PRUrl"}}}
+        }
+      ],
       "required": ["schema", "schema_version", "ok", "name", "version", "package_digest", "release_digest", "warnings", "state", "freshness", "observed_at", "pr_url"],
       "properties": {
         "schema": {"const": "hive-workflow-publish"},
@@ -81,6 +92,13 @@
     "CachedLifecyclePayload": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"state": {"const": "listed"}}, "required": ["state"]},
+          "then": {"properties": {"pr_url": {"oneOf": [{"$ref": "#/$defs/PRUrl"}, {"type": "null"}]}}},
+          "else": {"properties": {"pr_url": {"$ref": "#/$defs/PRUrl"}}}
+        }
+      ],
       "required": ["schema", "schema_version", "ok", "name", "version", "package_digest", "release_digest", "warnings", "state", "freshness", "observed_at", "pr_url"],
       "properties": {
         "schema": {"const": "hive-workflow-publish"},
@@ -119,11 +137,12 @@
         "exit_code": {"type": "integer"},
         "message": {"type": "string", "minLength": 1},
         "retryable": {"type": "boolean"},
+        "warnings": {"type": "array", "items": {"$ref": "#/$defs/Warning"}},
         "package_digest": {"$ref": "#/$defs/Digest"},
         "release_digest": {"$ref": "#/$defs/Digest"},
         "last_completed_step": {"enum": ["validated", "prepared", "fork_create_intent", "fork_verified", "push_intent", "pushed", "pr_create_intent", "pr_verified"]},
         "last_observed_state": {"enum": ["pending_review", "merged_pending_listing", "listed", "closed_unmerged"]},
-        "pr_url": {"type": "string"}
+        "pr_url": {"$ref": "#/$defs/PRUrl"}
       }
     },
     "ValidationErrorPayload": {

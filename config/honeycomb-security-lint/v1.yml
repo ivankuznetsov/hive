@@ -2,8 +2,8 @@ schema: hive.honeycomb-security-lint-contract/v1
 version: v1
 upstream_commit: ada805d0d8c94dc236a0673a22232a0440843cf0
 upstream_policy_sha256: abb0d43bf30e683413e38060f5416e9ece370b98eba9c836a7c56ebbcdd765fa
-fixture_corpus_sha256: 7b0e4466e56dfafcf6787b5aad59f6fec1b0a7cb6601aa89d4d74e0c9a205c69
-expected_output_sha256: 3cf4e298457a196b567d4a77c928dcabaa267e14c89735859eb43c175d1aa032
+fixture_corpus_sha256: bfc864815663dd61f75043da7c24e954364220c9d7eeb85ba73b298d824c268d
+expected_output_sha256: 549ca5ec602fbc7ee7618a0c44f2ef48b10b3bb57f91aee3b7c73b21f1d63fb6
 baseline_network_hosts:
   - api.github.com
   - github.com

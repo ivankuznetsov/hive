@@ -21,7 +21,13 @@ class WorkflowPublishSubmissionIntegrationTest < Minitest::Test
 
     def authenticate! = "alice"
     def pull_requests(_repository) = @pr ? [ @pr ] : []
-    def version_present?(_repository, _ref, _package) = nil
+    def version_present?(_repository, ref, _package)
+      return nil unless @pr && ref == @pr.head_oid
+      {
+        package_digest: @package.package_digest,
+        release_digest: @package.release_digest
+      }
+    end
     def direct_permission?(_repository, _login) = false
     def base_oid(_repository, _branch) = "b" * 40
 
@@ -50,6 +56,8 @@ class WorkflowPublishSubmissionIntegrationTest < Minitest::Test
       raise "release changed" unless package.release_digest == @package.release_digest
       true
     end
+
+    def cleanup_commit(_package, repository:) = false
 
     def create_pull_request(repository:, base_branch:, head_repository:, branch:, package:)
       @mutation_count[:pr] += 1

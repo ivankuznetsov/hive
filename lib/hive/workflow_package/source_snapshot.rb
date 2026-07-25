@@ -2,6 +2,7 @@ require "fileutils"
 require "pathname"
 require "yaml"
 require "hive/workflow_package/authoring_metadata"
+require "hive/workflow_package/input_name"
 require "hive/workflow_package/registry_manifest"
 
 module Hive
@@ -11,9 +12,19 @@ module Hive
       MAX_TOTAL_BYTES = 10 * 1024 * 1024
       MAX_FILES = 1000
       SKILL_NAME = /\A[a-zA-Z0-9][a-zA-Z0-9._:\/-]{0,127}\z/
+      EXTENSION_KEYS = %w[tools prompt_assets optional_inputs].freeze
+      RESERVED_ASSETS = %w[README.md honeycomb.yml manifest.yml workflow.yml].freeze
 
       FileRecord = Data.define(:path, :bytes, :mode, :source)
-      Snapshot = Data.define(:name, :descriptor, :files, :external_skills)
+      Snapshot = Data.define(
+        :name, :descriptor, :files, :tools, :prompt_assets, :optional_inputs,
+        :external_skills
+      ) do
+        def initialize(name:, descriptor:, files:, tools: [], prompt_assets: [],
+                       optional_inputs: [], external_skills: [])
+          super
+        end
+      end
 
       def self.capture(name:, workflows_dir:, descriptor_path:, authored_dir:, metadata:)
         new(
@@ -38,6 +49,7 @@ module Hive
         unless descriptor["id"] == @name
           raise Hive::ConfigError, "workflow descriptor id must exactly match publish id #{@name.inspect}"
         end
+        extension = validate_extension!(descriptor.delete("x-hive"))
 
         instructions = {}
         external_skills = []
@@ -69,14 +81,28 @@ module Hive
         end
         Array(@metadata.assets).each do |relative|
           normalized = normalize_path(relative, label: "asset")
+          if RESERVED_ASSETS.include?(normalized)
+            raise Hive::ConfigError, "declared asset #{normalized.inspect} is reserved authoring or generated metadata"
+          end
           raise Hive::ConfigError, "declared asset collides with generated package path" if files.key?(normalized)
           source, = resolve_owned_path(relative, kind: "asset", base: @authored_dir)
-          files[normalized] = read_record(source, package_path: normalized, preserve_executable: true)
+          executable = extension.fetch("tools").include?(normalized)
+          files[normalized] = read_record(source, package_path: normalized, executable: executable)
+        end
+        declared_assets = Array(@metadata.assets)
+        behavior_assets = extension.fetch("tools") + extension.fetch("prompt_assets")
+        missing_assets = behavior_assets - declared_assets
+        unless missing_assets.empty?
+          raise Hive::ConfigError,
+                "x-hive behavior paths must also be declared assets: #{missing_assets.sort.join(', ')}"
         end
         raise Hive::ConfigError, "workflow package exceeds file-count limit" if files.length > MAX_FILES
 
         Snapshot.new(
           name: @name, descriptor: deep_freeze(rewritten), files: files.sort.to_h.freeze,
+          tools: extension.fetch("tools").freeze,
+          prompt_assets: extension.fetch("prompt_assets").freeze,
+          optional_inputs: deep_freeze(extension.fetch("optional_inputs")),
           external_skills: external_skills.sort.uniq.freeze
         ).freeze
       end
@@ -145,7 +171,7 @@ module Hive
         end
       end
 
-      def read_record(source, package_path:, preserve_executable: false)
+      def read_record(source, package_path:, executable: false)
         component_identity = validate_path_components!(source, package_path: package_path)
         flags = File::RDONLY
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
@@ -168,12 +194,67 @@ module Hive
         end
         @total_bytes += bytes.bytesize
         raise Hive::ConfigError, "workflow package inputs exceed total-byte limit" if @total_bytes > MAX_TOTAL_BYTES
-        mode = preserve_executable && (before.mode & 0o111).positive? ? 0o755 : 0o644
+        if executable && (before.mode & 0o111).zero?
+          raise Hive::ConfigError, "workflow package tool #{package_path.inspect} must be executable"
+        end
+        mode = executable ? 0o755 : 0o644
         FileRecord.new(path: package_path, bytes: bytes.freeze, mode: mode, source: source).freeze
       rescue Errno::ELOOP, Errno::ENOENT, Errno::EACCES, IOError
         raise Hive::ConfigError, "workflow package input #{package_path.inspect} is missing, linked, or unreadable"
       ensure
         file&.close
+      end
+
+      def validate_extension!(value)
+        value ||= {}
+        unless value.is_a?(Hash) && (value.keys - EXTENSION_KEYS).empty?
+          raise Hive::ConfigError, "workflow descriptor x-hive contains unsupported fields"
+        end
+        tools = validate_path_set!(value.fetch("tools", []), label: "tools")
+        prompt_assets = validate_path_set!(
+          value.fetch("prompt_assets", []), label: "prompt_assets"
+        )
+        optional_inputs = validate_optional_inputs!(value.fetch("optional_inputs", []))
+        {
+          "tools" => tools, "prompt_assets" => prompt_assets,
+          "optional_inputs" => optional_inputs
+        }.freeze
+      end
+
+      def validate_path_set!(value, label:)
+        unless value.is_a?(Array) && value.all? { |path| path.is_a?(String) }
+          raise Hive::ConfigError, "workflow descriptor x-hive #{label} must be a path array"
+        end
+        paths = value.map { |path| normalize_path(path, label: "x-hive #{label}") }
+        unless paths == paths.sort.uniq
+          raise Hive::ConfigError, "workflow descriptor x-hive #{label} must be sorted and unique"
+        end
+        paths
+      end
+
+      def validate_optional_inputs!(value)
+        unless value.is_a?(Array) && value.all? { |entry| entry.is_a?(Hash) }
+          raise Hive::ConfigError, "workflow descriptor x-hive optional_inputs must be an array"
+        end
+        inputs = value.map do |entry|
+          unless entry.keys.sort == %w[authorized_slots name] &&
+                 InputName.valid?(entry["name"]) &&
+                 entry["authorized_slots"].is_a?(Array) &&
+                 !entry["authorized_slots"].empty? &&
+                 entry["authorized_slots"].all? { |slot| slot.is_a?(String) && !slot.empty? } &&
+                 entry["authorized_slots"] == entry["authorized_slots"].sort.uniq
+            raise Hive::ConfigError, "workflow descriptor x-hive optional input is malformed"
+          end
+          {
+            "name" => entry.fetch("name"),
+            "authorized_slots" => entry.fetch("authorized_slots").dup.freeze
+          }.freeze
+        end
+        names = inputs.map { |entry| entry.fetch("name") }
+        unless names == names.sort.uniq
+          raise Hive::ConfigError, "workflow descriptor x-hive optional inputs must be sorted and unique"
+        end
+        inputs.freeze
       end
 
       def validate_path_components!(source, package_path:)

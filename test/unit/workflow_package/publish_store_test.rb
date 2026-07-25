@@ -92,6 +92,36 @@ class WorkflowPackagePublishStoreTest < Minitest::Test
     end
   end
 
+  def test_listed_bundle_can_be_marked_gc_eligible_without_removing_receipt
+    with_package do |package|
+      with_tmp_dir do |state|
+        store = Hive::WorkflowPackage::PublishStore.new(root: File.join(state, "publish"))
+        receipt = store.create_or_load(package, registry: "owner/registry")
+        receipt = receipt.advance(
+          "pr_verified",
+          submission_mode: "direct", destination_repository: "owner/registry",
+          base_branch: "main", base_sha: "b" * 40,
+          head_repository: "owner/registry", head_branch: "honeycomb-demo",
+          owner: "owner", commit_oid: "c" * 40, pr_number: 1,
+          pr_url: "https://github.com/owner/registry/pull/1"
+        )
+        store.save(receipt)
+        listed = receipt.observe(
+          state: "listed", observed_at: "2026-07-21T13:00:00Z",
+          pr_url: receipt.data.fetch("pr_url"), pr_number: 1
+        )
+        store.save(listed)
+
+        marker = store.mark_bundle_gc_eligible(listed)
+
+        assert store.bundle_gc_eligible?(package.package_digest)
+        assert_equal 0o600, File.stat(marker).mode & 0o777
+        assert File.directory?(store.bundle_path(package.package_digest))
+        assert_equal listed.data, store.load("owner/registry", "demo", "1.2.3").data
+      end
+    end
+  end
+
   def test_retained_bundle_rejects_version_payload_and_state_file_drift
     with_package do |package|
       with_tmp_dir do |state|

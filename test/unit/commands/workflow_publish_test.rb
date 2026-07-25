@@ -35,6 +35,7 @@ class WorkflowPublishCommandTest < Minitest::Test
 
   def test_expected_digest_mismatch_stops_before_publish
     publisher, calls = publisher_double
+    publisher.define_singleton_method(:receipt_for) { |_package| raise "durable state must not be opened" }
     assert_raises(Hive::Commands::Workflow::Publish::ValidationError) do
       command(publisher, expected_release_digest: "c" * 64).call!
     end
@@ -76,6 +77,9 @@ class WorkflowPublishCommandTest < Minitest::Test
       [ Hive::WorkflowPackage::PublishOfflineError.new("offline"), "offline", 69, true ],
       [ Hive::WorkflowPackage::PublishConflict.new("conflict"), "immutable_conflict", 1, false ],
       [ Hive::WorkflowPackage::PublishAmbiguousError.new("ambiguous"), "remote_ambiguous", 75, true ],
+      [ Hive::ConcurrentRunError.new("locked"), "remote_ambiguous", 75, true ],
+      [ Hive::WorkflowPackage::RegistryError.new("registry"), "offline", 69, true ],
+      [ Hive::WorkflowPackage::PublishRecoveryError.new("corrupt"), "internal", 70, false ],
       [ Hive::WorkflowPackage::PublishPolicyBlocked.new("policy"), "validation", 64, false ],
       [ RuntimeError.new("raw internal detail"), "internal", 70, false ]
     ]
@@ -92,6 +96,40 @@ class WorkflowPublishCommandTest < Minitest::Test
       assert_equal retryable, payload.fetch("retryable")
       assert publish_schemer.valid?(payload), "#{kind} producer payload must validate"
     end
+  end
+
+  def test_temporary_cleanup_failure_preserves_success_with_a_warning
+    publisher, = publisher_double
+    instance = command(
+      publisher, expected_release_digest: "b" * 64, stdout: StringIO.new
+    )
+    instance.define_singleton_method(:cleanup_tempdir) do |_root|
+      {
+        "rule_id" => "publish.cleanup_failed", "path" => "temporary-package",
+        "message" => "temporary package cleanup failed; publication outcome is unchanged",
+        "detail" => "Errno::EACCES"
+      }
+    end
+
+    payload = instance.call!
+
+    assert_equal "pending_review", payload.fetch("state")
+    assert_equal "publish.cleanup_failed", payload.fetch("warnings").first.fetch("rule_id")
+    assert publish_schemer.valid?(payload)
+  end
+
+  def test_lifecycle_schema_rejects_arbitrary_and_contradictory_pr_urls
+    publisher, = publisher_double
+    payload = command(
+      publisher, expected_release_digest: "b" * 64, stdout: StringIO.new
+    ).call!
+    refute publish_schemer.valid?(payload.merge("pr_url" => "https://example.test/pr/42"))
+    refute publish_schemer.valid?(
+      payload.merge("state" => "pending_review", "pr_url" => nil)
+    )
+    assert publish_schemer.valid?(
+      payload.merge("state" => "listed", "pr_url" => nil)
+    )
   end
 
   def test_invalid_registry_configuration_remains_configuration_not_authoring_validation
@@ -133,13 +171,16 @@ class WorkflowPublishCommandTest < Minitest::Test
     publisher.define_singleton_method(:receipt_for) { |_package| raise IOError, "receipt unavailable" }
     command = command(publisher)
     command.instance_variable_set(:@last_package, publisher.prepare(destination: Dir.pwd))
+    command.instance_variable_set(:@receipt_context_available, true)
     error = Hive::WorkflowPackage::PublishOfflineError.new("offline")
 
     payload = command.send(:error_payload, error)
 
     assert_equal "offline", payload.fetch("error_kind")
     assert_equal true, payload.fetch("retryable")
-    refute payload.key?("package_digest")
+    assert_equal "a" * 64, payload.fetch("package_digest")
+    assert_equal "b" * 64, payload.fetch("release_digest")
+    assert_equal "validated", payload.fetch("last_completed_step")
   end
 
   def test_config_errors_have_the_configuration_error_kind

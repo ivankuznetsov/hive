@@ -3,7 +3,9 @@ require "hive/workflow_package/registry_manifest"
 
 module Hive
   module WorkflowPackage
-    class PublishRecoveryError < Hive::ConfigError; end
+    class PublishRecoveryError < Hive::Error
+      def exit_code = Hive::ExitCodes::SOFTWARE
+    end
 
     class PublishConflict < Hive::Error
       def exit_code = Hive::ExitCodes::GENERIC

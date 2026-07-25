@@ -46,13 +46,31 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
 
   def test_catalogue_observation_rejects_digest_mismatch
     with_registry do |repository, _source_revision, _catalog_commit|
-      error = assert_raises(Hive::WorkflowPackage::RegistryError) do
+      error = assert_raises(Hive::WorkflowPackage::PublishConflict) do
         Hive::WorkflowPackage::RegistryClient.new(repository: repository).observe(
           name: "demo", version: "1.0.0", release_digest: "a" * 64
         )
       end
       assert_match(/digest conflicts/, error.message)
     end
+  end
+
+  def test_configured_catalogue_branch_is_bound_at_clone_time
+    calls = []
+    client = Hive::WorkflowPackage::RegistryClient.new(
+      repository: "https://github.com/owner/registry.git", branch: "release/v1"
+    )
+    client.define_singleton_method(:git!) do |*args, **_kwargs|
+      calls << args
+      ""
+    end
+    client.send(:clone!, "/checkout")
+
+    assert_equal(
+      [ "clone", "--quiet", "--no-checkout", "--branch", "release/v1",
+        "--single-branch", "--", "https://github.com/owner/registry.git", "/checkout" ],
+      calls.first
+    )
   end
 
   def test_catalogue_observation_separates_invalid_identity_from_transport_unavailability

@@ -29,7 +29,11 @@ module Hive
           name: receipt.name, version: receipt.version, release_digest: receipt.release_digest
         )
         if catalogue.listed
-          return persist(receipt, "listed", pr_url: receipt.data["pr_url"], pr_number: receipt.data["pr_number"])
+          result = persist(
+            receipt, "listed", pr_url: receipt.data["pr_url"],
+            pr_number: receipt.data["pr_number"]
+          )
+          return finalize_local_state(result, package, listed: true)
         end
 
         pr = exact_pull_request!(receipt, package)
@@ -39,7 +43,8 @@ module Hive
         when "CLOSED" then "closed_unmerged"
         else raise PublishRecoveryError, "registry pull request lifecycle is unsupported"
         end
-        persist(receipt, state, pr_url: pr.url, pr_number: pr.number)
+        result = persist(receipt, state, pr_url: pr.url, pr_number: pr.number)
+        finalize_local_state(result, package, listed: false)
       rescue CatalogueUnavailable, PublishOfflineError => e
         cached(receipt, e)
       end
@@ -124,6 +129,39 @@ module Hive
           } ].freeze,
           receipt: receipt
         ).freeze
+      end
+
+      def finalize_local_state(result, package, listed:)
+        warnings = []
+        if listed
+          begin
+            @store.mark_bundle_gc_eligible(result.receipt)
+          rescue StandardError => error
+            warnings << cleanup_warning(
+              "publish.bundle_gc_marker_failed",
+              "retained bundle could not be marked GC-eligible", error
+            )
+          end
+        end
+        begin
+          @gateway.cleanup_commit(package, repository: @registry)
+        rescue StandardError => error
+          warnings << cleanup_warning(
+            "publish.object_cleanup_failed",
+            "disposable retained commit cleanup failed", error
+          )
+        end
+        return result if warnings.empty?
+
+        result.with(warnings: (result.warnings + warnings).freeze)
+      end
+
+      def cleanup_warning(rule, message, error)
+        {
+          "rule_id" => rule, "path" => "workflow-publish/v1",
+          "message" => "#{message}; lifecycle result is unchanged",
+          "detail" => error.class.name.split("::").last
+        }.freeze
       end
     end
   end

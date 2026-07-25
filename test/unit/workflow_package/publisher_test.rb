@@ -152,6 +152,12 @@ class WorkflowPackagePublisherTest < Minitest::Test
         Hive::WorkflowPackage::Publisher.new("demo", project_root: project, version: "latest")
                                                 .package(destination: File.join(project, "out"))
       end
+      error = assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::Publisher.new(
+          "demo", project_root: project, version: "1.0.0+build.1"
+        ).package(destination: File.join(project, "out"))
+      end
+      assert_match(/equal-precedence releases collide/, error.message)
       destination = File.join(project, "occupied")
       FileUtils.mkdir_p(destination)
       File.write(File.join(destination, "file"), "occupied")
@@ -222,6 +228,14 @@ class WorkflowPackagePublisherTest < Minitest::Test
           assert_equal retained, package.root
           assert_empty Dir.children(destination)
         end
+
+        File.write(File.join(authored_dir, "README.md"), valid_readme)
+        FileUtils.rm_f(File.join(authored_dir, "work.md"))
+        Dir.mktmpdir("publisher-no-instruction-") do |destination|
+          package = instance.prepare(destination: destination)
+          assert_equal retained, package.root
+          assert_empty Dir.children(destination)
+        end
       end
     end
   end
@@ -273,6 +287,9 @@ class WorkflowPackagePublisherTest < Minitest::Test
       config: { "honeycomb" => { "repository" => "owner/registry", "base_branch" => "release/v1" } }
     )
     assert_equal [ "owner/registry", "release/v1" ], valid.send(:publication_destination)
+    components = valid.send(:publication_components)
+    catalogue = components.fetch(:resolver).instance_variable_get(:@catalogue)
+    assert_equal "release/v1", catalogue.instance_variable_get(:@branch)
 
     [
       { "honeycomb" => { "repository" => "https://example.test/registry" } },
@@ -386,22 +403,7 @@ class WorkflowPackagePublisherTest < Minitest::Test
             state_file: done.md
       YAML
       File.write(File.join(authored, "work.md"), instruction)
-      File.write(File.join(authored, "README.md"), <<~MARKDOWN)
-        # Demo
-
-        ## Behavior
-        Produces a concise result.
-        ## Prerequisites
-        Requires readable task files.
-        ## Inputs
-        Reads the task brief.
-        ## Outputs
-        Writes a concise result.
-        ## Permissions and Risks
-        Uses read-only file access.
-        ## Recovery
-        Retry from the same immutable inputs.
-      MARKDOWN
+      File.write(File.join(authored, "README.md"), valid_readme)
       File.write(File.join(authored, "honeycomb.yml"), <<~YAML)
         description: Produce a concise result
         author:
@@ -416,5 +418,24 @@ class WorkflowPackagePublisherTest < Minitest::Test
       YAML
       yield project, authored
     end
+  end
+
+  def valid_readme
+    <<~MARKDOWN
+      # Demo
+
+      ## Behavior
+      Produces a concise result.
+      ## Prerequisites
+      Requires readable task files.
+      ## Inputs
+      Reads the task brief.
+      ## Outputs
+      Writes a concise result.
+      ## Permissions and Risks
+      Uses read-only file access.
+      ## Recovery
+      Retry from the same immutable inputs.
+    MARKDOWN
   end
 end

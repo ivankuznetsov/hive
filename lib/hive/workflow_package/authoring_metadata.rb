@@ -2,6 +2,7 @@ require "psych"
 require "rubygems"
 require "uri"
 require "hive/workflow_package/registry_manifest"
+require "hive/workflow_package/safe_file"
 
 module Hive
   module WorkflowPackage
@@ -152,11 +153,10 @@ module Hive
         end
 
         def bounded_read(path, label:)
-          stat = File.lstat(path)
-          unless stat.file? && !stat.symlink? && stat.size <= MAX_BYTES
-            raise Hive::ConfigError, "#{label} must be a bounded regular file"
-          end
-          File.binread(path)
+          SafeFile.read(
+            path, max_bytes: MAX_BYTES, error_class: Hive::ConfigError,
+            message: "#{label} must be a bounded regular file"
+          ).first
         end
 
         def utf8(bytes, label:)

@@ -5,6 +5,7 @@ require "timeout"
 require "tmpdir"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/manifest"
+require "hive/workflow_package/publish_receipt"
 require "hive/workflow_package/registry_manifest"
 require "hive/workflow_package/validator"
 
@@ -40,8 +41,9 @@ module Hive
       ].freeze
       STATES = %w[listed soft_hidden yanked revoked].freeze
 
-      def initialize(repository: OFFICIAL_REPOSITORY, timeout_sec: TIMEOUT_SEC)
+      def initialize(repository: OFFICIAL_REPOSITORY, branch: nil, timeout_sec: TIMEOUT_SEC)
         @repository = repository
+        @branch = branch
         @timeout_sec = timeout_sec
       end
 
@@ -51,7 +53,7 @@ module Hive
         raise RegistryError, "registry destination must be empty" if File.exist?(destination) && !Dir.empty?(destination)
 
         Dir.mktmpdir("hive-honeycomb-registry-") do |checkout|
-          git!("clone", "--quiet", "--no-checkout", "--", @repository, checkout)
+          clone!(checkout)
           catalog_commit = git!("-C", checkout, "rev-parse", "HEAD").strip
           validate_full_sha!(catalog_commit, "catalog commit")
           catalog_bytes = git!("-C", checkout, "show", "#{catalog_commit}:catalog.json", binary: true)
@@ -85,7 +87,7 @@ module Hive
         end
         Dir.mktmpdir("hive-honeycomb-observe-") do |checkout|
           begin
-            git!("clone", "--quiet", "--no-checkout", "--", @repository, checkout)
+            clone!(checkout)
             commit = git!("-C", checkout, "rev-parse", "HEAD").strip
             validate_full_sha!(commit, "catalog commit")
             bytes = git!("-C", checkout, "show", "#{commit}:catalog.json", binary: true)
@@ -99,7 +101,7 @@ module Hive
           return CatalogueObservation.new(listed: false, catalog_commit: commit, entry: nil).freeze unless entry
           actual = entry.dig("listing_approval", "release_sha256")
           unless actual == release_digest
-            raise RegistryError, "catalogue immutable release digest conflicts with the publication"
+            raise PublishConflict, "catalogue immutable release digest conflicts with the publication"
           end
           CatalogueObservation.new(
             listed: entry["state"] == "listed", catalog_commit: commit, entry: entry.freeze
@@ -115,6 +117,12 @@ module Hive
       end
 
       private
+
+      def clone!(checkout)
+        args = [ "clone", "--quiet", "--no-checkout" ]
+        args.concat([ "--branch", @branch, "--single-branch" ]) if @branch
+        git!(*args, "--", @repository, checkout)
+      end
 
       def bind_catalog_metadata!(resolution, manifest)
         data = manifest.data

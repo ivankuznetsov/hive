@@ -35,7 +35,9 @@ abort "trusted policy checksum does not match --policy-sha256" unless actual_pol
 
 root = File.expand_path("..", __dir__)
 contract = File.join(root, "config", "honeycomb-security-lint", "#{options.fetch(:version)}.yml")
-fixtures = File.join(root, "test", "fixtures", "honeycomb_security_lint", options.fetch(:version))
+fixtures = File.join(
+  root, "config", "honeycomb-security-lint", options.fetch(:version), "fixtures"
+)
 abort "contract version already exists" if File.exist?(contract) || File.exist?(fixtures)
 
 Dir.mktmpdir("hive-honeycomb-lint-import-") do |stage|

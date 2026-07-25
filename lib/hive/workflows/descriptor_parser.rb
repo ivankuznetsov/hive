@@ -12,7 +12,7 @@ module Hive
     # mid-flight) stay as arguments because they vary within a single parse.
     class DescriptorParser
       SAFE_SLUG = /\A[a-z0-9][a-z0-9-]*\z/
-      TOP_LEVEL_KEYS = %w[id stages].freeze
+      TOP_LEVEL_KEYS = %w[id stages x-hive].freeze
       STAGE_KEYS = %w[
         name
         kind

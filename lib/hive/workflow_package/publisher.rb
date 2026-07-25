@@ -1,5 +1,6 @@
 require "fileutils"
 require "digest"
+require "psych"
 require "hive/config"
 require "hive/workflow_package/authoring_metadata"
 require "hive/workflow_package/authoring_lint"
@@ -9,6 +10,7 @@ require "hive/workflow_package/publish_resolver"
 require "hive/workflow_package/publish_store"
 require "hive/workflow_package/registry_client"
 require "hive/workflow_package/registry_submission"
+require "hive/workflow_package/safe_file"
 require "hive/workflow_package/source_snapshot"
 require "hive/workflow_package/validator"
 require "hive/workflows/loader"
@@ -159,7 +161,9 @@ module Hive
         submission = @submission || RegistrySubmission.new(
           registry: registry, base_branch: base_branch, gateway: gateway, store: store
         )
-        catalogue = RegistryClient.new(repository: "https://github.com/#{registry}.git")
+        catalogue = RegistryClient.new(
+          repository: "https://github.com/#{registry}.git", branch: base_branch
+        )
         resolver = @resolver || PublishResolver.new(
           registry: registry, gateway: gateway, catalogue: catalogue, store: store
         )
@@ -193,7 +197,27 @@ module Hive
       end
 
       def authored_inputs_available?
-        [ descriptor_path, metadata_path, readme_path ].all? { |path| File.file?(path) && !File.symlink?(path) }
+        authored = [ descriptor_path, metadata_path, readme_path ]
+        return false unless authored.all? { |path| File.file?(path) && !File.symlink?(path) }
+
+        metadata = load_metadata
+        descriptor = AuthoringMetadata.parse_yaml_map(
+          SafeFile.read(
+            descriptor_path, max_bytes: AuthoringMetadata::MAX_BYTES,
+            error_class: Hive::ConfigError,
+            message: "workflow descriptor must be a bounded regular file"
+          ).first,
+          label: "workflow descriptor"
+        )
+        referenced = descriptor_references(descriptor).map do |value|
+          File.expand_path(value, workflows_dir)
+        end
+        assets = metadata.assets.map { |value| File.expand_path(value, authored_dir) }
+        (referenced + assets).all? { |path| File.file?(path) && !File.symlink?(path) }
+      rescue Psych::Exception, Errno::ENOENT, Errno::EACCES, IOError
+        false
+      rescue Hive::ConfigError
+        true
       end
 
       def validate_identity!
@@ -202,6 +226,10 @@ module Hive
         end
         unless RegistryManifest::SEMVER.match?(@version)
           raise Hive::ConfigError, "workflow publish requires --version with a semantic version such as 1.2.3"
+        end
+        if @version.include?("+")
+          raise Hive::ConfigError,
+                "workflow publish versions cannot contain build metadata because equal-precedence releases collide"
         end
       end
 
@@ -222,6 +250,19 @@ module Hive
 
       def load_metadata
         AuthoringMetadata.load(metadata_path)
+      end
+
+      def descriptor_references(value)
+        case value
+        when Hash
+          value.flat_map do |key, child|
+            key == "instruction" ? [ child ] : descriptor_references(child)
+          end
+        when Array
+          value.flat_map { |child| descriptor_references(child) }
+        else
+          []
+        end
       end
     end
   end

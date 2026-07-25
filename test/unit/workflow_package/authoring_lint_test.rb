@@ -41,7 +41,7 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
     assert_equal Hive::WorkflowPackage::LintPolicy::UPSTREAM_POLICY_SHA256,
                  policy.identity.fetch("upstream_policy_sha256")
     assert_equal fixture_corpus_sha256, policy.identity.fetch("fixture_corpus_sha256")
-    assert_equal Digest::SHA256.file(fixture("expected.json")).hexdigest,
+    assert_equal Digest::SHA256.file(runtime_fixture("expected.json")).hexdigest,
                  policy.identity.fetch("expected_output_sha256")
 
     with_tmp_dir do |dir|
@@ -56,6 +56,14 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
       refute result.valid?
       assert_includes result.findings.map(&:rule_id), "policy.file-limit"
     end
+  end
+
+  def test_runtime_gem_payload_includes_the_pinned_lint_fixture_contract
+    spec = Gem::Specification.load(File.expand_path("../../../hive.gemspec", __dir__))
+    Hive::WorkflowPackage::LintPolicy::FIXTURE_FILES.each do |name|
+      assert_includes spec.files, "config/honeycomb-security-lint/v1/fixtures/#{name}"
+    end
+    assert_includes spec.files, "config/honeycomb-security-lint/v1/fixtures/expected.json"
   end
 
   def test_matches_pinned_secret_deny_permission_and_network_rules
@@ -118,6 +126,18 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
     end
   end
 
+  def test_pinned_upstream_safe_yaml_cases_match_hive_extraction
+    cases = JSON.parse(File.read(runtime_fixture("safe_yaml_cases.json"))).fetch("cases")
+    expected = JSON.parse(File.read(runtime_fixture("expected.json"))).fetch("safe_yaml_cases")
+    cases.each do |name, yaml|
+      with_lint_package("safe\n", files: { "instructions/#{name}.yml" => yaml }) do |root, manifest|
+        rules = Lint.verify(root, manifest: manifest).findings.map(&:rule_id)
+        rule = expected.fetch(name)
+        rule ? assert_includes(rules, rule, name) : refute_includes(rules, "instruction.malformed-yaml", name)
+      end
+    end
+  end
+
   def test_policy_loader_rejects_version_shape_and_fixture_drift
     policy_class = Hive::WorkflowPackage::LintPolicy
     policy = policy_class.load_version("v1")
@@ -138,9 +158,9 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
 
     with_tmp_dir do |fixtures|
       policy_class::FIXTURE_FILES.each do |name|
-        FileUtils.cp(fixture(name), File.join(fixtures, name))
+        FileUtils.cp(runtime_fixture(name), File.join(fixtures, name))
       end
-      FileUtils.cp(fixture("expected.json"), File.join(fixtures, policy_class::EXPECTED_FILE))
+      FileUtils.cp(runtime_fixture("expected.json"), File.join(fixtures, policy_class::EXPECTED_FILE))
       File.open(File.join(fixtures, "benign.md"), "ab") { |file| file.write("changed") }
       assert_raises(Hive::ConfigError) do
         policy_class.send(:verify_fixture_contract!, data, fixtures)
@@ -196,22 +216,31 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
 
     with_lint_package("safe\n") do |root, manifest|
       target = File.join(root, "README.md")
-      original = File.method(:lstat)
-      reads = 0
-      replacement = lambda do |path|
-        stat = original.call(path)
-        next stat unless path == target
-        reads += 1
-        next stat unless reads == 2
+      original = File.method(:open)
+      replacement = lambda do |*args, &block|
+        file = original.call(*args, &block)
+        next file unless args.first == target && block.nil?
 
-        changed = Object.new
-        {
-          file?: true, symlink?: false, directory?: false,
-          dev: stat.dev, ino: stat.ino, size: stat.size + 1
-        }.each { |name, value| changed.define_singleton_method(name) { value } }
-        changed
+        stats = 0
+        wrapper = Object.new
+        wrapper.define_singleton_method(:read) { |*values| file.read(*values) }
+        wrapper.define_singleton_method(:close) { file.close }
+        wrapper.define_singleton_method(:stat) do
+          stats += 1
+          stat = file.stat
+          next stat if stats == 1
+          changed = Object.new
+          %i[dev ino size mtime mode nlink uid].each do |field|
+            value = stat.public_send(field)
+            changed.define_singleton_method(field) { value }
+          end
+          changed.define_singleton_method(:ctime) { stat.ctime + 1 }
+          changed.define_singleton_method(:file?) { true }
+          changed
+        end
+        wrapper
       end
-      with_replaced_singleton_method(File, :lstat, replacement) do
+      with_replaced_singleton_method(File, :open, replacement) do
         assert_includes Lint.verify(root, manifest: manifest).findings.map(&:rule_id),
                         "policy.invalid-file"
       end
@@ -407,11 +436,12 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
   private
 
   def fixture(name) = File.expand_path("../../fixtures/honeycomb_security_lint/#{name}", __dir__)
+  def runtime_fixture(name) = File.join(Hive::WorkflowPackage::LintPolicy::FIXTURE_ROOT, name)
 
   def fixture_corpus_sha256
     digest = Digest::SHA256.new
-    %w[benign.md malicious.md].each do |name|
-      digest << name << "\0" << File.binread(fixture(name))
+    Hive::WorkflowPackage::LintPolicy::FIXTURE_FILES.each do |name|
+      digest << name << "\0" << File.binread(runtime_fixture(name))
     end
     digest.hexdigest
   end

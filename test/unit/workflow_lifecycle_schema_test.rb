@@ -186,7 +186,8 @@ class WorkflowLifecycleSchemaTest < Minitest::Test
         "state" => "pending_review", "freshness" => "current",
         "name" => "demo", "version" => "1.0.0",
         "package_digest" => "b" * 64, "release_digest" => "c" * 64, "warnings" => [],
-        "observed_at" => "2026-07-21T12:00:00Z", "pr_url" => "https://example.test/pull/1"
+        "observed_at" => "2026-07-21T12:00:00Z",
+        "pr_url" => "https://github.com/honeycomb-registry/workflows/pull/1"
       }
     }
   end

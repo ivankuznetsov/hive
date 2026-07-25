@@ -2,6 +2,7 @@ require "hive/stages/base"
 require "hive/config"
 require "hive/claude_launcher"
 require "hive/markers"
+require "hive/brainstorm_parser"
 
 module Hive
   module Stages
@@ -158,7 +159,7 @@ module Hive
         marker = Hive::Markers.current(path)
         case marker.name
         when :waiting
-          body.match?(/^##\s+Round\s+\d+\b/i)
+          body.each_line.any? { |line| Hive::BrainstormParser::ROUND_RE.match?(line) }
         when :complete
           requirements = body.split(/^##\s+Requirements\b.*$/i, 2)[1]
           requirements && requirements.gsub(Hive::Markers::MARKER_RE, "").strip != ""

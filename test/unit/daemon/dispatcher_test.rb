@@ -337,8 +337,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       }
     end
 
-    def resume(request:, row:, now:)
-      @resumes << { request: request, row: row, now: now }
+    def resume(request:, row:)
+      @resumes << { request: request, row: row }
       Hive::Daemon::RecoveryCoordinator::Receipt.new(
         status: @status,
         request_id: request.request_id,
@@ -5217,12 +5217,19 @@ end
       dispatcher.define_singleton_method(:project_enabled?) { |_| false }
       begin
         dispatcher.tick(now: T0)
+        dispatcher.tick(now: T0 + 60)
 
         blocked = logger.events.find do |(n, attrs)|
           n == :dispatch_request_blocked && attrs[:request_id] == "DISABLED"
         end
         refute_nil blocked, ":dispatch_request_blocked must fire for a disabled project"
         assert_equal "project_disabled", blocked[1][:reason]
+        assert_equal 1, logger.events.count { |name, attrs|
+          name == :dispatch_request_blocked && attrs[:request_id] == "DISABLED"
+        }, "an unchanged durable block must not append another log entry every poll"
+        assert_equal 1, logger.events.count { |name, attrs|
+          name == :dispatch_request_observed && attrs[:request_id] == "DISABLED"
+        }, "an unchanged request observation must not append another log entry every poll"
         # Request file stays on disk for retry once project is re-enabled.
         files = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
         assert_equal 1, files.size,

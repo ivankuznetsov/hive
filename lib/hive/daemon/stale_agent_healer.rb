@@ -287,12 +287,11 @@ module Hive
       # are reduced to task identity and counters; marker contents and
       # executable commands never cross this interface. Nil limits mean the
       # retry state never exhausts.
-      def operational_snapshot
-        {
+      def operational_snapshot(include_receipts: true)
+        snapshot = {
           "enabled" => @auto_retry_enabled,
           "error_retries" => retry_entries(@error_auto_recoveries, kind: "error"),
           "review_retries" => retry_entries(@review_error_auto_recoveries, kind: "review"),
-          "receipts" => operational_recovery_receipts,
           # Compatibility fields from the former bounded policy.
           "error_exhausted" => [],
           "review_exhausted" => [],
@@ -302,6 +301,8 @@ module Hive
             "attempt_loss" => @attempt_loss_recovery_limit
           }
         }
+        snapshot["receipts"] = operational_recovery_receipts if include_receipts
+        snapshot
       end
 
       # Read-only assessment shared with the scheduler disposition publisher.
@@ -624,26 +625,25 @@ module Hive
 
       def coordinate_error_recovery(row, now:, marker_reason:)
         key = error_recovery_key(row, marker_reason)
-        prior = @error_auto_recoveries[key]
-        receipt = @recovery_coordinator.request(
-          row: row, requestor: "healer", now: now, retry_count: prior
+        coordinate_recovery(
+          row, now: now, recoveries: @error_auto_recoveries, key: key
         )
-        @recovery_receipts[[ row.project.to_s, row.slug.to_s ]] = receipt
-        @error_auto_recoveries[key] = receipt.retry_count.to_i if
-          receipt.status == "queued" && receipt.retry_count
-        log_coordinated_recovery(row, receipt)
-        receipt
       end
 
       def coordinate_review_recovery(row, now:)
         reason = marker_reason(row)
         key = review_error_auto_recovery_key(row, reason: reason)
-        prior = @review_error_auto_recoveries[key]
+        coordinate_recovery(
+          row, now: now, recoveries: @review_error_auto_recoveries, key: key
+        )
+      end
+
+      def coordinate_recovery(row, now:, recoveries:, key:)
         receipt = @recovery_coordinator.request(
-          row: row, requestor: "healer", now: now, retry_count: prior
+          row: row, requestor: "healer", now: now, retry_count: recoveries[key]
         )
         @recovery_receipts[[ row.project.to_s, row.slug.to_s ]] = receipt
-        @review_error_auto_recoveries[key] = receipt.retry_count.to_i if
+        recoveries[key] = receipt.retry_count.to_i if
           receipt.status == "queued" && receipt.retry_count
         log_coordinated_recovery(row, receipt)
         receipt

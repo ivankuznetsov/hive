@@ -1,5 +1,6 @@
 require "digest"
 require "fileutils"
+require "json"
 require "shellwords"
 require "hive/config"
 require "hive/stages"
@@ -93,8 +94,6 @@ module Hive
         @lost_outcome_processor = lost_outcome_processor
         @operational_snapshot = operational_snapshot
         @attempt_snapshot = nil
-        @dispatch_request_state_home = dispatch_request_state_home
-        @dispatch_result_state_home = dispatch_result_state_home
         @recovery_coordinator = recovery_coordinator || RecoveryCoordinator.new(
           state_home: dispatch_request_state_home || Hive::Paths.state_home
         )
@@ -210,6 +209,10 @@ module Hive
         # pattern so a persistently-raising scheduler logs once per distinct
         # fault (and re-logs after a clean run), not on every ~30s poll.
         @digest_scheduler_fatal_signatures = {}
+        # `[request_id, event] → last payload digest`. Durable requests can
+        # remain blocked for many polls; only state changes are useful in the
+        # append-only daemon log.
+        @dispatch_request_log_signatures = {}
       end
 
       # Single tick: reap, fetch, dispatch. Pure dispatcher — no signal
@@ -1379,10 +1382,6 @@ module Hive
           state_home: dispatch_request_state_home,
           bad_handler: ->(**_attrs) { malformed += 1 }
         )
-        pending = pending.reject do |request|
-          request.respond_to?(:recovery) &&
-            request.recovery&.fetch("phase", nil) == "terminal"
-        end
         claimed = claimed.reject do |delivery|
           delivery.respond_to?(:request) &&
             delivery.request.recovery&.fetch("phase", nil) == "terminal"
@@ -1409,7 +1408,7 @@ module Hive
       end
 
       def operational_recovery_snapshot
-        stale_agent = @stale_agent_healer.operational_snapshot.merge(
+        stale_agent = @stale_agent_healer.operational_snapshot(include_receipts: false).merge(
           "receipts" => durable_recovery_receipts
         )
         {
@@ -1843,6 +1842,10 @@ module Hive
             FileUtils.rm_f(path)
           }
         )
+        current_request_ids = pending.to_h { |request| [ request.request_id.to_s, true ] }
+        @dispatch_request_log_signatures.delete_if do |(request_id, _event), _signature|
+          !current_request_ids.key?(request_id)
+        end
 
         # Per-slug in-flight gate within this tick: if we just spawned
         # for (project, slug) on this tick, defer subsequent requests
@@ -1851,10 +1854,11 @@ module Hive
         # `record_dispatch`, so this is naturally exclusive across
         # iterations of this loop too.
         pending.each do |req|
-          @logger.event(:dispatch_request_observed,
-                        request_id: req.request_id, project: req.project,
-                        slug: req.slug, trigger: req.trigger,
-                        requestor: req.requestor)
+          log_dispatch_request_once(
+            :dispatch_request_observed,
+            request_id: req.request_id, project: req.project,
+            slug: req.slug, trigger: req.trigger, requestor: req.requestor
+          )
 
           # Per-iteration rescue: a Process.spawn failure (Errno::EAGAIN
           # / Errno::ENOMEM under fork-exhaustion) or any other
@@ -1876,6 +1880,17 @@ module Hive
             # the same request_id.
           end
         end
+      end
+
+      def log_dispatch_request_once(event, request_id:, **attributes)
+        key = [ request_id.to_s, event.to_s ]
+        canonical = attributes.sort_by { |name, _value| name.to_s }.to_h
+        signature = ::Digest::SHA256.hexdigest(JSON.generate(canonical))
+        return false if @dispatch_request_log_signatures[key] == signature
+
+        @logger.event(event, request_id: request_id, **attributes)
+        @dispatch_request_log_signatures[key] = signature
+        true
       end
 
       # Body of one queue iteration. Extracted so the rescue in
@@ -1900,9 +1915,11 @@ module Hive
 
         unless Hive::Config.find_project(req.project)
           if durable_error_retry_request?(req)
-            @logger.event(:dispatch_request_blocked,
-                          request_id: req.request_id, project: req.project,
-                          slug: req.slug, reason: "unknown_project")
+            log_dispatch_request_once(
+              :dispatch_request_blocked,
+              request_id: req.request_id, project: req.project,
+              slug: req.slug, reason: "unknown_project"
+            )
           else
             reject_request(req, reason: "unknown_project")
           end
@@ -1915,9 +1932,11 @@ module Hive
         # request path must mirror to keep the single-dispatcher
         # invariant honest.
         unless project_enabled?(req.project)
-          @logger.event(:dispatch_request_blocked,
-                        request_id: req.request_id, project: req.project,
-                        slug: req.slug, reason: "project_disabled")
+          log_dispatch_request_once(
+            :dispatch_request_blocked,
+            request_id: req.request_id, project: req.project,
+            slug: req.slug, reason: "project_disabled"
+          )
           return
         end
 
@@ -1927,19 +1946,17 @@ module Hive
               candidate.slug.to_s == req.slug.to_s
           end
           unless row
-            @logger.event(
+            log_dispatch_request_once(
               :dispatch_request_blocked,
               request_id: req.request_id, project: req.project,
               slug: req.slug, reason: "recovery_observation_unavailable"
             )
             return
           end
-          recovery_receipt = @recovery_coordinator.resume(
-            request: req, row: row, now: now
-          )
+          recovery_receipt = @recovery_coordinator.resume(request: req, row: row)
           unless recovery_receipt.status == "queued" &&
                  recovery_receipt.phase == "cleared"
-            @logger.event(
+            log_dispatch_request_once(
               :dispatch_request_blocked,
               request_id: req.request_id, project: req.project,
               slug: req.slug, reason: recovery_receipt.reason || recovery_receipt.status,
@@ -1960,7 +1977,7 @@ module Hive
         if dependency_gated_request?(req)
           row = rows.find { |candidate| candidate.project == req.project && candidate.slug == req.slug }
           if row&.admission_error
-            @logger.event(
+            log_dispatch_request_once(
               :dispatch_request_blocked,
               request_id: req.request_id, project: req.project, slug: req.slug,
               reason: "admission_error", reason_code: row.admission_error.reason_code
@@ -1968,7 +1985,7 @@ module Hive
             return
           end
           if row&.blocked == true
-            @logger.event(
+            log_dispatch_request_once(
               :dispatch_request_blocked,
               request_id: req.request_id, project: req.project, slug: req.slug,
               reason: "dependency_unmet", blocked_by: row.blocked_by
@@ -1982,9 +1999,11 @@ module Hive
         # in-flight slug doesn't incur the can_dispatch? scan. Per R-04
         # / M-05 from PR #241 ce-code-review.
         if @controller.running_task?(project: req.project, slug: req.slug)
-          @logger.event(:dispatch_request_blocked,
-                        request_id: req.request_id, project: req.project,
-                        slug: req.slug, reason: "in_flight")
+          log_dispatch_request_once(
+            :dispatch_request_blocked,
+            request_id: req.request_id, project: req.project,
+            slug: req.slug, reason: "in_flight"
+          )
           return
         end
 
@@ -1994,9 +2013,11 @@ module Hive
           external_project_count: external_active_agent_count_for(req.project)
         )
         unless gate == :ok
-          @logger.event(:dispatch_request_blocked,
-                        request_id: req.request_id, project: req.project,
-                        slug: req.slug, reason: gate.to_s)
+          log_dispatch_request_once(
+            :dispatch_request_blocked,
+            request_id: req.request_id, project: req.project,
+            slug: req.slug, reason: gate.to_s
+          )
           return
         end
 
@@ -2042,7 +2063,7 @@ module Hive
         marker = Hive::Markers.current(row.state_file)
         if marker.name.to_s == req.expected_marker_name.to_s &&
            recovery_marker_identity(marker) == req.expected_marker_id.to_s
-          @logger.event(
+          log_dispatch_request_once(
             :dispatch_request_blocked,
             request_id: req.request_id, project: req.project, slug: req.slug,
             reason: "awaiting_marker_clear"
@@ -2065,7 +2086,7 @@ module Hive
 
         true
       rescue StandardError => e
-        @logger.event(
+        log_dispatch_request_once(
           :dispatch_request_blocked,
           request_id: req.request_id, project: req.project, slug: req.slug,
           reason: "retry_identity_inspection_failed",
@@ -2100,9 +2121,11 @@ module Hive
         end
 
         if @controller.running_task?(project: req.project, slug: req.slug)
-          @logger.event(:dispatch_request_blocked,
-                        request_id: req.request_id, project: req.project,
-                        slug: req.slug, reason: "in_flight")
+          log_dispatch_request_once(
+            :dispatch_request_blocked,
+            request_id: req.request_id, project: req.project,
+            slug: req.slug, reason: "in_flight"
+          )
           return
         end
 
@@ -2132,9 +2155,11 @@ module Hive
             Hive::Daemon::DispatchRequestQueue.release_claim(
               req.request_id, state_home: dispatch_request_state_home
             )
-            @logger.event(:dispatch_request_blocked,
-                          request_id: req.request_id, project: req.project,
-                          slug: req.slug, reason: result.reason)
+            log_dispatch_request_once(
+              :dispatch_request_blocked,
+              request_id: req.request_id, project: req.project,
+              slug: req.slug, reason: result.reason
+            )
             return result
           end
 

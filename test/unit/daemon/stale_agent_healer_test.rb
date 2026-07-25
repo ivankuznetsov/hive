@@ -143,6 +143,12 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     assert_empty snapshot.fetch("review_exhausted")
   end
 
+  def test_operational_snapshot_can_skip_receipt_resolution_for_dispatcher_assembly
+    snapshot = @healer.operational_snapshot(include_receipts: false)
+
+    refute snapshot.key?("receipts")
+  end
+
   def test_universal_error_healer_delegates_to_recovery_coordinator_without_clearing
     coordinator = FakeRecoveryCoordinator.new
     healer = Hive::Daemon::StaleAgentHealer.new(

@@ -90,14 +90,9 @@ module Hive
         "review_stale" => "REVIEW_STALE",
         "review_ci_stale" => "REVIEW_CI_STALE"
       }.freeze
-      # Legacy review-stale candidate keys. REVIEW_ERROR uses its generated
-      # marker_id through Hive::Markers.review_error_recovery_match_attr.
-      REVIEW_RECOVERY_MATCH_ATTRS = %w[pass reason attempts phase].freeze
       # Display-priority order for the success flash detail. Known
       # keys render in this order; unknown keys append after, sorted
-      # alphabetically (see `review_recovery_detail`). Order is for
-      # display only — the match-attr guard reads
-      # `REVIEW_RECOVERY_MATCH_ATTRS` instead.
+      # alphabetically (see `review_recovery_detail`).
       REVIEW_RECOVERY_DETAIL_ATTRS = %w[
         phase reason pass attempts elapsed files matches exception_class
       ].freeze
@@ -970,7 +965,7 @@ module Hive
         end
 
         detail = review_recovery_detail(row, marker_name)
-        spawn_review_recovery_thread(row, marker_name)
+        spawn_review_recovery_thread(row)
         [ flashed("Checking recovery — #{Hive::Tui::Text.sanitize(detail)[0, 160]}…"), nil ]
       end
 
@@ -996,9 +991,9 @@ module Hive
       # same join-with-timeout-then-kill discipline. The eviction +
       # thread-list cleanup runs in `ensure` so a programmer-error
       # crash inside the worker still releases the dedup slot.
-      def spawn_review_recovery_thread(row, marker_name)
+      def spawn_review_recovery_thread(row)
         thread = Thread.new do
-          perform_review_recovery(row, marker_name)
+          perform_review_recovery(row)
         ensure
           evict_review_recovery_attempt(row.folder)
           @healed_folders_mutex.synchronize { @heal_threads.delete(Thread.current) }
@@ -1010,7 +1005,7 @@ module Hive
       # Worker body. The durable coordinator returns the canonical lifecycle
       # receipt; the TUI renders it verbatim instead of guessing that a clear
       # or a process start succeeded.
-      def perform_review_recovery(row, marker_name)
+      def perform_review_recovery(row)
         receipt = request_recovery(row)
         flash_async(Hive::Tui::Text.sanitize(receipt.human_summary)[0, 240])
       rescue SystemCallError, IOError => e

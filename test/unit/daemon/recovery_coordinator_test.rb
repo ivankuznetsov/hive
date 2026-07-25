@@ -79,7 +79,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       request = Q.pending(state_home: state_home).fetch(0)
       observed_generation = request.recovery.fetch("observed_marker_generation")
 
-      resumed = coordinator.resume(request: request, row: row, now: NOW + 1)
+      resumed = coordinator.resume(request: request, row: row)
 
       assert_equal "queued", resumed.status
       assert_equal "cleared", resumed.phase
@@ -105,7 +105,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         purge_history: true
       )
 
-      resumed = coordinator.resume(request: request, row: row, now: NOW + 1)
+      resumed = coordinator.resume(request: request, row: row)
 
       assert_equal "queued", resumed.status
       assert_equal "cleared", resumed.phase
@@ -128,7 +128,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       )
       request = Q.pending(state_home: state_home).fetch(0)
 
-      resumed = coordinator.resume(request: request, row: row, now: NOW + 1)
+      resumed = coordinator.resume(request: request, row: row)
 
       assert_equal 3, inspections
       assert_equal "blocked", resumed.status
@@ -173,7 +173,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         )
         request = Q.pending(state_home: state_home).fetch(0)
 
-        resumed = coordinator.resume(request: request, row: row, now: NOW + 1)
+        resumed = coordinator.resume(request: request, row: row)
 
         assert_equal "blocked", resumed.status, dimension
         assert_equal "task_identity_conflict", resumed.reason, dimension
@@ -188,7 +188,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         blocked_path = Q.fetch(request.request_id, state_home: state_home).path
         blocked_inode = File.stat(blocked_path).ino
 
-        replayed = coordinator.resume(request: request, row: row, now: NOW + 2)
+        replayed = coordinator.resume(request: request, row: row)
 
         assert_equal "blocked", replayed.status, dimension
         assert_equal blocked_inode, File.stat(blocked_path).ino,
@@ -215,7 +215,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         file.write("\napi_key=abcdefghijklmnopqrstuvwxyz123456\n")
       end
 
-      resumed = coordinator.resume(request: request, row: row, now: NOW + 1)
+      resumed = coordinator.resume(request: request, row: row)
 
       assert_equal "blocked", resumed.status
       assert_equal "safety_blocked", resumed.reason
@@ -246,7 +246,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         Hive::Daemon::AutoRetrySafety.method(:safe_to_retry?)
       )
 
-      resumed = coordinator.resume(request: request, row: row, now: NOW + 1)
+      resumed = coordinator.resume(request: request, row: row)
 
       assert_equal "blocked", resumed.status
       assert_equal "safety_blocked", resumed.reason
@@ -271,7 +271,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       )
       File.write(row.state_file, "# operator changed this after clear\n")
 
-      resumed = coordinator.resume(request: request, row: row, now: NOW + 1)
+      resumed = coordinator.resume(request: request, row: row)
 
       assert_equal "blocked", resumed.status
       assert_equal "generation_conflict", resumed.reason
@@ -289,7 +289,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       request = Q.pending(state_home: state_home).fetch(0)
       Hive::Markers.set(row.state_file, :error, reason: "timeout", marker_id: "marker-2")
 
-      resumed = coordinator.resume(request: request, row: row, now: NOW + 1)
+      resumed = coordinator.resume(request: request, row: row)
 
       assert_equal "blocked", resumed.status
       assert_equal "generation_conflict", resumed.reason

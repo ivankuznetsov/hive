@@ -2,7 +2,9 @@ require "json"
 require "fileutils"
 require "securerandom"
 require "digest"
+require "set"
 require "time"
+require "hive/atomic_file"
 require "hive/paths"
 require "hive/attempts/output_reference"
 require "hive/daemon/queue_directory"
@@ -663,7 +665,7 @@ module Hive
       end
 
       def claimed_request_ids(dir)
-        Dir.glob(File.join(dir, "*.json#{CLAIMED_SUFFIX}")).each_with_object([]) do |path, ids|
+        Dir.glob(File.join(dir, "*.json#{CLAIMED_SUFFIX}")).each_with_object(Set.new) do |path, ids|
           data = parse_json_hash(path)
           ids << data["request_id"] if data && data["request_id"]
         end
@@ -868,23 +870,14 @@ module Hive
             dispatch_generation
           ].each do |key|
             value = recovery[key].to_s
-            raise ArgumentError, "#{key} must be a sha256" unless value.match?(/\A[0-9a-f]{64}\z/)
+            unless Hive::Attempts::OutputReference::SHA256_PATTERN.match?(value)
+              raise ArgumentError, "#{key} must be a sha256"
+            end
           end
         end
 
         def rewrite_request(path, data)
-          dir = File.dirname(path)
-          tmp_path = File.join(
-            dir, ".#{File.basename(path)}.tmp.#{Process.pid}.#{Thread.current.object_id}"
-          )
-          File.open(tmp_path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
-            file.write(JSON.generate(data))
-            file.flush
-            file.fsync
-          end
-          File.rename(tmp_path, path)
-        ensure
-          FileUtils.rm_f(tmp_path) if defined?(tmp_path) && tmp_path && File.exist?(tmp_path)
+          Hive::AtomicFile.write(path, JSON.generate(data), mode: 0o600)
         end
       end
     end

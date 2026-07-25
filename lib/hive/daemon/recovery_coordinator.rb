@@ -33,21 +33,7 @@ module Hive
         end
 
         def to_h
-          {
-            "status" => status,
-            "request_id" => request_id,
-            "attempt_id" => attempt_id,
-            "phase" => phase,
-            "failure_origin" => failure_origin,
-            "next_eligible_at" => next_eligible_at,
-            "owner" => owner,
-            "reason" => reason,
-            "remediation" => remediation,
-            "retry_count" => retry_count,
-            "provider_hint" => provider_hint,
-            "terminal_outcome" => terminal_outcome,
-            "terminal_at" => terminal_at
-          }
+          super.transform_keys(&:to_s)
         end
 
         def primary_label
@@ -352,7 +338,7 @@ module Hive
       # daemon immediately before ordinary attempt admission. It can recover a
       # crash after the marker rewrite because the expected markerless
       # fingerprint was persisted before mutation.
-      def resume(request:, row:, now: Time.now.utc)
+      def resume(request:, row:)
         recovery = request.recovery
         return unavailable_request(request, "request_has_no_recovery_transition") unless recovery.is_a?(Hash)
         return receipt_for_request(request) if %w[dispatched terminal].include?(recovery["phase"])

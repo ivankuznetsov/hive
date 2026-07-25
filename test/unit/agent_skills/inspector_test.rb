@@ -60,6 +60,16 @@ class AgentSkillsInspectorTest < Minitest::Test
     }
   end
 
+  def grok_responses(bin:, plugins:, loaded_plugins:, version: "0.2.102")
+    {
+      [ bin, "--version" ] => result(stdout: "grok #{version}\n"),
+      [ bin, "plugin", "list", "--json" ] => result(stdout: JSON.generate(plugins)),
+      [ bin, "inspect", "--json" ] => result(
+        stdout: JSON.generate("plugins" => loaded_plugins, "skills" => [])
+      )
+    }
+  end
+
   def inspect_rows(cfg:, project:, runner:, environment: {})
     Hive::AgentSkills::Inspector.new(
       config: cfg,
@@ -573,28 +583,104 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
-  def test_unmanaged_reviewer_without_a_skill_resolver_is_non_blocking
+  def test_grok_native_compound_engineering_reviewer_is_managed_and_healthy
     with_tmp_dir do |dir|
       bin = File.join(dir, "bin", "grok")
       executable(bin)
+      grok_home = File.join(dir, ".grok")
+      install = File.join(grok_home, "installed-plugins", "compound-engineering-plugin-abc123")
+      write(File.join(install, "skills", "ce-code-review", "SKILL.md"))
+      write(
+        File.join(grok_home, "installed-plugins", "registry.json"),
+        JSON.generate(
+          "version" => 1,
+          "repos" => {
+            "compound-engineering-plugin-abc123" => {
+              "path" => install,
+              "plugins" => { "compound-engineering" => { "version" => "3.20.0" } }
+            }
+          }
+        )
+      )
+      write(File.join(grok_home, "config.toml"), "[plugins]\nenabled = [\"compound-engineering\"]\n")
       reviewer = {
         "name" => "grok-ce", "kind" => "agent",
         "agent" => "grok", "skill" => "ce-code-review"
       }
       cfg = config(reviewers: [ reviewer ])
       cfg["agents"]["grok"]["bin"] = bin
+      runner = FakeRunner.new(
+        grok_responses(
+          bin: bin,
+          plugins: [
+            {
+              "status" => "installed",
+              "name" => "compound-engineering",
+              "version" => "3.20.0",
+              "path" => install,
+              "source" => "https://github.com/EveryInc/compound-engineering-plugin"
+            }
+          ],
+          loaded_plugins: [
+            { "name" => "compound-engineering", "path" => install, "enabled" => true }
+          ]
+        )
+      )
 
       row = Hive::AgentSkills::Inspector.new(
-        config: cfg, project_root: dir, runner: FakeRunner.new,
-        environment: { "HOME" => dir, "PATH" => "" }
+        config: cfg, project_root: dir, runner: runner,
+        environment: { "HOME" => dir, "PATH" => "", "GROK_HOME" => grok_home }
       ).inspect(skills: [ "ce-code-review" ]).first
 
-      assert_equal false, row.managed
-      assert_equal "unavailable", row.health
+      assert_equal true, row.managed
+      assert_equal "healthy", row.health
       assert_equal "info", row.severity
-      assert_equal "unsupported", row.resolution.fetch("status")
-      assert_match(/unsupported skill resolver for "grok"/, row.explanation)
-      assert_match(/Hive does not manage custom skills/, row.remediation)
+      assert_equal "present", row.resolution.fetch("status")
+      assert_equal install, row.native.dig("package", "install_path")
+      assert_equal "hive setup-agents --agent grok --skill ce-code-review", row.remediation
+    end
+  end
+
+  def test_grok_runtime_plugin_shadow_is_a_conflict
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "grok")
+      executable(bin)
+      native = Hive::AgentSkills::Manifest.load.package("compound-engineering").native_for("grok")
+      installed = File.join(dir, ".grok", "installed-plugins", "compound-engineering-plugin-abc123")
+      shadow = File.join(dir, "project", ".grok", "plugins", "compound-engineering")
+      runner = FakeRunner.new(
+        grok_responses(
+          bin: bin,
+          plugins: [
+            {
+              "status" => "installed",
+              "name" => native.package,
+              "version" => "3.20.0",
+              "path" => installed,
+              "source" => native.source
+            }
+          ],
+          loaded_plugins: [
+            { "name" => native.package, "path" => shadow, "enabled" => true }
+          ]
+        )
+      )
+      cfg = config(agent: "grok", bin: bin)
+      inspector = Hive::AgentSkills::Inspector.new(
+        config: cfg,
+        project_root: dir,
+        runner: runner,
+        environment: { "HOME" => dir, "PATH" => "", "GROK_HOME" => File.join(dir, ".grok") }
+      )
+
+      evidence = inspector.send(
+        :inspect_native,
+        profile: Hive::AgentProfiles.lookup("grok", cfg: cfg),
+        bin: bin,
+        native_spec: native
+      )
+
+      assert_match(/runtime plugin .* resolves from/, evidence.fetch("issues").first.last)
     end
   end
 
@@ -757,6 +843,11 @@ class AgentSkillsInspectorTest < Minitest::Test
       assert_equal 2, source_issues.size
       assert_match(/marketplace .* is owned by/, source_issues.first.last)
       assert_match(/installed package source/, source_issues.last.last)
+      missing_source = inspector.send(
+        :source_issues, package.native_for("pi"),
+        { "marketplace" => nil, "package" => { "source" => nil } }
+      )
+      assert_match(/source is unavailable/, missing_source.first.last)
 
       empty_package = File.join(dir, "empty-package")
       FileUtils.mkdir_p(empty_package)

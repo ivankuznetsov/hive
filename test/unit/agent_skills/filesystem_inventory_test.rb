@@ -129,6 +129,71 @@ class AgentSkillsFilesystemInventoryTest < Minitest::Test
     end
   end
 
+  def test_grok_reads_native_registry_and_enabled_plugin_config
+    with_tmp_dir do |root|
+      spec = native_spec(
+        provider: "grok",
+        package: "compound-engineering",
+        marketplace: nil,
+        source: "EveryInc/compound-engineering-plugin"
+      )
+      install = File.join(root, "installed-plugins", "compound-engineering-plugin-abc123")
+      write_json(
+        File.join(root, "installed-plugins", "registry.json"),
+        "version" => 1,
+        "repos" => {
+          "compound-engineering-plugin-abc123" => {
+            "kind" => {
+              "type" => "Git",
+              "url" => "https://github.com/EveryInc/compound-engineering-plugin"
+            },
+            "path" => install,
+            "plugins" => { "compound-engineering" => { "version" => "3.20.0" } }
+          }
+        }
+      )
+      write(File.join(root, "config.toml"), "[plugins]\nenabled = [\"compound-engineering\"]\n")
+
+      result = inspect_provider(spec, root)
+
+      assert_empty result.fetch("issues")
+      assert_equal "compound-engineering", result.dig("package", "id")
+      assert_equal "3.20.0", result.dig("package", "version")
+      assert_equal true, result.dig("package", "enabled")
+      assert_equal install, result.dig("package", "install_path")
+      assert_equal "https://github.com/EveryInc/compound-engineering-plugin",
+                   result.dig("package", "source")
+    end
+  end
+
+  def test_grok_reports_installed_but_disabled_plugin
+    with_tmp_dir do |root|
+      spec = native_spec(
+        provider: "grok",
+        package: "compound-engineering",
+        marketplace: nil,
+        source: "EveryInc/compound-engineering-plugin"
+      )
+      write_json(
+        File.join(root, "installed-plugins", "registry.json"),
+        "version" => 1,
+        "repos" => {
+          "compound-engineering-plugin-abc123" => {
+            "kind" => { "type" => "Git", "url" => spec.source },
+            "path" => File.join(root, "installed-plugins", "compound-engineering-plugin-abc123"),
+            "plugins" => { "compound-engineering" => { "version" => "3.20.0" } }
+          }
+        }
+      )
+      write(File.join(root, "config.toml"), "[plugins]\ndisabled = [\"compound-engineering\"]\n")
+
+      result = inspect_provider(spec, root)
+
+      assert_empty result.fetch("issues")
+      assert_equal false, result.dig("package", "enabled")
+    end
+  end
+
   private
 
   def inventory

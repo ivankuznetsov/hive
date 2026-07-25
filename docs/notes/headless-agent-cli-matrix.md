@@ -212,9 +212,18 @@ Hive rejects relative path overrides so preflight and a child spawned in another
 working directory cannot resolve different credential files or state directories. Grok has no
 `--add-dir` equivalent or native dollar-budget flag, so Hive retains its
 process-group wall-clock limit and emits the normal reduced-isolation warning.
-No Grok skill verifier exists yet; the bundled Grok CE reviewer therefore uses
-a compact, self-contained, report-only prompt instead of claiming native skill
-resolution.
+Grok Build now supports native plugins. Hive manages Compound Engineering with:
+
+```sh
+grok plugin install EveryInc/compound-engineering-plugin --trust
+grok plugin enable compound-engineering
+grok plugin update compound-engineering
+```
+
+`Hive::SkillCheck::Grok` resolves enabled plugin skills from Grok's native
+`installed-plugins/registry.json` and `[plugins]` configuration. The opt-in Grok
+CE reviewer now invokes `/ce-code-review`; the previous self-contained copied
+review prompt was only a compatibility stopgap and has been removed.
 
 ## Normalized implementation identity arguments (2026-07-17)
 

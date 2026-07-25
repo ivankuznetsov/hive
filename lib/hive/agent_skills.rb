@@ -155,7 +155,11 @@ module Hive
       end
 
       def resolve(agents: nil, skills: nil)
-        targets = Manifest::AGENTS.map { |agent| operating_target(agent) }
+        # Only agents declared by the bundled Hive operating skill get an
+        # always-present operating target. Native-only agents such as Grok
+        # can still own stage/reviewer capabilities without requiring a
+        # copied Hive operating-skill projection.
+        targets = @manifest.capability("hive").agents.keys.map { |agent| operating_target(agent) }
         STAGES.each { |stage| targets << stage_target(stage) }
         Array(@config.dig("review", "reviewers")).each_with_index do |spec, index|
           name = spec["name"].to_s

@@ -293,6 +293,91 @@ class HiveSkillCheckCodexTest < Minitest::Test
   end
 end
 
+class HiveSkillCheckGrokTest < Minitest::Test
+  include HiveTestHelper
+
+  def test_resolves_enabled_native_plugin_skill
+    with_tmp_dir do |home|
+      grok_home = File.join(home, ".grok")
+      install = File.join(grok_home, "installed-plugins", "compound-engineering-plugin-abc123")
+      write_file(File.join(install, "skills", "ce-code-review", "SKILL.md"))
+      write_file(
+        File.join(grok_home, "installed-plugins", "registry.json"),
+        JSON.generate(
+          "version" => 1,
+          "repos" => {
+            "compound-engineering-plugin-abc123" => {
+              "path" => install,
+              "plugins" => { "compound-engineering" => { "version" => "3.20.0" } }
+            }
+          }
+        )
+      )
+      write_file(File.join(grok_home, "config.toml"), "[plugins]\nenabled = [\"compound-engineering\"]\n")
+
+      resolution = Hive::SkillCheck::Grok.resolve(
+        "/ce-code-review", environment: { "HOME" => home, "GROK_HOME" => grok_home }
+      )
+
+      assert_equal :present, resolution.status
+      assert_equal File.join(install, "skills", "ce-code-review", "SKILL.md"), resolution.path
+    end
+  end
+
+  def test_disabled_or_unenabled_native_plugin_does_not_resolve
+    with_tmp_dir do |home|
+      grok_home = File.join(home, ".grok")
+      install = File.join(grok_home, "installed-plugins", "compound-engineering-plugin-abc123")
+      write_file(File.join(install, "skills", "ce-code-review", "SKILL.md"))
+      write_file(
+        File.join(grok_home, "installed-plugins", "registry.json"),
+        JSON.generate(
+          "version" => 1,
+          "repos" => {
+            "compound-engineering-plugin-abc123" => {
+              "path" => install,
+              "plugins" => { "compound-engineering" => { "version" => "3.20.0" } }
+            }
+          }
+        )
+      )
+      write_file(File.join(grok_home, "config.toml"), "[plugins]\ndisabled = [\"compound-engineering\"]\n")
+
+      resolution = Hive::SkillCheck::Grok.resolve(
+        "/ce-code-review", environment: { "HOME" => home, "GROK_HOME" => grok_home }
+      )
+
+      assert_equal :missing, resolution.status
+      assert_match(/grok plugin enable compound-engineering/, resolution.message)
+    end
+  end
+
+  def test_project_plugin_skill_takes_precedence_over_installed_plugin
+    with_tmp_dir do |home|
+      project = File.join(home, "project")
+      grok_home = File.join(home, ".grok")
+      project_skill = File.join(project, ".grok", "plugins", "private-review", "skills", "ce-code-review", "SKILL.md")
+      write_file(project_skill)
+
+      resolution = Hive::SkillCheck::Grok.resolve(
+        "/ce-code-review",
+        project_root: project,
+        environment: { "HOME" => home, "GROK_HOME" => grok_home }
+      )
+
+      assert_equal :present, resolution.status
+      assert_equal project_skill, resolution.path
+    end
+  end
+
+  private
+
+  def write_file(path, content = "")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, content)
+  end
+end
+
 class HiveSkillCheckPiTest < Minitest::Test
   include HiveTestHelper
 

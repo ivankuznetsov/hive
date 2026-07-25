@@ -204,6 +204,36 @@ class AgentProfilesTest < Minitest::Test
     assert_equal "--always-approve", grok.permission_skip_flag
     assert_equal [ "--output-format", "streaming-json" ], grok.output_format_flags
     assert grok.headless_supported
+    assert_equal "/ce-code-review", grok.format_skill_invocation("ce-code-review")
+  end
+
+  def test_grok_profile_verifies_native_plugin_skills
+    Dir.mktmpdir do |home|
+      grok_home = File.join(home, ".grok")
+      install = File.join(grok_home, "installed-plugins", "compound-engineering-plugin-abc123")
+      FileUtils.mkdir_p(File.join(install, "skills", "ce-code-review"))
+      File.write(File.join(install, "skills", "ce-code-review", "SKILL.md"), "")
+      FileUtils.mkdir_p(File.join(grok_home, "installed-plugins"))
+      File.write(
+        File.join(grok_home, "installed-plugins", "registry.json"),
+        JSON.generate(
+          "version" => 1,
+          "repos" => {
+            "compound-engineering-plugin-abc123" => {
+              "path" => install,
+              "plugins" => { "compound-engineering" => { "version" => "3.20.0" } }
+            }
+          }
+        )
+      )
+      File.write(File.join(grok_home, "config.toml"), "[plugins]\nenabled = [\"compound-engineering\"]\n")
+
+      with_env("HOME" => home, "GROK_HOME" => grok_home) do
+        status, path = Hive::AgentProfiles.lookup(:grok).verify_skill("/ce-code-review")
+        assert_equal :present, status
+        assert_equal File.join(install, "skills", "ce-code-review", "SKILL.md"), path
+      end
+    end
   end
 
   def test_grok_logged_in_probes_auth_json

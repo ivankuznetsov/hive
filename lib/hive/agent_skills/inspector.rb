@@ -376,6 +376,7 @@ module Hive
         when "claude" then claude_inventory(bin, native_spec, commands, issues)
         when "codex" then codex_inventory(bin, native_spec, commands, issues)
         when "pi" then pi_inventory(bin, native_spec, commands, issues)
+        when "grok" then grok_inventory(bin, native_spec, commands, issues)
         else
           issues << [ "incompatible", "unsupported provider #{native_spec.provider.inspect}" ]
           { "package" => nil, "marketplace" => nil }
@@ -476,6 +477,41 @@ module Hive
         { "package" => package, "marketplace" => nil }
       end
 
+      def grok_inventory(bin, native_spec, commands, issues)
+        plugins_result = run([ bin, "plugin", "list", "--json" ], commands)
+        inspect_result = run([ bin, "inspect", "--json" ], commands)
+        issues << [ "incompatible", "grok plugin inventory failed: #{command_failure(plugins_result)}" ] unless plugins_result.success?
+        issues << [ "incompatible", "grok runtime inspection failed: #{command_failure(inspect_result)}" ] unless inspect_result.success?
+        plugins = JSON.parse(plugins_result.stdout)
+        runtime = JSON.parse(inspect_result.stdout)
+        runtime_plugins = runtime.fetch("plugins")
+        raise TypeError, "grok plugin list must be an Array" unless plugins.is_a?(Array)
+        raise TypeError, "grok runtime plugins must be an Array" unless runtime_plugins.is_a?(Array)
+
+        plugin = plugins.find do |entry|
+          entry["status"] == "installed" && entry["name"] == native_spec.package
+        end
+        runtime_plugin = runtime_plugins.find { |entry| entry["name"] == native_spec.package }
+        if plugin && runtime_plugin && plugin["path"] && runtime_plugin["path"] &&
+           File.expand_path(plugin["path"]) != File.expand_path(runtime_plugin["path"])
+          issues << [
+            "conflicting",
+            "grok runtime plugin #{native_spec.package} resolves from #{runtime_plugin['path'].inspect}, " \
+              "expected installed package #{plugin['path'].inspect}"
+          ]
+        end
+        {
+          "package" => plugin && {
+            "id" => plugin["name"],
+            "version" => plugin["version"],
+            "enabled" => runtime_plugin ? runtime_plugin.fetch("enabled", true) : false,
+            "install_path" => plugin["path"],
+            "source" => plugin["source"]
+          }.freeze,
+          "marketplace" => nil
+        }
+      end
+
       def inspect_resolution(target, contract, native)
         issues = []
         alias_path = nil
@@ -558,7 +594,9 @@ module Hive
           end
         end
         package_source = native.dig("package", "source")
-        if package_source && !same_source?(package_source, native_spec.source)
+        if native["package"] && package_source.nil? && native_spec.marketplace.nil?
+          issues << [ "incompatible", "installed package source is unavailable" ]
+        elsif package_source && !same_source?(package_source, native_spec.source)
           issues << [ "incompatible", "installed package source #{package_source.inspect} does not match #{native_spec.source.inspect}" ]
         end
         issues
@@ -639,7 +677,7 @@ module Hive
       end
 
       def runner_environment
-        %w[HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR].each_with_object({}) do |key, out|
+        %w[HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME].each_with_object({}) do |key, out|
           out[key] = @environment[key] if @environment.key?(key)
         end
       end
@@ -649,6 +687,7 @@ module Hive
         when "claude" then Hive::SkillCheck::Claude
         when "codex" then Hive::SkillCheck::Codex
         when "pi" then Hive::SkillCheck::Pi
+        when "grok" then Hive::SkillCheck::Grok
         else raise Hive::ConfigError, "unsupported skill resolver for #{agent.inspect}"
         end
       end
@@ -662,6 +701,7 @@ module Hive
         candidates = [
           File.join(root, ".claude-plugin", "plugin.json"),
           File.join(root, ".codex-plugin", "plugin.json"),
+          File.join(root, ".grok-plugin", "plugin.json"),
           File.join(root, "package.json")
         ]
         candidates.each do |path|
@@ -686,6 +726,7 @@ module Hive
         when "claude" then File.join(home, ".claude")
         when "codex" then File.join(home, ".codex")
         when "pi" then File.join(home, ".pi", "agent")
+        when "grok" then File.join(home, ".grok")
         end
       end
 

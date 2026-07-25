@@ -3,7 +3,7 @@ title: Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-07-22
+updated: 2026-07-25
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -82,7 +82,7 @@ generation/selection policy and `Reconstructor` retains recovery policy.
 - `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, interim plus terminal usage extraction, and opt-in verified capabilities for `safe_mode` plus the minimal patrol review/fix contexts. Patrol disables slash commands; review exposes `Read,Grep,Glob,Write`, while fix additionally exposes `Bash,Edit`. The profile reserves 20,000 initial-context tokens for patrol admission. Message-start/delta counters support a true in-flight patrol stop. Min version `2.1.118`. `:state_file_marker` mode. `AgentProfile#permission_flags(mode)` is the single source of truth for permission argv, shared by the headless `Hive::Agent` path and the tmux `Hive::ClaudeLauncher#wrapper_command` path: `bypassPermissions` (and a nil mode) yields `--dangerously-skip-permissions`, any other ordinary Claude mode yields `--permission-mode <mode>`.
 - `codex` — `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, headless via the `exec` subcommand, `--json` output, and dedicated read-only/workspace-write sandbox bundles (approval policy `never`, ephemeral execution, and ignored user config/rules) for architecture discovery and fixes. Prompts are delivered on stdin with `-` in argv. No native budget flag. Hive consumes usage events when present, but real interim-event coverage remains unverified, so spawn/day quotas and the wall-clock timeout are the provider-independent fallback. Min version `0.125.0`. `:output_file_exists`.
 - `pi` — no permission flag, no `--add-dir` (triggers `warn_isolation_reduced` when callers pass `add_dirs:` per ADR-018), preflight checks for `auth.json` beneath the same validated `PI_CODING_AGENT_DIR` (or default `~/.pi/agent`) used by skill discovery. Min version `0.70.2`. `:output_file_exists`.
-- `grok` — headless via `-p <prompt>`, `--always-approve`, and `--output-format streaming-json`. Preflight accepts `XAI_API_KEY`, `GROK_CODE_XAI_API_KEY`, an explicit absolute credential file via `GROK_AUTH_PATH`, or `auth.json` under an absolute `GROK_HOME`/the default `~/.grok`; device login is `grok login --device-auth`. The direct path takes precedence over `GROK_HOME`, matching the CLI and allowing one refresh-token/lock domain to be mounted into isolated runners. Hive rejects relative path overrides, even when an API key is present, so its parent preflight and a child spawned in another working directory cannot consume different credential files or state directories. No add-dir or budget flag. Text events are concatenated into `final_message`; unavailable token usage stays nil. Min version `0.2.90`. `:output_file_exists`. Native skill verification is not yet available.
+- `grok` — headless via `-p <prompt>`, `--always-approve`, and `--output-format streaming-json`. Preflight accepts `XAI_API_KEY`, `GROK_CODE_XAI_API_KEY`, an explicit absolute credential file via `GROK_AUTH_PATH`, or `auth.json` under an absolute `GROK_HOME`/the default `~/.grok`; device login is `grok login --device-auth`. The direct path takes precedence over `GROK_HOME`, matching the CLI and allowing one refresh-token/lock domain to be mounted into isolated runners. Hive rejects relative path overrides, even when an API key is present, so its parent preflight and a child spawned in another working directory cannot consume different credential files or state directories. No add-dir or budget flag. Text events are concatenated into `final_message`; unavailable token usage stays nil. Min version `0.2.90`. `:output_file_exists`. `Hive::SkillCheck::Grok` resolves project/user skills plus enabled native installed-plugin skills under `GROK_HOME`; Compound Engineering is provisioned with Grok's own plugin install/enable/update commands.
 
 ## Used by
 
@@ -107,8 +107,8 @@ generation/selection policy and `Reconstructor` retains recovery policy.
 `Hive::AgentSkills::Inspector` always calls `AgentProfiles.lookup(name, cfg:
 config)`, so project `agents.<name>.bin` overrides and profile minimum versions
 match actual stage spawns. It then pairs each profile's native inventory with
-`Hive::SkillCheck` resolution under `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, or
-`PI_CODING_AGENT_DIR`.
+`Hive::SkillCheck` resolution under `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+`PI_CODING_AGENT_DIR`, or `GROK_HOME`.
 
 The profile is the runtime contract; `config/agent-skills.yml` is the package
 contract. Adapters use the profile's binary/version gate plus manifest-declared

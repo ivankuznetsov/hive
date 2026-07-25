@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-24
+updated: 2026-07-25
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, dependencies, admission, web]
 ---
 
@@ -102,6 +102,7 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 | `<!-- COMPLETE -->` | stage finished, ready for `mv` to next stage | brainstorm/plan/open-pr/finalize agents; `done` runner |
 | `<!-- AGENT_WORKING pid=N started=ISO -->` | claude subprocess is running right now | `Hive::Agent#run!` pre-spawn |
 | `<!-- ERROR reason=... marker_id=<hex16> -->` | runner or launcher detected timeout, non-zero exit, concurrent edit, protected-file tamper, tmux session loss, or a stage-specific preflight failure; `Markers.set` generates `marker_id` for new `ERROR` markers. This is durable diagnostic evidence, not a permanent workflow terminal: with no live owner, Hive retries indefinitely. Every reason uses the same shared marker-age cooldown, after which the guarded rerun re-applies the stage's normal safety checks. | `Hive::Agent#handle_exit`, `Hive::ClaudeLauncher`, stage runners |
+| `<!-- ERROR reason=budget_exhausted provider=claude subtype=error_max_budget_usd max_budget_usd=N observed_cost_usd=N remedy=raise_stage_budget marker_id=<hex16> -->` | Claude's structured terminal event says the configured per-invocation cap stopped this run before it produced a current valid artifact. This is deliberately separate from provider account/rate/quota `limits_reached`: it carries no provider reset estimate and tells the operator to raise the affected stage cap. A current non-empty marker-owned artifact can outrank a trailing budget diagnostic; stricter stages such as Brainstorm validate the artifact structure and whether it changed during this spawn before accepting it. | `Hive::Agent#handle_exit`, `Stages::Brainstorm` |
 | `<!-- ERROR reason=limits_reached provider=<agent>? message="limits reached for <agent>: ..." retry_after=<iso8601> marker_id=<hex16> -->` | provider account/rate/quota limit surfaced by agent stdout/stderr or a Claude tmux pane menu; used to avoid masking account exhaustion as `timeout`, `exit_code`, `tmux_session_terminated`, `implementer_failed`, or "interactive prompt did not become ready". When the captured provider text includes a complete dated reset hint (month, day, year, and time), `Hive::AgentLimit.retry_after` preserves that boundary plus a one-minute grace for operator display; ambiguous time-only text and unparseable/expired/implausibly distant dates fall back to `now + RETRY_COOLDOWN_SEC` (default 1h, env `HIVE_LIMITS_RETRY_COOLDOWN_SEC`). Tmux parsing bounds this input to the live matched limit line and adjacent menu/reset lines, excluding unrelated transcript dates; all-reviewer failures display the latest captured provider boundary. Daemon scheduling does not trust the date as an embargo: it retries one cooldown interval after the latest marker mtime, indefinitely, so usage resets, top-ups, and account switches can recover early. `4-execute` stamps `provider=<execute-agent>` because its runner owns the final marker in `:exit_code_only` mode; older agent/launcher writers may only expose the provider in `message=`. | `Hive::Agent#handle_exit`, `Hive::ClaudeLauncher`, `Stages::Execute#run_pass` |
 | `<!-- ERROR reason=ensure_clean_on_exit_failed residue_paths=<rel,paths> marker_id=<hex16> -->` | the clean-exit invariant (`Hive::Stages::CleanExit`, gated on `stages.ensure_clean_on_exit`) overwrote a stage's outcome marker because residue at stage exit was out-of-scope for `review.fix.auto_commit.scope_check`, git add/commit failed (including `git status` / `git add -A` / `git reset HEAD --` / `git diff --cached --name-only` exceeding the shared `AUTO_COMMIT_OP_TIMEOUT_SEC = 300` cap), or auto-commit raised `Hive::ConfigError`. The marker preserves `residue_paths` / `detail` and rewrites the run result to `:error`. Hive and operator Autofix may retry indefinitely; re-entry never bypasses the scope check, so unchanged unsafe residue simply writes a fresh error and starts the next cooldown. | `Hive::Stages::Base#enforce_clean_exit!` via `with_stage_events` exit hook + `Stages::Finalize` entry backstop |
 | `<!-- EXECUTE_WAITING reason=no_worktree_changes\|dirty_worktree\|missing_research_output\|branch_mismatch\|head_not_descendant -->` | impl spawn exited cleanly but cannot be marked done yet; inspect `## Execute Output`, revise/mark research, clean/commit worktree changes, or recover the expected task branch | `Stages::Execute#run!` |
@@ -115,9 +116,10 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 
 New `REVIEW_WORKING` and `REVIEW_ERROR` writes carry a generated `marker_id`,
 just like generic `ERROR` writes. Review healers match the id observed in the
-status row and claim the per-task lock before clearing; a legacy row without an
-id can clear only another legacy no-id marker. If an external run acquired the
-lock after the status snapshot, healing leaves its lock and marker untouched.
+status row and claim the per-task lock before clearing. Runtime recovery rejects
+an id-less recoverable marker with `recovery_migration_required`; `hive migrate`
+performs the one-off identity backfill. If an external run acquired the lock
+after the status snapshot, healing leaves its lock and marker untouched.
 For a live-but-wedged review holder, status also snapshots the lock PID,
 process start time, and generated lock id. The healer rechecks that exact
 identity before signaling, claims its own lock generation after termination,
@@ -126,9 +128,18 @@ healer tick from disrupting a newer review or runner generation.
 
 `5-open-pr`, `7-artifacts`, and `8-finalize` reuse the generic `COMPLETE` / `ERROR` marker names with stage-specific attrs such as `pr_url=...`, `is_draft=true|false`, `idempotent=true`, and `reason=...`. No `ERROR` or `REVIEW_ERROR` is a permanent terminal. The daemon preserves the marker between attempts, waits for the shared cooldown, then clears only the observed generation when the project/global retry gates permit it, no live owner exists, and current work-area evidence is safe. A fresh failure restarts the schedule; retries never exhaust. `3-plan` clears enqueue a non-expiring `hive plan ... --from 3-plan` continuation because an empty markerless `plan.md` otherwise classifies back to `:error`; enqueue failure restores a fresh error generation. See [[daemon]].
 
-Marker name allowlist: `Hive::Markers::KNOWN_NAMES`. Regex: `Hive::Markers::MARKER_RE`. Adding a marker requires updating BOTH (two sources of truth). Attributes are `key=value` (or `key="quoted value"`). New `ERROR` markers get a generated `marker_id` attr; human labels hide it, but recovery surfaces use it as the preferred `hive markers clear --match-attr marker_id=...` guard. Legacy `ERROR` rows without `marker_id` fall back to observed attrs such as `reason=exit_code,exit_code=143`. U9 dropped `EXECUTE_STALE` from the live grammar (review iteration moved out of 4-execute); the name remains in `KNOWN_NAMES` for back-compat parsing of historical state files but is never written by current code. `EXECUTE_WAITING` remains live for implementation-output pauses, not review iteration.
+Marker name allowlist: `Hive::Markers::KNOWN_NAMES`. Regex: `Hive::Markers::MARKER_RE`. Adding a marker requires updating BOTH (two sources of truth). Attributes are `key=value` (or `key="quoted value"`). New recoverable markers get a generated `marker_id` attr; human labels hide it, but every recovery request binds to it as the canonical generation identity. Reason, mtime, pass, and phase are diagnostics only and are never identity fallbacks. U9 dropped `EXECUTE_STALE` from the live grammar (review iteration moved out of 4-execute); the name remains in `KNOWN_NAMES` for parsing historical state files but is never written by current code. `EXECUTE_WAITING` remains live for implementation-output pauses, not review iteration.
 
-Recovery from a stale or error marker is agent-callable via `hive markers clear FOLDER --name <NAME>` (LFG-4, see [[commands/markers]]). The clear allowlist is `REVIEW_STALE`, `REVIEW_CI_STALE`, `REVIEW_ERROR`, `EXECUTE_STALE`, `ERROR`; terminal-success markers (`REVIEW_COMPLETE`, `EXECUTE_COMPLETE`, `COMPLETE`) are refused. Race-sensitive callers should pass `--match-attr`: `ERROR` and `REVIEW_ERROR` prefer `marker_id`, while legacy review markers fall back to pass/phase/reason attrs. The `Stages::Review` pre-flight warn text now embeds the concrete `hive markers clear …` command for each stale-marker case.
+Normal recovery from a stale or error marker is submitted by TUI, Rails,
+Telegram, recorder, CLI/action, healer, or operator adapters through
+`Hive::Recovery::API`; `RecoveryCoordinator` owns the guarded clear and retry
+admission. The low-level `hive markers clear FOLDER --name <NAME>` command
+remains only as an explicit operator repair primitive. Its clear allowlist is
+`REVIEW_STALE`, `REVIEW_CI_STALE`, `REVIEW_ERROR`, `EXECUTE_STALE`, `ERROR`;
+terminal-success markers (`REVIEW_COMPLETE`, `EXECUTE_COMPLETE`, `COMPLETE`)
+are refused. A max-pass `REVIEW_STALE` with a current escalation artifact
+requires the operator to edit that input and use the TUI's explicit `r`
+gesture; ordinary action, web, and bot retry surfaces cannot bypass it.
 
 `Markers.set` writes via tempfile + `File.rename` for atomicity, holding `LOCK_EX` on a `.markers-lock` sidecar (not the data file) so readers never see partial writes. UTF-8 is pinned. See [[modules/markers]].
 
@@ -148,6 +159,12 @@ claim, heartbeat, terminal, and loss transitions. See [[modules/attempts]].
 The generation progress token includes the task's current dependency-admission
 verdict as well as its stage artifact, so terminal replay is stable while an
 admission wait is unchanged but cannot mask a later prerequisite advance.
+For `2-brainstorm`, a successful receipt is additionally gated by the current
+structural artifact: WAITING needs `## Round N`, COMPLETE needs non-empty
+`## Requirements`. A legacy success receipt with no valid artifact admits one
+repair attempt for that task generation across request IDs; after that repair
+terminalizes, its newest receipt replays so missing output can be repaired
+without creating an infinite loop.
 
 - **Per-task lock**: `<task folder>/.lock` — compatibility/work-area exclusion projection, not the restart-safe owner. Its YAML payload is `{pid, started_at, process_start_time, lock_id, attempt_id?, task_generation?, claude_pid?, claude_pid_start_time?, slug?, stage?}`; old readers tolerate the optional attempt fields. `Hive::Lock.acquire_task_lock` writes and fsyncs a sibling tempfile, then atomically hard-links the complete payload into place under an already-ignored `.lock.tmp.guard` flock. Stale check uses `Process.kill(0, pid)` plus `/proc/<pid>/stat` field-22 cross-check to defeat runner PID reuse; release compares `lock_id` so an old owner cannot remove a replacement generation and does not recreate a source folder moved by a stage transition. After spawning, both headless `Hive::Agent` and tmux-backed `Hive::ClaudeLauncher` write the child `claude_pid` and its `claude_pid_start_time`; cleanup compares that identity metadata with the live process before signalling so PID reuse cannot target an unrelated child.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
@@ -196,59 +213,72 @@ The identity stores only provider, concrete model, profile/launcher label, sourc
 ## Runtime dispatch queue and web snapshots
 
 The daemon's producer queue lives under `$HIVE_HOME/dispatch_requests/`
-(`Hive::Paths.state_home`, not inside a project `.hive-state/`). Producers are
-the Telegram bot, hivebox web, and the `3-plan` error-retry healer.
-Web paths currently write through `Hive::Bot::DispatchRequestWriter`, so the
-JSON `requestor` field is commonly `bot`; `trigger` values such as `web` and
-`web_recover` distinguish the web-originated requests, while the healer writes
-`requestor=healer`.
+(`Hive::Paths.state_home`, not inside a project `.hive-state/`). Ordinary
+producers include Telegram and hivebox web. Every recoverable-marker surface
+(TUI, Rails, Telegram, recorder, CLI/action, and automatic healer scheduling)
+submits through `Hive::Recovery::API`; `RecoveryCoordinator` is the only
+producer of a recovery transition. The `requestor` field records the actual
+adapter rather than disguising web or TUI requests as bot traffic.
 Each pending request is one JSON file:
 
 ```yaml
 schema: hive-dispatch-request
-schema_version: 3
+schema_version: 4
 request_id: <hex16>
 created_at: <UTC-ISO8601>
 project: <registered project name>
 slug: <task slug>
 argv: ["hive", "<allowlisted verb>", ...]
-requestor: bot|healer
+requestor: bot|healer|web|tui|cli|action|daemon|recorder|operator
 chat_id:
 update_id:
 trigger:
 task_generation:
 predecessor_attempt_id:
 inherited_outputs: []
+task_id:
+expected_stage:
+expected_marker_name:
+expected_marker_id:
+recovery: null
 ```
 
-Current producers write `hive-dispatch-request.v3`, adding generation intent,
-predecessor, and inherited outputs. Consumers continue accepting pending v2
-files and infer their generation under the same admission lock. Queue and
-claim sidecars remain delivery records: after admission the claim stores the
-attempt ID/generation, follows a loss successor, and completes from its
-terminal receipt.
+Current producers write `hive-dispatch-request.v4`. Ordinary requests leave
+`recovery` null. Coordinator requests persist canonical task/marker/generation
+identity, owner/remediation, retry count, terminal outcome/time, and the
+`admitted → cleared → dispatched → terminal` phase. Consumers continue
+accepting pending v2/v3 delivery records and infer their generation under the
+same admission lock; no current producer emits them. Queue and claim sidecars
+remain delivery records: after admission the claim stores the attempt
+ID/generation, follows a loss successor, and completes from its terminal
+receipt.
 
 `Hive::Daemon::DispatchRequestQueue.valid_argv?` requires `argv[0] == "hive"`
 and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,
 `plan`, `review`, `open-pr`, `artifacts`, `finalize`, `archive`, `markers`).
-Pending requests expire after `EXPIRY_SEC = 600`. On dispatch, the daemon
+Ordinary pending requests expire after `EXPIRY_SEC = 600`. V4 recovery
+requests instead persist `admitted → cleared → dispatched → terminal`, bound
+to canonical task/stage/marker/generation identity plus owner/remediation and
+terminal outcome/time. Nonterminal recovery never expires or generic-prunes,
+and a bounded request-keyed lock shard serializes claim, phase CAS, and
+pruning; request IDs are bounded filesystem-safe identifiers. On dispatch, the daemon
 renames the file to `<id>.json.claimed` and writes
 `<id>.json.claimed.claim` with `pid`, `process_start_time`, and `claimed_at`;
 after task admission it also carries `attempt_id` and `task_generation`.
 If the daemon dies after admission but before writing those fields, startup
 recovers them from the attempt record's immutable `request_id` correlation.
-Those claims are at-most-once delivery records, not execution owners. Multi-step recoveries
-store later argv arrays in `<request_id>.sequence` and promote the next request
-only after the previous attempt receipt exits 0; non-zero/lost outcomes discard the sequence.
-Hivebox `recover` writes the sequence sidecar first, then the guarded
-`hive markers clear ... --json` request, and discards the sidecar if the
-request write fails so no orphaned continuation remains.
+Those claims are at-most-once delivery records, not execution owners.
+`RecoveryCoordinator` is the destructive authority for recoverable markers:
+adapters submit observations, while replay re-resolves identity and safety
+under lock before resuming the persisted phase.
 
 Hivebox's `web/app/models/status_broadcaster.rb` is a Rails model class, but it
 is not an ActiveRecord workflow entity. It bridges `Hive::Web::StatusFeed` to
 Turbo Streams. `StatusFeed#snapshot` computes a fresh
 `Hive::Commands::Status#json_payload(Hive::Config.registered_projects)` for
-request-time reads. That page-render snapshot primes the live feed, avoiding a
+request-time reads, then overlays canonical recovery receipts from that same
+producer's operational payload by project/slug in memory. This performs no
+second registry scan. That page-render snapshot primes the live feed, avoiding a
 second full-registry scan when the page's Cable connection arrives. The first
 idle request owns that baseline until the poller starts; competing page renders
 cannot replace it. Each rendered status/task page carries a canonical SHA-256

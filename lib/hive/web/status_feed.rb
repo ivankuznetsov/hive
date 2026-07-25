@@ -43,7 +43,9 @@ module Hive
       # `/` route, `task_row`, `find_project!`). The SSE path goes through the
       # shared poller instead so it never pays this cost per connection.
       def snapshot
-        @status_command.json_payload(Hive::Config.registered_projects)
+        projects = Hive::Config.registered_projects
+        payload = @status_command.json_payload(projects)
+        overlay_operational_recoveries(payload, projects)
       end
 
       # Seed the shared poller from the snapshot Rails already computed to
@@ -132,6 +134,35 @@ module Hive
       end
 
       private
+
+      # The web page already paid for one ordinary status scan. Reuse that
+      # exact payload when asking the status producer to join the daemon's
+      # owner-private snapshot, then copy only canonical recovery receipts
+      # onto the matching task rows. This is a file read + in-memory join, not
+      # a second fleet scan. The lean projection also avoids building the
+      # complete operational envelope on every five-second web poll.
+      def overlay_operational_recoveries(payload, projects)
+        return payload unless @status_command.respond_to?(:operational_recoveries)
+
+        recovery_rows = @status_command.operational_recoveries(
+          projects,
+          status_payload: payload
+        )
+        recoveries = Array(recovery_rows).to_h do |task|
+          identity = task["identity"] || {}
+          [ [ identity["project"].to_s, identity["slug"].to_s ], task["recovery"] ]
+        end
+        Array(payload["projects"]).each do |project|
+          Array(project["tasks"]).each do |task|
+            recovery = recoveries[[ project["name"].to_s, task["slug"].to_s ]]
+            task["recovery"] = recovery if recovery.is_a?(Hash)
+          end
+        end
+        payload
+      rescue StandardError => e
+        warn "hive web: operational recovery overlay failed (#{e.class}: #{e.message}); using base status"
+        payload
+      end
 
       # Lazily start the single shared poller on the first subscriber so a box
       # with no open dashboards does no background scanning at all.

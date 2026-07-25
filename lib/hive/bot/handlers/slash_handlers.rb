@@ -2,7 +2,7 @@ require "securerandom"
 require "time"
 require "hive/bot/notification_builders"
 require "hive/bot/idea_keyboards"
-require "hive/bot/handlers/recovery_sequence"
+require "hive/bot/handlers/recovery_result_builder"
 
 module Hive
   module Bot
@@ -317,7 +317,7 @@ module Hive
           # (including the diagnostic), so a directly-typed /autofix on a row
           # that isn't auto-retryable — a manual-only state, or a non-error
           # recovery row whose diagnostic carries no retry suggestion — must
-          # refuse here rather than dispatch markers-clear + a retry verb.
+          # refuse here rather than submit a coordinator recovery request.
           # Without this, manually typing /autofix bypassed the retryability
           # gate that both other surfaces enforce.
           unless Hive::Bot::NotificationBuilders.retryable_recovery?(row)
@@ -329,11 +329,12 @@ module Hive
           # tapped, so there's no keyboard to clear on the originating
           # message. The inline-button path (CallbackHandlers#autofix) sets it
           # to true. This is the only legitimate divergence between surfaces.
-          # We forward row.attrs for guarded marker matching.
-          RecoverySequence.build(
+          # We forward row.attrs for guarded marker comparison.
+          RecoveryResultBuilder.build(
             project: row.project, slug: row.slug, stage: row.stage,
             marker: row.marker, match_attr: match_attr, attrs: row.attrs,
             workflow: row.respond_to?(:workflow) ? row.workflow : nil,
+            row: row,
             result_class: @result_class, clear_keyboard: false
           )
         end

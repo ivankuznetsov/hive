@@ -30,7 +30,6 @@ module Hive
         callback_rerun
         callback_reject
         callback_autofix
-        callback_clear_and_retry
         callback_open_laptop
         callback_show_details
         callback_refresh_diagnose
@@ -62,10 +61,10 @@ module Hive
       Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                           :project, :slug, :stage, :question_n, :answer_text, :mode,
                           :intent, :alert_reset, :clear_keyboard, :format,
-                          :attachment, keyword_init: true)
+                          :attachment, :recovery, keyword_init: true)
 
       ALLOWED_ACTIONS = %i[
-        noop reply dispatch_then_reply dispatch_commands start_answer
+        noop reply dispatch_then_reply dispatch_commands dispatch_recovery start_answer
         write_answer_then_reply
         stage_attachment transcribe_voice commit_idea
       ].freeze
@@ -111,6 +110,7 @@ module Hive
           result_class: Result,
           idea_draft_store: @idea_draft_store,
           projects_provider: @projects_provider,
+          status_snapshot_provider: status_snapshot_provider,
           last_project: -> { @last_project },
           logger: @logger
         )
@@ -260,7 +260,6 @@ module Hive
         when /\Arerun:/ then :callback_rerun
         when /\Areject:/ then :callback_reject
         when /\Aautofix:/ then :callback_autofix
-        when /\Aclear_retry:/ then :callback_clear_and_retry
         when /\Aopen_laptop:/ then :callback_open_laptop
         when /\Adetails:/ then :callback_show_details
         when /\Arefresh_diagnose:/ then :callback_refresh_diagnose

@@ -1,6 +1,8 @@
 require "test_helper"
+require "digest"
 require "fileutils"
 require "json"
+require "json_schemer"
 require "securerandom"
 require "tmpdir"
 require "hive/daemon/dispatch_request_queue"
@@ -9,6 +11,24 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
   include HiveTestHelper
 
   Q = Hive::Daemon::DispatchRequestQueue
+
+  def recovery_payload(phase: "admitted", terminal_at: nil, marker_generation: "a" * 64)
+    {
+      "phase" => phase,
+      "observed_marker_generation" => marker_generation,
+      "expected_marker_attrs" => { "marker_id" => "marker-a", "reason" => "timeout" },
+      "canonical_task_folder" => "/tmp/retry-task",
+      "expected_post_clear_progress_fingerprint" => "b" * 64,
+      "dispatch_generation" => "c" * 64,
+      "failure_origin" => "timeout",
+      "next_eligible_at" => Time.utc(2026, 7, 25, 12).iso8601(6),
+      "owner" => "scheduler",
+      "blocked_reason" => nil,
+      "blocked_remediation" => nil,
+      "terminal_outcome" => phase == "terminal" ? "succeeded" : nil,
+      "terminal_at" => terminal_at
+    }
+  end
 
   def write_request(state_home, request_id:, created_at:, argv: [ "hive", "run", "slug-x", "--json" ],
                     project: "hive", slug: "slug-x", requestor: "bot", chat_id: 42,
@@ -38,6 +58,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       "expected_marker_name" => expected_marker_name,
       "expected_marker_id" => expected_marker_id
     }
+    payload["recovery"] = nil if schema_version >= 4
     File.write(path, JSON.generate(payload))
     path
   end
@@ -63,36 +84,38 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
-  def test_error_retry_identity_round_trips_and_duplicate_write_is_idempotent
+  def test_recovery_identity_round_trips_and_duplicate_write_is_idempotent
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       at = Time.utc(2026, 7, 24, 10, 0, 0)
       request_id = Q.write_request!(
         project: "hive",
         slug: "plan-task",
-        argv: %w[hive plan plan-task],
+        argv: %w[hive run plan-task --stage 3-plan --project hive --json],
         requestor: "healer",
-        trigger: "error_retry",
+        trigger: "recovery",
         request_id: "stable-plan-retry",
         task_generation: "generation-a",
         task_id: 817,
         expected_stage: "3-plan",
         expected_marker_name: "error",
         expected_marker_id: "marker-a",
+        recovery: recovery_payload,
         state_home: dir,
         now: at
       )
       duplicate = Q.write_request!(
         project: "hive",
         slug: "plan-task",
-        argv: %w[hive plan plan-task],
+        argv: %w[hive run plan-task --stage 3-plan --project hive --json],
         requestor: "healer",
-        trigger: "error_retry",
+        trigger: "recovery",
         request_id: "stable-plan-retry",
         task_generation: "generation-b",
         task_id: 999,
         expected_stage: "8-finalize",
         expected_marker_name: "review_error",
         expected_marker_id: "marker-b",
+        recovery: recovery_payload(phase: "cleared"),
         state_home: dir,
         now: at + 1
       )
@@ -107,6 +130,341 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       assert_equal "error", request.expected_marker_name
       assert_equal "marker-a", request.expected_marker_id
       assert_equal 817, Q.metadata(request_id, state_home: dir).fetch(:task_id)
+    end
+  end
+
+  def test_v4_recovery_transition_round_trips_and_phase_updates_are_compare_and_swap
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      recovery = {
+        "phase" => "admitted",
+        "observed_marker_generation" => "a" * 64,
+        "expected_marker_attrs" => { "marker_id" => "marker-a", "reason" => "timeout" },
+        "canonical_task_folder" => "/tmp/retry-task",
+        "expected_post_clear_progress_fingerprint" => "b" * 64,
+        "dispatch_generation" => "c" * 64,
+        "failure_origin" => "timeout",
+        "next_eligible_at" => Time.utc(2026, 7, 25, 12).iso8601(6),
+        "owner" => "scheduler",
+        "blocked_reason" => nil,
+        "blocked_remediation" => nil
+      }
+      request_id = Q.write_request!(
+        project: "hive",
+        slug: "retry-task",
+        argv: %w[hive run retry-task --stage 4-execute --project hive --json],
+        requestor: "web",
+        trigger: "recovery",
+        request_id: "recovery-v4",
+        task_generation: "c" * 64,
+        task_id: 817,
+        expected_stage: "4-execute",
+        expected_marker_name: "error",
+        expected_marker_id: "marker-a",
+        recovery: recovery,
+        state_home: dir,
+        now: Time.utc(2026, 7, 25, 12)
+      )
+
+      parsed = Q.pending(state_home: dir).fetch(0)
+      assert_equal 4, parsed.schema_version
+      assert_equal recovery, parsed.recovery
+      assert Q.update_recovery!(
+        request_id,
+        expected_phase: "admitted",
+        changes: { "phase" => "cleared", "blocked_reason" => nil },
+        state_home: dir
+      )
+      refute Q.update_recovery!(
+        request_id,
+        expected_phase: "admitted",
+        changes: { "phase" => "dispatched" },
+        state_home: dir
+      )
+      assert_equal "cleared", Q.pending(state_home: dir).fetch(0).recovery.fetch("phase")
+    end
+  end
+
+  def test_v4_recovery_runtime_validation_matches_closed_wire_contract
+    invalid = [
+      recovery_payload.merge("unexpected" => true),
+      recovery_payload.merge("owner" => "mystery"),
+      recovery_payload.merge(
+        "provider_hint" => { "retry_after" => nil, "display_only" => true }
+      )
+    ]
+
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      invalid.each_with_index do |recovery, index|
+        assert_raises(ArgumentError) do
+          Q.write_request!(
+            project: "hive", slug: "retry-task",
+            argv: %w[hive run retry-task --stage 4-execute --project hive --json],
+            request_id: "invalid-recovery-#{index}", recovery: recovery,
+            state_home: dir, now: Time.utc(2026, 7, 25, 12)
+          )
+        end
+      end
+    end
+  end
+
+  def test_v4_recovery_runtime_validation_rejects_each_invalid_field_shape
+    invalid = {
+      "phase" => recovery_payload.merge("phase" => "unknown"),
+      "marker attrs object" => recovery_payload.merge("expected_marker_attrs" => []),
+      "marker attrs scalars" => recovery_payload.merge(
+        "expected_marker_attrs" => {
+          "marker_id" => "marker-a", "nested" => []
+        }
+      ),
+      "marker id" => recovery_payload.merge(
+        "expected_marker_attrs" => { "marker_id" => "" }
+      ),
+      "sha256" => recovery_payload.merge("dispatch_generation" => "not-a-sha"),
+      "canonical folder" => recovery_payload.merge("canonical_task_folder" => ""),
+      "failure origin" => recovery_payload.merge("failure_origin" => ""),
+      "nullable strings" => recovery_payload.merge("blocked_reason" => true),
+      "retry count" => recovery_payload.merge("retry_count" => -1),
+      "timestamp" => recovery_payload.merge("next_eligible_at" => "not-a-time")
+    }
+
+    invalid.each do |label, recovery|
+      assert_raises(ArgumentError, label) do
+        Q.send(:validate_recovery!, recovery)
+      end
+    end
+  end
+
+  def test_pending_rejects_a_v4_request_with_invalid_recovery
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      request_id = Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --stage 4-execute --project hive --json],
+        request_id: "invalid-on-read", recovery: recovery_payload,
+        state_home: dir, now: Time.utc(2026, 7, 25, 12)
+      )
+      request = Q.fetch(request_id, state_home: dir)
+      payload = JSON.parse(File.read(request.path))
+      payload.fetch("recovery")["phase"] = "invalid"
+      File.write(request.path, JSON.generate(payload))
+      reasons = []
+
+      assert_empty Q.pending(
+        state_home: dir,
+        bad_handler: ->(path:, reason:) { reasons << [ path, reason ] }
+      )
+      assert_equal "invalid_recovery", reasons.dig(0, 1)
+    end
+  end
+
+  def test_v4_recovery_written_by_runtime_validates_against_published_schema
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      recovery = recovery_payload.merge(
+        "retry_count" => 1,
+        "provider_hint" => {
+          "retry_after" => "2026-07-25T14:00:00Z",
+          "display_only" => true
+        }
+      )
+      request_id = Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --stage 4-execute --project hive --json],
+        requestor: "healer", trigger: "recovery",
+        request_id: "valid-recovery-v4", task_generation: "c" * 64,
+        task_id: 817, expected_stage: "4-execute",
+        expected_marker_name: "error", expected_marker_id: "marker-a",
+        recovery: recovery, state_home: dir, now: Time.utc(2026, 7, 25, 12)
+      )
+      payload = JSON.parse(File.read(Q.fetch(request_id, state_home: dir).path))
+      schema = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-request")))
+      )
+
+      assert_empty schema.validate(payload).to_a
+    end
+  end
+
+  def test_recovery_transition_lock_serializes_phase_cas_with_claim_and_prune
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      Q.write_request!(
+        project: "hive",
+        slug: "retry-task",
+        argv: %w[hive run retry-task --stage 4-execute --project hive --json],
+        requestor: "web",
+        trigger: "recovery",
+        request_id: "locked-recovery",
+        task_generation: "c" * 64,
+        task_id: 817,
+        expected_stage: "4-execute",
+        expected_marker_name: "error",
+        expected_marker_id: "marker-a",
+        recovery: recovery_payload,
+        state_home: dir,
+        now: Time.utc(2026, 7, 25, 12)
+      )
+
+      transition_entered = Queue.new
+      release_transition = Queue.new
+      transition = Thread.new do
+        Q.with_request_lock("locked-recovery", state_home: dir) do
+          transition_entered << true
+          release_transition.pop
+          Q.update_recovery!(
+            "locked-recovery",
+            expected_phase: "admitted",
+            changes: { "phase" => "cleared" },
+            state_home: dir,
+            request_locked: true
+          )
+        end
+      end
+      transition_entered.pop
+
+      claim = Thread.new do
+        Q.claim(
+          "locked-recovery", pid: 123, state_home: dir,
+          now: Time.utc(2026, 7, 25, 12, 0, 1)
+        )
+      end
+      prune = Thread.new do
+        Q.remove_if_unclaimed("locked-recovery", state_home: dir)
+      end
+      Thread.pass until [ claim, prune ].all? { |thread| thread.status == "sleep" }
+
+      assert_equal "admitted",
+                   Q.fetch("locked-recovery", state_home: dir).recovery.fetch("phase")
+      release_transition << true
+
+      assert transition.value
+      refute_nil claim.value
+      assert_equal false, prune.value
+      persisted = Q.fetch("locked-recovery", state_home: dir)
+      refute_nil persisted
+      assert_equal "cleared", persisted.recovery.fetch("phase")
+    ensure
+      release_transition << true if transition&.alive?
+      [ transition, claim, prune ].compact.each(&:join)
+    end
+  end
+
+  def test_terminal_recovery_is_not_dispatchable_but_remains_fetchable
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      Q.write_request!(
+        project: "hive",
+        slug: "retry-task",
+        argv: %w[hive run retry-task --stage 4-execute --project hive --json],
+        requestor: "web",
+        trigger: "recovery",
+        request_id: "terminal-v4",
+        task_generation: "c" * 64,
+        task_id: 817,
+        expected_stage: "4-execute",
+        expected_marker_name: "error",
+        expected_marker_id: "marker-a",
+        recovery: recovery_payload(
+          phase: "terminal",
+          terminal_at: Time.utc(2026, 7, 25, 12).iso8601(6)
+        ),
+        state_home: dir,
+        now: Time.utc(2026, 7, 25, 12)
+      )
+
+      assert_empty Q.pending(state_home: dir)
+      assert_equal "terminal", Q.fetch("terminal-v4", state_home: dir).recovery.fetch("phase")
+    end
+  end
+
+  def test_terminal_recovery_retention_is_bounded_and_new_generation_supersedes_old
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      old_at = Time.utc(2026, 7, 1, 12)
+      recent_at = Time.utc(2026, 7, 25, 12)
+      {
+        "old-terminal" => [ "retry-task", old_at ],
+        "recent-terminal" => [ "other-task", recent_at ]
+      }.each do |request_id, (slug, at)|
+        Q.write_request!(
+          project: "hive",
+          slug: slug,
+          argv: [ "hive", "run", slug, "--json" ],
+          requestor: "healer",
+          trigger: "recovery",
+          request_id: request_id,
+          task_generation: "c" * 64,
+          expected_stage: "4-execute",
+          expected_marker_name: "error",
+          expected_marker_id: "marker-a",
+          recovery: recovery_payload(phase: "terminal", terminal_at: at.iso8601(6)),
+          state_home: dir,
+          now: at
+        )
+      end
+
+      assert_equal 1, Q.prune_terminal_recoveries(
+        state_home: dir,
+        now: recent_at,
+        retention_sec: 7 * 24 * 60 * 60
+      )
+      assert_nil Q.fetch("old-terminal", state_home: dir)
+      refute_nil Q.fetch("recent-terminal", state_home: dir)
+
+      assert_equal 1, Q.remove_terminal_recoveries(
+        project: "hive",
+        slug: "other-task",
+        state_home: dir
+      )
+      assert_nil Q.fetch("recent-terminal", state_home: dir)
+    end
+  end
+
+  def test_terminal_recovery_retention_falls_back_to_request_creation_time
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      old_at = Time.utc(2026, 7, 1, 12)
+      Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --json],
+        request_id: "terminal-without-time",
+        recovery: recovery_payload(phase: "terminal", terminal_at: nil),
+        state_home: dir, now: old_at
+      )
+
+      assert_equal 1, Q.prune_terminal_recoveries(
+        state_home: dir,
+        now: Time.utc(2026, 7, 25, 12),
+        retention_sec: 7 * 24 * 60 * 60
+      )
+      assert_nil Q.fetch("terminal-without-time", state_home: dir)
+    end
+  end
+
+  def test_recovery_queue_reads_and_updates_tolerate_a_disappearing_directory
+    with_replaced_singleton_method(
+      Q, :request_files, ->(_dir) { raise Errno::ENOENT, "gone" }
+    ) do
+      assert_nil Q.find_recovery(
+        project: "hive", slug: "task",
+        observed_marker_generation: "a" * 64,
+        state_home: "/tmp/hive-missing"
+      )
+      assert_equal 0, Q.recovery_retry_count(
+        project: "hive", slug: "task", state_home: "/tmp/hive-missing"
+      )
+      assert_nil Q.fetch("missing", state_home: "/tmp/hive-missing")
+      assert_equal 0, Q.remove_terminal_recoveries(
+        project: "hive", slug: "task", state_home: "/tmp/hive-missing"
+      )
+      assert_equal 0, Q.prune_terminal_recoveries(state_home: "/tmp/hive-missing")
+      refute Q.update_recovery!(
+        "missing", expected_phase: "admitted", changes: {},
+        state_home: "/tmp/hive-missing", request_locked: true
+      )
+    end
+  end
+
+  def test_locked_recovery_update_returns_false_when_request_is_absent
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      refute Q.update_recovery!(
+        "missing", expected_phase: "admitted", changes: {},
+        state_home: dir, request_locked: true
+      )
     end
   end
 
@@ -148,6 +506,94 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       reasons = []
       Q.pending(state_home: dir, bad_handler: ->(path:, reason:) { reasons << reason })
       assert_equal [ "unknown_schema_version" ], reasons
+    end
+  end
+
+  def test_requestor_is_a_closed_contract_at_write_and_read_boundaries
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      assert_raises(ArgumentError) do
+        Q.write_request!(
+          project: "hive", slug: "safe-task",
+          argv: %w[hive run safe-task],
+          requestor: "invented", state_home: dir
+        )
+      end
+
+      path = write_request(
+        dir, request_id: "badrequestor",
+        created_at: Time.utc(2026, 5, 28, 18, 0, 0),
+        requestor: "invented"
+      )
+      reasons = []
+      assert_empty Q.pending(
+        state_home: dir,
+        bad_handler: ->(path:, reason:) { reasons << [ path, reason ] }
+      )
+      assert_equal [ [ path, "invalid_requestor" ] ], reasons
+
+      id = Q.write_request!(
+        project: "hive", slug: "safe-task",
+        argv: %w[hive run safe-task],
+        requestor: "operator", state_home: dir
+      )
+      assert_equal "operator", Q.fetch(id, state_home: dir).requestor
+    end
+  end
+
+  def test_request_ids_are_filesystem_safe_and_request_locks_are_bounded
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      assert_raises(ArgumentError) do
+        Q.write_request!(
+          project: "hive", slug: "safe-task",
+          argv: %w[hive run safe-task],
+          request_id: "../escape", state_home: dir
+        )
+      end
+      assert_raises(ArgumentError) do
+        Q.with_request_lock("../escape", state_home: dir) { flunk "must not lock" }
+      end
+
+      100.times do |index|
+        Q.with_request_lock("request-#{index}", state_home: dir) { nil }
+      end
+      locks = Dir.glob(File.join(Q.directory(state_home: dir), ".request-lock-*"))
+      assert_operator locks.length, :<=, Q::REQUEST_LOCK_SHARDS
+      assert locks.all? { |path| File.basename(path).match?(/\A\.request-lock-\d{2}\z/) }
+    end
+  end
+
+  def test_pending_rejects_unsafe_request_id
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      queue_dir = Q.directory(state_home: dir)
+      payload = {
+        "schema" => Q::SCHEMA,
+        "schema_version" => Q::SCHEMA_VERSION,
+        "request_id" => "../escape",
+        "created_at" => Time.utc(2026, 7, 25, 12).iso8601(6),
+        "project" => "hive",
+        "slug" => "safe-task",
+        "argv" => %w[hive run safe-task],
+        "requestor" => "bot",
+        "chat_id" => nil,
+        "update_id" => nil,
+        "trigger" => "",
+        "task_generation" => nil,
+        "predecessor_attempt_id" => nil,
+        "inherited_outputs" => [],
+        "task_id" => nil,
+        "expected_stage" => nil,
+        "expected_marker_name" => nil,
+        "expected_marker_id" => nil,
+        "recovery" => nil
+      }
+      File.write(File.join(queue_dir, "unsafe.json"), JSON.generate(payload))
+      reasons = []
+
+      assert_empty Q.pending(
+        state_home: dir,
+        bad_handler: ->(path:, reason:) { reasons << reason }
+      )
+      assert_equal [ "invalid_request_id" ], reasons
     end
   end
 
@@ -400,20 +846,6 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     refute Q.expired?(request, now: later, expiry_sec: 7200)
   end
 
-  def test_healer_plan_retry_does_not_expire_before_admission
-    request = Q::Request.new(
-      request_id: "H", created_at: Time.utc(2026, 5, 28, 18, 0, 0),
-      project: "p", slug: "s", argv: [ "hive", "plan", "s" ],
-      requestor: "healer", trigger: "error_retry"
-    )
-
-    refute Q.expired?(
-      request,
-      now: Time.utc(2026, 5, 29, 18, 0, 0),
-      expiry_sec: 600
-    )
-  end
-
   # ── C3: atomic claim + restart recovery ───────────────────────────────
 
   def test_claim_renames_to_claimed_and_hides_from_pending
@@ -557,6 +989,74 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_recover_claims_requeues_recovery_claim_when_preclaim_crashes_before_attempt
+    Dir.mktmpdir("hive-queue") do |dir|
+      at = Time.utc(2026, 7, 25, 12)
+      request_id = Q.write_request!(
+        project: "hive",
+        slug: "retry-task",
+        argv: %w[hive run retry-task --stage 4-execute --project hive --json],
+        requestor: "healer",
+        trigger: "recovery",
+        request_id: "recovery-preclaim-crash",
+        task_generation: "c" * 64,
+        task_id: 817,
+        expected_stage: "4-execute",
+        expected_marker_name: "error",
+        expected_marker_id: "marker-a",
+        recovery: recovery_payload(phase: "cleared"),
+        state_home: dir,
+        now: at
+      )
+      claimed = Q.claim(request_id, pid: nil, state_home: dir, now: at)
+      events = []
+
+      recovered = Q.recover_claims(
+        state_home: dir,
+        now: at + 1,
+        alive: ->(_pid, _start) { false },
+        attempt_for_request: ->(_seen_request_id) { nil },
+        handler: ->(request_id:, reason:, path:) {
+          events << [ request_id, reason, path ]
+        }
+      )
+
+      assert_equal 1, recovered
+      refute File.exist?(claimed)
+      assert_empty Q.claimed(state_home: dir)
+      pending = Q.pending(state_home: dir)
+      assert_equal [ request_id ], pending.map(&:request_id)
+      assert_equal "cleared", pending.first.recovery.fetch("phase")
+      assert_equal "recovery_claim_requeued", events.dig(0, 1)
+    end
+  end
+
+  def test_recover_claims_discards_the_claim_when_a_pending_recovery_sibling_exists
+    Dir.mktmpdir("hive-queue") do |dir|
+      at = Time.utc(2026, 7, 25, 12)
+      request_id = Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --stage 4-execute --project hive --json],
+        requestor: "healer", trigger: "recovery",
+        request_id: "recovery-sibling",
+        recovery: recovery_payload(phase: "cleared"),
+        state_home: dir, now: at
+      )
+      claimed = Q.claim(request_id, pid: nil, state_home: dir, now: at)
+      pending = claimed.delete_suffix(Q::CLAIMED_SUFFIX)
+      FileUtils.cp(claimed, pending)
+
+      assert_equal 1, Q.recover_claims(
+        state_home: dir, now: at + 1,
+        alive: ->(_pid, _start) { false },
+        attempt_for_request: ->(_seen_request_id) { nil }
+      )
+      refute File.exist?(claimed)
+      assert File.exist?(pending)
+      assert_equal [ request_id ], Q.pending(state_home: dir).map(&:request_id)
+    end
+  end
+
   def test_recover_claims_expires_aged_claim_even_when_owner_alive
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       write_request(dir, request_id: "aged0001", created_at: Time.utc(2026, 5, 28, 18, 0, 0))
@@ -659,19 +1159,67 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
-  def test_recover_claims_removes_malformed_claim_file
+  def test_recover_claims_quarantines_malformed_claim_file_with_evidence
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       claim_dir = Q.directory(state_home: dir)
       bad = File.join(claim_dir, "20260528-bad.json#{Q::CLAIMED_SUFFIX}")
       File.write(bad, "{not json")
-      reasons = []
+      events = []
       removed = Q.recover_claims(
         state_home: dir, now: Time.now, alive: ->(_p, _s) { true },
-        handler: ->(request_id:, reason:, path:) { reasons << reason }
+        handler: ->(request_id:, reason:, path:) { events << [ reason, path ] }
       )
       assert_equal 1, removed
-      assert_equal [ "malformed_claim" ], reasons
+      assert_equal [ "malformed_claim_quarantined" ], events.map(&:first)
       refute File.exist?(bad)
+      quarantined = events.dig(0, 1)
+      assert_equal "{not json", File.binread(quarantined)
+      evidence = JSON.parse(File.read("#{quarantined}.evidence.json"))
+      assert_equal "malformed_claim", evidence.fetch("reason")
+      assert_equal Digest::SHA256.hexdigest("{not json"), evidence.fetch("sha256")
+      assert_equal 0, File.stat(File.dirname(quarantined)).mode & 0o077
+    end
+  end
+
+  def test_recover_claims_reports_when_malformed_claim_quarantine_fails
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      claim_dir = Q.directory(state_home: dir)
+      bad = File.join(claim_dir, "bad.json#{Q::CLAIMED_SUFFIX}")
+      File.write(bad, "{not json")
+      events = []
+
+      with_replaced_singleton_method(Q, :quarantine_claim, ->(*) { nil }) do
+        assert_equal 0, Q.recover_claims(
+          state_home: dir, alive: ->(_pid, _start) { false },
+          handler: ->(**event) { events << event }
+        )
+      end
+
+      assert_equal "malformed_claim_quarantine_failed", events.dig(0, :reason)
+      assert File.exist?(bad)
+    end
+  end
+
+  def test_malformed_claim_quarantine_rolls_back_both_files_when_evidence_write_fails
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      claim_dir = Q.directory(state_home: dir)
+      bad = File.join(claim_dir, "bad.json#{Q::CLAIMED_SUFFIX}")
+      metadata = "#{bad}#{Q::CLAIM_META_SUFFIX}"
+      File.write(bad, "{not json")
+      File.write(metadata, JSON.generate("pid" => 123))
+
+      with_replaced_singleton_method(
+        Hive::AtomicFile, :write, ->(*) { raise IOError, "disk full" }
+      ) do
+        assert_nil Q.send(
+          :quarantine_claim, bad,
+          reason: "malformed_claim", now: Time.utc(2026, 7, 25, 12)
+        )
+      end
+
+      assert File.exist?(bad)
+      assert File.exist?(metadata)
+      assert_equal "{not json", File.read(bad)
     end
   end
 
@@ -824,7 +1372,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
-  def test_v3_round_trips_generation_and_v2_remains_readable
+  def test_v4_round_trips_generation_and_v2_remains_readable
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       Q.write_request!(
         project: "hive", slug: "task", argv: [ "hive", "run", "task" ],
@@ -836,13 +1384,14 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       write_request(dir, request_id: "v2request", created_at: Time.utc(2026, 7, 16, 11, 0, 0),
                     schema_version: 2)
 
-      v2, v3 = Q.pending(state_home: dir)
+      v2, v4 = Q.pending(state_home: dir)
       assert_nil v2.task_generation
       assert_equal 2, v2.schema_version
-      assert_equal "generation-1", v3.task_generation
-      assert_equal "attempt-zero", v3.predecessor_attempt_id
-      assert_equal 3, v3.schema_version
-      assert_equal 1, v3.inherited_outputs.size
+      assert_equal "generation-1", v4.task_generation
+      assert_equal "attempt-zero", v4.predecessor_attempt_id
+      assert_equal 4, v4.schema_version
+      assert_nil v4.recovery
+      assert_equal 1, v4.inherited_outputs.size
     end
   end
 

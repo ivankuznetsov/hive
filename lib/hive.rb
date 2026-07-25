@@ -14,9 +14,9 @@ module Hive
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
       "hive-status" => 6,
-      "hive-operational-status" => 1,
+      "hive-operational-status" => 2,
       "hive-watch-event" => 1,
-      "hive-act" => 1,
+      "hive-act" => 2,
       "hive-init" => 2,
       "hive-setup-agents" => 1,
       "hive-setup" => 1,
@@ -77,7 +77,7 @@ module Hive
       # `dispatch_requests/` directory. See
       # `Hive::Daemon::DispatchRequestQueue` and
       # `Hive::Bot::DispatchRequestWriter`.
-      "hive-dispatch-request" => 3,
+      "hive-dispatch-request" => 4,
       # Reverse-direction notice the daemon writes for the bot to relay a
       # non-zero, bot-originated dispatch back to the originating Telegram
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).

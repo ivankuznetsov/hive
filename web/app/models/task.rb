@@ -9,6 +9,13 @@ class Task
   DIFF_TIMEOUT_SEC = Integer(Hive::Web::Environment.value("HIVE_WEB_DIFF_TIMEOUT_SEC"))
   DIFF_MAX_BYTES = 512 * 1024
   RECOVERY_ACTIONS = %w[recover_execute recover_review error].freeze
+  RECOVERY_LABELS = {
+    "queued" => "Recovery queued",
+    "cooldown" => "Retry available later",
+    "running" => "Agent running",
+    "blocked" => "Recovery blocked",
+    "unavailable" => "Current state unavailable"
+  }.freeze
   STAGE_DISPATCH_ACTIONS = {
     "1" => "ready_to_brainstorm",
     "2" => "ready_to_brainstorm",
@@ -162,6 +169,49 @@ class Task
     RECOVERY_ACTIONS.include?(self["action"].to_s)
   end
 
+  def recovery
+    value = self["recovery"]
+    value.is_a?(Hash) ? value : nil
+  end
+
+  def recovery_action_visible?
+    recovery_action? && recovery&.fetch("status", nil) != "terminal"
+  end
+
+  def recovery_action_enabled?
+    recovery_action? && recovery.nil? && !recovery_intervention_required?
+  end
+
+  def recovery_primary_label
+    return unless recovery
+
+    status = recovery["status"].to_s
+    return recovery_terminal_success? ? "Completed" : "Failed" if status == "terminal"
+
+    RECOVERY_LABELS.fetch(status, "Current state unavailable")
+  end
+
+  def recovery_context
+    return [] unless recovery
+
+    context = []
+    context << "request #{recovery['request_id']}" if recovery["request_id"].present?
+    context << "attempt #{recovery['attempt_id']}" if recovery["attempt_id"].present?
+    context << "eligible #{recovery['next_eligible_at']}" if
+      recovery["status"] == "cooldown" && recovery["next_eligible_at"].present?
+    context << "origin #{recovery['failure_origin']}" if recovery["failure_origin"].present?
+    context << recovery["terminal_outcome"].to_s.tr("_", " ") if
+      recovery["status"] == "terminal" && recovery["terminal_outcome"].present?
+    context << "at #{recovery['terminal_at']}" if
+      recovery["status"] == "terminal" && recovery["terminal_at"].present?
+    context << recovery["reason"].to_s.tr("_", " ") if recovery["reason"].present?
+    context << recovery["remediation"] if recovery["remediation"].present?
+    if recovery.dig("provider_hint", "retry_after").present?
+      context << "provider reset estimate #{recovery.dig('provider_hint', 'retry_after')} (display only)"
+    end
+    context
+  end
+
   def passable?
     PASSABLE_MARKERS.include?(self["marker"].to_s)
   end
@@ -225,6 +275,18 @@ class Task
   end
 
   private
+
+  def recovery_intervention_required?
+    Hive::Recovery.intervention_required?(
+      marker: self["marker"], attrs: self["attrs"] || {}, folder: folder
+    )
+  end
+
+  def recovery_terminal_success?
+    %w[succeeded success completed terminal_replay].include?(
+      recovery["terminal_outcome"].to_s
+    )
+  end
 
   def original_idea_line
     text = original_idea_text.to_s.gsub(/\[image\d+\]/, "")

@@ -33,6 +33,13 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
     end
   end
 
+  def test_marker_attrs_defaults_to_an_empty_hash_for_unknown_row_shapes
+    assert_equal(
+      {},
+      Hive::Daemon::AutoRetrySafety.send(:marker_attrs, Object.new)
+    )
+  end
+
   def test_execute_clean_worktree_is_safe
     with_tmp_dir do |dir|
       worktree = File.join(dir, "wt")

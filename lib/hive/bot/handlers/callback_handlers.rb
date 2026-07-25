@@ -1,6 +1,7 @@
 require "hive/bot/notification_builders"
 require "hive/bot/idea_keyboards"
-require "hive/bot/handlers/recovery_sequence"
+require "hive/bot/handlers/recovery_result_builder"
+require "hive/recovery/retry_policy"
 require "hive/daemon/plan_approval"
 require "shellwords"
 
@@ -33,7 +34,6 @@ module Hive
           when :callback_rerun then rerun(data)
           when :callback_reject then @result_class.new(action: :reply, text: "Left unchanged.")
           when :callback_autofix then autofix(data)
-          when :callback_clear_and_retry then clear_and_retry(data)
           when :callback_open_laptop then @result_class.new(action: :reply, text: "Open laptop for this one.")
           when :callback_show_details then show_details(data)
           when :callback_refresh_diagnose then refresh_diagnose(data)
@@ -164,18 +164,29 @@ module Hive
           )
         end
 
-        def clear_and_retry(data)
-          # Legacy clear_retry: buttons (from messages predating the Autofix
-          # rename) use the current guarded policy verbatim.
-          autofix(data)
-        end
-
         def autofix(data)
           _prefix, project, slug, stage, marker, *rest = split_callback(data, [ 5, 6, 7 ])
           match_attr, workflow = recovery_tail(rest)
-          RecoverySequence.build(
+          provisional = RecoveryResultBuilder.build(
             project: project, slug: slug, stage: stage, marker: marker,
             match_attr: match_attr, workflow: workflow,
+            result_class: @result_class, clear_keyboard: true
+          )
+          return provisional unless provisional.action == :dispatch_recovery
+
+          row = status_row(project: project, slug: slug, stage: stage)
+          return @result_class.new(action: :reply, text: "Task status changed - reopen /queue.") unless row
+          unless row.marker.to_s.casecmp(marker.to_s).zero?
+            return @result_class.new(action: :reply, text: "Task status changed - reopen /queue.")
+          end
+          expected_attrs = RecoveryResultBuilder.attrs_from_match_attr(match_attr)
+          if expected_attrs && !expected_attrs.all? { |key, value| row.attrs[key].to_s == value.to_s }
+            return @result_class.new(action: :reply, text: "Task status changed - reopen /queue.")
+          end
+
+          RecoveryResultBuilder.build(
+            project: project, slug: slug, stage: stage, marker: marker,
+            match_attr: match_attr, attrs: row.attrs, workflow: workflow, row: row,
             result_class: @result_class, clear_keyboard: true
           )
         end
@@ -331,7 +342,7 @@ module Hive
         def findings_toggle(data, verb)
           _prefix, _kind, project, slug, stage = split_callback(data, 5)
           stage_argv = stage ? [ "--stage", stage ] : []
-          retry_verb = RecoverySequence.retry_verb_for_stage(stage)
+          retry_verb = Hive::Recovery::RetryPolicy.verb_for(stage)
           retry_argv = retry_verb ? [ "hive", retry_verb, slug, "--from", stage, "--project", project, "--json" ] : nil
           commands = [
             [ "hive", verb, slug, "--all", *stage_argv, "--project", project, "--json" ]
@@ -346,7 +357,7 @@ module Hive
             project: project,
             slug: slug,
             commands: commands,
-            alert_reset: RecoverySequence.alert_reset(project, slug, stage),
+            alert_reset: RecoveryResultBuilder.alert_reset(project, slug, stage),
             clear_keyboard: true
           )
         end
@@ -399,7 +410,7 @@ module Hive
           [ nil, Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY ]
         end
 
-        # The recovery callbacks (autofix / clear_and_retry) carry up to two
+        # The recovery callback carries up to two
         # optional trailing tokens — a match_attr and a workflow id — in either
         # order. They're disambiguated by content: a match_attr is always a
         # `key=value` pair (contains `=`), a workflow id never contains `=`.

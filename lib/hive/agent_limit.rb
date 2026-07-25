@@ -5,8 +5,8 @@ module Hive
   module AgentLimit
     # How long to wait, after a `limits_reached` marker is written, before
     # the daemon healer is allowed to auto-retry the parked task. A usage /
-    # credit window may have changed by then, so the marker self-heals instead
-    # of staying red until a human runs `hive markers clear`. Provider reset
+    # credit window may have changed by then, so the daemon submits the marker
+    # to the shared recovery coordinator. Provider reset
     # hints remain useful for display, but never gate daemon scheduling: credits
     # can be added, usage can be reset, or the active account can change early.
     # Overridable per-process via HIVE_LIMITS_RETRY_COOLDOWN_SEC (a positive

@@ -791,7 +791,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_match(/fix guardrail/i, notification.text)
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     refute_includes labels, "Clear and retry",
-                    "REVIEW_WAITING is not a clearable marker — must not surface a clear_retry button"
+                    "REVIEW_WAITING is not recoverable — must not surface an Autofix button"
     refute_includes labels, "Open laptop",
                     "Open laptop was retired — operators are on Telegram and the button has no payload"
     assert_includes labels, "Show details"
@@ -815,12 +815,14 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal [ [ "Accept all", "Reject all" ], [ "Show details" ] ], row_labels
   end
 
-  def test_recovery_match_attr_review_stale_uses_pass_reason
-    attrs = { "pass" => "3", "reason" => "timeout" }
+  def test_recovery_match_attr_review_stale_uses_marker_generation
+    attrs = {
+      "pass" => "3", "reason" => "timeout",
+      "marker_id" => "review-stale-generation-3"
+    }
     r = row(action: "recover_review", marker: "review_stale", attrs: attrs)
     autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
-    assert_match(/:pass=3\z/, autofix,
-                 "review_stale must drive recovery_match_attr toward the pass=<n> key")
+    assert_match(/:marker_id=review-stale-generation-3,reason=timeout\z/, autofix)
   end
 
   def test_recovery_match_attr_review_error_prefers_marker_generation
@@ -851,12 +853,11 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  "(manual-only routing key), leading with marker_id")
   end
 
-  def test_recovery_match_attr_error_legacy_falls_back_to_observed_attrs
+  def test_recovery_match_attr_error_does_not_synthesize_legacy_identity
     attrs = { "reason" => "exit_code", "exit_code" => "137" }
     r = row(action: "error", marker: "error", attrs: attrs)
     autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
-    assert_match(/:reason=exit_code,exit_code=137\z/, autofix,
-                 "legacy `error` marker must use observed reason and exit_code together")
+    refute_match(/reason=exit_code|exit_code=137/, autofix)
   end
 
   def test_recovery_match_attr_unknown_marker_omits_match_attr_suffix
@@ -894,7 +895,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
   def test_recovery_keyboard_is_single_autofix_button
     notification = Hive::Bot::NotificationBuilders.build(
-      row(action: "recover_review", marker: "review_error", attrs: { "pass" => "2" },
+      row(action: "recover_review", marker: "review_error",
+          attrs: { "pass" => "2", "marker_id" => "review-generation-2" },
           slug: "we-need-to-improve-this-260522-db23", stage: "6-review",
           diagnostic: retry_diagnostic)
     )
@@ -903,7 +905,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal 1, notification.keyboard.first.length
     button = notification.keyboard.first.first
     assert_equal "🔧 Autofix", button[:text]
-    assert_equal "autofix:hive:we-need-to-improve-this-260522-db23:6-review:review_error:pass=2",
+    assert_equal "autofix:hive:we-need-to-improve-this-260522-db23:6-review:" \
+                 "review_error:marker_id=review-generation-2",
                  Hive::Bot::NotificationBuilders.resolve_callback(button[:callback_data])
   end
 

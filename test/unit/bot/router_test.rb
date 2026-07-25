@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/bot/router"
 require "hive/bot/conversation_store"
 require "hive/bot/idea_draft_store"
+require "hive/bot/status_watcher"
 require "hive/bot/telegram"
 
 class HiveBotRouterTest < Minitest::Test
@@ -19,13 +20,14 @@ class HiveBotRouterTest < Minitest::Test
     )
   end
 
-  def build_test_router(bot_config:, pairing_store: nil)
+  def build_test_router(bot_config:, pairing_store: nil, status_snapshot_provider: -> { [] })
     kwargs = {
       bot_config: bot_config,
       logger: @logger,
       conversation_store: @store,
       idea_draft_store: @draft_store,
-      projects_provider: -> { @projects }
+      projects_provider: -> { @projects },
+      status_snapshot_provider: status_snapshot_provider
     }
     kwargs[:pairing_store] = pairing_store if pairing_store
     Hive::Bot::Router.new(**kwargs)
@@ -66,11 +68,15 @@ class HiveBotRouterTest < Minitest::Test
   end
 
   def test_autofix_slash_resolves_against_default_empty_snapshot_provider
-    # The router's default status_snapshot_provider returns [] so unknown
-    # slugs (which is every slug, in this test setup) reply with the
-    # archive hint. This covers both the default lambda body and the
-    # /autofix dispatch path without needing a Supervisor instance.
-    result = @router.handle(update(text: "/autofix unknown-260526-zzzz"))
+    router = Hive::Bot::Router.new(
+      bot_config: { "chat_id_allowlist" => [ 12345 ] },
+      logger: @logger,
+      conversation_store: @store,
+      idea_draft_store: @draft_store,
+      projects_provider: -> { @projects }
+    )
+
+    result = router.handle(update(text: "/autofix unknown-260526-zzzz"))
 
     assert_equal :reply, result.action
     assert_match(/Slug not found/, result.text)
@@ -692,16 +698,14 @@ class HiveBotRouterTest < Minitest::Test
                    "--project", "hive", "--json" ], result.command_argv
   end
 
-  def test_clear_retry_callback_dispatches_marker_clear_then_retry
+  def test_removed_clear_retry_callback_is_unknown
     result = @router.handle(
       update(callback_data: "clear_retry:hive:slug-260514-abcd:5-review:review_error")
     )
 
-    assert_equal :dispatch_commands, result.action
-    assert_equal [ "hive", "markers", "clear", "slug-260514-abcd", "--name",
-                   "REVIEW_ERROR", "--project", "hive", "--json" ], result.commands.first
-    assert_equal [ "hive", "review", "slug-260514-abcd", "--from", "5-review",
-                   "--project", "hive", "--json" ], result.commands.last
+    assert_equal :reply, result.action
+    assert_equal :unknown, result.intent
+    assert_match(/did not understand/, result.text)
   end
 
   def test_default_projects_provider_reads_registered_projects

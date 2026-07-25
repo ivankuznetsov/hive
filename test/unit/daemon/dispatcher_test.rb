@@ -320,6 +320,68 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  class FakeRecoveryCoordinator
+    attr_reader :resumes, :deferred, :marked
+    attr_accessor :defer_error
+
+    def initialize(status: "blocked")
+      @status = status
+      @resumes = []
+      @deferred = []
+      @marked = []
+      @defer_error = nil
+    end
+
+    def assessment(row, now:)
+      {
+        due: true,
+        retry_at: now,
+        safe: true,
+        safety_reason: "safe"
+      }
+    end
+
+    def resume(request:, row:, now: nil)
+      @resumes << { request: request, row: row, now: now }
+      Hive::Daemon::RecoveryCoordinator::Receipt.new(
+        status: @status,
+        request_id: request.request_id,
+        attempt_id: nil,
+        phase: request.recovery["phase"],
+        failure_origin: request.recovery["failure_origin"],
+        next_eligible_at: request.recovery["next_eligible_at"],
+        owner: "operator",
+        reason: @status == "blocked" ? "generation_conflict" : nil,
+        remediation: @status == "blocked" ? "refresh status" : nil,
+        retry_count: nil,
+        provider_hint: nil
+      )
+    end
+
+    def defer_dispatch_failure(request, now:)
+      raise defer_error if defer_error
+
+      @deferred << { request: request, now: now }
+      Hive::Daemon::RecoveryCoordinator::Receipt.new(
+        status: "cooldown",
+        request_id: request.request_id,
+        attempt_id: nil,
+        phase: request.recovery["phase"],
+        failure_origin: request.recovery["failure_origin"],
+        next_eligible_at: (now + 3_600).iso8601(6),
+        owner: "scheduler",
+        reason: nil,
+        remediation: nil,
+        retry_count: request.recovery["retry_count"],
+        provider_hint: nil
+      )
+    end
+
+    def mark_dispatched(request, **attributes)
+      @marked << { request: request, **attributes }
+    end
+  end
+
   # ── construction helpers ───────────────────────────────────────────────
 
   def make_dispatcher(rows: [], dry_run: false, with_merge_watcher: false,
@@ -330,7 +392,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       refactor_patrol_merge_reconciler: nil,
                       refactor_patrol_scheduler: nil, patrol_arbiter: nil,
                       attempt_dispatcher: nil, attempt_reconciler: nil,
-                      operational_snapshot: nil)
+                      operational_snapshot: nil, recovery_coordinator: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -381,7 +443,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatch_result_state_home: dispatch_result_state_home,
       attempt_dispatcher: attempt_dispatcher,
       attempt_reconciler: attempt_reconciler,
-      operational_snapshot: operational_snapshot
+      operational_snapshot: operational_snapshot,
+      recovery_coordinator: recovery_coordinator
     )
     # Generic dispatcher tests exercise routing, not the detached production
     # name generator. Rows intentionally omit display names in many fixtures;
@@ -397,6 +460,104 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler,
       digest_scheduler, answer_digest_scheduler
     ]
+  end
+
+  def test_recovery_request_is_resumed_by_the_shared_coordinator_before_dispatch
+    coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+    dispatcher, supervisor, = make_dispatcher(
+      rows: [], recovery_coordinator: coordinator
+    )
+    recovery = {
+      "phase" => "admitted",
+      "observed_marker_generation" => "a" * 64,
+      "expected_marker_attrs" => { "reason" => "timeout", "marker_id" => "m1" },
+      "canonical_task_folder" => "/tmp/s1",
+      "expected_post_clear_progress_fingerprint" => "b" * 64,
+      "dispatch_generation" => "c" * 64,
+      "failure_origin" => "timeout",
+      "next_eligible_at" => T0.iso8601(6),
+      "owner" => "scheduler",
+      "blocked_reason" => nil,
+      "blocked_remediation" => nil
+    }
+    request = Hive::Daemon::DispatchRequestQueue::Request.new(
+      request_id: "recovery-1", created_at: T0, project: "p1", slug: "s1",
+      argv: %w[hive run s1 --stage 4-execute --project p1 --json],
+      requestor: "web", chat_id: nil, update_id: nil, trigger: "recovery",
+      task_generation: "c" * 64, predecessor_attempt_id: nil,
+      inherited_outputs: [], task_id: 1, expected_stage: "4-execute",
+      expected_marker_name: "error", expected_marker_id: "m1",
+      recovery: recovery, schema_version: 4, path: nil
+    )
+    observed = row(
+      stage: "4-execute", marker: "error", action: "error",
+      marker_attrs: { "reason" => "timeout", "marker_id" => "m1" }
+    )
+
+    with_replaced_singleton_method(
+      Hive::Config,
+      :find_project,
+      ->(_name) { { "name" => "p1", "path" => "/tmp/p1" } }
+    ) do
+      dispatcher.send(:process_dispatch_request_iteration, request, now: T0, rows: [ observed ])
+    end
+
+    assert_equal 1, coordinator.resumes.size
+    assert_empty supervisor.spawned
+  end
+
+  def test_recovery_request_waits_when_the_status_observation_is_missing
+    coordinator = FakeRecoveryCoordinator.new(status: "queued")
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      rows: [], recovery_coordinator: coordinator
+    )
+    request = Q::Request.new(
+      request_id: "recovery-missing-row",
+      created_at: T0,
+      project: "p1",
+      slug: "s1",
+      argv: %w[hive run s1 --stage 4-execute --project p1 --json],
+      requestor: "web",
+      trigger: "recovery",
+      recovery: dispatcher_recovery
+    )
+
+    with_replaced_singleton_method(
+      Hive::Config, :find_project,
+      ->(_name) { { "name" => "p1", "path" => "/tmp/p1" } }
+    ) do
+      dispatcher.send(
+        :process_dispatch_request_iteration, request, now: T0, rows: []
+      )
+    end
+
+    assert_empty coordinator.resumes
+    assert_empty supervisor.spawned
+    assert logger.events.any? { |name, attributes|
+      name == :dispatch_request_blocked &&
+        attributes[:reason] == "recovery_observation_unavailable"
+    }
+  end
+
+  def test_recovery_dispatch_failure_pacing_is_best_effort
+    coordinator = FakeRecoveryCoordinator.new(status: "queued")
+    coordinator.defer_error = IOError.new("queue rewrite failed")
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      recovery_coordinator: coordinator
+    )
+    request = Q::Request.new(
+      request_id: "recovery-pacing-failure",
+      recovery: dispatcher_recovery(phase: "cleared")
+    )
+
+    assert_nil dispatcher.send(
+      :defer_recovery_after_dispatch_failure, request, now: T0
+    )
+    assert logger.events.any? { |name, attributes|
+      name == :fatal &&
+        attributes[:message].include?("recovery dispatch pacing failed") &&
+        attributes[:request_id] == request.request_id
+    }
   end
 
 
@@ -1114,6 +1275,220 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
     assert_equal "unavailable", unavailable.fetch("status")
     assert_match(/Errno::EACCES/, unavailable.fetch("reason"))
+  end
+
+  def test_queue_and_recovery_projections_share_one_directory_scan
+    dispatcher, = make_dispatcher
+    calls = Hash.new(0)
+    pending_reader = lambda do |state_home:, bad_handler:|
+      calls[:pending] += 1
+      []
+    end
+    claimed_reader = lambda do |state_home:, bad_handler:|
+      calls[:claimed] += 1
+      []
+    end
+
+    with_replaced_singleton_method(
+      Hive::Daemon::DispatchRequestQueue, :pending, pending_reader
+    ) do
+      with_replaced_singleton_method(
+        Hive::Daemon::DispatchRequestQueue, :claimed, claimed_reader
+      ) do
+        queue_state = dispatcher.send(:operational_queue_state)
+        dispatcher.send(
+          :operational_queue_snapshot, now: T0, queue_state: queue_state
+        )
+        dispatcher.send(
+          :operational_recovery_snapshot, queue_state: queue_state
+        )
+      end
+    end
+
+    assert_equal({ pending: 1, claimed: 1 }, calls)
+  end
+
+  def test_recovery_projection_degrades_when_the_shared_queue_scan_failed
+    dispatcher, _supervisor, _controller, logger = make_dispatcher
+    state = Hive::Daemon::Dispatcher::OperationalQueueState.new(
+      pending: [], claimed: [], malformed: 0,
+      error: IOError.new("queue unreadable")
+    )
+
+    assert_equal(
+      [],
+      dispatcher.send(:durable_recovery_receipts, queue_state: state)
+    )
+    assert logger.events.any? { |name, attributes|
+      name == :fatal &&
+        attributes[:message].include?("recovery lifecycle projection") &&
+        attributes[:message].include?("queue unreadable")
+    }
+  end
+
+  def test_recovery_lifecycle_survives_restart_without_redispatch_or_log_loop
+    Dir.mktmpdir("hive-recovery-lifecycle") do |state_home|
+      recovery = {
+        "phase" => "admitted",
+        "observed_marker_generation" => "a" * 64,
+        "expected_marker_attrs" => { "reason" => "timeout", "marker_id" => "marker-1" },
+        "canonical_task_folder" => "/tmp/recovery-task",
+        "expected_post_clear_progress_fingerprint" => "b" * 64,
+        "dispatch_generation" => "c" * 64,
+        "failure_origin" => "timeout",
+        "next_eligible_at" => T0.iso8601(6),
+        "owner" => "scheduler",
+        "blocked_reason" => nil,
+        "blocked_remediation" => nil
+      }
+      Q.write_request!(
+        project: "p1",
+        slug: "recovery-task",
+        argv: %w[hive run recovery-task --stage 4-execute --project p1 --json],
+        requestor: "healer",
+        trigger: "recovery",
+        request_id: "recovery-restart",
+        task_generation: "c" * 64,
+        expected_stage: "4-execute",
+        expected_marker_name: "error",
+        expected_marker_id: "marker-1",
+        recovery: recovery,
+        state_home: state_home,
+        now: T0
+      )
+
+      queued_dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      queued = queued_dispatcher.send(:durable_recovery_receipts).fetch(0)
+      assert_equal "queued", queued.dig("receipt", "status")
+      assert_equal "admitted", queued.dig("receipt", "phase")
+
+      assert Q.update_recovery!(
+        "recovery-restart",
+        expected_phase: "admitted",
+        changes: { "phase" => "cleared" },
+        state_home: state_home
+      )
+      Q.claim(
+        "recovery-restart",
+        pid: nil,
+        attempt_id: "attempt-1",
+        task_generation: "c" * 64,
+        state_home: state_home,
+        now: T0 + 1
+      )
+      assert Q.update_recovery!(
+        "recovery-restart",
+        expected_phase: "cleared",
+        changes: { "phase" => "dispatched", "attempt_id" => "attempt-1" },
+        state_home: state_home
+      )
+
+      running_dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      running = running_dispatcher.send(:durable_recovery_receipts).fetch(0)
+      assert_equal "running", running.dig("receipt", "status")
+      assert_equal "attempt-1", running.dig("receipt", "attempt_id")
+
+      assert Q.update_recovery!(
+        "recovery-restart",
+        expected_phase: "dispatched",
+        changes: {
+          "phase" => "terminal",
+          "terminal_outcome" => "succeeded",
+          "terminal_at" => (T0 + 2).iso8601(6)
+        },
+        state_home: state_home
+      )
+      fetches = 0
+      reconciler = Object.new
+      reconciler.define_singleton_method(:fetch) do |_attempt_id|
+        fetches += 1
+        raise "terminal recovery should not be reconciled twice"
+      end
+      terminal_dispatcher, _supervisor, _controller, logger = make_dispatcher(
+        rows: [],
+        dispatch_request_state_home: state_home,
+        attempt_reconciler: reconciler
+      )
+      terminal_dispatcher.send(:recover_dispatch_claims, now: T0 + 3)
+      terminal = terminal_dispatcher.send(:durable_recovery_receipts).fetch(0)
+      assert_equal "terminal", terminal.dig("receipt", "status")
+      assert_equal "terminal", terminal.dig("receipt", "phase")
+      assert_equal "succeeded", terminal.dig("receipt", "terminal_outcome")
+      assert_equal (T0 + 2).iso8601(6), terminal.dig("receipt", "terminal_at")
+      assert_equal "none", terminal.dig("receipt", "owner")
+
+      terminal_dispatcher.send(:process_dispatch_requests, now: T0 + 3, rows: [])
+      terminal_dispatcher.send(:reconcile_attempt_deliveries, now: T0 + 3)
+
+      assert_equal 0, fetches
+      assert_empty Q.pending(state_home: state_home)
+      refute_nil Q.fetch("recovery-restart", state_home: state_home)
+      refute logger.events.any? { |name, _attrs|
+        %i[
+          dispatch_request_observed dispatch_request_blocked
+          dispatch_request_completed dispatch_request_dispatched
+        ].include?(name)
+      }
+    end
+  end
+
+  def test_recovery_lifecycle_projection_keeps_healthy_receipts_when_one_request_raises
+    recovery = {
+      "phase" => "admitted",
+      "observed_marker_generation" => "a" * 64,
+      "expected_marker_attrs" => { "reason" => "timeout" },
+      "canonical_task_folder" => "/tmp/recovery-task",
+      "expected_post_clear_progress_fingerprint" => "b" * 64,
+      "dispatch_generation" => "c" * 64,
+      "failure_origin" => "timeout",
+      "next_eligible_at" => T0.iso8601(6),
+      "owner" => "scheduler",
+      "blocked_reason" => nil,
+      "blocked_remediation" => nil
+    }
+    requests = %w[broken healthy].map do |slug|
+      Hive::Daemon::DispatchRequestQueue::Request.new(
+        request_id: "recovery-#{slug}", created_at: T0, project: "p1", slug: slug,
+        argv: [ "hive", "run", slug ], requestor: "healer", trigger: "recovery",
+        expected_stage: "4-execute", expected_marker_name: "error",
+        recovery: recovery
+      )
+    end
+    coordinator = Object.new
+    coordinator.define_singleton_method(:receipt_for_request) do |request|
+      raise IOError, "one corrupt lifecycle" if request.slug == "broken"
+
+      Hive::Daemon::RecoveryCoordinator::Receipt.new(
+        status: "queued", request_id: request.request_id, attempt_id: nil,
+        phase: "admitted", failure_origin: "timeout",
+        next_eligible_at: T0.iso8601(6), owner: "scheduler", reason: nil,
+        remediation: nil, retry_count: nil, provider_hint: nil
+      )
+    end
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      recovery_coordinator: coordinator
+    )
+
+    receipts = with_replaced_singleton_method(
+      Hive::Daemon::DispatchRequestQueue, :pending, ->(**) { requests }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Daemon::DispatchRequestQueue, :claimed, ->(**) { [] }
+      ) do
+        dispatcher.send(:durable_recovery_receipts)
+      end
+    end
+
+    assert_equal [ "healthy" ], receipts.map { |entry| entry.fetch("slug") }
+    assert logger.events.any? { |name, attrs|
+      name == :fatal &&
+        attrs[:request_id] == "recovery-broken" &&
+        attrs[:message].include?("one corrupt lifecycle")
+    }
   end
 
   def test_advance_action_dispatches_workflow_verb
@@ -2871,7 +3246,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     rebuilt = dispatcher.instance_variable_get(:@stale_agent_healer)
     refute_same original_healer, rebuilt,
                 "reload_config! must rebuild the universal healer"
-    assert_equal false, rebuilt.operational_snapshot.fetch("enabled")
+    assert_equal false, rebuilt.auto_retry_enabled?
   end
 
 def test_run_forever_reloads_ticks_and_shuts_down_cleanly
@@ -3507,7 +3882,7 @@ def test_late_reload_loader_failure_never_splits_auto_retry_policy
     assert_same previous_config, dispatcher.instance_variable_get(:@config)
     assert_same previous_healer, dispatcher.instance_variable_get(:@stale_agent_healer)
     assert_equal previously_enabled,
-                 previous_healer.operational_snapshot.fetch("enabled"),
+                 previous_healer.auto_retry_enabled?,
                  "failed #{previously_enabled ? 'disable' : 'enable'} reload must retain one coherent policy"
     refute logger.events.any? { |name, _attrs| name == :config_reloaded }
     assert logger.events.any? { |name, attrs|
@@ -3824,6 +4199,68 @@ end
     end
   end
 
+  def test_recovery_attempt_dispatch_marks_each_admission_result_and_logs_its_event
+    expectations = {
+      existing_live: :dispatch_request_attached,
+      terminal_replay: :dispatch_request_terminal_replay,
+      blocked: :dispatch_request_blocked
+    }
+
+    expectations.each do |status, expected_event|
+      Dir.mktmpdir("hive-recovery-attempt-dispatch") do |state_home|
+        attempt = Struct.new(:attempt_id, :task_generation, :state).new(
+          "attempt-#{status}", "generation-#{status}", "launching"
+        )
+        result = Hive::Attempts::DispatchResult.new(
+          status: status,
+          attempt: attempt,
+          receipt: status == :terminal_replay ?
+            { "outcome" => "succeeded" } : nil,
+          attach_descriptor: nil,
+          reason: status == :blocked ? "admission blocked" : nil
+        )
+        attempt_dispatcher = Object.new
+        attempt_dispatcher.define_singleton_method(:dispatch_request) do |*_args, **_kwargs|
+          result
+        end
+        coordinator = FakeRecoveryCoordinator.new(status: "queued")
+        dispatcher, _supervisor, _controller, logger = make_dispatcher(
+          rows: [],
+          dispatch_request_state_home: state_home,
+          attempt_dispatcher: attempt_dispatcher,
+          recovery_coordinator: coordinator
+        )
+        Q.write_request!(
+          project: "p1",
+          slug: "recovery-task",
+          argv: %w[hive run recovery-task --stage 4-execute --project p1 --json],
+          requestor: "healer",
+          trigger: "recovery",
+          request_id: "recovery-#{status}",
+          task_generation: "c" * 64,
+          task_id: 817,
+          expected_stage: "4-execute",
+          expected_marker_name: "error",
+          expected_marker_id: "marker-1",
+          recovery: dispatcher_recovery(phase: "cleared"),
+          state_home: state_home,
+          now: T0
+        )
+        request = Q.pending(state_home: state_home).fetch(0)
+
+        assert_same result, dispatcher.send(:dispatch_request!, request, now: T0)
+
+        marked = coordinator.marked.fetch(0)
+        assert_equal "attempt-#{status}", marked.fetch(:attempt_id)
+        assert_equal(status == :terminal_replay, marked.fetch(:terminal))
+        assert logger.events.any? { |name, attributes|
+          name == expected_event &&
+            attributes[:request_id] == "recovery-#{status}"
+        }
+      end
+    end
+  end
+
   def test_attempt_reconciliation_failure_stops_tick_before_status
     reconciler = Object.new
     reconciler.define_singleton_method(:reconcile) { |now:| raise "lease store unavailable" }
@@ -3872,6 +4309,96 @@ end
         name == :dispatch_request_blocked && attrs[:reason] == "capacity"
       }
     end
+  end
+
+  def test_deferred_recovery_delivery_advances_hourly_pacing_before_releasing_claim
+    Dir.mktmpdir("hive-recovery-deferred") do |state_home|
+      result = Hive::Attempts::DispatchResult.new(
+        status: :deferred, attempt: nil, receipt: nil,
+        attach_descriptor: nil, reason: "launch_handoff_failed"
+      )
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) { |*_args, **_kwargs| result }
+      coordinator = FakeRecoveryCoordinator.new(status: "queued")
+      dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        attempt_dispatcher: attempt_dispatcher,
+        recovery_coordinator: coordinator
+      )
+      recovery = {
+        "phase" => "cleared",
+        "observed_marker_generation" => "a" * 64,
+        "expected_marker_attrs" => {
+          "reason" => "timeout", "marker_id" => "marker-1"
+        },
+        "canonical_task_folder" => "/tmp/recovery-task",
+        "expected_post_clear_progress_fingerprint" => "b" * 64,
+        "dispatch_generation" => "c" * 64,
+        "failure_origin" => "timeout",
+        "next_eligible_at" => T0.iso8601(6),
+        "owner" => "scheduler",
+        "blocked_reason" => nil,
+        "blocked_remediation" => nil,
+        "retry_count" => 1
+      }
+      Q.write_request!(
+        project: "p1", slug: "recovery-task",
+        argv: %w[hive run recovery-task --stage 4-execute --project p1 --json],
+        requestor: "healer", trigger: "recovery",
+        request_id: "recovery-deferred",
+        task_generation: "c" * 64, task_id: 817,
+        expected_stage: "4-execute", expected_marker_name: "error",
+        expected_marker_id: "marker-1", recovery: recovery,
+        state_home: state_home, now: T0
+      )
+      request = Q.pending(state_home: state_home).fetch(0)
+
+      assert_same result, dispatcher.send(:dispatch_request!, request, now: T0)
+
+      assert_equal [ T0 ], coordinator.deferred.map { |entry| entry.fetch(:now) }
+      assert_equal [ "recovery-deferred" ],
+                   Q.pending(state_home: state_home).map(&:request_id)
+      assert_empty Q.claimed(state_home: state_home)
+    end
+  end
+
+  def test_terminal_recovery_pruning_runs_at_most_hourly
+    dispatcher, = make_dispatcher
+    calls = []
+    replacement = lambda do |state_home:, now:|
+      calls << [ state_home, now ]
+      0
+    end
+
+    with_replaced_singleton_method(
+      Hive::Daemon::DispatchRequestQueue,
+      :prune_terminal_recoveries,
+      replacement
+    ) do
+      dispatcher.send(:prune_terminal_recovery_receipts, now: T0)
+      dispatcher.send(:prune_terminal_recovery_receipts, now: T0 + 30)
+      dispatcher.send(:prune_terminal_recovery_receipts, now: T0 + 3_600)
+    end
+
+    assert_equal [ T0, T0 + 3_600 ], calls.map(&:last)
+  end
+
+  def test_terminal_recovery_pruning_failure_is_logged_and_swallowed
+    dispatcher, _supervisor, _controller, logger = make_dispatcher
+
+    with_replaced_singleton_method(
+      Hive::Daemon::DispatchRequestQueue,
+      :prune_terminal_recoveries,
+      ->(**_kwargs) { raise IOError, "retention store unavailable" }
+    ) do
+      dispatcher.send(:prune_terminal_recovery_receipts, now: T0)
+    end
+
+    assert logger.events.any? { |name, attributes|
+      name == :fatal &&
+        attributes[:message].include?("prune terminal recovery receipts") &&
+        attributes[:message].include?("retention store unavailable")
+    }
   end
 
   def test_attempt_claim_update_failure_is_raised_for_retry_and_repair
@@ -3966,6 +4493,47 @@ end
     assert_equal [ "request-failed" ], removed
   end
 
+  def test_terminal_attempt_reconciliation_closes_the_durable_recovery_receipt
+    request = Q::Request.new(
+      request_id: "recovery-terminal",
+      created_at: T0,
+      project: "p1",
+      slug: "recovery-task",
+      argv: %w[hive run recovery-task],
+      requestor: "daemon",
+      chat_id: nil,
+      recovery: dispatcher_recovery(phase: "dispatched")
+    )
+    delivery = Q::ClaimedDelivery.new(
+      request: request,
+      claim: { "attempt_id" => "attempt-terminal" },
+      path: "/claim"
+    )
+    receipt = { "exit_status" => 7, "outcome" => "failed" }
+    attempt = Struct.new(:attempt_id, :task_generation, :state, :receipt).new(
+      "attempt-terminal", "generation-1", "terminal", receipt
+    )
+    reconciler = Object.new
+    reconciler.define_singleton_method(:fetch) { |_id| attempt }
+    coordinator = FakeRecoveryCoordinator.new(status: "queued")
+    dispatcher, = make_dispatcher(
+      rows: [],
+      attempt_reconciler: reconciler,
+      recovery_coordinator: coordinator
+    )
+
+    with_replaced_singleton_method(Q, :claimed, ->(**_kwargs) { [ delivery ] }) do
+      with_replaced_singleton_method(Q, :discard_sequence, ->(*_args, **_kwargs) { }) do
+        dispatcher.send(:reconcile_attempt_deliveries, now: T0)
+      end
+    end
+
+    marked = coordinator.marked.fetch(0)
+    assert_equal "attempt-terminal", marked.fetch(:attempt_id)
+    assert_equal true, marked.fetch(:terminal)
+    assert_equal "failed", marked.fetch(:outcome)
+  end
+
   def test_legacy_manual_lost_delivery_remains_claimed_for_successor_recovery
     Dir.mktmpdir("hive-attempt-manual-delivery") do |state_home|
       request_id = Q.write_request!(
@@ -3998,10 +4566,10 @@ end
     end
   end
 
-  def test_durable_auto_dispatch_logs_all_admission_outcomes_and_charges_starts
+  def test_durable_auto_dispatch_logs_all_admission_outcomes_and_charges_only_new_starts
     attempt = Struct.new(:attempt_id, :task_generation, :state)
                     .new("attempt-1", "generation-1", "launching")
-    statuses = [ :accepted, :existing_live, :deferred ]
+    statuses = [ :accepted, :existing_live, :terminal_replay, :deferred ]
     calls = []
     attempt_dispatcher = Object.new
     attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **options|
@@ -4015,7 +4583,7 @@ end
     dispatcher, supervisor, _controller, logger = make_dispatcher(
       rows: [], attempt_dispatcher: attempt_dispatcher
     )
-    results = 3.times.map do |index|
+    results = 4.times.map do |index|
       dispatcher.send(
         :dispatch_command, "hive run demo-task", project: "p1", slug: "demo-task",
         stage: "4-execute", state_file_mtime: nil, state_file_path: nil,
@@ -4023,12 +4591,14 @@ end
       )
     end
 
-    assert_equal %i[accepted existing_live deferred], results.map(&:status)
-    assert_equal 3, calls.size
+    assert_equal %i[accepted existing_live terminal_replay deferred], results.map(&:status)
+    assert_equal 4, calls.size
     assert_empty supervisor.spawned
-    assert_equal 2, dispatcher.instance_variable_get(:@dispatched_today)
-    assert_equal %i[attempt_accepted attempt_duplicate attempt_capacity_deferred],
+    assert_equal 1, dispatcher.instance_variable_get(:@dispatched_today)
+    assert_equal %i[attempt_accepted attempt_duplicate attempt_terminal_replay attempt_capacity_deferred],
                  logger.events.map(&:first).grep(/attempt_/)
+    dispatched = logger.events.select { |name, _attrs| name == :dispatched }
+    assert_equal 1, dispatched.size
 
     unknown = Hive::Attempts::DispatchResult.new(
       status: :unknown, attempt: nil, receipt: nil, attach_descriptor: nil, reason: nil
@@ -4054,7 +4624,8 @@ end
       "trigger" => trigger,
       "task_generation" => nil,
       "predecessor_attempt_id" => nil,
-      "inherited_outputs" => []
+      "inherited_outputs" => [],
+      "recovery" => nil
     }
     File.write(path, JSON.generate(payload))
     path
@@ -4690,172 +5261,52 @@ end
     end
   end
 
-  def test_healer_error_retry_stays_queued_when_project_is_temporarily_unknown
+  def test_v4_recovery_stays_queued_when_project_is_temporarily_unknown
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
         rows: [], dispatch_request_state_home: state_home
       )
-      write_request_file(
-        state_home,
-        slug: "s1",
-        request_id: "HEAL",
-        project: "temporarily-missing",
-        requestor: "healer",
-        trigger: "error_retry"
-      )
-      Hive::Config.singleton_class.alias_method(:__orig_find_project, :find_project) unless Hive::Config.singleton_class.method_defined?(:__orig_find_project)
-      Hive::Config.define_singleton_method(:find_project) { |_| nil }
-      begin
-        dispatcher.tick(now: T0)
-
-        blocked = logger.events.find do |(name, attrs)|
-          name == :dispatch_request_blocked && attrs[:request_id] == "HEAL"
-        end
-        refute_nil blocked
-        assert_equal "unknown_project", blocked[1][:reason]
-        assert_empty sup.spawned
-        assert_equal 1, Dir.glob(File.join(Q.directory(state_home: state_home), "*.json")).size
-      ensure
-        restore_find_project!
-      end
-    end
-  end
-
-  def test_durable_error_retry_identity_inspection_failure_is_deferred
-    with_tmp_dir do |dir|
-      request = Q::Request.new(
-        request_id: "retry-inspection",
-        created_at: T0,
-        project: "p1",
-        slug: "plan-task",
-        argv: %w[hive plan plan-task],
-        requestor: "healer",
-        trigger: "error_retry",
-        task_generation: "generation",
-        task_id: 817,
-        expected_stage: "3-plan",
-        expected_marker_name: "error",
-        expected_marker_id: "marker-a"
-      )
-      observed = row(
-        project: "p1",
-        slug: "plan-task",
-        id: 817,
-        stage: "3-plan",
-        marker: "none",
-        folder: dir,
-        state_file: dir
-      )
-      dispatcher, _supervisor, _controller, logger = make_dispatcher(rows: [])
-
-      refute dispatcher.send(
-        :durable_error_retry_current?, request, rows: [ observed ]
-      )
-      event = logger.events.find do |name, attrs|
-        name == :dispatch_request_blocked &&
-          attrs[:request_id] == "retry-inspection"
-      end
-      refute_nil event
-      assert_equal "retry_identity_inspection_failed", event.last.fetch(:reason)
-      assert_includes event.last.fetch(:error), "EISDIR"
-    end
-  end
-
-  def test_legacy_recovery_marker_identity_is_content_addressed
-    dispatcher, = make_dispatcher
-    marker = Hive::Markers::State.new(
-      name: :error,
-      attrs: { "reason" => "agent_orphaned" },
-      raw: "<!-- ERROR reason=agent_orphaned -->"
-    )
-
-    identity = dispatcher.send(:recovery_marker_identity, marker)
-
-    assert_match(/\Alegacy-[0-9a-f]{16}\z/, identity)
-    assert_equal identity, dispatcher.send(:recovery_marker_identity, marker)
-  end
-
-  def test_healer_plan_retry_waits_for_exact_clear_and_rejects_later_task_generation
-    with_tmp_dir do |project_root|
-      folder = File.join(
-        project_root, ".hive-state", "stages", "3-plan", "plan-task"
-      )
-      FileUtils.mkdir_p(folder)
-      Hive::TaskMeta.write(
-        folder,
-        id: 817,
-        slug: "plan-task",
-        display_name: "Plan task"
-      )
-      state_file = File.join(folder, "plan.md")
-      Hive::Markers.set(state_file, :error, reason: "agent_failed", marker_id: "marker-a")
-      task = Hive::Task.new(folder)
-      markerless = Hive::Markers.without_markers(File.binread(state_file))
-      progress_token = Hive::Attempts::Generation.artifact_token(
-        task, state_file_content: markerless
-      )
-      task_generation = Hive::Attempts::Generation.resolve(
-        task: task,
-        project: "p1",
-        intended_stage: "3-plan",
-        progress_token: progress_token
-      ).task_generation
-      request = Q::Request.new(
-        request_id: "plan-retry",
-        created_at: T0,
-        project: "p1",
-        slug: "plan-task",
-        argv: %w[hive plan plan-task],
-        requestor: "healer",
-        trigger: "error_retry",
-        task_generation: task_generation,
-        task_id: 817,
-        expected_stage: "3-plan",
-        expected_marker_name: "error",
-        expected_marker_id: "marker-a"
-      )
-      observed = row(
-        project: "p1",
-        slug: "plan-task",
-        id: 817,
-        stage: "3-plan",
-        marker: "error",
-        action: "error",
-        folder: folder,
-        state_file: state_file,
-        marker_attrs: Hive::Markers.current(state_file).attrs
-      )
-      dispatcher, _supervisor, _controller, logger = make_dispatcher(rows: [])
-      rejected = []
-      dispatcher.define_singleton_method(:reject_request) do |_request, reason:|
-        rejected << reason
-      end
-
-      refute dispatcher.send(
-        :durable_error_retry_current?, request, rows: [ observed ]
-      )
-      assert logger.events.any? { |name, attrs|
-        name == :dispatch_request_blocked &&
-          attrs[:reason] == "awaiting_marker_clear"
+      recovery = {
+        "phase" => "admitted",
+        "observed_marker_generation" => "a" * 64,
+        "expected_marker_attrs" => { "reason" => "timeout", "marker_id" => "marker-1" },
+        "canonical_task_folder" => "/tmp/recovery-task",
+        "expected_post_clear_progress_fingerprint" => "b" * 64,
+        "dispatch_generation" => "c" * 64,
+        "failure_origin" => "timeout",
+        "next_eligible_at" => T0.iso8601(6),
+        "owner" => "scheduler",
+        "blocked_reason" => nil,
+        "blocked_remediation" => nil
       }
-
-      assert Hive::Markers.clear_current(
-        state_file,
-        expected_name: :error,
-        match_attrs: { "reason" => "agent_failed", "marker_id" => "marker-a" },
-        purge_history: true
+      Q.write_request!(
+        project: "temporarily-missing",
+        slug: "recovery-task",
+        argv: %w[hive run recovery-task --stage 4-execute --project temporarily-missing --json],
+        requestor: "web",
+        trigger: "recovery",
+        request_id: "RECOVERY-MISSING",
+        task_generation: "c" * 64,
+        task_id: 817,
+        expected_stage: "4-execute",
+        expected_marker_name: "error",
+        expected_marker_id: "marker-1",
+        recovery: recovery,
+        state_home: state_home,
+        now: T0
       )
-      observed.marker = "none"
-      observed.marker_attrs = {}
-      assert dispatcher.send(
-        :durable_error_retry_current?, request, rows: [ observed ]
-      ), "the exact predicted post-clear generation must be dispatchable"
+      with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { nil }) do
+        dispatcher.tick(now: T0)
+      end
 
-      File.open(state_file, "a") { |file| file.write("\noperator replaced the task generation\n") }
-      refute dispatcher.send(
-        :durable_error_retry_current?, request, rows: [ observed ]
-      )
-      assert_equal [ "stale_task_generation" ], rejected
+      blocked = logger.events.find do |(name, attrs)|
+        name == :dispatch_request_blocked && attrs[:request_id] == "RECOVERY-MISSING"
+      end
+      refute_nil blocked
+      assert_equal "unknown_project", blocked[1][:reason]
+      assert_empty sup.spawned
+      assert_equal [ "RECOVERY-MISSING" ],
+                   Q.pending(state_home: state_home).map(&:request_id)
     end
   end
 
@@ -4975,12 +5426,19 @@ end
       dispatcher.define_singleton_method(:project_enabled?) { |_| false }
       begin
         dispatcher.tick(now: T0)
+        dispatcher.tick(now: T0 + 60)
 
         blocked = logger.events.find do |(n, attrs)|
           n == :dispatch_request_blocked && attrs[:request_id] == "DISABLED"
         end
         refute_nil blocked, ":dispatch_request_blocked must fire for a disabled project"
         assert_equal "project_disabled", blocked[1][:reason]
+        assert_equal 1, logger.events.count { |name, attrs|
+          name == :dispatch_request_blocked && attrs[:request_id] == "DISABLED"
+        }, "an unchanged durable block must not append another log entry every poll"
+        assert_equal 1, logger.events.count { |name, attrs|
+          name == :dispatch_request_observed && attrs[:request_id] == "DISABLED"
+        }, "an unchanged request observation must not append another log entry every poll"
         # Request file stays on disk for retry once project is re-enabled.
         files = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
         assert_equal 1, files.size,
@@ -5475,6 +5933,25 @@ end
   end
 
   private
+
+  def dispatcher_recovery(phase: "admitted")
+    {
+      "phase" => phase,
+      "observed_marker_generation" => "a" * 64,
+      "expected_marker_attrs" => {
+        "reason" => "timeout", "marker_id" => "marker-1"
+      },
+      "canonical_task_folder" => "/tmp/recovery-task",
+      "expected_post_clear_progress_fingerprint" => "b" * 64,
+      "dispatch_generation" => "c" * 64,
+      "failure_origin" => "timeout",
+      "next_eligible_at" => T0.iso8601(6),
+      "owner" => phase == "dispatched" ? "agent" : "scheduler",
+      "blocked_reason" => nil,
+      "blocked_remediation" => nil,
+      "retry_count" => 1
+    }
+  end
 
   def events_include?(logger, name)
     logger.events.any? { |(n, _)| n == name }

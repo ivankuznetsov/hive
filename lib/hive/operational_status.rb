@@ -85,6 +85,34 @@ module Hive
       }
     end
 
+    # Lean projection for high-frequency adapters that only need canonical
+    # recovery receipts. It shares the same scheduler join and normalization
+    # as #to_h without allocating the full operational envelope for every
+    # task on every poll.
+    def recovery_rows
+      validate_source!
+      projects = @status_payload.fetch("projects")
+      @scheduler_join_issues = []
+      @scheduler_join_issue_keys = {}
+      scheduler = scheduler_payload(projects)
+
+      active_rows(projects).filter_map do |project, row|
+        next unless recovery_candidate?(project, row, scheduler)
+
+        disposition, freshness = scheduler_disposition_for(project, row, scheduler)
+        recovery = recovery_payload(row, disposition, freshness)
+        next unless recovery
+
+        {
+          "identity" => {
+            "project" => project.fetch("name"),
+            "slug" => row.fetch("slug")
+          },
+          "recovery" => recovery
+        }
+      end
+    end
+
     private
 
     def validate_source!
@@ -285,7 +313,10 @@ module Hive
         end
       end
       action = Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row)
-      action = nil if daemon_enabled?(project.fetch("name"))
+      if daemon_enabled?(project.fetch("name")) &&
+         action&.fetch("action_id") != Hive::OperationalAction::RETRY_ACTION_ID
+        action = nil
+      end
       {
         "identity" => {
           "project" => project.fetch("name"),
@@ -308,6 +339,7 @@ module Hive
         "reasons" => reasons,
         "provider" => provider_payload(row),
         "retry" => retry_payload(scheduler_disposition),
+        "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
         "dependency" => {
           "blocked" => row["blocked"] == true,
           "blocked_by" => row["blocked_by"],
@@ -461,12 +493,16 @@ module Hive
         [ "waiting_on_provider_or_scheduler", "scheduler" ]
       when "retry_in_flight"
         [ "running", "agent" ]
+      when "attempt_terminal_replay"
+        [ "idle", "none" ]
       when "retry_safety_blocked"
         [ "needs_repair", disposition["owner"] || "operator" ]
+      when "recovery_unavailable"
+        [ "unknown", "hive" ]
       when "wait_for_answers"
         [ "waiting_on_you", "operator" ]
       when "quarantined", "project_dropped", "folder_missing", "folder_missing_nil",
-           "plan_approval_invalid", "legacy_layout", "markerless_stalled", "recovery_exhausted"
+           "plan_approval_invalid", "legacy_layout", "markerless_stalled"
         [ "needs_repair", disposition["owner"] || "operator" ]
       else
         [ nil, nil ]
@@ -502,6 +538,109 @@ module Hive
         "safe" => disposition["retry_safe"] == true,
         "safety_reason" => disposition["safety_reason"]
       }
+    end
+
+    def recovery_payload(row, disposition, scheduler_freshness)
+      canonical = disposition["recovery"] if disposition.is_a?(Hash)
+      if canonical.is_a?(Hash)
+        return normalized_recovery(canonical, row) unless
+          canonical["status"] == "queued" && canonical["request_id"].to_s.empty?
+      end
+
+      return nil unless Hive::Recovery::API.recoverable_marker?(row["marker"])
+      return nil if invalid_task?(row)
+      if row.dig("attrs", "marker_id").to_s.empty?
+        return normalized_recovery(
+          {
+            "status" => "blocked",
+            "request_id" => nil,
+            "attempt_id" => row["attempt_id"],
+            "phase" => nil,
+            "failure_origin" => row.dig("attrs", "reason"),
+            "next_eligible_at" => nil,
+            "owner" => "operator",
+            "reason" => "recovery_migration_required",
+            "remediation" => "run `hive migrate` in the task project and retry from fresh status",
+            "retry_count" => nil,
+            "provider_hint" => provider_hint(row),
+            "terminal_outcome" => nil,
+            "terminal_at" => nil
+          },
+          row
+        )
+      end
+
+      decision = disposition&.fetch("decision", nil)
+      # An eligibility assessment is not queue admission. Until the
+      # coordinator supplies a canonical receipt/request ID, keep the action
+      # available so a human surface can submit the same guarded admission.
+      return nil if decision == "retry_pending"
+
+      status = case decision
+      when "retry_cooldown" then "cooldown"
+      when "retry_in_flight", "dispatched" then "running"
+      when "retry_safety_blocked" then "blocked"
+      when "attempt_terminal_replay" then "terminal"
+      else "unavailable"
+      end
+      reason = if status == "unavailable"
+        scheduler_freshness == "current" ? "recovery_observation_missing" : "scheduler_observation_unavailable"
+      elsif status == "blocked"
+        decision
+      end
+      normalized_recovery(
+        {
+          "status" => status,
+          "request_id" => disposition&.fetch("request_id", nil),
+          "attempt_id" => disposition&.fetch("attempt_id", nil) || row["attempt_id"],
+          "phase" => disposition&.fetch("recovery_phase", nil),
+          "failure_origin" => row.dig("attrs", "reason"),
+          "next_eligible_at" => disposition&.fetch("retry_at", nil),
+          "owner" => disposition&.fetch("owner", nil) || (status == "unavailable" ? "hive" : "scheduler"),
+          "reason" => reason,
+          "remediation" => disposition&.fetch("safety_reason", nil),
+          "retry_count" => disposition&.fetch("retry_count", nil),
+          "provider_hint" => provider_hint(row),
+          "terminal_outcome" => nil,
+          "terminal_at" => nil
+        },
+        row
+      )
+    end
+
+    def recovery_candidate?(project, row, scheduler)
+      return true if Hive::Recovery::API.recoverable_marker?(row["marker"])
+      return false unless scheduler.fetch("status") == "current"
+
+      observed = (@scheduler_task_index || {})[
+        [ project.fetch("name"), row.fetch("slug") ]
+      ]
+      observed&.dig("disposition", "recovery").is_a?(Hash)
+    end
+
+    def normalized_recovery(recovery, row)
+      {
+        "status" => recovery.fetch("status"),
+        "request_id" => recovery["request_id"],
+        "attempt_id" => recovery["attempt_id"],
+        "phase" => recovery["phase"],
+        "failure_origin" => recovery["failure_origin"] || row.dig("attrs", "reason"),
+        "next_eligible_at" => recovery["next_eligible_at"],
+        "owner" => recovery["owner"],
+        "reason" => recovery["reason"],
+        "remediation" => recovery["remediation"],
+        "retry_count" => recovery["retry_count"],
+        "provider_hint" => recovery["provider_hint"] || provider_hint(row),
+        "terminal_outcome" => recovery["terminal_outcome"],
+        "terminal_at" => recovery["terminal_at"]
+      }
+    end
+
+    def provider_hint(row)
+      retry_after = row.dig("attrs", "retry_after") || row.dig("held", "retry_after")
+      return nil if retry_after.to_s.empty?
+
+      { "retry_after" => retry_after.to_s, "display_only" => true }
     end
 
     def invalid_task?(row)

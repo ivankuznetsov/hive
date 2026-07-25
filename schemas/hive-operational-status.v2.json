@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:hive:schema:operational-status:v1",
-  "title": "hive operational status output (v1)",
+  "$id": "urn:hive:schema:operational-status:v2",
+  "title": "hive operational status output (v2)",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
@@ -16,7 +16,7 @@
       ],
       "properties": {
     "schema": { "const": "hive-operational-status" },
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "ok": { "const": true },
     "generated_at": { "type": "string", "format": "date-time" },
     "completeness": { "$ref": "#/$defs/Completeness" },
@@ -110,7 +110,7 @@
       "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
       "properties": {
         "schema": { "const": "hive-operational-status" },
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "ok": { "const": false },
         "error_class": { "type": "string" },
         "error_kind": { "type": "string", "enum": ["config", "internal", "error"] },
@@ -183,7 +183,7 @@
       "additionalProperties": false,
       "required": [
         "identity", "workflow", "position", "liveness", "state", "blocker_owner",
-        "reason", "reasons", "provider", "retry", "dependency", "freshness", "evidence", "action"
+        "reason", "reasons", "provider", "retry", "recovery", "dependency", "freshness", "evidence", "action"
       ],
       "properties": {
         "identity": {
@@ -256,6 +256,12 @@
             }
           ]
         },
+        "recovery": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/Recovery" }
+          ]
+        },
         "dependency": {
           "type": "object",
           "additionalProperties": false,
@@ -308,6 +314,52 @@
         "freshness": { "type": "string", "enum": ["current", "stale", "unavailable"] }
       }
     },
+    "Recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "request_id", "attempt_id", "phase", "failure_origin",
+        "next_eligible_at", "owner", "reason", "remediation", "retry_count",
+        "provider_hint", "terminal_outcome", "terminal_at"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["queued", "cooldown", "running", "blocked", "terminal", "unavailable"]
+        },
+        "request_id": { "type": ["string", "null"] },
+        "attempt_id": { "type": ["string", "null"] },
+        "phase": {
+          "type": ["string", "null"],
+          "enum": ["admitted", "cleared", "dispatched", "terminal", null]
+        },
+        "failure_origin": { "type": ["string", "null"] },
+        "next_eligible_at": { "type": ["string", "null"], "format": "date-time" },
+        "owner": {
+          "type": ["string", "null"],
+          "enum": ["agent", "operator", "provider", "scheduler", "hive", "none", "unknown", null]
+        },
+        "reason": { "type": ["string", "null"] },
+        "remediation": { "type": ["string", "null"] },
+        "retry_count": { "type": ["integer", "null"], "minimum": 0 },
+        "terminal_outcome": { "type": ["string", "null"] },
+        "terminal_at": { "type": ["string", "null"], "format": "date-time" },
+        "provider_hint": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["retry_after", "display_only"],
+              "properties": {
+                "retry_after": { "type": "string" },
+                "display_only": { "const": true }
+              }
+            }
+          ]
+        }
+      }
+    },
     "Action": {
       "type": "object",
       "additionalProperties": false,
@@ -316,7 +368,7 @@
         "confirmation_required", "provenance"
       ],
       "properties": {
-        "action_id": { "const": "workflow.advance" },
+        "action_id": { "type": "string", "enum": ["workflow.advance", "workflow.retry"] },
         "target": { "type": "string", "pattern": "^.+:.+$" },
         "observation_token": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "risk_class": { "const": "routine_idempotent" },

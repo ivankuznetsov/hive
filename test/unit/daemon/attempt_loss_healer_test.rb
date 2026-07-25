@@ -109,7 +109,6 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         assert_equal 1, dispatcher.calls.size
         assert_equal 4, dispatcher.calls.first.fetch(:retry_charge)
         assert_equal "successor_dispatched", outcomes.fetch(lost.attempt_id).fetch("status")
-        refute logger.events.any? { |name, _attrs| name == :marker_heal_exhausted }
       end
     end
   end

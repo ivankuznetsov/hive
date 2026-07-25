@@ -5,7 +5,6 @@ require "time"
 require "hive/atomic_file"
 require "hive/agent_limit"
 require "hive/attempts/dirty_state_capture"
-require "hive/markers"
 require "hive/task_resolver"
 
 module Hive
@@ -137,14 +136,12 @@ module Hive
           }.compact,
           now: now
         )
-        ready = @outcome_store.update(
+        @outcome_store.update(
           annotated, now: now, status: "ready", cleanup: cleanup,
           task_folder: task&.folder,
           capture_references: capture&.references || [],
           diagnostic: nil
         )
-        project_marker(task, annotated)
-        ready
       rescue CompareAndSwapFailed
         @outcome_store.fetch(attempt.attempt_id) || raise
       end
@@ -173,23 +170,6 @@ module Hive
         return nil unless worktree && File.directory?(worktree)
 
         @dirty_capture.capture(attempt: attempt, worktree: worktree, now: now)
-      end
-
-      def project_marker(task, attempt)
-        return unless task
-
-        Hive::Markers.set(
-          task.state_file, :error,
-          reason: "attempt_lost",
-          attempt_id: attempt.attempt_id,
-          task_generation: attempt.task_generation,
-          checkpoint: attempt["checkpoint"]["revision"]
-        )
-      rescue SystemCallError, IOError
-        # The ready outcome and lost lease are authoritative. A later daemon
-        # tick can still dispatch the successor if this compatibility
-        # projection could not be written.
-        nil
       end
 
       def resolve_task(attempt)

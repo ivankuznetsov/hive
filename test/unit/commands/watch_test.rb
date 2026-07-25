@@ -761,7 +761,7 @@ class CommandsWatchTest < Minitest::Test
     end + archived
     Hive::Commands::Watch::SourceSnapshot.new(
       operational: {
-        "schema" => "hive-operational-status", "schema_version" => 1, "ok" => true,
+        "schema" => "hive-operational-status", "schema_version" => 2, "ok" => true,
         "generated_at" => "2026-07-20T12:00:00Z", "completeness" => "complete",
         "source" => { "task_graph" => { "status" => "complete" } },
         "tasks" => active

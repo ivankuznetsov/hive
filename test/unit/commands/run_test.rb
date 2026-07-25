@@ -221,7 +221,8 @@ class CommandsRunTest < Minitest::Test
     assert_equal "/tmp/task-folder/reviews/errors-04.md", partial.fetch("target")
     assert_equal "reviewer_partial_failure", partial.fetch("reason")
     assert_equal "reviewers", partial.fetch("phase")
-    assert_match(/partial coverage/, partial.fetch("instructions"))
+    assert_match(/one or more reviewers failed/, partial.fetch("instructions"))
+    assert_match(/workflow\.retry/, partial.fetch("instructions"))
     assert_equal Hive::Schemas::NextActionKind::EDIT, scope_failure.fetch("kind")
     assert_equal "/tmp/task-folder/reviews/auto-commit-scope-01.md", scope_failure.fetch("target")
     assert_match(/scope artifact/, scope_failure.fetch("instructions"))
@@ -339,7 +340,7 @@ class CommandsRunTest < Minitest::Test
     assert_equal [ "wiki/notes.md", "lib/foo.rb" ], clean_exit_failure.fetch("residue_paths")
     assert_equal [ "error" ], clean_exit_failure.fetch("markers_to_clear")
     assert_match(/commit or discard/, clean_exit_failure.fetch("instructions"))
-    assert_match(/reason=ensure_clean_on_exit_failed/, clean_exit_failure.fetch("instructions"))
+    assert_match(/workflow\.retry/, clean_exit_failure.fetch("instructions"))
     assert clean_exit_failure.key?("rerun_with"),
            "ensure_clean_on_exit_failed must include rerun_with so agents have a copy-paste verb"
 

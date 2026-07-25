@@ -8,6 +8,7 @@ require "hive/agent_limit"
 require "hive/atomic_file"
 require "hive/lock"
 require "hive/paths"
+require "hive/recovery"
 
 module Hive
   module Daemon
@@ -156,8 +157,8 @@ module Hive
             [ [ task.dig("identity", "project"), task.dig("identity", "slug") ], task ]
           end
           holds = provider_holds(final_rows)
-          overlay_recovery_dispositions!(task_index, recoveries || {})
           overlay_provider_dispositions!(task_index, holds)
+          overlay_recovery_dispositions!(task_index, recoveries || {})
           @store.write(
             base_record(phase: "complete", now: now).merge(
               "reason" => nil,
@@ -279,20 +280,28 @@ module Hive
         end
 
         def overlay_recovery_dispositions!(task_index, recoveries)
-          stale = recoveries.fetch("stale_agent", {})
-          generic = recoveries.fetch("recoverable_error", {})
-          exhausted = Array(stale["error_exhausted"]) +
-                      Array(stale["review_exhausted"]) +
-                      Array(generic["exhausted"])
-          exhausted.each do |entry|
-            task = find_task(task_index, entry)
-            next unless task && task.dig("disposition", "status") == "available"
+          coordinator = recoveries.fetch("coordinator", {})
+          Array(coordinator["receipts"]).each do |entry|
+            task = find_recovery_task(task_index, entry)
+            next unless task
 
+            receipt = entry["receipt"]
+            next unless receipt.is_a?(Hash)
+
+            status = receipt["status"].to_s
             task["disposition"] = {
               "status" => "available",
-              "decision" => "recovery_exhausted",
-              "owner" => "operator",
-              "reason" => "automatic recovery budget is exhausted"
+              "decision" => {
+                "queued" => "retry_pending",
+                "cooldown" => "retry_cooldown",
+                "running" => "retry_in_flight",
+                "blocked" => "retry_safety_blocked",
+                "terminal" => "attempt_terminal_replay",
+                "unavailable" => "recovery_unavailable"
+              }.fetch(status, "recovery_unavailable"),
+              "owner" => receipt["owner"] || "hive",
+              "reason" => receipt["reason"] || status.tr("_", " "),
+              "recovery" => receipt
             }
           end
         end
@@ -320,6 +329,36 @@ module Hive
           return unless identity["stage"].to_s.empty? || task["stage"] == identity["stage"].to_s
           return unless identity["reason"].to_s.empty? ||
                         task.dig("marker_attrs", "reason").to_s == identity["reason"].to_s
+
+          task
+        end
+
+        def find_recovery_task(task_index, identity)
+          task = find_task(task_index, identity)
+          return unless task
+
+          phase = identity["recovery_phase"].to_s
+          if phase == "admitted"
+            return unless task["marker"].to_s == identity["expected_marker_name"].to_s
+
+            expected = identity["expected_marker_attrs"]
+            if expected.is_a?(Hash)
+              return unless expected.all? do |key, value|
+                task.dig("marker_attrs", key.to_s).to_s == value.to_s
+              end
+            end
+          elsif %w[cleared dispatched].include?(phase)
+            # Once the original marker is gone, a fresh ERROR/REVIEW_ERROR is
+            # a new recovery generation. Do not let an older terminal receipt
+            # hide that generation's cooldown/action.
+            return unless %w[none agent_working].include?(task["marker"].to_s)
+          elsif phase == "terminal"
+            # A completed attempt normally leaves a meaningful workflow marker
+            # (WAITING, COMPLETE, REVIEW_COMPLETE, and similar). Preserve its
+            # terminal receipt unless a fresh recoverable failure now owns the
+            # task.
+            return if Hive::Recovery.recoverable_marker?(task["marker"])
+          end
 
           task
         end

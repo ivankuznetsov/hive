@@ -251,6 +251,7 @@ module Hive
       log_file = log_path
       messages = Hive::Agent::MessageExtractor::Accumulator.new(max_bytes: FINAL_MESSAGE_TAIL_BYTES)
       limit_text = nil
+      structured_failure = nil
       last_usage = nil
       token_meter = StreamTokenMeter.new(@profile.name)
       resource_exhaustion = nil
@@ -302,6 +303,9 @@ module Hive
             # so per-line regex redaction cannot safely retain their payloads.
             json = parse_json_line(line)
             message = messages.observe(json, raw_line: line)
+            if structured_failure.nil? && @profile.name == :claude
+              structured_failure = Hive::Agent::MessageExtractor.extract_failure(json)
+            end
             if @log_stream
               safe_line = if message
                 "[structured message omitted type=#{json.fetch('type', 'unknown')}]\n"
@@ -441,9 +445,17 @@ module Hive
       end
 
       message = messages.value
+      failure_details = structured_failure && {
+        provider: @profile.name.to_s,
+        subtype: structured_failure[:subtype],
+        configured_cap_usd: @max_budget_usd,
+        observed_cost_usd: structured_failure[:observed_cost_usd],
+        diagnostic: structured_failure[:diagnostic],
+        remedy: structured_failure[:remedy]
+      }.compact
 
       reported_usage = resource_exhaustion || output_completed ? token_meter.usage : last_usage
-      {
+      result = {
         pid: pid,
         pgid: pgid,
         exit_code: exit_code,
@@ -459,6 +471,11 @@ module Hive
         output_completed: output_completed,
         status: nil
       }
+      if structured_failure
+        result[:failure_origin] = structured_failure.fetch(:origin)
+        result[:failure_details] = failure_details
+      end
+      result
     ensure
       if stdin_file
         stdin_file.close
@@ -582,6 +599,21 @@ module Hive
         return
       end
 
+      # Claude can finish the required state artifact and only then emit a
+      # trailing max-budget diagnostic while unwinding. The current terminal
+      # marker plus non-empty artifact is stronger completion evidence than
+      # that trailing event; Brainstorm applies its stricter format/current-run
+      # validation above this generic boundary.
+      if result[:failure_origin] == "budget_exhausted" && completed_state_file_artifact?
+        result[:status] = Hive::Markers.current(@task.state_file).name
+        return
+      end
+
+      if result[:failure_origin] == "budget_exhausted"
+        handle_budget_exhaustion(result)
+        return
+      end
+
       if result[:resource_exhaustion]
         handle_resource_exhaustion(result)
         return
@@ -702,6 +734,35 @@ module Hive
       result[:error_message] = message
     end
 
+    def handle_budget_exhaustion(result)
+      detail = result[:failure_details].is_a?(Hash) ? result[:failure_details] : {}
+      observed = detail[:observed_cost_usd]
+      configured = detail[:configured_cap_usd]
+      diagnostic = detail[:diagnostic].to_s
+      amounts = []
+      amounts << "observed $#{observed}" unless observed.nil?
+      amounts << "configured $#{configured}" unless configured.nil?
+      message = "agent exhausted its per-run budget"
+      message = "#{message} (#{amounts.join(', ')})" unless amounts.empty?
+      message = "#{message}: #{diagnostic}" unless diagnostic.empty?
+      message = "#{message}; raise this stage's max_budget_usd"
+
+      if effective_status_mode == :state_file_marker
+        attrs = {
+          reason: "budget_exhausted",
+          provider: detail[:provider] || @profile.name,
+          subtype: detail[:subtype] || "error_max_budget_usd",
+          max_budget_usd: configured,
+          observed_cost_usd: observed,
+          remedy: detail[:remedy] || "raise_stage_budget",
+          message: message.byteslice(0, 200).to_s.scrub
+        }.compact
+        Hive::Markers.set(@task.state_file, :error, **attrs)
+      end
+      result[:status] = :error
+      result[:error_message] = message
+    end
+
     def resource_exhaustion_marker_attrs(detail)
       if detail.fetch(:reason) == "token_limit"
         {
@@ -723,6 +784,16 @@ module Hive
         !@expected_output.to_s.empty? &&
         File.exist?(@expected_output) &&
         File.size(@expected_output).positive?
+    end
+
+    def completed_state_file_artifact?
+      return false unless effective_status_mode == :state_file_marker
+      return false unless File.file?(@task.state_file) && File.size(@task.state_file).positive?
+
+      marker = Hive::Markers.current(@task.state_file)
+      marker.name == :waiting || Hive::Markers::TERMINAL_MARKER_NAMES.include?(marker.name)
+    rescue SystemCallError
+      false
     end
 
     def detected_limit_text(result)

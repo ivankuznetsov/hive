@@ -1,11 +1,10 @@
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
 require "hive/bot/dispatch_request_writer"
-require "hive/bot/handlers/recovery_sequence"
-require "hive/bot/notification_builders"
 require "hive/commands/approve"
 require "hive/commands/drop"
 require "hive/daemon/dispatch_request_queue"
+require "hive/recovery/api"
 require "hive/stages"
 require "hive/task_action"
 
@@ -15,8 +14,6 @@ module TaskMutations
   STAGE_VERB_BY_ACTION = Hive::TaskAction::READY_COMMANDS.select do |_action, verb|
     Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS.include?(verb)
   end.freeze
-
-  RecoveryRow = Data.define(:marker, :attrs)
 
   def approve!(from: nil, to: nil, force: false)
     Hive::Commands::Approve.new(
@@ -71,27 +68,25 @@ module TaskMutations
 
   def recover!
     marker = self["marker"]
-    attrs = (self["attrs"] || {}).to_h.transform_keys(&:to_s)
     marker_name = marker.to_s.downcase
     if marker_name.empty? || %w[none agent_working].include?(marker_name)
       raise Hive::Error, "nothing to recover: #{slug} has no failure marker (its state changed — reload the page)"
     end
-    if Hive::Bot::Handlers::RecoverySequence.manual_only?(marker, attrs)
-      raise Hive::Error, Hive::Bot::Handlers::RecoverySequence.manual_only_text(marker, attrs)
+    unless Hive::Recovery::API.recoverable_marker?(marker)
+      raise Hive::Error, "Hive has no automatic recovery for this state - open it on a laptop."
+    end
+    if Hive::Recovery.intervention_required?(
+      marker: marker, attrs: self["attrs"] || {}, folder: folder
+    )
+      raise Hive::Error,
+            "edit the current review escalation, then confirm the retry from the TUI with `r`"
     end
 
-    match_attr = Hive::Bot::NotificationBuilders.recovery_match_attr(RecoveryRow.new(marker, attrs))
-    commands = Hive::Bot::Handlers::RecoverySequence.retry_commands(
+    Hive::Recovery::API.recover!(
+      row: self,
       project: project.name,
-      slug:,
-      stage: self["stage"],
-      marker:,
-      match_attr:,
-      workflow: self["workflow"]
+      requestor: "web"
     )
-    raise Hive::Error, "no retry verb for stage #{self["stage"].inspect}" if commands.empty?
-
-    enqueue_recovery(commands)
   end
 
   def intervene!(message)
@@ -138,27 +133,6 @@ module TaskMutations
     raise Hive::Error, "unknown stage #{from.inspect}" unless parsed
 
     Hive::Stages.prev_dir(parsed.first) || Hive::Stages::DIRS.first
-  end
-
-  def enqueue_recovery(commands)
-    request_id = Hive::Bot::DispatchRequestWriter.generate_request_id
-    first, *remaining = commands
-    if remaining.any?
-      Hive::Bot::DispatchRequestWriter.write_sequence!(request_id:, remaining_argvs: remaining)
-    end
-    begin
-      Hive::Bot::DispatchRequestWriter.write!(
-        project: project.name,
-        slug:,
-        argv: first,
-        trigger: "web_recover",
-        request_id:
-      )
-    rescue StandardError
-      Hive::Bot::DispatchRequestWriter.discard_sequence!(request_id:) if remaining.any?
-      raise
-    end
-    request_id
   end
 
   def brainstorm_path!(noun: "intervene")

@@ -47,15 +47,9 @@ module Hive
         merge_watcher_dropped
         gh_error
         marker_healed
-        heal_requeued
-        heal_requeue_failed
         marker_heal_failed
-        marker_heal_exhausted
-        marker_heal_observer_missing
-        auto_retry
-        auto_retry_skipped
-        auto_retry_exhausted
-        auto_retry_failed
+        recovery_requested
+        recovery_blocked
         display_name_backfill
         update_available
         update_check_no_result
@@ -71,6 +65,8 @@ module Hive
         daemon_dispatch_baselines_newer_schema_suspended
         dispatch_request_observed
         dispatch_request_dispatched
+        dispatch_request_attached
+        dispatch_request_terminal_replay
         dispatch_request_completed
         dispatch_request_rejected
         dispatch_request_blocked
@@ -85,6 +81,7 @@ module Hive
         attempt_terminal
         attempt_lost
         attempt_duplicate
+        attempt_terminal_replay
         attempt_capacity_deferred
         attempt_legacy_backfilled
         digest_catchup_skipped

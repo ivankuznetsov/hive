@@ -6,8 +6,10 @@ require "hive/config"
 require "hive/display_name/generator"
 require "hive/git_ops"
 require "hive/lock"
+require "hive/markers"
 require "hive/paths"
 require "hive/process_kill"
+require "hive/recovery"
 require "hive/stages"
 require "hive/task"
 require "hive/task_counter"
@@ -62,6 +64,7 @@ module Hive
 
         moved = []
         backfilled_count = 0
+        recovery_marker_count = 0
         no_move_message = nil
         Hive::Lock.with_commit_lock(hive_state) do
           plan = build_migration_plan(stages)
@@ -69,9 +72,18 @@ module Hive
           if plan.empty?
             ensure_current_stage_dirs(stages)
             backfilled_count = backfill_task_ids(stages)
-            if config_changed || backfilled_count.positive?
-              commit_migration(hive_state, moved, config_only: config_changed, backfilled_count: backfilled_count)
-              no_move_message = migration_no_move_message(config_changed: config_changed, backfilled_count: backfilled_count)
+            recovery_marker_count = backfill_recovery_marker_ids(stages)
+            if config_changed || backfilled_count.positive? || recovery_marker_count.positive?
+              commit_migration(
+                hive_state, moved, config_only: config_changed,
+                backfilled_count: backfilled_count,
+                recovery_marker_count: recovery_marker_count
+              )
+              no_move_message = migration_no_move_message(
+                config_changed: config_changed,
+                backfilled_count: backfilled_count,
+                recovery_marker_count: recovery_marker_count
+              )
             elsif already_migrated?(stages)
               no_move_message = "hive: migrate found nothing to move (target stage directories look already-migrated)"
             else
@@ -87,7 +99,12 @@ module Hive
             moved.concat(plan.map { |op| [ op[:old_stage], op[:new_stage], op[:entry] ] })
             ensure_current_stage_dirs(stages)
             backfilled_count = backfill_task_ids(stages)
-            commit_migration(hive_state, moved, config_only: false, backfilled_count: backfilled_count)
+            recovery_marker_count = backfill_recovery_marker_ids(stages)
+            commit_migration(
+              hive_state, moved, config_only: false,
+              backfilled_count: backfilled_count,
+              recovery_marker_count: recovery_marker_count
+            )
           end
         end
 
@@ -102,7 +119,8 @@ module Hive
           puts no_move_message
         else
           puts "hive: migrate complete (#{moved.size} task#{moved.size == 1 ? '' : 's'} moved" \
-               "#{backfilled_count.positive? ? ", #{backfilled_count} id#{backfilled_count == 1 ? '' : 's'} backfilled" : ''})"
+               "#{backfilled_count.positive? ? ", #{backfilled_count} id#{backfilled_count == 1 ? '' : 's'} backfilled" : ''}" \
+               "#{recovery_marker_count.positive? ? ", #{recovery_marker_count} recovery marker#{recovery_marker_count == 1 ? '' : 's'} upgraded" : ''})"
         end
         if display_name_count.positive?
           puts "hive: migrate backfilled #{display_name_count} display name#{display_name_count == 1 ? '' : 's'}"
@@ -202,6 +220,33 @@ module Hive
         targets.size
       end
 
+      # Recovery v2 requires every recoverable marker generation to carry a
+      # durable random identity. Older projects may have ERROR/REVIEW_ERROR
+      # markers written before marker_id existed. Migrate them once, under the
+      # project commit lock, so runtime recovery can reject id-less markers
+      # instead of carrying a permanent compatibility identity algorithm.
+      def backfill_recovery_marker_ids(stages)
+        task_folders(stages).count do |folder|
+          state_file = recovery_state_file(folder)
+          next false unless state_file
+
+          marker = Hive::Markers.current(state_file)
+          next false unless Hive::Recovery.recoverable_marker?(marker.name)
+          next false unless marker.attrs["marker_id"].to_s.empty?
+
+          Hive::Markers.upgrade_recovery_marker_id(state_file, observed: marker)
+        end
+      end
+
+      def recovery_state_file(folder)
+        Hive::Task.new(folder).state_file
+      rescue Hive::InvalidTaskPath, Hive::ConfigError
+        # An unknown or incomplete workflow cannot identify its authoritative
+        # state file safely. Preserve it unchanged; recovery remains blocked
+        # until the workflow is restored and migrate can be rerun.
+        nil
+      end
+
       def backfill_display_names(stages)
         cfg = Hive::Config.load(@project_path)
         targets = task_folders(stages).select { |folder| Hive::TaskMeta.read(folder)[:display_name].nil? }
@@ -253,13 +298,17 @@ module Hive
         {}
       end
 
-      def commit_migration(hive_state, moved, config_only: false, backfilled_count: 0)
+      def commit_migration(hive_state, moved, config_only: false, backfilled_count: 0,
+                           recovery_marker_count: 0)
         ops = Hive::GitOps.new(@project_path)
         ops.run_git!("-C", hive_state, "add", "-A")
         _out, _err, status = Open3.capture3("git", "-C", hive_state, "diff", "--cached", "--quiet")
         return if status.success?
 
-        message = migrate_commit_message(moved, config_only: config_only, backfilled_count: backfilled_count)
+        message = migrate_commit_message(
+          moved, config_only: config_only, backfilled_count: backfilled_count,
+          recovery_marker_count: recovery_marker_count
+        )
         ops.run_git!("-C", hive_state, "commit", "-m", message)
       rescue Hive::GitError => e
         # The mv operations already succeeded — the on-disk layout is
@@ -273,7 +322,10 @@ module Hive
         # `Migrate#call` (daemon restart, completion message) still
         # runs against the consistent on-disk layout. ce-code-review
         # P2 #21.
-        message = migrate_commit_message(moved, config_only: config_only, backfilled_count: backfilled_count)
+        message = migrate_commit_message(
+          moved, config_only: config_only, backfilled_count: backfilled_count,
+          recovery_marker_count: recovery_marker_count
+        )
         warn "hive: migrate completed the on-disk mv operations but " \
              "could not commit them to the hive-state git history: " \
              "#{e.class}: #{e.message}"
@@ -297,24 +349,34 @@ module Hive
              "(#{display_name_count} task#{display_name_count == 1 ? '' : 's'})'"
       end
 
-      def migrate_commit_message(moved, config_only:, backfilled_count: 0)
-        if moved.empty? && backfilled_count.positive? && !config_only
+      def migrate_commit_message(moved, config_only:, backfilled_count: 0,
+                                 recovery_marker_count: 0)
+        if moved.empty? && recovery_marker_count.positive? &&
+           backfilled_count.zero? && !config_only
+          "hive: migrate recovery markers (#{recovery_marker_count} task#{recovery_marker_count == 1 ? '' : 's'})"
+        elsif moved.empty? && backfilled_count.positive? && !config_only &&
+              recovery_marker_count.zero?
           "hive: migrate task ids (#{backfilled_count} task#{backfilled_count == 1 ? '' : 's'})"
-        elsif config_only && moved.empty?
+        elsif config_only && moved.empty? && recovery_marker_count.zero?
           "hive: migrate config keys (no tasks moved)"
+        elsif moved.empty?
+          "hive: migrate project state (#{backfilled_count} ids, #{recovery_marker_count} recovery markers)"
         else
           "hive: migrate stage directories (#{moved.size} task#{moved.size == 1 ? '' : 's'})"
         end
       end
 
-      def migration_no_move_message(config_changed:, backfilled_count:)
-        if config_changed && backfilled_count.positive?
-          "hive: migrate rewrote legacy config keys and backfilled #{backfilled_count} task id#{backfilled_count == 1 ? '' : 's'}"
-        elsif config_changed
-          "hive: migrate rewrote legacy config keys (no task folders to move)"
-        else
-          "hive: migrate backfilled #{backfilled_count} task id#{backfilled_count == 1 ? '' : 's'}"
+      def migration_no_move_message(config_changed:, backfilled_count:,
+                                    recovery_marker_count: 0)
+        actions = []
+        actions << "rewrote legacy config keys" if config_changed
+        if backfilled_count.positive?
+          actions << "backfilled #{backfilled_count} task id#{backfilled_count == 1 ? '' : 's'}"
         end
+        if recovery_marker_count.positive?
+          actions << "upgraded #{recovery_marker_count} recovery marker#{recovery_marker_count == 1 ? '' : 's'}"
+        end
+        "hive: migrate #{actions.join(' and ')}"
       end
 
       # Rewrite legacy `pr` budget/timeout keys onto the canonical

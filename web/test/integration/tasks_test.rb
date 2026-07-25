@@ -357,11 +357,21 @@ class TasksTest < ActionDispatch::IntegrationTest
                   message: "a captured manifest with no items must not render a bare Demo heading"
   end
 
-  test "a red task offers Retry which queues the clear-then-rerun pair" do
+  test "a red task offers Retry which queues one identity-bound recovery request" do
     FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
                  stage_dir(@project, "6-review").join(@slug))
     folder = stage_dir(@project, "6-review").join(@slug)
-    folder.join("task.md").write("# t\n\n<!-- REVIEW_ERROR phase=triage reason=merge_conflict pass=1 -->\n")
+    state_file = folder.join("task.md")
+    state_file.write("# t\n")
+    Hive::Markers.set(
+      state_file,
+      :review_error,
+      phase: "triage",
+      reason: "merge_conflict",
+      pass: 1
+    )
+    marker_id = Hive::Markers.current(state_file).attrs.fetch("marker_id")
+    File.utime(Time.now - 3600, Time.now - 3600, state_file)
 
     get "/tasks/#{@project}/#{@slug}"
     assert_response :success
@@ -372,12 +382,76 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     post "/tasks/#{@project}/#{@slug}/recover"
     assert_redirected_to "/tasks/#{@project}/#{@slug}"
+    assert_match(/\ARecovery queued — request /, flash[:notice])
     queue = Dir.glob(File.join(ENV["HIVE_HOME"], "**", "dispatch_request*", "**", "*"))
                .select { |f| File.file?(f) }
-    assert queue.any? { |f| File.read(f).include?("markers") },
-           "recover must queue the guarded marker clear"
-    assert queue.any? { |f| content = File.read(f); content.include?("review") && content.include?(@slug) },
-           "recover must queue the stage rerun behind the clear"
+    payload = queue.filter_map do |path|
+      JSON.parse(File.read(path))
+    rescue JSON::ParserError
+      nil
+    end.find { |entry| entry["slug"] == @slug }
+    refute_nil payload
+    assert_equal "web", payload.fetch("requestor")
+    assert_equal "admitted", payload.dig("recovery", "phase")
+    assert_equal marker_id, payload.fetch("expected_marker_id")
+    refute_equal "markers", payload.fetch("argv")[1],
+                 "the web surface must not recreate marker-clear authority"
+  end
+
+  test "recovery lifecycle renders an accessible status and disables duplicate actions" do
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
+                 stage_dir(@project, "6-review").join(@slug))
+    state_file = stage_dir(@project, "6-review").join(@slug, "task.md")
+    state_file.write("# t\n\n<!-- REVIEW_ERROR phase=triage reason=merge_conflict pass=1 -->\n")
+    snapshot = StatusBroadcaster.snapshot
+    row = snapshot.fetch("projects")
+                  .find { |project| project["name"] == @project }
+                  .fetch("tasks")
+                  .find { |task| task["slug"] == @slug }
+    row["recovery"] = {
+      "status" => "queued",
+      "request_id" => "recovery-1",
+      "attempt_id" => nil,
+      "phase" => "admitted",
+      "failure_origin" => "merge_conflict",
+      "next_eligible_at" => nil,
+      "owner" => "scheduler",
+      "reason" => nil,
+      "remediation" => nil,
+      "retry_count" => 1,
+      "provider_hint" => nil,
+      "terminal_outcome" => nil,
+      "terminal_at" => nil
+    }
+    replacement = proc do
+      StatusBroadcaster::PageSnapshot.new(payload: snapshot, version: "test-recovery")
+    end
+
+    with_replaced_singleton_method(StatusBroadcaster, :snapshot_with_version, replacement) do
+      get "/tasks/#{@project}/#{@slug}"
+      assert_response :success
+      assert_select ".recovery-lifecycle[role=status][aria-live=polite][data-recovery-status=queued]",
+                    text: /Recovery queued.*request recovery-1.*origin merge_conflict/
+      assert_select ".task-actions form[action=?] button[disabled]",
+                    "/tasks/#{@project}/#{@slug}/recover",
+                    text: "Retry stage",
+                    count: 1
+
+      row["recovery"] = row.fetch("recovery").merge(
+        "status" => "terminal",
+        "phase" => "terminal",
+        "attempt_id" => "attempt-1",
+        "terminal_outcome" => "succeeded",
+        "terminal_at" => "2026-07-25T12:00:00.000000Z"
+      )
+      get "/tasks/#{@project}/#{@slug}"
+      assert_response :success
+      assert_select ".recovery-lifecycle[data-recovery-status=terminal]",
+                    text: /Completed.*attempt attempt-1.*succeeded/
+      assert_select ".task-actions form[action=?]",
+                    "/tasks/#{@project}/#{@slug}/recover",
+                    count: 0
+    end
   end
 
   test "recover on a healthy task is a readable 422, not a hidden run" do

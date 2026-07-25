@@ -42,8 +42,9 @@ module Hive
       COMMAND_ACK_INTENTS = %i[
         slash_approve
         slash_done
+        slash_autofix
         callback_approve
-        callback_clear_and_retry
+        callback_autofix
         callback_findings_accept_all
         callback_findings_reject_all
       ].freeze

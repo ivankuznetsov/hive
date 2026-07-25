@@ -14,7 +14,7 @@ steps:
     args: [brainstorm, "{slug}", --from, 1-inbox]
     env:
       HIVE_FAKE_CLAUDE_WRITE_FILE: "{task_dir:2-brainstorm}/brainstorm.md"
-      HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Brainstorm\n\n<!-- COMPLETE -->\n"
+      HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Brainstorm\n\n## Requirements\n\nImplement the durable replay.\n\n<!-- COMPLETE -->\n"
   - kind: cli
     args: [plan, "{slug}", --from, 2-brainstorm]
     env:

@@ -1,4 +1,5 @@
 require "test_helper"
+require "digest"
 require "json"
 require "json_schemer"
 require "hive/commands/answer_digest"
@@ -2633,14 +2634,17 @@ class SchemaFilesTest < Minitest::Test
 
   # ── agent-first operational contracts ─────────────────────────────────
 
-  def test_operational_status_watch_and_act_schemas_are_published_at_v1
-    %w[hive-operational-status hive-watch-event hive-act].each do |name|
+  def test_operational_status_and_act_publish_only_v2_after_migration
+    %w[hive-operational-status hive-act].each do |name|
       path = Hive::Schemas.schema_path(name)
       assert File.file?(path), "schema file missing: #{path}"
       document = JSON.parse(File.read(path))
       assert_equal "https://json-schema.org/draft/2020-12/schema", document.fetch("$schema")
-      assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS.fetch(name)
+      assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch(name)
+      refute File.exist?(Hive::Schemas.schema_path(name, version: 1)),
+             "#{name} v1 must not remain published after the one-off migration"
     end
+    assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-watch-event")
   end
 
   def test_hive_act_error_enum_matches_producer_and_common_envelope_validates

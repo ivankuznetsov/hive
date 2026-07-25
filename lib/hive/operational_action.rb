@@ -1,5 +1,6 @@
 require "digest"
 require "time"
+require "hive/recovery/api"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -9,6 +10,8 @@ module Hive
   # revalidates the same fields while the mutation command owns its lock.
   class OperationalAction
     ACTION_ID = "workflow.advance".freeze
+    RETRY_ACTION_ID = "workflow.retry".freeze
+    ACTION_IDS = [ ACTION_ID, RETRY_ACTION_ID ].freeze
     RISK_CLASS = "routine_idempotent".freeze
 
     SAFE_TASK_ACTIONS = %w[
@@ -42,10 +45,11 @@ module Hive
 
     class << self
       def descriptor(project:, row:)
-        return nil unless safe?(row)
+        action_id = action_id_for(row)
+        return nil unless action_id
 
         {
-          "action_id" => ACTION_ID,
+          "action_id" => action_id,
           "target" => "#{project}:#{row.fetch('slug')}",
           "observation_token" => token(project: project, row: row),
           "risk_class" => RISK_CLASS,
@@ -63,7 +67,34 @@ module Hive
           row["marker"] != "manual_steering"
       end
 
+      def recoverable?(row)
+        Hive::Recovery::API.recoverable_marker?(row["marker"]) &&
+          row.dig("attrs", "reason").to_s != "invalid_task" &&
+          !Hive::Recovery.intervention_required?(
+            marker: row["marker"], attrs: row["attrs"] || {}, folder: row["folder"]
+          ) &&
+          row["marker"] != "manual_steering"
+      end
+
+      def action_id_for(row)
+        return RETRY_ACTION_ID if recoverable?(row)
+        return ACTION_ID if safe?(row)
+
+        nil
+      end
+
       def token(project:, row:)
+        if recoverable?(row)
+          return Hive::Recovery::API.observation_token(
+            row.merge(
+              "project" => project,
+              "state_file_mtime" => row["observation_mtime"] || row["mtime"],
+              "marker_attrs" => row["attrs"],
+              "attempt_id" => row["attempt_id"] || row["current_attempt"]
+            )
+          )
+        end
+
         fields = TOKEN_FIELDS.to_h do |field|
           value = if field == "project"
             project
@@ -94,6 +125,7 @@ module Hive
           "project" => project,
           "slug" => task.slug,
           "folder" => task.folder,
+          "state_file" => task.state_file,
           "workflow" => task.workflow.id.to_s,
           "stage" => "#{task.stage_index}-#{task.stage_name}",
           "marker" => marker.name.to_s,
@@ -103,6 +135,9 @@ module Hive
           "condition_task_generation" => projection_data.dig("identity", "task_generation"),
           "commit_generation" => projection_data.dig("identity", "commit_generation"),
           "current_attempt" => projection_data.dig("identity", "attempt_id"),
+          "attempt_id" => projection_data.dig("identity", "attempt_id"),
+          "task_generation" => projection_data.dig("identity", "task_generation"),
+          "live_task_lock" => false,
           "blocked" => false,
           "held" => nil
         }
@@ -150,12 +185,33 @@ module Hive
     # values select no command arguments beyond the registered action ID and
     # exact project/task identity; stage, verb, and guards are recomputed.
     class Executor
+      def initialize(recovery_writer: Hive::Recovery::API)
+        @recovery_writer = recovery_writer
+      end
+
       def execute(action_id:, target:, observation_token:)
         validate_action_id!(action_id)
         project_name, slug = parse_target(target)
         project = registered_project(project_name)
         task = resolve_task(slug, project_name)
         observed = OperationalAction.observed_row(task, project: project_name)
+        OperationalAction.assert_current!(
+          task,
+          project: project_name,
+          action_id: action_id,
+          target: target,
+          observation_token: observation_token
+        )
+        if action_id == OperationalAction::RETRY_ACTION_ID
+          receipt = @recovery_writer.recover!(
+            row: observed,
+            project: project_name,
+            requestor: "action",
+            observation_token: observation_token
+          )
+          return recovery_result(observed, receipt)
+        end
+
         guard = lambda do |locked_task|
           OperationalAction.assert_current!(
             locked_task,
@@ -175,7 +231,7 @@ module Hive
       private
 
       def validate_action_id!(action_id)
-        return if action_id == OperationalAction::ACTION_ID
+        return if OperationalAction::ACTION_IDS.include?(action_id)
 
         raise Hive::OperationalActionUsageError,
               "unknown operational action #{action_id.inspect}; take a fresh operational snapshot"
@@ -255,6 +311,15 @@ module Hive
         }
       rescue Hive::StaleOperationalObservation
         { "task_state" => "archived", "stage" => nil, "marker" => nil }
+      end
+
+      def recovery_result(observed, receipt)
+        {
+          "task_state" => observed.fetch("action"),
+          "stage" => observed.fetch("stage"),
+          "marker" => observed.fetch("marker"),
+          "recovery" => receipt.to_h
+        }
       end
     end
   end

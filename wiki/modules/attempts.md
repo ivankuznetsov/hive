@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-07-24
+updated: 2026-07-25
 tags: [attempts, ownership, leases, daemon, recovery]
 ---
 
@@ -197,17 +197,17 @@ signals an unverifiable process group. Once the worker is absent,
 `DirtyStateCapture` records HEAD, porcelain-v2 status, binary patches, and
 hashed untracked metadata without stash/reset/checkout/clean/add/commit.
 
-One `ERROR reason=attempt_lost` compatibility marker is projected. Only the
-lease-aware stale-agent healer consumes it; legacy marker discovery skips it.
-The marker remains while its successor lineage is unresolved, live, lost, or
-successful. Once one unambiguous lineage ends in a terminal failed/cancelled
-successor, the healer releases the marker through the same cooldown, current
-safety check, task lock, and marker-generation guard as every other error so a
-fresh ordinary admission can retry the resolved generation. Unreadable or
-ambiguous lineage evidence fails closed. `retry_charge` remains durable
-lineage/accounting evidence but is not an exhaustion budget. Unsafe cleanup,
-temporarily missing task lookup, and lost successors remain retryable until the
-process becomes safely absent or a successor is admitted. Unsafe
+Attempt loss does not project an `ERROR reason=attempt_lost` compatibility
+marker. The attempt ledger and `LostOutcomeStore` are the sole durable loss
+lifecycle: `StaleAgentHealer#heal_attempt_losses` verifies orphan cleanup,
+captures dirty state, and asks the shared attempt dispatcher to admit a
+same-generation successor. Conditions and status may expose `attempt_lost` as
+read-only health, but marker recovery does not interpret attempt lineage.
+
+`retry_charge` remains durable lineage/accounting evidence but is not an
+exhaustion budget. Unsafe cleanup, temporarily missing task lookup, and lost
+successors remain retryable until the process becomes safely absent or a
+successor is admitted. Unsafe
 orphan-cleanup inspection itself is paced by the shared cooldown, so one
 unreaped process cannot trigger expensive cleanup on every daemon tick.
 Successor dispatch attempts use the same persisted cooldown; a deferred
@@ -221,6 +221,10 @@ an admitted successor and later complete from its receipt. If the daemon
 crashes after admission but before stamping the queue claim, restart repairs
 correlation by the immutable request ID before deciding whether the claim is
 live.
+
+If a successor itself terminates with a normal recoverable failure marker, that
+fresh marker enters the ordinary `RecoveryCoordinator` lifecycle. It is not a
+special attempt-loss branch.
 
 ## Tests
 

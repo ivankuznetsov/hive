@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-dispatch-request.v4.json",
+  "title": "hive dispatch request (v4)",
+  "description": "Delivery request for the shared durable task-attempt dispatcher. v4 adds a restartable generation-safe recovery transition; normal requests carry recovery=null. Consumers continue accepting pending v2 and v3 files.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "request_id", "created_at", "project", "slug",
+    "argv", "requestor", "chat_id", "update_id", "trigger", "task_generation",
+    "predecessor_attempt_id", "inherited_outputs", "recovery"
+  ],
+  "properties": {
+    "schema": { "const": "hive-dispatch-request" },
+    "schema_version": { "const": 4 },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "project": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "minLength": 1 },
+    "slug": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}[a-z0-9]$" },
+    "argv": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } },
+    "requestor": {
+      "type": "string",
+      "enum": ["bot", "healer", "web", "tui", "cli", "action", "daemon", "recorder", "operator"]
+    },
+    "chat_id": { "type": ["integer", "null"] },
+    "update_id": { "type": ["integer", "null"] },
+    "trigger": { "type": ["string", "null"] },
+    "task_generation": { "type": ["string", "null"] },
+    "predecessor_attempt_id": { "type": ["string", "null"] },
+    "task_id": { "type": ["string", "integer", "null"] },
+    "expected_stage": { "type": ["string", "null"] },
+    "expected_marker_name": {
+      "type": ["string", "null"],
+      "enum": ["error", "review_error", "review_stale", "review_ci_stale", null]
+    },
+    "expected_marker_id": { "type": ["string", "null"] },
+    "inherited_outputs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/OutputReference" }
+    },
+    "recovery": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/RecoveryTransition" }
+      ]
+    }
+  },
+  "$defs": {
+    "OutputReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "RecoveryTransition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase", "observed_marker_generation", "expected_marker_attrs",
+        "canonical_task_folder", "expected_post_clear_progress_fingerprint",
+        "dispatch_generation", "failure_origin", "next_eligible_at", "owner",
+        "blocked_reason", "blocked_remediation"
+      ],
+      "properties": {
+        "phase": {
+          "type": "string",
+          "enum": ["admitted", "cleared", "dispatched", "terminal"]
+        },
+        "observed_marker_generation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "expected_marker_attrs": {
+          "type": "object",
+          "required": ["marker_id"],
+          "properties": {
+            "marker_id": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        },
+        "canonical_task_folder": { "type": "string", "minLength": 1 },
+        "expected_post_clear_progress_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "dispatch_generation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "failure_origin": { "type": "string", "minLength": 1 },
+        "next_eligible_at": { "type": ["string", "null"], "format": "date-time" },
+        "owner": {
+          "type": ["string", "null"],
+          "enum": ["agent", "operator", "provider", "scheduler", "hive", "none", "unknown", null]
+        },
+        "blocked_reason": { "type": ["string", "null"] },
+        "blocked_remediation": { "type": ["string", "null"] },
+        "retry_count": { "type": "integer", "minimum": 0 },
+        "provider_hint": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["retry_after", "display_only"],
+          "properties": {
+            "retry_after": { "type": "string", "minLength": 1 },
+            "display_only": { "const": true }
+          }
+        },
+        "attempt_id": { "type": ["string", "null"] },
+        "terminal_outcome": { "type": ["string", "null"] },
+        "terminal_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  }
+}

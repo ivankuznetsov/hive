@@ -92,4 +92,15 @@ class AgentMessageExtractorTest < Minitest::Test
     assert_equal :plain, plain.source
     refute plain.truncated?
   end
+
+  def test_budget_failure_omits_an_invalid_observed_cost
+    failure = Hive::Agent::MessageExtractor.extract_failure(
+      "type" => "result",
+      "subtype" => "error_max_budget_usd",
+      "total_cost_usd" => "not-a-number"
+    )
+
+    assert_equal "budget_exhausted", failure.fetch(:origin)
+    refute failure.key?(:observed_cost_usd)
+  end
 end

@@ -54,6 +54,69 @@ class TaskTest < ActiveSupport::TestCase
     assert_equal "idle", Task.new(project:, attributes: {}).status_label
   end
 
+  test "recovery lifecycle controls action availability and truthful context" do
+    project = Project.new("name" => "alpha")
+    queued = Task.new(
+      project:,
+      attributes: {
+        "action" => "error",
+        "recovery" => {
+          "status" => "queued",
+          "request_id" => "request-1",
+          "failure_origin" => "implementer_failed"
+        }
+      }
+    )
+    terminal = Task.new(
+      project:,
+      attributes: {
+        "action" => "error",
+        "recovery" => {
+          "status" => "terminal",
+          "attempt_id" => "attempt-1",
+          "terminal_outcome" => "succeeded",
+          "terminal_at" => "2026-07-25T12:00:00.000000Z"
+        }
+      }
+    )
+    fresh = Task.new(project:, attributes: { "action" => "error" })
+
+    assert queued.recovery_action_visible?
+    refute queued.recovery_action_enabled?
+    assert_equal "Recovery queued", queued.recovery_primary_label
+    assert_includes queued.recovery_context, "request request-1"
+    assert_includes queued.recovery_context, "origin implementer_failed"
+
+    refute terminal.recovery_action_visible?
+    refute terminal.recovery_action_enabled?
+    assert_equal "Completed", terminal.recovery_primary_label
+    assert_includes terminal.recovery_context, "attempt attempt-1"
+    assert_includes terminal.recovery_context, "succeeded"
+
+    assert fresh.recovery_action_visible?
+    assert fresh.recovery_action_enabled?
+  end
+
+  test "max pass review escalation is visible but not directly retryable" do
+    folder = Pathname(Dir.mktmpdir("hive-web-review-escalation"))
+    folder.join("reviews").mkpath
+    folder.join("reviews/escalations-02.md").write("# Questions\n")
+    task = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: {
+        "action" => "recover_review",
+        "marker" => "review_stale",
+        "attrs" => { "pass" => "2", "marker_id" => "marker-2" },
+        "folder" => folder.to_s
+      }
+    )
+
+    assert task.recovery_action_visible?
+    refute task.recovery_action_enabled?
+  ensure
+    FileUtils.remove_entry(folder) if folder&.exist?
+  end
+
   test "resolves only plain media filenames inside the real task folder" do
     root = Pathname(Dir.mktmpdir("hive-web-task-model"))
     folder = root.join("task")

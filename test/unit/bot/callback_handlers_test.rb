@@ -781,6 +781,31 @@ class HiveBotCallbackHandlersTest < Minitest::Test
                  "Autofix must request keyboard removal to prevent double-tap dispatch."
   end
 
+  def test_autofix_rejects_a_callback_for_a_replaced_marker
+    row = status_row(slug: "red-task-260518-cccc", marker: "error")
+    result = handlers_with_rows([ row ]).handle(
+      :callback_autofix,
+      update("autofix:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR")
+    )
+
+    assert_equal :reply, result.action
+    assert_equal "Task status changed - reopen /queue.", result.text
+  end
+
+  def test_autofix_rejects_a_callback_for_replaced_marker_attributes
+    row = status_row(
+      slug: "red-task-260518-cccc",
+      attrs: { "pass" => "3" }
+    )
+    result = handlers_with_rows([ row ]).handle(
+      :callback_autofix,
+      update("autofix:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR:pass=2")
+    )
+
+    assert_equal :reply, result.action
+    assert_equal "Task status changed - reopen /queue.", result.text
+  end
+
   def test_autofix_execute_stale_replies_without_dispatch
     result = @handlers.handle(
       :callback_autofix,

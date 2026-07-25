@@ -196,6 +196,40 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_default_project_retry_policy_allows_coordinator_submission
+    healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      recovery_coordinator: @coordinator
+    )
+    assert healer.instance_variable_get(
+      :@project_auto_retry_enabled
+    ).call("any-project")
+
+    with_error_marker do |row, _state_file|
+      healer.heal([ row ], now: NOW)
+    end
+
+    assert_equal 1, @coordinator.requests.size
+  end
+
+  def test_recovery_event_logging_is_best_effort
+    logger = Object.new
+    logger.define_singleton_method(:event) do |*_args, **_kwargs|
+      raise IOError, "log unavailable"
+    end
+    healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: logger,
+      recovery_coordinator: @coordinator
+    )
+    row = make_row("/tmp/task.md", pid_alive: nil)
+    receipt = @coordinator.request(row: row, requestor: "healer", now: NOW)
+
+    assert_nil healer.send(:log_coordinated_recovery, row, receipt)
+  end
+
   def test_coordinator_failure_is_logged_without_clearing_the_marker
     @coordinator.request_error = Errno::ENOSPC.new("queue full")
 
@@ -607,6 +641,98 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_equal :review_working, Hive::Markers.current(state_file).name
       failure = @logger.events.find { |name, _attributes| name == :marker_heal_failed }
       assert_equal "review_orphaned", failure.last.fetch(:reason)
+    end
+  end
+
+  def test_wedged_review_inspection_failure_is_logged
+    with_marker_file do |state_file|
+      row = review_working_row(
+        state_file, pid_alive: false, live_task_lock: true
+      )
+      with_replaced_singleton_method(
+        @healer, :task_lock_holder, ->(_row) { raise IOError, "lock unreadable" }
+      ) do
+        @healer.send(:heal_wedged_review_row, row)
+      end
+
+      failure = @logger.events.find do |name, attributes|
+        name == :marker_heal_failed &&
+          attributes[:reason] == "review_agent_died"
+      end
+      assert_includes failure.last.fetch(:error), "lock unreadable"
+    end
+  end
+
+  def test_task_lock_and_marker_attribute_helpers_fail_closed
+    with_marker_file do |state_file|
+      row = make_row(state_file, pid_alive: nil)
+      File.write(File.join(row.folder, ".lock"), "---\n: invalid: [")
+
+      assert_nil @healer.send(:task_lock_holder, row)
+      assert_equal({}, @healer.send(:marker_attrs_for, Object.new))
+    end
+  end
+
+  def test_child_process_lookup_handles_each_pgrep_outcome
+    status = Struct.new(:exitstatus, :successful) do
+      def success?
+        successful
+      end
+    end
+
+    with_replaced_singleton_method(
+      Open3, :capture3, ->(*_args) { [ "", "", status.new(1, false) ] }
+    ) do
+      assert_equal [], @healer.send(:child_pids, 123)
+    end
+    with_replaced_singleton_method(
+      Open3, :capture3, ->(*_args) { [ "", "", status.new(2, false) ] }
+    ) do
+      assert_nil @healer.send(:child_pids, 123)
+    end
+    with_replaced_singleton_method(
+      Open3, :capture3,
+      ->(*_args) { [ "12\nnot-a-pid\n13\n", "", status.new(0, true) ] }
+    ) do
+      assert_equal [ 12, 13 ], @healer.send(:child_pids, 123)
+    end
+    with_replaced_singleton_method(
+      Open3, :capture3, ->(*_args) { raise Errno::ENOENT, "pgrep missing" }
+    ) do
+      assert_nil @healer.send(:child_pids, 123)
+    end
+  end
+
+  def test_terminate_lock_holder_escalates_and_tolerates_a_disappearing_process
+    holder = { "pid" => 12_345 }
+    signals = []
+    times = [ NOW, NOW + 2 ]
+
+    with_replaced_singleton_method(
+      @healer, :lock_holder_process_alive?, ->(_holder) { true }
+    ) do
+      with_replaced_singleton_method(@healer, :sleep, ->(_seconds) { }) do
+        with_replaced_singleton_method(Time, :now, -> { times.shift || NOW + 2 }) do
+          with_replaced_singleton_method(Process, :kill, lambda { |signal, pid|
+            signals << [ signal, pid ]
+            1
+          }) do
+            @healer.send(:terminate_lock_holder, holder)
+          end
+        end
+      end
+    end
+
+    assert_equal [ [ "TERM", 12_345 ], [ "KILL", 12_345 ] ], signals
+
+    with_replaced_singleton_method(
+      @healer, :lock_holder_process_alive?, ->(_holder) { true }
+    ) do
+      with_replaced_singleton_method(
+        Process, :kill, ->(*_args) { raise Errno::ESRCH, "gone" }
+      ) do
+        assert_nil @healer.send(:terminate_lock_holder, holder)
+      end
     end
   end
 

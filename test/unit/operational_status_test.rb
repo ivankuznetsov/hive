@@ -349,6 +349,18 @@ class OperationalStatusTest < Minitest::Test
     end
   end
 
+  def test_recovery_specific_scheduler_states_have_closed_classifications
+    status = Hive::OperationalStatus.new(status_payload: status_payload)
+
+    assert_equal(
+      [ "unknown", "hive" ],
+      status.send(
+        :classify_scheduler_disposition,
+        { "decision" => "recovery_unavailable" }
+      )
+    )
+  end
+
   def test_retry_projection_exposes_exact_deadline_and_safety_owner
     source_task = task(
       action: "error",
@@ -437,6 +449,38 @@ class OperationalStatusTest < Minitest::Test
       assert_equal "request-1", projected.dig("recovery", "request_id"), status
       assert_equal phase, projected.dig("recovery", "phase"), status
     end
+  end
+
+  def test_recovery_projection_derives_running_terminal_and_provider_hint_without_a_receipt
+    row = task(
+      action: "error", slug: "derived-recovery", stage: "4-execute",
+      marker: "error",
+      attrs: {
+        "reason" => "limits_reached",
+        "marker_id" => "marker-1",
+        "retry_after" => "2026-07-20T11:00:00Z"
+      }
+    )
+    status = Hive::OperationalStatus.new(status_payload: status_payload(row))
+
+    running = status.send(
+      :recovery_payload, row, { "decision" => "dispatched" }, "current"
+    )
+    terminal = status.send(
+      :recovery_payload, row,
+      { "decision" => "attempt_terminal_replay" },
+      "current"
+    )
+
+    assert_equal "running", running.fetch("status")
+    assert_equal "terminal", terminal.fetch("status")
+    assert_equal(
+      {
+        "retry_after" => "2026-07-20T11:00:00Z",
+        "display_only" => true
+      },
+      running.fetch("provider_hint")
+    )
   end
 
   def test_retry_eligibility_without_a_durable_request_does_not_claim_queued

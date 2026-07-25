@@ -207,6 +207,55 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_v4_recovery_runtime_validation_rejects_each_invalid_field_shape
+    invalid = {
+      "phase" => recovery_payload.merge("phase" => "unknown"),
+      "marker attrs object" => recovery_payload.merge("expected_marker_attrs" => []),
+      "marker attrs scalars" => recovery_payload.merge(
+        "expected_marker_attrs" => {
+          "marker_id" => "marker-a", "nested" => []
+        }
+      ),
+      "marker id" => recovery_payload.merge(
+        "expected_marker_attrs" => { "marker_id" => "" }
+      ),
+      "sha256" => recovery_payload.merge("dispatch_generation" => "not-a-sha"),
+      "canonical folder" => recovery_payload.merge("canonical_task_folder" => ""),
+      "failure origin" => recovery_payload.merge("failure_origin" => ""),
+      "nullable strings" => recovery_payload.merge("blocked_reason" => true),
+      "retry count" => recovery_payload.merge("retry_count" => -1),
+      "timestamp" => recovery_payload.merge("next_eligible_at" => "not-a-time")
+    }
+
+    invalid.each do |label, recovery|
+      assert_raises(ArgumentError, label) do
+        Q.send(:validate_recovery!, recovery)
+      end
+    end
+  end
+
+  def test_pending_rejects_a_v4_request_with_invalid_recovery
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      request_id = Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --stage 4-execute --project hive --json],
+        request_id: "invalid-on-read", recovery: recovery_payload,
+        state_home: dir, now: Time.utc(2026, 7, 25, 12)
+      )
+      request = Q.fetch(request_id, state_home: dir)
+      payload = JSON.parse(File.read(request.path))
+      payload.fetch("recovery")["phase"] = "invalid"
+      File.write(request.path, JSON.generate(payload))
+      reasons = []
+
+      assert_empty Q.pending(
+        state_home: dir,
+        bad_handler: ->(path:, reason:) { reasons << [ path, reason ] }
+      )
+      assert_equal "invalid_recovery", reasons.dig(0, 1)
+    end
+  end
+
   def test_v4_recovery_written_by_runtime_validates_against_published_schema
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       recovery = recovery_payload.merge(
@@ -363,6 +412,59 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
         state_home: dir
       )
       assert_nil Q.fetch("recent-terminal", state_home: dir)
+    end
+  end
+
+  def test_terminal_recovery_retention_falls_back_to_request_creation_time
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      old_at = Time.utc(2026, 7, 1, 12)
+      Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --json],
+        request_id: "terminal-without-time",
+        recovery: recovery_payload(phase: "terminal", terminal_at: nil),
+        state_home: dir, now: old_at
+      )
+
+      assert_equal 1, Q.prune_terminal_recoveries(
+        state_home: dir,
+        now: Time.utc(2026, 7, 25, 12),
+        retention_sec: 7 * 24 * 60 * 60
+      )
+      assert_nil Q.fetch("terminal-without-time", state_home: dir)
+    end
+  end
+
+  def test_recovery_queue_reads_and_updates_tolerate_a_disappearing_directory
+    with_replaced_singleton_method(
+      Q, :request_files, ->(_dir) { raise Errno::ENOENT, "gone" }
+    ) do
+      assert_nil Q.find_recovery(
+        project: "hive", slug: "task",
+        observed_marker_generation: "a" * 64,
+        state_home: "/tmp/hive-missing"
+      )
+      assert_equal 0, Q.recovery_retry_count(
+        project: "hive", slug: "task", state_home: "/tmp/hive-missing"
+      )
+      assert_nil Q.fetch("missing", state_home: "/tmp/hive-missing")
+      assert_equal 0, Q.remove_terminal_recoveries(
+        project: "hive", slug: "task", state_home: "/tmp/hive-missing"
+      )
+      assert_equal 0, Q.prune_terminal_recoveries(state_home: "/tmp/hive-missing")
+      refute Q.update_recovery!(
+        "missing", expected_phase: "admitted", changes: {},
+        state_home: "/tmp/hive-missing", request_locked: true
+      )
+    end
+  end
+
+  def test_locked_recovery_update_returns_false_when_request_is_absent
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      refute Q.update_recovery!(
+        "missing", expected_phase: "admitted", changes: {},
+        state_home: dir, request_locked: true
+      )
     end
   end
 
@@ -929,6 +1031,32 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_recover_claims_discards_the_claim_when_a_pending_recovery_sibling_exists
+    Dir.mktmpdir("hive-queue") do |dir|
+      at = Time.utc(2026, 7, 25, 12)
+      request_id = Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --stage 4-execute --project hive --json],
+        requestor: "healer", trigger: "recovery",
+        request_id: "recovery-sibling",
+        recovery: recovery_payload(phase: "cleared"),
+        state_home: dir, now: at
+      )
+      claimed = Q.claim(request_id, pid: nil, state_home: dir, now: at)
+      pending = claimed.delete_suffix(Q::CLAIMED_SUFFIX)
+      FileUtils.cp(claimed, pending)
+
+      assert_equal 1, Q.recover_claims(
+        state_home: dir, now: at + 1,
+        alive: ->(_pid, _start) { false },
+        attempt_for_request: ->(_seen_request_id) { nil }
+      )
+      refute File.exist?(claimed)
+      assert File.exist?(pending)
+      assert_equal [ request_id ], Q.pending(state_home: dir).map(&:request_id)
+    end
+  end
+
   def test_recover_claims_expires_aged_claim_even_when_owner_alive
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       write_request(dir, request_id: "aged0001", created_at: Time.utc(2026, 5, 28, 18, 0, 0))
@@ -1050,6 +1178,48 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       assert_equal "malformed_claim", evidence.fetch("reason")
       assert_equal Digest::SHA256.hexdigest("{not json"), evidence.fetch("sha256")
       assert_equal 0, File.stat(File.dirname(quarantined)).mode & 0o077
+    end
+  end
+
+  def test_recover_claims_reports_when_malformed_claim_quarantine_fails
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      claim_dir = Q.directory(state_home: dir)
+      bad = File.join(claim_dir, "bad.json#{Q::CLAIMED_SUFFIX}")
+      File.write(bad, "{not json")
+      events = []
+
+      with_replaced_singleton_method(Q, :quarantine_claim, ->(*) { nil }) do
+        assert_equal 0, Q.recover_claims(
+          state_home: dir, alive: ->(_pid, _start) { false },
+          handler: ->(**event) { events << event }
+        )
+      end
+
+      assert_equal "malformed_claim_quarantine_failed", events.dig(0, :reason)
+      assert File.exist?(bad)
+    end
+  end
+
+  def test_malformed_claim_quarantine_rolls_back_both_files_when_evidence_write_fails
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      claim_dir = Q.directory(state_home: dir)
+      bad = File.join(claim_dir, "bad.json#{Q::CLAIMED_SUFFIX}")
+      metadata = "#{bad}#{Q::CLAIM_META_SUFFIX}"
+      File.write(bad, "{not json")
+      File.write(metadata, JSON.generate("pid" => 123))
+
+      with_replaced_singleton_method(
+        Hive::AtomicFile, :write, ->(*) { raise IOError, "disk full" }
+      ) do
+        assert_nil Q.send(
+          :quarantine_claim, bad,
+          reason: "malformed_claim", now: Time.utc(2026, 7, 25, 12)
+        )
+      end
+
+      assert File.exist?(bad)
+      assert File.exist?(metadata)
+      assert_equal "{not json", File.read(bad)
     end
   end
 

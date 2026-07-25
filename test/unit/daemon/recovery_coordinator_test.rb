@@ -8,6 +8,8 @@ require "hive/lock"
 require "hive/markers"
 
 class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
+  include HiveTestHelper
+
   NOW = Time.utc(2026, 7, 25, 12, 0, 0)
   Q = Hive::Daemon::DispatchRequestQueue
 
@@ -301,6 +303,39 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_admission_rejects_a_newer_recoverable_marker_generation
+    with_fixture do |coordinator, row, state_home|
+      Hive::Markers.set(
+        row.state_file, :error, reason: "timeout", marker_id: "marker-2"
+      )
+
+      receipt = coordinator.request(
+        row: row, requestor: "web",
+        request_id: "recover-replaced-before-admission", now: NOW
+      )
+
+      assert_equal "blocked", receipt.status
+      assert_equal "generation_conflict", receipt.reason
+      assert_empty Q.pending(state_home: state_home)
+    end
+  end
+
+  def test_request_reports_resolution_failures_as_recovery_unavailable
+    builder = lambda do |_task, _dir|
+      ->(**_kwargs) { raise Hive::Error, "resolver offline" }
+    end
+    with_fixture(task_resolver_builder: builder) do |coordinator, row, state_home|
+      receipt = coordinator.request(
+        row: row, requestor: "web", request_id: "resolver-failure", now: NOW
+      )
+
+      assert_equal "unavailable", receipt.status
+      assert_equal "recovery_unavailable", receipt.reason
+      assert_includes receipt.remediation, "resolver offline"
+      assert_empty Q.pending(state_home: state_home)
+    end
+  end
+
   def test_live_task_owner_returns_running_and_safety_failure_returns_blocked
     with_fixture do |coordinator, row, state_home|
       lock = Hive::Lock.acquire_task_lock(row.folder, "attempt_id" => "attempt-live")
@@ -422,6 +457,191 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_resume_reports_a_live_lock_owner_and_resolution_failure
+    with_fixture do |coordinator, row, state_home|
+      coordinator.request(
+        row: row, requestor: "healer", request_id: "recover-resume-errors",
+        now: NOW
+      )
+      request = Q.fetch("recover-resume-errors", state_home: state_home)
+      error = Hive::ConcurrentRunError.new(
+        "busy", holder: { "attempt_id" => "attempt-live" }
+      )
+
+      running = with_replaced_singleton_method(
+        Hive::Lock, :with_task_lock,
+        ->(*_args, &_block) { raise error }
+      ) do
+        coordinator.resume(request: request, row: row, now: NOW)
+      end
+
+      assert_equal "running", running.status
+      assert_equal "attempt-live", running.attempt_id
+      assert_equal "existing_live", running.reason
+
+      coordinator.instance_variable_set(
+        :@task_resolver,
+        ->(**_kwargs) { raise Hive::Error, "task disappeared" }
+      )
+      unavailable = coordinator.resume(request: request, row: row, now: NOW)
+
+      assert_equal "unavailable", unavailable.status
+      assert_includes unavailable.reason, "task disappeared"
+    end
+  end
+
+  def test_dispatched_replay_is_idempotent_and_invalid_source_fails_closed
+    with_fixture do |coordinator, row, state_home|
+      coordinator.request(
+        row: row, requestor: "healer", request_id: "recover-dispatch",
+        now: NOW
+      )
+      admitted = Q.fetch("recover-dispatch", state_home: state_home)
+
+      invalid = coordinator.mark_dispatched(
+        admitted, attempt_id: "attempt-too-early", now: NOW
+      )
+      assert_equal "unavailable", invalid.status
+      assert_equal "transition_conflict", invalid.reason
+
+      coordinator.resume(request: admitted, row: row, now: NOW)
+      cleared = Q.fetch("recover-dispatch", state_home: state_home)
+      first = coordinator.mark_dispatched(
+        cleared, attempt_id: "attempt-1", now: NOW
+      )
+      replay = coordinator.mark_dispatched(
+        cleared, attempt_id: "attempt-1", now: NOW + 1
+      )
+
+      assert_equal "running", first.status
+      assert_equal "running", replay.status
+      assert_equal "attempt-1", replay.attempt_id
+    end
+  end
+
+  def test_receipt_helpers_fail_closed_for_unknown_or_missing_requests
+    request = Q::Request.new(
+      request_id: "unknown-phase",
+      recovery: {
+        "phase" => "mystery",
+        "failure_origin" => "timeout",
+        "next_eligible_at" => NOW.iso8601(6),
+        "owner" => "scheduler"
+      }
+    )
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(
+      state_home: "/tmp/hive-recovery-receipts"
+    )
+
+    assert_equal "unavailable", coordinator.receipt_for_request(request).status
+    assert_nil coordinator.receipt_for_id("missing")
+  end
+
+  def test_defensive_recovery_helpers_keep_the_closed_contract
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(
+      state_home: "/tmp/hive-recovery-helpers"
+    )
+    indexable = Class.new do
+      def [](key)
+        "value-for-#{key}"
+      end
+    end.new
+
+    assert_equal(
+      Hive::Daemon::RecoveryCoordinator.observation_token(
+        "state_file_mtime" => "not-a-time"
+      ),
+      Hive::Daemon::RecoveryCoordinator.observation_token(
+        "state_file_mtime" => "still-not-a-time"
+      )
+    )
+    assert_equal "value-for-slug", coordinator.send(:value, indexable, :slug)
+    assert_nil coordinator.send(:value, Object.new, :slug)
+    assert_raises(ArgumentError) do
+      coordinator.send(
+        :clear_recoverable_marker, "/tmp/task.md",
+        expected_name: "complete", match_attrs: {}
+      )
+    end
+    assert coordinator.send(
+      :recovery_due?, { "next_eligible_at" => "not-a-time" }, now: NOW
+    )
+    assert_equal(
+      "transition_conflict",
+      coordinator.send(
+        :unavailable_request, request_for_helpers, "transition_conflict"
+      ).reason
+    )
+    assert_includes(
+      coordinator.send(:remediation_for, "transition_conflict"),
+      "another recovery owner"
+    )
+    assert_includes(
+      coordinator.send(:remediation_for, "unexpected"),
+      "inspect the recovery request"
+    )
+
+    malformed_command = FakeRow.new(
+      project: "hive", slug: "demo-task", folder: "/tmp/demo-task",
+      state_file: "/tmp/demo-task/task.md", stage: "4-execute",
+      workflow: "coding", marker: "error", marker_attrs: {},
+      state_file_mtime: NOW, live_task_lock: false, attempt_id: nil,
+      task_generation: nil, suggested_command: "'unterminated"
+    )
+    error = assert_raises(Hive::Error) do
+      coordinator.send(:retry_argv, malformed_command)
+    end
+    assert_includes error.message, "invalid retry command"
+  end
+
+  def test_assessment_and_resolved_block_updates_fail_closed
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(
+      state_home: "/tmp/hive-recovery-assessment",
+      safety: ->(_row) { raise IOError, "inspection failed" }
+    )
+    assessment = coordinator.assessment(
+      { "state_file_mtime" => NOW - 3600 }, now: NOW
+    )
+    assert_equal false, assessment.fetch(:due)
+    assert_equal false, assessment.fetch(:safe)
+    assert_includes assessment.fetch(:safety_reason), "inspection failed"
+
+    request = request_for_helpers(
+      recovery: {
+        "phase" => "cleared",
+        "failure_origin" => "timeout",
+        "next_eligible_at" => NOW.iso8601(6),
+        "owner" => "operator",
+        "blocked_reason" => "safety_blocked",
+        "blocked_remediation" => "worktree dirty"
+      }
+    )
+    refreshed = request.dup
+    refreshed.recovery = request.recovery.merge(
+      "owner" => "scheduler",
+      "blocked_reason" => nil,
+      "blocked_remediation" => nil
+    )
+    queue = Object.new
+    queue.define_singleton_method(:update_recovery!) { |*_args, **_kwargs| true }
+    queue.define_singleton_method(:fetch) { |*_args, **_kwargs| refreshed }
+    successful = Hive::Daemon::RecoveryCoordinator.new(
+      state_home: "/tmp/hive-recovery-block", request_queue: queue
+    )
+
+    assert_same(
+      refreshed,
+      successful.send(:clear_resolved_block, request, request_locked: true)
+    )
+
+    queue.define_singleton_method(:update_recovery!) { |*_args, **_kwargs| false }
+    queue.define_singleton_method(:fetch) { |*_args, **_kwargs| nil }
+    assert_same(
+      request,
+      successful.send(:clear_resolved_block, request, request_locked: true)
+    )
+  end
+
   def test_post_clear_dispatch_failure_uses_durable_hourly_pacing
     with_fixture do |coordinator, row, state_home|
       coordinator.request(
@@ -473,6 +693,20 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   end
 
   private
+
+  def request_for_helpers(recovery: nil)
+    Q::Request.new(
+      request_id: "helper-request",
+      project: "hive",
+      slug: "demo-task",
+      recovery: recovery || {
+        "phase" => "cleared",
+        "failure_origin" => "timeout",
+        "next_eligible_at" => NOW.iso8601(6),
+        "owner" => "scheduler"
+      }
+    )
+  end
 
   def write_terminal_recovery_history(row:, state_home:, retry_count:)
     Q.write_request!(

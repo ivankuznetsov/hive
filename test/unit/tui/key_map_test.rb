@@ -683,6 +683,22 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same row, msg.row
   end
 
+  def test_enter_message_routes_error_rows_to_recovery
+    row = make_row(
+      action_key: "error", action_label: "Error",
+      marker: "error", suggested_command: nil
+    )
+
+    msg = with_replaced_singleton_method(
+      Hive::Tui::KeyMap, :red_detail_row?, ->(_row) { false }
+    ) do
+      Hive::Tui::KeyMap.enter_message(row)
+    end
+
+    assert_kind_of Hive::Tui::Messages::RecoverError, msg
+    assert_same row, msg.row
+  end
+
   # Enter on an error-state row with a non-kill-class exit code now
   # opens the red-status detail view first. The detail view's Enter
   # key still routes to RecoverError, but only after the operator sees

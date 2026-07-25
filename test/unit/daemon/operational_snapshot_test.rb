@@ -204,6 +204,47 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_recovery_overlay_matches_the_exact_marker_generation_and_post_clear_state
+    with_tmp_dir do |dir|
+      _store, assembler, _reader = build(File.join(dir, "snapshot.json"))
+      task = {
+        "stage" => "4-execute",
+        "marker" => "error",
+        "marker_attrs" => { "marker_id" => "marker-1", "reason" => "timeout" }
+      }
+      index = { [ "demo", "ship-it" ] => task }
+      admitted = {
+        "project" => "demo",
+        "slug" => "ship-it",
+        "recovery_phase" => "admitted",
+        "expected_marker_name" => "error",
+        "expected_marker_attrs" => {
+          "marker_id" => "marker-1", "reason" => "timeout"
+        }
+      }
+
+      assert_same task, assembler.send(:find_recovery_task, index, admitted)
+      assert_nil assembler.send(
+        :find_recovery_task, index,
+        admitted.merge("expected_marker_name" => "review_error")
+      )
+      assert_nil assembler.send(
+        :find_recovery_task, index,
+        admitted.merge(
+          "expected_marker_attrs" => {
+            "marker_id" => "marker-2", "reason" => "timeout"
+          }
+        )
+      )
+
+      cleared = admitted.merge("recovery_phase" => "cleared")
+      task["marker"] = "none"
+      assert_same task, assembler.send(:find_recovery_task, index, cleared)
+      task["marker"] = "error"
+      assert_nil assembler.send(:find_recovery_task, index, cleared)
+    end
+  end
+
   def test_provider_hold_without_stage_or_reason_still_matches_the_current_task
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")

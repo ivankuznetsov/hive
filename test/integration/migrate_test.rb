@@ -45,14 +45,31 @@ class MigrateTest < Minitest::Test
           FileUtils.mkdir_p(folder)
           File.write(File.join(folder, "task.md"), "x\n")
         end
+        legacy_error = File.join(
+          stages, "5-review", "old-review-260513-abcd", "task.md"
+        )
+        File.write(legacy_error, "# Review\n\n<!-- REVIEW_ERROR reason=timeout -->\n")
 
-        capture_io { migrate_command(dir).call }
+        out, _err = capture_io { migrate_command(dir).call }
 
         assert File.directory?(File.join(stages, "6-review", "old-review-260513-abcd"))
         assert File.directory?(File.join(stages, "8-finalize", "old-pr-260513-abcd"))
         assert File.directory?(File.join(stages, "9-done", "old-done-260513-abcd"))
+        assert_includes out, "1 recovery marker upgraded"
       end
     end
+  end
+
+  def test_combined_metadata_only_migration_has_a_project_state_commit_message
+    message = migrate_command("/tmp/project").send(
+      :migrate_commit_message,
+      [],
+      config_only: false,
+      backfilled_count: 2,
+      recovery_marker_count: 3
+    )
+
+    assert_equal "hive: migrate project state (2 ids, 3 recovery markers)", message
   end
 
   def test_migrates_previous_canonical_finalize_and_done_stage_directories

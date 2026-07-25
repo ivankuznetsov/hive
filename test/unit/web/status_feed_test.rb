@@ -196,6 +196,29 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  def test_snapshot_falls_back_to_base_status_when_recovery_overlay_fails
+    with_tmp_global_config do
+      base = {
+        "generated_at" => Time.utc(2026, 7, 25, 12).iso8601(6),
+        "projects" => []
+      }
+      status = CountingStatus.new([ base ])
+      status.define_singleton_method(:operational_recoveries) do |*_args, **_kwargs|
+        raise IOError, "owner snapshot unreadable"
+      end
+      feed = Hive::Web::StatusFeed.new(status_command: status)
+
+      _out, err = capture_io do
+        assert_same base, feed.snapshot
+      end
+
+      assert_includes err, "operational recovery overlay failed"
+      assert_includes err, "owner snapshot unreadable"
+    ensure
+      feed&.stop
+    end
+  end
+
   # PERF-001/002: N concurrent /events subscribers must trigger only ONE
   # filesystem scan per tick, not one per connection. The shared poller does
   # the scan; every subscriber reads the published value.

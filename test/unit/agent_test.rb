@@ -1743,4 +1743,24 @@ class AgentTest < Minitest::Test
 
     assert_equal "6-review", agent.send(:event_stage)
   end
+
+  def test_state_file_completion_fails_closed_when_the_artifact_cannot_be_statted
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      agent = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5,
+        status_mode: :state_file_marker
+      )
+      original = File.method(:size)
+
+      with_replaced_singleton_method(File, :size, lambda { |path|
+        raise Errno::EACCES if path == task.state_file
+
+        original.call(path)
+      }) do
+        refute agent.send(:completed_state_file_artifact?)
+      end
+    end
+  end
 end

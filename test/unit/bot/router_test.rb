@@ -68,11 +68,15 @@ class HiveBotRouterTest < Minitest::Test
   end
 
   def test_autofix_slash_resolves_against_default_empty_snapshot_provider
-    # The router's default status_snapshot_provider returns [] so unknown
-    # slugs (which is every slug, in this test setup) reply with the
-    # archive hint. This covers both the default lambda body and the
-    # /autofix dispatch path without needing a Supervisor instance.
-    result = @router.handle(update(text: "/autofix unknown-260526-zzzz"))
+    router = Hive::Bot::Router.new(
+      bot_config: { "chat_id_allowlist" => [ 12345 ] },
+      logger: @logger,
+      conversation_store: @store,
+      idea_draft_store: @draft_store,
+      projects_provider: -> { @projects }
+    )
+
+    result = router.handle(update(text: "/autofix unknown-260526-zzzz"))
 
     assert_equal :reply, result.action
     assert_match(/Slug not found/, result.text)

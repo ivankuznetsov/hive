@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/bot/router"
 require "hive/bot/conversation_store"
 require "hive/bot/idea_draft_store"
+require "hive/bot/status_watcher"
 require "hive/bot/telegram"
 
 class HiveBotRouterTest < Minitest::Test
@@ -19,13 +20,14 @@ class HiveBotRouterTest < Minitest::Test
     )
   end
 
-  def build_test_router(bot_config:, pairing_store: nil)
+  def build_test_router(bot_config:, pairing_store: nil, status_snapshot_provider: -> { [] })
     kwargs = {
       bot_config: bot_config,
       logger: @logger,
       conversation_store: @store,
       idea_draft_store: @draft_store,
-      projects_provider: -> { @projects }
+      projects_provider: -> { @projects },
+      status_snapshot_provider: status_snapshot_provider
     }
     kwargs[:pairing_store] = pairing_store if pairing_store
     Hive::Bot::Router.new(**kwargs)
@@ -692,16 +694,28 @@ class HiveBotRouterTest < Minitest::Test
                    "--project", "hive", "--json" ], result.command_argv
   end
 
-  def test_clear_retry_callback_dispatches_marker_clear_then_retry
-    result = @router.handle(
+  def test_clear_retry_callback_dispatches_guarded_recovery_for_current_row
+    row = Hive::Bot::StatusWatcher::Row.new(
+      project: "hive",
+      slug: "slug-260514-abcd",
+      stage: "5-review",
+      workflow: "coding",
+      marker: "review_error",
+      attrs: {},
+      folder: "/tmp/slug-260514-abcd"
+    )
+    router = build_test_router(
+      bot_config: { "chat_id_allowlist" => [ 12345 ] },
+      status_snapshot_provider: -> { [ row ] }
+    )
+
+    result = router.handle(
       update(callback_data: "clear_retry:hive:slug-260514-abcd:5-review:review_error")
     )
 
-    assert_equal :dispatch_commands, result.action
-    assert_equal [ "hive", "markers", "clear", "slug-260514-abcd", "--name",
-                   "REVIEW_ERROR", "--project", "hive", "--json" ], result.commands.first
-    assert_equal [ "hive", "review", "slug-260514-abcd", "--from", "5-review",
-                   "--project", "hive", "--json" ], result.commands.last
+    assert_equal :dispatch_recovery, result.action
+    assert_same row, result.recovery
+    assert_nil result.commands
   end
 
   def test_default_projects_provider_reads_registered_projects

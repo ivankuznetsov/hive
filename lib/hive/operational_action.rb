@@ -1,6 +1,6 @@
 require "digest"
 require "time"
-require "hive/bot/dispatch_request_writer"
+require "hive/recovery/api"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -68,7 +68,7 @@ module Hive
       end
 
       def recoverable?(row)
-        %w[error review_error].include?(row["marker"].to_s) &&
+        Hive::Recovery::API.recoverable_marker?(row["marker"]) &&
           row.dig("attrs", "reason").to_s != "invalid_task" &&
           row["marker"] != "manual_steering"
       end
@@ -82,7 +82,7 @@ module Hive
 
       def token(project:, row:)
         if recoverable?(row)
-          return Hive::Daemon::RecoveryCoordinator.observation_token(
+          return Hive::Recovery::API.observation_token(
             row.merge(
               "project" => project,
               "state_file_mtime" => row["observation_mtime"] || row["mtime"],
@@ -182,7 +182,7 @@ module Hive
     # values select no command arguments beyond the registered action ID and
     # exact project/task identity; stage, verb, and guards are recomputed.
     class Executor
-      def initialize(recovery_writer: Hive::Bot::DispatchRequestWriter)
+      def initialize(recovery_writer: Hive::Recovery::API)
         @recovery_writer = recovery_writer
       end
 

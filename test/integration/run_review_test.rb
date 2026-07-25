@@ -344,7 +344,7 @@ class RunReviewTest < Minitest::Test
         refute_nil next_action, "review_error envelopes must include next_action"
         assert_equal "fix", next_action["phase"]
         assert_equal "fix_failed", next_action["reason"]
-        assert_match(/REVIEW_ERROR/, next_action["instructions"].to_s)
+        assert_match(/workflow\.retry/, next_action["instructions"].to_s)
       end
     end
   end

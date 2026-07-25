@@ -9,10 +9,10 @@ require "time"
 require "yaml"
 require "hive"
 require "hive/agent_profiles"
-require "hive/bot/dispatch_request_writer"
 require "hive/config"
 require "hive/commands/new"
 require "hive/markers"
+require "hive/recovery/api"
 require "hive/stages"
 require "hive/task"
 require "hive/usage_db"
@@ -102,7 +102,7 @@ module Hive
         dispatch: ->(_msg) { },
         clipboard_probe: ->(pasted_text:) { Hive::Tui::Clipboard.probe(pasted_text: pasted_text) },
         archive_refresh: -> { },
-        recovery_writer: Hive::Bot::DispatchRequestWriter,
+        recovery_writer: Hive::Recovery::API,
         update_state: nil
       )
         @hive_model = hive_model
@@ -952,8 +952,8 @@ module Hive
         # the questions in $EDITOR; clearing the marker without edits
         # would just produce the same findings on the next pass. The
         # `r` verb-key path sets `force: true` to declare "edits are
-        # done, retry now" — that bypasses the gate below and falls
-        # through to the clear+rerun path. Incomplete-triage and
+        # done, retry now" — that bypasses the gate below and submits the
+        # observed row to the coordinator. Incomplete-triage and
         # wall_clock shapes return true from `retryable_review_stale?`
         # and need no force flag.
         if marker_name == "REVIEW_STALE" && !retryable_review_stale?(row) && !force
@@ -1085,7 +1085,7 @@ module Hive
       # Same idea as REVIEW_RECOVERY_DETAIL_ATTRS but ordered for the
       # attrs that ERROR markers actually carry: `reason` (e.g.
       # `exit_code`) and `exit_code` go first because they're what the
-      # operator wants to see when reading "marker cleared" feedback.
+      # operator wants to see in the recovery receipt.
       ERROR_RECOVERY_DETAIL_ATTRS = %w[reason exit_code phase elapsed].freeze
 
       # Enter-driven ERROR-marker recovery. Mirrors `recover_review` but

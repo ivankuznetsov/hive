@@ -84,7 +84,8 @@ class CommandsActTest < Minitest::Test
       ).call
     end
     assert_equal(
-      "Retry available later — eligible 2026-07-20T11:00:00.000000Z; shared cooldown\n",
+      "Retry available later — eligible 2026-07-20T11:00:00.000000Z; shared cooldown; " \
+      "retry remains available after the shared cooldown\n",
       stdout
     )
 
@@ -96,6 +97,43 @@ class CommandsActTest < Minitest::Test
     payload = JSON.parse(json_stdout)
     schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-act"))))
     assert schema.valid?(payload), schema.validate(payload).map { |error| error.fetch("error") }.inspect
+  end
+
+  def test_terminal_retry_human_output_includes_outcome_and_time
+    recovery = {
+      "status" => "terminal",
+      "request_id" => "recovery-1",
+      "attempt_id" => "attempt-1",
+      "phase" => "terminal",
+      "failure_origin" => "implementer_failed",
+      "next_eligible_at" => nil,
+      "owner" => "none",
+      "reason" => nil,
+      "remediation" => nil,
+      "retry_count" => 1,
+      "provider_hint" => nil,
+      "terminal_outcome" => "succeeded",
+      "terminal_at" => "2026-07-25T15:00:00.000000Z"
+    }
+    executor = FakeExecutor.new(
+      result: {
+        "task_state" => "idle", "stage" => "4-execute",
+        "marker" => "complete", "recovery" => recovery
+      }
+    )
+
+    stdout, = capture_io do
+      Hive::Commands::Act.new(
+        "workflow.retry", "demo:task", observation: "d" * 64,
+        executor: executor
+      ).call
+    end
+
+    assert_equal(
+      "Completed — request recovery-1; attempt attempt-1; succeeded; " \
+      "at 2026-07-25T15:00:00.000000Z\n",
+      stdout
+    )
   end
 
   def test_stale_observation_emits_typed_json_error_and_performs_no_action

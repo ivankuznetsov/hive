@@ -8,6 +8,7 @@ require "hive/daemon/auto_retry_safety"
 require "hive/daemon/dispatch_request_queue"
 require "hive/lock"
 require "hive/markers"
+require "hive/recovery"
 require "hive/task"
 require "hive/task_resolver"
 require "hive/workflows"
@@ -36,6 +37,14 @@ module Hive
           super.transform_keys(&:to_s)
         end
 
+        def self.from_h(value)
+          attributes = members.to_h do |member|
+            key = value.key?(member) ? member : member.to_s
+            [ member, value[key] ]
+          end
+          new(**attributes)
+        end
+
         def primary_label
           {
             "queued" => "Recovery queued",
@@ -53,6 +62,7 @@ module Hive
           context << "attempt #{attempt_id}" if attempt_id
           context << "eligible #{next_eligible_at}" if status == "cooldown" && next_eligible_at
           context << terminal_outcome.to_s.tr("_", " ") if status == "terminal" && terminal_outcome
+          context << "at #{terminal_at}" if status == "terminal" && terminal_at
           context << reason.to_s.tr("_", " ") if reason
           context << remediation if remediation && status != "queued"
           context.empty? ? primary_label : "#{primary_label} — #{context.join('; ')}"
@@ -77,7 +87,7 @@ module Hive
         # coordinator performs the generation-guarded transition.
         def clear_recoverable_marker(state_file, expected_name:, match_attrs:)
           marker_name = expected_name.to_s
-          unless %w[error review_error review_stale review_ci_stale].include?(marker_name)
+          unless Hive::Recovery.recoverable_marker?(marker_name)
             raise ArgumentError, "not a recoverable marker: #{marker_name}"
           end
 
@@ -208,7 +218,10 @@ module Hive
           current = Hive::Markers.current(locked_task.state_file)
           expected_generation = observed_marker_generation(row)
           unless recoverable_marker?(current) &&
-                 marker_generation(current) == expected_generation
+                 marker_generation(
+                   current,
+                   occurrence_time: File.mtime(locked_task.state_file).utc
+                 ) == expected_generation
             return receipt(
               "blocked", failure_origin: failure_origin, owner: "operator",
               reason: "generation_conflict",
@@ -252,8 +265,17 @@ module Hive
           if existing
             return receipt_for_request(
               existing,
-              retry_count: retry_count + 1,
-              replay: existing.recovery&.fetch("phase", nil) == "terminal"
+              replay: existing.recovery&.fetch("phase", nil) == "terminal",
+              now: now
+            )
+          end
+
+          if locked_task.id.to_s.empty?
+            return receipt(
+              "blocked", failure_origin: failure_origin, owner: "hive",
+              reason: "missing_task_id",
+              remediation: "wait for Hive to assign the task id, then retry from a fresh status snapshot",
+              retry_count: retry_count, provider_hint: provider_hint(row)
             )
           end
 
@@ -269,7 +291,10 @@ module Hive
             row, locked_task, expected_generation, generation.task_generation
           ) if canonical_request_id.empty?
           attrs = current.attrs.to_h.transform_keys(&:to_s)
-          marker_id = marker_identity(current)
+          marker_id = marker_identity(
+            current,
+            occurrence_time: File.mtime(locked_task.state_file).utc
+          )
           next_eligible_at = assessment[:retry_at].utc.iso8601(6)
           recovery = {
             "phase" => "admitted",
@@ -283,6 +308,7 @@ module Hive
             "owner" => "scheduler",
             "blocked_reason" => nil,
             "blocked_remediation" => nil,
+            "retry_count" => retry_count + 1,
             "provider_hint" => provider_hint(row)
           }
           @request_queue.write_request!(
@@ -313,7 +339,7 @@ module Hive
             "queued", request_id: canonical_request_id, phase: "admitted",
             failure_origin: recovery.fetch("failure_origin"),
             next_eligible_at: next_eligible_at, owner: "scheduler",
-            retry_count: retry_count + 1, provider_hint: recovery["provider_hint"]
+            retry_count: recovery["retry_count"], provider_hint: recovery["provider_hint"]
           )
         end
       rescue Hive::ConcurrentRunError => e
@@ -338,10 +364,11 @@ module Hive
       # daemon immediately before ordinary attempt admission. It can recover a
       # crash after the marker rewrite because the expected markerless
       # fingerprint was persisted before mutation.
-      def resume(request:, row:)
+      def resume(request:, row:, now: Time.now.utc)
+        now = now.utc
         recovery = request.recovery
         return unavailable_request(request, "request_has_no_recovery_transition") unless recovery.is_a?(Hash)
-        return receipt_for_request(request) if %w[dispatched terminal].include?(recovery["phase"])
+        return receipt_for_request(request, now: now) if %w[dispatched terminal].include?(recovery["phase"])
 
         task = resolve_task_for(row)
         Hive::Lock.with_task_lock(task.folder, "operation" => "recovery_transition") do
@@ -350,7 +377,7 @@ module Hive
             return unavailable_request(request, "request_disappeared_before_transition") unless current_request
 
             recovery = current_request.recovery
-            return receipt_for_request(current_request) if %w[dispatched terminal].include?(recovery["phase"])
+            return receipt_for_request(current_request, now: now) if %w[dispatched terminal].include?(recovery["phase"])
 
             locked_task = resolve_task_for(row)
             unless same_task_identity?(task, locked_task) &&
@@ -394,7 +421,10 @@ module Hive
                   owner: "operator", request_locked: true
                 ) unless
                   marker.name.to_s == current_request.expected_marker_name.to_s &&
-                  marker_generation(marker) == recovery["observed_marker_generation"].to_s &&
+                  marker_generation(
+                    marker,
+                    occurrence_time: File.mtime(locked_task.state_file).utc
+                  ) == recovery["observed_marker_generation"].to_s &&
                   expected_attrs_match?(marker, recovery.fetch("expected_marker_attrs"))
 
                 markerless = Hive::Markers.without_markers(File.binread(locked_task.state_file))
@@ -430,6 +460,7 @@ module Hive
                 expected_phase: "admitted",
                 changes: {
                   "phase" => "cleared",
+                  "owner" => "scheduler",
                   "blocked_reason" => nil,
                   "blocked_remediation" => nil
                 },
@@ -443,7 +474,7 @@ module Hive
                 owner: "hive",
                 request_locked: true
               ) unless transitioned && refreshed
-              return receipt_for_request(refreshed)
+              return receipt_for_request(refreshed, now: now)
             end
 
             return block_request(
@@ -454,7 +485,8 @@ module Hive
               marker.none? &&
               generation_matches?(generation, recovery)
 
-            receipt_for_request(current_request)
+            refreshed = clear_resolved_block(current_request, request_locked: true)
+            receipt_for_request(refreshed, now: now)
           end
         end
       rescue Hive::ConcurrentRunError => e
@@ -511,14 +543,45 @@ module Hive
         end
       end
 
-      def receipt_for_request(request, retry_count: nil, attempt_id: nil, replay: false)
+      # A preflight/spawn failure after the marker was cleared must not be
+      # retried on every daemon tick. Keep the durable transition in `cleared`
+      # and schedule the next admission with the same shared hourly cadence.
+      def defer_dispatch_failure(request, now: Time.now.utc)
+        now = now.utc
+        @request_queue.with_request_lock(request.request_id, state_home: @state_home) do
+          current = @request_queue.fetch(request.request_id, state_home: @state_home) || request
+          recovery = current.recovery || {}
+          return receipt_for_request(current, now: now) unless recovery["phase"] == "cleared"
+
+          transitioned = @request_queue.update_recovery!(
+            request.request_id,
+            expected_phase: "cleared",
+            changes: {
+              "next_eligible_at" => (now + Hive::AgentLimit.retry_cooldown_sec).iso8601(6),
+              "owner" => "scheduler",
+              "blocked_reason" => nil,
+              "blocked_remediation" => nil
+            },
+            state_home: @state_home,
+            request_locked: true
+          )
+          refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)
+          return unavailable_request(current, "transition_conflict") unless transitioned && refreshed
+
+          receipt_for_request(refreshed, now: now)
+        end
+      end
+
+      def receipt_for_request(request, retry_count: nil, attempt_id: nil, replay: false,
+                              now: Time.now.utc)
         recovery = request.recovery || {}
         blocked = recovery["blocked_reason"].to_s
         status = if !blocked.empty?
           "blocked"
         else
           case recovery["phase"]
-          when "admitted", "cleared" then "queued"
+          when "admitted", "cleared"
+            recovery_due?(recovery, now: now) ? "queued" : "cooldown"
           when "dispatched" then "running"
           when "terminal" then "terminal"
           else "unavailable"
@@ -534,12 +597,13 @@ module Hive
           owner: case status
                  when "running" then "agent"
                  when "terminal" then "none"
+                 when "cooldown" then "scheduler"
                  else recovery["owner"]
                  end,
           reason: blocked.empty? ? (replay ? "terminal_replay" : nil) : blocked,
           remediation: blocked.empty? ? nil :
             (recovery["blocked_remediation"] || remediation_for(blocked)),
-          retry_count: retry_count,
+          retry_count: retry_count || recovery["retry_count"],
           provider_hint: recovery["provider_hint"],
           terminal_outcome: recovery["terminal_outcome"],
           terminal_at: recovery["terminal_at"]
@@ -587,33 +651,41 @@ module Hive
       end
 
       def observed_marker_generation(row)
+        observed_at = value(row, :state_file_mtime) ||
+                      value(row, :observation_mtime) ||
+                      value(row, :mtime)
         marker_generation(
           Hive::Markers::State.new(
             name: value(row, :marker).to_s.downcase.to_sym,
             attrs: marker_attrs(row),
             raw: nil
-          )
+          ),
+          occurrence_time: observed_at
         )
       end
 
-      def marker_generation(marker)
+      def marker_generation(marker, occurrence_time: nil)
         attrs = marker.attrs.to_h.transform_keys(&:to_s)
         canonical = attrs.keys.sort.to_h { |key| [ key, attrs[key] ] }
-        ::Digest::SHA256.hexdigest(JSON.generate(
+        identity = {
           "name" => marker.name.to_s,
           "attrs" => canonical
-        ))
+        }
+        if attrs["marker_id"].to_s.empty?
+          identity["legacy_occurrence_at"] = normalized_occurrence_time(occurrence_time)
+        end
+        ::Digest::SHA256.hexdigest(JSON.generate(identity))
       end
 
-      def marker_identity(marker)
+      def marker_identity(marker, occurrence_time: nil)
         marker_id = marker.attrs["marker_id"].to_s
         return marker_id unless marker_id.empty?
 
-        "legacy-#{marker_generation(marker)[0, 16]}"
+        "legacy-#{marker_generation(marker, occurrence_time: occurrence_time)[0, 16]}"
       end
 
       def recoverable_marker?(marker)
-        %i[error review_error review_stale review_ci_stale].include?(marker.name)
+        Hive::Recovery.recoverable_marker?(marker.name)
       end
 
       def resolve_task_for(row)
@@ -813,6 +885,45 @@ module Hive
         return unavailable_request(request, "transition_conflict") unless transitioned && refreshed
 
         receipt_for_request(refreshed)
+      end
+
+      def clear_resolved_block(request, request_locked:)
+        recovery = request.recovery || {}
+        return request if recovery["blocked_reason"].nil? &&
+                          recovery["blocked_remediation"].nil? &&
+                          recovery["owner"].to_s == "scheduler"
+
+        transitioned = @request_queue.update_recovery!(
+          request.request_id,
+          expected_phase: recovery["phase"],
+          changes: {
+            "blocked_reason" => nil,
+            "blocked_remediation" => nil,
+            "owner" => "scheduler"
+          },
+          state_home: @state_home,
+          request_locked: request_locked
+        )
+        refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)
+        return refreshed if transitioned && refreshed
+
+        request
+      end
+
+      def recovery_due?(recovery, now:)
+        eligible_at = Time.parse(recovery["next_eligible_at"].to_s)
+        now.utc >= eligible_at.utc
+      rescue ArgumentError, TypeError
+        true
+      end
+
+      def normalized_occurrence_time(value)
+        return value.utc.iso8601(6) if value.respond_to?(:utc)
+        return Time.parse(value.to_s).utc.iso8601(6) unless value.to_s.empty?
+
+        nil
+      rescue ArgumentError, TypeError
+        value.to_s
       end
 
       def unavailable_request(request, reason)

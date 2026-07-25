@@ -21,7 +21,7 @@ renders the shared `Hive::Daemon::StatusReport.safe_payload` producer used by
 `hive daemon status --json`, and setup flows
 reuse `Hive::Web::GithubAuth`, `AgentsAuth`, `WorkflowLifecycle`, and the
 Telegram validators from the gem. Red task recovery submits the fresh status
-observation through `DispatchRequestWriter.recover!` to the same
+observation through the neutral `Hive::Recovery::API` to the same
 `RecoveryCoordinator` used by Telegram, TUI, CLI/action, recorder, and daemon
 healing.
 
@@ -581,7 +581,8 @@ same-version missing-asset repair, and preservation of the previous bundle on
 precompile failure. Repository setup always invokes the CLI init adapter with
 non-TTY provisioning input. It also pins that
 a red task page shows the diagnostic banner and Retry button, and that the
-route queues the marker-clear command plus the hidden rerun sequence. It also
+  route submits the current row to the durable recovery coordinator and renders
+  its queued/cooldown/running/blocked/terminal receipt. It also
 pins the Telegram first-run guide shape, strict token/chat-ID validation,
 empty-list pairing bootstrap, saved-token reuse, pending-code rendering,
 corrupt-store visibility, consent-gated approval, and the test-message

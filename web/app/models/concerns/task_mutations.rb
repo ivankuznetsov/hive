@@ -6,6 +6,7 @@ require "hive/bot/notification_builders"
 require "hive/commands/approve"
 require "hive/commands/drop"
 require "hive/daemon/dispatch_request_queue"
+require "hive/recovery/api"
 require "hive/stages"
 require "hive/task_action"
 
@@ -83,7 +84,7 @@ module TaskMutations
     )
     raise Hive::Error, "no retry verb for stage #{self["stage"].inspect}" unless verb
 
-    Hive::Bot::DispatchRequestWriter.recover!(
+    Hive::Recovery::API.recover!(
       row: self,
       project: project.name,
       requestor: "web"

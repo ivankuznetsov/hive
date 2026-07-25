@@ -29,7 +29,7 @@ slug = "implement-the-pull-git-command-260612-bd0e"
 raise "sandbox missing" unless File.directory?(project_dir)
 
 ENV["HIVE_HOME"] = hive_home
-require "hive/bot/dispatch_request_writer"
+require "hive/recovery/api"
 require "hive/commands/status"
 
 env_base = {
@@ -54,7 +54,7 @@ if folder.include?("3-plan")
   raise "stranded task is absent from status" unless row
 
   if row["marker"].to_s == "error"
-    receipt = Hive::Bot::DispatchRequestWriter.recover!(
+    receipt = Hive::Recovery::API.recover!(
       row: row,
       project: "shipped",
       requestor: "recorder",

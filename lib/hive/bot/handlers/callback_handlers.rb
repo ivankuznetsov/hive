@@ -185,6 +185,10 @@ module Hive
           unless row.marker.to_s.casecmp(marker.to_s).zero?
             return @result_class.new(action: :reply, text: "Task status changed - reopen /queue.")
           end
+          expected_attrs = RecoverySequence.attrs_from_match_attr(match_attr)
+          if expected_attrs && !expected_attrs.all? { |key, value| row.attrs[key].to_s == value.to_s }
+            return @result_class.new(action: :reply, text: "Task status changed - reopen /queue.")
+          end
 
           RecoverySequence.build(
             project: project, slug: slug, stage: stage, marker: marker,

@@ -1,22 +1,31 @@
 require "test_helper"
 require "hive/bot/router"
 require "hive/bot/conversation_store"
+require "hive/bot/status_watcher"
 require "hive/bot/telegram"
 
 class HiveBotScenarioReviewErrorTest < Minitest::Test
-  def test_s2_clear_and_retry_maps_to_marker_clear_then_review
+  def test_s2_clear_and_retry_maps_to_guarded_recovery
+    row = Hive::Bot::StatusWatcher::Row.new(
+      project: "hive",
+      slug: "slug-260514-abcd",
+      stage: "5-review",
+      workflow: "coding",
+      marker: "review_error",
+      attrs: {},
+      folder: "/tmp/slug-260514-abcd"
+    )
     router = Hive::Bot::Router.new(
       bot_config: { "chat_id_allowlist" => [ 12345 ] },
       logger: StubLogger.new,
-      conversation_store: Hive::Bot::ConversationStore.new
+      conversation_store: Hive::Bot::ConversationStore.new,
+      status_snapshot_provider: -> { [ row ] }
     )
     result = router.handle(update(callback_data: "clear_retry:hive:slug-260514-abcd:5-review:review_error"))
 
-    assert_equal :dispatch_commands, result.action
-    assert_equal [ "hive", "markers", "clear", "slug-260514-abcd", "--name",
-                   "REVIEW_ERROR", "--project", "hive", "--json" ], result.commands.first
-    assert_equal [ "hive", "review", "slug-260514-abcd", "--from", "5-review",
-                   "--project", "hive", "--json" ], result.commands.last
+    assert_equal :dispatch_recovery, result.action
+    assert_same row, result.recovery
+    assert_nil result.commands
   end
 
   private

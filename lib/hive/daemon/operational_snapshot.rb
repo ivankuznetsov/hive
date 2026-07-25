@@ -8,6 +8,7 @@ require "hive/agent_limit"
 require "hive/atomic_file"
 require "hive/lock"
 require "hive/paths"
+require "hive/recovery"
 
 module Hive
   module Daemon
@@ -361,11 +362,17 @@ module Hive
                 task.dig("marker_attrs", key.to_s).to_s == value.to_s
               end
             end
-          elsif %w[cleared dispatched terminal].include?(phase)
+          elsif %w[cleared dispatched].include?(phase)
             # Once the original marker is gone, a fresh ERROR/REVIEW_ERROR is
             # a new recovery generation. Do not let an older terminal receipt
             # hide that generation's cooldown/action.
             return unless %w[none agent_working].include?(task["marker"].to_s)
+          elsif phase == "terminal"
+            # A completed attempt normally leaves a meaningful workflow marker
+            # (WAITING, COMPLETE, REVIEW_COMPLETE, and similar). Preserve its
+            # terminal receipt unless a fresh recoverable failure now owns the
+            # task.
+            return if Hive::Recovery.recoverable_marker?(task["marker"])
           end
 
           task

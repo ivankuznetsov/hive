@@ -323,14 +323,13 @@ module Hive
           end
         when :review_stale
           { "kind" => kind::RECOVER_STALE,
-            "instructions" => "if highest-pass reviewer files lack escalations-NN.md, remove the REVIEW_STALE " \
-                              "marker and re-run to retry that pass; otherwise edit/rename highest-pass review " \
-                              "files, remove the marker, then re-run",
+            "instructions" => "inspect or edit the highest-pass review files, then refresh " \
+                              "`hive status --operational --json` and invoke this task's workflow.retry action",
             "markers_to_clear" => [ "review_stale" ] }
         when :review_ci_stale
           { "kind" => kind::RECOVER_STALE,
-            "instructions" => "fix CI failures, edit reviews/ci-blocked.md, remove the REVIEW_CI_STALE marker, " \
-                              "then re-run",
+            "instructions" => "fix CI failures, edit reviews/ci-blocked.md, then refresh " \
+                              "`hive status --operational --json` and invoke this task's workflow.retry action",
             "markers_to_clear" => [ "review_ci_stale" ] }
         when :manual_steering
           { "kind" => Hive::Schemas::NextActionKind::NO_OP, "reason" => "manual_steering" }
@@ -356,9 +355,8 @@ module Hive
               "reason" => "ensure_clean_on_exit_failed",
               "residue_paths" => residue_paths,
               "error" => marker.attrs,
-              "instructions" => "commit or discard the residue paths in #{target}, " \
-                                "then `hive markers clear #{task.folder} --name ERROR --match-attr reason=ensure_clean_on_exit_failed` " \
-                                "and re-run",
+              "instructions" => "commit or discard the residue paths in #{target}, then refresh " \
+                                "`hive status --operational --json` and invoke this task's workflow.retry action",
               "markers_to_clear" => [ "error" ],
               "rerun_with" => verb
             }
@@ -383,7 +381,7 @@ module Hive
               "error" => marker.attrs,
               "instructions" => "inspect the auto-commit scope artifact and worktree changes; " \
                                 "remove/revert rejected files or adjust review.fix.auto_commit.scope_check, " \
-                                "then clear REVIEW_ERROR and re-run",
+                                "then refresh operational status and invoke this task's workflow.retry action",
               "rerun_with" => "hive run #{task.folder}"
             }
           end
@@ -397,8 +395,9 @@ module Hive
               "reason" => marker.attrs["reason"],
               "error" => marker.attrs,
               "instructions" => "inspect the fix-agent worktree changes and signing config; " \
-                                "manually commit or revert remaining worktree changes before clearing REVIEW_ERROR; " \
-                                "fix signing or adjust review.fix.auto_commit.sign_policy before re-running"
+                                "manually commit or revert remaining worktree changes; " \
+                                "fix signing or adjust review.fix.auto_commit.sign_policy, then refresh operational " \
+                                "status and invoke this task's workflow.retry action"
             }
           end
 
@@ -413,9 +412,8 @@ module Hive
               "reason" => marker.attrs["reason"],
               "error" => marker.attrs,
               "instructions" => "one or more reviewers failed for this pass; inspect " \
-                                "#{File.basename(target)} for the failing reviewer, then either re-run " \
-                                "hoping for recovery or clear the marker via " \
-                                "`hive markers clear #{task.folder} --name REVIEW_ERROR` to accept partial coverage",
+                                "#{File.basename(target)} for the failing reviewer, then refresh operational " \
+                                "status and invoke this task's workflow.retry action",
               "rerun_with" => "hive run #{task.folder}"
             }
           end
@@ -425,8 +423,8 @@ module Hive
             "phase" => marker.attrs["phase"],
             "reason" => marker.attrs["reason"],
             "error" => marker.attrs,
-            "instructions" => "investigate; clear the marker via " \
-                              "`hive markers clear #{task.folder} --name REVIEW_ERROR`; re-run"
+            "instructions" => "investigate, then refresh `hive status --operational --json` " \
+                              "and invoke this task's workflow.retry action with `hive act`"
           }
         else
           { "kind" => Hive::Schemas::NextActionKind::NO_OP }
@@ -480,10 +478,11 @@ module Hive
           puts "  next: answer open questions in reviews/escalations-NN.md; legacy reviewer files still accept [x], " \
                "then `hive run #{task.folder}`"
         when :review_stale
-          puts "  next: if highest-pass reviewer files lack escalations-NN.md, remove REVIEW_STALE and re-run; " \
-               "otherwise edit/rename highest-pass review files, remove REVIEW_STALE, then re-run"
+          puts "  next: inspect or edit the highest-pass review files, then refresh " \
+               "`hive status --operational --json` and invoke this task's workflow.retry action"
         when :review_ci_stale
-          puts "  next: fix CI failures, edit reviews/ci-blocked.md, remove the REVIEW_CI_STALE marker, then re-run"
+          puts "  next: fix CI failures, edit reviews/ci-blocked.md, then refresh " \
+               "`hive status --operational --json` and invoke this task's workflow.retry action"
         when :manual_steering
           puts "  next: manual steering active; automated run skipped"
         when :error, :review_error
@@ -497,11 +496,11 @@ module Hive
               pass = marker.attrs["pass"].to_s
               pass_suffix = pass.match?(/\A\d+\z/) ? format("%02d", pass.to_i) : nil
               detail = pass_suffix ? "reviews/errors-#{pass_suffix}.md" : "reviews/"
-              warn "  next: inspect #{detail} for the failing reviewer, then re-run for recovery or clear " \
-                   "the marker via `hive markers clear #{task.folder} --name REVIEW_ERROR` to accept partial coverage"
+              warn "  next: inspect #{detail} for the failing reviewer, then refresh " \
+                   "`hive status --operational --json` and invoke this task's workflow.retry action"
             else
-              warn "  next: investigate; clear the marker via " \
-                   "`hive markers clear #{task.folder} --name REVIEW_ERROR`; re-run"
+              warn "  next: investigate, then refresh `hive status --operational --json` " \
+                   "and invoke this task's workflow.retry action with `hive act`"
             end
           end
           raise Hive::TaskInErrorState, "stage recorded :#{marker.name} (#{marker.attrs.inspect})"

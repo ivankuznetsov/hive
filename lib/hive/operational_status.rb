@@ -516,7 +516,7 @@ module Hive
       canonical = disposition["recovery"] if disposition.is_a?(Hash)
       return normalized_recovery(canonical, row) if canonical.is_a?(Hash)
 
-      return nil unless %w[error review_error].include?(row["marker"].to_s)
+      return nil unless Hive::Recovery::API.recoverable_marker?(row["marker"])
       return nil if invalid_task?(row)
 
       status = case disposition&.fetch("decision", nil)

@@ -84,21 +84,7 @@ module Hive
       end
 
       def recovery_summary(recovery)
-        label = {
-          "queued" => "Recovery queued",
-          "cooldown" => "Retry available later",
-          "running" => "Agent running",
-          "blocked" => "Recovery blocked",
-          "terminal" => "Recovery terminal",
-          "unavailable" => "Current state unavailable"
-        }.fetch(recovery.fetch("status"))
-        context = []
-        context << "request #{recovery['request_id']}" if recovery["request_id"]
-        context << "attempt #{recovery['attempt_id']}" if recovery["attempt_id"]
-        context << "eligible #{recovery['next_eligible_at']}" if
-          recovery["status"] == "cooldown" && recovery["next_eligible_at"]
-        context << recovery["reason"].to_s.tr("_", " ") if recovery["reason"]
-        context.empty? ? "#{label}\n" : "#{label} — #{context.join('; ')}\n"
+        "#{Hive::Daemon::RecoveryCoordinator::Receipt.from_h(recovery).human_summary}\n"
       end
     end
   end

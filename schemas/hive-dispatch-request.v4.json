@@ -92,15 +92,19 @@
         },
         "failure_origin": { "type": "string", "minLength": 1 },
         "next_eligible_at": { "type": ["string", "null"], "format": "date-time" },
-        "owner": { "type": ["string", "null"] },
+        "owner": {
+          "type": ["string", "null"],
+          "enum": ["agent", "operator", "provider", "scheduler", "hive", "none", "unknown", null]
+        },
         "blocked_reason": { "type": ["string", "null"] },
         "blocked_remediation": { "type": ["string", "null"] },
+        "retry_count": { "type": "integer", "minimum": 0 },
         "provider_hint": {
           "type": ["object", "null"],
           "additionalProperties": false,
           "required": ["retry_after", "display_only"],
           "properties": {
-            "retry_after": { "type": ["string", "null"] },
+            "retry_after": { "type": "string", "minLength": 1 },
             "display_only": { "const": true }
           }
         },

@@ -10,7 +10,7 @@ tags: [command, status, operational, agents, observability, json, diagnostics, a
 **TLDR**: `hive status` now defaults to a compact operational snapshot for
 humans: closed state bands, counts, exact blocker ownership/reasons, and at
 most five representative rows per band. `hive status --operational --json`
-emits the additive agent contract `hive-operational-status.v1`. The established
+emits the additive agent contract `hive-operational-status.v2`. The established
 complete task graph remains unchanged as `hive status --json`
 (`hive-status.v6`), and `hive status --full` keeps the former detailed human
 table.
@@ -21,7 +21,7 @@ table.
 |---|---|
 | `hive status` | Concise human operational snapshot. |
 | `hive status --operational` | Explicit alias for the same concise human view. |
-| `hive status --operational --json` | Additive `hive-operational-status.v1` agent document. |
+| `hive status --operational --json` | Additive `hive-operational-status.v2` agent document; v1 remains pinned for stored-output compatibility. |
 | `hive status --json` | Unchanged complete `hive-status.v6` compatibility graph for daemon, bot, TUI, and pinned consumers. |
 | `hive status --full` | Former grouped detailed human table. |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`/`--full`. |
@@ -66,17 +66,23 @@ an idle verdict. Unclassifiable rows remain `unknown`; a partial snapshot may
 still report a stronger directly observed active state, but never claims idle
 from missing evidence.
 
-`hive-operational-status.v1` includes summary/state counts, daemon identity and
+`hive-operational-status.v2` includes summary/state counts, daemon identity and
 phase, scheduler capacity/queue/provider holds, archive counts, typed issues,
 per-task liveness/freshness, blocker ownership and reasons, nullable retry
 evidence (`due`, `retry_at`, `safe`, `safety_reason`), and an optional closed
-action descriptor. It never embeds a shell command or argv. A routine,
+action descriptor plus the canonical durable recovery receipt. It never embeds
+a shell command or argv. A routine,
 confirmation-free recommendation carries `action_id`, exact `project:slug`, an
 observation token, risk class, and provenance; execute it only with:
 
 ```bash
 hive act workflow.advance PROJECT:SLUG --observation TOKEN --json
 ```
+
+Recoverable rows instead recommend `workflow.retry` with the same token
+contract. `hive-act.v2` returns the canonical queued/cooldown/running/blocked/
+terminal recovery receipt; `hive-act.v1` and operational-status v1 remain
+unchanged compatibility schemas and do not contain recovery fields.
 
 `hive act` resolves and locks the task again, recomputes the permitted verb,
 and rejects stale tokens or recommendations that are no longer routine. It is

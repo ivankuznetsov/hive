@@ -72,7 +72,7 @@ class TaskMutationsTest < ActiveSupport::TestCase
     end
 
     actual = with_replaced_singleton_method(
-      Hive::Bot::DispatchRequestWriter, :recover!, replacement
+      Hive::Recovery::API, :recover!, replacement
     ) { subject.recover! }
 
     assert_equal receipt, actual
@@ -90,7 +90,7 @@ class TaskMutationsTest < ActiveSupport::TestCase
     )
     replacement = proc { |**| raise Errno::ENOSPC, "no space left on device" }
 
-    with_replaced_singleton_method(Hive::Bot::DispatchRequestWriter, :recover!, replacement) do
+    with_replaced_singleton_method(Hive::Recovery::API, :recover!, replacement) do
       assert_raises(Errno::ENOSPC) { subject.recover! }
     end
 
@@ -132,7 +132,7 @@ class TaskMutationsTest < ActiveSupport::TestCase
       receipt
     end
     actual = with_replaced_singleton_method(
-      Hive::Bot::DispatchRequestWriter, :recover!, replacement
+      Hive::Recovery::API, :recover!, replacement
     ) { subject.recover! }
 
     assert_equal receipt, actual

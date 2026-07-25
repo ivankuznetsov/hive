@@ -111,6 +111,7 @@ module Hive
           result_class: Result,
           idea_draft_store: @idea_draft_store,
           projects_provider: @projects_provider,
+          status_snapshot_provider: status_snapshot_provider,
           last_project: -> { @last_project },
           logger: @logger
         )

@@ -9,6 +9,8 @@ require "hive/workflows"
 module Hive
   module Attempts
     class Dispatcher
+      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: coding brainstorm artifact repair
+
       DEFAULT_LIMITS = { max_global: 3, max_per_project: 3, max_daily: 50 }.freeze
 
       def initialize(store:, launcher:, limits: DEFAULT_LIMITS, clock: -> { Time.now.utc },
@@ -206,16 +208,6 @@ module Hive
           # the legacy success is considered.
           same_request_failure = same_request.reverse.find { |record| record.outcome != "succeeded" }
           return same_request_failure if same_request_failure
-
-          ordered = terminals.sort_by { |record| [ record["accepted_at"].to_s, record.attempt_id ] }
-          first_invalid_success = ordered.index { |record| record.outcome == "succeeded" }
-          if first_invalid_success
-            # The first success without its required artifact admits one
-            # repair, regardless of which request ID asks for it. Any terminal
-            # receipt after that success is the repair outcome and owns later
-            # requests until a new task generation is admitted.
-            return ordered.drop(first_invalid_success + 1).last
-          end
         end
 
         unless same_request.empty?
@@ -230,15 +222,22 @@ module Hive
       end
 
       def brainstorm_artifact_missing?(task, records)
-        record = records.find { |candidate| candidate["intended_stage"] == "2-brainstorm" }
+        return false unless coding_brainstorm?(task)
+
+        record = records.find { |candidate| candidate["intended_stage"] == BRAINSTORM_STAGE_DIR }
         record && !required_artifact_valid?(task, record)
       end
 
       def required_artifact_valid?(task, record)
-        return true unless record["intended_stage"] == "2-brainstorm"
+        return true unless coding_brainstorm?(task) &&
+                           record["intended_stage"] == BRAINSTORM_STAGE_DIR
 
         require "hive/stages/brainstorm"
         Hive::Stages::Brainstorm.artifact_valid?(task.state_file)
+      end
+
+      def coding_brainstorm?(task)
+        Hive::Workflows.coding_id?(task.respond_to?(:workflow) ? task.workflow : nil)
       end
 
       # A lost attempt blocks ordinary admission only until its explicit

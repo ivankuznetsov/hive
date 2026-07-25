@@ -654,6 +654,7 @@ module Hive
         legacy_execute_findings: legacy_execute_findings?,
         stale_agent_reason: stale_agent_reason,
         condition_gate: migration_selection.effective == "conditions" ? condition_gate : nil,
+        projection: @projection,
         state_file_mtime: @state_file_mtime,
         project_name: project_name,
         project_count: @project_count

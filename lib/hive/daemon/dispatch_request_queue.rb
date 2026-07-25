@@ -8,6 +8,7 @@ require "hive/atomic_file"
 require "hive/paths"
 require "hive/attempts/output_reference"
 require "hive/daemon/queue_directory"
+require "hive/recovery"
 
 module Hive
   module Daemon
@@ -40,6 +41,16 @@ module Hive
       CLAIMED_SUFFIX = ".claimed".freeze
       CLAIM_META_SUFFIX = ".claim".freeze
       SEQUENCE_SUFFIX = ".sequence".freeze
+      QUARANTINE_DIRNAME = "quarantine".freeze
+
+      RECOVERY_PHASES = %w[admitted cleared dispatched terminal].freeze
+      RECOVERY_KEYS = %w[
+        phase observed_marker_generation expected_marker_attrs
+        canonical_task_folder expected_post_clear_progress_fingerprint
+        dispatch_generation failure_origin next_eligible_at owner
+        blocked_reason blocked_remediation provider_hint attempt_id
+        terminal_outcome terminal_at retry_count
+      ].freeze
 
       SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
       PROJECT_RE = /\A[A-Za-z0-9_.\-]+\z/
@@ -318,10 +329,15 @@ module Hive
         Dir.glob(File.join(dir, "*.json#{CLAIMED_SUFFIX}")).each do |path|
           data = parse_json_hash(path)
           unless data
-            File.unlink(path) if File.exist?(path)
-            FileUtils.rm_f(claim_metadata_path(path))
-            handler&.call(request_id: nil, reason: "malformed_claim", path: path)
-            removed += 1
+            quarantined = quarantine_claim(path, reason: "malformed_claim", now: now)
+            if quarantined
+              handler&.call(request_id: nil, reason: "malformed_claim_quarantined",
+                            path: quarantined)
+              removed += 1
+            else
+              handler&.call(request_id: nil, reason: "malformed_claim_quarantine_failed",
+                            path: path)
+            end
             next
           end
 
@@ -859,11 +875,21 @@ module Hive
           ]
           missing = required.reject { |key| recovery.key?(key) }
           raise ArgumentError, "recovery missing #{missing.join(', ')}" unless missing.empty?
-          unless %w[admitted cleared dispatched terminal].include?(recovery["phase"].to_s)
+          unknown = recovery.keys.map(&:to_s) - RECOVERY_KEYS
+          raise ArgumentError, "recovery has unexpected keys #{unknown.join(', ')}" unless unknown.empty?
+          unless RECOVERY_PHASES.include?(recovery["phase"]) &&
+                 recovery["phase"].is_a?(String)
             raise ArgumentError, "invalid recovery phase"
           end
           unless recovery["expected_marker_attrs"].is_a?(Hash)
             raise ArgumentError, "expected_marker_attrs must be an object"
+          end
+          unless recovery["expected_marker_attrs"].keys.all?(String) &&
+                 recovery["expected_marker_attrs"].values.all? { |value|
+                   value.nil? || value.is_a?(String) || value.is_a?(Numeric) ||
+                     value == true || value == false
+                 }
+            raise ArgumentError, "expected_marker_attrs must contain JSON scalar values"
           end
           %w[
             observed_marker_generation expected_post_clear_progress_fingerprint
@@ -874,6 +900,85 @@ module Hive
               raise ArgumentError, "#{key} must be a sha256"
             end
           end
+          unless recovery["canonical_task_folder"].is_a?(String) &&
+                 !recovery["canonical_task_folder"].empty?
+            raise ArgumentError, "canonical_task_folder must be a non-empty string"
+          end
+          unless recovery["failure_origin"].is_a?(String) &&
+                 !recovery["failure_origin"].empty?
+            raise ArgumentError, "failure_origin must be a non-empty string"
+          end
+          validate_nullable_time!(recovery["next_eligible_at"], "next_eligible_at")
+          unless recovery["owner"].nil? ||
+                 Hive::Recovery::OWNERS.include?(recovery["owner"])
+            raise ArgumentError, "invalid recovery owner"
+          end
+          %w[blocked_reason blocked_remediation attempt_id terminal_outcome].each do |key|
+            next if recovery[key].nil? || recovery[key].is_a?(String)
+
+            raise ArgumentError, "#{key} must be a string or null"
+          end
+          if recovery.key?("retry_count") &&
+             (!recovery["retry_count"].is_a?(Integer) || recovery["retry_count"].negative?)
+            raise ArgumentError, "retry_count must be a non-negative integer"
+          end
+          validate_nullable_time!(recovery["terminal_at"], "terminal_at")
+          validate_provider_hint!(recovery["provider_hint"]) if recovery.key?("provider_hint")
+        end
+
+        def validate_nullable_time!(value, key)
+          return if value.nil?
+          raise ArgumentError, "#{key} must be a string or null" unless value.is_a?(String)
+
+          Time.iso8601(value)
+        rescue ArgumentError
+          raise ArgumentError, "#{key} must be an ISO-8601 timestamp or null"
+        end
+
+        def validate_provider_hint!(hint)
+          return if hint.nil?
+          raise ArgumentError, "provider_hint must be an object or null" unless hint.is_a?(Hash)
+          unless hint.keys.sort == %w[display_only retry_after] &&
+                 hint["retry_after"].is_a?(String) &&
+                 !hint["retry_after"].empty? &&
+                 hint["display_only"] == true
+            raise ArgumentError, "invalid provider_hint"
+          end
+        end
+
+        def quarantine_claim(path, reason:, now:)
+          return nil unless File.file?(path)
+
+          source_meta = claim_metadata_path(path)
+          bytes = File.binread(path)
+          dir = File.join(File.dirname(path), QUARANTINE_DIRNAME)
+          FileUtils.mkdir_p(dir, mode: 0o700)
+          File.chmod(0o700, dir)
+          basename = "#{File.basename(path)}.#{SecureRandom.hex(8)}"
+          destination = File.join(dir, basename)
+          destination_meta = "#{destination}#{CLAIM_META_SUFFIX}"
+          File.rename(path, destination)
+          moved_meta = File.file?(source_meta)
+          File.rename(source_meta, destination_meta) if moved_meta
+          evidence = {
+            "reason" => reason.to_s,
+            "source" => File.basename(path),
+            "quarantined_at" => now.utc.iso8601(6),
+            "sha256" => Digest::SHA256.hexdigest(bytes)
+          }
+          Hive::AtomicFile.write(
+            "#{destination}.evidence.json", "#{JSON.generate(evidence)}\n", mode: 0o600
+          )
+          fsync_directory(dir)
+          destination
+        rescue StandardError
+          File.rename(destination_meta, source_meta) if
+            defined?(moved_meta) && moved_meta &&
+            defined?(destination_meta) && File.file?(destination_meta) &&
+            !File.exist?(source_meta)
+          File.rename(destination, path) if
+            defined?(destination) && File.file?(destination) && !File.exist?(path)
+          nil
         end
 
         def rewrite_request(path, data)

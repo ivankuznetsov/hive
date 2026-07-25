@@ -315,6 +315,18 @@ module Hive
 
         observe_external_running_rows(result.rows)
 
+        # Recovery requests require the immutable task id. Assign ids before
+        # the healer observes failures so an externally-created legacy task can
+        # become recoverable in this tick instead of producing an unusable
+        # request that no later backfill can repair.
+        begin
+          @task_id_backfiller.backfill(result.rows, now: now)
+        rescue StandardError => e
+          @logger.event(:fatal,
+                        message: "task_id_backfiller raised: #{e.class}: #{e.message}",
+                        keeping_previous: true)
+        end
+
         # Heal AGENT_WORKING markers whose backing agent isn't alive
         # BEFORE per-row dispatch — a healed row classifies as :error on
         # the next status read, and we don't want the dispatcher to try
@@ -346,17 +358,6 @@ module Hive
         rescue StandardError => e
           @logger.event(:fatal,
                         message: "display_name_backfiller raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
-
-        # Self-heal tasks created outside `hive new` that never got an id.
-        # Same additive, marker-free, defensively-rescued contract as the
-        # name backfiller above.
-        begin
-          @task_id_backfiller.backfill(result.rows, now: now)
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "task_id_backfiller raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
 
@@ -1425,25 +1426,45 @@ module Hive
       end
 
       def durable_recovery_receipts
+        bad_handler = lambda do |path:, reason:|
+          @logger.event(
+            :fatal,
+            message: "recovery lifecycle delivery skipped: #{reason}",
+            path: path,
+            keeping_previous: true
+          )
+        end
         pending = Hive::Daemon::DispatchRequestQueue.pending(
-          state_home: dispatch_request_state_home
+          state_home: dispatch_request_state_home,
+          bad_handler: bad_handler
         )
         claimed = Hive::Daemon::DispatchRequestQueue.claimed(
-          state_home: dispatch_request_state_home
+          state_home: dispatch_request_state_home,
+          bad_handler: bad_handler
         ).map(&:request)
         (pending + claimed).uniq(&:request_id).filter_map do |request|
           next unless request.recovery.is_a?(Hash)
 
-          receipt = @recovery_coordinator.receipt_for_request(request)
-          {
-            "project" => request.project,
-            "slug" => request.slug,
-            "stage" => request.expected_stage,
-            "recovery_phase" => request.recovery["phase"],
-            "expected_marker_name" => request.expected_marker_name,
-            "expected_marker_attrs" => request.recovery["expected_marker_attrs"],
-            "receipt" => receipt.to_h
-          }
+          begin
+            receipt = @recovery_coordinator.receipt_for_request(request)
+            {
+              "project" => request.project,
+              "slug" => request.slug,
+              "stage" => request.expected_stage,
+              "recovery_phase" => request.recovery["phase"],
+              "expected_marker_name" => request.expected_marker_name,
+              "expected_marker_attrs" => request.recovery["expected_marker_attrs"],
+              "receipt" => receipt.to_h
+            }
+          rescue StandardError => e
+            @logger.event(
+              :fatal,
+              message: "recovery lifecycle receipt raised: #{e.class}: #{e.message}",
+              request_id: request.request_id,
+              keeping_previous: true
+            )
+            nil
+          end
         end
       rescue StandardError => e
         @logger.event(
@@ -1869,10 +1890,13 @@ module Hive
           begin
             process_dispatch_request_iteration(req, now: now, rows: rows)
           rescue StandardError => e
+            recovery_receipt = defer_recovery_after_dispatch_failure(req, now: now)
             @logger.event(:dispatch_request_rejected,
                           request_id: req.request_id, project: req.project,
                           slug: req.slug,
                           reason: "spawn_failure: #{e.class}: #{e.message[0, 200]}",
+                          lifecycle: recovery_receipt&.status,
+                          next_eligible_at: recovery_receipt&.next_eligible_at,
                           path: req.path)
             # Don't remove the file — let the next tick try again.
             # If the failure is persistent (e.g. config corruption),
@@ -1891,6 +1915,20 @@ module Hive
         @logger.event(event, request_id: request_id, **attributes)
         @dispatch_request_log_signatures[key] = signature
         true
+      end
+
+      def defer_recovery_after_dispatch_failure(request, now:)
+        return unless request.recovery.is_a?(Hash)
+
+        @recovery_coordinator.defer_dispatch_failure(request, now: now)
+      rescue StandardError => e
+        @logger.event(
+          :fatal,
+          message: "recovery dispatch pacing failed: #{e.class}: #{e.message}",
+          request_id: request.request_id,
+          keeping_previous: true
+        )
+        nil
       end
 
       # Body of one queue iteration. Extracted so the rescue in
@@ -1953,7 +1991,7 @@ module Hive
             )
             return
           end
-          recovery_receipt = @recovery_coordinator.resume(request: req, row: row)
+          recovery_receipt = @recovery_coordinator.resume(request: req, row: row, now: now)
           unless recovery_receipt.status == "queued" &&
                  recovery_receipt.phase == "cleared"
             log_dispatch_request_once(

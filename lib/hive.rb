@@ -14,9 +14,9 @@ module Hive
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
       "hive-status" => 6,
-      "hive-operational-status" => 1,
+      "hive-operational-status" => 2,
       "hive-watch-event" => 1,
-      "hive-act" => 1,
+      "hive-act" => 2,
       "hive-init" => 2,
       "hive-setup-agents" => 1,
       "hive-setup" => 1,

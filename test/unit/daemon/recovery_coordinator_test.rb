@@ -67,6 +67,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
       assert_equal %w[queued queued queued], [ web.status, bot.status, healer.status ]
       assert_equal [ "web-action" ], [ web.request_id, bot.request_id, healer.request_id ].uniq
+      assert_equal [ 1 ], [ web.retry_count, bot.retry_count, healer.retry_count ].uniq
       assert_equal 1, Q.pending(state_home: state_home).size
     end
   end
@@ -392,10 +393,108 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_resolved_safety_block_is_cleared_before_dispatch
+    inspections = 0
+    safety = lambda do |_row|
+      inspections += 1
+      inspections == 3 ? [ false, "temporary ownership mismatch" ] : [ true, "safe" ]
+    end
+
+    with_fixture(safety: safety) do |coordinator, row, state_home|
+      coordinator.request(
+        row: row, requestor: "healer", request_id: "recover-resolved-block", now: NOW
+      )
+      request = Q.pending(state_home: state_home).fetch(0)
+      blocked = coordinator.resume(request: request, row: row, now: NOW)
+      assert_equal "blocked", blocked.status
+
+      resumed = coordinator.resume(request: request, row: row, now: NOW + 1)
+
+      assert_equal "queued", resumed.status
+      assert_equal "cleared", resumed.phase
+      persisted = Q.fetch(request.request_id, state_home: state_home).recovery
+      assert_nil persisted.fetch("blocked_reason")
+      assert_nil persisted.fetch("blocked_remediation")
+      assert_equal "scheduler", persisted.fetch("owner")
+    end
+  end
+
+  def test_post_clear_dispatch_failure_uses_durable_hourly_pacing
+    with_fixture do |coordinator, row, state_home|
+      coordinator.request(
+        row: row, requestor: "healer", request_id: "recover-spawn-failure", now: NOW
+      )
+      request = Q.pending(state_home: state_home).fetch(0)
+      coordinator.resume(request: request, row: row, now: NOW)
+      cleared = Q.fetch(request.request_id, state_home: state_home)
+
+      deferred = coordinator.defer_dispatch_failure(cleared, now: NOW + 5)
+      early = coordinator.resume(request: cleared, row: row, now: NOW + 6)
+      due = coordinator.resume(request: cleared, row: row, now: NOW + 3_605)
+
+      assert_equal "cooldown", deferred.status
+      assert_equal (NOW + 3_605).iso8601(6), deferred.next_eligible_at
+      assert_equal "cooldown", early.status
+      assert_equal "queued", due.status
+      assert_equal "cleared", due.phase
+    end
+  end
+
+  def test_idless_task_is_not_persisted_as_an_unrecoverable_request
+    with_fixture(task_id: nil) do |coordinator, row, state_home|
+      receipt = coordinator.request(
+        row: row, requestor: "healer", request_id: "recover-idless", now: NOW
+      )
+
+      assert_equal "blocked", receipt.status
+      assert_equal "missing_task_id", receipt.reason
+      assert_equal "hive", receipt.owner
+      assert_empty Q.pending(state_home: state_home)
+      assert_equal :error, Hive::Markers.current(row.state_file).name
+    end
+  end
+
+  def test_repeated_legacy_failure_with_same_attrs_is_a_new_occurrence
+    attrs = { "reason" => "timeout" }
+    initial_mtime = NOW - 3_600
+    with_fixture(marker_attrs: attrs, mtime: initial_mtime) do |coordinator, row, state_home|
+      first = coordinator.request(
+        row: row, requestor: "healer", request_id: "legacy-first", now: NOW
+      )
+      request = Q.fetch(first.request_id, state_home: state_home)
+      coordinator.resume(request: request, row: row, now: NOW)
+      request = Q.fetch(first.request_id, state_home: state_home)
+      coordinator.mark_dispatched(
+        request, attempt_id: "attempt-first", terminal: true,
+        outcome: "failed", now: NOW + 1
+      )
+
+      recurrence_at = NOW + 10
+      body = Hive::Markers.without_markers(File.binread(row.state_file))
+      File.write(
+        row.state_file,
+        "#{body.rstrip}\n\n#{Hive::Markers.build_marker("ERROR", attrs)}\n"
+      )
+      File.utime(recurrence_at, recurrence_at, row.state_file)
+      repeated = row.with(state_file_mtime: recurrence_at, marker_attrs: attrs)
+
+      second = coordinator.request(
+        row: repeated, requestor: "healer", request_id: "legacy-second",
+        now: recurrence_at + 3_600
+      )
+
+      assert_equal "queued", second.status
+      assert_equal "legacy-second", second.request_id
+      refute_equal first.request_id, second.request_id
+      assert_nil Q.fetch(first.request_id, state_home: state_home),
+                 "the superseded terminal receipt is removed after new admission"
+    end
+  end
+
   private
 
   def with_fixture(marker_attrs: nil, mtime: NOW - 3600, safety: nil,
-                   task_resolver_builder: nil)
+                   task_resolver_builder: nil, task_id: 817)
     Dir.mktmpdir("hive-recovery-coordinator") do |dir|
       folder = File.join(dir, "task")
       FileUtils.mkdir_p(folder)
@@ -404,7 +503,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       File.write(state_file, "# Task\n\n#{Hive::Markers.build_marker("ERROR", attrs)}\n")
       File.utime(mtime, mtime, state_file)
       task = FakeTask.new(
-        id: 817, slug: "demo-task", folder: folder, state_file: state_file,
+        id: task_id, slug: "demo-task", folder: folder, state_file: state_file,
         stage_index: 4, stage_name: "execute"
       )
       row = FakeRow.new(

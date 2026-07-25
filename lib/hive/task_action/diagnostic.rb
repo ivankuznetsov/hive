@@ -5,6 +5,7 @@ require "yaml"
 require "hive/execute_waiting_action"
 require "hive/conditions/recovery_action"
 require "hive/markers"
+require "hive/operational_action"
 require "hive/secret_patterns"
 require "hive/diagnostic_helpers"
 
@@ -45,6 +46,7 @@ module Hive
                      finalize_missing_pr_url:, finalize_pr_url_mismatch:,
                      legacy_execute_findings:, stale_agent_reason:,
                      condition_gate: nil,
+                     projection: nil,
                      state_file_mtime: nil,
                      project_name: nil, project_count: 1)
         @task = task
@@ -58,6 +60,7 @@ module Hive
         @legacy_execute_findings = legacy_execute_findings
         @stale_agent_reason = stale_agent_reason
         @condition_gate = condition_gate
+        @projection = projection
         @state_file_mtime = state_file_mtime
         @project_name = project_name
         @project_count = project_count
@@ -355,7 +358,7 @@ module Hive
           return [
             marker_summary,
             "Hive rejected the fix-agent fallback commit because staged paths were outside review.fix.auto_commit.scope_check.",
-            "Inspect the listed files, remove or revert rejected worktree changes, or adjust review.fix.auto_commit.scope_check before clearing REVIEW_ERROR."
+            "Inspect the listed files, remove or revert rejected worktree changes, or adjust review.fix.auto_commit.scope_check, then use the current workflow.retry operational action."
           ].join("\n")
         end
 
@@ -363,7 +366,7 @@ module Hive
           return [
             marker_summary,
             "Hive could not create the fix-agent fallback commit because commit signing policy or signing execution blocked it.",
-            "Inspect the worktree changes, manually commit or revert remaining changes, fix signing config or set review.fix.auto_commit.sign_policy to inherit/bypass/fail as appropriate, then clear REVIEW_ERROR and re-run."
+            "Inspect the worktree changes, manually commit or revert remaining changes, fix signing config or set review.fix.auto_commit.sign_policy to inherit/bypass/fail as appropriate, then use the current workflow.retry operational action."
           ].join("\n")
         end
 
@@ -371,7 +374,7 @@ module Hive
           return [
             marker_summary,
             "Hive could not read the task worktree Git status before or after running the review fix agent.",
-            "Repair the worktree or repository state, then clear REVIEW_ERROR and re-run the review."
+            "Repair the worktree or repository state, then use the current workflow.retry operational action."
           ].join("\n")
         end
 
@@ -485,44 +488,42 @@ module Hive
         )
       end
 
-      # `hive markers clear` accepts --match-attr KEY=VALUE or comma-separated
-      # KEY=VALUE pairs; pick the most-identifying guard per marker shape. The
-      # recipe stays a copy-pasteable one-liner so external agents and humans
-      # can run it from a shell unchanged.
+      # Recovery commands always carry the exact observation token from the
+      # current operational action. The coordinator re-resolves that same row
+      # under lock; diagnostics never publish a marker-clear shortcut.
       def retry_command_string
-        attrs = marker.attrs || {}
-        case marker.name
-        when :review_error
-          match_attr = Hive::Markers.review_error_recovery_match_attr(attrs)
-          attr_pair = match_attr ? [ "--match-attr", match_attr ] : []
-          clear_argv = [ "hive", "markers", "clear", task.folder,
-                         "--name", "REVIEW_ERROR", *attr_pair ]
-          "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
-        when :review_ci_stale
-          attr_pair = priority_match_attr(attrs, %w[pass phase reason])
-          clear_argv = [ "hive", "markers", "clear", task.folder,
-                         "--name", marker.name.to_s.upcase, *attr_pair ]
-          "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
-        when :review_stale
-          attr_pair = priority_match_attr(attrs, %w[pass reason])
-          clear_argv = [ "hive", "markers", "clear", task.folder,
-                         "--name", "REVIEW_STALE", *attr_pair ]
-          "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
-        when :error
-          match_attr = Hive::Markers.error_recovery_match_attr(attrs)
-          attr_pair = match_attr ? [ "--match-attr", match_attr ] : []
-          clear_argv = [ "hive", "markers", "clear", task.folder,
-                         "--name", "ERROR", *attr_pair ]
-          "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
-        end
-      end
+        return unless Hive::Recovery.recoverable_marker?(marker.name)
 
-      def priority_match_attr(attrs, keys)
-        keys.each do |key|
-          value = attrs[key]
-          return [ "--match-attr", "#{key}=#{value}" ] if value && !value.to_s.empty?
+        project = @project_name || (task.project_name if task.respond_to?(:project_name))
+        return if project.to_s.empty?
+
+        action_id = Hive::OperationalAction::RETRY_ACTION_ID
+        target = "#{project}:#{task.slug}"
+        projection = @projection.respond_to?(:to_h) ? @projection.to_h : @projection
+        projection = {} unless projection.is_a?(Hash)
+        identity = projection.fetch("identity", {})
+        observed_mtime = @state_file_mtime
+        if observed_mtime.nil? && task.respond_to?(:state_file) && File.file?(task.state_file)
+          observed_mtime = File.mtime(task.state_file).utc
         end
-        []
+        token = Hive::Recovery::API.observation_token(
+          {
+            "project" => project,
+            "slug" => task.slug,
+            "folder" => task.folder,
+            "state_file" => task.state_file,
+            "stage" => stage_dir,
+            "marker" => marker.name.to_s,
+            "marker_attrs" => marker.attrs,
+            "state_file_mtime" => observed_mtime,
+            "task_generation" => identity["task_generation"],
+            "attempt_id" => identity["attempt_id"]
+          }
+        )
+
+        [
+          "hive", "act", action_id, target, "--observation", token
+        ].shelljoin
       end
 
       def workflow_command(verb)

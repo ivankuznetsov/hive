@@ -215,6 +215,46 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_terminal_recovery_remains_visible_with_successful_workflow_marker
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      completed = row(marker: "waiting", marker_attrs: {})
+      receipt = {
+        "status" => "terminal",
+        "request_id" => "recovery-1",
+        "attempt_id" => "attempt-1",
+        "phase" => "terminal",
+        "terminal_outcome" => "succeeded"
+      }
+      recoveries = {
+        "stale_agent" => {
+          "receipts" => [
+            {
+              "project" => "demo",
+              "slug" => "ship-it",
+              "stage" => "4-execute",
+              "recovery_phase" => "terminal",
+              "expected_marker_name" => "error",
+              "expected_marker_attrs" => { "reason" => "timeout" },
+              "receipt" => receipt
+            }
+          ]
+        }
+      }
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        initial_rows: [ completed ], final_rows: [ completed ],
+        controller: {}, queue: {}, recoveries: recoveries, now: T0 + 1
+      )
+
+      disposition = reader.read(now: T0 + 2).dig("tasks", 0, "disposition")
+      assert_equal "attempt_terminal_replay", disposition.fetch("decision")
+      assert_equal receipt, disposition.fetch("recovery")
+    end
+  end
+
   def test_provider_hold_without_stage_or_reason_still_matches_the_current_task
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")

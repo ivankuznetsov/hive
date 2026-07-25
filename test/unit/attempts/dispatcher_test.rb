@@ -8,7 +8,7 @@ class AttemptsDispatcherTest < Minitest::Test
   CLAIM_CAPABILITY = "c" * 64
   FakeTask = Struct.new(
     :id, :slug, :state_file, :stage_index, :stage_name, :project_root, :worktree_path,
-    keyword_init: true
+    :workflow, keyword_init: true
   )
   FakeRequest = Struct.new(
     :slug, :project, :argv, :request_id, :task_generation,
@@ -172,7 +172,7 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def test_failed_brainstorm_artifact_repair_replays_for_a_new_request
+  def test_failed_brainstorm_artifact_repair_allows_a_new_request
     with_dispatcher do |dispatcher, launcher, task, store|
       task.stage_index = 2
       task.stage_name = "brainstorm"
@@ -200,9 +200,34 @@ class AttemptsDispatcherTest < Minitest::Test
         generation: repair.attempt.task_generation
       )
 
+      assert_equal :accepted, replay.status
+      refute_equal failed.attempt_id, replay.attempt.attempt_id
+      assert_equal 3, launcher.launched.size
+    end
+  end
+
+  def test_non_coding_stage_named_brainstorm_has_no_coding_artifact_contract
+    with_dispatcher do |dispatcher, launcher, task, store|
+      task.workflow = "writing"
+      task.stage_index = 2
+      task.stage_name = "brainstorm"
+      File.write(task.state_file, "")
+      first = dispatch(
+        dispatcher, task, request_id: "writing-one",
+        intended_stage: "2-brainstorm"
+      )
+      terminal = terminalize_attempt(
+        store, launcher, first, outcome: "succeeded", exit_status: 0, now: NOW + 3
+      )
+
+      replay = dispatch(
+        dispatcher, task, request_id: "writing-two",
+        intended_stage: "2-brainstorm"
+      )
+
       assert_equal :terminal_replay, replay.status
-      assert_equal failed.receipt, replay.receipt
-      assert_equal 2, launcher.launched.size
+      assert_equal terminal.receipt, replay.receipt
+      assert_equal 1, launcher.launched.size
     end
   end
 

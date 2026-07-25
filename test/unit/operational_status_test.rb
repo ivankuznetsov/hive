@@ -24,7 +24,8 @@ class OperationalStatusTest < Minitest::Test
     result = project(payload)
 
     assert_equal "hive-operational-status", result.fetch("schema")
-    assert_equal 1, result.fetch("schema_version")
+    assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-operational-status"),
+                 result.fetch("schema_version")
     assert_equal true, result.fetch("ok")
     assert_equal 6, result.dig("summary", "active")
     assert_equal 1, result.dig("archive", "count")

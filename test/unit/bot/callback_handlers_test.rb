@@ -792,6 +792,24 @@ class HiveBotCallbackHandlersTest < Minitest::Test
                    marker: "REVIEW_ERROR", match_attr: "pass=2" }, result.alert_reset)
   end
 
+  def test_clear_and_retry_rejects_callback_for_an_older_marker_generation
+    row = status_row(
+      slug: "red-task-260518-cccc",
+      attrs: { "marker_id" => "new-marker", "reason" => "limits_reached" }
+    )
+    result = handlers_with_rows([ row ]).handle(
+      :callback_clear_and_retry,
+      update(
+        "clear_retry:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR:" \
+        "marker_id=old-marker,reason=limits_reached"
+      )
+    )
+
+    assert_equal :reply, result.action
+    assert_equal "Task status changed - reopen /queue.", result.text
+    assert_nil result.recovery
+  end
+
   def test_clear_and_retry_none_marker_skips_marker_clear_and_runs_stage
     result = @handlers.handle(
       :callback_clear_and_retry,

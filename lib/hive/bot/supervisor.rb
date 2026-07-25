@@ -1155,16 +1155,16 @@ module Hive
       # before that request is visible to the daemon.
       def enqueue_dispatch_request(result, update, request_id: nil)
         writer_method = request_id.nil? && @dispatch_request_writer.respond_to?(:dispatch!) ? :dispatch! : :write!
-        written = @dispatch_request_writer.public_send(
-          writer_method,
+        writer_arguments = {
           project: result.project,
           slug: result.slug,
           argv: Array(result.command_argv),
           chat_id: update.chat_id,
           update_id: update.update_id,
-          trigger: trigger_for_result(result),
-          request_id: request_id
-        )
+          trigger: trigger_for_result(result)
+        }
+        writer_arguments[:request_id] = request_id if request_id
+        written = @dispatch_request_writer.public_send(writer_method, **writer_arguments)
         reference = written if written.respond_to?(:request_id)
         request_id = reference ? reference.request_id : written
         @logger.event(:dispatched_command,

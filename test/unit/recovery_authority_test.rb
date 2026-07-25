@@ -31,7 +31,7 @@ class HiveRecoveryAuthorityTest < Minitest::Test
     end
 
     assert_empty violations,
-                 "recovery adapters must submit to DispatchRequestWriter/RecoveryCoordinator:\n" \
+                 "recovery adapters must submit to Recovery::API/RecoveryCoordinator:\n" \
                  "#{violations.join("\n")}"
   end
 
@@ -53,7 +53,7 @@ class HiveRecoveryAuthorityTest < Minitest::Test
     assert_equal [ "lib/hive/daemon/recovery_coordinator.rb" ], direct_clear_files.sort
   end
 
-  def test_each_user_facing_adapter_routes_recovery_to_the_writer
+  def test_each_user_facing_adapter_routes_recovery_to_the_neutral_api
     expected = {
       "bot" => "lib/hive/bot/supervisor.rb",
       "tui" => "lib/hive/tui/bubble_model.rb",
@@ -64,7 +64,11 @@ class HiveRecoveryAuthorityTest < Minitest::Test
     expected.each do |surface, relative_path|
       source = File.read(File.join(ROOT, relative_path))
       assert_match(/\.recover!\(/, source,
-                   "#{surface} recovery must use the canonical writer")
+                   "#{surface} recovery must use the canonical API")
+      next if surface == "bot" # bot keeps the combined queue-writer compatibility adapter
+
+      assert_includes source, "Hive::Recovery::API",
+                      "#{surface} must not depend on the Telegram queue writer"
     end
   end
 

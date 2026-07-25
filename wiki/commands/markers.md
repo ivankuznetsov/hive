@@ -7,7 +7,7 @@ updated: 2026-07-12
 tags: [command, markers, recovery, json]
 ---
 
-**TLDR**: `hive markers clear FOLDER --name <NAME> [--project NAME] [--json]` validates the current recovery marker, removes marker history from the task's state file (atomic write), and records a `hive_commit` so the audit trail stays accurate. Replaces the previous "manually edit `task.md` and delete the marker comment" recovery prose with a deterministic, agent-callable surface.
+**TLDR**: `hive markers clear FOLDER --name <NAME> [--project NAME] [--json]` is a low-level maintenance command that validates the current recovery marker, removes marker history from the task's state file (atomic write), and records a `hive_commit` so the audit trail stays accurate. Normal agent recovery must use the fresh `workflow.retry` action from operational status so mutation and rerun remain one durable lifecycle.
 
 ## Usage
 
@@ -88,14 +88,14 @@ The `error_kind` enum mirrors `hive approve --json`: `ambiguous_slug`, `wrong_st
 | Any `--match-attr` key/value does not match the current marker attrs | 4 (`WRONG_STAGE`) | `Hive::WrongStage` |
 | Internal failure (git, fs) | 70 (`SOFTWARE`) | `Hive::InternalError` |
 
-## Why a typed command instead of `sed -i`?
+## Why this maintenance command exists
 
-The old recovery prose was "remove the marker, then re-run `hive run`". That worked for humans but broke for agents:
+Direct file editing is never safe marker maintenance:
 
 - **No deterministic exit code on success/failure.** A regex replace either touches the file or doesn't; an agent can't tell whether the marker was actually present.
 - **No marker-vs-state guard.** `sed -i` happily deletes any HTML comment matching a regex, including `<!-- REVIEW_COMPLETE -->`. The allowlist + actual-marker check refuses both forms of mistake.
 - **No audit trail.** Hand-edits don't land on the `hive/state` branch; future `hive metrics` walks miss the recovery action entirely.
-- **No JSON envelope.** `hive markers clear --json` is part of the same agent-callable surface as `hive approve --json` and `hive run --json`.
+- **No JSON envelope.** `hive markers clear --json` remains scriptable for explicit maintenance, but it does not create a durable continuation. Use `hive act workflow.retry ...` for ordinary recovery.
 
 ## Backlinks
 

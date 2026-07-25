@@ -1,6 +1,8 @@
 require "test_helper"
+require "digest"
 require "fileutils"
 require "json"
+require "json_schemer"
 require "securerandom"
 require "tmpdir"
 require "hive/daemon/dispatch_request_queue"
@@ -177,6 +179,56 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
         state_home: dir
       )
       assert_equal "cleared", Q.pending(state_home: dir).fetch(0).recovery.fetch("phase")
+    end
+  end
+
+  def test_v4_recovery_runtime_validation_matches_closed_wire_contract
+    invalid = [
+      recovery_payload.merge("unexpected" => true),
+      recovery_payload.merge("owner" => "mystery"),
+      recovery_payload.merge(
+        "provider_hint" => { "retry_after" => nil, "display_only" => true }
+      )
+    ]
+
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      invalid.each_with_index do |recovery, index|
+        assert_raises(ArgumentError) do
+          Q.write_request!(
+            project: "hive", slug: "retry-task",
+            argv: %w[hive run retry-task --stage 4-execute --project hive --json],
+            request_id: "invalid-recovery-#{index}", recovery: recovery,
+            state_home: dir, now: Time.utc(2026, 7, 25, 12)
+          )
+        end
+      end
+    end
+  end
+
+  def test_v4_recovery_written_by_runtime_validates_against_published_schema
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      recovery = recovery_payload.merge(
+        "retry_count" => 1,
+        "provider_hint" => {
+          "retry_after" => "2026-07-25T14:00:00Z",
+          "display_only" => true
+        }
+      )
+      request_id = Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --stage 4-execute --project hive --json],
+        requestor: "healer", trigger: "recovery",
+        request_id: "valid-recovery-v4", task_generation: "c" * 64,
+        task_id: 817, expected_stage: "4-execute",
+        expected_marker_name: "error", expected_marker_id: "marker-a",
+        recovery: recovery, state_home: dir, now: Time.utc(2026, 7, 25, 12)
+      )
+      payload = JSON.parse(File.read(Q.fetch(request_id, state_home: dir).path))
+      schema = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-request")))
+      )
+
+      assert_empty schema.validate(payload).to_a
     end
   end
 
@@ -960,19 +1012,25 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
-  def test_recover_claims_removes_malformed_claim_file
+  def test_recover_claims_quarantines_malformed_claim_file_with_evidence
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       claim_dir = Q.directory(state_home: dir)
       bad = File.join(claim_dir, "20260528-bad.json#{Q::CLAIMED_SUFFIX}")
       File.write(bad, "{not json")
-      reasons = []
+      events = []
       removed = Q.recover_claims(
         state_home: dir, now: Time.now, alive: ->(_p, _s) { true },
-        handler: ->(request_id:, reason:, path:) { reasons << reason }
+        handler: ->(request_id:, reason:, path:) { events << [ reason, path ] }
       )
       assert_equal 1, removed
-      assert_equal [ "malformed_claim" ], reasons
+      assert_equal [ "malformed_claim_quarantined" ], events.map(&:first)
       refute File.exist?(bad)
+      quarantined = events.dig(0, 1)
+      assert_equal "{not json", File.binread(quarantined)
+      evidence = JSON.parse(File.read("#{quarantined}.evidence.json"))
+      assert_equal "malformed_claim", evidence.fetch("reason")
+      assert_equal Digest::SHA256.hexdigest("{not json"), evidence.fetch("sha256")
+      assert_equal 0, File.stat(File.dirname(quarantined)).mode & 0o077
     end
   end
 

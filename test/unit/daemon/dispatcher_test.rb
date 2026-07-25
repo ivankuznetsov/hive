@@ -337,8 +337,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       }
     end
 
-    def resume(request:, row:)
-      @resumes << { request: request, row: row }
+    def resume(request:, row:, now: nil)
+      @resumes << { request: request, row: row, now: now }
       Hive::Daemon::RecoveryCoordinator::Receipt.new(
         status: @status,
         request_id: request.request_id,
@@ -1304,6 +1304,61 @@ class HiveDaemonDispatcherTest < Minitest::Test
         ].include?(name)
       }
     end
+  end
+
+  def test_recovery_lifecycle_projection_keeps_healthy_receipts_when_one_request_raises
+    recovery = {
+      "phase" => "admitted",
+      "observed_marker_generation" => "a" * 64,
+      "expected_marker_attrs" => { "reason" => "timeout" },
+      "canonical_task_folder" => "/tmp/recovery-task",
+      "expected_post_clear_progress_fingerprint" => "b" * 64,
+      "dispatch_generation" => "c" * 64,
+      "failure_origin" => "timeout",
+      "next_eligible_at" => T0.iso8601(6),
+      "owner" => "scheduler",
+      "blocked_reason" => nil,
+      "blocked_remediation" => nil
+    }
+    requests = %w[broken healthy].map do |slug|
+      Hive::Daemon::DispatchRequestQueue::Request.new(
+        request_id: "recovery-#{slug}", created_at: T0, project: "p1", slug: slug,
+        argv: [ "hive", "run", slug ], requestor: "healer", trigger: "recovery",
+        expected_stage: "4-execute", expected_marker_name: "error",
+        recovery: recovery
+      )
+    end
+    coordinator = Object.new
+    coordinator.define_singleton_method(:receipt_for_request) do |request|
+      raise IOError, "one corrupt lifecycle" if request.slug == "broken"
+
+      Hive::Daemon::RecoveryCoordinator::Receipt.new(
+        status: "queued", request_id: request.request_id, attempt_id: nil,
+        phase: "admitted", failure_origin: "timeout",
+        next_eligible_at: T0.iso8601(6), owner: "scheduler", reason: nil,
+        remediation: nil, retry_count: nil, provider_hint: nil
+      )
+    end
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      recovery_coordinator: coordinator
+    )
+
+    receipts = with_replaced_singleton_method(
+      Hive::Daemon::DispatchRequestQueue, :pending, ->(**) { requests }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Daemon::DispatchRequestQueue, :claimed, ->(**) { [] }
+      ) do
+        dispatcher.send(:durable_recovery_receipts)
+      end
+    end
+
+    assert_equal [ "healthy" ], receipts.map { |entry| entry.fetch("slug") }
+    assert logger.events.any? { |name, attrs|
+      name == :fatal &&
+        attrs[:request_id] == "recovery-broken" &&
+        attrs[:message].include?("one corrupt lifecycle")
+    }
   end
 
   def test_advance_action_dispatches_workflow_verb

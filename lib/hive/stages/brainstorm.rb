@@ -162,6 +162,7 @@ module Hive
           body.each_line.any? { |line| Hive::BrainstormParser::ROUND_RE.match?(line) }
         when :complete
           requirements = body.split(/^##\s+Requirements\b.*$/i, 2)[1]
+          requirements = requirements&.split(/^##\s+/, 2)&.first
           requirements && requirements.gsub(Hive::Markers::MARKER_RE, "").strip != ""
         else
           false

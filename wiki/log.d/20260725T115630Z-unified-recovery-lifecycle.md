@@ -20,8 +20,10 @@
   it without a second fleet scan and disables or hides Retry according to that
   lifecycle. The real demo recorder now exercises the same queued path from a
   sandbox instead of deleting `plan.md`. Recovery-aware agent contracts are
-  published as operational-status v2 and act v2; the checked-in v1 schemas stay
-  byte-for-byte compatible.
+  published only as operational-status v2 and act v2. A one-off migration
+  updated every in-repository producer, consumer, fixture, and operating skill;
+  the obsolete v1 recovery contracts were removed rather than retained as
+  compatibility code.
 - **Verification**: Focused coordinator, queue, dispatcher, operational,
   adapter-authority, bot, TUI, Rails, status-feed, schema, and recorder syntax
   coverage pins the shared behavior.

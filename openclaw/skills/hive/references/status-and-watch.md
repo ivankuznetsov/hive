@@ -3,7 +3,7 @@
 ## Choose the status surface
 
 - Use `hive status` for a concise human snapshot.
-- Use `hive status --operational --json` for agent decisions. It emits `hive-operational-status.v1`.
+- Use `hive status --operational --json` for agent decisions. It emits `hive-operational-status.v2`.
 - Use `hive status --json` only when a consumer needs the compatibility `hive-status.v6` full graph.
 - Use `hive status --full` for the detailed human table.
 - Use `hive daemon status --json` for daemon process health. Do not substitute daemon health for task or scheduler truth.

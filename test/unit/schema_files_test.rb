@@ -2634,28 +2634,17 @@ class SchemaFilesTest < Minitest::Test
 
   # ── agent-first operational contracts ─────────────────────────────────
 
-  def test_operational_status_and_act_publish_v2_without_mutating_v1
+  def test_operational_status_and_act_publish_only_v2_after_migration
     %w[hive-operational-status hive-act].each do |name|
       path = Hive::Schemas.schema_path(name)
       assert File.file?(path), "schema file missing: #{path}"
       document = JSON.parse(File.read(path))
       assert_equal "https://json-schema.org/draft/2020-12/schema", document.fetch("$schema")
       assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch(name)
-      assert File.file?(Hive::Schemas.schema_path(name, version: 1)),
-             "#{name} v1 must remain published for pinned consumers"
+      refute File.exist?(Hive::Schemas.schema_path(name, version: 1)),
+             "#{name} v1 must not remain published after the one-off migration"
     end
     assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-watch-event")
-    expected_v1 = {
-      "hive-operational-status" =>
-        "99e5d2ec31c3b73bf2b3c3cfcd7067705ceb66a6953288ebbd0a66015e55409f",
-      "hive-act" =>
-        "2dcdf3cd66a76f96e0421f225bed7be0cf50898927e89abd75a387c5ad281b0f"
-    }
-    expected_v1.each do |name, checksum|
-      assert_equal checksum,
-                   Digest::SHA256.file(Hive::Schemas.schema_path(name, version: 1)).hexdigest,
-                   "#{name} v1 changed in place"
-    end
   end
 
   def test_hive_act_error_enum_matches_producer_and_common_envelope_validates

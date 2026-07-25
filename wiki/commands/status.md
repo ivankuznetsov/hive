@@ -21,7 +21,7 @@ table.
 |---|---|
 | `hive status` | Concise human operational snapshot. |
 | `hive status --operational` | Explicit alias for the same concise human view. |
-| `hive status --operational --json` | Additive `hive-operational-status.v2` agent document; v1 remains pinned for stored-output compatibility. |
+| `hive status --operational --json` | `hive-operational-status.v2` agent document. The recovery rollout migrated every in-repository consumer to v2 and removed v1. |
 | `hive status --json` | Unchanged complete `hive-status.v6` compatibility graph for daemon, bot, TUI, and pinned consumers. |
 | `hive status --full` | Former grouped detailed human table. |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`/`--full`. |
@@ -81,8 +81,9 @@ hive act workflow.advance PROJECT:SLUG --observation TOKEN --json
 
 Recoverable rows instead recommend `workflow.retry` with the same token
 contract. `hive-act.v2` returns the canonical queued/cooldown/running/blocked/
-terminal recovery receipt; `hive-act.v1` and operational-status v1 remain
-unchanged compatibility schemas and do not contain recovery fields.
+terminal recovery receipt. The one-off recovery-contract migration moved every
+in-repository producer, consumer, fixture, and operating skill to v2; v1 is no
+longer published or supported.
 
 `hive act` resolves and locks the task again, recomputes the permitted verb,
 and rejects stale tokens or recommendations that are no longer routine. It is

@@ -36,6 +36,8 @@ class GoldenPathE2E < ApplicationSystemTestCase
   end
 
   setup do
+    @web_lock_path = File.join(__dir__, "../../Gemfile.lock")
+    @web_lock_before = File.binread(@web_lock_path)
     configure_owner!(owner: "") # claimable Hive web instance
     speed_up_daemon!
     @project = create_hive_project!("golden-app")
@@ -153,6 +155,8 @@ class GoldenPathE2E < ApplicationSystemTestCase
     log = `git -C #{worktrees.first} log --oneline -1`
     assert_includes log, "golden path sample implementation",
                     "the fake agent's commit must be a real commit in a real worktree"
+    assert_equal @web_lock_before, File.binread(@web_lock_path),
+                 "the nested root bundle must not rewrite the web lockfile"
   end
 
   private
@@ -305,6 +309,9 @@ class GoldenPathE2E < ApplicationSystemTestCase
   def spawn_daemon!
     env = {
       "HIVE_HOME" => ENV["HIVE_HOME"],
+      "HIVE_SKIP_LLM_WIKI_SCHEDULER" => ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"],
+      "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"],
+      "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"],
       # Worktrees must live INSIDE the sandbox — the project-config default
       # would land them in the operator's real ~/Dev.
       "HIVE_WORKTREE_BASE" => File.join(ENV["HIVE_TEST_HOME_ROOT"], "worktrees"),
@@ -322,15 +329,17 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # Fail fast with the REAL error: on CI a broken spawn env produced a
     # daemon that died silently before its first log line, leaving an
     # undiagnosable timeout 90s later.
-    probe_out, probe_err, probe = Open3.capture3(env, "bundle", "exec", "ruby", "-Ilib",
-                                                 "bin/hive", "--version", chdir: REPO_ROOT)
-    unless probe.success?
-      raise "daemon env probe failed (#{probe.exitstatus}): #{probe_err.strip}\n#{probe_out.strip}"
-    end
-
     @daemon_log = ENV.fetch("GOLDEN_E2E_DAEMON_LOG", File.join(ENV["HIVE_TEST_HOME_ROOT"], "golden-daemon.log"))
-    @daemon_pid = Process.spawn(env, "bundle", "exec", "ruby", "-Ilib", "bin/hive",
-                                "daemon", "start", "--foreground",
-                                chdir: REPO_ROOT, out: @daemon_log, err: @daemon_log)
+    Bundler.with_unbundled_env do
+      probe_out, probe_err, probe = Open3.capture3(env, "bundle", "exec", "ruby", "-Ilib",
+                                                   "bin/hive", "--version", chdir: REPO_ROOT)
+      unless probe.success?
+        raise "daemon env probe failed (#{probe.exitstatus}): #{probe_err.strip}\n#{probe_out.strip}"
+      end
+
+      @daemon_pid = Process.spawn(env, "bundle", "exec", "ruby", "-Ilib", "bin/hive",
+                                  "daemon", "start", "--foreground",
+                                  chdir: REPO_ROOT, out: @daemon_log, err: @daemon_log)
+    end
   end
 end

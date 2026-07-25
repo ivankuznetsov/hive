@@ -68,6 +68,114 @@ class ImplementationIdentityRoutingTest < Minitest::Test
     end
   end
 
+  def test_every_implementation_identity_freezes_routing_until_a_new_generation
+    with_identity_task do |task, attempts|
+      first_cfg = identity_config(
+        task.project_root,
+        provider: "codex",
+        model: "gpt-5.6-base-one",
+        models: {
+          "execute" => { "effort" => "low" },
+          "execute_implementation" => { "model" => "gpt-5.6-execute-one" },
+          "open_pr" => { "model" => "gpt-5.6-open-one", "effort" => "medium" },
+          "review" => { "effort" => "high" },
+          "review_fix" => { "model" => "gpt-5.6-fix-one" },
+          "review_ci" => { "model" => "gpt-5.6-ci-one" }
+        }
+      )
+      first = {
+        "execute" => capture_execute(task, attempts, first_cfg, generation: 1),
+        "open_pr" => resolve_stage(
+          task, attempts, first_cfg, "open_pr", "5-open-pr", generation: 1,
+          attempt_id: "open-pr-first"
+        ),
+        "review.fix" => resolve_stage(
+          task, attempts, first_cfg, "review.fix", "6-review", generation: 1,
+          attempt_id: "review-fix-first"
+        ),
+        "review.ci" => resolve_stage(
+          task, attempts, first_cfg, "review.ci", "6-review", generation: 1,
+          attempt_id: "review-ci-first"
+        )
+      }
+      drifted_cfg = identity_config(
+        task.project_root,
+        provider: "codex",
+        model: "gpt-5.6-base-drift",
+        models: {
+          "execute_implementation" => {
+            "model" => "gpt-5.6-execute-drift", "effort" => "xhigh"
+          },
+          "open_pr" => { "model" => "gpt-5.6-open-drift", "effort" => "xhigh" },
+          "review_fix" => { "model" => "gpt-5.6-fix-drift", "effort" => "xhigh" },
+          "review_ci" => { "model" => "gpt-5.6-ci-drift", "effort" => "xhigh" }
+        }
+      )
+      retried = {
+        "execute" => capture_execute(
+          task, attempts, drifted_cfg, generation: 1, attempt_id: "execute-retry"
+        ),
+        "open_pr" => resolve_stage(
+          task, attempts, drifted_cfg, "open_pr", "5-open-pr", generation: 1,
+          attempt_id: "open-pr-retry"
+        ),
+        "review.fix" => resolve_stage(
+          task, attempts, drifted_cfg, "review.fix", "6-review", generation: 1,
+          attempt_id: "review-fix-retry"
+        ),
+        "review.ci" => resolve_stage(
+          task, attempts, drifted_cfg, "review.ci", "6-review", generation: 1,
+          attempt_id: "review-ci-retry"
+        )
+      }
+
+      assert_equal first.transform_values(&:to_h), retried.transform_values(&:to_h)
+      assert_equal(
+        {
+          "execute" => [ "gpt-5.6-execute-one", "low" ],
+          "open_pr" => [ "gpt-5.6-open-one", "medium" ],
+          "review.fix" => [ "gpt-5.6-fix-one", "high" ],
+          "review.ci" => [ "gpt-5.6-ci-one", "high" ]
+        },
+        first.transform_values { |selection| [ selection.model, selection.requested_effort ] }
+      )
+
+      File.write(File.join(task.folder, "plan.md"), "# accepted generation two plan\n")
+      second = {
+        "execute" => capture_execute(
+          task, attempts, drifted_cfg, generation: 2, attempt_id: "execute-generation-2"
+        ),
+        "open_pr" => resolve_stage(
+          task, attempts, drifted_cfg, "open_pr", "5-open-pr", generation: 2,
+          attempt_id: "open-pr-generation-2"
+        ),
+        "review.fix" => resolve_stage(
+          task, attempts, drifted_cfg, "review.fix", "6-review", generation: 2,
+          attempt_id: "review-fix-generation-2"
+        ),
+        "review.ci" => resolve_stage(
+          task, attempts, drifted_cfg, "review.ci", "6-review", generation: 2,
+          attempt_id: "review-ci-generation-2"
+        )
+      }
+
+      assert_equal(
+        {
+          "execute" => [ "gpt-5.6-execute-drift", "xhigh" ],
+          "open_pr" => [ "gpt-5.6-open-drift", "xhigh" ],
+          "review.fix" => [ "gpt-5.6-fix-drift", "xhigh" ],
+          "review.ci" => [ "gpt-5.6-ci-drift", "xhigh" ]
+        },
+        second.transform_values { |selection| [ selection.model, selection.requested_effort ] }
+      )
+      events = Hive::TaskProjection.read_journal(
+        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      )
+      assert_equal 2, events.count { |event| event["event_type"] == "implementation_identity_captured" }
+      assert_equal 6, events.count { |event| event["event_type"] == "implementation_stage_resolved" }
+    end
+  end
+
   def test_pi_and_grok_open_pr_keep_provider_default_unpinned_and_report_unsupported_effort
     with_tmp_dir do |project_root|
       FileUtils.mkdir_p(File.join(project_root, ".pi"))
@@ -123,8 +231,8 @@ class ImplementationIdentityRoutingTest < Minitest::Test
     end
   end
 
-  def resolve_stage(task, attempts, cfg, stage, intended_stage, generation:)
-    attempt_id = "#{stage.tr('.', '-')}-#{generation}"
+  def resolve_stage(task, attempts, cfg, stage, intended_stage, generation:,
+                    attempt_id: "#{stage.tr('.', '-')}-#{generation}")
     attempt = create_attempt(
       task, attempts, attempt_id: attempt_id, stage: intended_stage,
       generation: generation, provider: cfg.dig("execute", "agent")
@@ -156,16 +264,18 @@ class ImplementationIdentityRoutingTest < Minitest::Test
     )
   end
 
-  def identity_config(project_root, provider:, model:, effort: nil)
+  def identity_config(project_root, provider:, model:, effort: nil, models: nil)
     fields = { "agent" => provider, "model" => model }
     fields["effort"] = effort if effort
     fields.freeze
-    {
+    value = {
       "project_root" => project_root,
       "execute" => fields.dup,
       Hive::Config::IMPLEMENTATION_IDENTITY_PROVENANCE_KEY => {
         "execute" => fields, "open_pr" => {}, "review.fix" => {}, "review.ci" => {}
       }.freeze
     }
+    value["models"] = models if models
+    value
   end
 end

@@ -57,3 +57,12 @@ and yields only controls whose effective provenance is exact or coarse.
 Disabled calls and fully shadowed coarse fields never reach the capability
 callback. This keeps structural errors unconditional while deferring
 profile-specific capability errors until reachability is known.
+
+Implementation identity composes these public resolutions into the durable
+stage lifecycle. `execute`, `open_pr`, `review.fix`, and `review.ci` resolve as
+`execute_implementation`, `open_pr`, `review_fix`, and `review_ci`
+respectively. Exact/coarse fields override the current implementation
+identity; absent routed fields fall back through the existing current/legacy
+chain. The selected provider never changes. The effective values and their
+provenance are frozen in the journal before launch, so later reconstruction
+does not reread live `models:` configuration.

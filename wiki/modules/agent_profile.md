@@ -87,6 +87,13 @@ reasoning controls as global arguments before its subcommand. The typed
 argument envelope retains profile, stage, values, and provenance and is
 revalidated at the spawn boundary to prevent cross-profile argv reuse.
 
+Durable routed implementation identities persist that typed envelope's
+effective values and provenance as JSON-safe metadata, not rendered argv.
+Reconstruction asks the stored profile to validate and render the metadata
+again, which preserves global-versus-subcommand placement without consulting
+live routing configuration. Historical identities without the metadata keep
+their legacy flat identity argv path.
+
 `Hive::ImplementationIdentity::EventBuilder` owns the durable journal envelope
 shared by first-time identity capture and legacy reconstruction. It binds the
 task, coding workflow/stage, durable attempt, input/ownership generations,

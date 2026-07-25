@@ -189,9 +189,36 @@ See [[modules/conditions]].
 
 ### Implementation identity events
 
-The same task journal is the sole authority for implementation ownership. `implementation_identity_captured` and `implementation_identity_backfilled` retain one immutable execute identity per numeric task generation; `implementation_identity_fallback` makes last-resort legacy config recovery visible; and `implementation_stage_resolved` records the actual PR-opening or repair selection before its process starts. Reconstruction accepts historical execute attempts only when project, task id/slug, and numeric generation match the current durable attempt. The journal and projection are protected across implementation-owning agent spawns. The projection retains execute history and the latest stage resolution for the current generation. Idempotency keys make equivalent retries no-ops and reject conflicting captures.
+The same task journal is the sole authority for implementation ownership.
+`implementation_identity_captured` and `implementation_identity_backfilled`
+retain one immutable execute identity per numeric task generation;
+`implementation_identity_fallback` makes last-resort legacy config recovery
+visible; and `implementation_stage_resolved` records the actual PR-opening or
+repair selection before its process starts. Reconstruction accepts historical
+execute attempts only when project, task id/slug, and numeric generation match
+the current durable attempt. The journal and projection are protected across
+implementation-owning agent spawns. The projection retains execute history and
+the first resolution for each downstream stage in the current generation, so
+attempt retries and configuration drift cannot replace a launched stage's
+identity. Idempotency keys are generation-and-stage scoped: equivalent retries
+are no-ops and conflicting captures preserve the first journal winner.
 
-The identity stores only provider, concrete model, profile/launcher label, source, generation, originating/resolved attempt, model-pin policy, and requested/effective effort support. Credentials, arbitrary provider configuration, prompts, and raw environment values are excluded. Any compatibility snapshot is cursor/hash-validated and replaceable from the journal.
+New routed identities also store a JSON-safe routing snapshot: the public stage,
+concrete effective model/effort, and exact/coarse/current/legacy field
+provenance. Durable stages map to public keys as `execute` →
+`execute_implementation`, `open_pr` → `open_pr`, `review.fix` → `review_fix`,
+and `review.ci` → `review_ci`. Provider-native `default`/`inherit` model
+sentinels are materialized once before journaling. Reconstruction renders typed
+profile-native arguments from that snapshot without consulting live `models:`
+configuration; historical identities without routing metadata retain their
+legacy flat native arguments.
+
+The identity otherwise stores only provider, concrete model, profile/launcher
+label, source, generation, originating/resolved attempt, model-pin policy, and
+requested/effective effort support. Credentials, arbitrary provider
+configuration, prompts, and raw environment values are excluded. Any
+compatibility snapshot is cursor/hash-validated and replaceable from the
+journal.
 
 ## Runtime dispatch queue and web snapshots
 

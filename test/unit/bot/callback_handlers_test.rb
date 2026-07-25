@@ -13,7 +13,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :stage, :question_n, :answer_text, :mode,
                       :intent, :alert_reset, :clear_keyboard, :format,
-                      :attachment, keyword_init: true)
+                      :attachment, :recovery, keyword_init: true)
   FakeLogger = Struct.new(:events, keyword_init: true) do
     def event(name, **payload)
       events << { name: name, payload: payload }
@@ -766,29 +766,28 @@ class HiveBotCallbackHandlersTest < Minitest::Test
   end
 
   def test_clear_and_retry_uses_current_review_stage_name
-    result = @handlers.handle(
+    row = status_row(slug: "red-task-260518-cccc", attrs: { "pass" => "2" })
+    result = handlers_with_rows([ row ]).handle(
       :callback_clear_and_retry,
       update("clear_retry:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR")
     )
 
-    assert_equal(
-      [ "hive", "review", "red-task-260518-cccc", "--from", "6-review", "--project", "alpha", "--json" ],
-      result.commands.last,
-      "clear-and-retry must dispatch the current review-stage verb, not a retired stage map"
-    )
+    assert_equal :dispatch_recovery, result.action
+    assert_same row, result.recovery
+    assert_nil result.commands,
+               "clear-and-retry must delegate marker mutation and retry admission to the recovery coordinator"
   end
 
   def test_clear_and_retry_passes_marker_match_attr_when_present
-    result = @handlers.handle(
+    row = status_row(slug: "red-task-260518-cccc", attrs: { "pass" => "2" })
+    result = handlers_with_rows([ row ]).handle(
       :callback_clear_and_retry,
       update("clear_retry:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR:pass=2")
     )
 
-    assert_equal(
-      [ "hive", "markers", "clear", "red-task-260518-cccc", "--name",
-        "REVIEW_ERROR", "--project", "alpha", "--match-attr", "pass=2", "--json" ],
-      result.commands.first
-    )
+    assert_equal :dispatch_recovery, result.action
+    assert_same row, result.recovery
+    assert_nil result.commands
     assert_equal({ project: "alpha", slug: "red-task-260518-cccc", stage: "6-review",
                    marker: "REVIEW_ERROR", match_attr: "pass=2" }, result.alert_reset)
   end
@@ -835,21 +834,16 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_nil result.commands, "manual-only refusal must not dispatch any commands"
   end
 
-  def test_autofix_marker_dispatches_clear_then_retry
-    result = @handlers.handle(
+  def test_autofix_marker_dispatches_guarded_recovery
+    row = status_row(slug: "red-task-260518-cccc", attrs: { "pass" => "2" })
+    result = handlers_with_rows([ row ]).handle(
       :callback_autofix,
       update("autofix:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR:pass=2")
     )
 
-    assert_equal :dispatch_commands, result.action
-    assert_equal(
-      [
-        [ "hive", "markers", "clear", "red-task-260518-cccc", "--name",
-          "REVIEW_ERROR", "--project", "alpha", "--match-attr", "pass=2", "--json" ],
-        [ "hive", "review", "red-task-260518-cccc", "--from", "6-review", "--project", "alpha", "--json" ]
-      ],
-      result.commands
-    )
+    assert_equal :dispatch_recovery, result.action
+    assert_same row, result.recovery
+    assert_nil result.commands
     assert_equal({ project: "alpha", slug: "red-task-260518-cccc", stage: "6-review",
                    marker: "REVIEW_ERROR", match_attr: "pass=2" }, result.alert_reset)
     assert_equal true, result.clear_keyboard,

@@ -483,6 +483,8 @@ module Hive
           execute_dispatch(result, update)
         when :dispatch_commands
           dispatch_command_sequence(result, update)
+        when :dispatch_recovery
+          execute_recovery(result, update)
         when :start_answer
           start_answer(result, update)
         when :write_answer_then_reply
@@ -869,6 +871,45 @@ module Hive
           end
         end
         reset_alert_for_result(result) if reset_pending && !failed
+      end
+
+      def execute_recovery(result, update)
+        clear_inline_keyboard(update) if result.respond_to?(:clear_keyboard) && result.clear_keyboard
+        receipt = @dispatch_request_writer.recover!(
+          row: result.recovery,
+          project: result.project,
+          requestor: "bot",
+          chat_id: update.chat_id,
+          update_id: update.update_id
+        )
+        reset_alert_for_result(result) if %w[queued running terminal].include?(receipt.status)
+        @logger.event(
+          :dispatched_command,
+          project: result.project,
+          slug: result.slug,
+          command: "recovery",
+          update_id: update.update_id,
+          via: "recovery_coordinator",
+          request_id: receipt.request_id,
+          attempt_id: receipt.attempt_id,
+          dispatch_status: receipt.status
+        )
+        safe_send_message(chat_id: update.chat_id, text: receipt.human_summary)
+        receipt
+      rescue StandardError => e
+        @logger.event(
+          :send_failure,
+          source: "execute_recovery",
+          chat_id: update.chat_id,
+          slug: result.slug,
+          error_class: e.class.name,
+          message: e.message
+        )
+        safe_send_message(
+          chat_id: update.chat_id,
+          text: "Current state unavailable — #{e.class}; reopen /queue and retry."
+        )
+        nil
       end
 
       # Queue path for `dispatch_command_sequence`: write only the FIRST

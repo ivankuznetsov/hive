@@ -1,17 +1,16 @@
 #!/usr/bin/env ruby
 # Resumes record_box_demo_real.rb after the plan agent hit the Claude
 # session limit: segments A (idea) and B (Q&A) are already on disk; the
-# task is stranded in 3-plan with an ERROR marker in an otherwise empty
-# plan.md. Deleting that plan.md clears the error and the daemon reruns
-# the stage fresh — brainstorm.md (answered, COMPLETE) is intact, so the
-# plan agent keeps its full context. Films segments C + D and concats all
-# four into box-demo-real.mp4.
+# task is stranded in 3-plan with an ERROR marker. Recovery is submitted
+# through Hive's durable coordinator before the daemon boots, so this recorder
+# exercises the same generation/safety contract as auto, web, bot, TUI, and
+# CLI callers. Films segments C + D and concats all four into
+# box-demo-real.mp4.
 #
 #   cd web && bundle exec ruby script/record_box_demo_real_resume.rb \
 #     <segment-a.webm> <segment-b.webm>
 require "fileutils"
 require "net/http"
-require "open3"
 require "playwright"
 require "timeout"
 require "socket"
@@ -29,18 +28,15 @@ project_dir = File.join(sandbox, "repos", "shipped")
 slug = "implement-the-pull-git-command-260612-bd0e"
 raise "sandbox missing" unless File.directory?(project_dir)
 
+ENV["HIVE_HOME"] = hive_home
+require "hive/bot/dispatch_request_writer"
+require "hive/commands/status"
+
 env_base = {
   "HIVE_HOME" => hive_home,
   "BUNDLE_GEMFILE" => File.join(REPO_ROOT, "Gemfile"),
   "RUBYOPT" => nil, "RUBYLIB" => nil
 }
-
-def run!(env, *cmd, chdir: nil)
-  out, err, status = Open3.capture3(env, *cmd, chdir: chdir || Dir.pwd)
-  raise "#{cmd.join(' ')} failed: #{err}\n#{out}" unless status.success?
-
-  out
-end
 
 def stage_glob(project_dir, slug)
   Dir[File.join(project_dir, ".hive-state", "stages", "*", slug)].first
@@ -48,26 +44,29 @@ end
 
 folder = stage_glob(project_dir, slug) or raise "task folder vanished"
 if folder.include?("3-plan")
-  plan_md = File.join(folder, "plan.md")
-  if File.file?(plan_md) && File.read(plan_md).include?("<!-- ERROR")
-    FileUtils.rm_f([ plan_md, "#{plan_md}.markers-lock" ])
-    puts "==> cleared stranded plan error marker"
-  end
-end
+  status_payload = Hive::Commands::Status.new(json: true).json_payload(
+    Hive::Config.registered_projects
+  )
+  row = status_payload.fetch("projects")
+                      .find { |project| project["name"] == "shipped" }
+                      &.fetch("tasks", [])
+                      &.find { |task| task["slug"] == slug }
+  raise "stranded task is absent from status" unless row
 
-# The daemon's policy still classifies this task as error (events.jsonl /
-# status.md carry the failed stage_exit), so it will never re-dispatch it.
-# Run the plan stage FOREGROUND through the product CLI — the same argv the
-# stale-agent healer enqueues — which appends fresh stage events; once plan
-# completes, the daemon advances the task normally.
-if File.directory?(File.join(project_dir, ".hive-state", "stages", "3-plan", slug))
-  puts "==> rerunning plan (foreground, real agent)"
-  $stdout.flush
-  run!(env_base, "bundle", "exec", "ruby", "-Ilib", "bin/hive",
-       "plan", slug, "--project", "shipped", "--from", "3-plan",
-       chdir: REPO_ROOT)
-  puts "==> plan complete"
-  $stdout.flush
+  if row["marker"].to_s == "error"
+    receipt = Hive::Bot::DispatchRequestWriter.recover!(
+      row: row,
+      project: "shipped",
+      requestor: "recorder",
+      state_home: hive_home
+    )
+    puts "==> #{receipt.human_summary}"
+    unless %w[queued running terminal].include?(receipt.status)
+      raise "recorder recovery was not admitted: #{receipt.human_summary}"
+    end
+  else
+    puts "==> plan recovery already advanced to marker=#{row['marker']}"
+  end
 end
 
 puts "==> booting rails + daemon"

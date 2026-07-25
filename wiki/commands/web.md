@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-23
+updated: 2026-07-25
 tags: [command, web, rails, turbo, hivebox-container]
 ---
 
@@ -20,11 +20,10 @@ through the daemon dispatch queue from the filesystem-backed Rails `Task`, daemo
 renders the shared `Hive::Daemon::StatusReport.safe_payload` producer used by
 `hive daemon status --json`, and setup flows
 reuse `Hive::Web::GithubAuth`, `AgentsAuth`, `WorkflowLifecycle`, and the
-Telegram validators from the gem. Red task recovery uses the bot's
-`RecoverySequence` path so the web
-Retry button and Telegram Autofix share the same guarded clear plus rerun
-contract; the TUI's Recover has its own subprocess-based clear + `hive run`
-path with separate gates.
+Telegram validators from the gem. Red task recovery submits the fresh status
+observation through `DispatchRequestWriter.recover!` to the same
+`RecoveryCoordinator` used by Telegram, TUI, CLI/action, recorder, and daemon
+healing.
 
 ## CLI
 
@@ -543,13 +542,12 @@ typed 422 error page, and the moved task folder is left intact.
 Task recovery is routed as `POST /tasks/:project/:slug/recover` →
 `Tasks::RecoveriesController#create` → `Task#recover!`. The shared base
 controller re-reads the current status row rather than trusting form-posted
-stage/marker state. The task refuses manual-only states with
-`RecoverySequence.manual_only_text`, derives the most discriminating
-`--match-attr` through `NotificationBuilders.recovery_match_attr`, then writes
-the first command (`hive markers clear ... --json`) to the daemon dispatch
-queue with `trigger=web_recover` and persists the stage rerun as the same
-request's sequence sidecar. If the guarded clear exits non-zero, the rerun is
-not promoted.
+stage/marker state, then submits that observation to the canonical recovery
+writer. The queued/cooldown/running/blocked/terminal/unavailable receipt is
+flashed verbatim. `StatusFeed` overlays the same durable receipt onto the
+ordinary status payload with an in-memory join, so a snapshot still performs
+one fleet scan. Pending lifecycle states keep Retry visible but disabled with
+an accessible status summary; terminal recovery hides it.
 
 Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
 404) — never a blank 500. Stage-run posts validate the action map before
@@ -641,6 +639,9 @@ stages a temporary local repo, boots the real Rails app and real `hive daemon`,
 uses stage-aware fake `claude` / `gh` shims so the pipeline advances in
 seconds, drives Chromium through Playwright, and writes
 `web/tmp/box-demo.webm` / `web/tmp/box-demo.mp4` via ffmpeg.
+Its real-resume helper uses a sandbox state home, reads the live status row,
+submits recorder-owned recovery through the same writer, and boots the daemon
+to consume it; it never deletes `plan.md` or foreground-runs the plan stage.
 
 ## Docker
 

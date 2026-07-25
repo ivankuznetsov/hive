@@ -10,6 +10,88 @@ class OperationalActionTest < Minitest::Test
   include HiveTestHelper
 
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)
+  RecoveryReceipt = Data.define(:payload) do
+    def to_h = payload
+  end
+  RecoveryWriter = Struct.new(:calls, keyword_init: true) do
+    def recover!(**kwargs)
+      calls << kwargs
+      RecoveryReceipt.new(payload: {
+        "status" => "queued", "request_id" => "request-1", "attempt_id" => nil,
+        "phase" => "admitted", "failure_origin" => "implementer_failed",
+        "next_eligible_at" => "2026-07-20T10:00:00.000000Z",
+        "owner" => "scheduler", "reason" => nil, "remediation" => nil,
+        "retry_count" => 1, "provider_hint" => nil,
+        "terminal_outcome" => nil, "terminal_at" => nil
+      })
+    end
+  end
+
+  def test_retry_action_uses_coordinator_token_and_forwards_it_to_locked_admission
+    observed = {
+      "project" => "demo",
+      "slug" => "failed-task",
+      "folder" => "/tmp/failed-task",
+      "state_file" => "/tmp/failed-task/task.md",
+      "workflow" => "coding",
+      "stage" => "4-execute",
+      "marker" => "error",
+      "attrs" => { "reason" => "implementer_failed", "marker_id" => "marker-1" },
+      "mtime" => "2026-07-20T09:00:00.000000Z",
+      "action" => "error",
+      "condition_task_generation" => "generation-1",
+      "task_generation" => "generation-1",
+      "commit_generation" => nil,
+      "current_attempt" => nil,
+      "attempt_id" => nil,
+      "live_task_lock" => false,
+      "blocked" => false,
+      "held" => nil
+    }
+    action = Hive::OperationalAction.descriptor(project: "demo", row: observed)
+    expected_token = Hive::Daemon::RecoveryCoordinator.observation_token(
+      observed.merge(
+        "state_file_mtime" => observed.fetch("mtime"),
+        "marker_attrs" => observed.fetch("attrs")
+      )
+    )
+    assert_equal "workflow.retry", action.fetch("action_id")
+    assert_equal expected_token, action.fetch("observation_token")
+
+    writer = RecoveryWriter.new(calls: [])
+    executor = Hive::OperationalAction::Executor.new(recovery_writer: writer)
+    task = Object.new
+    executor.define_singleton_method(:registered_project) { |_name| { "path" => "/tmp" } }
+    executor.define_singleton_method(:resolve_task) { |_slug, _project| task }
+    assertions = []
+    with_replaced_singleton_method(
+      Hive::OperationalAction,
+      :observed_row,
+      ->(_task, project:) { observed.merge("project" => project) }
+    ) do
+      with_replaced_singleton_method(
+        Hive::OperationalAction,
+        :assert_current!,
+        lambda { |_task, **kwargs|
+          assertions << kwargs
+          action
+        }
+      ) do
+        result = executor.execute(
+          action_id: action.fetch("action_id"),
+          target: action.fetch("target"),
+          observation_token: action.fetch("observation_token")
+        )
+
+        assert_equal "queued", result.dig("recovery", "status")
+      end
+    end
+
+    assert_equal action.fetch("observation_token"),
+                 writer.calls.fetch(0).fetch(:observation_token)
+    assert_equal action.fetch("observation_token"),
+                 assertions.fetch(0).fetch(:observation_token)
+  end
 
   def test_task_recheck_reproduces_status_token_and_rejects_marker_rotation
     with_tmp_global_config do

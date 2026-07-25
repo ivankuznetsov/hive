@@ -9,6 +9,7 @@ require "hive/workflows"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/healer_support"
 require "hive/daemon/auto_retry_safety"
+require "hive/daemon/recovery_coordinator"
 require "hive/attempts/lost_outcome"
 
 module Hive
@@ -105,7 +106,8 @@ module Hive
                      attempt_loss_recovery_limit: ATTEMPT_LOSS_RECOVERY_LIMIT,
                      auto_retry_enabled: true,
                      project_auto_retry_enabled: ->(_project) { true },
-                     safety: Hive::Daemon::AutoRetrySafety)
+                     safety: Hive::Daemon::AutoRetrySafety,
+                     recovery_coordinator: nil)
         @controller = controller
         @logger = logger
         @request_queue = request_queue
@@ -114,6 +116,7 @@ module Hive
         @error_auto_recovery_limit = nil
         @review_error_auto_recoveries = Hash.new(0)
         @error_auto_recoveries = Hash.new(0)
+        @recovery_receipts = {}
         @attempt_store = attempt_store
         @attempt_dispatcher = attempt_dispatcher
         @lost_outcome_store = lost_outcome_store
@@ -122,6 +125,7 @@ module Hive
         @auto_retry_enabled = auto_retry_enabled == true
         @project_auto_retry_enabled = project_auto_retry_enabled
         @safety = safety
+        @recovery_coordinator = recovery_coordinator
       end
 
       # Lease-backed loss is processed independently of legacy marker rows.
@@ -288,6 +292,7 @@ module Hive
           "enabled" => @auto_retry_enabled,
           "error_retries" => retry_entries(@error_auto_recoveries, kind: "error"),
           "review_retries" => retry_entries(@review_error_auto_recoveries, kind: "review"),
+          "receipts" => operational_recovery_receipts,
           # Compatibility fields from the former bounded policy.
           "error_exhausted" => [],
           "review_exhausted" => [],
@@ -304,6 +309,8 @@ module Hive
       # claiming scheduler ownership for a row the healer will deliberately
       # leave parked.
       def retry_assessment(row, now: Time.now.utc)
+        return @recovery_coordinator.assessment(row, now: now) if @recovery_coordinator
+
         retry_at = row.state_file_mtime &&
                    (row.state_file_mtime + Hive::AgentLimit.retry_cooldown_sec)
         safe, safety_reason = @safety.safe_to_retry?(row)
@@ -343,6 +350,8 @@ module Hive
         end
         @error_auto_recoveries.delete_if { |key, _| !error_tasks[key.first(2)] }
         @review_error_auto_recoveries.delete_if { |key, _| !review_tasks[key.first(2)] }
+        live = error_tasks.merge(review_tasks)
+        @recovery_receipts.delete_if { |key, _| !live[key] }
       end
 
       def retry_entries(source, kind:)
@@ -400,6 +409,8 @@ module Hive
         end
         return if row.live_task_lock == true
         return unless auto_recoverable_error?(row, now: now)
+        return coordinate_error_recovery(row, now: now, marker_reason: marker_reason) if
+          @recovery_coordinator
         # The clear makes a markerless error row take the
         # edit-resume path; without a pre-clear mtime to seed as the
         # dispatch baseline, that row can strand as first-sight
@@ -424,11 +435,10 @@ module Hive
           request_id = requeue_plan_rerun(row, trigger: "error_retry") if plan_retry
           next false if plan_retry && !request_id
 
-          result = Hive::Markers.clear_current(
+          result = RecoveryCoordinator.clear_recoverable_marker(
             row.state_file,
             expected_name: :error,
-            match_attrs: marker_match_attrs(row, marker_reason),
-            purge_history: true
+            match_attrs: marker_match_attrs(row, marker_reason)
           )
           remove_plan_retry_if_unclaimed(request_id) unless result
           result
@@ -546,6 +556,7 @@ module Hive
       def heal_review_error_if_auto_recoverable(row, now:)
         return if row.live_task_lock == true
         return unless auto_recoverable_review_error?(row, now: now)
+        return coordinate_review_recovery(row, now: now) if @recovery_coordinator
 
         reason = marker_reason(row)
         marker_attrs = review_marker_attrs(row)
@@ -558,11 +569,10 @@ module Hive
         recovery_limit = nil
 
         cleared = with_error_heal_lock(row, reason: review_heal_label(reason)) do
-          Hive::Markers.clear_current(
+          RecoveryCoordinator.clear_recoverable_marker(
             row.state_file,
             expected_name: :review_error,
-            match_attrs: marker_attrs,
-            purge_history: true
+            match_attrs: marker_attrs
           )
         end
         return unless cleared
@@ -610,6 +620,72 @@ module Hive
         when "reviewer_partial_failure" then "reviewer_tmux_session_terminated"
         else "review_error_retry"
         end
+      end
+
+      def coordinate_error_recovery(row, now:, marker_reason:)
+        key = error_recovery_key(row, marker_reason)
+        prior = @error_auto_recoveries[key]
+        receipt = @recovery_coordinator.request(
+          row: row, requestor: "healer", now: now, retry_count: prior
+        )
+        @recovery_receipts[[ row.project.to_s, row.slug.to_s ]] = receipt
+        @error_auto_recoveries[key] = receipt.retry_count.to_i if
+          receipt.status == "queued" && receipt.retry_count
+        log_coordinated_recovery(row, receipt)
+        receipt
+      end
+
+      def coordinate_review_recovery(row, now:)
+        reason = marker_reason(row)
+        key = review_error_auto_recovery_key(row, reason: reason)
+        prior = @review_error_auto_recoveries[key]
+        receipt = @recovery_coordinator.request(
+          row: row, requestor: "healer", now: now, retry_count: prior
+        )
+        @recovery_receipts[[ row.project.to_s, row.slug.to_s ]] = receipt
+        @review_error_auto_recoveries[key] = receipt.retry_count.to_i if
+          receipt.status == "queued" && receipt.retry_count
+        log_coordinated_recovery(row, receipt)
+        receipt
+      end
+
+      def log_coordinated_recovery(row, receipt)
+        event = receipt.status == "queued" ? :recovery_requested : :recovery_blocked
+        @logger.event(
+          event,
+          project: row.project,
+          slug: row.slug,
+          stage: row.stage,
+          request_id: receipt.request_id,
+          attempt_id: receipt.attempt_id,
+          lifecycle: receipt.status,
+          phase: receipt.phase,
+          failure_origin: receipt.failure_origin,
+          next_eligible_at: receipt.next_eligible_at,
+          owner: receipt.owner,
+          reason: receipt.reason,
+          remediation: receipt.remediation
+        )
+      rescue StandardError
+        nil
+      end
+
+      def operational_recovery_receipts
+        @recovery_receipts.keys.sort.map do |project, slug|
+          observed = @recovery_receipts.fetch([ project, slug ])
+          current = if observed.request_id && @recovery_coordinator
+            @recovery_coordinator.receipt_for_id(observed.request_id) || observed
+          else
+            observed
+          end
+          {
+            "project" => project,
+            "slug" => slug,
+            "receipt" => current.to_h
+          }
+        end
+      rescue StandardError
+        []
       end
 
       # A provider reset hint is display-only: credits, usage, or the active

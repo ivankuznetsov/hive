@@ -9,7 +9,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :stage, :question_n, :answer_text, :mode,
                       :intent, :alert_reset, :clear_keyboard, :format,
-                      :attachment, keyword_init: true)
+                      :attachment, :recovery, keyword_init: true)
   Update = Struct.new(:text, :chat_id, keyword_init: true) do
     def effective_text = text
     def media? = false
@@ -368,8 +368,8 @@ class HiveBotSlashHandlersTest < Minitest::Test
     # sequence, while the miss path must leave it nil rather than dispatch
     # against an unintended row. (Bare `assert_nil` here would pass for any
     # :reply regardless of correctness.)
-    refute_nil handlers.autofix(Update.new(text: "/autofix #9281", chat_id: 1)).commands,
-               "control: a matching id populates the recovery commands"
+    refute_nil handlers.autofix(Update.new(text: "/autofix #9281", chat_id: 1)).recovery,
+               "control: a matching id populates the recovery observation"
     assert_nil result.commands,
                "a missing id must not populate the recovery commands the success path sets"
   end
@@ -431,7 +431,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     result = handlers.autofix(Update.new(text: "/autofix 9281-260525-abcd", chat_id: 1))
 
-    assert_equal :dispatch_commands, result.action
+    assert_equal :dispatch_recovery, result.action
     assert_equal "9281-260525-abcd", result.slug
   end
 
@@ -497,15 +497,12 @@ class HiveBotSlashHandlersTest < Minitest::Test
   end
 
   def assert_review_error_autofix_result(result)
-    assert_equal :dispatch_commands, result.action
+    assert_equal :dispatch_recovery, result.action
     assert_equal "hive", result.project
     assert_equal "stuck-260525-abcd", result.slug
     assert_nil result.text, "a successful autofix dispatch carries no operator reply text"
-    assert_equal [
-      [ "hive", "markers", "clear", "stuck-260525-abcd", "--name", "REVIEW_ERROR",
-        "--project", "hive", "--match-attr", "pass=2,phase=fix", "--json" ],
-      [ "hive", "review", "stuck-260525-abcd", "--from", "6-review", "--project", "hive", "--json" ]
-    ], result.commands
+    assert_equal REVIEW_ERROR_ROW, result.recovery
+    assert_nil result.commands
     assert_equal({ project: "hive", slug: "stuck-260525-abcd", stage: "6-review",
                    marker: "review_error", match_attr: "pass=2,phase=fix" }, result.alert_reset)
     refute result.clear_keyboard,
@@ -524,11 +521,11 @@ class HiveBotSlashHandlersTest < Minitest::Test
     callback_data = Hive::Bot::NotificationBuilders.autofix_callback(row)
     button = Hive::Bot::Handlers::CallbackHandlers.new(
       pending_ideas: {}, set_last_project: ->(_p) { }, conversation_store: nil,
-      result_class: Result, logger: nil
+      result_class: Result, logger: nil, status_snapshot_provider: -> { [ row ] }
     ).handle(:callback_autofix, Struct.new(:callback_data).new(callback_data))
 
-    assert_equal button.commands, slash.commands,
-                 "slash and inline-button autofix must dispatch byte-identical argv for the same row"
+    assert_equal button.recovery, slash.recovery,
+                 "slash and inline-button autofix must submit the same observed row"
     assert_equal button.alert_reset, slash.alert_reset,
                  "alert_reset must match across surfaces so dedupe behaves identically"
     # The one legitimate divergence: the button clears its inline keyboard;
@@ -625,7 +622,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     result = handlers.autofix(Update.new(text: "/autofix tampered-260525-abcd", chat_id: 1))
 
-    assert_equal :dispatch_commands, result.action
+    assert_equal :dispatch_recovery, result.action
   end
 
   def test_autofix_retries_fix_status_check_failed_row
@@ -641,7 +638,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     result = handlers.autofix(Update.new(text: "/autofix status-260530-abcd", chat_id: 1))
 
-    assert_equal :dispatch_commands, result.action
+    assert_equal :dispatch_recovery, result.action
   end
 
   def test_autofix_no_retry_verb_for_stage_replies_cleanly

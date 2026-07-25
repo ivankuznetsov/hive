@@ -238,24 +238,29 @@ terminal receipt.
 `Hive::Daemon::DispatchRequestQueue.valid_argv?` requires `argv[0] == "hive"`
 and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,
 `plan`, `review`, `open-pr`, `artifacts`, `finalize`, `archive`, `markers`).
-Pending requests expire after `EXPIRY_SEC = 600`. On dispatch, the daemon
+Ordinary pending requests expire after `EXPIRY_SEC = 600`. V4 recovery
+requests instead persist `admitted → cleared → dispatched → terminal`, bound
+to canonical task/stage/marker/generation identity plus owner/remediation and
+terminal outcome/time. Nonterminal recovery never expires or generic-prunes,
+and a bounded request-keyed lock shard serializes claim, phase CAS, and
+pruning; request IDs are bounded filesystem-safe identifiers. On dispatch, the daemon
 renames the file to `<id>.json.claimed` and writes
 `<id>.json.claimed.claim` with `pid`, `process_start_time`, and `claimed_at`;
 after task admission it also carries `attempt_id` and `task_generation`.
 If the daemon dies after admission but before writing those fields, startup
 recovers them from the attempt record's immutable `request_id` correlation.
-Those claims are at-most-once delivery records, not execution owners. Multi-step recoveries
-store later argv arrays in `<request_id>.sequence` and promote the next request
-only after the previous attempt receipt exits 0; non-zero/lost outcomes discard the sequence.
-Hivebox `recover` writes the sequence sidecar first, then the guarded
-`hive markers clear ... --json` request, and discards the sidecar if the
-request write fails so no orphaned continuation remains.
+Those claims are at-most-once delivery records, not execution owners.
+`RecoveryCoordinator` is the destructive authority for recoverable markers:
+adapters submit observations, while replay re-resolves identity and safety
+under lock before resuming the persisted phase.
 
 Hivebox's `web/app/models/status_broadcaster.rb` is a Rails model class, but it
 is not an ActiveRecord workflow entity. It bridges `Hive::Web::StatusFeed` to
 Turbo Streams. `StatusFeed#snapshot` computes a fresh
 `Hive::Commands::Status#json_payload(Hive::Config.registered_projects)` for
-request-time reads. That page-render snapshot primes the live feed, avoiding a
+request-time reads, then overlays canonical recovery receipts from that same
+producer's operational payload by project/slug in memory. This performs no
+second registry scan. That page-render snapshot primes the live feed, avoiding a
 second full-registry scan when the page's Cable connection arrives. The first
 idle request owns that baseline until the poller starts; competing page renders
 cannot replace it. Each rendered status/task page carries a canonical SHA-256

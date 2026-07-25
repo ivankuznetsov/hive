@@ -1,7 +1,8 @@
 class Tasks::RecoveriesController < Tasks::BaseController
   def create
-    @task.recover!
+    receipt = @task.recover!
+    flash_type = %w[queued running terminal].include?(receipt.status) ? :notice : :alert
     redirect_to task_path(@project.name, @task.slug),
-                notice: "Recovery queued — clearing the error and re-running the stage"
+                flash: { flash_type => receipt.human_summary }
   end
 end

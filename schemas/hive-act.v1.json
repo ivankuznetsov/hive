@@ -18,7 +18,7 @@
         "schema": { "const": "hive-act" },
         "schema_version": { "const": 1 },
         "ok": { "const": true },
-        "action_id": { "const": "workflow.advance" },
+        "action_id": { "type": "string", "enum": ["workflow.advance", "workflow.retry"] },
         "target": { "type": "string", "pattern": "^.+:.+$" },
         "observation_token": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "result": {
@@ -28,8 +28,55 @@
           "properties": {
             "task_state": { "type": "string" },
             "stage": { "type": ["string", "null"] },
-            "marker": { "type": ["string", "null"] }
+            "marker": { "type": ["string", "null"] },
+            "recovery": { "$ref": "#/$defs/Recovery" }
           }
+        }
+      }
+    },
+    "Recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "request_id", "attempt_id", "phase", "failure_origin",
+        "next_eligible_at", "owner", "reason", "remediation", "retry_count",
+        "provider_hint", "terminal_outcome", "terminal_at"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["queued", "cooldown", "running", "blocked", "terminal", "unavailable"]
+        },
+        "request_id": { "type": ["string", "null"] },
+        "attempt_id": { "type": ["string", "null"] },
+        "phase": {
+          "type": ["string", "null"],
+          "enum": ["admitted", "cleared", "dispatched", "terminal", null]
+        },
+        "failure_origin": { "type": ["string", "null"] },
+        "next_eligible_at": { "type": ["string", "null"], "format": "date-time" },
+        "owner": {
+          "type": ["string", "null"],
+          "enum": ["agent", "operator", "provider", "scheduler", "hive", "none", "unknown", null]
+        },
+        "reason": { "type": ["string", "null"] },
+        "remediation": { "type": ["string", "null"] },
+        "retry_count": { "type": ["integer", "null"], "minimum": 0 },
+        "terminal_outcome": { "type": ["string", "null"] },
+        "terminal_at": { "type": ["string", "null"], "format": "date-time" },
+        "provider_hint": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["retry_after", "display_only"],
+              "properties": {
+                "retry_after": { "type": "string" },
+                "display_only": { "const": true }
+              }
+            }
+          ]
         }
       }
     },

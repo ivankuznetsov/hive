@@ -61,7 +61,7 @@ class HiveBotSupervisorTest < Minitest::Test
   class FakeRouter
     Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands, :project, :slug,
                         :stage, :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
-                        :intent, :attachment,
+                        :intent, :attachment, :recovery,
                         keyword_init: true)
   end
 
@@ -94,6 +94,7 @@ class HiveBotSupervisorTest < Minitest::Test
   # land here instead. `write!` returns a request_id so the supervisor's
   # logging path that includes it stays exercised.
   FakeDispatchRequestWriter = Struct.new(:writes, :sequences, :discarded_sequences,
+                                         :recoveries, :recovery_receipt,
                                          :next_request_id, :raise_on_write,
                                          :raise_on_sequence, :raise_on_discard,
                                          keyword_init: true) do
@@ -124,6 +125,11 @@ class HiveBotSupervisorTest < Minitest::Test
 
       (self.discarded_sequences ||= []) << request_id
       true
+    end
+
+    def recover!(**kwargs)
+      (self.recoveries ||= []) << kwargs
+      recovery_receipt
     end
   end
 
@@ -172,7 +178,9 @@ class HiveBotSupervisorTest < Minitest::Test
     @idea_draft_store = Hive::Bot::IdeaDraftStore.new
     @transcriber = FakeTranscriber.new(results: [], calls: [])
     @notification_dispatcher = FakeNotificationDispatcher.new(processed: [], reset_tasks: [])
-    @dispatch_request_writer = FakeDispatchRequestWriter.new(writes: [], sequences: [], discarded_sequences: [])
+    @dispatch_request_writer = FakeDispatchRequestWriter.new(
+      writes: [], sequences: [], discarded_sequences: [], recoveries: []
+    )
     # Drive the real constructor so any future invariant added to
     # Supervisor#initialize is exercised by every test in this file. We
     # inject all collaborators so the constructor's `||=` defaults never
@@ -1156,7 +1164,7 @@ class HiveBotSupervisorTest < Minitest::Test
                  "a failed tick must leave the last good snapshot intact, not overwrite it"
   end
 
-  def test_reload_rewires_status_snapshot_provider_into_the_rebuilt_router
+  def test_reload_rewires_status_snapshot_provider_into_canonical_recovery
     # Regression guard: reload_config_if_requested rebuilds @router, and that
     # rebuild must keep the status_snapshot_provider wiring. The original bug
     # rebuilt the Router without it, so after any `hive bot reload` /autofix
@@ -1188,20 +1196,19 @@ class HiveBotSupervisorTest < Minitest::Test
     )
     supervisor.process_update(update)
 
-    queued = @dispatch_request_writer.writes.map { |w| w[:argv] }
-    assert(queued.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
-           "after SIGHUP reload, /autofix must still resolve the slug and queue the " \
-           "recover sequence — proving the rebuilt Router kept status_snapshot_provider")
+    assert_equal 1, @dispatch_request_writer.recoveries.size,
+                 "after SIGHUP reload, /autofix must still resolve the cached row " \
+                 "through the rebuilt Router and submit canonical recovery"
     assert_empty @child_supervisor.dispatched,
                  "queue-routable verbs must not spawn from the bot (single-dispatcher invariant)"
   end
 
-  def test_default_status_snapshot_provider_dispatches_recover_sequence_for_cached_row
+  def test_default_status_snapshot_provider_dispatches_canonical_recovery_for_cached_row
     # Exercises the full default wiring (real Router built by the constructor)
     # end-to-end: the status_snapshot_provider lambda must reach
-    # latest_status_rows, resolve the cached row, and dispatch the recover
-    # sequence. Asserts the dispatched argv, not merely "some message sent",
-    # so the lambda returning [] or the row failing to resolve would fail.
+    # latest_status_rows, resolve the cached row, and dispatch canonical
+    # recovery. Asserting the writer call, not merely "some message sent",
+    # means an empty provider or unresolved row still fails.
     retryable = row(slug: "wire-260526-aaaa", stage: "6-review", action: "recover_review",
                     marker: "review_error", attrs: { "pass" => "2" },
                     diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
@@ -1220,10 +1227,9 @@ class HiveBotSupervisorTest < Minitest::Test
     )
     supervisor.process_update(update)
 
-    queued = @dispatch_request_writer.writes.map { |w| w[:argv] }
-    assert(queued.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
-           "default snapshot provider must route /autofix through latest_status_rows " \
-           "to a real recover-sequence queued dispatch")
+    assert_equal 1, @dispatch_request_writer.recoveries.size,
+                 "default snapshot provider must route /autofix through " \
+                 "latest_status_rows to canonical recovery"
     assert_empty @child_supervisor.dispatched,
                  "queue-routable verbs must not spawn from the bot (single-dispatcher invariant)"
   end
@@ -2150,6 +2156,37 @@ class HiveBotSupervisorTest < Minitest::Test
                  @dispatch_request_writer.sequences.first[:request_id]
     assert_equal [ [ "hive", "review", "task", "--from", "6-review", "--json" ] ],
                  @dispatch_request_writer.sequences.first[:remaining_argvs]
+  end
+
+  def test_execute_recovery_renders_the_canonical_receipt_without_commands
+    receipt = Hive::Daemon::RecoveryCoordinator::Receipt.new(
+      status: "blocked", request_id: "recovery-1", attempt_id: nil,
+      phase: "admitted", failure_origin: "timeout", next_eligible_at: nil,
+      owner: "operator", reason: "generation_conflict",
+      remediation: "refresh status; task or marker generation changed",
+      retry_count: 1, provider_hint: nil
+    )
+    @dispatch_request_writer.recovery_receipt = receipt
+    observed = { marker: "error", attrs: { "marker_id" => "m1" } }
+    result = FakeRouter::Result.new(
+      action: :dispatch_recovery,
+      project: "hive",
+      slug: "task",
+      recovery: observed,
+      alert_reset: { project: "hive", slug: "task", stage: "4-execute" }
+    )
+
+    actual = @supervisor.send(
+      :execute_recovery, result, Update.new(chat_id: 42, update_id: 12)
+    )
+
+    assert_equal receipt, actual
+    assert_empty @child_supervisor.dispatched
+    assert_empty @dispatch_request_writer.writes
+    assert_equal observed, @dispatch_request_writer.recoveries.first.fetch(:row)
+    assert_match(/\ARecovery blocked/, @telegram.messages.last.fetch(:text))
+    assert_empty @notification_dispatcher.reset_tasks,
+                 "a blocked receipt must not clear the existing recovery alert"
   end
 
   # AC-05 (PR #241 ce-code-review): the all-queue-routable path must NOT

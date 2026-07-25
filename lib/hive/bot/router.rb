@@ -62,10 +62,10 @@ module Hive
       Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                           :project, :slug, :stage, :question_n, :answer_text, :mode,
                           :intent, :alert_reset, :clear_keyboard, :format,
-                          :attachment, keyword_init: true)
+                          :attachment, :recovery, keyword_init: true)
 
       ALLOWED_ACTIONS = %i[
-        noop reply dispatch_then_reply dispatch_commands start_answer
+        noop reply dispatch_then_reply dispatch_commands dispatch_recovery start_answer
         write_answer_then_reply
         stage_attachment transcribe_voice commit_idea
       ].freeze

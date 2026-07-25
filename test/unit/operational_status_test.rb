@@ -385,6 +385,57 @@ class OperationalStatusTest < Minitest::Test
       "safe" => false,
       "safety_reason" => "worktree dirty"
     }, projected.fetch("retry"))
+    assert_equal "blocked", projected.dig("recovery", "status")
+  end
+
+  def test_durable_recovery_receipt_projects_across_marker_clear_and_terminal
+    cases = {
+      "queued" => [ "error", "error", "retry_pending", "admitted" ],
+      "running" => [ "agent_running", "agent_working", "retry_in_flight", "dispatched" ],
+      "terminal" => [ "ready_to_plan", "complete", "attempt_terminal_replay", "terminal" ]
+    }
+
+    cases.each do |status, (action, marker, decision, phase)|
+      source_task = task(
+        action: action,
+        slug: "recovery-#{status}",
+        stage: "4-execute",
+        marker: marker,
+        attrs: status == "queued" ? { "reason" => "implementer_failed" } : {}
+      )
+      snapshot = scheduler_snapshot_for(
+        source_task,
+        decision: decision,
+        reason: "recovery is #{status}"
+      )
+      snapshot.dig("tasks", 0, "disposition")["recovery"] = {
+        "status" => status,
+        "request_id" => "request-1",
+        "attempt_id" => status == "queued" ? nil : "attempt-1",
+        "phase" => phase,
+        "failure_origin" => "implementer_failed",
+        "next_eligible_at" => "2026-07-20T10:00:00.000000Z",
+        "owner" => status == "running" ? "agent" : "scheduler",
+        "reason" => nil,
+        "remediation" => nil,
+        "retry_count" => 1,
+        "provider_hint" => nil,
+        "terminal_outcome" => nil,
+        "terminal_at" => nil
+      }
+
+      projected = project(
+        status_payload(source_task),
+        project_context: {
+          "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+        },
+        scheduler_snapshot: snapshot
+      ).fetch("tasks").first
+
+      assert_equal status, projected.dig("recovery", "status"), status
+      assert_equal "request-1", projected.dig("recovery", "request_id"), status
+      assert_equal phase, projected.dig("recovery", "phase"), status
+    end
   end
 
   def test_matching_complete_daemon_observation_explains_scheduler_gate
@@ -475,16 +526,21 @@ class OperationalStatusTest < Minitest::Test
     refute_equal action.fetch("observation_token"), changed_action.fetch("observation_token")
   end
 
-  def test_human_and_elevated_states_have_no_executable_action
+  def test_human_and_nonrecoverable_elevated_states_have_no_action_but_error_has_retry
     rows = [
       task(action: "needs_input", slug: "human"),
       task(action: "error", slug: "error", marker: "error"),
       task(action: "review_parked", slug: "parked", stage: "6-review")
     ]
 
-    project(status_payload(*rows)).fetch("tasks").each do |row|
-      assert_nil row.fetch("action"), "#{row.dig('identity', 'slug')} must not be executable"
+    projected = project(status_payload(*rows)).fetch("tasks").to_h do |row|
+      [ row.dig("identity", "slug"), row ]
     end
+
+    assert_nil projected.fetch("human").fetch("action")
+    assert_nil projected.fetch("parked").fetch("action")
+    assert_equal "workflow.retry", projected.dig("error", "action", "action_id")
+    assert_equal "unavailable", projected.dig("error", "recovery", "status")
   end
 
   def test_payload_validates_against_published_schema

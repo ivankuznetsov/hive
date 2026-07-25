@@ -62,6 +62,36 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  class FakeRecoveryCoordinator
+    attr_reader :requests
+
+    def initialize
+      @requests = []
+    end
+
+    def assessment(row, now:)
+      {
+        due: true,
+        retry_at: row.state_file_mtime + Hive::AgentLimit.retry_cooldown_sec,
+        safe: true,
+        safety_reason: "safe"
+      }
+    end
+
+    def request(row:, requestor:, now:, retry_count:)
+      @requests << {
+        row: row, requestor: requestor, now: now, retry_count: retry_count
+      }
+      Hive::Daemon::RecoveryCoordinator::Receipt.new(
+        status: "queued", request_id: "coordinated-1", attempt_id: nil,
+        phase: "admitted", failure_origin: row.marker_attrs["reason"],
+        next_eligible_at: now.utc.iso8601(6), owner: "scheduler",
+        reason: nil, remediation: nil, retry_count: retry_count + 1,
+        provider_hint: nil
+      )
+    end
+  end
+
   AttemptRecord = Data.define(
     :attempt_id, :state, :outcome, :predecessor_attempt_id,
     :project, :task_slug, :task_generation
@@ -111,6 +141,39 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     assert_nil snapshot.dig("limits", "attempt_loss")
     assert_empty snapshot.fetch("error_retries")
     assert_empty snapshot.fetch("review_exhausted")
+  end
+
+  def test_universal_error_healer_delegates_to_recovery_coordinator_without_clearing
+    coordinator = FakeRecoveryCoordinator.new
+    healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      request_queue: @request_queue,
+      recovery_coordinator: coordinator
+    )
+
+    with_marker_file do |state_file|
+      Hive::Markers.set(state_file, :error, reason: "timeout", marker_id: "marker-1")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "4-execute",
+        marker: "error",
+        marker_attrs: Hive::Markers.current(state_file).attrs,
+        action: "error",
+        live_task_lock: false
+      )
+
+      healer.heal([ row ], now: NOW)
+
+      assert_equal :error, Hive::Markers.current(state_file).name
+      request = coordinator.requests.fetch(0)
+      assert_equal "healer", request.fetch(:requestor)
+      assert_equal 0, request.fetch(:retry_count)
+      event = @logger.events.find { |name, _attrs| name == :recovery_requested }
+      assert_equal "coordinated-1", event.last.fetch(:request_id)
+    end
   end
 
   def test_default_project_retry_gate_is_enabled

@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-07-24
+updated: 2026-07-25
 tags: [command, daemon, automation, json]
 ---
 
@@ -18,8 +18,8 @@ complete finalize rows or for two whitelisted stale finalize errors. It
 stops at human-input gates (`_WAITING` markers for Q&A / triage), temporary
 retry-safety blocks, and 8-finalize while the PR is still open on GitHub.
 Every persisted `ERROR` / `REVIEW_ERROR` is eligible for the universal
-marker-age retry; `StaleAgentHealer` clears only the exact safe generation
-before normal policy dispatch. Separately, it ingests merged PRs and fairly schedules
+marker-age retry; `RecoveryCoordinator` durably admits only the exact safe
+generation before normal policy dispatch. Separately, it ingests merged PRs and fairly schedules
 ordinary patrol alongside language-neutral architecture discovery/action
 resumes. When global `digest.enabled: true`, the same daemon
 also schedules one non-project-scoped `hive digest --date <day> --json` child
@@ -49,7 +49,7 @@ hive daemon queue   [list | show <id> | prune]  [--json]
 | `install`  | (Re)writes the platform-native unit file (`~/.config/systemd/user/hive-daemon.service` on Linux, `~/Library/LaunchAgents/local.hive-daemon.plist` on macOS) and starts/enables the service. Platform mechanics live in `ServiceInstaller::Base`; command-side summaries, JSON envelopes, and typed outcome translation are shared with bot install through `ServiceInstaller::ResultPresenter`. Installers and agent-assisted setup run this by default so daemon autostart is global install-time infrastructure, independent of any project. Without `--force`, refuses to overwrite a pre-existing unit (preserving operator hand-edits); exit `64` (USAGE) with a message pointing at `--force` so automation can branch without clobbering local changes. With `--force`, saves the previous content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` (rotated, never overwritten) via atomic write, then — only when an existing unit was actually overwritten (the `upgraded` outcome) — restarts the running daemon on Linux / unloads-then-loads on macOS so new `Environment=` lines take effect (a first-time `--force` install with no prior unit just starts/enables, no restart). A service-manager failure (systemctl reload/enable, or launchctl load rejecting the unit) exits `70` (SOFTWARE). A host with no systemd-user manager at all is different: the unit is still written, but autostart cannot be enabled, so it exits `0` with the `unsupported` outcome (and `target_path` set to the written unit) — a known-platform limitation, not a failure. With `--json`, every outcome (success and error) emits a `hive-daemon-install.v1` envelope. Units point at the user-facing wrapper path when installers provide it, so bash/Homebrew installs preserve the GEM_HOME/GEM_PATH wrapper across login/reboot; `hv` invocations remain valid when Apache Hive shadows `hive`. Use this after upgrading hive when the unit template has changed or when autostart needs repair. |
 | `enable`   | Sets `daemon.enabled: true` in `<project>/.hive-state/config.yml`. This enrolls a project for dispatch; it does not install, start, or autostart the global daemon service. Surgical line-level YAML editor (upsert) preserves comments, key order, and file-mode bits across enable/disable flips; rejects inline-flow `daemon: { ... }`, CRLF endings, and 4-space-indented children before any write. Atomic write goes via tempfile + `flock(LOCK_EX)` + `fsync` + rename; tempfile is ensure-cleaned on rename failure (ENOSPC / EACCES / EXDEV). Pre-flight (`preflight_targets`) validates every target before any write so `--all` cannot half-flip the registry on a bad middle project. Pass a registered project name OR `--all` (mutually exclusive — passing both raises USAGE 64). Exit 64 on missing/unknown target / not-initialised project / no registered projects. With `--json`, emits a `hive-daemon-enroll` envelope on success and an `EnrollErrorKind` JSON error envelope on failure (`missing_project` / `unknown_project` / `project_and_all` / `not_initialised` / `no_projects` / `config` / `internal`); YAML parse failures surface as `Hive::ConfigError` (exit 78). |
 | `disable`  | Same shape as `enable`, sets `daemon.enabled: false`. The next dispatcher tick honours the change automatically (per-tick enable-cache invalidation); `hive daemon reload` is optional for instant pickup. |
-| `queue`    | Read-only inspection of the dispatch-request queue the bot/web producers and `3-plan` healer write and the daemon consumes. Runs in the CLI process (no daemon contact); reads the same `<state_home>/dispatch_requests/` directory. Current pending request files use `hive-dispatch-request.v3`, whose `requestor` enum is `bot|healer`; pending v2 remains readable and other versions are malformed. V3 can bind healer continuations to task id, stage, marker identity, and post-clear task generation. `list` (default) prints each pending request with `request_id  age  project/slug  verb` plus `[EXPIRED]` / `[NOT-ALLOWLISTED]` flags and any malformed files. `show <id>` dumps one request's full payload (errors with exit 1 if the id is unknown; missing id is a USAGE error). `prune` removes expired + malformed request files (the daemon also does this lazily on its own tick) and reports the count. With `--json`, emits a `hive-daemon-queue.v1` envelope (`action`, `requests[]`, `request`, `malformed[]`, `pruned_count`). Unknown actions, missing `show` request ids, and unexpected queue-command exceptions emit the schema's `ErrorPayload` arm with `ok:false`, `error_kind` (`unknown_action` / `missing_request_id` / `internal`), and `message` before exiting non-zero. Claimed in-flight requests (`*.json.claimed`) are intentionally not listed — they are daemon-managed. Host-global maintenance is deliberately narrower than normal project dispatch: the `daemon` verb validates only the explicit `GLOBAL_MAINTENANCE_ARGVS` allowlist (`hive daemon install --force` under the `__global__` project sentinel), so a project-scoped request cannot smuggle daemon stop/disable/restart through the generic queue. See [[modules/daemon]] §"At-most-once dispatch via atomic claim". |
+| `queue`    | Read-only inspection of the dispatch-request queue all adapters write and the daemon consumes. Current files use `hive-dispatch-request.v4`; pending v2/v3 remain readable. V4 binds recovery to canonical task/stage/marker/generation identity and records `admitted`, `cleared`, `dispatched`, or `terminal` plus owner/remediation and terminal outcome/time. Nonterminal recovery requests do not expire or generic-prune; terminal receipts remain available for bounded replay. Existing `list`/`show`/`prune` JSON and human contracts remain unchanged. |
 
 ## Global Digest
 
@@ -80,19 +80,15 @@ when missed history exceeds
 Per `Hive::Daemon::Policy.decide`, the daemon classifies each `hive
 status --json` task row by `next_action.kind` (a `Hive::Schemas::TaskActionKind`
 value) and routes. `Hive::Daemon::StaleAgentHealer` runs before this policy
-step and applies one reason-agnostic policy to every `ERROR` and
-`REVIEW_ERROR`: wait for the shared marker-age cooldown, confirm the project
-and global retry switch are enabled, reject a live controller/task-lock owner,
-temporarily defer while current work-area evidence shows operator input or
-dirty execute work, then generation-guard the clear. Set
+step and submits eligible `ERROR` / `REVIEW_ERROR` observations to
+`Hive::Daemon::RecoveryCoordinator`. The coordinator waits for the shared
+marker-age cooldown, rejects live ownership or unsafe current-work evidence,
+persists the canonical task/marker/generation identity, and owns the guarded
+clear plus restart replay. Set
 `daemon.auto_retry.enabled: false` to disable all durable-error clears.
-`3-plan` error recovery persists a same-stage
-`hive plan ... --from 3-plan` request with `requestor=healer` before clearing.
-The deterministic request binds stable task id, stage, exact marker identity,
-and predicted post-clear task generation. It does not expire behind admission
-gates; a crash-before-clear leaves it pending, enqueue failure leaves the
-marker intact, and stale identity is rejected instead of crossing into a
-replacement task generation.
+The deterministic v4 request does not expire behind admission gates; a crash
+before or after clear resumes its persisted phase, while stale identity is
+blocked instead of crossing into a replacement task generation.
 Independently,
 `Hive::Daemon::DisplayNameBackfiller`
 runs each tick and re-spawns `hive generate-name <folder>` (fire-and-forget,

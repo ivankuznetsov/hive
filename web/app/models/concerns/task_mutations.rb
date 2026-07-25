@@ -16,8 +16,6 @@ module TaskMutations
     Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS.include?(verb)
   end.freeze
 
-  RecoveryRow = Data.define(:marker, :attrs)
-
   def approve!(from: nil, to: nil, force: false)
     Hive::Commands::Approve.new(
       slug,
@@ -80,18 +78,16 @@ module TaskMutations
       raise Hive::Error, Hive::Bot::Handlers::RecoverySequence.manual_only_text(marker, attrs)
     end
 
-    match_attr = Hive::Bot::NotificationBuilders.recovery_match_attr(RecoveryRow.new(marker, attrs))
-    commands = Hive::Bot::Handlers::RecoverySequence.retry_commands(
-      project: project.name,
-      slug:,
-      stage: self["stage"],
-      marker:,
-      match_attr:,
-      workflow: self["workflow"]
+    verb = Hive::Bot::Handlers::RecoverySequence.retry_verb_for_stage(
+      self["stage"], workflow: self["workflow"], project: project.name
     )
-    raise Hive::Error, "no retry verb for stage #{self["stage"].inspect}" if commands.empty?
+    raise Hive::Error, "no retry verb for stage #{self["stage"].inspect}" unless verb
 
-    enqueue_recovery(commands)
+    Hive::Bot::DispatchRequestWriter.recover!(
+      row: self,
+      project: project.name,
+      requestor: "web"
+    )
   end
 
   def intervene!(message)
@@ -138,27 +134,6 @@ module TaskMutations
     raise Hive::Error, "unknown stage #{from.inspect}" unless parsed
 
     Hive::Stages.prev_dir(parsed.first) || Hive::Stages::DIRS.first
-  end
-
-  def enqueue_recovery(commands)
-    request_id = Hive::Bot::DispatchRequestWriter.generate_request_id
-    first, *remaining = commands
-    if remaining.any?
-      Hive::Bot::DispatchRequestWriter.write_sequence!(request_id:, remaining_argvs: remaining)
-    end
-    begin
-      Hive::Bot::DispatchRequestWriter.write!(
-        project: project.name,
-        slug:,
-        argv: first,
-        trigger: "web_recover",
-        request_id:
-      )
-    rescue StandardError
-      Hive::Bot::DispatchRequestWriter.discard_sequence!(request_id:) if remaining.any?
-      raise
-    end
-    request_id
   end
 
   def brainstorm_path!(noun: "intervene")

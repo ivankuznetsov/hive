@@ -285,7 +285,10 @@ module Hive
         end
       end
       action = Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row)
-      action = nil if daemon_enabled?(project.fetch("name"))
+      if daemon_enabled?(project.fetch("name")) &&
+         action&.fetch("action_id") != Hive::OperationalAction::RETRY_ACTION_ID
+        action = nil
+      end
       {
         "identity" => {
           "project" => project.fetch("name"),
@@ -308,6 +311,7 @@ module Hive
         "reasons" => reasons,
         "provider" => provider_payload(row),
         "retry" => retry_payload(scheduler_disposition),
+        "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
         "dependency" => {
           "blocked" => row["blocked"] == true,
           "blocked_by" => row["blocked_by"],
@@ -461,8 +465,12 @@ module Hive
         [ "waiting_on_provider_or_scheduler", "scheduler" ]
       when "retry_in_flight"
         [ "running", "agent" ]
+      when "attempt_terminal_replay"
+        [ "idle", "none" ]
       when "retry_safety_blocked"
         [ "needs_repair", disposition["owner"] || "operator" ]
+      when "recovery_unavailable"
+        [ "unknown", "hive" ]
       when "wait_for_answers"
         [ "waiting_on_you", "operator" ]
       when "quarantined", "project_dropped", "folder_missing", "folder_missing_nil",
@@ -502,6 +510,72 @@ module Hive
         "safe" => disposition["retry_safe"] == true,
         "safety_reason" => disposition["safety_reason"]
       }
+    end
+
+    def recovery_payload(row, disposition, scheduler_freshness)
+      canonical = disposition["recovery"] if disposition.is_a?(Hash)
+      return normalized_recovery(canonical, row) if canonical.is_a?(Hash)
+
+      return nil unless %w[error review_error].include?(row["marker"].to_s)
+      return nil if invalid_task?(row)
+
+      status = case disposition&.fetch("decision", nil)
+      when "retry_pending" then "queued"
+      when "retry_cooldown" then "cooldown"
+      when "retry_in_flight", "dispatched" then "running"
+      when "retry_safety_blocked" then "blocked"
+      when "attempt_terminal_replay" then "terminal"
+      else "unavailable"
+      end
+      decision = disposition&.fetch("decision", nil)
+      reason = if status == "unavailable"
+        scheduler_freshness == "current" ? "recovery_observation_missing" : "scheduler_observation_unavailable"
+      elsif status == "blocked"
+        decision
+      end
+      normalized_recovery(
+        {
+          "status" => status,
+          "request_id" => disposition&.fetch("request_id", nil),
+          "attempt_id" => disposition&.fetch("attempt_id", nil) || row["attempt_id"],
+          "phase" => disposition&.fetch("recovery_phase", nil),
+          "failure_origin" => row.dig("attrs", "reason"),
+          "next_eligible_at" => disposition&.fetch("retry_at", nil),
+          "owner" => disposition&.fetch("owner", nil) || (status == "unavailable" ? "hive" : "scheduler"),
+          "reason" => reason,
+          "remediation" => disposition&.fetch("safety_reason", nil),
+          "retry_count" => disposition&.fetch("retry_count", nil),
+          "provider_hint" => provider_hint(row),
+          "terminal_outcome" => nil,
+          "terminal_at" => nil
+        },
+        row
+      )
+    end
+
+    def normalized_recovery(recovery, row)
+      {
+        "status" => recovery.fetch("status"),
+        "request_id" => recovery["request_id"],
+        "attempt_id" => recovery["attempt_id"],
+        "phase" => recovery["phase"],
+        "failure_origin" => recovery["failure_origin"] || row.dig("attrs", "reason"),
+        "next_eligible_at" => recovery["next_eligible_at"],
+        "owner" => recovery["owner"],
+        "reason" => recovery["reason"],
+        "remediation" => recovery["remediation"],
+        "retry_count" => recovery["retry_count"],
+        "provider_hint" => recovery["provider_hint"] || provider_hint(row),
+        "terminal_outcome" => recovery["terminal_outcome"],
+        "terminal_at" => recovery["terminal_at"]
+      }
+    end
+
+    def provider_hint(row)
+      retry_after = row.dig("attrs", "retry_after") || row.dig("held", "retry_after")
+      return nil if retry_after.to_s.empty?
+
+      { "retry_after" => retry_after.to_s, "display_only" => true }
     end
 
     def invalid_task?(row)

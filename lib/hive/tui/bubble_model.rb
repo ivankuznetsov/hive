@@ -9,6 +9,7 @@ require "time"
 require "yaml"
 require "hive"
 require "hive/agent_profiles"
+require "hive/bot/dispatch_request_writer"
 require "hive/config"
 require "hive/commands/new"
 require "hive/markers"
@@ -81,11 +82,9 @@ module Hive
       HELP_WHEEL_SCROLL_LINES = 3
       # Sized for ~32 lines of recent agent output — bounds render-time memory on large logs.
       INFO_PANEL_EXECUTE_TAIL_BYTES = 4 * 1024
-      # Lowercase snapshot-row marker keys → uppercase CLI marker names
-      # accepted by `hive markers clear --name`. Mirrors the upcase
-      # convention in `Hive::Markers::KNOWN_NAMES`. A new recoverable
-      # review marker added to the pipeline must land here AND in
-      # `Hive::Markers`'s allowlist for recovery to wire up.
+      # Lowercase snapshot-row marker keys → canonical marker names used by
+      # the recovery coordinator. A new recoverable review marker added to the
+      # pipeline must land here and in the coordinator's recoverable set.
       REVIEW_RECOVERY_MARKERS = {
         "review_error" => "REVIEW_ERROR",
         "review_stale" => "REVIEW_STALE",
@@ -108,12 +107,14 @@ module Hive
         dispatch: ->(_msg) { },
         clipboard_probe: ->(pasted_text:) { Hive::Tui::Clipboard.probe(pasted_text: pasted_text) },
         archive_refresh: -> { },
+        recovery_writer: Hive::Bot::DispatchRequestWriter,
         update_state: nil
       )
         @hive_model = hive_model
         @dispatch = dispatch
         @clipboard_probe = clipboard_probe
         @archive_refresh = archive_refresh
+        @recovery_writer = recovery_writer
         # Shared update-check state (written by the daemon). Read on a short
         # TTL so the footer reflects a new nudge without re-reading the file
         # on every render frame. Lazily constructed so tests and non-daemon
@@ -135,19 +136,16 @@ module Hive
         # the runner tore down. Same mutex covers both fields — both
         # are touched from the same paths.
         @heal_threads = []
-        # Per-folder dedup for review-recovery: a second Enter on a
-        # `recover_review` row whose first clear+rerun is still in
-        # flight refuses with a flash instead of firing a duplicate
-        # `hive markers clear` + `hive run` pair. Cleared in the
-        # spawn-thread's `ensure` block on completion (success or
-        # failure) so the user can retry once the first pass settles.
+        # Per-folder dedup for review recovery: a second Enter while the first
+        # coordinator request is in flight receives a local progress flash.
+        # The durable coordinator remains the cross-process dedup authority.
         # Same mutex as @healed_folders / @heal_threads — they all
         # gate background-thread bookkeeping on the same lock.
         @review_recovery_inflight = Set.new
         # Per-folder dedup for ERROR-marker recovery. Same shape as
         # @review_recovery_inflight: a second Enter on an `error` row
-        # whose first clear+rerun is still in flight refuses with a
-        # flash instead of double-firing the recovery sequence. Cleared
+        # whose first coordinator request is still in flight receives a
+        # progress flash instead of starting a duplicate worker. Cleared
         # in the spawn-thread's `ensure` so retries unblock once the
         # first pass settles. Reuses @healed_folders_mutex so all
         # background-thread bookkeeping fields (@healed_folders,
@@ -689,18 +687,12 @@ module Hive
       end
 
       # Scan a fresh snapshot for tasks whose `:error` marker came from
-      # a signal kill (130 / 137 / 143) and clear the marker in the
+      # a signal kill (130 / 137 / 143) and submit recovery in the
       # background. Each folder can claim one heal attempt per
       # HEAL_REPEAT_INTERVAL_SECONDS (`@healed_folders` repeat window),
       # so the loop never thrashes if the background heal is slow or a
-      # persistent marker-clear failure survives across snapshots.
-      #
-      # The heal runs in a Ruby thread — `hive markers clear` is an
-      # in-process subprocess via `run_quiet!` which captures
-      # stdout/stderr cleanly without touching the alt-screen. The
-      # next snapshot poll picks up the cleared marker and the row
-      # re-classifies (typically back to "Ready for X" because the
-      # agent's pre-kill state is preserved in the task folder).
+      # persistent coordinator block survives across snapshots.
+      # The next snapshot poll picks up the canonical lifecycle.
       def auto_heal_kill_class_errors(snapshot)
         return if snapshot.nil?
 
@@ -753,8 +745,7 @@ module Hive
         @healed_folders_mutex.synchronize { @healed_folders[folder] = Time.now }
       end
 
-      # Override-able for tests so they can capture the heal
-      # invocation without forking a real `hive markers clear`.
+      # Override-able for tests so they can capture the coordinator request.
       # F8: tracks the spawned Thread on `@heal_threads` so
       # `kill_inflight_heals!` can reap stragglers at TUI exit; the
       # Thread prunes itself once the heal returns to bound the
@@ -832,29 +823,16 @@ module Hive
         end
       end
 
-      # Calls `hive markers clear` and converts any failure (non-zero
-      # exit, exception) into a debug-log entry + backoff timestamp so
-      # persistent failures cannot spawn one heal thread per snapshot.
-      # Transient failures retry after HEAL_REPEAT_INTERVAL_SECONDS.
-      #
-      # `--match-attr marker_id=<observed>` ties the clear to the
-      # specific kill-class marker we observed. Legacy rows without a
-      # marker_id fall back to the observed reason/exit_code attrs so a
-      # same-code marker with a different reason is not erased. If a
-      # concurrent run writes a different ERROR marker between snapshot
-      # and heal, the match refuses, backoff is refreshed, and the next
-      # eligible snapshot sees the real failure instead of erasing it.
+      # Automatic TUI healing is only a caller of the shared recovery
+      # coordinator. The coordinator re-resolves the row under the task lock
+      # and owns marker-generation comparison, durable admission, and marker
+      # transition. This keeps a background snapshot from becoming another
+      # recovery authority.
       def heal_marker(row)
-        argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
-        match_attr = error_recovery_match_attr(row)
-        argv += [ "--match-attr", match_attr ] if match_attr
-        exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
-        return if exit_code.zero?
+        receipt = request_recovery(row)
+        return if %w[queued running terminal].include?(receipt.status)
 
-        Hive::Tui::Debug.log(
-          "auto_heal",
-          "clear failed for #{row.slug}: exit=#{exit_code} err=#{err.lines.first&.chomp.to_s[0, 120]}"
-        )
+        Hive::Tui::Debug.log("auto_heal", "#{row.slug}: #{receipt.human_summary}")
         record_heal_failure(row.folder)
       rescue StandardError => e
         Hive::Tui::Debug.log("auto_heal", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
@@ -961,21 +939,9 @@ module Hive
         )
       end
 
-      # Enter-driven review recovery. Review-stage recovery markers are
-      # intentionally explicit gates: the old flow told the operator to
-      # leave the TUI, clear a marker, then re-run `hive run`. The TUI
-      # keeps that exact command surface but sequences it for the
-      # highlighted row so Enter becomes "try again" after the operator
-      # has addressed the underlying cause (for example API quota reset).
-      #
-      # The clear+rerun runs off the bubbletea update thread:
-      # `Subprocess.run_quiet!` has a 30 s upper bound (markers-lock
-      # contention + commit-lock; see `lib/hive/markers.rb`), and
-      # blocking the runner thread for that long freezes rendering.
-      # Mirrors the `auto_heal_kill_class_errors`/`spawn_heal_thread`
-      # shape so the bubbletea thread returns immediately with a
-      # "clearing…" status flash; the worker thread dispatches a
-      # follow-up `Messages::Flash` via `@dispatch` on completion.
+      # Enter-driven review recovery. The potentially blocking durable
+      # admission runs off the bubbletea update thread; the worker returns the
+      # coordinator's canonical lifecycle receipt through a follow-up Flash.
       def recover_review(row, force: false)
         if row.folder.to_s.strip.empty?
           return [ flashed("review recovery unavailable: task folder missing"), nil ]
@@ -1005,15 +971,12 @@ module Hive
 
         detail = review_recovery_detail(row, marker_name)
         spawn_review_recovery_thread(row, marker_name)
-        [ flashed("review recovery: clearing #{Hive::Tui::Text.sanitize(detail)[0, 160]}…"), nil ]
+        [ flashed("Checking recovery — #{Hive::Tui::Text.sanitize(detail)[0, 160]}…"), nil ]
       end
 
-      # Atomic claim-or-skip on @review_recovery_inflight. Prevents
-      # two rapid Enter presses from firing two clear+rerun sequences
-      # against the same folder. Returns true when this caller wins
-      # the slot (must spawn the worker); false when an inflight
-      # recovery is still running. The worker's `ensure` block evicts
-      # the entry so a second attempt can run once the first settles.
+      # Atomic claim-or-skip on @review_recovery_inflight. This is only a UI
+      # responsiveness guard; durable request identity is enforced below this
+      # adapter by RecoveryCoordinator.
       def register_review_recovery_attempt(folder)
         @healed_folders_mutex.synchronize do
           return false if @review_recovery_inflight.include?(folder)
@@ -1044,74 +1007,25 @@ module Hive
         thread
       end
 
-      # Worker body. All operator-visible failures land here as a
-      # `Messages::Flash` dispatched through @dispatch — the
-      # synchronous return path already flashed "clearing…" and the
-      # bubbletea thread has moved on. Two distinct partial-failure
-      # surfaces:
-      #   1. `markers clear` non-zero — marker is intact, no rerun
-      #      fired, operator should fix the cause and retry.
-      #   2. `markers clear` succeeded BUT `dispatch_background`
-      #      raised — marker is gone, no rerun fired, operator must
-      #      run `hive run <folder>` manually. The flash text says so
-      #      explicitly instead of misleading them with "failed".
-      #
-      # Rescue is narrowed to the I/O failure classes the subprocess
-      # path can realistically throw (`SystemCallError` covers Errno::*,
-      # `IOError` covers pipe/EOF, `Subprocess::TimeoutError` covers the
-      # 30 s cap). Programmer errors (NoMethodError/NameError/
-      # ArgumentError) are intentionally NOT caught — they crash the
-      # worker thread loud so logs surface them instead of presenting
-      # them to the operator as a misleading "review recovery failed"
-      # flash.
+      # Worker body. The durable coordinator returns the canonical lifecycle
+      # receipt; the TUI renders it verbatim instead of guessing that a clear
+      # or a process start succeeded.
       def perform_review_recovery(row, marker_name)
-        clear_argv = review_recovery_clear_argv(row, marker_name)
-        exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(clear_argv)
-        unless exit_code.zero?
-          reason = err.to_s.lines.first&.chomp.to_s
-          reason = "exit #{exit_code}" if reason.empty?
-          Hive::Tui::Debug.log(
-            "review_recovery",
-            "clear failed for #{row.slug}: exit=#{exit_code} err=#{err.to_s.lines.first&.chomp.to_s[0, 200]}"
-          )
-          flash_async("review recovery failed: #{Hive::Tui::Text.sanitize(reason)[0, 120]}")
-          return
-        end
-
-        return unless dispatch_recovery_rerun(row, label: "review recovery", debug_scope: "review_recovery")
-
-        detail = review_recovery_detail(row, marker_name)
-        flash_async("review recovery: #{Hive::Tui::Text.sanitize(detail)[0, 160]}; running `hive run`…")
-      rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
+        receipt = request_recovery(row)
+        flash_async(Hive::Tui::Text.sanitize(receipt.human_summary)[0, 240])
+      rescue SystemCallError, IOError => e
         Hive::Tui::Debug.log("review_recovery", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
         flash_async(
           "review recovery failed: #{e.class.name}: #{Hive::Tui::Text.sanitize(e.message)[0, 80]}"
         )
       end
 
-      def dispatch_recovery_rerun(row, label:, debug_scope:)
-        started = Hive::Tui::Subprocess.dispatch_background(
-          [ "hive", "run", row.folder ],
-          dispatch: @dispatch
+      def request_recovery(row)
+        @recovery_writer.recover!(
+          row: row,
+          project: row.project_name,
+          requestor: "tui"
         )
-        return true unless started == false
-
-        Hive::Tui::Debug.log(debug_scope, "dispatch returned false for #{row.slug} (marker cleared)")
-        flash_async(
-          "#{label}: marker cleared, but `hive run` failed to start; " \
-          "run `hive run #{row.folder}` manually"
-        )
-        false
-      rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
-        Hive::Tui::Debug.log(
-          debug_scope,
-          "dispatch failed for #{row.slug} (marker cleared): #{e.class.name}: #{e.message}"
-        )
-        flash_async(
-          "#{label}: marker cleared, but `hive run` failed to start: " \
-          "#{Hive::Tui::Text.sanitize(e.message)[0, 80]}; run `hive run #{row.folder}` manually"
-        )
-        false
       end
 
       def flash_async(text)
@@ -1120,20 +1034,6 @@ module Hive
 
       def review_recovery_marker_name(row)
         REVIEW_RECOVERY_MARKERS[row.marker.to_s]
-      end
-
-      def review_recovery_clear_argv(row, marker_name)
-        argv = [ "hive", "markers", "clear", row.folder, "--name", marker_name ]
-        match_attr = review_recovery_match_attr(row)
-        match_attr ? argv + [ "--match-attr", match_attr ] : argv
-      end
-
-      def review_recovery_match_attr(row)
-        attrs = row.attrs || {}
-        return Hive::Markers.review_error_recovery_match_attr(attrs) if row.marker.to_s == "review_error"
-
-        key = REVIEW_RECOVERY_MATCH_ATTRS.find { |candidate| !attrs[candidate].to_s.empty? }
-        key ? "#{key}=#{attrs[key]}" : nil
       end
 
       def review_recovery_detail(row, marker_name)
@@ -1145,7 +1045,7 @@ module Hive
       end
 
       # Top-level gate: a REVIEW_STALE row is retryable from the TUI
-      # (clear+rerun) when ANY of the auto-recoverable shapes hold.
+      # when any of the auto-recoverable shapes hold.
       # Cases that fall through to the manual-cleanup message:
       #   * max_passes hit with completed passes (the "trim reviewer
       #     files" path) — neither sub-predicate matches.
@@ -1199,15 +1099,8 @@ module Hive
       # (`reason=exit_code exit_code=130|137|143`). Auto-heal owns that
       # interrupted-task shape; other structured reasons remain
       # recoverable even when they carry the same numeric code. Before
-      # this gesture existed those rows sat in "Error" forever and the
-      # only recovery path was a shell-level
-      # `hive markers clear --name ERROR`.
-      #
-      # Same threading model as `recover_review`: the bubbletea update
-      # thread returns immediately with a "clearing…" flash; the worker
-      # thread does the markers-clear + `hive run` so the UI keeps
-      # rendering during the sub-second-to-30s window the markers-lock
-      # can take.
+      # this gesture existed those rows sat in "Error" forever. The worker
+      # now submits the observed row to the durable coordinator.
       def recover_error(row)
         if row.folder.to_s.strip.empty?
           return [ flashed("error recovery unavailable: task folder missing"), nil ]
@@ -1227,7 +1120,7 @@ module Hive
 
         detail = error_recovery_detail(row)
         spawn_error_recovery_thread(row)
-        [ flashed("error recovery: clearing #{Hive::Tui::Text.sanitize(detail)[0, 160]}…"), nil ]
+        [ flashed("Checking recovery — #{Hive::Tui::Text.sanitize(detail)[0, 160]}…"), nil ]
       end
 
       def register_error_recovery_attempt(folder)
@@ -1271,48 +1164,15 @@ module Hive
         thread
       end
 
-      # Worker body. Same surface contract as `perform_review_recovery`:
-      # narrow rescue around the I/O failure classes the subprocess can
-      # realistically raise; programmer errors crash the worker so the
-      # debug log surfaces them instead of presenting a misleading
-      # "error recovery failed" flash.
+      # Same canonical receipt path as review recovery.
       def perform_error_recovery(row)
-        clear_argv = error_recovery_clear_argv(row)
-        exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(clear_argv)
-        unless exit_code.zero?
-          reason = err.to_s.lines.first&.chomp.to_s
-          reason = "exit #{exit_code}" if reason.empty?
-          Hive::Tui::Debug.log(
-            "error_recovery",
-            "clear failed for #{row.slug}: exit=#{exit_code} err=#{err.to_s.lines.first&.chomp.to_s[0, 200]}"
-          )
-          flash_async(error_recovery_failure_flash(row, exit_code, reason))
-          return
-        end
-
-        return unless dispatch_recovery_rerun(row, label: "error recovery", debug_scope: "error_recovery")
-
-        detail = error_recovery_detail(row)
-        flash_async("error recovery: #{Hive::Tui::Text.sanitize(detail)[0, 160]}; running `hive run`…")
-      rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
+        receipt = request_recovery(row)
+        flash_async(Hive::Tui::Text.sanitize(receipt.human_summary)[0, 240])
+      rescue SystemCallError, IOError => e
         Hive::Tui::Debug.log("error_recovery", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
         flash_async(
           "error recovery failed: #{e.class.name}: #{Hive::Tui::Text.sanitize(e.message)[0, 80]}"
         )
-      end
-
-      # `hive markers clear --match-attr marker_id=N` ties the clear
-      # to the specific ERROR marker observed at snapshot time. Legacy
-      # rows without marker_id fall back to the observed reason/exit_code
-      # attrs, preserving same-code/different-reason race protection.
-      def error_recovery_clear_argv(row)
-        argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
-        match_attr = error_recovery_match_attr(row)
-        match_attr ? argv + [ "--match-attr", match_attr ] : argv
-      end
-
-      def error_recovery_match_attr(row)
-        Hive::Markers.error_recovery_match_attr(row.attrs)
       end
 
       def error_recovery_detail(row)
@@ -1321,24 +1181,6 @@ module Hive
         keys += (attrs.keys.map(&:to_s) - keys).sort
         attr_text = keys.map { |key| "#{key}=#{attrs[key]}" }.join(" ")
         attr_text.empty? ? "ERROR" : "ERROR #{attr_text}"
-      end
-
-      # Builds the operator-facing flash for a markers-clear failure.
-      # `hive markers clear` exits 124 when the markers-lock can't be
-      # acquired within the 30s cap — usually another writer (auto-heal,
-      # background `hive run`, daemon) is holding it; surfacing "exit
-      # 124" alone left the user with no actionable next step. Map the
-      # common exit codes to specific guidance; fall through to the
-      # short `reason` we already extracted from stderr for unknown
-      # failures.
-      def error_recovery_failure_flash(row, exit_code, reason)
-        sanitised_reason = Hive::Tui::Text.sanitize(reason)[0, 120]
-        case exit_code
-        when Hive::Tui::Subprocess::COMMAND_TIMEOUT_EXIT
-          "error recovery failed: markers-clear timed out after 30s (lock contention); retry shortly or `hive markers clear #{row.folder} --name ERROR` manually"
-        else
-          "error recovery failed: #{sanitised_reason}"
-        end
       end
 
       # Workflow verbs route by `Hive::Workflows.interactive?(verb)`:

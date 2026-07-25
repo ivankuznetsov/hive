@@ -13,6 +13,7 @@ require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/operational_snapshot"
 require "hive/daemon/stale_agent_healer"
+require "hive/daemon/recovery_coordinator"
 require "hive/daemon/display_name_backfiller"
 require "hive/daemon/task_id_backfiller"
 require "hive/daemon/dispatch_request_queue"
@@ -72,7 +73,7 @@ module Hive
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                      attempt_dispatcher: nil, attempt_reconciler: nil,
                      lost_outcome_store: nil, lost_outcome_processor: nil,
-                     operational_snapshot: nil)
+                     operational_snapshot: nil, recovery_coordinator: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -92,6 +93,11 @@ module Hive
         @lost_outcome_processor = lost_outcome_processor
         @operational_snapshot = operational_snapshot
         @attempt_snapshot = nil
+        @dispatch_request_state_home = dispatch_request_state_home
+        @dispatch_result_state_home = dispatch_result_state_home
+        @recovery_coordinator = recovery_coordinator || RecoveryCoordinator.new(
+          state_home: dispatch_request_state_home || Hive::Paths.state_home
+        )
 
         # Update-flow collaborators (plan 2026-05-27-002). The check runs
         # only when a state store is injected (the daemon does so); existing
@@ -130,7 +136,8 @@ module Hive
           lost_outcome_store: @lost_outcome_store,
           lost_outcome_processor: @lost_outcome_processor,
           auto_retry_enabled: auto_retry_enabled?,
-          project_auto_retry_enabled: ->(project) { project_enabled?(project) }
+          project_auto_retry_enabled: ->(project) { project_enabled?(project) },
+          recovery_coordinator: @recovery_coordinator
         )
         # Additive self-heal for tasks whose one-shot name generation at
         # `hive new` never landed (agent/codex outage). Re-spawns
@@ -262,6 +269,7 @@ module Hive
 
         # 1d. Bound the dispatch-result notice dir (ADV-1 #6).
         prune_dispatch_results(now: now)
+        prune_terminal_recovery_receipts(now: now)
 
         # 1e. Global daily merged-PR digest. This is not project-scoped and
         # does not depend on the status snapshot, so it runs before status
@@ -661,16 +669,32 @@ module Hive
           if entry.request_id
             # ADV-1: read routing metadata BEFORE remove() unlinks the file,
             # so the completion can be surfaced back to the originating chat.
+            request = Hive::Daemon::DispatchRequestQueue.fetch(
+              entry.request_id, state_home: dispatch_request_state_home
+            )
             meta = Hive::Daemon::DispatchRequestQueue.metadata(
               entry.request_id, state_home: dispatch_request_state_home
             )
+            terminal_recovery = request&.recovery.is_a?(Hash)
+            if terminal_recovery
+              @recovery_coordinator.mark_dispatched(
+                request,
+                attempt_id: request.recovery["attempt_id"],
+                terminal: true,
+                outcome: entry.json_envelope&.dig("result", "outcome") ||
+                  (entry.exit_code.zero? ? "succeeded" : "failed"),
+                now: now
+              )
+            end
             continuation = promote_dispatch_sequence(entry, meta, now: now) if entry.exit_code == 0
             Hive::Daemon::DispatchRequestQueue.discard_sequence(
               entry.request_id, state_home: dispatch_request_state_home
             ) unless entry.exit_code == 0
-            Hive::Daemon::DispatchRequestQueue.remove(
-              entry.request_id, state_home: dispatch_request_state_home
-            )
+            unless terminal_recovery
+              Hive::Daemon::DispatchRequestQueue.remove(
+                entry.request_id, state_home: dispatch_request_state_home
+              )
+            end
             @logger.event(:dispatch_request_completed,
                           request_id: entry.request_id, pid: entry.pid,
                           project: entry.project, slug: entry.slug,
@@ -1355,6 +1379,14 @@ module Hive
           state_home: dispatch_request_state_home,
           bad_handler: ->(**_attrs) { malformed += 1 }
         )
+        pending = pending.reject do |request|
+          request.respond_to?(:recovery) &&
+            request.recovery&.fetch("phase", nil) == "terminal"
+        end
+        claimed = claimed.reject do |delivery|
+          delivery.respond_to?(:request) &&
+            delivery.request.recovery&.fetch("phase", nil) == "terminal"
+        end
         oldest = pending.map(&:created_at).compact.min
         {
           "status" => "current",
@@ -1377,8 +1409,11 @@ module Hive
       end
 
       def operational_recovery_snapshot
+        stale_agent = @stale_agent_healer.operational_snapshot.merge(
+          "receipts" => durable_recovery_receipts
+        )
         {
-          "stale_agent" => @stale_agent_healer.operational_snapshot,
+          "stale_agent" => stale_agent,
           # Compatibility shape for private snapshot readers from the former
           # probe-specific healer. StaleAgentHealer is now the sole retry owner.
           "recoverable_error" => {
@@ -1388,6 +1423,36 @@ module Hive
             "exhausted" => []
           }
         }
+      end
+
+      def durable_recovery_receipts
+        pending = Hive::Daemon::DispatchRequestQueue.pending(
+          state_home: dispatch_request_state_home
+        )
+        claimed = Hive::Daemon::DispatchRequestQueue.claimed(
+          state_home: dispatch_request_state_home
+        ).map(&:request)
+        (pending + claimed).uniq(&:request_id).filter_map do |request|
+          next unless request.recovery.is_a?(Hash)
+
+          receipt = @recovery_coordinator.receipt_for_request(request)
+          {
+            "project" => request.project,
+            "slug" => request.slug,
+            "stage" => request.expected_stage,
+            "recovery_phase" => request.recovery["phase"],
+            "expected_marker_name" => request.expected_marker_name,
+            "expected_marker_attrs" => request.recovery["expected_marker_attrs"],
+            "receipt" => receipt.to_h
+          }
+        end
+      rescue StandardError => e
+        @logger.event(
+          :fatal,
+          message: "recovery lifecycle projection raised: #{e.class}: #{e.message}",
+          keeping_previous: true
+        )
+        []
       end
 
       # Order rows so tasks closer to the end of the pipeline dispatch
@@ -1856,6 +1921,39 @@ module Hive
           return
         end
 
+        if req.recovery.is_a?(Hash)
+          row = rows.find do |candidate|
+            candidate.project.to_s == req.project.to_s &&
+              candidate.slug.to_s == req.slug.to_s
+          end
+          unless row
+            @logger.event(
+              :dispatch_request_blocked,
+              request_id: req.request_id, project: req.project,
+              slug: req.slug, reason: "recovery_observation_unavailable"
+            )
+            return
+          end
+          recovery_receipt = @recovery_coordinator.resume(
+            request: req, row: row, now: now
+          )
+          unless recovery_receipt.status == "queued" &&
+                 recovery_receipt.phase == "cleared"
+            @logger.event(
+              :dispatch_request_blocked,
+              request_id: req.request_id, project: req.project,
+              slug: req.slug, reason: recovery_receipt.reason || recovery_receipt.status,
+              lifecycle: recovery_receipt.status,
+              phase: recovery_receipt.phase,
+              remediation: recovery_receipt.remediation
+            )
+            return
+          end
+          req = Hive::Daemon::DispatchRequestQueue.fetch(
+            req.request_id, state_home: dispatch_request_state_home
+          ) || req
+        end
+
         return if durable_error_retry_request?(req) &&
                   !durable_error_retry_current?(req, rows: rows)
 
@@ -1917,7 +2015,8 @@ module Hive
       # clear. Project registration is reloadable operator state, so a missing
       # project must defer this request rather than deleting it permanently.
       def durable_error_retry_request?(req)
-        req.requestor.to_s == "healer" && req.trigger.to_s == "error_retry"
+        req.recovery.is_a?(Hash) ||
+          (req.requestor.to_s == "healer" && req.trigger.to_s == "error_retry")
       end
 
       # A healer plan request is intentionally non-expiring, so admission must
@@ -2040,11 +2139,27 @@ module Hive
           end
 
           update_dispatch_request_attempt_claim(req, result: result, now: now)
+          if req.recovery.is_a?(Hash)
+            @recovery_coordinator.mark_dispatched(
+              req,
+              attempt_id: result.attempt.attempt_id,
+              terminal: result.status == :terminal_replay,
+              outcome: result.receipt && result.receipt["outcome"],
+              now: now
+            )
+          end
+          event = case result.status
+          when :accepted then :dispatch_request_dispatched
+          when :existing_live then :dispatch_request_attached
+          when :terminal_replay then :dispatch_request_terminal_replay
+          else :dispatch_request_blocked
+          end
           @logger.event(
-            :dispatch_request_dispatched,
+            event,
             request_id: req.request_id, attempt_id: result.attempt.attempt_id,
             task_generation: result.attempt.task_generation,
             attempt_state: result.attempt.state,
+            admission_status: result.status.to_s,
             project: req.project, slug: req.slug,
             command: command, trigger: req.trigger,
             chat_id: req.chat_id, update_id: req.update_id
@@ -2240,11 +2355,22 @@ module Hive
           attempt_id = delivery.claim["attempt_id"].to_s
           next if attempt_id.empty?
 
+          request = delivery.request
+          next if request.recovery&.fetch("phase", nil) == "terminal"
+
           attempt = @attempt_reconciler.fetch(attempt_id)
           next unless attempt&.state == "terminal"
 
-          request = delivery.request
           receipt = attempt.receipt
+          if request.recovery.is_a?(Hash)
+            @recovery_coordinator.mark_dispatched(
+              request,
+              attempt_id: attempt.attempt_id,
+              terminal: true,
+              outcome: receipt["outcome"],
+              now: now
+            )
+          end
           continuation = if receipt["exit_status"].zero?
             Hive::Daemon::DispatchRequestQueue.promote_sequence(
               request.request_id,
@@ -2263,9 +2389,11 @@ module Hive
             nil
           end
           write_attempt_dispatch_result(request, attempt, receipt, now: now) unless continuation
-          Hive::Daemon::DispatchRequestQueue.remove(
-            request.request_id, state_home: dispatch_request_state_home
-          )
+          unless request.recovery.is_a?(Hash)
+            Hive::Daemon::DispatchRequestQueue.remove(
+              request.request_id, state_home: dispatch_request_state_home
+            )
+          end
           @logger.event(
             :dispatch_request_completed,
             request_id: request.request_id,
@@ -2370,6 +2498,19 @@ module Hive
         @logger.event(:fatal,
                       message: "prune_dispatch_results raised: #{e.class}: #{e.message}",
                       keeping_previous: true)
+      end
+
+      def prune_terminal_recovery_receipts(now:)
+        Hive::Daemon::DispatchRequestQueue.prune_terminal_recoveries(
+          state_home: dispatch_request_state_home,
+          now: now
+        )
+      rescue StandardError => e
+        @logger.event(
+          :fatal,
+          message: "prune terminal recovery receipts raised: #{e.class}: #{e.message}",
+          keeping_previous: true
+        )
       end
 
       # ADV-1: write a completion-notice file the bot will drain + relay to
@@ -2518,16 +2659,28 @@ module Hive
         )
         result = @attempt_dispatcher.dispatch_request(request, interactive: false, now: now)
         log_attempt_admission(result)
-        @logger.event(
-          result.status == :deferred ? :blocked : :dispatched,
-          attempt_id: result.attempt&.attempt_id,
-          task_generation: result.attempt&.task_generation,
-          attempt_state: result.attempt&.state,
-          project: project, slug: slug, stage: stage,
-          command: command, trigger: trigger,
-          reason: result.reason, dry_run: false
-        )
-        @dispatched_today += 1 unless result.status == :deferred
+        if result.status == :accepted
+          @logger.event(
+            :dispatched,
+            attempt_id: result.attempt&.attempt_id,
+            task_generation: result.attempt&.task_generation,
+            attempt_state: result.attempt&.state,
+            project: project, slug: slug, stage: stage,
+            command: command, trigger: trigger,
+            reason: result.reason, dry_run: false
+          )
+          @dispatched_today += 1
+        elsif result.status == :deferred
+          @logger.event(
+            :blocked,
+            attempt_id: result.attempt&.attempt_id,
+            task_generation: result.attempt&.task_generation,
+            attempt_state: result.attempt&.state,
+            project: project, slug: slug, stage: stage,
+            command: command, trigger: trigger,
+            reason: result.reason, dry_run: false
+          )
+        end
         result
       end
 
@@ -2535,7 +2688,8 @@ module Hive
         event =
           case result.status
           when :accepted then :attempt_accepted
-          when :existing_live, :terminal_replay then :attempt_duplicate
+          when :existing_live then :attempt_duplicate
+          when :terminal_replay then :attempt_terminal_replay
           when :deferred then :attempt_capacity_deferred
           else return
           end
@@ -2722,7 +2876,8 @@ module Hive
           lost_outcome_store: @lost_outcome_store,
           lost_outcome_processor: @lost_outcome_processor,
           auto_retry_enabled: daemon_cfg.fetch("auto_retry", {}).fetch("enabled", true) == true,
-          project_auto_retry_enabled: ->(project) { project_enabled?(project) }
+          project_auto_retry_enabled: ->(project) { project_enabled?(project) },
+          recovery_coordinator: @recovery_coordinator
         )
 
         @daemon_cfg = daemon_cfg

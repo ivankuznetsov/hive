@@ -158,6 +158,63 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_terminal_recovery_does_not_hide_a_fresh_failure_marker
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      fresh = row(
+        marker: "error",
+        marker_attrs: { "reason" => "timeout", "marker_id" => "marker-2" }
+      )
+      receipt = {
+        "status" => "terminal",
+        "request_id" => "recovery-1",
+        "attempt_id" => "attempt-1",
+        "phase" => "terminal",
+        "terminal_outcome" => "failed"
+      }
+      recoveries = {
+        "stale_agent" => {
+          "receipts" => [
+            {
+              "project" => "demo",
+              "slug" => "ship-it",
+              "stage" => "4-execute",
+              "recovery_phase" => "terminal",
+              "expected_marker_name" => "error",
+              "expected_marker_attrs" => {
+                "reason" => "timeout",
+                "marker_id" => "marker-1"
+              },
+              "receipt" => receipt
+            }
+          ]
+        }
+      }
+
+      assembler.begin_tick(now: T0)
+      assembler.observe(
+        fresh,
+        decision: "retry_cooldown",
+        owner: "scheduler",
+        reason: "new marker is cooling down",
+        retry_at: (T0 + 3_600).iso8601(6)
+      )
+      assembler.complete(
+        initial_rows: [ fresh ],
+        final_rows: [ fresh ],
+        controller: {},
+        queue: {},
+        recoveries: recoveries,
+        now: T0 + 1
+      )
+
+      disposition = reader.read(now: T0 + 2).dig("tasks", 0, "disposition")
+      assert_equal "retry_cooldown", disposition.fetch("decision")
+      refute disposition.key?("recovery")
+    end
+  end
+
   def test_provider_hold_without_stage_or_reason_still_matches_the_current_task
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")

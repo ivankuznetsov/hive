@@ -1,7 +1,9 @@
 <div class="task-actions<%= " task-actions-compact" if local_assigns[:compact] %>">
-  <% if task.recovery_action? %>
+  <% if task.recovery_action_visible? %>
     <%= button_to "Retry stage", task_recover_path(task.project.name, task.slug),
-          data: { turbo_submits_with: "Queueing…" } %>
+          disabled: !task.recovery_action_enabled?,
+          aria: { disabled: (!task.recovery_action_enabled?).to_s },
+          data: { turbo_submits_with: "Checking…" } %>
   <% end %>
   <% if task.passable? %>
     <%= button_to "Approve", task_approve_path(task.project.name, task.slug),

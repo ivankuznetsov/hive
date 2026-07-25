@@ -173,9 +173,22 @@ module Hive
         def autofix(data)
           _prefix, project, slug, stage, marker, *rest = split_callback(data, [ 5, 6, 7 ])
           match_attr, workflow = recovery_tail(rest)
-          RecoverySequence.build(
+          provisional = RecoverySequence.build(
             project: project, slug: slug, stage: stage, marker: marker,
             match_attr: match_attr, workflow: workflow,
+            result_class: @result_class, clear_keyboard: true
+          )
+          return provisional unless provisional.action == :dispatch_recovery
+
+          row = status_row(project: project, slug: slug, stage: stage)
+          return @result_class.new(action: :reply, text: "Task status changed - reopen /queue.") unless row
+          unless row.marker.to_s.casecmp(marker.to_s).zero?
+            return @result_class.new(action: :reply, text: "Task status changed - reopen /queue.")
+          end
+
+          RecoverySequence.build(
+            project: project, slug: slug, stage: stage, marker: marker,
+            match_attr: match_attr, attrs: row.attrs, workflow: workflow, row: row,
             result_class: @result_class, clear_keyboard: true
           )
         end

@@ -156,6 +156,48 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  def test_snapshot_overlays_canonical_recovery_without_a_second_status_scan
+    with_tmp_global_config do
+      base = {
+        "generated_at" => Time.utc(2026, 7, 25, 12).iso8601(6),
+        "projects" => [
+          {
+            "name" => "demo",
+            "tasks" => [ { "slug" => "failed-task", "marker" => "error" } ]
+          }
+        ]
+      }
+      status = CountingStatus.new([ base ])
+      receipt = {
+        "status" => "queued",
+        "request_id" => "recovery-1",
+        "attempt_id" => nil,
+        "phase" => "admitted"
+      }
+      status.define_singleton_method(:operational_payload) do |_projects, status_payload:|
+        raise "status payload was rescanned" unless status_payload.equal?(base)
+
+        {
+          "tasks" => [
+            {
+              "identity" => { "project" => "demo", "slug" => "failed-task" },
+              "recovery" => receipt
+            }
+          ]
+        }
+      end
+      feed = Hive::Web::StatusFeed.new(status_command: status)
+
+      payload = feed.snapshot
+
+      assert_equal 1, status.calls
+      assert_equal receipt,
+                   payload.dig("projects", 0, "tasks", 0, "recovery")
+    ensure
+      feed&.stop
+    end
+  end
+
   # PERF-001/002: N concurrent /events subscribers must trigger only ONE
   # filesystem scan per tick, not one per connection. The shared poller does
   # the scan; every subscriber reads the published value.

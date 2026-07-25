@@ -8,21 +8,21 @@ class HiveBotRecoverySequenceTest < Minitest::Test
   include HiveTestHelper
 
   Result = Struct.new(:action, :text, :command_argv, :commands, :project, :slug,
-                      :alert_reset, :clear_keyboard, keyword_init: true)
+                      :alert_reset, :clear_keyboard, :recovery, keyword_init: true)
 
-  def test_build_returns_dispatch_commands_for_retryable_review_error
+  def test_build_returns_one_shared_recovery_request_for_retryable_review_error
     result = Hive::Bot::Handlers::RecoverySequence.build(
       project: "hive", slug: "stuck-260525-abcd", stage: "6-review",
       marker: "review_error", match_attr: "pass=2",
       result_class: Result, clear_keyboard: false
     )
 
-    assert_equal :dispatch_commands, result.action
+    assert_equal :dispatch_recovery, result.action
     assert_equal "hive", result.project
     assert_equal "stuck-260525-abcd", result.slug
-    assert_equal 2, result.commands.length
-    assert_equal "markers", result.commands[0][1]
-    assert_equal "review", result.commands[1][1]
+    assert_nil result.commands
+    assert_equal "review_error", result.recovery.fetch(:marker)
+    assert_equal({ "pass" => "2" }, result.recovery.fetch(:attrs))
     refute result.clear_keyboard
   end
 
@@ -48,35 +48,6 @@ class HiveBotRecoverySequenceTest < Minitest::Test
     assert_match(/No retry verb for stage 9-done/, result.text)
   end
 
-  def test_retry_commands_skips_markers_clear_for_agent_working_marker
-    commands = Hive::Bot::Handlers::RecoverySequence.retry_commands(
-      project: "hive", slug: "any-260525-aaaa", stage: "6-review",
-      marker: "AGENT_WORKING", match_attr: nil
-    )
-
-    assert_equal 1, commands.length, "agent_working marker must NOT add a markers clear step"
-    assert_equal "review", commands[0][1]
-  end
-
-  def test_retry_commands_includes_match_attr_when_present
-    commands = Hive::Bot::Handlers::RecoverySequence.retry_commands(
-      project: "hive", slug: "stuck-260525-abcd", stage: "6-review",
-      marker: "review_error", match_attr: "pass=2"
-    )
-
-    assert_includes commands[0], "--match-attr"
-    assert_includes commands[0], "pass=2"
-  end
-
-  def test_retry_commands_omits_match_attr_when_invalid_shape
-    commands = Hive::Bot::Handlers::RecoverySequence.retry_commands(
-      project: "hive", slug: "stuck-260525-abcd", stage: "6-review",
-      marker: "review_error", match_attr: "no_equals_sign"
-    )
-
-    refute_includes commands[0], "--match-attr"
-  end
-
   # A non-coding workflow has no entry in the coding verb-by-stage table, so
   # before U6 a generic recovery row got "No retry verb". With the row's
   # workflow threaded in, it retries via the universal `hive run`, scoped by
@@ -86,28 +57,16 @@ class HiveBotRecoverySequenceTest < Minitest::Test
                  Hive::Bot::Handlers::RecoverySequence.retry_verb_for_stage("2-gather", workflow: "research")
   end
 
-  def test_retry_commands_for_generic_workflow_uses_hive_run_with_stage
-    commands = Hive::Bot::Handlers::RecoverySequence.retry_commands(
-      project: "hive", slug: "generic-260620-aaaa", stage: "2-gather",
-      marker: "error", workflow: "research"
-    )
-
-    assert_equal 2, commands.length
-    assert_equal %w[hive markers clear generic-260620-aaaa --name ERROR --project hive --json], commands[0]
-    assert_equal %w[hive run generic-260620-aaaa --stage 2-gather --project hive --json], commands[1],
-                 "generic retry must use `hive run --stage`, never an invalid `hive run --from`"
-  end
-
-  def test_build_dispatches_hive_run_for_generic_workflow_row
+  def test_build_routes_generic_workflow_row_to_shared_recovery
     result = Hive::Bot::Handlers::RecoverySequence.build(
       project: "hive", slug: "generic-260620-aaaa", stage: "2-gather",
       marker: "error", match_attr: nil, workflow: "research",
       result_class: Result, clear_keyboard: false
     )
 
-    assert_equal :dispatch_commands, result.action
-    assert_equal "run", result.commands.last[1]
-    assert_includes result.commands.last, "--stage"
+    assert_equal :dispatch_recovery, result.action
+    assert_equal "research", result.recovery.fetch(:workflow)
+    assert_equal "2-gather", result.recovery.fetch(:stage)
   end
 
   # The generic terminal (last) stage has no agent to re-run — offering
@@ -214,8 +173,8 @@ class HiveBotRecoverySequenceTest < Minitest::Test
       result_class: Result, clear_keyboard: true
     )
 
-    assert_equal :dispatch_commands, result.action
-    assert_equal 2, result.commands.length
+    assert_equal :dispatch_recovery, result.action
+    assert_nil result.commands
   end
 
   def test_build_retries_ensure_clean_on_exit_failed_via_match_attr
@@ -225,8 +184,8 @@ class HiveBotRecoverySequenceTest < Minitest::Test
       result_class: Result, clear_keyboard: false
     )
 
-    assert_equal :dispatch_commands, result.action
-    assert_equal 2, result.commands.length
+    assert_equal :dispatch_recovery, result.action
+    assert_nil result.commands
   end
 
   def test_build_retries_ensure_clean_on_exit_failed_via_attrs
@@ -237,8 +196,8 @@ class HiveBotRecoverySequenceTest < Minitest::Test
       result_class: Result, clear_keyboard: false
     )
 
-    assert_equal :dispatch_commands, result.action
-    assert_equal 2, result.commands.length
+    assert_equal :dispatch_recovery, result.action
+    assert_nil result.commands
   end
 
   def test_build_retries_fix_status_check_failed_via_attrs
@@ -249,8 +208,8 @@ class HiveBotRecoverySequenceTest < Minitest::Test
       result_class: Result, clear_keyboard: false
     )
 
-    assert_equal :dispatch_commands, result.action
-    assert_equal 2, result.commands.length
+    assert_equal :dispatch_recovery, result.action
+    assert_nil result.commands
   end
 
   def test_build_retries_marker_id_plus_reason_match_attr
@@ -261,8 +220,8 @@ class HiveBotRecoverySequenceTest < Minitest::Test
       result_class: Result, clear_keyboard: false
     )
 
-    assert_equal :dispatch_commands, result.action
-    assert_equal 2, result.commands.length
+    assert_equal :dispatch_recovery, result.action
+    assert_nil result.commands
   end
 
   # Other `:error` reasons keep the existing retry behaviour (clear +
@@ -274,8 +233,7 @@ class HiveBotRecoverySequenceTest < Minitest::Test
       result_class: Result, clear_keyboard: false
     )
 
-    assert_equal :dispatch_commands, result.action
-    assert_equal 2, result.commands.length
-    assert_equal "markers", result.commands[0][1]
+    assert_equal :dispatch_recovery, result.action
+    assert_nil result.commands
   end
 end

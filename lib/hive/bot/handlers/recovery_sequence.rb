@@ -23,7 +23,7 @@ module Hive
         # EXECUTE_STALE is the sole manual-only marker; ERROR and REVIEW_ERROR
         # always retain a guarded retry path.
         def self.build(project:, slug:, stage:, marker:, match_attr:, result_class:, clear_keyboard:,
-                       attrs: nil, workflow: nil)
+                       attrs: nil, workflow: nil, row: nil)
           # `match_attr` is a single `key=value` pair the inline-button
           # path encoded into callback_data because the full row.attrs
           # hash doesn't survive a Telegram callback. Synthesise a
@@ -41,12 +41,32 @@ module Hive
             return result_class.new(action: :reply, text: "No retry verb for stage #{stage_label}.")
           end
 
+          if %w[none agent_working].include?(marker.to_s.downcase)
+            stage_flag = verb == "run" ? "--stage" : "--from"
+            return result_class.new(
+              action: :dispatch_commands,
+              project: project,
+              slug: slug,
+              commands: [
+                [ "hive", verb, slug, stage_flag, stage, "--project", project, "--json" ]
+              ],
+              alert_reset: alert_reset(project, slug, stage, marker, match_attr),
+              clear_keyboard: clear_keyboard
+            )
+          end
+
           result_class.new(
-            action: :dispatch_commands,
+            action: :dispatch_recovery,
             project: project,
             slug: slug,
-            commands: retry_commands(project: project, slug: slug, stage: stage,
-                                     marker: marker, match_attr: match_attr, workflow: workflow),
+            recovery: row || {
+              project: project,
+              slug: slug,
+              stage: stage,
+              workflow: workflow,
+              marker: marker.to_s.downcase,
+              attrs: resolved_attrs || {}
+            },
             alert_reset: alert_reset(project, slug, stage, marker, match_attr),
             clear_keyboard: clear_keyboard
           )
@@ -163,32 +183,6 @@ module Hive
 
           match = Hive::Config.registered_projects.find { |p| p["name"] == project_name.to_s }
           Hive::Workflows::Project.load!(match["path"]) if match
-        end
-
-        # 9-done returns an empty command list (no retry verb), and
-        # AGENT_WORKING markers skip `hive markers clear` because that name
-        # is outside the clear allowlist (markers.rb#ALLOWED_NAMES) and
-        # would exit 4. Both branches intentionally diverge from the
-        # pre-U7 clear_and_retry path.
-        def self.retry_commands(project:, slug:, stage:, marker:, match_attr: nil, workflow: nil)
-          verb = retry_verb_for_stage(stage, workflow: workflow, project: project)
-          return [] unless verb
-
-          commands = []
-          marker_name = marker.to_s
-          unless marker_name.casecmp("none").zero? || marker_name.casecmp("agent_working").zero?
-            clear_argv = [ "hive", "markers", "clear", slug, "--name", marker_name.upcase,
-                           "--project", project ]
-            clear_argv += [ "--match-attr", match_attr ] if match_attr.to_s.include?("=")
-            clear_argv << "--json"
-            commands << clear_argv
-          end
-          # `hive run` (the generic stage runner) scopes by --stage and has no
-          # --from; the coding advance/recovery verbs assert the source stage
-          # with --from.
-          stage_flag = verb == "run" ? "--stage" : "--from"
-          commands << [ "hive", verb, slug, stage_flag, stage, "--project", project, "--json" ]
-          commands
         end
 
         def self.alert_reset(project, slug, stage, marker = nil, match_attr = nil)

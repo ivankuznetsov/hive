@@ -6,8 +6,9 @@ class CommandsActTest < Minitest::Test
   class FakeExecutor
     attr_reader :calls
 
-    def initialize(error: nil)
+    def initialize(error: nil, result: nil)
       @error = error
+      @result = result
       @calls = []
     end
 
@@ -15,7 +16,7 @@ class CommandsActTest < Minitest::Test
       @calls << kwargs
       raise @error if @error
 
-      { "task_state" => "idle", "stage" => "3-plan", "marker" => "complete" }
+      @result || { "task_state" => "idle", "stage" => "3-plan", "marker" => "complete" }
     end
   end
 
@@ -49,6 +50,52 @@ class CommandsActTest < Minitest::Test
     end
 
     assert_equal "advanced demo:task — idle at 3-plan (complete)\n", stdout
+  end
+
+  def test_retry_renders_and_validates_the_canonical_recovery_receipt
+    result = {
+      "task_state" => "error",
+      "stage" => "4-execute",
+      "marker" => "error",
+      "recovery" => {
+        "status" => "cooldown",
+        "request_id" => nil,
+        "attempt_id" => nil,
+        "phase" => nil,
+        "failure_origin" => "implementer_failed",
+        "next_eligible_at" => "2026-07-20T11:00:00.000000Z",
+        "owner" => "scheduler",
+        "reason" => "shared_cooldown",
+        "remediation" => "retry remains available after the shared cooldown",
+        "retry_count" => 0,
+        "terminal_outcome" => nil,
+        "terminal_at" => nil,
+        "provider_hint" => {
+          "retry_after" => "2026-07-20T14:00:00Z",
+          "display_only" => true
+        }
+      }
+    }
+    executor = FakeExecutor.new(result: result)
+    token = "c" * 64
+    stdout, = capture_io do
+      Hive::Commands::Act.new(
+        "workflow.retry", "demo:task", observation: token, executor: executor
+      ).call
+    end
+    assert_equal(
+      "Retry available later — eligible 2026-07-20T11:00:00.000000Z; shared cooldown\n",
+      stdout
+    )
+
+    json_stdout, = capture_io do
+      Hive::Commands::Act.new(
+        "workflow.retry", "demo:task", observation: token, json: true, executor: executor
+      ).call
+    end
+    payload = JSON.parse(json_stdout)
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-act"))))
+    assert schema.valid?(payload), schema.validate(payload).map { |error| error.fetch("error") }.inspect
   end
 
   def test_stale_observation_emits_typed_json_error_and_performs_no_action

@@ -1,6 +1,7 @@
 require "json"
 require "fileutils"
 require "securerandom"
+require "digest"
 require "time"
 require "hive/paths"
 require "hive/attempts/output_reference"
@@ -14,8 +15,8 @@ module Hive
       module_function
 
       SCHEMA = "hive-dispatch-request".freeze
-      SCHEMA_VERSION = 3
-      SUPPORTED_SCHEMA_VERSIONS = [ 2, 3 ].freeze
+      SCHEMA_VERSION = 4
+      SUPPORTED_SCHEMA_VERSIONS = [ 2, 3, 4 ].freeze
 
       ALLOWED_VERBS = %w[
         run develop brainstorm plan review open-pr artifacts finalize
@@ -40,12 +41,15 @@ module Hive
 
       SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
       PROJECT_RE = /\A[A-Za-z0-9_.\-]+\z/
+      REQUEST_ID_RE = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
+      REQUEST_LOCK_SHARDS = 64
 
       Request = Struct.new(
         :request_id, :created_at, :project, :slug, :argv, :requestor,
         :chat_id, :update_id, :trigger, :task_generation,
         :predecessor_attempt_id, :inherited_outputs, :task_id,
         :expected_stage, :expected_marker_name, :expected_marker_id,
+        :recovery,
         :schema_version, :path,
         keyword_init: true
       )
@@ -53,6 +57,7 @@ module Hive
 
       EXPIRY_SEC = 600
       CLAIM_EXPIRY_SEC = 14_400
+      TERMINAL_RECOVERY_RETENTION_SEC = 7 * 24 * 60 * 60
 
       # Resolve (and mkdir, mode 0700) the requests directory via the shared
       # QueueDirectory helper so the owner-only invariant lives in one place
@@ -71,17 +76,20 @@ module Hive
                          inherited_outputs: [], task_id: nil,
                          expected_stage: nil, expected_marker_name: nil,
                          expected_marker_id: nil,
+                         recovery: nil,
                          state_home: Hive::Paths.state_home, now: Time.now)
         unless valid_argv?(argv)
           raise ArgumentError, "argv #{argv.inspect} is not allowlisted for dispatch requests"
         end
         raise ArgumentError, "project is required for dispatch requests" if project.to_s.empty?
         raise ArgumentError, "slug is required for dispatch requests" if slug.to_s.empty?
+        validate_request_id!(request_id)
         Array(inherited_outputs).each do |reference|
           Hive::Attempts::OutputReference.validate_shape!(reference)
         rescue Hive::Attempts::InvalidOutputReference => e
           raise ArgumentError, e.message
         end
+        validate_recovery!(recovery) unless recovery.nil?
 
         created_at = now.utc
         payload = {
@@ -102,7 +110,8 @@ module Hive
           "task_id" => task_id,
           "expected_stage" => expected_stage,
           "expected_marker_name" => expected_marker_name,
-          "expected_marker_id" => expected_marker_id
+          "expected_marker_id" => expected_marker_id,
+          "recovery" => recovery
         }
 
         dir = directory(state_home: state_home)
@@ -134,6 +143,7 @@ module Hive
             next
           end
           next if claimed_ids.include?(parsed.request_id)
+          next if parsed.recovery&.fetch("phase", nil) == "terminal"
 
           entries << parsed
         end
@@ -163,20 +173,21 @@ module Hive
       def remove(request_id, state_home: Hive::Paths.state_home)
         return false if request_id.to_s.empty?
 
-        dir = directory(state_home: state_home)
-        removed = false
-        request_files(dir).each do |path|
-          next unless path.include?(request_id.to_s)
+        with_request_lock(request_id, state_home: state_home) do |dir|
+          removed = false
+          request_files(dir).each do |path|
+            next unless path.include?(request_id.to_s)
 
-          data = parse_json_hash(path)
-          next unless data && data["request_id"] == request_id.to_s
+            data = parse_json_hash(path)
+            next unless data && data["request_id"] == request_id.to_s
 
-          File.unlink(path)
-          FileUtils.rm_f(claim_metadata_path(path)) if path.end_with?(CLAIMED_SUFFIX)
-          discard_sequence(request_id, state_home: state_home)
-          removed = true
+            File.unlink(path)
+            FileUtils.rm_f(claim_metadata_path(path)) if path.end_with?(CLAIMED_SUFFIX)
+            discard_sequence(request_id, state_home: state_home)
+            removed = true
+          end
+          removed
         end
-        removed
       rescue Errno::ENOENT
         false
       end
@@ -192,19 +203,24 @@ module Hive
       def remove_if_unclaimed(request_id, state_home: Hive::Paths.state_home)
         return false if request_id.to_s.empty?
 
-        dir = directory(state_home: state_home)
-        return false if claimed_request_ids(dir).include?(request_id.to_s)
+        with_request_lock(request_id, state_home: state_home) do |dir|
+          next false if claimed_request_ids(dir).include?(request_id.to_s)
 
-        removed = false
-        Dir.glob(File.join(dir, "*.json")).each do |path|
-          data = parse_json_hash(path)
-          next unless data && data["request_id"] == request_id.to_s
+          removed = false
+          Dir.glob(File.join(dir, "*.json")).each do |path|
+            data = parse_json_hash(path)
+            next unless data && data["request_id"] == request_id.to_s
+            # Recovery requests are the durable half of a marker transition.
+            # Generic queue pruning must never unlink them; terminal receipts
+            # have their own bounded retention policy.
+            next if data["recovery"].is_a?(Hash)
 
-          File.unlink(path)
-          discard_sequence(request_id, state_home: state_home)
-          removed = true
+            File.unlink(path)
+            discard_sequence(request_id, state_home: state_home)
+            removed = true
+          end
+          removed
         end
-        removed
       rescue Errno::ENOENT
         false
       end
@@ -217,27 +233,30 @@ module Hive
                 state_home: Hive::Paths.state_home)
         return nil if request_id.to_s.empty?
 
-        dir = directory(state_home: state_home)
-        Dir.glob(File.join(dir, "*.json")).each do |path|
-          next unless path.include?(request_id.to_s)
+        with_request_lock(request_id, state_home: state_home) do |dir|
+          result = nil
+          Dir.glob(File.join(dir, "*.json")).each do |path|
+            next unless path.include?(request_id.to_s)
 
-          data = parse_json_hash(path)
-          next unless data && data["request_id"] == request_id.to_s
+            data = parse_json_hash(path)
+            next unless data && data["request_id"] == request_id.to_s
 
-          claimed_path = "#{path}#{CLAIMED_SUFFIX}"
-          File.rename(path, claimed_path)
-          write_claim_metadata(
-            claimed_path, pid: pid, process_start_time: process_start_time, now: now,
-            attempt_id: attempt_id, task_generation: task_generation
-          )
-          # The `.claimed` rename is the at-most-once commit point. fsync the
-          # directory so both that rename and the sidecar's rename survive an
-          # unclean shutdown — otherwise a power loss could leave the claim
-          # un-persisted and the request re-dispatchable on restart (#248).
-          fsync_directory(dir)
-          return claimed_path
+            claimed_path = "#{path}#{CLAIMED_SUFFIX}"
+            File.rename(path, claimed_path)
+            write_claim_metadata(
+              claimed_path, pid: pid, process_start_time: process_start_time, now: now,
+              attempt_id: attempt_id, task_generation: task_generation
+            )
+            # The `.claimed` rename is the at-most-once commit point. fsync the
+            # directory so both that rename and the sidecar's rename survive an
+            # unclean shutdown — otherwise a power loss could leave the claim
+            # un-persisted and the request re-dispatchable on restart (#248).
+            fsync_directory(dir)
+            result = claimed_path
+            break
+          end
+          result
         end
-        nil
       rescue Errno::ENOENT
         nil
       end
@@ -305,6 +324,11 @@ module Hive
           end
 
           request_id = data["request_id"]
+          # Terminal recovery files are retained as canonical receipts. They
+          # are deliberately invisible to dispatch and must also survive
+          # startup claim repair even when their original process is gone.
+          next if data.dig("recovery", "phase") == "terminal"
+
           claim = read_claim_metadata(path)
           attempt_id = claim && claim["attempt_id"]
           task_generation = claim && claim["task_generation"]
@@ -327,6 +351,30 @@ module Hive
           owner_alive = !aged_out && alive &&
                         alive.call(claim && claim["pid"], claim && claim["process_start_time"])
           next if owner_alive
+
+          # Recovery requests are the durable half of an already-started
+          # marker transition. If the daemon dies after the queue claim but
+          # before Attempts persists an admission, deleting the claim would
+          # strand the task markerless. No correlated attempt means no worker
+          # owns the transition, so put this idempotent request back in the
+          # pending queue for the coordinator to resume.
+          if data["recovery"].is_a?(Hash) && attempt_id.to_s.empty?
+            pending_path = path.delete_suffix(CLAIMED_SUFFIX)
+            if File.exist?(pending_path)
+              File.unlink(path)
+            else
+              File.rename(path, pending_path)
+            end
+            FileUtils.rm_f(claim_metadata_path(path))
+            fsync_directory(dir)
+            handler&.call(
+              request_id: request_id,
+              reason: "recovery_claim_requeued",
+              path: pending_path
+            )
+            removed += 1
+            next
+          end
 
           File.unlink(path) if File.exist?(path)
           FileUtils.rm_f(claim_metadata_path(path))
@@ -358,7 +406,8 @@ module Hive
             predecessor_attempt_id: data["predecessor_attempt_id"],
             task_id: data["task_id"], expected_stage: data["expected_stage"],
             expected_marker_name: data["expected_marker_name"],
-            expected_marker_id: data["expected_marker_id"]
+            expected_marker_id: data["expected_marker_id"],
+            recovery: data["recovery"]
           }
         end
         nil
@@ -425,8 +474,112 @@ module Hive
           task_generation: nil, predecessor_attempt_id: nil, inherited_outputs: [],
           task_id: nil, expected_stage: nil, expected_marker_name: nil,
           expected_marker_id: nil,
+          recovery: nil,
           schema_version: SCHEMA_VERSION, path: nil
         )
+      end
+
+      # Find an existing recovery transition for the exact observed marker
+      # generation. Callers invoke this while holding the task lock, making
+      # independently generated web/bot/healer action IDs converge on the
+      # first durable request instead of creating competing clear owners.
+      def find_recovery(project:, slug:, observed_marker_generation:,
+                        state_home: Hive::Paths.state_home)
+        request_files(directory(state_home: state_home)).filter_map do |path|
+          parsed = parse_file(path)
+          next if parsed.is_a?(Symbol) || !parsed.recovery.is_a?(Hash)
+          next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
+          next unless parsed.recovery["observed_marker_generation"].to_s ==
+                      observed_marker_generation.to_s
+
+          parsed
+        end.min_by { |request| [ request.created_at, request.request_id ] }
+      rescue Errno::ENOENT
+        nil
+      end
+
+      def fetch(request_id, state_home: Hive::Paths.state_home)
+        request_files(directory(state_home: state_home)).each do |path|
+          parsed = parse_file(path)
+          next if parsed.is_a?(Symbol)
+          return parsed if parsed.request_id.to_s == request_id.to_s
+        end
+        nil
+      rescue Errno::ENOENT
+        nil
+      end
+
+      def remove_terminal_recoveries(project:, slug:, except_request_id: nil,
+                                     state_home: Hive::Paths.state_home)
+        request_files(directory(state_home: state_home)).filter_map do |path|
+          parsed = parse_file(path)
+          next if parsed.is_a?(Symbol) || parsed.recovery&.fetch("phase", nil) != "terminal"
+          next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
+          next if parsed.request_id.to_s == except_request_id.to_s
+
+          parsed.request_id
+        end.uniq.count { |request_id| remove(request_id, state_home: state_home) }
+      rescue Errno::ENOENT
+        0
+      end
+
+      def prune_terminal_recoveries(now: Time.now,
+                                    retention_sec: TERMINAL_RECOVERY_RETENTION_SEC,
+                                    state_home: Hive::Paths.state_home)
+        cutoff = now.utc - retention_sec
+        request_files(directory(state_home: state_home)).filter_map do |path|
+          parsed = parse_file(path)
+          next if parsed.is_a?(Symbol) || parsed.recovery&.fetch("phase", nil) != "terminal"
+
+          terminal_at = Time.parse(parsed.recovery["terminal_at"].to_s)
+          parsed.request_id if terminal_at < cutoff
+        rescue ArgumentError, TypeError
+          parsed.request_id if parsed.created_at < cutoff
+        end.uniq.count { |request_id| remove(request_id, state_home: state_home) }
+      rescue Errno::ENOENT
+        0
+      end
+
+      # Compare-and-swap the recovery transition without changing the queue
+      # filename or claim state. A blocked transition records its reason while
+      # deliberately retaining the last authoritative phase.
+      def update_recovery!(request_id, expected_phase:, changes:,
+                           state_home: Hive::Paths.state_home,
+                           request_locked: false)
+        operation = lambda do |dir|
+          request_files(dir).each do |path|
+            data = parse_json_hash(path)
+            next unless data && data["request_id"].to_s == request_id.to_s
+
+            recovery = data["recovery"]
+            return false unless recovery.is_a?(Hash)
+            return false unless recovery["phase"].to_s == expected_phase.to_s
+
+            updated = recovery.merge(changes.to_h.transform_keys(&:to_s))
+            validate_recovery!(updated)
+            data["recovery"] = updated
+            rewrite_request(path, data)
+            fsync_directory(dir)
+            return true
+          end
+          false
+        end
+        return operation.call(directory(state_home: state_home)) if request_locked
+
+        with_request_lock(request_id, state_home: state_home, &operation)
+      rescue Errno::ENOENT
+        false
+      end
+
+      def with_request_lock(request_id, state_home: Hive::Paths.state_home)
+        validate_request_id!(request_id)
+        dir = directory(state_home: state_home)
+        shard = Digest::SHA256.digest(request_id.to_s).unpack1("C") % REQUEST_LOCK_SHARDS
+        lock_path = File.join(dir, format(".request-lock-%02d", shard))
+        File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+          lock.flock(File::LOCK_EX)
+          yield dir
+        end
       end
 
       # Queue files remain delivery records. Ownership resolution is delegated
@@ -460,12 +613,27 @@ module Hive
       end
 
       def filename_for(created_at:, request_id:)
+        validate_request_id!(request_id)
         ts = created_at.utc.strftime("%Y%m%dT%H%M%S%6N")
         "#{ts}-#{request_id}.json"
       end
 
+      def valid_request_id?(request_id)
+        REQUEST_ID_RE.match?(request_id.to_s)
+      end
+
+      def validate_request_id!(request_id)
+        return request_id.to_s if valid_request_id?(request_id)
+
+        raise ArgumentError, "request_id must be a bounded filesystem-safe identifier"
+      end
+
       def expired?(request, now: Time.now, expiry_sec: EXPIRY_SEC)
         return false unless request.respond_to?(:created_at)
+        # A recovery request is the durable half of the marker transition.
+        # Expiring it could strand a task after the marker's atomic rewrite.
+        return false if request.respond_to?(:recovery) && request.recovery.is_a?(Hash)
+
         # A healer's 3-plan request is the durable continuation of a marker
         # clear. Expiring it could leave an empty markerless plan permanently
         # undispatchable, so it remains pending until admitted. A temporarily
@@ -524,6 +692,7 @@ module Hive
       end
 
       def sequence_path(dir, request_id)
+        validate_request_id!(request_id)
         File.join(dir, "#{request_id}#{SEQUENCE_SUFFIX}")
       end
 
@@ -605,6 +774,7 @@ module Hive
 
           request_id = data["request_id"].to_s
           return :missing_request_id if request_id.empty?
+          return :invalid_request_id unless valid_request_id?(request_id)
 
           project = data["project"].to_s
           return :missing_project if project.empty?
@@ -623,7 +793,7 @@ module Hive
           created_at = parse_time(data["created_at"])
           return :invalid_created_at if created_at.nil?
 
-          if schema_version == 3
+          if schema_version >= 3
             required_v3 = %w[task_generation predecessor_attempt_id inherited_outputs]
             return :missing_v3_fields unless required_v3.all? { |key| data.key?(key) }
             return :invalid_inherited_outputs unless data["inherited_outputs"].is_a?(Array)
@@ -633,6 +803,14 @@ module Hive
               end
             rescue Hive::Attempts::InvalidOutputReference
               return :invalid_inherited_outputs
+            end
+          end
+          if schema_version >= 4
+            return :missing_v4_fields unless data.key?("recovery")
+            begin
+              validate_recovery!(data["recovery"]) unless data["recovery"].nil?
+            rescue ArgumentError
+              return :invalid_recovery
             end
           end
 
@@ -653,6 +831,7 @@ module Hive
             expected_stage: data["expected_stage"],
             expected_marker_name: data["expected_marker_name"],
             expected_marker_id: data["expected_marker_id"],
+            recovery: data["recovery"],
             schema_version: schema_version,
             path: path
           )
@@ -664,6 +843,48 @@ module Hive
           Time.parse(value.to_s)
         rescue ArgumentError
           nil
+        end
+
+        def validate_recovery!(recovery)
+          return if recovery.nil?
+          raise ArgumentError, "recovery must be an object" unless recovery.is_a?(Hash)
+
+          required = %w[
+            phase observed_marker_generation expected_marker_attrs
+            canonical_task_folder expected_post_clear_progress_fingerprint
+            dispatch_generation failure_origin next_eligible_at owner
+            blocked_reason blocked_remediation
+          ]
+          missing = required.reject { |key| recovery.key?(key) }
+          raise ArgumentError, "recovery missing #{missing.join(', ')}" unless missing.empty?
+          unless %w[admitted cleared dispatched terminal].include?(recovery["phase"].to_s)
+            raise ArgumentError, "invalid recovery phase"
+          end
+          unless recovery["expected_marker_attrs"].is_a?(Hash)
+            raise ArgumentError, "expected_marker_attrs must be an object"
+          end
+          %w[
+            observed_marker_generation expected_post_clear_progress_fingerprint
+            dispatch_generation
+          ].each do |key|
+            value = recovery[key].to_s
+            raise ArgumentError, "#{key} must be a sha256" unless value.match?(/\A[0-9a-f]{64}\z/)
+          end
+        end
+
+        def rewrite_request(path, data)
+          dir = File.dirname(path)
+          tmp_path = File.join(
+            dir, ".#{File.basename(path)}.tmp.#{Process.pid}.#{Thread.current.object_id}"
+          )
+          File.open(tmp_path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
+            file.write(JSON.generate(data))
+            file.flush
+            file.fsync
+          end
+          File.rename(tmp_path, path)
+        ensure
+          FileUtils.rm_f(tmp_path) if defined?(tmp_path) && tmp_path && File.exist?(tmp_path)
         end
       end
     end

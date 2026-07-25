@@ -334,6 +334,13 @@ class InitPromptsTest < Minitest::Test
     assert_equal %w[claude-ce-code-review pr-review-toolkit], answers["enabled_reviewers"]
   end
 
+  def test_interactive_reviewers_can_select_optional_grok_native_review
+    prompts, _output = make_prompts(interactive_input(reviewers: "grok-ce-code-review"))
+    answers = prompts.collect
+
+    assert_equal %w[grok-ce-code-review], answers["enabled_reviewers"]
+  end
+
   def test_interactive_reviewers_mixed_index_and_name
     prompts, _output = make_prompts(interactive_input(reviewers: "1,pr-review-toolkit"))
     answers = prompts.collect

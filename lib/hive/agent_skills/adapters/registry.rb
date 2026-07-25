@@ -1,5 +1,6 @@
 require "hive/agent_skills/adapters/claude"
 require "hive/agent_skills/adapters/codex"
+require "hive/agent_skills/adapters/grok"
 require "hive/agent_skills/adapters/pi"
 
 module Hive
@@ -9,6 +10,7 @@ module Hive
         ADAPTERS = {
           "claude" => Claude,
           "codex" => Codex,
+          "grok" => Grok,
           "pi" => Pi
         }.freeze
 

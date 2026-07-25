@@ -29,11 +29,13 @@ module Hive
       TERM_GRACE_SEC = 0.5
       REAP_GRACE_SEC = 0.2
 
-      def call(argv, env: {}, timeout: 10)
+      def call(argv, env: {}, timeout: 10, chdir: nil)
         timeout = Float(timeout)
         raise ArgumentError, "command timeout must be positive" unless timeout.finite? && timeout.positive?
 
-        stdin, stdout, stderr, waiter = Open3.popen3(env, *argv, pgroup: true)
+        options = { pgroup: true }
+        options[:chdir] = chdir if chdir
+        stdin, stdout, stderr, waiter = Open3.popen3(env, *argv, **options)
         stdin.close
         readers = [ capture_reader(stdout), capture_reader(stderr) ]
         deadline = monotonic_now + timeout
@@ -155,7 +157,11 @@ module Hive
       end
 
       def resolve(agents: nil, skills: nil)
-        targets = Manifest::AGENTS.map { |agent| operating_target(agent) }
+        # Only agents declared by the bundled Hive operating skill get an
+        # always-present operating target. Native-only agents such as Grok
+        # can still own stage/reviewer capabilities without requiring a
+        # copied Hive operating-skill projection.
+        targets = @manifest.capability("hive").agents.keys.map { |agent| operating_target(agent) }
         STAGES.each { |stage| targets << stage_target(stage) }
         Array(@config.dig("review", "reviewers")).each_with_index do |spec, index|
           name = spec["name"].to_s

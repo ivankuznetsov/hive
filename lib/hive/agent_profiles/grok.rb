@@ -1,4 +1,5 @@
 require "hive/agent_profile"
+require "hive/skill_check"
 require "hive/agent_profiles/usage_extractors"
 
 module Hive
@@ -82,17 +83,14 @@ module Hive
       budget_flag: nil,
       output_format_flags: [ "--output-format", "streaming-json" ],
       version_flag: "--version",
-      # Grok registers extension commands at the top level (`/<name>`), like
-      # codex. UNVERIFIED against a skill-invoking stage — grok has no
-      # skill_verifier yet, so stage prompts fall back to plain instruction
-      # text when the skill is absent.
+      # Grok exposes enabled plugin skills at the top level (`/<name>`).
       skill_syntax_format: "/%{skill}",
       headless_supported: true,
       min_version: "0.2.90",
       status_detection_mode: :output_file_exists,
       preflight: GROK_PREFLIGHT,
       usage_extractor: Hive::AgentProfiles::UsageExtractors::GROK,
-      skill_verifier: nil,
+      skill_verifier: Hive::SkillCheck::Grok.method(:verify),
       default_model_resolver: ->(**kwargs) {
         Hive::ImplementationIdentity::NativeDefaults.resolve(:grok, **kwargs)
       },

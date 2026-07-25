@@ -104,6 +104,72 @@ class AgentSkillAdaptersTest < Minitest::Test
     end
   end
 
+  def test_grok_uses_native_plugin_install_enable_and_update_commands
+    with_tmp_dir do |dir|
+      missing = inspection(
+        agent: "grok", capability: "ce-code-review", package: "compound-engineering",
+        health: "missing", bin: "/fake/grok"
+      )
+      install = adapter(Hive::AgentSkills::Adapters::Grok, dir: dir).plan([ missing ]).operations.fetch(0)
+      assert_equal [
+        "/fake/grok", "plugin", "install", "EveryInc/compound-engineering-plugin", "--trust"
+      ], install.argv
+
+      disabled = inspection(
+        agent: "grok", capability: "ce-code-review", package: "compound-engineering",
+        health: "missing", bin: "/fake/grok",
+        native_package: {
+          "id" => "compound-engineering", "version" => "3.20.0", "enabled" => false
+        }
+      )
+      enable = adapter(Hive::AgentSkills::Adapters::Grok, dir: dir).plan([ disabled ]).operations.fetch(0)
+      assert_equal [ "/fake/grok", "plugin", "enable", "compound-engineering" ], enable.argv
+
+      stale = inspection(
+        agent: "grok", capability: "ce-code-review", package: "compound-engineering",
+        health: "stale", bin: "/fake/grok",
+        native_package: {
+          "id" => "compound-engineering", "version" => "2.9.0", "enabled" => true
+        }
+      )
+      update = adapter(Hive::AgentSkills::Adapters::Grok, dir: dir).plan([ stale ]).operations.fetch(0)
+      assert_equal [ "/fake/grok", "plugin", "update", "compound-engineering" ], update.argv
+
+      stale_and_disabled = inspection(
+        agent: "grok", capability: "ce-code-review", package: "compound-engineering",
+        health: "stale", bin: "/fake/grok",
+        native_package: {
+          "id" => "compound-engineering", "version" => "2.9.0", "enabled" => false
+        }
+      )
+      combined = adapter(
+        Hive::AgentSkills::Adapters::Grok, dir: dir
+      ).plan([ stale_and_disabled ]).operations
+      assert_equal %w[plugin_update plugin_enable], combined.map(&:kind)
+      assert_equal [ combined.first.id ], combined.last.depends_on
+
+      unresolved = inspection(
+        agent: "grok", capability: "ce-code-review", package: "compound-engineering",
+        health: "missing", bin: "/fake/grok",
+        native_package: {
+          "id" => "compound-engineering", "version" => "3.20.0", "enabled" => true
+        }
+      )
+      repair = adapter(Hive::AgentSkills::Adapters::Grok, dir: dir).plan([ unresolved ]).operations.fetch(0)
+      assert_equal [ "/fake/grok", "plugin", "update", "compound-engineering" ], repair.argv
+    end
+  end
+
+  def test_registry_exposes_grok_adapter
+    with_tmp_dir do |dir|
+      registry = Hive::AgentSkills::Adapters::Registry.new(
+        config: Hive::Config::DEFAULTS, project_root: dir, environment: { "HOME" => dir }
+      )
+
+      assert_instance_of Hive::AgentSkills::Adapters::Grok, registry.fetch("grok")
+    end
+  end
+
   def test_claude_plan_alias_is_atomic_and_depends_on_plugin_install
     with_tmp_dir do |dir|
       row = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",

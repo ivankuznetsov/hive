@@ -3,23 +3,25 @@ title: hive setup-agents
 type: command
 source: skills/hive/, config/agent-skills.yml, lib/hive/agent_skills/, lib/hive/commands/setup_agents.rb
 created: 2026-07-10
-updated: 2026-07-20
+updated: 2026-07-25
 tags: [command, agents, skills, hive, canonical, provisioning, consent]
 ---
 
-**TLDR**: `hive setup-agents` provisions the bundled Hive operating skill and
-other unresolved built-in capabilities for Claude, Codex, and Pi. The Hive
-skill is always part of the supported-agent baseline, independent of project
-stage/reviewer configuration. Setup prints one immutable aggregate preview,
-obtains consent once, revalidates state, publishes whole skill directories or
-uses supported native package operations, and reinspects the result. It never
-provisions arbitrary custom skills or replaces user-owned conflicts.
+**TLDR**: `hive setup-agents` provisions the bundled Hive operating skill for
+Claude, Codex, and Pi plus unresolved built-in native capabilities for those
+agents and Grok. Grok currently participates through native Compound
+Engineering plugin capabilities, not a copied Hive operating-skill projection.
+Setup prints one immutable aggregate preview, obtains consent once, revalidates
+state, publishes whole skill directories or uses supported native package
+operations, and reinspects the result. It never provisions arbitrary custom
+skills or replaces user-owned conflicts.
 
 ## Usage
 
 ```bash
 hive setup-agents
 hive setup-agents --agent claude --skill ce-brainstorm
+hive setup-agents --agent grok --skill ce-code-review
 hive setup-agents --yes
 hive setup-agents --yes --json
 ```
@@ -31,9 +33,11 @@ so a narrow request cannot omit a required package. A prerequisite that cannot
 be inspected, repaired, or proven healthy blocks its dependent operation. With
 no filters, setup addresses every unresolved managed capability in the
 effective coding configuration plus the bundled `hive` capability for every
-supported agent. Filtering to an agent retains that agent's Hive operating
-skill. OpenClaw is deliberately not a setup target: its native/ClawHub state is
-diagnosed read-only and installed through OpenClaw itself.
+agent declared by that bundled package. Filtering to Claude, Codex, or Pi
+retains that agent's Hive operating skill. Grok is native-capability-only, so
+its targets come from effective stage/reviewer configuration. OpenClaw is
+deliberately not a setup target: its native/ClawHub state is diagnosed
+read-only and installed through OpenClaw itself.
 
 ## Consent and lifecycle
 
@@ -87,6 +91,15 @@ install but keep individual verification rows.
 - Codex uses native `plugin marketplace` / `plugin` JSON commands so the CLI
   owns config and cache population.
 - Pi uses native package list/install/update commands.
+- Grok uses native `plugin list`, `inspect`, install-with-trust, enable, and
+  update commands. Runtime inspection executes from the target project and
+  requires the requested skill's reported `source.path` to match the
+  realpath-jailed skill under the expected installed plugin. Durable doctor
+  inspection cross-checks
+  `installed-plugins/registry.json` with `[plugins] enabled`/`disabled` in
+  `config.toml`; a stale, disabled plugin is updated and then enabled in one
+  repair plan, rather than being mistaken for a healthy runtime skill or
+  requiring a second setup run.
 - The bundled Hive capability for Claude, Codex, and Pi uses
   `DirectoryPublisher` against each agent's private user root. It verifies the
   projection manifest and file digests, stages every file in a private sibling,

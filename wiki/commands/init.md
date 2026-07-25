@@ -3,7 +3,7 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-07-20
+updated: 2026-07-25
 tags: [command, bootstrap, git, prompts, llm-wiki, provisioning]
 ---
 
@@ -130,7 +130,7 @@ Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g
 
 The prompt's choice list is rendered in a documented stable order:
 - **Agent profiles**: `claude`, `codex`, `pi`, `grok` — the order in which `lib/hive/agent_profiles.rb` requires them at boot. `Hive::AgentProfiles.registered_names` returns them in this order. The llm-wiki `context_agents` scaffold remains `claude`/`codex`/`pi` until Grok has a native wiki skill verifier.
-- **Default reviewers**: `claude-ce-code-review`, `codex-ce-code-review`, `pr-review-toolkit` — the order shipped in `templates/project_config.yml.erb` and surfaced via `Hive::Commands::Init::Prompts::DEFAULT_REVIEWER_NAMES`.
+- **Available ordinary reviewers**: `claude-ce-code-review`, `codex-ce-code-review`, `pr-review-toolkit`, `grok-ce-code-review`. The first three remain the blank-answer and non-TTY defaults; Grok is opt-in so a fresh project does not silently acquire Grok authentication/plugin prerequisites.
 - **Patrol reviewers**: `codex-native-review`, `codex-ce-code-review`, `claude-ce-code-review` — native Codex review is index 1 and the blank/default; the CE reviewers are optional broader patrol reviewers.
 
 Reordering either is a **breaking change for scripted automation** that uses index answers — index `1` would silently shift to a different value. Prefer names in scripts.

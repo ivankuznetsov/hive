@@ -350,16 +350,20 @@ aggregate council cost or wall-clock cap yet. Add one only with clear semantics
 for partially completed rounds, command reviewers, and profiles that cannot
 natively enforce dollar budgets.
 
-## Grok live skill and telemetry verification (2026-07-10)
+## Grok live review and telemetry verification (2026-07-10, narrowed 2026-07-25)
 
 The Grok profile's argv, device/API-key authentication, `GROK_AUTH_PATH` / `GROK_HOME`, and
 streaming text-event contract are verified against the installed CLI and its
-documentation. Two boundaries remain intentionally open:
+documentation. Hive now manages Compound Engineering through Grok's native
+plugin commands, verifies enabled installed-plugin skills through
+`Hive::SkillCheck::Grok`, and renders the Grok reviewer with
+`/ce-code-review`; local `grok inspect --json` evidence confirmed that the
+installed plugin exposes that skill. Two runtime boundaries remain open:
 
-- Grok has no `Hive::SkillCheck` verifier, so skill-backed planning/review
-  stages cannot prove a configured slash command exists before spawn. The
-  bundled Grok CE reviewer uses a compact self-contained prompt as a stopgap;
-  a real Grok extension invocation still needs a live end-to-end smoke test.
+- A full token-consuming Hive reviewer spawn has not yet captured a real Grok
+  `/ce-code-review` artifact through 6-review. Offline tests and the native
+  inspection prove discovery, enablement, prompt rendering, and expected
+  package ownership, but not the model's final report behavior.
 - Current `streaming-json` terminal events expose no token counts. Hive leaves
   Grok usage unavailable rather than storing fake zeroes. Add a captured-stream
   fixture and extractor mapping if a future CLI version publishes usage.

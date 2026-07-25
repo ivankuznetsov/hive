@@ -157,6 +157,7 @@ module Hive
           when "claude" then File.join(home, ".claude")
           when "codex" then File.join(home, ".codex")
           when "pi" then File.join(home, ".pi", "agent")
+          when "grok" then File.join(home, ".grok")
           end
         end
 
@@ -188,7 +189,7 @@ module Hive
         end
 
         def runner_environment
-          %w[HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR].each_with_object({}) do |key, out|
+          %w[HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME].each_with_object({}) do |key, out|
             out[key] = @environment[key] if @environment.key?(key)
           end
         end

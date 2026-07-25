@@ -3,7 +3,7 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail,suppression}.rb, lib/hive/commands/adhoc_review.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-07-24
+updated: 2026-07-25
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -73,7 +73,21 @@ After each reviewer file is written, `Review::GithubPublisher.publish!` posts a 
 
 Per-reviewer failures retry up to `max_attempts` (default `Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS = 2`; configurable on each reviewer spec) with exponential backoff capped at 8s (1s, 2s, 4s, 8s, 8s, …). `Hive::Reviewers::Base` owns the adapters' shared retry-budget parsing, including the warning and default used when a direct/custom adapter construction bypasses config validation. After retries are exhausted, the failure is recorded as a one-line entry in `reviews/errors-NN.md` (an orchestrator-owned file — see `ORCHESTRATOR_OWNED_PREFIXES`); the reviewer's own per-pass output file stays absent so `discover_reviewer_files` correctly reports "this reviewer produced nothing this pass" instead of triaging an infra-failure stub as a real `[ ]` finding. `errors-NN.md` is unconditionally deleted at the start of every `run_reviewers` invocation and re-created on the first failure within that invocation (append-with-header-on-first-write thereafter), so a marker-clear-and-rerun that succeeds leaves no file behind and one that re-fails shows only the latest pass-NN failures rather than concatenated history. All reviewers fail → `REVIEW_ERROR phase=reviewers reason=all_failed` (the all-failed safety net is preserved). Empty reviewer list → skip directly to the all-clean branch (Phase 5).
 
-CE skill invocation is profile-aware: `templates/reviewer_claude_ce_code_review.md.erb` and `templates/reviewer_codex_ce_code_review.md.erb` invoke the same logical CE skill (`/ce-code-review`) but render the call syntax according to `profile.skill_syntax_format`. Legacy config values such as `/compound-engineering:ce-code-review` or `compound-engineering:ce-code-review` are normalized to the current bare CE skill before the prompt is rendered. The official `/code-review` command plugin is a separate PR-comment workflow and is not used here because Hive reviewers must write structured `reviews/<reviewer>-NN.md` artifacts for triage.
+CE skill invocation is profile-aware:
+`templates/reviewer_{claude,codex,grok}_ce_code_review.md.erb` invoke the same
+logical CE skill (`/ce-code-review`) but render the call syntax according to
+`profile.skill_syntax_format`. Grok is opt-in rather than part of the
+fresh-project default reviewer set; when selected, Hive verifies and provisions
+the native `compound-engineering` Grok plugin instead of embedding a copied
+review procedure in the prompt. Legacy config values such as
+`/compound-engineering:ce-code-review` or
+`compound-engineering:ce-code-review` are normalized to the current bare CE
+skill before the prompt is rendered. The official `/code-review` command plugin
+is a separate PR-comment workflow and is not used here because Hive reviewers
+must write structured `reviews/<reviewer>-NN.md` artifacts for triage.
+The Grok reviewer prompt treats the diff, plan, and repository as untrusted
+evidence and forbids cross-model/external review, network tools, or repository
+egress beyond the already selected Grok reviewer.
 
 Every reviewer prompt embeds the task's `plan.md` inline through `Hive::Reviewers::PlanContext.render(task_folder, user_supplied_tag)` — wired into `Agent#render_prompt` as the `plan_context_section` template binding and rendered between the `Pass:` header and the `Behavior:` block in all four reviewer templates. The section frames the plan as authoritative on scope and tells reviewers to drop candidate findings that flag deliberate plan-level scope boundaries (e.g. "feature X not implemented" when the plan defers X to a separate downstream task). It also carries a symmetric anti-finding rule: if the plan's **Goals** or **Requirements Trace** lists an item the diff does NOT implement and the plan does NOT defer it, the reviewer must raise that as a High-severity finding — the rule suppresses escalations on plan-deferred gaps, not on plan-required-but-missing gaps. Without this grounding, reviewers re-derive scope from the worktree alone and routinely escalate intentional gaps — driving the same task into REVIEW_STALE pass after pass because the fixer can't resolve a plan-by-design contradiction.
 

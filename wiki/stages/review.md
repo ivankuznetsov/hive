@@ -50,6 +50,12 @@ Pass cap (`review.max_passes`, default 2) gates re-entry to Phase 2 — exceedin
 
 CI-fix and Phase 4 fix resolve through the current generation's persisted execute identity and append `implementation_stage_resolved` before each spawn. The synthetic review task carries the durable slug/id, and the identity resolved before the protected-file snapshot is passed directly into the spawn. This avoids a second projection rebuild inside the protected interval while still detecting any journal or projection rewrite by the agent. Automatic `review.ci` and `review.fix` selections keep the exact execute provider/model and request `high` effort. An authored downstream `agent`, `model`, or `effort` replaces only that field and records `explicit_override`; a cross-provider agent-only override resolves the new provider's concrete default model. Execute effort is audit-only and is never inherited.
 
+When `models.review_ci`, `models.review_fix`, or their coarse `models.review`
+family is active, the first generation-scoped selection stores frozen routing
+metadata. Each repair launcher re-renders it through the selected profile and
+passes typed routed arguments to both headless and Claude/tmux execution.
+Unsupported controls fail before the resolution event or subprocess.
+
 This inheritance is deliberately limited to repair work. Reviewer fan-out, triage, and browser-test profiles continue to use their independently configured identities, preserving independent review signals. The phrase “fix agent” below refers to this resolved identity, not a baked-in Claude default.
 
 ## Phase 1 — CI fix (`Hive::Stages::Review::CiFix`)

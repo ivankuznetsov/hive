@@ -574,6 +574,33 @@ because automatic conversion could duplicate a Telegram chunk whose response
 was lost. See [[commands/digest]], [[modules/digest]], [[dependencies]], and
 [[modules/daemon]].
 
+## ADR-032: Per-stage controls overlay the current durable identity
+
+**Status:** Active
+
+**Context:** The closed PR #706 established the useful public idea of a
+provider-neutral `models:` map, but its renderer predated current
+`AgentProfile` capabilities and generation-scoped implementation ownership.
+Reusing that implementation would let retries observe config drift or put
+provider-specific flags in generic routing code.
+
+**Decision:** Keep one closed registry of built-in exact/coarse identities and
+resolve `model` and `effort` independently. Provider selection remains entirely
+owned by existing `agent:` configuration. Effective controls are validated and
+rendered by the already-selected profile. Execute, open-PR, review-fix, and
+review-CI freeze routing metadata in their durable generation identity and
+render it only at the trusted launcher seam; Codex global controls precede its
+subcommand. Arbitrary custom-workflow stages retain descriptor-level
+`model`/`effort` and cannot extend `models:`.
+
+**Consequences:** Retry argv cannot drift within a generation, unsupported
+reachable controls fail before effects, and no provider receives another
+provider's flags. Configs without `models:` and calls without recognized stage
+context keep the legacy path byte-for-byte. The architecture idea recovered
+from #706 survives, while its stale renderer and identity mechanics do not.
+See [[modules/model_routing]], [[modules/agent_profile]], [[modules/config]],
+and [[state-model]].
+
 ## Source
 
 Once `git log` accumulates real history, future updates should add ADRs from substantive merge commits or refactor messages.

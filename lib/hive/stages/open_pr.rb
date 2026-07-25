@@ -116,19 +116,27 @@ module Hive
         local_result = handle_secret_scan_result(task, "", local_scan, "open_pr")
         return local_result if local_result
 
-        Hive::Gh.push_branch!(worktree_path, branch, cfg: cfg)
-
-        prompt = render_prompt(task, worktree_path, branch,
-                               base_branch: dependency_pr_base_branch(task, cfg))
         identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "open_pr")
         profile = if identity
           Hive::AgentProfiles.lookup(identity.provider, cfg: cfg)
         else
           Hive::Stages::Base.stage_profile(cfg, "open_pr")
         end
+        # Resolve and profile-validate the durable routed identity before the
+        # first remote mutation. Unsupported controls must not push a branch
+        # or leave any other externally visible open-PR effect behind.
+        launch_arguments = Hive::Stages::Base.implementation_launch_arguments(identity, profile)
+
+        Hive::Gh.push_branch!(worktree_path, branch, cfg: cfg)
+
+        prompt = render_prompt(task, worktree_path, branch,
+                               base_branch: dependency_pr_base_branch(task, cfg))
         protected_capture = Hive::ProtectedFiles.capture(task.folder)
         before_sha = Hive::ProtectedFiles.snapshot(task.folder)
-        spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path, identity: identity)
+        spawn_open_pr_agent(
+          task, cfg, prompt, profile, worktree_path,
+          identity: identity, launch_arguments: launch_arguments
+        )
         after_sha = Hive::ProtectedFiles.snapshot(task.folder)
         if (tampered = Hive::ProtectedFiles.diff(before_sha, after_sha)).any?
           restored, restore_error = Hive::ProtectedFiles.restore_safely(
@@ -163,7 +171,10 @@ module Hive
         { commit: "pr_opened_draft", status: :complete }
       end
 
-      def spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path, identity: nil)
+      def spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path,
+                              identity: nil, launch_arguments: nil)
+        launch_arguments ||=
+          Hive::Stages::Base.implementation_launch_arguments(identity, profile)
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "open_pr", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
@@ -178,7 +189,7 @@ module Hive
           profile: profile,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker,
-          identity_arguments: identity&.native_arguments
+          **launch_arguments
         }
         if profile.name == :claude
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(

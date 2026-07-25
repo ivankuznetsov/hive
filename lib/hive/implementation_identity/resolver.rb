@@ -144,6 +144,19 @@ module Hive
           routing_stage, profile: profile, model: model, effort: effort
         )
         if resolution&.active?
+          Hive::ModelRouting.validate_effective!(
+            models: @cfg.fetch("models", Hive::ModelRouting::EMPTY_MODELS),
+            calls: [
+              {
+                stage: routing_stage,
+                profile: profile,
+                provider: profile.name,
+                current: { model: model, effort: effort }
+              }
+            ]
+          ) do |control|
+            profile.validate_routed_control!(control, source: routing_source)
+          end
           resolution = materialize_concrete_routed_model(resolution, profile)
           profile.routing_arguments(resolution, source: routing_source)
           arguments = profile.identity_arguments(

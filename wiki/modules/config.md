@@ -9,6 +9,13 @@ tags: [config, yaml, validation]
 
 **TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, digest-owned `models.digest`, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
+The live project template includes a commented, copyable `models:` example.
+The global template documents the sole global route, `models.digest`. Exact
+and coarse entries inherit model and effort independently, never select an
+agent, and are absent by default so generated projects keep legacy behavior.
+Arbitrary descriptor stage names remain descriptor-owned and are rejected from
+the closed `models:` vocabulary.
+
 ## Strict project root keys
 
 After YAML parsing confirms that `.hive-state/config.yml` is a mapping,

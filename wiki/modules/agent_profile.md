@@ -64,6 +64,13 @@ Constructor kwargs (every profile freezes after init):
 | `validate_routed_control!(control, source:)` | Validates one exact/coarse `ModelRouting::EffectiveControl` against this profile's native model/effort capabilities and vocabulary. |
 | `routing_arguments(resolution, source:)` | Atomically validates an active `ModelRouting::Resolution`, renders both routed and inherited effective fields with profile-native sentinel behavior, and returns typed global/subcommand argv. Inactive or unscoped resolutions return nil. |
 
+The public routed capability matrix is mirrored in
+`docs/notes/headless-agent-cli-matrix.md`: Claude and Codex support model plus
+effort, while Grok and Pi support routed model only. Codex places routed
+controls before `exec`/`review`; Claude uses the same rendered flags in
+headless and tmux launches. Unsupported effective controls raise before the
+launcher performs work instead of being dropped.
+
 `STATUS_DETECTION_MODES` is the closed enum used by `Hive::Agent#handle_exit` to decide success: `state_file_marker` (claude default — agent writes the marker), `exit_code_only` (CI-fix loops — make the command succeed), `output_file_exists` (reviewer/triage spawns — produce the artifact).
 
 ## `Hive::AgentProfiles` — registry

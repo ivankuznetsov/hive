@@ -38,6 +38,12 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 # digest:
 #   enabled: false         # only needed to opt OUT; otherwise auto-on with the bot
 #   max_catchup_days: 7
+#
+# `digest` is the only globally owned per-stage model route. It changes
+# model/effort only and never selects the digest provider:
+# models:
+#   digest:
+#     model: gpt-5.6-terra
 
 # Daily pending-answer digest. When enabled, the daemon schedules one global
 # `hive answer-digest` subprocess at/after the configured local hour. Empty

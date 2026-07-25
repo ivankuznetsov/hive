@@ -9,6 +9,14 @@ tags: [agent, claude, subprocess]
 
 **TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for marker-owned spawns, optionally persists stdout/stderr to the per-stage log, always parses the stream for a bounded final-message summary and limits, enforces native budget-equivalent, streamed token, optional completed-turn, and wall-clock ceilings, kills the process group on exhaustion or completed output, classifies provider account/rate/quota limits before generic failures, and translates the exit into a status/marker according to the selected `AgentProfile` status mode. The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
 
+For recognized built-in routing, `RoutingArguments.global_arguments` are
+inserted before the profile headless subcommand and
+`subcommand_arguments` after the common launch controls. Durable routed
+implementation identities are rendered at the launcher seam for execute,
+open-PR, review-fix, and review-CI, including Claude's headless/tmux adapter;
+their deliberately empty legacy `native_arguments` array is never treated as
+the complete routed command.
+
 ## Class shape
 
 ```ruby

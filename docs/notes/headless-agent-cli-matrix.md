@@ -6,6 +6,22 @@
 
 This doc is the authoritative source for the `AgentProfile` instances under `lib/hive/agent_profiles/` (created in U12). If a CLI's behavior changes upstream, update this doc and the corresponding profile in lockstep.
 
+## Routed model and effort capabilities
+
+The selected `AgentProfile` validates and renders an effective built-in-stage
+route. `models:` never selects the profile.
+
+| Profile | Routed model | Routed effort | Native placement |
+| --- | --- | --- | --- |
+| Claude | yes; `inherit` omits the flag | `default`, `inherit`, `low`, `medium`, `high`, `xhigh`, `max` | `--model` / `--effort` in Claude argv; shared by headless and tmux |
+| Codex | yes; `default`/`inherit` omit the flag | `default`, `inherit`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh` | global `--model` / `-c model_reasoning_effort=…` before `exec` or `review` |
+| Grok | yes; `default`/`inherit` omit the flag | unsupported | profile-native model flag only |
+| Pi | yes; `default`/`inherit` omit the flag | unsupported | profile-native model flag only |
+
+An unsupported effective effort fails before launch; Hive does not translate
+or leak another provider's flags. When routing is inactive or no recognized
+stage context is supplied, the pre-routing argv path and order are unchanged.
+
 > **Scope decision (2026-04-25, post-spike):** **opencode is dropped from v1 scope.** Reasons captured in the per-CLI summary below: (a) no native CE plugin → hive must inline SKILL.md content, losing plugin-update propagation; (b) per-spawn filesystem isolation requires temp-config writing rather than a simple flag, which is non-trivial to implement and harder to reason about than the per-spawn `--add-dir` model; (c) hive's v1 default reviewer set already covers two profile-supported CLIs (claude + codex), so opencode adds maintenance surface without unique signal. The opencode column below is preserved as evidence of evaluation; U12 ships profiles for **claude, codex, and pi only**. Opencode can be revisited in v1.1 if a user needs it (e.g., for OpenCode Zen cost reasons).
 
 ---

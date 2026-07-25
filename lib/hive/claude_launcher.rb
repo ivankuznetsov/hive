@@ -153,18 +153,22 @@ module Hive
                 allowed_tools: nil,
                 disallowed_tools: nil,
                 permission_mode: nil, mcp_config_path: nil,
-                strict_mcp_config: false, identity_arguments: nil, runtime_policy: nil)
+                strict_mcp_config: false, identity_arguments: nil,
+                routing_arguments: nil, runtime_policy: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
-      cli_flags = identity_arguments || (cfg ? Hive::Config.claude_cli_flags(cfg) : [])
+      profile.validate_routing_arguments!(routing_arguments) if routing_arguments
+      routed_flags = routing_arguments&.native_arguments
+      cli_flags = routed_flags || identity_arguments || (cfg ? Hive::Config.claude_cli_flags(cfg) : [])
       launch_mode = Hive::Config.claude_mode(cfg)
 
       if launch_mode == :headless
         require "hive/stages/base"
         # mcp_flags is only consumed on this headless branch — the tmux path
         # recomputes them inside wrapper_command — so compute it here.
-        headless_flags = cli_flags + (runtime_policy ? [] : mcp_cli_flags(mcp_config_path, strict_mcp_config))
+        headless_flags = (routing_arguments ? [] : cli_flags) +
+                         (runtime_policy ? [] : mcp_cli_flags(mcp_config_path, strict_mcp_config))
         return Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -181,6 +185,7 @@ module Hive
           disallowed_tools: disallowed_tools,
           cli_flags: headless_flags,
           identity_arguments: identity_arguments,
+          routing_arguments: routing_arguments,
           runtime_policy: runtime_policy
         )
       end

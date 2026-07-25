@@ -293,6 +293,31 @@ Put `model` and `effort` on the workflow stage descriptor (or use the selected
 agent profile's project-global configuration); a project `work.model` or
 `work.effort` value is not a runtime override.
 
+The built-in top-level `models:` map is deliberately closed and does not accept
+custom stage names. A copyable custom-workflow equivalent is:
+
+```yaml
+id: analysis
+stages:
+  - name: inbox
+    kind: terminal
+    state_file: idea.md
+  - name: investigate
+    kind: agent
+    state_file: report.md
+    instruction: ./analysis/investigate.md
+    agent: codex
+    model: gpt-5.6-sol
+    effort: xhigh
+  - name: done
+    kind: terminal
+    state_file: done.md
+```
+
+Here `investigate.model` and `investigate.effort` remain descriptor-owned.
+Adding `models.investigate` to project config is an error, and built-in family
+inheritance does not cross into this descriptor.
+
 Hive rejects arbitrary top-level names, including stage-name lookalikes. The
 stage must be present in a registered descriptor before its override is valid.
 Project review adapters are a separate configuration surface and belong under

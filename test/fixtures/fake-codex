@@ -25,6 +25,20 @@ if [[ "${1:-}" == "--version" ]]; then
   exit 0
 fi
 
+if [[ " $* " == *" exec "* ]]; then
+  if [[ -n "${HIVE_FAKE_CODEX_ARGV_LOG:-}" ]]; then
+    mkdir -p "$(dirname "${HIVE_FAKE_CODEX_ARGV_LOG}")"
+    {
+      echo "---"
+      echo "cwd=$(pwd)"
+      for a in "$@"; do
+        printf 'arg=%s\n' "$a"
+      done
+    } >> "${HIVE_FAKE_CODEX_ARGV_LOG}"
+  fi
+  exit "${HIVE_FAKE_CODEX_EXIT:-0}"
+fi
+
 if [[ "${1:-}" == "review" ]]; then
   if [[ -n "${HIVE_FAKE_CODEX_ARGV_LOG:-}" ]]; then
     mkdir -p "$(dirname "${HIVE_FAKE_CODEX_ARGV_LOG}")"

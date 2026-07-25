@@ -170,6 +170,55 @@ class ClaudeModeDispatchTest < Minitest::Test
     end
   end
 
+  def test_execute_forwards_routed_codex_arguments
+    with_tmp_dir do |dir|
+      cfg = routed_identity_config(provider: "codex", stage: "execute_implementation")
+      task = make_task(dir, stage_name: "execute", state_name: "task.md")
+      File.write(File.join(task.folder, "plan.md"), "## Plan\n")
+      worktree_path = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree_path)
+      identity = Hive::ImplementationIdentity::Resolver.new(cfg: cfg).resolve_execute(
+        generation: 1, attempt_id: "exec"
+      )
+
+      with_spawn_capture do |captured|
+        Hive::Stages::Execute.spawn_implementation(
+          task, cfg, worktree_path, identity: identity
+        )
+
+        kwargs = captured.fetch(0).fetch(:kwargs)
+        assert_empty kwargs.fetch(:identity_arguments)
+        assert_equal [ "--model", "routed-model", "-c", "model_reasoning_effort=xhigh" ],
+                     kwargs.fetch(:routing_arguments).global_arguments
+      end
+    end
+  end
+
+  def test_execute_forwards_routed_claude_arguments_to_tmux_launcher
+    with_tmp_dir do |dir|
+      cfg = routed_identity_config(provider: "claude", stage: "execute_implementation")
+      cfg["claude"] = { "mode" => "tmux" }
+      task = make_task(dir, stage_name: "execute", state_name: "task.md")
+      File.write(File.join(task.folder, "plan.md"), "## Plan\n")
+      worktree_path = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree_path)
+      identity = Hive::ImplementationIdentity::Resolver.new(cfg: cfg).resolve_execute(
+        generation: 1, attempt_id: "exec"
+      )
+
+      with_spawn_capture do |captured|
+        Hive::Stages::Execute.spawn_implementation(
+          task, cfg, worktree_path, identity: identity
+        )
+
+        kwargs = captured.fetch(0).fetch(:kwargs)
+        assert_empty kwargs.fetch(:identity_arguments)
+        assert_equal [ "--model", "routed-model", "--effort", "xhigh" ],
+                     kwargs.fetch(:routing_arguments).subcommand_arguments
+      end
+    end
+  end
+
   def test_open_pr_and_finalize_use_stage_specific_claude_sessions
     with_tmp_dir do |dir|
       cfg = { "claude" => { "mode" => "tmux" } }
@@ -218,6 +267,27 @@ class ClaudeModeDispatchTest < Minitest::Test
     end
   end
 
+  def test_open_pr_forwards_routed_codex_arguments
+    with_tmp_dir do |dir|
+      cfg = routed_identity_config(provider: "codex", stage: "open_pr")
+      task = make_task(dir, stage_name: "open-pr", state_name: "pr.md")
+      worktree_path = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree_path)
+      identity = review_identity(cfg, "open_pr")
+
+      with_spawn_capture do |captured|
+        Hive::Stages::OpenPr.spawn_open_pr_agent(
+          task, cfg, "prompt", codex_profile(cfg), worktree_path, identity: identity
+        )
+
+        kwargs = captured.fetch(0).fetch(:kwargs)
+        assert_empty kwargs.fetch(:identity_arguments)
+        assert_equal [ "--model", "routed-model", "-c", "model_reasoning_effort=xhigh" ],
+                     kwargs.fetch(:routing_arguments).global_arguments
+      end
+    end
+  end
+
   def test_review_fix_forwards_execute_model_with_high_effort
     with_tmp_dir do |dir|
       cfg = identity_config
@@ -239,6 +309,32 @@ class ClaudeModeDispatchTest < Minitest::Test
         assert_equal :headless, captured.fetch(0).fetch(:launcher)
         assert_equal [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=high" ],
                      captured[0][:kwargs][:identity_arguments]
+      end
+    end
+  end
+
+  def test_review_fix_forwards_routed_codex_arguments
+    with_tmp_dir do |dir|
+      cfg = routed_identity_config(provider: "codex", stage: "review_fix")
+      task = make_task(dir, stage_name: "review", state_name: "task.md")
+      worktree_path = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree_path)
+      FileUtils.mkdir_p(File.join(task.folder, "reviews"))
+      ctx = Hive::Reviewers::Context.new(
+        worktree_path: worktree_path, task_folder: task.folder,
+        default_branch: "main", pass: 1
+      )
+      identity = review_identity(cfg, "review.fix")
+
+      with_spawn_capture do |captured|
+        Hive::Stages::Review.spawn_fix_agent(
+          task, cfg, ctx, accepted: [], identity: identity
+        )
+
+        kwargs = captured.fetch(0).fetch(:kwargs)
+        assert_empty kwargs.fetch(:identity_arguments)
+        assert_equal [ "--model", "routed-model", "-c", "model_reasoning_effort=xhigh" ],
+                     kwargs.fetch(:routing_arguments).global_arguments
       end
     end
   end
@@ -269,10 +365,50 @@ class ClaudeModeDispatchTest < Minitest::Test
     end
   end
 
+  def test_ci_fix_forwards_routed_codex_arguments
+    with_tmp_dir do |dir|
+      cfg = routed_identity_config(provider: "codex", stage: "review_ci")
+      task = make_task(dir, stage_name: "review", state_name: "task.md")
+      worktree_path = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree_path)
+      FileUtils.mkdir_p(File.join(task.folder, "logs"))
+      ctx = Hive::Reviewers::Context.new(
+        worktree_path: worktree_path, task_folder: task.folder,
+        default_branch: "main", pass: 1
+      )
+      identity = review_identity(cfg, "review.ci")
+
+      with_spawn_capture do |captured|
+        Hive::Stages::Review::CiFix.spawn_fix_agent(
+          cfg: cfg, ctx: ctx, command: [ "bin/test" ], attempt: 1,
+          max_attempts: 2, captured_output: "failure", identity: identity
+        )
+
+        kwargs = captured.fetch(0).fetch(:kwargs)
+        assert_empty kwargs.fetch(:identity_arguments)
+        assert_equal [ "--model", "routed-model", "-c", "model_reasoning_effort=xhigh" ],
+                     kwargs.fetch(:routing_arguments).global_arguments
+      end
+    end
+  end
+
   def identity_config
     fields = { "agent" => "codex", "model" => "gpt-5.6-sol" }.freeze
     {
       "execute" => fields.dup,
+      Hive::Config::IMPLEMENTATION_IDENTITY_PROVENANCE_KEY => {
+        "execute" => fields, "open_pr" => {}, "review.fix" => {}, "review.ci" => {}
+      }.freeze
+    }
+  end
+
+  def routed_identity_config(provider:, stage:)
+    fields = { "agent" => provider }.freeze
+    {
+      "execute" => fields.dup,
+      "models" => {
+        stage => { "model" => "routed-model", "effort" => "xhigh" }
+      },
       Hive::Config::IMPLEMENTATION_IDENTITY_PROVENANCE_KEY => {
         "execute" => fields, "open_pr" => {}, "review.fix" => {}, "review.ci" => {}
       }.freeze

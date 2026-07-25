@@ -132,6 +132,19 @@ module Hive
         Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).resolve_stage!(stage)
       end
 
+      # Durable routed identities intentionally persist provider-neutral
+      # routing metadata instead of rendered argv. Materialize that metadata
+      # through the selected profile at the last trusted seam before launch;
+      # legacy identities continue to use their stored native argv unchanged.
+      def implementation_launch_arguments(identity, profile)
+        return { identity_arguments: nil, routing_arguments: nil } unless identity
+
+        {
+          identity_arguments: identity.native_arguments,
+          routing_arguments: identity.routing_arguments(profile)
+        }
+      end
+
       def stage_permission_scope(cfg, stage_name, task, profile,
                                  base_add_dirs: [ task.folder ],
                                  default_allowed_tools: nil,
@@ -709,7 +722,8 @@ module Hive
                          profile: nil, expected_output: nil, status_mode: nil,
                          permission_mode: nil, allowed_tools: nil,
                          disallowed_tools: nil, mcp_config_path: nil,
-                         strict_mcp_config: false, identity_arguments: nil, runtime_policy: nil)
+                         strict_mcp_config: false, identity_arguments: nil,
+                         routing_arguments: nil, runtime_policy: nil)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -737,6 +751,7 @@ module Hive
           mcp_config_path: mcp_config_path,
           strict_mcp_config: strict_mcp_config,
           identity_arguments: identity_arguments,
+          routing_arguments: routing_arguments,
           runtime_policy: runtime_policy
         )
       end

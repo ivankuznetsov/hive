@@ -22,6 +22,29 @@ class WebAgentSkillsTest < Minitest::Test
     end
   end
 
+  def test_health_uses_the_agent_skills_facade_factory_by_default
+    with_tmp_dir do |dir|
+      write_project_config(dir)
+      row = Struct.new(:payload) { def to_h = payload }.new({ "health" => "healthy" })
+      inspector = Struct.new(:row) { def inspect = [ row ] }.new(row)
+      captured = {}
+
+      with_replaced_singleton_method(
+        Hive::AgentSkills,
+        :hive_inspector,
+        lambda { |**kwargs|
+          captured.merge!(kwargs)
+          inspector
+        }
+      ) do
+        result = Hive::Web::AgentSkills.new.health("path" => dir)
+
+        assert_equal [ { "health" => "healthy" } ], result
+        assert_equal File.expand_path(dir), captured.fetch(:project_root)
+      end
+    end
+  end
+
   def test_repair_uses_the_cli_command_with_non_tty_explicit_web_consent
     with_tmp_dir do |dir|
       write_project_config(dir)

@@ -23,6 +23,9 @@ plan values and typed errors, validates the clean entry point and Agent ABI
 dependency, and rejects production direct requires or construction of
 Skillpack internals. Added focused facade coverage while retaining exact
 canonical bytes, provenance, rollback, setup, and packaged projection tests.
+The coverage bootstrap now reloads the version and error contracts that the
+gemspec loads before instrumentation, alongside `lib/hive.rb`, so clean
+entry-point splits remain visible to the unchanged 100% executable-line gate.
 
 **Docs:** Updated [[commands/setup-agents]], [[component-boundaries]], and
 [[testing]]. Did not edit compiled [[log]].

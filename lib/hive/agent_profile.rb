@@ -45,7 +45,7 @@ module Hive
                 :workspace_write_flags, :read_only_flags, :cli_capabilities,
                 :initial_context_tokens, :default_model_resolver,
                 :model_argument_builder, :effort_argument_builder,
-                :launcher_identity, :policy_capabilities
+                :launcher_identity, :policy_capabilities, :tool_scope_flags
 
     # Public API — do not break.
     #
@@ -88,6 +88,10 @@ module Hive
     #   initial_context_tokens: default 0. Conservative admission reserve for
     #                           provider-owned context sent before the first
     #                           streamed usage event.
+    #   tool_scope_flags:      default {}. Maps :allowed/:disallowed tool
+    #                          scopes to the provider's corresponding flags.
+    #   raw_cli_arguments_supported: default false. Explicit opt-in for
+    #                          legacy provider-native argv passthrough.
     #   prompt_style:          default :stdin for a profile named :codex,
     #                          otherwise :positional (backward compatible
     #                          with pre-profile-style custom registrations)
@@ -123,7 +127,9 @@ module Hive
                    model_argument_builder: nil,
                    effort_argument_builder: nil,
                    launcher_identity: nil,
-                   policy_capabilities: [])
+                   policy_capabilities: [],
+                   tool_scope_flags: {},
+                   raw_cli_arguments_supported: false)
       prompt_style ||= name.to_sym == :codex ? :stdin : :positional
       unless PROMPT_STYLES.include?(prompt_style)
         raise ArgumentError,
@@ -166,6 +172,8 @@ module Hive
       @effort_argument_builder = effort_argument_builder
       @launcher_identity = (launcher_identity || "AgentProfile/v1:#{name}").to_s.freeze
       @policy_capabilities = Array(policy_capabilities).map(&:to_sym).uniq.freeze
+      @tool_scope_flags = normalize_tool_scope_flags(tool_scope_flags)
+      @raw_cli_arguments_supported = raw_cli_arguments_supported == true
 
       freeze
     end
@@ -254,6 +262,10 @@ module Hive
 
     def read_only_supported?
       !@read_only_flags.empty?
+    end
+
+    def raw_cli_arguments_supported?
+      @raw_cli_arguments_supported
     end
 
     def concrete_default_model(cfg: nil, project_root: nil, home: nil)
@@ -444,6 +456,23 @@ module Hive
       end.freeze
     end
 
+    def normalize_tool_scope_flags(flags)
+      unless flags.is_a?(Hash)
+        raise ArgumentError, "tool_scope_flags must be a Hash; got #{flags.class}"
+      end
+
+      flags.each_with_object({}) do |(scope, raw_flag), normalized|
+        name = scope.to_sym
+        unless %i[allowed disallowed].include?(name)
+          raise ArgumentError, "unknown tool scope #{scope.inspect}; valid: [:allowed, :disallowed]"
+        end
+        flag = raw_flag.to_s
+        raise ArgumentError, "tool scope #{scope.inspect} must declare a flag" if flag.empty?
+
+        normalized[name] = flag.freeze
+      end.freeze
+    end
+
     def capture_help!(capability_flags)
       out, err, status = bounded_capture3(
         bin, *capability_flags, "--help", timeout_sec: VERSION_CHECK_TIMEOUT_SEC
@@ -584,7 +613,9 @@ module Hive
         model_argument_builder: @model_argument_builder,
         effort_argument_builder: @effort_argument_builder,
         launcher_identity: @launcher_identity,
-        policy_capabilities: @policy_capabilities.dup
+        policy_capabilities: @policy_capabilities.dup,
+        tool_scope_flags: @tool_scope_flags.dup,
+        raw_cli_arguments_supported: @raw_cli_arguments_supported
       }
     end
 

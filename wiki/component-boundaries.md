@@ -19,7 +19,7 @@ the first and primary consumer.
 |-----------|-------|---------------------|-------------------|
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
-| Agent ABI | `candidate` | `require "hive/agent_profile"` → `Hive::AgentProfile` | [[modules/agent_profile]] |
+| Agent ABI | `boundary-ready` | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_profile]] |
 | Agent Artifact Firewall | `candidate` | `require "hive/protected_files"` → `Hive::ProtectedFiles` | [[modules/protected_files]] |
 | Skillpack | `candidate` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
 | Safe Agent Git Gate | `candidate` | `require "hive/managed_git"` → `Hive::ManagedGit` | [[modules/git_ops]] |
@@ -46,6 +46,16 @@ atomic replacement, backups, manager operations, and removal below one clean
 entry point. The daemon, bot, web, setup, init, status, and uninstall surfaces
 remain Hive-owned adapters for templates, policy, messages, JSON, prompts, and
 global sequencing.
+
+The `Agent ABI` is boundary-ready below orchestration. `AgentRuntime` exposes
+immutable request, compiled invocation, capability/probe evidence, and
+observable-result values while preserving `AgentProfile.new(...)` and
+`AgentProfiles.register` as extension points. Claude, Codex, Pi, Grok, and
+custom profiles remain adapters inside the boundary. Hive owns process
+lifetime, timeouts, retries, workflow selection, artifact acceptance, and
+stage success. `Hive::SecretPatterns` remains shared Hive infrastructure rather
+than component-owned state: both the ABI's bounded diagnostics and the future
+artifact firewall consume it.
 
 ## Catalog contract
 

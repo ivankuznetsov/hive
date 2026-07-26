@@ -98,7 +98,19 @@ class ComponentBoundariesTest < Minitest::Test
                  user_service.fetch("forbidden_constructions")
     assert_empty user_service.fetch("migration_exceptions")
 
-    remaining_candidates = contract.components.reject { |component| component == user_service }
+    agent_abi = contract.component("agent-abi")
+    assert_equal "boundary-ready", agent_abi.fetch("state")
+    assert_equal "hive/agent_runtime", agent_abi.dig("entrypoint", "require")
+    assert_equal "Hive::AgentRuntime", agent_abi.dig("entrypoint", "constant")
+    assert_includes agent_abi.dig("public_contract", "values"),
+                    "Hive::AgentRuntime::ObservableResult"
+    assert_includes agent_abi.dig("public_contract", "errors"),
+                    "Hive::AgentRuntime::UnsupportedCapability"
+    assert_empty agent_abi.fetch("migration_exceptions")
+
+    remaining_candidates = contract.components.reject do |component|
+      [ user_service, agent_abi ].include?(component)
+    end
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
     clean_load = contract.validate_clean_load!("attempts")
@@ -110,6 +122,11 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::UserService", user_service_load.fetch("constant")
     assert_empty user_service_load.fetch("forbidden_loaded_features")
     assert_empty user_service_load.fetch("forbidden_constants")
+
+    agent_abi_load = contract.validate_clean_load!("agent-abi")
+    assert_equal "Hive::AgentRuntime", agent_abi_load.fetch("constant")
+    assert_empty agent_abi_load.fetch("forbidden_loaded_features")
+    assert_empty agent_abi_load.fetch("forbidden_constants")
   end
 
   def test_invalid_catalog_rows_name_the_component_and_field

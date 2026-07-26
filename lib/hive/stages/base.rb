@@ -3,6 +3,7 @@ require "fileutils"
 require "securerandom"
 require "time"
 require "hive/agent"
+require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/config"
 require "hive/events"
@@ -616,8 +617,7 @@ module Hive
         # instead of letting the exception escape and land
         # `reason="runner_exception"`.
         begin
-          profile.check_version!
-          profile.preflight!
+          Hive::AgentRuntime.prepare!(profile)
         rescue Hive::AgentError => e
           return { status: :error,
                    error_message: "preflight failed: #{e.message}" }

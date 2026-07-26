@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "tempfile"
 require "time"
+require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/agent_limit"
 require "hive/agent/message_extractor"
@@ -131,7 +132,7 @@ module Hive
 
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :max_tokens, :max_turns, :timeout_sec,
                 :profile, :expected_output, :status_mode, :permission_mode,
-                :runtime_policy, :child_environment
+                :runtime_policy, :child_environment, :observable_result
 
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
@@ -241,6 +242,7 @@ module Hive
       end
       result = spawn_and_wait
       handle_exit(result)
+      @observable_result = Hive::AgentRuntime.observe(@profile, result)
       result
     ensure
       emit_agent_event(:agent_end, message: agent_end_message(result, $!))
@@ -337,7 +339,7 @@ module Hive
             end
             write_tool_in_current_turn = true if claude_write_tool_event?(json)
 
-            usage = json && @profile.extract_usage_event(json)
+            usage = json && Hive::AgentRuntime.extract_usage(@profile, json)
             if usage
               last_usage = usage
               observed_tokens = token_meter.observe(json, usage)
@@ -483,15 +485,16 @@ module Hive
       end
     end
 
-    # Build the argv for the configured profile.
+    # Compile the provider-neutral request through AgentRuntime.
     #
     # Order is fixed:
     #   bin, headless_flag, permission flags (if any),
     #   --add-dir <dir> repeated for each add_dir (if profile supports),
-    #   Claude-only tool scope flags (if supplied),
+    #   profile-declared tool scope flags (if supplied),
     #   budget_flag <amount> (if profile supports),
+    #   typed implementation identity arguments,
+    #   legacy raw arguments (only when the profile explicitly supports them),
     #   output_format_flags...,
-    #   extra_flags...,
     #   prompt
     #
     # The claude profile reproduces today's hardcoded argv exactly (verified
@@ -499,43 +502,7 @@ module Hive
     # and #test_argv_includes_verbose_when_stream_json which still pass after
     # the refactor — the claude profile's flag set IS today's flag set).
     def build_cmd
-      cmd = [ @profile.bin ]
-      if @profile.headless_flag
-        cmd << @profile.headless_flag
-        # Some CLIs' headless flag TAKES the prompt as its value (grok's
-        # -p/--single) rather than reading a trailing positional — the prompt
-        # must sit adjacent to the flag, before any other flags.
-        cmd << @prompt if @profile.prompt_style == :headless_flag_value
-      end
-      cmd.concat(permission_flags)
-      if @profile.add_dir_flag
-        @add_dirs.each do |d|
-          cmd << @profile.add_dir_flag << d
-        end
-      end
-      if @profile.name == :claude
-        if (allowed = Hive::PermissionScope.tool_csv(@allowed_tools))
-          cmd << "--allowedTools" << allowed
-        end
-        if (disallowed = Hive::PermissionScope.tool_csv(@disallowed_tools))
-          cmd << "--disallowedTools" << disallowed
-        end
-      end
-      if @profile.budget_flag && @max_budget_usd
-        cmd << @profile.budget_flag << @max_budget_usd.to_s
-      end
-      # Typed profile-native identity argv is provider-safe and always
-      # arrives as discrete Process.spawn arguments. The raw cli_flags path
-      # remains Claude-only for backward compatibility with callers that
-      # need unrelated Claude flags (MCP, legacy capability adapters).
-      cmd.concat(@identity_arguments)
-      if @cli_flags.any? && @profile.name != :claude
-        raise ArgumentError, "cli_flags are claude-specific; got #{@cli_flags.inspect} for #{@profile.name}"
-      end
-      cmd.concat(@cli_flags)
-      cmd.concat(@profile.output_format_flags)
-      cmd << (@profile.prompt_style == :stdin ? "-" : @prompt) unless @profile.prompt_style == :headless_flag_value
-      cmd
+      compiled_invocation.argv.dup
     end
 
     def permission_flags
@@ -543,16 +510,32 @@ module Hive
     end
 
     def prompt_via_stdin?
-      @profile.prompt_style == :stdin
+      !compiled_invocation.stdin_data.nil?
     end
 
     def prompt_stdin_file
       return nil unless prompt_via_stdin?
 
       file = Tempfile.new([ "hive-agent-prompt-", ".txt" ])
-      file.write(@prompt)
+      file.write(compiled_invocation.stdin_data)
       file.rewind
       file
+    end
+
+    def compiled_invocation
+      @compiled_invocation ||= Hive::AgentRuntime.compile(
+        Hive::AgentRuntime::Request.new(
+          profile: @profile,
+          prompt: @prompt,
+          permission_mode: @permission_mode,
+          add_dirs: @add_dirs,
+          allowed_tools: @allowed_tools,
+          disallowed_tools: @disallowed_tools,
+          max_budget_usd: @max_budget_usd,
+          identity_arguments: @identity_arguments,
+          raw_cli_arguments: @cli_flags
+        )
+      )
     end
 
     def kill_group(pgid)

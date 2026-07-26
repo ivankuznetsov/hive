@@ -173,18 +173,27 @@ components:
 
   - id: agent-abi
     name: Agent ABI
-    state: candidate
+    state: boundary-ready
     entrypoint:
-      file: lib/hive/agent_profile.rb
-      require: hive/agent_profile
-      constant: Hive::AgentProfile
+      file: lib/hive/agent_runtime.rb
+      require: hive/agent_runtime
+      constant: Hive::AgentRuntime
     public_contract:
       values:
+        - Hive::AgentRuntime::Request
+        - Hive::AgentRuntime::CompiledInvocation
+        - Hive::AgentRuntime::CapabilityEvidence
+        - Hive::AgentRuntime::ProbeResult
+        - Hive::AgentRuntime::ObservableResult
         - Hive::AgentProfile
         - Hive::AgentProfiles
       errors:
         - Hive::AgentError
+        - Hive::AgentRuntime::UnsupportedCapability
+        - Hive::AgentRuntime::ProbeError
+        - Hive::AgentRuntime::CompilationError
     owned_paths:
+      - lib/hive/agent_runtime.rb
       - lib/hive/agent_profile.rb
       - lib/hive/agent_profiles.rb
       - lib/hive/agent_profiles
@@ -195,19 +204,33 @@ components:
     lock_contracts:
       - "Version/capability probes are bounded and reap descendant process groups"
     component_dependencies: []
-    allowed_hive_dependencies: []
+    allowed_hive_dependencies:
+      - hive/implementation_identity
+      - hive/permission_scope
+      - hive/secret_patterns
+      - hive/skill_check
     internal_collaborators:
       - Hive::AgentProfiles::UsageExtractors
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/agent.rb
+      - lib/hive/claude_launcher.rb
+      - lib/hive/diagnosis_agent.rb
+      - lib/hive/display_name/generator.rb
+      - lib/hive/patrol/agent_launch.rb
+      - lib/hive/reviewers/codex_review.rb
       - lib/hive/stages/base.rb
+      - lib/hive/tui/bubble_model.rb
     mutation_authority: "Hive orchestration selects profiles and permission policy; adapters only compile and observe."
     recovery_surface: "Probe and invocation failures return bounded evidence; workflow retry policy stays in Hive."
     wiki_page: wiki/modules/agent_profile.md
     focused_tests:
+      - test/unit/agent_runtime_test.rb
       - test/unit/agent_profile_test.rb
+      - test/unit/agent_profiles_test.rb
+      - test/unit/agent_profile_modes_test.rb
+      - test/unit/agent_test.rb
     migration_exceptions: []
 
   - id: agent-artifact-firewall
@@ -225,7 +248,6 @@ components:
         - ArgumentError
     owned_paths:
       - lib/hive/protected_files.rb
-      - lib/hive/secret_patterns.rb
     state_contracts:
       - "In-memory protected-file capture plus post-spawn custody report"
     schema_contracts:

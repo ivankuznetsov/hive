@@ -106,13 +106,17 @@ class AgentTest < Minitest::Test
       ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
       ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
 
-      result = Hive::Agent.new(task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5).run!
+      agent = Hive::Agent.new(task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5)
+      result = agent.run!
 
       assert_equal 0, result[:exit_code]
       assert_equal :waiting, result[:status]
       assert_equal :waiting, Hive::Markers.current(task.state_file).name
       assert File.exist?(result[:log_file])
       assert_equal 0o600, File.stat(result[:log_file]).mode & 0o777
+      assert_instance_of Hive::AgentRuntime::ObservableResult, agent.observable_result
+      assert_equal :waiting, agent.observable_result.status
+      assert_equal result[:exit_code], agent.observable_result.exit_code
     end
   end
 
@@ -402,8 +406,9 @@ class AgentTest < Minitest::Test
         profile: Hive::AgentProfiles.lookup(:codex), cli_flags: [ "--model", "unsafe" ]
       )
 
-      error = assert_raises(ArgumentError) { agent.send(:build_cmd) }
-      assert_includes error.message, "cli_flags are claude-specific"
+      error = assert_raises(Hive::AgentRuntime::UnsupportedCapability) { agent.send(:build_cmd) }
+      assert_equal :raw_cli_arguments, error.evidence.capability
+      assert_equal false, error.evidence.supported
     end
   end
 

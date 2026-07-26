@@ -1,7 +1,7 @@
 ---
 title: Hive::Agent
 type: module
-source: lib/hive/agent.rb, lib/hive/agent/message_extractor.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
+source: lib/hive/agent.rb, lib/hive/agent_runtime.rb, lib/hive/agent/message_extractor.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
 updated: 2026-07-25
 tags: [agent, claude, subprocess]
@@ -71,14 +71,17 @@ configured run cap is simply too low.
 2. `Markers.set(state_file, :agent_working, pid: Process.pid, started: now)`.
 3. `spawn_and_wait` — see below.
 4. `handle_exit`: translate timeout / non-zero exit / missing-marker-after-clean-exit into the appropriate status/marker for the selected status mode.
-5. Return the result hash.
+5. Normalize the final Hash into immutable
+   `AgentRuntime::ObservableResult`, available as `observable_result`.
+6. Return the unchanged legacy result Hash.
 
 There is **no inode-tracking concurrent-edit detection.** It was tried in early Phase 1 and removed — claude's own `Edit` and `Write` tools rewrite atomically (write tempfile + rename), changing the state file's inode every time. Inode mismatch was 100% false-positive. The current safety net for "user edits state file mid-run" is the documented "don't edit during AGENT_WORKING" rule plus the per-task `.lock` file's PID-liveness probe.
 
 ## `build_cmd`
 
-`build_cmd` composes argv from the selected `AgentProfile`, not from a
-hardcoded Claude template:
+`build_cmd` delegates a provider-neutral `AgentRuntime::Request` to
+`AgentRuntime.compile`; it no longer assembles provider argv itself. The
+selected `AgentProfile` remains the provider adapter:
 
 ```
 <profile.bin> <profile.headless_flag>
@@ -138,7 +141,8 @@ and ignored user config/rules; architecture-patrol auto-fix runs with that mode
 and the isolated fix worktree as `cwd`.
 
 Claude tool-scope flags are also per spawn. `allowed_tools:` and
-`disallowed_tools:` are emitted only for the Claude profile and only when
+`disallowed_tools:` are emitted only when the profile declares the corresponding
+`tool_scope_flags` (currently Claude) and only when
 non-empty, after `--add-dir` flags and before budget/model/output-format
 flags. This preserves the historical yolo headless argv (no tool lists) while
 letting `Hive::PermissionScope` enforce opt-in `read-only` and `scoped`
@@ -157,7 +161,7 @@ value (fresh init offers `low`, `medium`, and `high`).
 tmux-backed Claude sessions, and the shell wrapper forwards `--model` and
 `--effort` without shell re-parsing.
 
-Read-only architecture discovery is a separate Claude-only launch contract.
+Read-only architecture discovery is a separate Claude-only launch policy.
 `Hive::RefactorPatrol::ReviewAgentRunner` resolves the existing read-only tool
 scope and also asks the profile for its verified `safe_mode` capability. Hive
 runs `claude --safe-mode --help` once per binary/version/capability tuple and

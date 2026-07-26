@@ -12,6 +12,23 @@ class AgentProfileTest < Minitest::Test
     assert_predicate capable.policy_capabilities, :frozen?
   end
 
+  def test_runtime_adapter_fields_are_optional_validated_and_frozen
+    profile = make_profile
+    assert_equal({}, profile.tool_scope_flags)
+    refute profile.raw_cli_arguments_supported?
+
+    capable = make_profile(
+      tool_scope_flags: { allowed: "--allow", disallowed: "--deny" },
+      raw_cli_arguments_supported: true
+    )
+    assert_equal({ allowed: "--allow", disallowed: "--deny" }, capable.tool_scope_flags)
+    assert_predicate capable.tool_scope_flags, :frozen?
+    assert capable.raw_cli_arguments_supported?
+
+    assert_raises(ArgumentError) { make_profile(tool_scope_flags: { unknown: "--flag" }) }
+    assert_raises(ArgumentError) { make_profile(tool_scope_flags: { allowed: "" }) }
+  end
+
   include HiveTestHelper
 
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)
@@ -500,6 +517,18 @@ class AgentProfileTest < Minitest::Test
     assert_same model_builder, overridden.model_argument_builder
     assert_same effort_builder, overridden.effort_argument_builder
     assert_equal "custom-launcher/v2", overridden.launcher_identity
+  end
+
+  def test_with_overrides_preserves_runtime_adapter_fields
+    profile = make_profile(
+      tool_scope_flags: { allowed: "--allow" },
+      raw_cli_arguments_supported: true
+    )
+
+    overridden = profile.with_overrides("min_version" => "9.9.9")
+
+    assert_equal({ allowed: "--allow" }, overridden.tool_scope_flags)
+    assert overridden.raw_cli_arguments_supported?
   end
 
   # --- with_overrides ---------------------------------------------------

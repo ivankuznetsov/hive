@@ -1,5 +1,6 @@
 require "digest"
 require "json"
+require "base64"
 require "shellwords"
 require "hive"
 require "hive/bot/format"
@@ -611,6 +612,14 @@ module Hive
 
       def button(text, callback_data)
         { text: text, callback_data: compact_callback(callback_data) }
+      end
+
+      def encode_closure_callback(prefix, payload)
+        unless %w[closure_preview closure_confirm].include?(prefix.to_s)
+          raise ArgumentError, "unsupported closure callback"
+        end
+
+        "#{prefix}:#{Base64.urlsafe_encode64(JSON.generate(payload), padding: false)}"
       end
 
       def compact_callback(callback_data)

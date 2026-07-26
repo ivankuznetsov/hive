@@ -22,6 +22,7 @@ module Hive
         slash_approve
         slash_autofix
         slash_details
+        slash_close
         slash_done
         slash_help
         slash_start
@@ -157,6 +158,7 @@ module Hive
         when %r{\A/approve\b} then :slash_approve
         when %r{\A/autofix\b} then :slash_autofix
         when %r{\A/details\b} then :slash_details
+        when %r{\A/close\b} then :slash_close
         when %r{\A/done\b} then :slash_done
         when %r{\A/help\b} then :slash_help
         # Telegram sends /start automatically on first contact with a bot —
@@ -347,6 +349,7 @@ module Hive
         when :slash_approve then @slash_handlers.approve(update)
         when :slash_autofix then @slash_handlers.autofix(update)
         when :slash_details then @slash_handlers.details(update)
+        when :slash_close then @slash_handlers.closure(update)
         when :slash_done then @slash_handlers.done(update, @conversation_store)
         when :slash_help then @slash_handlers.help(update)
         when :slash_start then @slash_handlers.start(update)

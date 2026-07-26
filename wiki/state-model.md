@@ -91,25 +91,59 @@ The receipt records:
   `operator_attestation`;
 - exact task/project/workflow identity plus task and marker generation;
 - canonical task repository identity and default branch;
-- at most 16 canonical merged-PR/full-commit facts, their full OIDs,
-  default-branch reachability, and one canonical evidence digest;
+- at most 16 canonical merged-PR/full-commit facts, including full PR head and
+  merge OIDs where applicable, default-branch reachability, and one canonical
+  evidence digest;
 - the registered successor and bounded attestation for supersession;
 - exact preview digest, operator/channel, timestamp, and canonical receipt
   digest.
 
-Preview is read-only. Confirmation requires an authenticated CLI/web/bot
-operator, names the exact preview digest, and re-verifies repository, remote,
-owner, attempt, marker, generation, and owned-worktree facts under an adjacent
-private lock. `closure.json` is mode 0600 and is written/fsynced before the
-centralized move to `9-done`; a restart resumes the same receipt idempotently.
-Projection overlays only a fully validated receipt and never rewrites journal
-facts.
+Preview is read-only. Public confirmation requires an authenticated
+CLI/web/bot operator, names the exact preview digest, and re-verifies
+repository, remote, owner, attempt, marker, generation, and owned-worktree
+facts under an adjacent private lock. The daemon has one narrower internal
+channel: it may write `authority=remote_merge`, `channel=daemon` only for the
+task's own verified same-repository merged PR after the durable reconciler's
+guards pass. The reconciler's observed head and merge OIDs must still equal
+the closure service's final GitHub read, so architecture-intake delay cannot
+race a changed PR binding. That channel is not accepted by the public confirmation API and
+cannot take over an operator receipt. `closure.json` is mode 0600 and is
+written/fsynced before the centralized move to `9-done`; a restart resumes the
+same receipt idempotently. Projection overlays only a fully validated receipt
+and never rewrites journal facts.
 
 Invalid receipt bytes move to
 `$HIVE_HOME/state/closure-quarantine/<project-key>/<slug>/` with a bounded
 reason. The active task remains in place, status retains the quarantine
 blocker, and no receipt digest is admitted by the closure transition guard.
 The preserved bytes are audit material, not authority.
+
+## Durable task-bound merge reconciliation
+
+Each registered project owns
+`.hive-state/daemon/pr-merge-reconciliation.json`
+(`hive-pr-merge-reconciliation.v1`). This is distinct from architecture
+patrol's repository-wide catch-up checkpoint and from the task-local closure
+receipt. The ledger binds registration, canonical project/state paths,
+GitHub host/repository, and default branch. It stores a backlog watermark,
+per-project fair cursor, and candidates keyed by project, slug, and exact task
+generation.
+
+Each candidate retains its stage/marker generation, dependency/admission
+hold, canonical PR and observed head, remote state and immutable merge facts,
+architecture request/receipt, archive receipt, next eligible time, uncapped
+failure count, and bounded diagnostic. GitHub verification and accepted
+architecture intake are separately checkpointed before archive. `OPEN`,
+closed-unmerged, held, unsafe, superseded-generation, and retrying candidates
+therefore remain explainable across restart; none is discarded after a fixed
+failure count.
+
+An adjacent mode-0600 lock serializes readers and writers. State writes use
+owner-private atomic replacement plus directory fsync. Malformed,
+unsupported, or identity-drifted authoritative bytes are not rewritten:
+conflict evidence is copied to
+`.hive-state/daemon/quarantine/pr-merge-reconciliation/`, that project blocks,
+and other registrations continue.
 
 Task ids are allocated from the global counter file `<state_home>/task-counter.yml` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`). The counter is protected by `<state_home>/.task-counter.lock` (`flock LOCK_EX`, default 30s timeout, 0.2s polling) and stores the next id as YAML:
 

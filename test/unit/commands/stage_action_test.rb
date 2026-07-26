@@ -152,17 +152,6 @@ class CommandsStageActionTest < Minitest::Test
                  calls.first.fetch(:argv)
   end
 
-  def test_durable_worker_argv_preserves_recovery_reason
-    task = Struct.new(:folder).new("/tmp/task-folder")
-    command = Hive::Commands::StageAction.new(
-      "plan", "some-slug", recover_merged_error_reason: "ci_failed"
-    )
-    assert_equal [
-      "hive", "plan", "/tmp/task-folder",
-      "--recover-merged-error-reason", "ci_failed"
-    ], command.send(:durable_worker_argv, task)
-  end
-
   def test_lost_durable_attempt_emits_versioned_json_error_envelope
     task = Struct.new(:folder, :slug, :project_root, :project_name).new(
       "/tmp/task-folder", "some-slug", "/tmp/project", "demo"

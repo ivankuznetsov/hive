@@ -47,7 +47,7 @@ case "${1:-}" in
         # HIVE_FAKE_GH_PR_EXISTS_FILE points at a file that fake-claude
         # creates on first invocation; when present we report the PR at
         # the URL HIVE_FAKE_GH_PR_EXISTS_URL (default
-        # https://example.com/pr/9). Tests use this to simulate the
+        # https://github.com/acme/app/pull/9). Tests use this to simulate the
         # post-agent state: before the agent runs the file does not
         # exist and `pr list` reports `[]`; after the agent runs (the
         # agent supposedly invoked `gh pr create`) the file exists and
@@ -56,7 +56,7 @@ case "${1:-}" in
         if [[ -n "${HIVE_FAKE_GH_PR_EXISTS_FILE:-}" && -f "${HIVE_FAKE_GH_PR_EXISTS_FILE}" ]]; then
           state="${HIVE_FAKE_GH_PR_STATE:-OPEN}"
           isdraft="${HIVE_FAKE_GH_PR_ISDRAFT:-true}"
-          url="${HIVE_FAKE_GH_PR_EXISTS_URL:-https://example.com/pr/9}"
+          url="${HIVE_FAKE_GH_PR_EXISTS_URL:-https://github.com/acme/app/pull/9}"
           num="${HIVE_FAKE_GH_PR_EXISTS_NUMBER:-9}"
           head_oid="${HIVE_FAKE_GH_HEAD_REF_OID:-fake-head-oid}"
           head_name="${HIVE_FAKE_GH_HEAD_REF_NAME:-fake-head}"
@@ -66,7 +66,9 @@ case "${1:-}" in
           isdraft="${HIVE_FAKE_GH_PR_ISDRAFT:-true}"
           head_oid="${HIVE_FAKE_GH_HEAD_REF_OID:-fake-head-oid}"
           head_name="${HIVE_FAKE_GH_HEAD_REF_NAME:-fake-head}"
-          printf '[{"url":"https://example.com/pr/1","number":1,"state":"%s","isDraft":%s,"headRefOid":"%s","headRefName":"%s"}]\n' "$state" "$isdraft" "$head_oid" "$head_name"
+          url="${HIVE_FAKE_GH_PR_EXISTS_URL:-https://github.com/acme/app/pull/1}"
+          num="${HIVE_FAKE_GH_PR_EXISTS_NUMBER:-1}"
+          printf '[{"url":"%s","number":%s,"state":"%s","isDraft":%s,"headRefOid":"%s","headRefName":"%s"}]\n' "$url" "$num" "$state" "$isdraft" "$head_oid" "$head_name"
         else
           printf '[]\n'
         fi
@@ -81,15 +83,23 @@ case "${1:-}" in
         # The publisher's already_posted? parses this and matches
         # per-comment line-anchored, not on the raw blob.
         wants_comments=0
+        wants_pr_metadata=0
         for a in "$@"; do
           [[ "$a" == "comments" ]] && wants_comments=1
+          [[ "$a" == *"headRefOid"* ]] && wants_pr_metadata=1
         done
         # `-q .comments[].body` short-circuits to legacy raw-body
         # output (kept for compatibility with older test paths).
         if [[ "${*: -1}" == ".comments[].body" ]]; then
           wants_comments=0
         fi
-        if [[ "${*: -1}" == ".body" ]]; then
+        if [[ "$wants_pr_metadata" == 1 ]]; then
+          metadata_url="${HIVE_FAKE_GH_PR_METADATA_URL:-https://github.com/acme/app/pull/9}"
+          metadata_number="${HIVE_FAKE_GH_PR_METADATA_NUMBER:-9}"
+          metadata_head="${HIVE_FAKE_GH_HEAD_REF_OID:-$(git rev-parse HEAD 2>/dev/null || printf 'fake-head-oid')}"
+          printf '{"number":%s,"url":"%s","baseRefName":"main","headRefOid":"%s","isCrossRepository":false,"state":"OPEN"}\n' \
+            "$metadata_number" "$metadata_url" "$metadata_head"
+        elif [[ "${*: -1}" == ".body" ]]; then
           printf '%s\n' "${HIVE_FAKE_GH_PR_BODY:-}"
         elif [[ "${*: -1}" == ".isDraft" ]]; then
           printf '%s\n' "${HIVE_FAKE_GH_PR_ISDRAFT:-true}"

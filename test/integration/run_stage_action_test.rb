@@ -37,20 +37,6 @@ class RunStageActionTest < Minitest::Test
     [ inbox, File.basename(inbox) ]
   end
 
-  def with_fake_gh_state(state)
-    Dir.mktmpdir do |dir|
-      gh = File.join(dir, "gh")
-      File.write(gh, <<~RUBY)
-        #!/usr/bin/env ruby
-        require "json"
-        abort "unexpected gh argv: \#{ARGV.inspect}" unless ARGV == %w[pr view https://github.com/example/repo/pull/42 --json state]
-        puts JSON.generate("state" => #{state.inspect})
-      RUBY
-      FileUtils.chmod(0o755, gh)
-      with_env("PATH" => "#{dir}:#{ENV.fetch('PATH', '')}") { yield }
-    end
-  end
-
   def test_brainstorm_moves_inbox_to_brainstorm_and_runs
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -286,39 +272,7 @@ class RunStageActionTest < Minitest::Test
     end
   end
 
-  def test_archive_accepts_matching_merged_error_recovery_reason
-    with_tmp_global_config do
-      with_tmp_git_repo do |dir|
-        inbox, slug = seed_inbox(dir)
-        finalize = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
-        FileUtils.mkdir_p(File.dirname(finalize))
-        FileUtils.mv(inbox, finalize)
-        File.write(File.join(finalize, "pr.md"), <<~MD)
-          ---
-          pr_url: https://github.com/example/repo/pull/42
-          ---
-
-          <!-- ERROR reason=git_status_failed -->
-        MD
-
-        with_fake_gh_state("MERGED") do
-          capture_io do
-            Hive::Commands::StageAction.new(
-              "archive",
-              slug,
-              recover_merged_error_reason: "git_status_failed"
-            ).call
-          end
-        end
-
-        done = File.join(dir, ".hive-state", "stages", "9-done", slug)
-        assert File.directory?(done)
-        assert_equal :complete, Hive::Markers.current(File.join(done, "task.md")).name
-      end
-    end
-  end
-
-  def test_archive_rejects_mismatched_merged_error_recovery_reason
+  def test_archive_rejects_error_marker_even_when_pr_metadata_names_a_merged_pr
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         inbox, slug = seed_inbox(dir)
@@ -334,51 +288,13 @@ class RunStageActionTest < Minitest::Test
         MD
 
         _out, err, status = with_captured_exit do
-          Hive::Commands::StageAction.new(
-            "archive",
-            slug,
-            recover_merged_error_reason: "claude_launch_failed"
-          ).call
+          Hive::Commands::StageAction.new("archive", slug).call
         end
 
         assert_equal Hive::ExitCodes::WRONG_STAGE, status
         assert_includes err, "archive cannot advance"
         assert File.directory?(finalize)
-      end
-    end
-  end
-
-  def test_archive_rejects_matching_recovery_reason_when_pr_is_open
-    with_tmp_global_config do
-      with_tmp_git_repo do |dir|
-        inbox, slug = seed_inbox(dir)
-        finalize = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
-        FileUtils.mkdir_p(File.dirname(finalize))
-        FileUtils.mv(inbox, finalize)
-        File.write(File.join(finalize, "pr.md"), <<~MD)
-          ---
-          pr_url: https://github.com/example/repo/pull/42
-          ---
-
-          <!-- ERROR reason=git_status_failed -->
-        MD
-
-        out = err = nil
-        status = nil
-        with_fake_gh_state("OPEN") do
-          out, err, status = with_captured_exit do
-            Hive::Commands::StageAction.new(
-              "archive",
-              slug,
-              recover_merged_error_reason: "git_status_failed"
-            ).call
-          end
-        end
-
-        assert_equal Hive::ExitCodes::WRONG_STAGE, status
-        assert_empty out
-        assert_includes err, "archive cannot advance"
-        assert File.directory?(finalize)
+        refute File.directory?(File.join(dir, ".hive-state", "stages", "9-done", slug))
       end
     end
   end

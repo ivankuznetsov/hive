@@ -12,16 +12,14 @@ require "hive/task_resolver"
 
 module TaskMutations
   def closure_preview(input)
-    native = Hive::TaskResolver.new(folder, project_filter: project.name).resolve
     Hive::TaskClosure.preview(
-      task: native, project: project.name, input: normalized_closure_input(input)
+      task: native_task_for_closure, project: project.name, input: normalized_closure_input(input)
     )
   end
 
   def close_with_evidence!(input:, preview_digest:, operator:, authorized:)
-    native = Hive::TaskResolver.new(folder, project_filter: project.name).resolve
     Hive::TaskClosure.confirm!(
-      task: native,
+      task: native_task_for_closure,
       project: project.name,
       input: normalized_closure_input(input),
       preview_digest: preview_digest,
@@ -147,6 +145,10 @@ module TaskMutations
   end
 
   private
+
+  def native_task_for_closure
+    Hive::TaskResolver.new(folder, project_filter: project.name).resolve
+  end
 
   def normalized_closure_input(input)
     values = input.respond_to?(:to_h) ? input.to_h : {}

@@ -1,7 +1,6 @@
 require "json"
 require "hive/commands/approve"
 require "hive/commands/run"
-require "hive/gh"
 require "hive/markers"
 require "hive/stages"
 require "hive/task_resolver"
@@ -33,25 +32,25 @@ module Hive
       include Hive::Schemas::EnvelopeEmitter
       include Hive::Attempts::CommandDispatch
 
-      def self.archive_with_closure(task, project:, receipt_digest:)
+      def self.archive_with_closure(task, project:, receipt_digest:,
+                                    observation_guard: nil)
         new(
           "archive", task.folder,
           project: project,
           quiet: true,
-          closure_receipt_digest: receipt_digest
+          closure_receipt_digest: receipt_digest,
+          observation_guard: observation_guard
         ).call
       end
 
       def initialize(verb, target, project: nil, from: nil, json: false,
-                     recover_merged_error_reason: nil, durable: false,
-                     attempt_entrypoint: nil, quiet: false, observation_guard: nil,
-                     closure_receipt_digest: nil)
+                     durable: false, attempt_entrypoint: nil, quiet: false,
+                     observation_guard: nil, closure_receipt_digest: nil)
         @verb = verb
         @target = target
         @project_filter = project
         @from = from
         @json = json
-        @recover_merged_error_reason = recover_merged_error_reason
         @durable = durable
         @attempts_api = attempt_entrypoint
         @quiet = quiet
@@ -89,9 +88,6 @@ module Hive
         argv = [ "hive", @verb, task.folder ]
         argv.concat([ "--from", @from ]) if @from
         argv << "--json" if @json
-        if @recover_merged_error_reason
-          argv.concat([ "--recover-merged-error-reason", @recover_merged_error_reason ])
-        end
         argv
       end
 
@@ -164,7 +160,6 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         Hive::Conditions::TransitionGuard.validate!(task, force: config[:force_source])
         return if terminal_marker?(marker)
-        return if archive_merged_error_recovery_marker?(task, marker, config)
 
         next_command = "hive #{@verb} #{task.slug} --from #{stage_dir(task)}"
         raise Hive::WrongStage.new(
@@ -182,22 +177,6 @@ module Hive
       # "Ready for PR" rows tripped on every dispatch.
       def terminal_marker?(marker)
         Hive::Markers::TERMINAL_MARKER_NAMES.include?(marker.name)
-      end
-
-      def archive_merged_error_recovery_marker?(task, marker, config)
-        return false unless @verb == "archive"
-        return false unless stage_dir(task) == config.fetch(:source)
-        return false unless marker.name == :error
-
-        reason = @recover_merged_error_reason.to_s
-        return false if reason.empty?
-
-        return false unless marker.attrs.to_h.fetch("reason", nil).to_s == reason
-
-        pr_url = Hive::Gh.pr_frontmatter(task.state_file)["pr_url"].to_s
-        return false if pr_url.empty?
-
-        Hive::Gh.pr_state(pr_url) == "MERGED"
       end
 
       # Evidence closure may retire a task from any active stage, but only
@@ -254,11 +233,7 @@ module Hive
           to: target_stage,
           from: current_stage,
           project: @project_filter,
-          force: config[:force_source] || archive_merged_error_recovery_marker?(
-            task,
-            Hive::Markers.current(task.state_file),
-            config
-          ),
+          force: config[:force_source],
           json: false,
           quiet: @json || @quiet,
           observation_guard: @observation_guard

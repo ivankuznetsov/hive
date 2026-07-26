@@ -25,8 +25,12 @@ The first two checks are the shared `Hive::Stages::Base.worktree_pointer_or_exit
 2. Secret-scan every current OPEN PR body before pushing or spawning a
    body-authoring agent. This closes the retry window where a known leaked body
    could otherwise be republished before the next post-write scan.
-3. If an OPEN PR exists, write `pr.md` with `idempotent=true`, secret-scan it, and finish without spawning an agent.
-4. If a MERGED PR exists for the current local `HEAD` (`headRefOid` match), write `pr.md` with `merged=true`, secret-scan it, write `summary.md`, and finish without spawning an agent.
+3. If an OPEN PR exists, write `pr.md` with `idempotent=true` and the
+   controller-observed full `head_oid`, secret-scan it, and finish without
+   spawning an agent.
+4. If a MERGED PR exists for the current local `HEAD` (`headRefOid` match),
+   write `pr.md` with `merged=true` and that immutable head binding,
+   secret-scan it, write `summary.md`, and finish without spawning an agent.
 5. Secret-scan the local PR source, then push the branch with `git push -u origin <branch>`.
    A missing `pr.md` is the normal first-entry shape and contributes an empty
    local source; remote bodies are still fetched and scanned.
@@ -35,10 +39,13 @@ The first two checks are the shared `Hive::Stages::Base.worktree_pointer_or_exit
    captured before spawn and restored atomically on a mismatch; the resulting
    error carries `reason=open_pr_tampered` and `restored=true|false`. The prompt
    invokes `/ce-commit-push-pr`, requires `gh pr create --draft`, forbids
-   another push, requires `pr.md` frontmatter with `pr_url` / `pr_number`, and
+   another push, requires `pr.md` frontmatter with `pr_url`, `pr_number`, and
+   full `head_oid`, and
    ends with a required completion section that makes the
    `<!-- COMPLETE pr_url=... is_draft=true -->` marker the last line.
-8. Secret-scan the resulting `pr.md` and PR body before returning success.
+8. Secret-scan the resulting `pr.md` and PR body, revalidate that GitHub's
+   `headRefOid` is the exact local `HEAD`, and canonicalize the immutable PR
+   identity in frontmatter before returning success.
 
 ## Marker → commit action
 

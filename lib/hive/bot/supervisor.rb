@@ -49,6 +49,7 @@ module Hive
         { command: "approve", description: "Approve a task at its current stage: /approve <id|slug>" },
         { command: "autofix", description: "Retry a stuck task: /autofix <id|slug>" },
         { command: "details", description: "Show diagnostic detail: /details <id|slug>" },
+        { command: "close",   description: "Verify delivered work before archiving: /close <id|slug>" },
         { command: "done",    description: "Mark a brainstorm as done after answering" },
         { command: "help",    description: "Show available commands" }
       ].freeze

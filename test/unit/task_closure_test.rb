@@ -8,6 +8,7 @@ class TaskClosureTest < Minitest::Test
 
   FakeGh = Struct.new(
     :repository, :state, :reachable, :merge_oid, :remote_default_branch,
+    :head_oid,
     keyword_init: true
   ) do
     def ensure_authenticated!(*)
@@ -28,6 +29,7 @@ class TaskClosureTest < Minitest::Test
         "state" => state || "MERGED",
         "merged_at" => "2026-07-25T10:00:00Z",
         "merge_oid" => merge_oid || ("a" * 40),
+        "head_oid" => head_oid || ("b" * 40),
         "base_ref_name" => "main",
         "reachable_from_default" => reachable != false
       }
@@ -91,6 +93,125 @@ class TaskClosureTest < Minitest::Test
         operator: "tester", channel: "cli", authorized: true
       )
       assert_equal receipt.fetch("receipt_digest"), replay.fetch("receipt_digest")
+    end
+  end
+
+  def test_daemon_reconciles_same_repository_merge_and_replays_idempotently
+    with_closure_project do |task, project|
+      File.write(
+        File.join(task.folder, "pr.md"),
+        <<~MD
+          ---
+          pr_url: https://github.com/acme/app/pull/42
+          pr_number: 42
+          head_oid: #{"b" * 40}
+          ---
+        MD
+      )
+      service = service_for
+      receipt = service.reconcile_remote_merge!(
+        task: task,
+        project: project,
+        pr_url: "https://github.com/acme/app/pull/42",
+        expected_head: "b" * 40,
+        expected_merge_oid: "a" * 40
+      )
+
+      archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+      assert_equal "9-done", "#{archived.stage_index}-#{archived.stage_name}"
+      assert_equal :complete, Hive::Markers.current(archived.state_file).name
+      assert_equal "remote_merge", receipt.fetch("authority")
+      assert_equal "hive-daemon", receipt.dig("confirmed_by", "operator")
+      assert_equal "daemon", receipt.dig("confirmed_by", "channel")
+
+      schema = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path(Hive::TaskClosure::SCHEMA)))
+      )
+      assert schema.valid?(receipt), schema.validate(receipt).to_a.inspect
+
+      replay = service.reconcile_remote_merge!(
+        task: archived,
+        project: project,
+        pr_url: "https://github.com/acme/app/pull/42",
+        expected_head: "b" * 40,
+        expected_merge_oid: "a" * 40
+      )
+      assert_equal receipt.fetch("receipt_digest"), replay.fetch("receipt_digest")
+    end
+  end
+
+  def test_daemon_cannot_take_over_an_operator_owned_closure
+    with_closure_project do |task, project|
+      service = service_for
+      input = input_for("acme/app#42")
+      preview = service.preview(task: task, project: project, input: input)
+      service.confirm!(
+        task: task,
+        project: project,
+        input: input,
+        preview_digest: preview.preview_digest,
+        operator: "tester",
+        channel: "cli",
+        authorized: true
+      )
+      archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+
+      error = assert_raises(Hive::TaskClosure::InvalidReceipt) do
+        service.reconcile_remote_merge!(
+          task: archived,
+          project: project,
+          pr_url: "https://github.com/acme/app/pull/42",
+          expected_head: "b" * 40,
+          expected_merge_oid: "a" * 40
+        )
+      end
+      assert_match(/operator closure receipt already owns/, error.message)
+    end
+  end
+
+  def test_daemon_reconciliation_rejects_head_or_merge_drift_at_final_verification
+    [
+      [ FakeGh.new(head_oid: "c" * 40), "b" * 40, "a" * 40 ],
+      [ FakeGh.new(merge_oid: "d" * 40), "b" * 40, "a" * 40 ]
+    ].each do |gh, expected_head, expected_merge_oid|
+      with_closure_project do |task, project|
+        service = service_for(gh: gh)
+
+        error = assert_raises(Hive::TaskClosure::StalePreview) do
+          service.reconcile_remote_merge!(
+            task: task,
+            project: project,
+            pr_url: "https://github.com/acme/app/pull/42",
+            expected_head: expected_head,
+            expected_merge_oid: expected_merge_oid
+          )
+        end
+
+        assert_match(/head or merge OID changed/, error.message)
+        assert File.directory?(task.folder)
+        refute File.exist?(File.join(task.folder, "closure.json"))
+      end
+    end
+  end
+
+  def test_daemon_channel_is_not_public_confirmation_authority
+    with_closure_project do |task, project|
+      service = service_for
+      input = input_for("acme/app#42")
+      preview = service.preview(task: task, project: project, input: input)
+
+      assert_raises(Hive::TaskClosure::Unauthorized) do
+        service.confirm!(
+          task: task,
+          project: project,
+          input: input,
+          preview_digest: preview.preview_digest,
+          operator: "hive-daemon",
+          channel: "daemon",
+          authorized: true
+        )
+      end
+      assert File.directory?(task.folder)
     end
   end
 
@@ -260,6 +381,22 @@ class TaskClosureTest < Minitest::Test
       projected = Hive::TaskClosure.projection(task, project: project)
       assert_equal "invalid", projected.fetch("status")
       assert_equal result.quarantine_path, projected.fetch("quarantine_path")
+
+      restarted = service_for.read(task, project: project)
+      assert_equal "invalid", restarted.status
+      assert_equal result.quarantine_path, restarted.quarantine_path
+      assert_raises(Hive::TaskClosure::InvalidReceipt) do
+        service_for.confirm!(
+          task: task,
+          project: project,
+          input: input_for("acme/app#42"),
+          preview_digest: "a" * 64,
+          operator: "tester",
+          channel: "cli",
+          authorized: true
+        )
+      end
+      assert File.directory?(task.folder)
     end
 
     with_closure_project do |task, project|
@@ -372,6 +509,77 @@ class TaskClosureTest < Minitest::Test
       assert_equal receipt.fetch("receipt_digest"),
                    JSON.parse(File.read(File.join(archived.folder, "closure.json")))
                        .fetch("receipt_digest")
+    end
+  end
+
+  def test_final_locked_guard_rejects_worktree_mutation_after_receipt_persist
+    with_closure_project do |task, project|
+      worktree = Hive::Worktree.new(
+        task.project_root, task.slug,
+        worktree_root: Hive::Worktree.canonical_root(task.project_root)
+      )
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      File.write(File.join(worktree.path, "delivered.txt"), "merged through PR\n")
+      run!("git", "-C", worktree.path, "add", "delivered.txt")
+      run!("git", "-C", worktree.path, "commit", "-m", "delivered", "--quiet")
+      head = Hive::GitOps.new(worktree.path).head_sha
+      service = service_for(gh: FakeGh.new(head_oid: head))
+      input = input_for("acme/app#42")
+      preview = service.preview(task: task, project: project, input: input)
+      assert preview.valid?, preview.to_h.inspect
+
+      original_transition = service.method(:transition!)
+      service.define_singleton_method(:transition!) do |locked_task, name, receipt|
+        File.write(File.join(worktree.path, "late-change.txt"), "unsafe\n")
+        original_transition.call(locked_task, name, receipt)
+      end
+
+      error = assert_raises(Hive::TaskClosure::VerificationFailed) do
+        service.confirm!(
+          task: task, project: project, input: input,
+          preview_digest: preview.preview_digest,
+          operator: "tester", channel: "cli", authorized: true
+        )
+      end
+      assert_match(/uncommitted changes/, error.message)
+      assert File.directory?(task.folder)
+      assert File.file?(File.join(task.folder, "closure.json"))
+    end
+  end
+
+  def test_daemon_final_guard_rejects_pr_binding_mutation_after_observation
+    with_closure_project do |task, project|
+      pr_path = File.join(task.folder, "pr.md")
+      File.write(
+        pr_path,
+        "---\npr_url: https://github.com/acme/app/pull/42\n" \
+        "pr_number: 42\nhead_oid: #{'b' * 40}\n---\n"
+      )
+      service = service_for
+      original_transition = service.method(:transition!)
+      service.define_singleton_method(:transition!) do |locked_task, name, receipt|
+        File.write(
+          pr_path,
+          "---\npr_url: https://github.com/acme/app/pull/43\n" \
+          "pr_number: 43\nhead_oid: #{'c' * 40}\n---\n"
+        )
+        original_transition.call(locked_task, name, receipt)
+      end
+
+      assert_raises(Hive::TaskClosure::InvalidReceipt) do
+        service.reconcile_remote_merge!(
+          task: task,
+          project: project,
+          pr_url: "https://github.com/acme/app/pull/42",
+          expected_head: "b" * 40,
+          expected_merge_oid: "a" * 40
+        )
+      end
+      assert File.directory?(task.folder)
+      refute File.file?(File.join(task.folder, "closure.json"))
+      assert_equal "invalid",
+                   Hive::TaskClosure.read(task, project: project).status
     end
   end
 

@@ -249,8 +249,8 @@ module Hive
       "every #{seconds} seconds"
     end
 
-    # Machine-readable `held` object for the JSON status payload (schema:
-    # hive-status.v4.json#held). The vocabulary switch is deliberate: the
+    # Machine-readable `held` object for the current hive-status schema. The
+    # vocabulary switch is deliberate: the
     # on-disk marker uses `reason="limits_reached"`, but the JSON contract
     # exposes the held state as `reason="quota"` so consumers key off a
     # stable noun rather than the internal marker verb. `provider` /

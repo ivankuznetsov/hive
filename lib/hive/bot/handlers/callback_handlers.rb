@@ -60,7 +60,7 @@ module Hive
           when :callback_findings_accept_all then findings_toggle(data, "accept-finding")
           when :callback_findings_reject_all then findings_toggle(data, "reject-finding")
           when :callback_idea_project_new then idea_project_new(data)
-          when :callback_closure_preview then closure_preview(data, update)
+          when :callback_closure_preview then closure_preview(data)
           when :callback_closure_confirm then closure_confirm(data, update)
           else @result_class.new(action: :reply, text: "Bot got confused - please retry from /queue.")
           end
@@ -71,7 +71,7 @@ module Hive
 
         private
 
-        def closure_preview(data, update)
+        def closure_preview(data)
           payload = decode_closure_callback(data, "closure_preview")
           task = Hive::TaskResolver.new(
             payload.fetch("slug"), project_filter: payload.fetch("project")
@@ -87,7 +87,9 @@ module Hive
           end
 
           confirm_payload = payload.merge("preview_digest" => preview.preview_digest)
-          callback = encode_closure_callback("closure_confirm", confirm_payload)
+          callback = Hive::Bot::NotificationBuilders.encode_closure_callback(
+            "closure_confirm", confirm_payload
+          )
           evidence = preview.evidence.map do |item|
             "#{item.fetch('repository')} #{item['number'] ? "PR ##{item['number']}" : item.fetch('oid')[0, 12]}"
           end
@@ -145,10 +147,6 @@ module Hive
           payload
         rescue ArgumentError => e
           raise ArgumentError, "closure callback is malformed: #{e.message}"
-        end
-
-        def encode_closure_callback(prefix, payload)
-          "#{prefix}:#{Base64.urlsafe_encode64(JSON.generate(payload), padding: false)}"
         end
 
         def bot_operator(update)

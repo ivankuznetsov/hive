@@ -78,14 +78,14 @@ class RunFinalizeTest < Minitest::Test
     pr_md = File.join(task_dir, "pr.md")
     File.write(pr_md, <<~MD)
       ---
-      pr_url: https://example.com/pr/9
+      pr_url: https://github.com/acme/app/pull/9
       pr_number: 9
       ---
 
       ## Summary
       draft
 
-      <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=true -->
+      <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=true -->
     MD
     [ task_dir, worktree_path, pr_md ]
   end
@@ -118,14 +118,14 @@ class RunFinalizeTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           final
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
         MD
 
         capture_io { Hive::Commands::Run.new(task_dir).call }
@@ -138,12 +138,12 @@ class RunFinalizeTest < Minitest::Test
         assert_equal "false", marker.attrs["is_draft"],
                      "finalize must require is_draft=false marker, not the open-pr is_draft=true"
         assert File.exist?(File.join(task_dir, "summary.md"))
-        assert_includes File.read(File.join(task_dir, "summary.md")), "https://example.com/pr/9"
+        assert_includes File.read(File.join(task_dir, "summary.md")), "https://github.com/acme/app/pull/9"
 
         # AC4: runner OWNS `gh pr ready`. Argv log must show it was
         # invoked with the PR URL. A regression that drops this call
         # would silently leave the PR in draft state after finalize.
-        assert_match(/arg=ready\n.*arg=https:\/\/example\.com\/pr\/9/m, gh_argv_log,
+        assert_match(/arg=ready\n.*arg=https:\/\/github\.com\/acme\/app\/pull\/9/m, gh_argv_log,
                      "finalize runner must invoke `gh pr ready <pr_url>`")
       end
     end
@@ -171,14 +171,14 @@ class RunFinalizeTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           final
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
         MD
 
         capture_io { Hive::Commands::Run.new(task_dir).call }
@@ -267,14 +267,14 @@ class RunFinalizeTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           final
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
         MD
 
         capture_io { Hive::Commands::Run.new(task_dir).call }
@@ -424,14 +424,14 @@ class RunFinalizeTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           api_key sk-ant-#{"a" * 30}
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
         MD
 
         _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
@@ -443,7 +443,7 @@ class RunFinalizeTest < Minitest::Test
         # redact) must have been invoked.
         log = gh_argv_log
         refute_match(/arg=ready\n/, log, "ready must NOT fire when secret detected")
-        assert_match(/arg=edit\n.*arg=https:\/\/example\.com\/pr\/9/m, log,
+        assert_match(/arg=edit\n.*arg=https:\/\/github\.com\/acme\/app\/pull\/9/m, log,
                      "finalize must redact the secret-bearing PR body")
         # The argv log carries `arg=<value>` one line per gh argv; the
         # redact payload's `--body` argument is the literal placeholder.
@@ -467,14 +467,14 @@ class RunFinalizeTest < Minitest::Test
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
         File.write(pr_md, <<~MD)
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           leaked token sk-ant-#{"b" * 30}
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=true -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=true -->
         MD
 
         _out, _err, status = with_captured_exit do
@@ -486,7 +486,7 @@ class RunFinalizeTest < Minitest::Test
         assert_equal :error, marker.name
         assert_equal "secret_in_pr_body", marker.attrs.fetch("reason")
         assert_includes marker.attrs.fetch("patterns"), "anthropic"
-        assert_match(/arg=edit\n.*arg=https:\/\/example\.com\/pr\/9/m, gh_argv_log)
+        assert_match(/arg=edit\n.*arg=https:\/\/github\.com\/acme\/app\/pull\/9/m, gh_argv_log)
         refute_match(/arg=ready\n/, gh_argv_log)
       end
     end
@@ -499,14 +499,14 @@ class RunFinalizeTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           refreshed
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
         MD
         scans = [
           Hive::Gh::ScanResult.new(
@@ -550,7 +550,7 @@ class RunFinalizeTest < Minitest::Test
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
         File.write(File.join(task_dir, "summary.md"), "previously written summary\n")
         # Re-mark pr.md as already-complete so warn includes the URL.
-        Hive::Markers.set(pr_md, :complete, pr_url: "https://example.com/pr/9", is_draft: "false")
+        Hive::Markers.set(pr_md, :complete, pr_url: "https://github.com/acme/app/pull/9", is_draft: "false")
 
         _out, err = capture_io { Hive::Commands::Run.new(task_dir).call }
         assert_match(/already complete/, err)
@@ -602,14 +602,14 @@ class RunFinalizeTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           final
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
         MD
 
         capture_io { Hive::Commands::Run.new(task_dir).call }
@@ -670,14 +670,14 @@ class RunFinalizeTest < Minitest::Test
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
         File.write(pr_md, <<~MD)
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           api_key sk-ant-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=true -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=true -->
         MD
         ENV["HIVE_FAKE_GH_VIEW_EXIT"] = "1"
 
@@ -746,7 +746,7 @@ class RunFinalizeTest < Minitest::Test
       with_tmp_git_repo do |dir|
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
         task = Hive::Task.new(task_dir)
-        expected_url = "https://example.com/pr/9"
+        expected_url = "https://github.com/acme/app/pull/9"
 
         File.write(pr_md, "---\npr_url: https://example.com/pr/wrong\n---\n\nbody\n")
         Hive::Markers.set(pr_md, :complete, pr_url: expected_url, is_draft: "false")
@@ -780,7 +780,7 @@ class RunFinalizeTest < Minitest::Test
       with_tmp_git_repo do |dir|
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
         task = Hive::Task.new(task_dir)
-        pr_url = "https://example.com/pr/9"
+        pr_url = "https://github.com/acme/app/pull/9"
         ENV["HIVE_FAKE_GH_READY_EXIT"] = "1"
         ENV["HIVE_FAKE_GH_READY_STDERR"] = "Pull request is already ready for review"
 
@@ -810,7 +810,7 @@ class RunFinalizeTest < Minitest::Test
     ENV["HIVE_FAKE_GH_EDIT_STDERR"] = "edit denied"
     result = nil
     _out, err = capture_io do
-      result = Hive::Stages::Finalize.redact_pr_body!("https://example.com/pr/9", {})
+      result = Hive::Stages::Finalize.redact_pr_body!("https://github.com/acme/app/pull/9", {})
     end
     assert_equal :failed, result
     assert_match(/failed to redact PR body/, err)
@@ -821,7 +821,7 @@ class RunFinalizeTest < Minitest::Test
     }) do
       result = nil
       _out, err = capture_io do
-        result = Hive::Stages::Finalize.redact_pr_body!("https://example.com/pr/9", {})
+        result = Hive::Stages::Finalize.redact_pr_body!("https://github.com/acme/app/pull/9", {})
       end
       assert_equal :failed, result
       assert_match(/redact_pr_body raised RuntimeError: boom/, err)
@@ -896,13 +896,13 @@ class RunFinalizeTest < Minitest::Test
 
   def test_pr_already_merged_classifies_state_and_falls_through_on_error
     with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { "MERGED" }) do
-      assert Hive::Stages::Finalize.pr_already_merged?("https://example.com/pr/9", {})
+      assert Hive::Stages::Finalize.pr_already_merged?("https://github.com/acme/app/pull/9", {})
     end
     with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { "OPEN" }) do
-      refute Hive::Stages::Finalize.pr_already_merged?("https://example.com/pr/9", {})
+      refute Hive::Stages::Finalize.pr_already_merged?("https://github.com/acme/app/pull/9", {})
     end
     with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { raise Hive::GhError, "boom" }) do
-      refute Hive::Stages::Finalize.pr_already_merged?("https://example.com/pr/9", {}),
+      refute Hive::Stages::Finalize.pr_already_merged?("https://github.com/acme/app/pull/9", {}),
              "a GhError on the state lookup must fall through to the normal finalize path"
     end
   end

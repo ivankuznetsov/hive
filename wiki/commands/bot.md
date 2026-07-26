@@ -47,6 +47,7 @@ hive bot install [--force] [--json]
 | `/approve <id\|slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface after resolving numeric ids through the current status snapshot. Inline approval buttons usually use the workflow verb instead. |
 | `/autofix <id\|slug>` | Submits the latest observed recoverable row through `Hive::Recovery::API` and renders the durable coordinator receipt, matching the inline 🔧 Autofix button. Resolves an id or slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers. |
 | `/details <id\|slug>` | Resolves an id or slug against the latest `StatusWatcher` snapshot and replies with the same in-process details text as the inline "Show details" button: row summary, next-step hint, and cached diagnostic summary/detail when the row carries one. |
+| `/close <id\|slug> --reason <already_delivered\|superseded> --evidence <PR-or-commit> ...` | Starts the evidence-bound operator closure flow for an active status row. Repeat `--evidence` as needed; `superseded` also uses `--successor project:slug --attestation "statement"`. The command creates only a compacted **Verify evidence** callback. The first tap re-resolves and verifies immutable evidence; a separate allowlisted **Confirm and archive** tap is still required. |
 | `/done` | Ends the active brainstorm conversation and dispatches `hive run <slug> --json` so the brainstorm runner re-checks the round. There is no remaining draft-confirm substate; without an active conversation it replies with the friendly no-conversation hint. |
 | `/help` | Lists the typeable workflow command set. |
 
@@ -112,7 +113,7 @@ push-notification buttons):
 - anything else (e.g. in-flight `agent_running`) → no button
 
 The reply stays text-only when no row is actionable. The `/answer`,
-`/approve`, `/autofix`, `/details` slash commands remain typeable
+`/approve`, `/autofix`, `/details`, `/close` slash commands remain typeable
 (and appear in the quick-actions menu as `<id|slug>`) for operators who
 prefer typing or scripting.
 
@@ -136,7 +137,7 @@ binary path.
 On bot start the supervisor calls Telegram's `setMyCommands` so the
 blue quick-actions menu (shown when the operator taps the `/` icon in
 the chat input) surfaces `/idea`, `/status`, `/queue`, `/answer`,
-`/approve`, `/autofix`, `/details`, `/done`, and `/help` with
+`/approve`, `/autofix`, `/details`, `/close`, `/done`, and `/help` with
 human-readable descriptions. This is a one-shot idempotent RPC at
 start — it is not re-issued on SIGHUP/config reload because the
 command list does not change with config. A network failure during
@@ -158,7 +159,10 @@ Push notifications use callback data that routes to:
 - Legacy stage-directory warnings are text-only project-level alerts. They tell the operator to run `hive migrate <project_path>`, have no inline action, dedupe while the project remains legacy-dirty, and re-alert after the project reports clean then regresses.
 - Idea project pickers use `idea_project:<project>:<token>`. Current drafts enter attachment collection instead of immediately spawning `hive new`; the follow-up keyboard emits `idea_done:<token>` and `idea_skip:<token>`, both of which finalize the current draft. `idea_project_new:<token>` clears the draft/picker token and replies that registering a new project from Telegram is out of MVP scope.
 - Legacy Path-A buttons (`path_a_yes:` / `path_a_type:`) from messages sent before Codex draft-assist retirement do not start a draft flow; they reply with instructions to tap **Answer in chat** or send `/answer <id|slug>`. Retired `codex_write:` / `codex_edit:` / `codex_cancel:` data is unknown callback data.
-- Evidence closure: `closure_preview:` decodes one bounded task/input payload,
+- Evidence closure: `/close` resolves an active cached task row and creates the
+  first compacted `closure_preview:` callback; the slash command itself does
+  not verify evidence or mutate task state. `closure_preview:` decodes one
+  bounded task/input payload,
   resolves the exact registered task, and calls `Hive::TaskClosure.preview`.
   A valid preview edits the message with normalized immutable facts plus one
   compacted `closure_confirm:` button. Confirmation rechecks the current chat

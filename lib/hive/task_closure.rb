@@ -36,6 +36,7 @@ module Hive
     REASONS = Hive::TaskClosureContract::REASONS
     AUTHORITIES = %w[remote_merge operator_attestation].freeze
     CHANNELS = %w[cli web bot].freeze
+    RECEIPT_CHANNELS = (CHANNELS + %w[daemon]).freeze
     MAX_EVIDENCE = 16
     MAX_REFERENCE_BYTES = 512
     MAX_ATTESTATION_BYTES = 2 * 1024
@@ -46,8 +47,8 @@ module Hive
       preview_digest confirmed_by confirmed_at receipt_digest
     ].freeze
     EVIDENCE_KEYS = %w[
-      kind host repository number oid url state merged_at same_repository
-      reachable_from_default
+      kind host repository number oid head_oid url state merged_at
+      same_repository reachable_from_default
     ].freeze
     FULL_OID_RE = /\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/i
     SUCCESSOR_RE = /\A([^:\s]+):([a-z][a-z0-9-]{1,63})\z/
@@ -114,6 +115,20 @@ module Hive
         )
       end
 
+      # Internal daemon authority for the one closure Hive can decide without
+      # an operator: the task-bound PR is immutably merged into the same
+      # registered repository. Cross-repository or semantic supersession still
+      # requires the explicit preview/confirm flow above.
+      def reconcile_remote_merge!(task:, project:, pr_url:, expected_head:,
+                                  expected_merge_oid:, gh: Hive::Gh,
+                                  now: Time.now.utc)
+        new(gh: gh, now: now).reconcile_remote_merge!(
+          task: task, project: project, pr_url: pr_url,
+          expected_head: expected_head,
+          expected_merge_oid: expected_merge_oid
+        )
+      end
+
       def read(task, project: nil, quarantine: true)
         new.read(task, project: project, quarantine: quarantine)
       end
@@ -121,10 +136,7 @@ module Hive
       def projection(task, project: nil)
         service = new
         result = service.read(task, project: project)
-        if result.absent?
-          result = service.send(:latest_quarantine, task)
-          return nil unless result
-        end
+        return nil if result.absent?
         return result.receipt if result.valid?
 
         {
@@ -194,6 +206,8 @@ module Hive
           ""
         end
         meta = File.file?(task.meta_yml_path) ? File.binread(task.meta_yml_path) : ""
+        pr_path = File.join(task.folder, "pr.md")
+        pr_identity = File.file?(pr_path) ? File.binread(pr_path) : ""
         projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(
           marker: marker
         )
@@ -203,6 +217,7 @@ module Hive
           "workflow" => task.workflow.id.to_s,
           "state_without_markers_sha256" => ::Digest::SHA256.hexdigest(markerless),
           "meta_sha256" => ::Digest::SHA256.hexdigest(meta),
+          "pr_identity_sha256" => ::Digest::SHA256.hexdigest(pr_identity),
           "condition_task_generation" => projection["identity"]["task_generation"],
           "commit_generation" => projection["identity"]["commit_generation"]
         )
@@ -235,7 +250,13 @@ module Hive
       successor = resolve_successor(normalized_input, task, errors)
       evidence = verify_evidence(normalized_input, task_repository, errors)
       authority = closure_authority(normalized_input, task_repository, evidence, errors)
-      blockers.concat(task_blockers(task, project))
+      delivered_heads = evidence.filter_map do |item|
+        item["head_oid"] if item["kind"] == "pull_request" &&
+                            item["same_repository"] == true
+      end
+      blockers.concat(
+        task_blockers(task, project, delivered_heads: delivered_heads)
+      )
 
       task_observation = observation(task, project)
       evidence_digest = self.class.digest(evidence)
@@ -307,9 +328,79 @@ module Hive
       end
     end
 
+    def reconcile_remote_merge!(task:, project:, pr_url:, expected_head:,
+                                expected_merge_oid:)
+      input = {
+        "reason" => "already_delivered",
+        "evidence" => [ pr_url.to_s ],
+        "successor" => nil,
+        "attestation" => nil
+      }
+      with_closure_lock(task) do
+        locked_task = resolve_current_task(task, project)
+        existing = read(locked_task, project: project)
+        if existing.valid?
+          receipt = existing.receipt
+          unless receipt.fetch("authority") == "remote_merge" &&
+                 receipt.dig("confirmed_by", "channel") == "daemon"
+            raise InvalidReceipt,
+                  "an operator closure receipt already owns this task"
+          end
+          validate_expected_remote_merge!(
+            receipt.fetch("evidence"),
+            expected_head: expected_head,
+            expected_merge_oid: expected_merge_oid
+          )
+          return resume_existing!(
+            task: locked_task,
+            project: project,
+            input: input,
+            preview_digest: receipt.fetch("preview_digest"),
+            receipt: receipt
+          )
+        end
+        unless existing.absent?
+          raise InvalidReceipt,
+                "invalid closure receipt was quarantined; inspect " \
+                "#{existing.quarantine_path || 'the closure quarantine'}"
+        end
+
+        current = preview(task: locked_task, project: project, input: input)
+        validate_preview!(current)
+        unless current.authority == "remote_merge" &&
+               current.evidence.all? { |item| item["same_repository"] == true }
+          raise VerificationFailed,
+                "automatic reconciliation accepts only same-repository remote merge evidence"
+        end
+        validate_expected_remote_merge!(
+          current.evidence,
+          expected_head: expected_head,
+          expected_merge_oid: expected_merge_oid
+        )
+
+        receipt = build_receipt(
+          current, operator: "hive-daemon", channel: "daemon"
+        )
+        persist_receipt!(locked_task, receipt)
+        transition!(locked_task, project, receipt)
+        archived = resolve_current_task(locked_task, project)
+        result = read(archived, project: project)
+        raise InvalidReceipt, "closure receipt did not survive archival" unless result.valid?
+
+        result.receipt
+      end
+    end
+
     def read(task, project: nil, quarantine: true)
       path = File.join(task.folder, RECEIPT_BASENAME)
-      return ReadResult.new(status: "absent", receipt: nil, error: nil, quarantine_path: nil) unless File.file?(path)
+      unless File.file?(path)
+        quarantined = latest_quarantine(task)
+        return quarantined if quarantined
+
+        return ReadResult.new(
+          status: "absent", receipt: nil, error: nil, quarantine_path: nil
+        )
+      end
 
       bytes = File.binread(path)
       receipt = JSON.parse(bytes)
@@ -527,19 +618,26 @@ module Hive
         )
       end
 
+      if (pull_request = Hive::Gh.parse_pull_request_url(reference))
+        unless pull_request.fetch("host") == task_repository.fetch("host")
+          raise InvalidInput,
+                "evidence host #{pull_request.fetch('host').inspect} is not the task repository host"
+        end
+        return pull_request_identity(
+          pull_request.fetch("host"),
+          pull_request.fetch("repository"),
+          pull_request.fetch("number")
+        )
+      end
+
       uri = URI.parse(reference)
       unless uri.scheme == "https" && uri.host && uri.userinfo.nil? &&
-             uri.query.nil? && uri.fragment.nil? && (uri.port.nil? || uri.port == 443)
+             uri.query.nil? && uri.fragment.nil? && uri.port == 443
         raise InvalidInput, "evidence URL must be credential-free HTTPS with no query or fragment"
       end
       host = uri.host.downcase
       unless host == task_repository.fetch("host")
         raise InvalidInput, "evidence host #{host.inspect} is not the task repository host"
-      end
-      if (match = uri.path.match(
-        %r{\A/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)\z}
-      ))
-        return pull_request_identity(host, "#{match[1]}/#{match[2]}", match[3].to_i)
       end
       if (match = uri.path.match(
         %r{\A/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/commit/([0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?)\z}
@@ -598,6 +696,9 @@ module Hive
       merge_oid = facts.fetch("merge_oid").to_s.downcase
       raise VerificationFailed, "merged pull request has no full immutable merge OID" unless
         merge_oid.match?(FULL_OID_RE)
+      head_oid = facts.fetch("head_oid").to_s.downcase
+      raise VerificationFailed, "merged pull request has no full immutable head OID" unless
+        head_oid.match?(FULL_OID_RE)
       observed_repository = facts.fetch("repository").to_s.downcase
       unless observed_repository == identity.fetch("repository").downcase
         raise VerificationFailed, "pull request repository identity changed during verification"
@@ -610,6 +711,7 @@ module Hive
         "repository" => observed_repository,
         "number" => identity.fetch("number"),
         "oid" => merge_oid,
+        "head_oid" => head_oid,
         "url" => identity.fetch("url"),
         "state" => "MERGED",
         "merged_at" => facts.fetch("merged_at"),
@@ -644,6 +746,7 @@ module Hive
         "repository" => identity.fetch("repository"),
         "number" => nil,
         "oid" => oid,
+        "head_oid" => nil,
         "url" => identity.fetch("url"),
         "state" => "REACHABLE",
         "merged_at" => nil,
@@ -678,9 +781,9 @@ module Hive
         "operator_attestation" : "remote_merge"
     end
 
-    def task_blockers(task, project)
+    def task_blockers(task, project, ignore_task_lock: false, delivered_heads: [])
       blockers = []
-      if live_task_lock?(task)
+      if !ignore_task_lock && live_task_lock?(task)
         blockers << blocker("live_attempt", "a live task owner must finish before closure")
       end
       active_attempts(task, project).each do |attempt|
@@ -689,7 +792,7 @@ module Hive
           "durable attempt #{attempt.attempt_id} is #{attempt.state}"
         )
       end
-      blockers.concat(worktree_blockers(task))
+      blockers.concat(worktree_blockers(task, delivered_heads: delivered_heads))
       blockers.uniq
     rescue Hive::Error, SystemCallError, IOError => e
       [ blocker("ownership_unverifiable", e.message) ]
@@ -723,7 +826,7 @@ module Hive
       end
     end
 
-    def worktree_blockers(task)
+    def worktree_blockers(task, delivered_heads: [])
       pointer_path = File.join(task.folder, "worktree.yml")
       return [] unless File.file?(pointer_path)
 
@@ -738,6 +841,10 @@ module Hive
 
       status = local_git(path, "status", "--porcelain=v1", "--untracked-files=all")
       return [ blocker("unique_worktree_changes", "owned worktree has uncommitted changes") ] unless status.empty?
+
+      head = local_git(path, "rev-parse", "HEAD").strip.downcase
+      verified_heads = Array(delivered_heads).map { |oid| oid.to_s.downcase }
+      return [] if head.match?(FULL_OID_RE) && verified_heads.include?(head)
 
       config = Hive::Config.load(task.project_root)
       branch = config["default_branch"].to_s.strip
@@ -958,6 +1065,7 @@ module Hive
         number = item.fetch("number")
         unless number.is_a?(Integer) && number.positive? &&
                item.fetch("state") == "MERGED" &&
+               item.fetch("head_oid").to_s.match?(FULL_OID_RE) &&
                !item.fetch("merged_at").to_s.empty?
           raise InvalidReceipt, "closure pull request evidence is malformed"
         end
@@ -965,7 +1073,7 @@ module Hive
         "https://#{host}/#{repository}/pull/#{number}"
       elsif kind == "commit"
         unless item["number"].nil? && item.fetch("state") == "REACHABLE" &&
-               item["merged_at"].nil?
+               item["merged_at"].nil? && item["head_oid"].nil?
           raise InvalidReceipt, "closure commit evidence is malformed"
         end
         canonical_commit_url(host, repository, oid)
@@ -987,7 +1095,7 @@ module Hive
       confirmation = receipt.fetch("confirmed_by")
       unless confirmation.is_a?(Hash) &&
              confirmation.keys.sort == %w[channel operator] &&
-             CHANNELS.include?(confirmation.fetch("channel").to_s) &&
+             RECEIPT_CHANNELS.include?(confirmation.fetch("channel").to_s) &&
              !confirmation.fetch("operator").to_s.strip.empty?
         raise InvalidReceipt, "closure confirmation identity is malformed"
       end
@@ -1033,7 +1141,7 @@ module Hive
              normalized["attestation"].to_s == receipt["attestation"].to_s
         raise StalePreview, "existing closure receipt belongs to different closure input"
       end
-      requested = normalized.fetch("evidence").sort
+      requested = normalized.fetch("evidence")
       recorded = receipt.fetch("evidence").map { |item| item.fetch("url") }.sort
       unless requested.map { |reference| canonical_reference(reference, receipt.fetch("task_repository")) }.sort ==
              recorded
@@ -1049,7 +1157,13 @@ module Hive
 
       unless self.class.terminal_task?(task)
         self.class.validate_active_cas!(task, receipt)
-        blockers = task_blockers(task, project)
+        delivered_heads = receipt.fetch("evidence").filter_map do |item|
+          item["head_oid"] if item["kind"] == "pull_request" &&
+                              item["same_repository"] == true
+        end
+        blockers = task_blockers(
+          task, project, delivered_heads: delivered_heads
+        )
         raise VerificationFailed, blockers.map { |entry| entry["message"] }.join("; ") unless blockers.empty?
       end
       transition!(task, project, receipt)
@@ -1060,13 +1174,100 @@ module Hive
       result.receipt
     end
 
+    def validate_expected_remote_merge!(evidence, expected_head:, expected_merge_oid:)
+      head = expected_head.to_s.downcase
+      merge_oid = expected_merge_oid.to_s.downcase
+      unless head.match?(FULL_OID_RE) && merge_oid.match?(FULL_OID_RE)
+        raise VerificationFailed,
+              "automatic reconciliation requires full expected head and merge OIDs"
+      end
+      item = Array(evidence).find { |entry| entry["kind"] == "pull_request" }
+      unless item &&
+             self.class.secure_compare(item.fetch("head_oid").to_s, head) &&
+             self.class.secure_compare(item.fetch("oid").to_s, merge_oid)
+        raise StalePreview,
+              "pull request head or merge OID changed before automatic closure"
+      end
+      true
+    end
+
     def transition!(task, project, receipt)
       require "hive/commands/stage_action"
       Hive::Commands::StageAction.archive_with_closure(
         task,
         project: project,
-        receipt_digest: receipt.fetch("receipt_digest")
+        receipt_digest: receipt.fetch("receipt_digest"),
+        observation_guard: lambda do |locked_task|
+          validate_final_transition!(locked_task, project, receipt)
+        end
       )
+    end
+
+    def validate_final_transition!(task, project, receipt)
+      self.class.validate_active_cas!(task, receipt)
+
+      repository_errors = []
+      live_repository = resolve_task_repository(task, project, repository_errors)
+      unless repository_errors.empty? &&
+             live_repository == receipt.fetch("task_repository")
+        detail = repository_errors.map { |entry| entry.fetch("message") }.join("; ")
+        raise StalePreview,
+              detail.empty? ? "task repository identity changed before archive" : detail
+      end
+
+      normalized = {
+        "reason" => receipt.fetch("reason"),
+        "evidence" => receipt.fetch("evidence").map { |item| item.fetch("url") },
+        "successor" => successor_reference(receipt["successor"]),
+        "attestation" => receipt["attestation"]
+      }
+      evidence_errors = []
+      refreshed = verify_evidence(normalized, live_repository, evidence_errors)
+      unless evidence_errors.empty? &&
+             self.class.secure_compare(
+               receipt.fetch("evidence_digest"), self.class.digest(refreshed)
+             )
+        detail = evidence_errors.map { |entry| entry.fetch("message") }.join("; ")
+        raise StalePreview,
+              detail.empty? ? "remote evidence changed before archive" : detail
+      end
+
+      validate_daemon_pr_binding!(task, receipt) if
+        receipt.dig("confirmed_by", "channel") == "daemon"
+      delivered_heads = refreshed.filter_map do |item|
+        item["head_oid"] if item["kind"] == "pull_request" &&
+                            item["same_repository"] == true
+      end
+      blockers = task_blockers(
+        task, project,
+        ignore_task_lock: true,
+        delivered_heads: delivered_heads
+      )
+      unless blockers.empty?
+        raise VerificationFailed,
+              blockers.map { |entry| entry.fetch("message") }.join("; ")
+      end
+      true
+    end
+
+    def validate_daemon_pr_binding!(task, receipt)
+      frontmatter = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))
+      current = Hive::Gh.parse_pull_request_url(frontmatter["pr_url"])
+      evidence = receipt.fetch("evidence").find do |item|
+        item["kind"] == "pull_request"
+      end
+      head = %w[head_oid head_sha headRefOid].filter_map do |field|
+        value = frontmatter[field].to_s.downcase
+        value if value.match?(FULL_OID_RE)
+      end.first
+      unless current && evidence &&
+             current.fetch("url") == evidence.fetch("url") &&
+             current.fetch("number") == evidence.fetch("number") &&
+             head == evidence.fetch("head_oid")
+        raise StalePreview,
+              "task pull request binding changed before automatic archive"
+      end
+      true
     end
 
     def with_closure_lock(task)

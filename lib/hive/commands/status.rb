@@ -187,7 +187,7 @@ module Hive
         ).to_h
       end
 
-      # Canonical recovery receipts for adapters that already hold a v6
+      # Canonical recovery receipts for adapters that already hold a current
       # status graph. Unlike #operational_payload, this does not build task
       # classifications, reasons, actions, summaries, or archive metadata.
       def operational_recoveries(projects, scheduler_snapshot: AUTO_SCHEDULER_SNAPSHOT, status_payload: nil)
@@ -227,7 +227,7 @@ module Hive
 
       def validate_mode_combinations!
         if @full && @json
-          raise Hive::InvalidTaskPath, "--full cannot be combined with --json; omit --full for hive-status.v6"
+          raise Hive::InvalidTaskPath, "--full cannot be combined with --json; omit --full for hive-status.v7"
         end
         if @full && @operational
           raise Hive::InvalidTaskPath, "--full cannot be combined with --operational"

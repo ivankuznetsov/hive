@@ -178,7 +178,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         old_folder = task.folder.sub("2-brainstorm", "1-inbox")
         worker_argv = [
           "hive", "brainstorm", old_folder, "--from", "1-inbox", "--json",
-          "--recover-merged-error-reason", "ci_failed"
+          "--project", "demo"
         ]
         store = Hive::Attempts::Store.new(root: root)
         lost = lost_attempt(
@@ -194,7 +194,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
 
         assert_equal [
           "hive", "brainstorm", task.folder, "--json",
-          "--recover-merged-error-reason", "ci_failed"
+          "--project", "demo"
         ], dispatcher.calls.first.fetch(:argv)
       end
     end

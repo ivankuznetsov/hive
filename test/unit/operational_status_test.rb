@@ -76,6 +76,31 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "d" * 64, archived.fetch("receipt_digest")
   end
 
+  def test_invalid_closure_keeps_semantic_reason_null_and_exposes_quarantine
+    invalid = {
+      "status" => "invalid",
+      "reason" => "closure receipt digest does not match",
+      "quarantine_path" => "/tmp/hive/closure-quarantine/task/deadbeef.json"
+    }
+    result = project(status_payload(
+      task(action: "error", slug: "candidate", closure: invalid)
+    ))
+    closure = result.fetch("tasks").first.fetch("closure")
+
+    assert_equal "blocked", closure.fetch("status")
+    assert_nil closure.fetch("reason")
+    assert_equal invalid.fetch("reason"), closure.fetch("diagnostic")
+    assert_equal invalid.fetch("quarantine_path"),
+                 closure.fetch("quarantine_path")
+
+    schema = JSONSchemer.schema(
+      JSON.parse(
+        File.read(Hive::Schemas.schema_path("hive-operational-status"))
+      )
+    )
+    assert_empty schema.validate(result).to_a
+  end
+
   def test_running_precedence_retains_provider_hold_as_secondary_reason
     row = task(
       action: "agent_running", slug: "overlap", live_task_lock: true,
@@ -274,7 +299,16 @@ class OperationalStatusTest < Minitest::Test
 
     error = assert_raises(ArgumentError) { project(payload) }
 
-    assert_equal "operational status requires a successful hive-status payload", error.message
+    assert_equal "operational status requires a successful hive-status v7 payload", error.message
+  end
+
+  def test_rejects_an_older_status_schema
+    payload = status_payload
+    payload["schema_version"] = 6
+
+    error = assert_raises(ArgumentError) { project(payload) }
+
+    assert_equal "operational status requires a successful hive-status v7 payload", error.message
   end
 
   def test_noncurrent_scheduler_snapshot_propagates_its_freshness
@@ -802,7 +836,9 @@ class OperationalStatusTest < Minitest::Test
       } ]
     end
     {
-      "schema" => "hive-status", "schema_version" => 6, "ok" => true,
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true,
       "generated_at" => "2026-07-20T10:00:00Z", "projects" => projects
     }
   end

@@ -5,8 +5,8 @@ require "hive/task_closure"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
-  # is deliberately the public v6 payload so the compatibility serializer
-  # remains untouched and every operational consumer shares one collected
+  # is deliberately the current public payload so every operational consumer
+  # shares one collected
   # graph instead of re-scanning task folders independently.
   class OperationalStatus
     STATES = %w[
@@ -117,9 +117,13 @@ module Hive
     private
 
     def validate_source!
-      return if @status_payload["ok"] == true && @status_payload["schema"] == "hive-status"
+      current_version = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+      return if @status_payload["ok"] == true &&
+                @status_payload["schema"] == "hive-status" &&
+                @status_payload["schema_version"] == current_version
 
-      raise ArgumentError, "operational status requires a successful hive-status payload"
+      raise ArgumentError,
+            "operational status requires a successful hive-status v#{current_version} payload"
     end
 
     def archive_rows(projects)
@@ -654,16 +658,20 @@ module Hive
           "authority" => projected["authority"],
           "receipt_digest" => projected["receipt_digest"],
           "evidence" => Array(projected["evidence"]),
+          "diagnostic" => nil,
+          "quarantine_path" => nil,
           "action" => nil
         }
       end
       if projected.is_a?(Hash) && projected["status"] == "invalid"
         return {
           "status" => "blocked",
-          "reason" => projected["reason"],
+          "reason" => nil,
           "authority" => nil,
           "receipt_digest" => nil,
           "evidence" => [],
+          "diagnostic" => projected["reason"].to_s[0, Hive::TaskClosure::MAX_QUARANTINE_REASON_BYTES],
+          "quarantine_path" => projected["quarantine_path"],
           "action" => nil
         }
       end
@@ -674,6 +682,8 @@ module Hive
         "authority" => nil,
         "receipt_digest" => nil,
         "evidence" => [],
+        "diagnostic" => nil,
+        "quarantine_path" => nil,
         "action" => Hive::OperationalAction.closure_descriptor(
           project: project.fetch("name"), row: row
         )

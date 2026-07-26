@@ -15,7 +15,7 @@ tags: [stage, finalize, pr, github, clean-exit, closure]
 2. `pr.md` must already exist with `pr_url` frontmatter from 5-open-pr; missing PR metadata records `ERROR reason=missing_pr_md` or `ERROR reason=missing_pr_url`.
 3. Unless the PR is already `MERGED`, `gh auth status` must succeed. A `Hive::Gh.pr_state` lookup error does not skip finalize; it falls through to the normal auth/status/body-refresh path.
 4. The feature worktree must be clean on exit. The new clean-exit invariant (`Hive::Stages::CleanExit`, gated on `stages.ensure_clean_on_exit`) runs as both an entry backstop (Finalize self-heals dirty residue when 6-review left untracked changes behind) and a `with_stage_events` exit hook on every WORKTREE_OWNING stage. In-scope residue (review.fix.auto_commit.scope_check allowlist) is auto-committed; out-of-scope residue or git failure overwrites the marker to `<!-- ERROR reason=ensure_clean_on_exit_failed residue_paths=... -->`. Legacy `<!-- ERROR reason=dirty_worktree -->` markers continue to write when entry preflight fails before CleanExit runs.
-5. The branch must be pushed to its upstream. Auto-rebase publishes a successfully rewritten PR branch immediately with an exact pre-rebase remote-OID lease, so later stage commits normally remain fast-forward pushable. Finalize still attempts one push before writing `<!-- ERROR reason=unpushed_commits -->`. If that push fails because the local worktree is the stale side of older or externally produced remote auto-rebase history, `resync_stale_rebase!` runs `git cherry <branch>@{u} HEAD`; only when every local commit is patch-identical upstream (`-` lines, no `+` lines) does it `git reset --hard <branch>@{u}` and continue. A genuinely unpushed local change still writes `ERROR reason=unpushed_commits` and is not discarded. Like every finalize error, it remains eligible for the unbounded shared-cooldown retry when no task lock is live and current safety evidence passes. The scheduler submits the observation; `RecoveryCoordinator` owns the marker-id guard and workflow-derived finalize request, so re-entry still runs the ordinary clean-exit, auth, secret, and push checks. Once GitHub reports the PR as `MERGED`, the daemon may archive stale `git_status_failed` or `claude_launch_failed` finalize errors through the internal `hive archive --recover-merged-error-reason` path; that path re-checks the current marker reason and PR state before moving the task to `9-done`.
+5. The branch must be pushed to its upstream. Auto-rebase publishes a successfully rewritten PR branch immediately with an exact pre-rebase remote-OID lease, so later stage commits normally remain fast-forward pushable. Finalize still attempts one push before writing `<!-- ERROR reason=unpushed_commits -->`. If that push fails because the local worktree is the stale side of older or externally produced remote auto-rebase history, `resync_stale_rebase!` runs `git cherry <branch>@{u} HEAD`; only when every local commit is patch-identical upstream (`-` lines, no `+` lines) does it `git reset --hard <branch>@{u}` and continue. A genuinely unpushed local change still writes `ERROR reason=unpushed_commits` and is not discarded. Like every finalize error, it remains eligible for the unbounded shared-cooldown retry when no task lock is live and current safety evidence passes. The scheduler submits the observation; `RecoveryCoordinator` owns the marker-id guard and workflow-derived finalize request, so re-entry still runs the ordinary clean-exit, auth, secret, and push checks. Independently, the durable task-bound merge reconciler observes PR-bearing tasks in stages 5–8. Once it verifies the exact task PR as merged, checkpoints required architecture intake, and revalidates generation/ownership/worktree safety, it writes a daemon-owned closure receipt and uses the centralized transition to `9-done`; no special finalize error allowlist or archive bypass remains.
 
 The worktree precondition is enforced by `Hive::Stages::Base.worktree_pointer_or_exit`, shared with [[stages/open-pr]] so both stages preserve the same missing-pointer and missing-directory UX.
 
@@ -26,6 +26,15 @@ verifies immutable GitHub evidence, writes a task-bound `closure.json`, and
 invokes the centralized archive transition through a receipt-only guard.
 Ordinary `hive archive <slug>` still requires a valid completed
 `8-finalize` task.
+
+The daemon uses a narrower internal authority for a task's own
+same-repository PR: `TaskClosure.reconcile_remote_merge!` writes
+`authority=remote_merge`, `channel=daemon`, and cannot take over an
+operator-owned closure. It does not authorize cross-repository or semantic
+supersession. The final closure re-read must match the reconciler's exact PR
+head and merge OIDs. Remote facts and architecture acceptance are checkpointed in
+the project-local reconciliation ledger before archive so restart replay does
+not repeat accepted work.
 
 ## Steps performed (`Stages::Finalize.run!`)
 

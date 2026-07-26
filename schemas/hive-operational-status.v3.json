@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:hive:schema:operational-status:v2",
-  "title": "hive operational status output (v2)",
+  "$id": "urn:hive:schema:operational-status:v3",
+  "title": "hive operational status output (v3)",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
@@ -16,7 +16,7 @@
       ],
       "properties": {
     "schema": { "const": "hive-operational-status" },
-    "schema_version": { "const": 2 },
+    "schema_version": { "const": 3 },
     "ok": { "const": true },
     "generated_at": { "type": "string", "format": "date-time" },
     "completeness": { "$ref": "#/$defs/Completeness" },
@@ -129,7 +129,7 @@
       "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
       "properties": {
         "schema": { "const": "hive-operational-status" },
-        "schema_version": { "const": 2 },
+        "schema_version": { "const": 3 },
         "ok": { "const": false },
         "error_class": { "type": "string" },
         "error_kind": { "type": "string", "enum": ["config", "internal", "error"] },
@@ -385,7 +385,8 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "status", "reason", "authority", "receipt_digest", "evidence", "action"
+        "status", "reason", "authority", "receipt_digest", "evidence",
+        "diagnostic", "quarantine_path", "action"
       ],
       "properties": {
         "status": {
@@ -408,6 +409,14 @@
           "type": "array",
           "maxItems": 16,
           "items": { "type": "object", "additionalProperties": true }
+        },
+        "diagnostic": {
+          "type": ["string", "null"],
+          "maxLength": 240
+        },
+        "quarantine_path": {
+          "type": ["string", "null"],
+          "maxLength": 4096
         },
         "action": {
           "oneOf": [

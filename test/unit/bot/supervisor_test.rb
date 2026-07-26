@@ -1357,7 +1357,7 @@ class HiveBotSupervisorTest < Minitest::Test
     commands = registered.first
     assert_equal Hive::Bot::Supervisor::BOT_COMMANDS, commands
     slash_names = commands.map { |cmd| cmd.fetch(:command) }
-    assert_equal %w[idea status waiting queue answer approve autofix details done help], slash_names
+    assert_equal %w[idea status waiting queue answer approve autofix details close done help], slash_names
     assert(commands.all? { |cmd| cmd.fetch(:description).length.between?(1, 256) },
            "every command description must be non-empty and within Telegram's 256-char cap")
     # Pin the A5 discoverability copy: the typeable command menu must advertise

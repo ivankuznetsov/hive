@@ -80,7 +80,7 @@
       "required": ["operator", "channel"],
       "properties": {
         "operator": { "type": "string", "minLength": 1 },
-        "channel": { "type": "string", "enum": ["cli", "web", "bot"] }
+        "channel": { "type": "string", "enum": ["cli", "web", "bot", "daemon"] }
       }
     },
     "confirmed_at": { "type": "string", "format": "date-time" },
@@ -91,7 +91,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "kind", "host", "repository", "number", "oid", "url", "state",
+        "kind", "host", "repository", "number", "oid", "head_oid", "url", "state",
         "merged_at", "same_repository", "reachable_from_default"
       ],
       "properties": {
@@ -100,6 +100,10 @@
         "repository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
         "number": { "type": ["integer", "null"], "minimum": 1 },
         "oid": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+        "head_oid": {
+          "type": ["string", "null"],
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
         "url": { "type": "string", "format": "uri" },
         "state": { "type": "string", "enum": ["MERGED", "REACHABLE"] },
         "merged_at": { "type": ["string", "null"] },

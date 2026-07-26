@@ -207,6 +207,8 @@ class HiveStagesOpenPrTest < Minitest::Test
                 assert_equal "false", marker.attrs.fetch("is_draft")
                 assert_equal "true", marker.attrs.fetch("merged")
                 assert_includes File.read(task.state_file), "PR already merged for this task."
+                assert_equal head_oid,
+                             Hive::Gh.pr_frontmatter(task.state_file).fetch("head_oid")
                 assert_includes File.read(File.join(task.folder, "summary.md")), "PR #134 was already merged"
 
                 # Fix #142: merged recovery also lands terminal markers on
@@ -357,14 +359,14 @@ class HiveStagesOpenPrTest < Minitest::Test
         # PR matches the marker; that helper still pulls from the same
         # `gh pr list` fixture via `lookup_prs_for_branch`.
         old_merged = {
-          "url" => "https://example.com/pr/old",
+          "url" => "https://github.com/acme/app/pull/133",
           "number" => 133,
           "state" => "MERGED",
           "isDraft" => false,
           "headRefOid" => "0" * 40
         }
         new_pr = {
-          "url" => "https://example.com/pr/new",
+          "url" => "https://github.com/acme/app/pull/135",
           "number" => 135,
           "state" => "OPEN",
           "isDraft" => true,
@@ -398,7 +400,11 @@ class HiveStagesOpenPrTest < Minitest::Test
                           assert pushed, "mismatched historical merged PR must not skip the normal push/create path"
                           refute File.exist?(File.join(task.folder, "summary.md"))
                           marker = Hive::Markers.current(task.state_file)
-                          assert_equal "https://example.com/pr/new", marker.attrs.fetch("pr_url")
+                          assert_equal "https://github.com/acme/app/pull/135",
+                                       marker.attrs.fetch("pr_url")
+                          frontmatter = Hive::Gh.pr_frontmatter(task.state_file)
+                          assert_equal local_head, frontmatter.fetch("head_oid")
+                          assert_equal 135, frontmatter.fetch("pr_number")
                         end
                       end
                     end
@@ -426,14 +432,14 @@ class HiveStagesOpenPrTest < Minitest::Test
         # Stale OPEN PR on the same branch but a different HEAD — must NOT
         # short-circuit into `open_pr_already_open`.
         stale_open = {
-          "url" => "https://example.com/pr/stale-open",
+          "url" => "https://github.com/acme/app/pull/200",
           "number" => 200,
           "state" => "OPEN",
           "isDraft" => true,
           "headRefOid" => "0" * 40
         }
         new_pr = {
-          "url" => "https://example.com/pr/fresh",
+          "url" => "https://github.com/acme/app/pull/201",
           "number" => 201,
           "state" => "OPEN",
           "isDraft" => true,
@@ -465,8 +471,11 @@ class HiveStagesOpenPrTest < Minitest::Test
                             assert pushed, "stale OPEN PR with mismatched headRefOid must not skip the normal push/create path"
                             marker = Hive::Markers.current(task.state_file)
                             assert_equal :complete, marker.name
-                            assert_equal "https://example.com/pr/fresh", marker.attrs.fetch("pr_url"),
+                            assert_equal "https://github.com/acme/app/pull/201",
+                                         marker.attrs.fetch("pr_url"),
                                          "the freshly-opened PR's url must land on the marker, not the stale OPEN PR's"
+                            assert_equal local_head,
+                                         Hive::Gh.pr_frontmatter(task.state_file).fetch("head_oid")
                           end
                         end
                       end
@@ -489,6 +498,7 @@ class HiveStagesOpenPrTest < Minitest::Test
 
       assert_includes prompt, "gh pr create --draft"
       assert_includes prompt, "--head open-pr-task --base base-task"
+      assert_includes prompt, "head_oid: <full git rev-parse HEAD>"
     end
   end
 
@@ -694,6 +704,45 @@ class HiveStagesOpenPrTest < Minitest::Test
       assert_equal({ commit: "open_pr_lookup_failed", status: :error }, result)
       assert_equal "open_pr_lookup_failed", marker.attrs.fetch("reason")
       assert_match(/api unavailable/, marker.attrs.fetch("detail"))
+    end
+  end
+
+  def test_validate_complete_marker_rejects_remote_head_that_is_not_local_head
+    with_tmp_dir do |root|
+      task = make_task(root)
+      with_tmp_git_repo do |worktree|
+        marker = Hive::Markers::State.new(
+          name: :complete,
+          attrs: { "pr_url" => "https://example.com/pr/4", "is_draft" => "true" },
+          raw: nil
+        )
+        real = {
+          "url" => "https://example.com/pr/4",
+          "number" => 4,
+          "isDraft" => true,
+          "headRefOid" => "f" * 40
+        }
+        remediated = []
+
+        with_replaced_singleton_method(
+          Hive::Gh, :lookup_existing_pr,
+          ->(_worktree, _branch, cfg:) { real }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Stages::OpenPr, :remediate_orphan_pr!,
+            ->(url) { remediated << url }
+          ) do
+            result = Hive::Stages::OpenPr.validate_complete_marker(
+              task, marker, worktree, task.slug, cfg
+            )
+
+            assert_equal({ commit: "open_pr_head_mismatch", status: :error }, result)
+            assert_equal [ "https://example.com/pr/4" ], remediated
+            error = Hive::Markers.current(task.state_file)
+            assert_equal "open_pr_head_mismatch", error.attrs.fetch("reason")
+          end
+        end
+      end
     end
   end
 

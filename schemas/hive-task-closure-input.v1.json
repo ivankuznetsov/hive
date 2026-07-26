@@ -28,17 +28,20 @@
         "attestation": { "type": ["string", "null"], "maxLength": 2048 }
       }
     },
-    "task": { "type": "object", "additionalProperties": true },
+    "task": { "$ref": "#/$defs/TaskObservation" },
     "task_repository": {
       "oneOf": [
         { "type": "null" },
         { "type": "object", "additionalProperties": false,
           "required": ["host", "repository", "identity", "default_branch"],
           "properties": {
-            "host": { "type": "string" },
-            "repository": { "type": "string" },
-            "identity": { "type": "string" },
-            "default_branch": { "type": "string" }
+            "host": { "type": "string", "minLength": 1, "maxLength": 253 },
+            "repository": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            },
+            "identity": { "type": "string", "minLength": 3, "maxLength": 512 },
+            "default_branch": { "type": "string", "minLength": 1, "maxLength": 255 }
           }
         }
       ]
@@ -46,12 +49,12 @@
     "evidence": {
       "type": "array",
       "maxItems": 16,
-      "items": { "type": "object", "additionalProperties": true }
+      "items": { "$ref": "#/$defs/Evidence" }
     },
     "successor": {
       "oneOf": [
         { "type": "null" },
-        { "type": "object", "additionalProperties": true }
+        { "$ref": "#/$defs/Successor" }
       ]
     },
     "authority": {
@@ -66,13 +69,79 @@
   "$defs": {
     "Diagnostic": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "required": ["code", "message"],
       "properties": {
-        "field": { "type": "string" },
-        "code": { "type": "string" },
+        "field": { "type": "string", "maxLength": 256 },
+        "code": { "type": "string", "minLength": 1, "maxLength": 128 },
         "message": { "type": "string", "maxLength": 500 },
-        "owner": { "type": "string" }
+        "owner": { "type": "string", "enum": ["operator"] }
+      }
+    },
+    "TaskObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project", "slug", "id", "workflow", "folder", "stage", "marker",
+        "task_generation", "marker_generation"
+      ],
+      "properties": {
+        "project": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "id": { "type": ["integer", "null"] },
+        "workflow": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "folder": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "stage": {
+          "type": "string",
+          "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$"
+        },
+        "marker": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "task_generation": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "marker_generation": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "host", "repository", "number", "oid", "head_oid", "url",
+        "state", "merged_at", "same_repository", "reachable_from_default"
+      ],
+      "properties": {
+        "kind": { "type": "string", "enum": ["pull_request", "commit"] },
+        "host": { "type": "string", "minLength": 1, "maxLength": 253 },
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "number": { "type": ["integer", "null"], "minimum": 1 },
+        "oid": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "head_oid": {
+          "type": ["string", "null"],
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "url": { "type": "string", "format": "uri", "maxLength": 512 },
+        "state": { "type": "string", "enum": ["MERGED", "REACHABLE"] },
+        "merged_at": { "type": ["string", "null"], "maxLength": 64 },
+        "same_repository": { "type": "boolean" },
+        "reachable_from_default": { "const": true }
+      }
+    },
+    "Successor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "slug", "id", "stage"],
+      "properties": {
+        "project": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "id": { "type": ["integer", "null"] },
+        "stage": {
+          "type": "string",
+          "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$"
+        }
       }
     }
   }

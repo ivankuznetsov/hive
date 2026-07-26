@@ -495,6 +495,14 @@ one gem/source/four-platform skill candidate; verifies manifest digests and
 every archive projection byte against `skills/hive/`; and invokes the privately
 installed candidate binary. The same job then exercises the exact managed web
 archive. Later jobs consume those artifacts without rebuilding them.
+Focused managed-web unit coverage additionally distinguishes ordinary healthy
+same-version bootstrap (no work) from explicit `hive web install --force`
+(staged dependency/asset reprovision plus rollback-safe activation), pins that
+an activation failure restores the previous bundle, and proves the command
+forwards force intent into `Hive::Web::AppBundle.ensure!`. It also proves a
+refresh restarts an unchanged running service exactly once, does not duplicate
+the restart already performed by a unit upgrade, and advertises the mutation
+scope in `hive help web`.
 
 `test/smoke/live_hive_operating_skill_smoke_test.rb` is the four-platform
 OpenClaw/Claude/Codex/Pi harness. It is disabled by default and skips with a

@@ -5,6 +5,7 @@ require "open3"
 require "open-uri"
 require "rbconfig"
 require "rubygems/package"
+require "securerandom"
 require "tmpdir"
 require "zlib"
 
@@ -16,6 +17,7 @@ module Hive
   module Web
     module AppBundle
       VERSION_FILE = ".hive-web-version".freeze
+      REFRESH_LOCK_FILE = ".hive-web-refresh.lock".freeze
       REQUIRED_ASSETS = %w[application.css application.js].freeze
       COSIGN_TIMEOUT_SEC = 60
 
@@ -66,45 +68,92 @@ module Hive
       end
 
       def ensure!(bundle_url: default_bundle_url, bundle_sha256: default_bundle_sha256,
-                  runner: nil, output: $stderr, downloader: nil, verifier: nil)
-        return app_dir if present? && !stale? && assets_ready?
+                  runner: nil, output: $stderr, downloader: nil, verifier: nil,
+                  force_refresh: false, renamer: nil)
+        with_refresh_lock do
+          return app_dir if !force_refresh && present? && !stale? && assets_ready?
 
-        if bundle_url.to_s.empty?
-          raise Hive::Error,
-                "hive web: managed web app is missing. Set HIVE_WEB_BUNDLE_URL or run from a source checkout."
-        end
-
-        tmp = "#{app_dir}.tmp.#{Process.pid}"
-        FileUtils.rm_rf(tmp)
-        FileUtils.mkdir_p(tmp)
-        fetch_and_extract(
-          bundle_url, tmp,
-          bundle_sha256: bundle_sha256,
-          downloader: downloader,
-          verifier: verifier
-        )
-        unless File.file?(File.join(tmp, "config", "application.rb"))
-          nested = Dir.children(tmp).map { |child| File.join(tmp, child) }
-                      .find { |path| File.file?(File.join(path, "config", "application.rb")) }
-          if nested
-            Dir.children(nested).each { |child| FileUtils.mv(File.join(nested, child), tmp) }
+          if bundle_url.to_s.empty?
+            raise Hive::Error,
+                  "hive web: managed web app is missing. Set HIVE_WEB_BUNDLE_URL or run from a source checkout."
           end
+
+          tmp = "#{app_dir}.tmp.#{Process.pid}.#{SecureRandom.hex(6)}"
+          FileUtils.mkdir_p(tmp)
+          fetch_and_extract(
+            bundle_url, tmp,
+            bundle_sha256: bundle_sha256,
+            downloader: downloader,
+            verifier: verifier
+          )
+          unless File.file?(File.join(tmp, "config", "application.rb"))
+            nested = Dir.children(tmp).map { |child| File.join(tmp, child) }
+                        .find { |path| File.file?(File.join(path, "config", "application.rb")) }
+            if nested
+              Dir.children(nested).each { |child| FileUtils.mv(File.join(nested, child), tmp) }
+            end
+          end
+          unless File.file?(File.join(tmp, "config", "application.rb"))
+            raise Hive::Error, "hive web: downloaded web bundle does not contain config/application.rb"
+          end
+
+          # Prepare and stamp the staged bundle before activation. The current
+          # generation is retained as a sibling backup until the staged rename
+          # succeeds, and any activation failure restores it.
+          prepare!(dir: tmp, runner: runner, output: output)
+          File.write(File.join(tmp, VERSION_FILE), "#{Hive::VERSION}\n")
+          activate!(tmp, renamer: renamer)
+        ensure
+          FileUtils.rm_rf(tmp) if tmp
         end
-        unless File.file?(File.join(tmp, "config", "application.rb"))
-          raise Hive::Error, "hive web: downloaded web bundle does not contain config/application.rb"
+      end
+
+      def with_refresh_lock
+        parent = File.dirname(app_dir)
+        FileUtils.mkdir_p(parent)
+        path = File.join(parent, REFRESH_LOCK_FILE)
+        File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|
+          lock.flock(File::LOCK_EX)
+          yield
+        ensure
+          lock.flock(File::LOCK_UN)
+        end
+      end
+
+      def activate!(staged_dir, renamer: nil)
+        renamer ||= File.method(:rename)
+        backup = "#{app_dir}.backup.#{Process.pid}.#{SecureRandom.hex(6)}"
+        previous_moved = false
+        activated = false
+
+        begin
+          if File.exist?(app_dir) || File.symlink?(app_dir)
+            renamer.call(app_dir, backup)
+            previous_moved = true
+          end
+          renamer.call(staged_dir, app_dir)
+          activated = true
+        rescue StandardError => activation_error
+          begin
+            if previous_moved && (File.exist?(backup) || File.symlink?(backup))
+              FileUtils.rm_rf(app_dir) if File.exist?(app_dir) || File.symlink?(app_dir)
+              renamer.call(backup, app_dir)
+              previous_moved = false
+            end
+          rescue StandardError => rollback_error
+            raise Hive::Error,
+                  "hive web: could not activate prepared web bundle " \
+                  "(#{activation_error.class}: #{activation_error.message}); " \
+                  "rollback failed (#{rollback_error.class}: #{rollback_error.message})"
+          end
+          raise Hive::Error,
+                "hive web: could not activate prepared web bundle " \
+                "(#{activation_error.class}: #{activation_error.message})"
+        ensure
+          FileUtils.rm_rf(backup) if activated && previous_moved
         end
 
-        # Prepare dependencies and production assets in the staged bundle
-        # before swapping it into place. A failed refresh leaves the previous
-        # working install untouched, and the version stamp is written last.
-        prepare!(dir: tmp, runner: runner, output: output)
-        FileUtils.rm_rf(app_dir)
-        FileUtils.mkdir_p(File.dirname(app_dir))
-        FileUtils.mv(tmp, app_dir)
-        File.write(File.join(app_dir, VERSION_FILE), "#{Hive::VERSION}\n")
         app_dir
-      ensure
-        FileUtils.rm_rf(tmp) if tmp
       end
 
       def bundle_install!(dir: app_dir, runner: nil, output: $stderr)

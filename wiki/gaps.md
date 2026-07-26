@@ -247,7 +247,27 @@ completed real GitHub/Codex/Claude provider login plus a daemon-owned PR push.
 
 51. **Ad-hoc PR review is source/test-pinned but not live-smoked.** `hive review --pr PR` runs through `Hive::Commands::AdhocReview`, `Hive::Gh.pr_metadata`, `Hive::Pr.identifier_to_number`, and `Hive::Worktree.materialize_pr`. Focused unit/integration tests pin PR identifier parsing, project-scoped `gh pr view` lookup via `chdir:`, synthetic `6-review/adhoc-review-pr-N` task creation/reuse/collision behavior, PR-head materialization, head-SHA verification, cleanup after partial creation, reviewer selection, and default fix-off behavior (`review.adhoc.fix: false`). This refresh did not find an in-tree artifact showing a real registered project running `hive review --pr <github-pr>`, materializing the PR head from GitHub, completing review with real reviewer agents, and surfacing the ad-hoc task through `hive status`/TUI/bot. The 2026-06-30 cleanup audit for `make-the-hive-daemon-automatically-260629-223d` rechecked the branch commit, current source/tests, and configured main-wiki context and found no new live ad-hoc PR review evidence closing this gap.
 
-52. **Local setup/web install repair is source/test-pinned but not live-smoked.** Branch `add-local-hive-web-install-260629-f4ca` documents `hive setup`, managed web-bundle refresh/install safety, daemon/web same-binary service install, web loopback/no-auth gating, and `hive web start --detach` systemd reload behavior. Focused tests cover phase-exit semantics, AppBundle extraction/stamping, service-installer rendering/parsing, and queue allowlisting, but this refresh did not find an in-tree artifact showing a real Homebrew/AUR/install.sh local install running setup, repairing stale daemon/web services, downloading the release web bundle, and serving the updated local web UI after a CLI upgrade. The 2026-07-20 agent-first setup change restored `--yes` as the explicit unattended consent boundary, added the agent-skills-first phase, and pinned zero mutation for JSON/non-TTY runs without consent. The native-default work adds default-on web-service setup, versioned service/readiness schemas, release-layout dependency resolution, signed-manifest/digest enforcement, and a package-layout integration fixture. These close the source/package simulation gap but not the missing live published-release smoke on real systemd-user and launchd hosts.
+52. **Local setup/web install repair is source/test-pinned, with a real
+systemd-user source-deployment smoke but no published-release/launchd proof.**
+Branch `add-local-hive-web-install-260629-f4ca` documents `hive setup`, managed
+web-bundle refresh/install safety, daemon/web same-binary service install, web
+loopback/no-auth gating, and `hive web start --detach` systemd reload behavior.
+The 2026-07-26 current-main dogfood installed the exact checkout binary and
+managed Rails app through real systemd-user, served `/up`, and held zero
+restarts, but exposed that a healthy `0.6.9` version stamp could hide newer web
+content after another same-version merge. Explicit `hive web install --force`
+now bypasses only that healthy-bundle early return and reuses the existing
+staged dependency/asset preparation plus rollback-safe activation path; ordinary
+bootstrap stays a no-op. Focused tests cover that split, phase-exit semantics,
+AppBundle extraction/stamping, service-installer rendering/parsing, and queue
+allowlisting. The remaining release gap is a real Homebrew/AUR/install.sh
+published archive running setup and same-version forced repair on systemd-user,
+plus equivalent launchd evidence. The 2026-07-20 agent-first setup change
+restored `--yes` as the explicit unattended consent boundary, added the
+agent-skills-first phase, and pinned zero mutation for JSON/non-TTY runs without
+consent. The native-default work adds default-on web-service setup, versioned
+service/readiness schemas, release-layout dependency resolution,
+signed-manifest/digest enforcement, and a package-layout integration fixture.
 
 53. **Daemon status `unreadable` drift is source/test-pinned but schema-unpinned.** Branch `arch-review-local-web-install` extracts the daemon-status envelope into `Hive::Daemon::StatusReport`; that producer now owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE`, can emit `binary_drift: "unreadable"` when an installed same-path binary cannot answer `--version`, and the hivebox `_daemon` view treats that value as actionable through `StatusReport::BINARY_DRIFT_ACTIONABLE`. Focused daemon tests cover `StatusReport#safe_payload`, `binary_state`, `binary_version`, and the `unreadable` drift branch. However, `schemas/hive-daemon-status.v1.json` still enumerates only `none`, `path`, `version`, `unparseable`, and `not_applicable`, so an actual `unreadable` payload would not validate against the published daemon-status schema. A follow-up should add `unreadable` to the schema enum/description and pin a schema validation test for that payload shape. The 2026-07-01 post-commit audit for `arch-review-local-web-install` rechecked the branch diff, `Hive::Daemon::StatusReport`, daemon CLI wiring, hivebox `_daemon` rendering, the daemon-status schema, and focused daemon tests; it found no schema update or live repair artifact closing this gap.
 
@@ -758,3 +778,12 @@ through locked `bundle exec` and the current Ruby too. The remaining evidence
 is one installed-main service upgrade from the merged fix, followed by a real
 worktree capture; keep those operational checks distinct from the packaged
 fixture.
+
+Latest refresh (2026-07-26): same-version dogfood also showed that a successful
+forced reprovision did not restart an already-running service when its unit was
+unchanged. The implementation now serializes refreshes, restores the previous
+bundle if activation fails, and restarts a running service exactly once after a
+successful refresh. Focused tests cover those contracts. The remaining evidence
+is still the installed-main replay: use an explicit checkout bundle URL for
+unreleased dogfood, verify the unchanged-unit restart receipt, then confirm the
+managed lockfile and live service both identify the merged generation.

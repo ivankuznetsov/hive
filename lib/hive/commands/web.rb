@@ -257,11 +257,16 @@ module Hive
       def install_command
         @install_json_emitted = false
         phase = :bootstrap
+        bundle_refreshed = false
         unless @no_bootstrap
-          Hive::Web::AppBundle.ensure!
+          bundle_refreshed = @force ||
+                             !Hive::Web::AppBundle.present? ||
+                             Hive::Web::AppBundle.stale? ||
+                             !Hive::Web::AppBundle.assets_ready?
+          Hive::Web::AppBundle.ensure!(force_refresh: @force)
         end
         phase = :service_install
-        install_service
+        install_service(bundle_refreshed: bundle_refreshed)
       rescue StandardError => e
         error = normalize_install_error(e, phase: phase)
         emit_install_error(error, error_kind: install_error_kind(phase)) if @json && !@install_json_emitted
@@ -337,7 +342,7 @@ module Hive
         Hive::Web::Loopback.address?(bind)
       end
 
-      def install_service
+      def install_service(bundle_refreshed: false)
         require "hive/commands/web/service_installer"
         config = Hive::Config.load_global_web
         installer = Hive::Commands::Web::ServiceInstaller.new(
@@ -345,8 +350,14 @@ module Hive
           environment: @environment,
           config: config
         )
+        was_running = Hive::Web::ServiceStatus.lifecycle_state(installer)["service_running"]
         outcome = installer.install!(autostart: true, force: @force)
-        envelope = service_envelope(installer, outcome, config: config)
+        restarted = outcome.restarted
+        if bundle_refreshed && was_running && outcome.success? && !restarted
+          installer.restart!
+          restarted = true
+        end
+        envelope = service_envelope(installer, outcome, config: config, restarted: restarted)
         if @json
           emit_install_json(envelope)
         else
@@ -414,7 +425,8 @@ module Hive
         end
       end
 
-      def service_envelope(installer, outcome, config: Hive::Config.load_global_web)
+      def service_envelope(installer, outcome, config: Hive::Config.load_global_web,
+                           restarted: outcome.restarted)
         state = Hive::Web::ServiceStatus.snapshot(
           installer: installer, config: config, environment: @environment,
           wait_for_running: true,
@@ -429,7 +441,7 @@ module Hive
           "outcome" => outcome.wire_outcome,
           "target_path" => installer.target_path,
           "backup_path" => outcome.backup_path,
-          "restarted" => outcome.restarted,
+          "restarted" => restarted,
           "messages" => installer.messages.dup,
           "warnings" => environment_warnings
         }.merge(state)

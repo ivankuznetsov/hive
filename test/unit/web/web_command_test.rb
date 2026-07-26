@@ -399,10 +399,14 @@ class WebCommandTest < Minitest::Test
   # a drifted unit → InvalidTaskPath (retry with --force), a failed install →
   # Hive::Error, and --json emits the hive-web-install envelope. Swap in a fake
   # installer so the mapping is asserted without touching launchctl/systemctl.
-  def with_fake_web_installer(outcome_kind, state: nil, install_error: nil)
+  def with_fake_web_installer(outcome_kind, state: nil, install_error: nil,
+                              outcome_restarted: false, restart_calls: nil)
     require "hive/commands/web/service_installer"
     require "hive/commands/service_installer/outcome"
-    outcome = Hive::Commands::ServiceInstaller::Outcome.new(outcome_kind)
+    outcome = Hive::Commands::ServiceInstaller::Outcome.new(
+      outcome_kind,
+      restarted: outcome_restarted
+    )
     service_state = state || {
       "platform" => "macos", "unit_path" => "/tmp/local.hive-web.plist",
       "service_installed" => true, "service_enabled" => true,
@@ -415,6 +419,11 @@ class WebCommandTest < Minitest::Test
         raise install_error if install_error
 
         outcome
+      end
+      define_method(:service_lifecycle_state) { service_state }
+      define_method(:restart!) do
+        restart_calls << true if restart_calls
+        true
       end
       define_method(:messages) { [ "installed note" ] }
       define_method(:target_path) { "/tmp/local.hive-web.plist" }
@@ -481,6 +490,50 @@ class WebCommandTest < Minitest::Test
                            "a failed install is a hard error, not a retry-with-force drift"
       end
     end
+  end
+
+  def test_force_install_forces_managed_bundle_refresh
+    observed = nil
+    restart_calls = []
+    replacement = lambda do |**kwargs|
+      observed = kwargs
+      Hive::Web::AppBundle.app_dir
+    end
+
+    with_tmp_global_config do
+      with_fake_web_installer(:unchanged, restart_calls: restart_calls) do
+        with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!, replacement) do
+          out, = capture_io { Hive::Commands::Web.new("install", force: true, json: true).call }
+          assert_equal true, JSON.parse(out).fetch("restarted")
+        end
+      end
+    end
+
+    assert_equal true, observed.fetch(:force_refresh)
+    assert_equal [ true ], restart_calls
+  end
+
+  def test_force_install_does_not_restart_twice_after_unit_upgrade_restart
+    restart_calls = []
+
+    with_tmp_global_config do
+      with_fake_web_installer(
+        :upgraded,
+        outcome_restarted: true,
+        restart_calls: restart_calls
+      ) do
+        with_replaced_singleton_method(
+          Hive::Web::AppBundle,
+          :ensure!,
+          ->(**) { Hive::Web::AppBundle.app_dir }
+        ) do
+          out, = capture_io { Hive::Commands::Web.new("install", force: true, json: true).call }
+          assert_equal true, JSON.parse(out).fetch("restarted")
+        end
+      end
+    end
+
+    assert_empty restart_calls
   end
 
   def test_install_service_json_envelope_shape

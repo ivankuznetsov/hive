@@ -3,6 +3,7 @@ require "fileutils"
 require "json"
 require "open3"
 require "open-uri"
+require "rbconfig"
 require "rubygems/package"
 require "tmpdir"
 require "zlib"
@@ -117,6 +118,7 @@ module Hive
                 "reinstall the hive-cli package before provisioning Hive web"
         end
 
+        command = runner ? %w[bundle install] : bundle_install_argv(dir)
         runner ||= default_runner(output)
         lockfile = File.join(dir, "Gemfile.lock")
         # Bundler rewrites a relative path source (`remote: ..`) to the
@@ -135,7 +137,7 @@ module Hive
           "HIVE_CLI_ROOT" => hive_cli_root
         }
         ok = Dir.chdir(dir) do
-          runner.call(%w[bundle install], env)
+          runner.call(command, env)
         end
         raise Hive::Error, "hive web: bundle install failed in #{dir}" unless ok
 
@@ -149,11 +151,12 @@ module Hive
       end
 
       def prepare!(dir: app_dir, runner: nil, output: $stderr)
-        runner ||= default_runner(output)
+        default_commands = runner.nil?
         lockfile = File.join(dir, "Gemfile.lock")
         lockfile_bytes = File.binread(lockfile) if File.file?(lockfile)
         lockfile_mode = File.stat(lockfile).mode & 0o777 if lockfile_bytes
         bundle_install!(dir: dir, runner: runner, output: nil)
+        runner ||= default_runner(output)
         asset_storage = File.join(dir, "tmp", "assets-build-storage")
         asset_env = {
           "BUNDLE_GEMFILE" => File.join(dir, "Gemfile"),
@@ -165,7 +168,15 @@ module Hive
           "SECRET_KEY_BASE" => "hive-managed-web-assets-build",
           "HIVE_WEB_STORAGE_DIR" => asset_storage
         }
-        ok = Dir.chdir(dir) { runner.call(%w[bin/rails assets:precompile], asset_env) }
+        command = if default_commands
+          bundle_argv(
+            dir, "exec", RbConfig.ruby,
+            File.join(dir, "bin", "rails"), "assets:precompile"
+          )
+        else
+          %w[bin/rails assets:precompile]
+        end
+        ok = Dir.chdir(dir) { runner.call(command, asset_env) }
         raise Hive::Error, "hive web: asset precompile failed in #{dir}" unless ok
         unless assets_ready?(dir)
           raise Hive::Error, "hive web: asset precompile produced no usable CSS/JavaScript in #{dir}"
@@ -186,6 +197,29 @@ module Hive
           destination = output || File::NULL
           system(env, *argv, out: destination, err: destination)
         end
+      end
+
+      def bundle_install_argv(dir)
+        bundle_argv(dir, "install")
+      end
+
+      def bundle_argv(dir, *arguments)
+        version = File.read(File.join(dir, "Gemfile.lock"))[
+          /^BUNDLED WITH\s*\n\s+(\S+)\s*$/m, 1
+        ].to_s
+        unless version.match?(/\A\d+(?:\.\d+){1,3}(?:[.-][0-9A-Za-z]+)*\z/)
+          raise Hive::Error,
+                "hive web: #{File.join(dir, 'Gemfile.lock')} has no valid BUNDLED WITH version"
+        end
+
+        executable = Gem.bin_path("bundler", "bundle", "= #{version}")
+        [ RbConfig.ruby, executable, *arguments ]
+      rescue Errno::ENOENT
+        raise Hive::Error, "hive web: downloaded web bundle does not contain a Gemfile.lock"
+      rescue Gem::GemNotFoundException
+        raise Hive::Error,
+              "hive web: locked Bundler #{version} is unavailable; " \
+              "install Bundler #{version} before provisioning Hive web"
       end
 
       def dependency_dir

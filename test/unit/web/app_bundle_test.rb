@@ -2,6 +2,7 @@ require "test_helper"
 require "rubygems/package"
 require "zlib"
 require "digest"
+require "rbconfig"
 require "hive/web/app_bundle"
 
 class WebAppBundleTest < Minitest::Test
@@ -405,6 +406,105 @@ class WebAppBundleTest < Minitest::Test
         assert_includes combined, "stdout"
         assert_includes combined, "stderr"
       end
+    end
+  end
+
+  def test_default_bundle_install_uses_locked_bundler_without_path_lookup
+    Dir.mktmpdir("hive-web-app") do |app|
+      version = "2.7.2"
+      File.write(File.join(app, "Gemfile"), "source 'https://rubygems.org'\n")
+      File.write(File.join(app, "Gemfile.lock"), "BUNDLED WITH\n   #{version}\n")
+      captured = nil
+      resolution = nil
+      fake_runner = lambda do |argv, _env|
+        captured = argv
+        true
+      end
+
+      with_replaced_singleton_method(
+        Hive::Web::AppBundle, :default_runner, ->(_output) { fake_runner }
+      ) do
+        with_replaced_singleton_method(
+          Gem, :bin_path, lambda { |*args|
+            resolution = args
+            "/locked/bundler/exe/bundle"
+          }
+        ) do
+          Hive::Web::AppBundle.bundle_install!(dir: app, output: nil)
+        end
+      end
+
+      assert_equal [ "bundler", "bundle", "= 2.7.2" ], resolution
+      assert_equal [ RbConfig.ruby, "/locked/bundler/exe/bundle", "install" ], captured
+    end
+  end
+
+  def test_default_bundle_install_requires_a_valid_locked_bundler
+    Dir.mktmpdir("hive-web-app") do |app|
+      File.write(File.join(app, "Gemfile"), "source 'https://rubygems.org'\n")
+
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.bundle_install!(dir: app, output: nil)
+      end
+      assert_match(/does not contain a Gemfile\.lock/, error.message)
+
+      File.write(File.join(app, "Gemfile.lock"), "BUNDLED WITH\n   not/a/version\n")
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.bundle_install!(dir: app, output: nil)
+      end
+      assert_match(/has no valid BUNDLED WITH version/, error.message)
+    end
+  end
+
+  def test_default_bundle_install_reports_an_unavailable_locked_bundler
+    Dir.mktmpdir("hive-web-app") do |app|
+      File.write(File.join(app, "Gemfile"), "source 'https://rubygems.org'\n")
+      File.write(File.join(app, "Gemfile.lock"), "BUNDLED WITH\n   9.9.9\n")
+
+      with_replaced_singleton_method(
+        Gem, :bin_path, ->(*_args) { raise Gem::GemNotFoundException }
+      ) do
+        error = assert_raises(Hive::Error) do
+          Hive::Web::AppBundle.bundle_install!(dir: app, output: nil)
+        end
+        assert_match(/locked Bundler 9\.9\.9 is unavailable/, error.message)
+      end
+    end
+  end
+
+  def test_default_prepare_runs_assets_through_the_current_ruby
+    Dir.mktmpdir("hive-web-app") do |app|
+      FileUtils.mkdir_p(File.join(app, "bin"))
+      File.write(File.join(app, "Gemfile"), "source 'https://rubygems.org'\n")
+      File.write(File.join(app, "Gemfile.lock"), "BUNDLED WITH\n   2.7.2\n")
+      File.write(File.join(app, "bin", "rails"), "#!/usr/bin/env ruby\n")
+      calls = []
+      fake_runner = lambda do |argv, _env|
+        calls << argv
+        write_compiled_assets(app) if argv.last == "assets:precompile"
+        true
+      end
+
+      with_replaced_singleton_method(
+        Hive::Web::AppBundle, :default_runner, ->(_output) { fake_runner }
+      ) do
+        with_replaced_singleton_method(
+          Gem, :bin_path, ->(*_args) { "/locked/bundler/exe/bundle" }
+        ) do
+          Hive::Web::AppBundle.prepare!(dir: app, output: nil)
+        end
+      end
+
+      assert_equal(
+        [
+          [ RbConfig.ruby, "/locked/bundler/exe/bundle", "install" ],
+          [
+            RbConfig.ruby, "/locked/bundler/exe/bundle", "exec",
+            RbConfig.ruby, File.join(app, "bin", "rails"), "assets:precompile"
+          ]
+        ],
+        calls
+      )
     end
   end
 

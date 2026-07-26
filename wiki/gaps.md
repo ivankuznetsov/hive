@@ -710,3 +710,21 @@ merge and install the exact head, replay the stranded patrol execute task and
 the stale writing workflow pin, and observe at least one daemon tick with the
 local-only registrations present and no merge-reconciliation error. Keep this
 gap open until those three live checks are recorded.
+
+## Managed web Bundler resolution needs installed-main replay (2026-07-26)
+
+Dogfood of merged recovery follow-ups reproduced the artifacts-stage failure
+against an immutable deployment: `hive web install` could run the CLI while
+still failing its internal bare `bundle install` because the Bundler wrapper
+was absent from `PATH`. Unit coverage now pins the exact Ruby/locked-Bundler
+argv, and the packaged-gem bootstrap passes with `PATH=/usr/bin:/bin` while
+installing the real Rails bundle and compiling assets. Exact-head CI then
+exposed the second half of the boundary: an isolated candidate `GEM_HOME` did
+not contain Bundler at all. The gemspec now makes the web lock's exact Bundler
+a runtime dependency, while the package fixture exposes that dependency's gem
+home without restoring any executable wrapper. Local replay then caught Rails
+activating a newer host Bundler during asset compilation; that phase now runs
+through locked `bundle exec` and the current Ruby too. The remaining evidence
+is one installed-main service upgrade from the merged fix, followed by a real
+worktree capture; keep those operational checks distinct from the packaged
+fixture.

@@ -185,6 +185,25 @@ module Hive
               "but runner #{profile_name.inspect} cannot enforce tool scoping (claude only)"
       end
 
+      resolve_parsed(parsed, task_folder: task_folder, stage: stage)
+    end
+
+    # Managed workflow runners have a second enforcement boundary in
+    # WorkflowPackage::RuntimePolicy. That compiler needs the same normalized
+    # permission scope without prematurely applying the legacy Claude-only
+    # runner gate above. Keeping this as a separate entrypoint prevents an
+    # ordinary project stage from treating a non-Claude profile as scoped
+    # merely because the descriptor parsed.
+    def resolve_managed(spec, task_folder:, stage: nil)
+      resolve_managed_spec(spec, task_folder: task_folder, stage: stage).first
+    end
+
+    def resolve_managed_spec(spec, task_folder:, stage: nil)
+      parsed = parse_spec(spec, stage: stage)
+      [ resolve_parsed(parsed, task_folder: task_folder, stage: stage), parsed.freeze ].freeze
+    end
+
+    def resolve_parsed(parsed, task_folder:, stage:)
       case parsed.fetch("preset")
       when YOLO, "read-only"
         # Both presets are pure pass-throughs of their PRESETS entry, so the

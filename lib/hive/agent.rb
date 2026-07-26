@@ -139,7 +139,7 @@ module Hive
                    permission_mode: nil, allowed_tools: nil,
                    disallowed_tools: nil, cli_flags: [], max_tokens: nil,
                    max_turns: nil, identity_arguments: [], runtime_policy: nil,
-                   log_stream: true)
+                   launch_arguments: nil, log_stream: true)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -168,17 +168,30 @@ module Hive
         @permission_mode = @runtime_policy.permission_mode
         @allowed_tools = @runtime_policy.allowed_tools
         @disallowed_tools = @runtime_policy.disallowed_tools
-        @add_dirs = @runtime_policy.directories
-        @cli_flags = Array(cli_flags) + @runtime_policy.cli_flags
+        @add_dirs = @runtime_policy.agent_add_dirs
+        @cli_flags = Array(cli_flags)
+        @runtime_cli_flags = @runtime_policy.cli_flags
         @child_environment = @runtime_policy.environment.merge(SCRUBBED_CHILD_ENV)
       else
         @permission_mode = permission_mode
         @allowed_tools = allowed_tools
         @disallowed_tools = disallowed_tools
         @cli_flags = Array(cli_flags)
+        @runtime_cli_flags = []
         @child_environment = SCRUBBED_CHILD_ENV
       end
-      @identity_arguments = Hive::ImplementationIdentity.validate_native_arguments(identity_arguments).freeze
+      @launch_arguments = normalize_launch_arguments(launch_arguments)
+      supplied_identity_arguments =
+        Hive::ImplementationIdentity.validate_native_arguments(identity_arguments)
+      if @launch_arguments
+        unless supplied_identity_arguments.empty? ||
+               supplied_identity_arguments == @launch_arguments.native_arguments
+          raise ArgumentError,
+                "launch_arguments and identity_arguments describe different native argv"
+        end
+        supplied_identity_arguments = @launch_arguments.native_arguments
+      end
+      @identity_arguments = supplied_identity_arguments.freeze
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -269,7 +282,8 @@ module Hive
         # which runner launched.
         log.puts "[hive] #{Time.now.utc.iso8601} spawn " \
                  "cwd=#{Hive::SecretPatterns.redact(@cwd)} " \
-                 "profile=#{@profile.name} executable=#{File.basename(cmd.first.to_s)} argc=#{cmd.length}"
+                 "profile=#{@profile.name} executable=#{File.basename(cmd.first.to_s)} argc=#{cmd.length}" \
+                 "#{launch_identity_log_fields}"
       end
       r, w = IO.pipe
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
@@ -499,7 +513,7 @@ module Hive
     # and #test_argv_includes_verbose_when_stream_json which still pass after
     # the refactor — the claude profile's flag set IS today's flag set).
     def build_cmd
-      cmd = [ @profile.bin ]
+      cmd = [ @runtime_policy&.executable || @profile.bin ]
       if @profile.headless_flag
         cmd << @profile.headless_flag
         # Some CLIs' headless flag TAKES the prompt as its value (grok's
@@ -533,12 +547,15 @@ module Hive
         raise ArgumentError, "cli_flags are claude-specific; got #{@cli_flags.inspect} for #{@profile.name}"
       end
       cmd.concat(@cli_flags)
+      cmd.concat(@runtime_cli_flags)
       cmd.concat(@profile.output_format_flags)
       cmd << (@profile.prompt_style == :stdin ? "-" : @prompt) unless @profile.prompt_style == :headless_flag_value
-      cmd
+      Array(@runtime_policy&.command_prefix) + cmd
     end
 
     def permission_flags
+      return @runtime_policy.permission_flags if @runtime_policy && !@runtime_policy.permission_flags.nil?
+
       @profile.permission_flags(@permission_mode)
     end
 
@@ -937,7 +954,7 @@ module Hive
       # worktree-vs-task-folder distinction (e.g. worktree-feat-x vs
       # feat-x-260424-aaaa) and loses that signal in the event log.
       "cwd=#{@cwd} timeout_sec=#{@timeout_sec} max_budget_usd=#{@max_budget_usd} " \
-        "max_tokens=#{@max_tokens} max_turns=#{@max_turns}"
+        "max_tokens=#{@max_tokens} max_turns=#{@max_turns}#{launch_identity_log_fields}"
     end
 
     def agent_end_message(result, exception)
@@ -947,6 +964,24 @@ module Hive
       end
 
       "status=#{result&.dig(:status)} exit_code=#{result&.dig(:exit_code)} pid=#{result&.dig(:pid)}"
+    end
+
+    def normalize_launch_arguments(value)
+      return nil if value.nil?
+      return value if value.is_a?(Hive::ImplementationIdentity::LaunchArguments)
+
+      raise ArgumentError, "launch_arguments must be a Hive::ImplementationIdentity::LaunchArguments"
+    end
+
+    def launch_identity_log_fields
+      return "" unless @launch_arguments
+
+      model = Hive::SecretPatterns.redact(@launch_arguments.model)
+      requested_effort = @launch_arguments.requested_effort || "none"
+      effective_effort = @launch_arguments.effective_effort || "provider-default"
+      " model=#{model} requested_effort=#{requested_effort} " \
+        "effective_effort=#{effective_effort} model_pinned=#{@launch_arguments.model_pinned} " \
+        "effort_supported=#{@launch_arguments.effort_supported}"
     end
   end
 end

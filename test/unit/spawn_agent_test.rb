@@ -9,6 +9,7 @@ require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/stages/base"
 require "hive/scripts/workflow_policy_hook"
+require "hive/workflow_package/runtime_policy"
 
 # Direct coverage for Hive::Stages::Base.spawn_agent: profile check_version! /
 # preflight! ordering, the warn_isolation_reduced trigger when the configured
@@ -285,6 +286,52 @@ class SpawnAgentTest < Minitest::Test
       effort_index = argv.index("-c")
       assert_equal "gpt-5.6-terra", argv.fetch(model_index + 1)
       assert_equal "model_reasoning_effort=medium", argv.fetch(effort_index + 1)
+    end
+  end
+
+  def test_invalid_managed_output_becomes_typed_error_without_writing
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p(package)
+      output = File.join(task.folder, "result.md")
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit(./result.md)" ]
+          },
+          task_folder: task.folder,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          managed_outputs: [ output ]
+        )
+      end
+      fake_agent = Object.new
+      fake_agent.define_singleton_method(:run!) do
+        {
+          status: :ok,
+          final_message: '{"files":',
+          final_message_truncated: false
+        }
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::Agent, :new, ->(**_kwargs) { fake_agent }
+      ) do
+        Hive::Stages::Base.spawn_agent(
+          task,
+          prompt: "x",
+          max_budget_usd: 1,
+          timeout_sec: 5,
+          runtime_policy: policy
+        )
+      end
+
+      assert_equal :error, result[:status]
+      assert_equal "managed_output_invalid", result[:error_reason]
+      assert_includes result[:error_message], "invalid structured output"
+      refute File.exist?(output)
     end
   end
 

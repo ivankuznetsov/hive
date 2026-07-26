@@ -149,6 +149,61 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_log_and_start_event_record_typed_model_and_effective_effort_without_serializing_argv
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+      profile = Hive::AgentProfiles.lookup(:claude)
+      launch_arguments = profile.identity_arguments(model: "claude-opus-4-8", effort: "high")
+
+      result = Hive::Agent.new(
+        task: task, prompt: "do not log this prompt", max_budget_usd: 1, timeout_sec: 5,
+        profile: profile, launch_arguments: launch_arguments
+      ).run!
+
+      log = File.read(result.fetch(:log_file))
+      start_event = File.readlines(File.join(task.folder, "events.jsonl"), chomp: true)
+                        .map { |line| JSON.parse(line) }
+                        .find { |event| event.fetch("event_type") == "agent_start" }
+      [ log, start_event.fetch("message") ].each do |receipt|
+        assert_includes receipt, "model=claude-opus-4-8"
+        assert_includes receipt, "requested_effort=high"
+        assert_includes receipt, "effective_effort=high"
+        assert_includes receipt, "model_pinned=true"
+        assert_includes receipt, "effort_supported=true"
+        refute_includes receipt, "--model"
+        refute_includes receipt, "do not log this prompt"
+      end
+    end
+  end
+
+  def test_launch_arguments_reject_invalid_types_and_conflicting_native_argv
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      profile = Hive::AgentProfiles.lookup(:claude)
+      launch_arguments = profile.identity_arguments(model: "claude-opus-4-8", effort: "high")
+
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+          profile: profile, launch_arguments: {}
+        )
+      end
+      assert_includes error.message, "LaunchArguments"
+
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+          profile: profile, launch_arguments: launch_arguments,
+          identity_arguments: [ "--model", "different-model" ]
+        )
+      end
+      assert_includes error.message, "different native argv"
+    end
+  end
+
   def test_private_log_open_refuses_symlinks
     with_tmp_dir do |dir|
       target = File.join(dir, "outside.log")
@@ -404,6 +459,46 @@ class AgentTest < Minitest::Test
 
       error = assert_raises(ArgumentError) { agent.send(:build_cmd) }
       assert_includes error.message, "cli_flags are claude-specific"
+    end
+  end
+
+  def test_managed_runtime_policy_can_supply_trusted_non_claude_argv
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p(package)
+      output = File.join(task.folder, "result.md")
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit(./result.md)" ]
+          },
+          task_folder: task.folder,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          managed_outputs: [ output ]
+        )
+      end
+      agent = Hive::Agent.new(
+        task: task,
+        prompt: "test",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        profile: Hive::AgentProfiles.lookup(:codex),
+        runtime_policy: policy
+      )
+
+      cmd = agent.send(:build_cmd)
+      assert_equal File.realpath("/bin/true"), cmd.first
+      assert_includes cmd, "default_permissions=\"hive-managed\""
+      assert_includes cmd, "--output-schema"
+      assert_includes cmd, "--ephemeral"
+      assert_includes cmd, "--ignore-user-config"
+      assert_includes cmd, "--ignore-rules"
+      refute_includes cmd, "--dangerously-bypass-approvals-and-sandbox"
+    ensure
+      policy&.cleanup!
     end
   end
 

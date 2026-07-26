@@ -10,7 +10,7 @@ PATH
       faraday-multipart (~> 1.0)
       json_schemer (~> 2.5)
       lipgloss (~> 0.2.2)
-      prdigest (~> 0.1.0)
+      prdigest (~> 0.2.0)
       rexml (~> 3.2)
       sqlite3 (~> 2.0)
       telegram-bot-ruby (~> 2.7)
@@ -121,7 +121,7 @@ GEM
     parser (3.3.11.1)
       ast (~> 2.4.1)
       racc
-    prdigest (0.1.0)
+    prdigest (0.2.0)
       erb (>= 4.0, < 7.0)
       faraday-retry (~> 2.2)
       octokit (~> 9.0)

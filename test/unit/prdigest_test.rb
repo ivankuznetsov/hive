@@ -391,7 +391,7 @@ class HivePrdigestTest < Minitest::Test
           assert_equal executable, runner.send(:resolve_binary, { "PATH" => "/bin" })
         end
       end
-      assert_equal [ [ "prdigest", "prdigest", "~> 0.1.0" ] ], gem_bin_calls
+      assert_equal [ [ "prdigest", "prdigest", "~> 0.2.0" ] ], gem_bin_calls
 
       with_replaced_singleton_method(Hive::InvokedBinary, :which, ->(*) { nil }) do
         with_replaced_singleton_method(Gem, :bin_path, ->(*) { File.join(dir, "missing") }) do

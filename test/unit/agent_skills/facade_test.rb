@@ -32,6 +32,7 @@ class AgentSkillsFacadeTest < Minitest::Test
       assert_equal "absent", plan.inspection.state
       assert plan.inspection.snapshot.frozen?
       assert plan.inspection.issues.all?(&:frozen?)
+      assert_equal "publish", plan.to_h.fetch("action")
       refute File.exist?(root)
 
       result = Hive::AgentSkills.apply(plan)
@@ -60,6 +61,64 @@ class AgentSkillsFacadeTest < Minitest::Test
 
       assert_raises(Hive::AgentSkills::StalePlan) do
         Hive::AgentSkills.apply(plan)
+      end
+    end
+  end
+
+  def test_noop_plan_refuses_a_destination_that_changed_after_preview
+    with_tmp_dir do |trusted_root|
+      root = File.join(trusted_root, "agent-home")
+      projection = Hive::AgentSkills.render("claude")
+      Hive::AgentSkills.apply(
+        Hive::AgentSkills.plan(
+          root: root, trusted_root: trusted_root, projection: projection
+        )
+      )
+      plan = Hive::AgentSkills.plan(
+        root: root, trusted_root: trusted_root, projection: projection
+      )
+      File.open(File.join(plan.inspection.destination, "SKILL.md"), "a") do |file|
+        file.write("\nchanged after preview\n")
+      end
+
+      assert_raises(Hive::AgentSkills::StalePlan) do
+        Hive::AgentSkills.apply(plan)
+      end
+    end
+  end
+
+  def test_plan_contract_rejects_wrong_projection_report_and_destination
+    with_tmp_dir do |trusted_root|
+      root = File.join(trusted_root, "agent-home")
+      projection = Hive::AgentSkills.render("claude")
+      inspection = Hive::AgentSkills.inspect(
+        root: root, trusted_root: trusted_root, projection: projection
+      )
+      attributes = {
+        action: "publish",
+        projection: projection,
+        root: root,
+        trusted_root: trusted_root,
+        inspection: inspection
+      }
+
+      assert_raises(ArgumentError) do
+        Hive::AgentSkills::Plan.new(**attributes.merge(projection: Object.new))
+      end
+      assert_raises(ArgumentError) do
+        Hive::AgentSkills::Plan.new(**attributes.merge(inspection: Object.new))
+      end
+
+      other = Hive::AgentSkills::ProjectionReport.new(
+        state: inspection.state,
+        destination: File.join(root, "other"),
+        manifest: inspection.manifest,
+        files: inspection.files,
+        snapshot: inspection.snapshot,
+        issues: inspection.issues
+      )
+      assert_raises(ArgumentError) do
+        Hive::AgentSkills::Plan.new(**attributes.merge(inspection: other))
       end
     end
   end

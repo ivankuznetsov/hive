@@ -73,15 +73,21 @@ module HiveTestCoverage
 
   def reload_preloaded_entrypoint!
     old_verbose = $VERBOSE
-    path = File.join(@root, "lib", "hive.rb")
-    return unless $LOADED_FEATURES.include?(path)
+    paths = %w[hive/version.rb hive/errors.rb hive.rb].map do |relative|
+      File.join(@root, "lib", relative)
+    end
+    loaded_paths = paths.select { |path| $LOADED_FEATURES.include?(path) }
+    return if loaded_paths.empty?
 
     # Bundler evaluates the gemspec before RUBYOPT coverage boots, and the
-    # gemspec requires lib/hive.rb for Hive::VERSION. Reload only the entrypoint
-    # under coverage so the unloaded-file gate can stay strict. Filter just the
-    # expected constant redefinition warnings; ordinary warnings still print.
+    # gemspec requires lib/hive.rb for Hive::VERSION. That entrypoint now loads
+    # its clean component-safe version and error contracts before coverage too,
+    # so reload all three in dependency order. Filter just the expected
+    # constant redefinition warnings; ordinary warnings still print.
     $VERBOSE = false
-    without_constant_redefinition_warnings { load path }
+    without_constant_redefinition_warnings do
+      loaded_paths.each { |path| load path }
+    end
   ensure
     $VERBOSE = old_verbose
   end

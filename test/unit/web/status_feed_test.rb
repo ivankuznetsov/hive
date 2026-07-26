@@ -595,7 +595,7 @@ class StatusFeedTest < Minitest::Test
       feed&.stop
     end
   end
-  def test_initial_snapshot_failure_publishes_empty_and_recovers
+  def test_initial_snapshot_failure_is_explicitly_unavailable_and_recovers
     calls = 0
     status = Object.new
     status.define_singleton_method(:json_payload) do |*|
@@ -622,12 +622,156 @@ class StatusFeedTest < Minitest::Test
     first = snapshots.pop(true)
     recovered = snapshots.pop(true)
 
+    assert_equal false, first.fetch("ok")
+    assert_equal true, first.fetch("unavailable"),
+                 "a failing first scan must not claim that an empty fleet is healthy"
     assert_equal [], first.fetch("projects"),
-                 "a failing FIRST snapshot must degrade to an empty grid, not crash the poller"
+                 "the unavailable envelope keeps a bounded projects shape for old payload consumers"
     assert_equal [ { "name" => "p", "tasks" => [] } ], recovered.fetch("projects"),
                  "the next successful scan must replace the empty fallback"
-    assert_match(/initial status snapshot failed/, err,
+    assert_match(/status snapshot failed/, err,
                  "the degradation must be observable")
+  ensure
+    subscriber&.kill
+    subscriber&.join(2)
+    feed&.stop
+  end
+
+  def test_concurrent_http_refreshes_coalesce_to_one_scan
+    with_tmp_global_config do
+      status = ControlledStatus.new
+      feed = Hive::Web::StatusFeed.new(interval: 5, status_command: status)
+      states = Queue.new
+      threads = 6.times.map do
+        Thread.new { states << feed.snapshot_state }
+      end
+
+      status.wait_until_started
+      sleep 0.02
+      status.release({ "projects" => [ { "name" => "shared" } ] })
+      threads.each { |thread| thread.join(2) }
+
+      assert threads.none?(&:alive?)
+      assert_equal 1, status.calls
+      assert_equal 1, status.max_active
+      assert_equal 1, feed.scan_count
+      delivered = 6.times.map { states.pop(true) }
+      assert delivered.all?(&:fresh?)
+      assert_equal 1, delivered.map(&:token).uniq.size
+    ensure
+      threads&.each(&:kill)
+      threads&.each { |thread| thread.join(2) }
+      feed&.stop
+    end
+  end
+
+  def test_failure_after_good_data_is_degraded_until_a_fresh_token_recovers
+    calls = 0
+    first = { "projects" => [ { "name" => "demo", "tasks" => [] } ] }
+    second = { "projects" => [ { "name" => "demo", "tasks" => [ { "slug" => "new" } ] } ] }
+    status = Object.new
+    status.define_singleton_method(:json_payload) do |*|
+      calls += 1
+      raise "mid-edit" if calls == 2
+
+      calls == 1 ? first : second
+    end
+    times = [
+      Time.utc(2026, 7, 25, 10),
+      Time.utc(2026, 7, 25, 11)
+    ]
+    feed = Hive::Web::StatusFeed.new(
+      status_command: status,
+      clock: -> { times.shift || Time.utc(2026, 7, 25, 12) }
+    )
+
+    fresh = feed.snapshot_state
+    _out, _err = capture_io { @degraded_state = feed.snapshot_state }
+    recovered = feed.snapshot_state
+
+    assert fresh.fresh?
+    assert @degraded_state.degraded?
+    assert_same first, @degraded_state.payload
+    assert_equal fresh.last_success_at, @degraded_state.last_success_at
+    refute_equal fresh.token, @degraded_state.token
+    assert recovered.fresh?
+    assert_same second, recovered.payload
+    refute_equal @degraded_state.token, recovered.token
+    assert_equal 3, feed.scan_count
+  ensure
+    feed&.stop
+  end
+
+  def test_reconnecting_subscribers_reuse_current_state_without_a_scan
+    with_tmp_global_config do
+      status = CountingStatus.new([ { "projects" => [] } ])
+      feed = Hive::Web::StatusFeed.new(interval: 5, status_command: status)
+      first = feed.snapshot_state
+
+      2.times do
+        subscriber = Thread.new { feed.each_state { break } }
+        subscriber.join(2)
+        refute subscriber.alive?
+      end
+
+      assert first.fresh?
+      assert_equal 1, status.calls
+      assert_equal 1, feed.scan_count
+    ensure
+      feed&.stop
+    end
+  end
+
+  def test_state_serializes_every_public_field
+    state = Hive::Web::StatusFeed::State.new(
+      payload: { "projects" => [] },
+      availability: "fresh",
+      token: "sha256:demo",
+      last_success_at: "2026-07-26T03:00:00.000000Z",
+      error: nil,
+      scan_count: 2,
+      generation: 3
+    )
+
+    assert_equal(
+      {
+        "payload" => { "projects" => [] },
+        "availability" => "fresh",
+        "token" => "sha256:demo",
+        "last_success_at" => "2026-07-26T03:00:00.000000Z",
+        "error" => nil,
+        "scan_count" => 2,
+        "generation" => 3
+      },
+      state.to_h
+    )
+  end
+
+  def test_each_state_reports_idle_ticks_and_then_yields_a_changed_state
+    first = { "projects" => [ { "name" => "demo" } ] }
+    second = { "projects" => [ { "name" => "changed" } ] }
+    status = CountingStatus.new([ first, first, second ])
+    feed = Hive::Web::StatusFeed.new(interval: 0.01, status_command: status)
+    idle = Queue.new
+    delivered = Queue.new
+
+    subscriber = Thread.new do
+      feed.each_state(on_idle: -> { idle << true }) do |state|
+        delivered << state
+        break if state.payload == second
+      end
+    end
+
+    first_state = Timeout.timeout(2) { delivered.pop }
+    Timeout.timeout(2) { idle.pop }
+    second_state = Timeout.timeout(2) { delivered.pop }
+    subscriber.join(2)
+
+    refute subscriber.alive?
+    assert_equal first, first_state.payload
+    assert_equal second, second_state.payload
+    assert_same second_state, feed.current_state
+    assert_operator status.calls, :>=, 3
   ensure
     subscriber&.kill
     subscriber&.join(2)

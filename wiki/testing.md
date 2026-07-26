@@ -654,6 +654,25 @@ Open-PR and finalize pointer-entry tests exercise the shared
 existing warnings for both a missing `worktree.yml` and a pointer whose
 directory has disappeared.
 
+## Web reliability and capture
+
+Focused U5 coverage lives in
+`test/unit/web/{status_feed,task_diff,task_target_resolver}_test.rb` and Rails
+status/task/model tests. It pins single-flight/latest-good semantics, zero fleet
+scans for task-local routes, bounded typed diff failures, and degraded mutation
+gates. U6 coverage lives in
+`test/unit/web/{source_bundle,browser_bundle,capture_runtime,task_capture}_test.rb`,
+`test/unit/artifacts/capture_policy_test.rb`,
+`test/unit/commands/web_test.rb`, artifacts-stage tests, and schema validation.
+Those tests pin fail-closed classification when the owned worktree evidence is
+missing or unreadable, refusal of non-empty unclaimed runtime roots, and
+owner-receipt revalidation before cleanup, pinned npm/Chromium cache ownership,
+and publish-after-teardown task capture.
+The packaged bootstrap and real clean-worktree Playwright capture remain outer
+proofs: the former archives committed `HEAD:web`, while the latter needs the
+pinned browser binaries and retains task-local media plus its exact-SHA
+manifest.
+
 ## Launch-path fixtures
 
 `test/unit/launch_path_fixture_test.rb` pins the public Build and Content

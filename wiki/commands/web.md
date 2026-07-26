@@ -706,5 +706,63 @@ legacy icon), `/icon.svg`, and `/icon.png` (apple-touch). The layout links all
 three so browsers no longer emit a root favicon 404, and the icon mark is the
 terracotta honeycomb hive glyph rather than the old placeholder.
 
+## Task-local reads and degraded status
+
+Task show, log, diff, media, and mutation routes resolve one registered project
+and task through `Hive::Web::TaskTargetResolver`; they do not call the
+fleet-wide status producer. One process-wide `StatusFeed` owns polling,
+single-flight refresh, actual scan count, and latest-good state. First-scan
+failure renders an explicit unavailable page. A later failure retains the last
+good rows with an accessible warning and disables freshness-dependent mutation
+controls until a fresh token arrives.
+
+Task diff uses `Hive::Web::TaskDiff`: it validates the owned worktree pointer,
+runs argv-form Git commands in bounded process groups, caps and redacts output,
+and separates committed, staged, unstaged, and untracked changes. HTML and JSON
+share typed `available`, `empty`, `truncated`, and `unavailable` results with
+409/422/503/504 failure mappings. Browser log/resource polling chains one
+abortable timeout at a time, pauses while hidden, backs off failures, and
+ignores late responses after disconnect.
+
+## Supervised worktree capture server
+
+`hive web capture --task-folder TASK_FOLDER [--source-root WORKTREE]` is the
+supported task recorder. The task must be in `7-artifacts`, have a current
+`required` capture receipt, and own the exact clean source worktree. The
+optional source root is an assertion: it must resolve to that owned worktree.
+The command seeds deterministic private fixture data, records the board-to-task
+flow through pinned Playwright Chromium, verifies PNG and WebM output with
+ffmpeg/ffprobe, rechecks the clean source HEAD, and publishes task-local media
+plus `media/capture-manifest.json` only after teardown. `--json` emits that
+manifest; the text form reports the retained artifact count and destination.
+Capture applicability ignores generated HTML marker comments, so fields such
+as `browser=skipped` cannot manufacture a user request for visual proof.
+
+`hive web capture-server` is an internal recorder interface. It requires an
+exact clean source root, private runtime root, lifecycle token, and inherited
+control descriptor. A lockfile-keyed `SourceBundle` cache installs the web gems
+outside the source worktree under a private flock and atomic rename. It invokes
+the exact `BUNDLED WITH` version through RubyGems rather than assuming the
+`bundle` shim is on the service or agent PATH; a missing locked Bundler fails
+before cache population. The same resolved executable owns bundle installation,
+Rails asset/database preparation, the Rails server, and fixture CLI setup.
+The supervisor prepares isolated assets/databases, binds literal `127.0.0.1`
+on an allocated port, and emits `hive-web-capture-runtime` v1 readiness JSON.
+The server thread owns its duplicate of the readiness descriptor until it
+exits; startup failures include the bounded, redacted private server log.
+Closing the control channel tears down the owned process group and runtime.
+The runtime root is accepted only when it is empty and unclaimed, or when its
+private owner receipt proves the same lifecycle token. Cleanup repeats that
+ownership proof before removing runtime state, so a recorder cannot adopt or
+erase an unrelated directory.
+
+The environment is deny-by-default: it gets private HOME/XDG/Hive/storage,
+bundle, assets, and tmp roots plus an ephemeral Rails secret; provider,
+GitHub/Telegram/release, SSH-agent, proxy, Bundler/Gem override, and Ruby hook
+state is not inherited. `BrowserBundle` installs the exact Playwright 1.60.0
+package declared in `web/package-lock.json` and its Chromium payload into a
+private lockfile-keyed cache outside linked worktrees. Capture preflights that
+cache, ffmpeg, and ffprobe.
+
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]], [[decisions]].

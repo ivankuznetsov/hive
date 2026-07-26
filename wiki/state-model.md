@@ -898,6 +898,21 @@ stateDiagram-v2
 
 Since 2026-05-22, `Hive::Stages::DIRS` has all nine slots filled in order; `Stages.next_dir(4)` returns `"5-open-pr"`, `Stages.next_dir(6)` returns `"7-artifacts"`, and `Stages.next_dir(8)` returns `"9-done"`. See [[stages/review]] for the autonomous-loop semantics.
 
+## Capture applicability receipts
+
+`7-artifacts/<slug>/capture-requirement.json` is `hive-capture-requirement` v1.
+Its stable identity is the task/project, task generation, implementation
+base/head, changed-path digest, and classifier version. Hive classifies
+user-visible paths or an explicit visual-proof request as `required`; other
+work is `not_applicable`. Agents cannot demote the result. A demotion records a
+confirmed operator, rationale, timestamp, and the same task generation.
+
+When required, `media/capture-manifest.json` is
+`hive-artifact-capture` v1 and must identify the same task and implementation
+head with at least one retained artifact. A `COMPLETE` marker without matching
+capture evidence is not terminal truth: the artifacts runner rewrites it to
+`ERROR reason=required_capture_missing`.
+
 See [[stages/index]] for one page per stage.
 
 ## Backlinks

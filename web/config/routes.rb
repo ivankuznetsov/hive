@@ -45,7 +45,7 @@ Rails.application.routes.draw do
     get  "log" => "tasks/logs#show", as: :task_log
     get  "media/:filename" => "tasks/media#show", as: :task_media,
          format: false,
-         constraints: { filename: /[\w.-]+\.(?:png|jpe?g|gif)/i }
+         constraints: { filename: /[\w.-]+\.(?:png|jpe?g|gif|webp|webm|mp4)/i }
     post "approve" => "tasks/approvals#create", as: :task_approve
     post "reject" => "tasks/rejections#create", as: :task_reject
     post "drop" => "tasks/drops#create", as: :task_drop

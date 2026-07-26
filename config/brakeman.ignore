@@ -1,6 +1,10 @@
 {
   "ignored_warnings": [
     {
+      "fingerprint": "c651219c164b28996e2b5f5d46d7dfa55865878c1231e2544a657b9c8f40a3e2",
+      "note": "False positive. HiveDemo::CaptureServer invokes Process.spawn with discrete argv elements and unsetenv_others; no shell parses source_root or runtime_root. source_root is the explicitly selected Hive checkout whose bin/hive is intentionally executed, while the supervised runtime separately validates its owned clean worktree and exact source SHA."
+    },
+    {
       "fingerprint": "ab976c42d9f793cc6e0340c16147e6f4c0ff1bff856e912b8cf316b5009e2c5f",
       "note": "False positive. RefactorPatrol::CheckoutGuard invokes git with discrete Open3.capture3 argv elements and places --end-of-options before the revision, so neither a shell nor git option parsing interprets ref content. Persisted analysis commits must be full 40- or 64-character hexadecimal object IDs, and every resolved value is revalidated as a full object ID before use. Fresh default-branch refs are constructed internally beneath refs/remotes/origin/ or refs/heads/."
     },
@@ -25,8 +29,8 @@
       "note": "False positive. Open3.capture3 array form: each argument is a discrete argv element passed to execve(2), not a shell. branch_name is interpolated only into a refspec literal that becomes a single argv member; no shell ever sees it."
     },
     {
-      "fingerprint": "8922963b169af70e1f2f8b4e8f5f037bbad37bdfa5355b97335e1d3dab3a6e16",
-      "note": "False positive. The task media route constrains filename to a single png/jpg/jpeg/gif component. Task#media_path requires File.basename equality and revalidates the extension, resolves the real task folder/media directory, refuses a symlinked media root, and returns only files whose realpath stays under that media root. Integration tests cover traversal, disallowed extensions, missing files, symlinked media roots, and inline image streaming. The fingerprint reflects Tasks::BaseController loading the same validated Task resource for the controller."
+      "fingerprint": "bf065155e907bfc8e73d17ddc097ac0be43d4c72b073f0eccb66c34a8b4b79a1",
+      "note": "False positive. The task media route constrains filename to one approved image or WebM component. Task#media_path requires File.basename equality and an allowlisted extension, resolves the real task folder/media directory, refuses a symlinked media root, and returns only files whose realpath stays below that root. Integration tests cover traversal, disallowed extensions, missing files, symlinked media roots, and inline streaming. The fingerprint reflects Tasks::BaseController loading the same validated Task resource through TaskTargetResolver."
     },
     {
       "fingerprint": "8122417c98bf7e28572aa9a7a8361ff6c1b3d0f9465adb6a984e84be2cbdea3b",
@@ -125,6 +129,6 @@
       "note": "False positive. Hive::Gh.capture3 passes discrete argv elements to Process.spawn. closure_default_branch requires a validated GitHub host and owner/repository slug before constructing the repository endpoint, so no shell interprets the endpoint."
     }
   ],
-  "updated": "2026-07-26 01:31:43 +0000",
+  "updated": "2026-07-26 03:05:00 +0000",
   "brakeman_version": "8.0.5"
 }

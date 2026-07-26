@@ -5,7 +5,14 @@
 class StatusBroadcaster
   CHANNEL = "status".freeze
   LIFECYCLE_MUTEX = Mutex.new
-  PageSnapshot = Data.define(:payload, :version)
+  PageSnapshot = Struct.new(
+    :payload, :version, :availability, :last_success_at, :error,
+    keyword_init: true
+  ) do
+    def fresh? = availability.nil? || availability == "fresh"
+    def degraded? = availability == "degraded"
+    def unavailable? = availability == "unavailable"
+  end
 
   # Seconds to back off after the subscriber loop dies before resubscribing.
   RETRY_SEC = 5
@@ -27,8 +34,35 @@ class StatusBroadcaster
 
     def snapshot_with_version
       current_feed = feed
-      payload = current_feed.snapshot
-      PageSnapshot.new(payload:, version: current_feed.prime(payload))
+      if current_feed.respond_to?(:snapshot_state)
+        state = current_feed.snapshot_state
+        PageSnapshot.new(
+          payload: state.payload,
+          version: state.token,
+          availability: state.availability,
+          last_success_at: state.last_success_at,
+          error: state.error
+        )
+      else
+        payload = current_feed.snapshot
+        PageSnapshot.new(payload:, version: current_feed.prime(payload))
+      end
+    end
+
+    # Non-scanning freshness read for task-local routes. A nil result means no
+    # status scan has completed in this process yet; the target resolver still
+    # resolves the requested registered task directly.
+    def current_page_snapshot
+      state = feed.respond_to?(:current_state) ? feed.current_state : nil
+      return unless state
+
+      PageSnapshot.new(
+        payload: state.payload,
+        version: state.token,
+        availability: state.availability,
+        last_success_at: state.last_success_at,
+        error: state.error
+      )
     end
 
     def current_version?(candidate)
@@ -36,7 +70,7 @@ class StatusBroadcaster
     end
 
     def projects(payload)
-      payload.fetch("projects", [])
+      Array(payload && payload["projects"])
              .each_with_index
              .sort_by { |(project, index)| [ -project.fetch("tasks", []).size, index ] }
              .map { |project, _index| Project.new(project) }
@@ -89,7 +123,10 @@ class StatusBroadcaster
             # The subscribing page already rendered the first snapshot. Use
             # it as the comparison baseline instead of forcing an immediate
             # duplicate refresh; after an error, the current value is retried.
-            feed.each_snapshot do |payload|
+            current_feed = feed
+            subscription = current_feed.respond_to?(:each_state) ? :each_state : :each_snapshot
+            current_feed.public_send(subscription) do |publication|
+              payload = publication.respond_to?(:payload) ? publication.payload : publication
               if skip_initial
                 skip_initial = false
               else

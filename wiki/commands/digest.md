@@ -66,7 +66,7 @@ when configured as `0` (unbounded) or above PRDigest's standalone scheduling
 range.
 
 `PRDIGEST_BIN` can point at an explicit development executable. Normal packaged
-installs receive PRDigest through Hive's `prdigest ~> 0.1.0` runtime dependency;
+installs receive PRDigest through Hive's `prdigest ~> 0.1.1` runtime dependency;
 when its executable is not on `PATH`, Hive resolves the installed gem's
 executable directly. Missing binary or authentication is a Hive adapter
 configuration error; Hive never falls back to an internal engine.

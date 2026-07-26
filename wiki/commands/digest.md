@@ -8,7 +8,9 @@ source: lib/hive/commands/digest.rb
 
 `hive digest` is a registry and scheduling adapter for the standalone PRDigest
 CLI. Hive does not fetch pull requests, generate prose, render Telegram markup,
-split messages, or decide delivery retries.
+split messages, or decide delivery retries. It always selects PRDigest's
+deterministic `run` command; it never selects the separate facts/prose surfaces
+or configures an AI provider.
 
 ```text
 Hive registered projects
@@ -58,6 +60,10 @@ Token values never enter YAML. GitHub authentication resolves from
 Real delivery loads Hive's private `.env` and forwards
 `HIVE_TELEGRAM_BOT_TOKEN` only in the child environment. Dry-run uses a
 non-deliverable placeholder chat when Telegram is not configured.
+The child configuration has no schedule, prose, or provider block. In
+particular, Hive's `digest.max_catchup_days` remains a daemon-only policy even
+when configured as `0` (unbounded) or above PRDigest's standalone scheduling
+range.
 
 `PRDIGEST_BIN` can point at an explicit development executable. Normal packaged
 installs receive PRDigest through Hive's `prdigest ~> 0.1.0` runtime dependency;
@@ -106,8 +112,9 @@ The `delivery` result preserves `accepted_chunks`, `total_chunks`,
 
 Hive's daemon owns only its once-per-London-day cursor in
 `digest_state.json`. It dispatches one explicit date at a time. A normal
-retryable PRDigest failure backs off. These non-replayable kinds park the date
-without advancing or redispatching:
+retryable PRDigest failure backs off. `digest.max_catchup_days` bounds that
+Hive-owned dispatch loop and is never sent to PRDigest. These non-replayable
+kinds park the date without advancing or redispatching:
 
 - `telegram_permanent`
 - `telegram_refused`

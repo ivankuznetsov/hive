@@ -255,7 +255,6 @@ module Hive
         state_root = File.join(Hive::Paths.state_home, "prdigest")
         {
           "timezone" => "Europe/London",
-          "schedule" => { "max_catchup_days" => cfg.fetch("digest", {}).fetch("max_catchup_days", 7) },
           "github" => {
             "token_env" => "HIVE_PRDIGEST_GITHUB_TOKEN",
             "repos" => repositories

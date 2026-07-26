@@ -7,7 +7,9 @@ source: lib/hive/prdigest.rb
 # `Hive::Prdigest`
 
 `Hive::Prdigest` is the complete Hive-side boundary for merged-PR digests. It is
-an adapter, not a second digest engine.
+an adapter, not a second digest engine. The adapter invokes only deterministic
+`prdigest run`; PRDigest facts/prose commands and AI-provider configuration are
+outside Hive's runtime boundary.
 
 ## Public surface
 
@@ -32,8 +34,9 @@ arbitrary repository from command input.
 
 The temporary config is owner-only, fsynced before execution, and automatically
 removed. It contains chat/repository identifiers and token environment names,
-but never token values. `Open3.capture3` receives an argv array, so repository
-names and config paths do not cross a shell parser.
+but never token values, schedule settings, prose/provider settings, or provider
+credentials. `Open3.capture3` receives an argv array, so repository names and
+config paths do not cross a shell parser.
 
 The child must return JSON with `schema=prdigest-result`,
 `schema_version=1`, a string status, and an object-or-null error. A zero exit
@@ -44,7 +47,9 @@ internal error. Hive does not reinterpret PRDigest's delivery decision.
 
 `Hive::LondonDate` exists only so the daemon and a date-less manual invocation
 select the correct completed London calendar day. It does not calculate GitHub
-query windows; PRDigest owns those. `Hive::LocalDateWindow` is the separate
+query windows; PRDigest owns those. Hive's daemon owns catch-up and always
+dispatches one explicit date, so `digest.max_catchup_days` is deliberately not
+serialized into PRDigest's child YAML. `Hive::LocalDateWindow` is the separate
 host-local helper retained for the unrelated pending-answer digest.
 
 ## Removed implementation

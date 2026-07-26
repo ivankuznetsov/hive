@@ -4,6 +4,12 @@
 and inspect locally installed headless agent CLIs without owning an agent
 orchestration system.
 
+> [!NOTE]
+> Canonical development, issues, pull requests, and release authority remain in
+> the [Hive monorepo](https://github.com/ivankuznetsov/hive/tree/main/components/agent-cli-runtime).
+> [`ivankuznetsov/agent-cli-runtime`](https://github.com/ivankuznetsov/agent-cli-runtime)
+> is a read-only distribution mirror for focused discovery and release browsing.
+
 It ships immutable profiles for Claude Code, Codex CLI, Pi, and Grok CLI;
 compiles provider-neutral requests into argv/stdin; reports typed capability
 evidence; extracts usage from provider JSON events; and exposes an honest local
@@ -132,6 +138,10 @@ Development remains in the Hive monorepo under
 `components/agent-cli-runtime`. Hive is the primary consumer and HiveBench is
 the first named external adopter. The Hive maintainer team owns compatibility,
 security response, and releases for the package.
+
+The distribution mirror synchronizes from the canonical component tree and
+cannot become an independent development or release source. Contributions and
+security reports follow the Hive repository links above.
 
 ## Development
 

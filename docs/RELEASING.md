@@ -78,6 +78,42 @@ never overwrite or reuse it: keep Hive's cutover blocked and prepare a
 separately approved fix-forward version. Yanking or transferring ownership
 requires separate explicit authorization.
 
+### Distribution mirror
+
+[`ivankuznetsov/agent-cli-runtime`](https://github.com/ivankuznetsov/agent-cli-runtime)
+is a public, read-only distribution mirror. It gives the gem a focused
+description, topics, source browser, and release history without splitting
+development across repositories. Hive remains the canonical source, issue
+tracker, pull-request surface, and release authority.
+
+The mirror's `main` branch is synchronized one way from
+`components/agent-cli-runtime/` by **Sync from Hive monorepo**, on a six-hour
+schedule or manual dispatch. Each snapshot records its exact canonical
+component commit in `.mirror-source.json`. The sync excludes the component's
+`mirror/` administration directory from the public package tree and preserves
+the mirror-only workflow, contribution, and security files.
+New mirror-only administration must first be added to the canonical
+`mirror/` allowlist in Hive; unsourced target-only files are removed. A fully
+absent admin set is preserved only for initial bootstrap compatibility, while a
+partial canonical admin set fails before mutating the mirror.
+
+After an approved component version has been published from Hive, manually run
+**Mirror a component release** in the mirror with `vX.Y.Z`. The workflow checks
+out the exact protected `components/agent-cli-runtime/vX.Y.Z` tag, requires its
+commit on canonical `main`, verifies its gemspec version is already available
+from RubyGems, and constructs an orphan source snapshot locally. The complete
+snapshot tree must match the canonical projection before the workflow builds
+and installs it and exercises `agent-runtime --version`. Only then does it push
+the mirror tag and create the GitHub release. Existing mirror tags are accepted
+only when their complete tree matches the newly reconstructed canonical
+snapshot.
+
+The mirror workflow never pushes to Hive or RubyGems and cannot choose or
+publish a version. Do not accept issues, pull requests, independent commits, or
+release decisions there. Changes flow through Hive first; running the mirror
+jobs is a distribution follow-up, not release authority. Both mirror workflows
+pin third-party Actions to reviewed commit SHAs.
+
 A maintainer's explicit `vX.Y.Z` tag triggers `.github/workflows/release.yml`.
 The workflow requires no model-provider credentials. On GitHub-hosted runners,
 it proves the exact tag candidate as follows:

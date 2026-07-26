@@ -13,6 +13,16 @@ class AgentRuntimeTest < Minitest::Test
     end
   end
 
+  SuccessfulProbeProfile = Struct.new(:name, :launcher_identity, keyword_init: true) do
+    def check_version!
+      "1.2.3"
+    end
+
+    def preflight!
+      nil
+    end
+  end
+
   FailingCapabilityProfile = Struct.new(:name, :launcher_identity, :error, keyword_init: true) do
     def require_cli_capability!(_name)
       raise error
@@ -59,6 +69,27 @@ class AgentRuntimeTest < Minitest::Test
     assert_predicate request.add_dirs, :frozen?
     assert_predicate invocation, :frozen?
     assert_predicate invocation.argv, :frozen?
+  end
+
+  def test_existing_claude_profile_preserves_legacy_tool_scope_without_new_keywords
+    profile = custom_profile(name: :claude)
+
+    invocation = compile(
+      profile,
+      allowed_tools: [ "Read" ],
+      disallowed_tools: [ "Write" ]
+    )
+
+    assert_includes invocation.argv, "--allowedTools"
+    assert_includes invocation.argv, "--disallowedTools"
+
+    opted_out = compile(
+      custom_profile(name: :claude, tool_scope_flags: {}),
+      allowed_tools: [ "Read" ],
+      disallowed_tools: [ "Write" ]
+    )
+    refute_includes opted_out.argv, "--allowedTools"
+    refute_includes opted_out.argv, "--disallowedTools"
   end
 
   def test_compile_rejects_non_request_with_typed_compilation_evidence
@@ -226,6 +257,21 @@ class AgentRuntimeTest < Minitest::Test
     refute_includes error.evidence.diagnostic, secret
     assert_includes error.evidence.diagnostic, "[REDACTED:anthropic_api_key]"
     assert_operator error.evidence.diagnostic.bytesize, :<=, Hive::AgentRuntime::DIAGNOSTIC_BYTES
+  end
+
+  def test_successful_probe_returns_immutable_value_contract
+    result = Hive::AgentRuntime.prepare!(
+      SuccessfulProbeProfile.new(name: :custom, launcher_identity: "custom/v2")
+    )
+
+    assert_instance_of Hive::AgentRuntime::ProbeResult, result
+    assert_equal :custom, result.provider
+    assert_equal "custom/v2", result.launcher_identity
+    assert_equal "1.2.3", result.version
+    assert_predicate result, :frozen?
+    assert_predicate result.capability_evidence, :frozen?
+    assert_equal %i[headless version preflight], result.capability_evidence.map(&:capability)
+    assert result.capability_evidence.all?(&:supported)
   end
 
   def test_named_capability_failure_returns_bounded_redacted_diagnostic

@@ -86,7 +86,7 @@ Constructor kwargs (every profile freezes after init):
 | `effort_argument_builder:` | Optional callable translating a normalized effort to discrete native argv; absence means unsupported. |
 | `launcher_identity:` | Stable profile/launcher version label stored in implementation identity events. |
 | `policy_capabilities:` | Optional symbols proving which managed-package controls the runner can enforce. Empty preserves custom-profile construction but makes managed admission fail closed. |
-| `tool_scope_flags:` | Optional `:allowed` / `:disallowed` native flag map. Empty preserves custom construction and means tool lists are omitted. Claude declares `--allowedTools` / `--disallowedTools`. |
+| `tool_scope_flags:` | Optional `:allowed` / `:disallowed` native flag map. Omission defaults to empty except for a profile named `claude`, where it preserves the legacy `--allowedTools` / `--disallowedTools` mapping; an explicit empty map opts out. |
 | `raw_cli_arguments_supported:` | Explicit opt-in for legacy provider-native argv passthrough. Defaults false; Claude enables it for existing MCP/settings/capability adapters. |
 
 ### Key methods

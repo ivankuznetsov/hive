@@ -667,7 +667,9 @@ gates. U6 coverage lives in
 Those tests pin fail-closed classification when the owned worktree evidence is
 missing or unreadable, refusal of non-empty unclaimed runtime roots, and
 owner-receipt revalidation before cleanup, pinned npm/Chromium cache ownership,
-and publish-after-teardown task capture.
+publish-after-teardown task capture, and a production-Rails subprocess proving
+the private capture server returns its isolated stylesheet through Propshaft
+instead of recording an unstyled page.
 The packaged bootstrap and real clean-worktree Playwright capture remain outer
 proofs: the former archives committed `HEAD:web`, while the latter needs the
 pinned browser binaries and retains task-local media plus its exact-SHA

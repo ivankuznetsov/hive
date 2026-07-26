@@ -37,6 +37,11 @@ module Hive
       model_argument_builder: ->(model) { [ "--model", model ] },
       effort_argument_builder: ->(effort) { [ "--effort", effort ] },
       launcher_identity: "claude-code/v1",
+      tool_scope_flags: {
+        allowed: "--allowedTools",
+        disallowed: "--disallowedTools"
+      },
+      raw_cli_arguments_supported: true,
       cli_capabilities: {
         safe_mode: [ "--safe-mode" ],
         patrol_review_context: [

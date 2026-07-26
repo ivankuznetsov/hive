@@ -1,13 +1,58 @@
 ---
-title: Hive::AgentProfile + Hive::AgentProfiles
+title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
-source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb, lib/hive/agent_skills/
+source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb, lib/hive/agent_skills/
 created: 2026-04-26
 updated: 2026-07-26
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
-**TLDR**: `Hive::AgentProfile` is a frozen value object describing one CLI's invocation contract (binary path, prompt delivery, permissions, normalized model/effort translation, concrete default-model discovery, root-confined workspace-write and read-only support, opt-in verified CLI capabilities, initial-context admission reserve, version requirement, status detection, usage extraction, and skill verification). `Hive::AgentProfiles` is the singleton registry — built-in profiles for `claude`, `codex`, `pi`, and `grok` auto-register on `require "hive/agent_profiles"`. Stages look up a profile by name (`AgentProfiles.lookup(:claude)`) and pass it to `Stages::Base.spawn_agent`. Replaces the previous claude-only singleton on `Hive::Agent`. References ADR-017 / ADR-018 / ADR-019.
+**TLDR**: `Hive::AgentRuntime` is the provider-neutral, policy-light invocation
+boundary. It accepts an immutable `Request`, compiles provider argv/stdin into
+a `CompiledInvocation`, returns typed capability/probe evidence, and normalizes
+provider output into an `ObservableResult`. `Hive::AgentProfile` remains the
+frozen provider adapter and its optional-keyword constructor remains the custom
+extension contract. `Hive::AgentProfiles` remains the registry; built-ins for
+Claude, Codex, Pi, and Grok load through `require "hive/agent_runtime"`.
+Process lifetime, timeouts, workflow selection, retries, artifact acceptance,
+and stage success remain in Hive.
+
+## Supported Agent ABI
+
+The supported entry point is:
+
+```ruby
+require "hive/agent_runtime"
+```
+
+The values crossing this boundary are:
+
+- `AgentRuntime::Request` — provider-neutral intent: prompt, permission mode,
+  directories, tool scope, budget hint, model/effort, named capabilities, and
+  legacy raw provider arguments.
+- `AgentRuntime::CompiledInvocation` — frozen discrete `argv`, optional
+  `stdin_data`, provider and launcher identity, and capability evidence.
+- `AgentRuntime::CapabilityEvidence` — supported/unsupported capability,
+  provider, launcher identity, native arguments, and a bounded redacted
+  diagnostic.
+- `AgentRuntime::ProbeResult` — version/preflight evidence after the profile's
+  bounded checks.
+- `AgentRuntime::ObservableResult` — provider-neutral exit, timeout, status,
+  normalized usage, final message, and bounded diagnostic.
+
+`compile` never spawns. `prepare!` delegates the version and provider preflight
+probes. `require_capability!` is the only supported path for opt-in named CLI
+capabilities. Unsupported headless, read-only, workspace-write, required
+additional-directory, model, effort, raw-argument, and named-capability
+requests fail closed as `AgentRuntime::UnsupportedCapability` with typed
+evidence. Probe failures become `AgentRuntime::ProbeError`; other compilation
+failures become `AgentRuntime::CompilationError`. Diagnostics are secret
+redacted and capped at 512 bytes.
+
+Legacy callers still receive the existing mutable result Hash from
+`Hive::Agent#run!`. After status handling, `Agent#observable_result` exposes
+the corresponding immutable observation without changing that return
+contract.
 
 ## `Hive::AgentProfile` — value object
 
@@ -41,6 +86,8 @@ Constructor kwargs (every profile freezes after init):
 | `effort_argument_builder:` | Optional callable translating a normalized effort to discrete native argv; absence means unsupported. |
 | `launcher_identity:` | Stable profile/launcher version label stored in implementation identity events. |
 | `policy_capabilities:` | Optional symbols proving which managed-package controls the runner can enforce. Empty preserves custom-profile construction but makes managed admission fail closed. |
+| `tool_scope_flags:` | Optional `:allowed` / `:disallowed` native flag map. Omission defaults to empty except for a profile named `claude`, where it preserves the legacy `--allowedTools` / `--disallowedTools` mapping; an explicit empty map opts out. |
+| `raw_cli_arguments_supported:` | Explicit opt-in for legacy provider-native argv passthrough. Defaults false; Claude enables it for existing MCP/settings/capability adapters. |
 
 ### Key methods
 
@@ -58,6 +105,7 @@ Constructor kwargs (every profile freezes after init):
 | `require_cli_capability!(name)` | Version-checks the resolved binary, probes `<bin> <capability-argv> --help` under the same bounded process-group deadline as version discovery, verifies every option token (arguments such as a `--tools` CSV are not mistaken for flags), caches the result by binary/version/capability/argv, and returns a copy. Missing declarations, flags, binaries, failed help, and timeouts raise `Hive::AgentError`. |
 | `concrete_default_model(cfg:, project_root:)` | Resolves and validates a provider-native model without copying credentials or arbitrary CLI configuration into Hive state. Codex discovery reads the top-level TOML `model` assignment and accepts ordinary inline comments. |
 | `identity_arguments(model:, effort:, pin_model:)` | Returns normalized model/effort observability plus discrete native argv, including requested/effective effort and support. |
+| `raw_cli_arguments_supported?` | True only for a profile that explicitly accepts the legacy raw argv escape hatch. |
 
 `STATUS_DETECTION_MODES` is the closed enum used by `Hive::Agent#handle_exit` to decide success: `state_file_marker` (claude default — agent writes the marker), `exit_code_only` (CI-fix loops — make the command succeed), `output_file_exists` (reviewer/triage spawns — produce the artifact).
 
@@ -76,8 +124,10 @@ For implementation identity, Claude translates normalized values to `--model
 model_reasoning_effort=<effort>`, and Grok to `--model <model>
 --reasoning-effort <effort>`. Pi can resolve and optionally pin a concrete
 provider-native model but declares effort unsupported. An unsupported effort
-stays visible as requested while native argv omits it and `effective_effort`
-remains unset.
+stays visible as requested in the durable profile identity value while native
+argv omits it and `effective_effort` remains unset. A new explicit runtime
+invocation request fails closed instead of silently omitting that requested
+capability.
 
 `Hive::ImplementationIdentity::EventBuilder` owns the durable journal envelope
 shared by first-time identity capture and legacy reconstruction. It binds the
@@ -109,9 +159,16 @@ generation/selection policy and `Reconstructor` retains recovery policy.
 
 ## Used by
 
-- `Stages::Base.spawn_agent` — calls `profile.check_version!` then `profile.preflight!` before spawning. Honors `add_dir_flag`; logs an isolation-reduced warning when callers pass `add_dirs:` to a profile that lacks the flag.
-- `Hive::Agent#build_cmd` — composes the argv from the profile's flags.
-- `Hive::Patrol::AgentLaunch` — derives initial-context admission headroom, verified minimal patrol capability argv, and the Claude review-turn ceiling.
+- `Stages::Base.spawn_agent` — calls `AgentRuntime.prepare!` before spawning,
+  then retains isolation/budget warnings and all workflow policy.
+- `Hive::Agent` — obtains argv/stdin and normalized usage through
+  `AgentRuntime`, while retaining process-group lifecycle and status policy.
+- `Hive::DiagnosisAgent` and `Hive::DisplayName::Generator` — use the same
+  compiler with their own output/lifecycle policies; diagnosis deliberately
+  omits structured output-format flags.
+- `Hive::Patrol::AgentLaunch` — obtains verified minimal patrol capability
+  argv through `AgentRuntime.require_capability!`, while retaining the
+  Claude-specific admission and turn-limit policy.
 - `Hive::RefactorPatrol::ReviewAgentRunner` — uses Claude's read-only permission scope or a profile-declared native read-only sandbox, and pins the resolved refactor model/effort arguments.
 - `Hive::RefactorPatrol::Fixer` — accepts only a profile with `workspace_write_supported?` and invokes it through the special `workspace-write` permission mode.
 - `Stages::Base.record_usage` — reads each profile's `usage_extractor` output and stores per-spawn rows in `Hive::UsageDB`.
@@ -154,6 +211,10 @@ make arbitrary custom profiles provisionable. See
 
 ## Tests
 
+- `test/unit/agent_runtime_test.rb` — immutable request/invocation/evidence
+  contracts, exact four-provider prompt transport, fail-closed unsupported
+  capabilities, bounded redacted failures, and observation/usage
+  normalization.
 - `test/unit/agent_profile_test.rb` — version/capability caches, env override, preflight, process-group timeout cleanup for version/help probes and stdout-inheriting descendants, workspace-write flags, and headless gate.
 - `test/unit/agent_profile_modes_test.rb` — `:state_file_marker` / `:exit_code_only` / `:output_file_exists` branching in `Hive::Agent#handle_exit`.
 - `test/unit/agent_profiles_test.rb` — registry register / lookup / unknown.

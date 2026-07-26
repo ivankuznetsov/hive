@@ -19,7 +19,7 @@ the first and primary consumer.
 |-----------|-------|---------------------|-------------------|
 | Attempts admission / future RunReceipt | `candidate` | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | UserService | `candidate` | `require "hive/commands/service_installer/base"` → `Hive::Commands::ServiceInstaller::Base` | [[commands/daemon]] |
-| Agent ABI | `candidate` | `require "hive/agent_profile"` → `Hive::AgentProfile` | [[modules/agent_profile]] |
+| Agent ABI | `boundary-ready` | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_profile]] |
 | Agent Artifact Firewall | `candidate` | `require "hive/protected_files"` → `Hive::ProtectedFiles` | [[modules/protected_files]] |
 | Skillpack | `candidate` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
 | Safe Agent Git Gate | `candidate` | `require "hive/managed_git"` → `Hive::ManagedGit` | [[modules/git_ops]] |
@@ -35,6 +35,16 @@ has earned a gem, version, repository, or release.
 as a `candidate`: daemon lifecycle code still constructs its store and
 reconciler internals directly. U2 owns reconciling that construction and may
 promote Attempts only after the completed boundary proof passes.
+
+The `Agent ABI` is boundary-ready below orchestration. `AgentRuntime` exposes
+immutable request, compiled invocation, capability/probe evidence, and
+observable-result values while preserving `AgentProfile.new(...)` and
+`AgentProfiles.register` as extension points. Claude, Codex, Pi, Grok, and
+custom profiles remain adapters inside the boundary. Hive owns process
+lifetime, timeouts, retries, workflow selection, artifact acceptance, and
+stage success. `Hive::SecretPatterns` remains shared Hive infrastructure rather
+than component-owned state: both the ABI's bounded diagnostics and the future
+artifact firewall consume it.
 
 ## Catalog contract
 

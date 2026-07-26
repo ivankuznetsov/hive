@@ -31,6 +31,37 @@ means the entry point, allowed dependency direction, consumer construction
 rules, and clean-process load are enforced. It does not mean that a component
 has earned a gem, version, repository, or release.
 
+## Final graph audit
+
+The U9 audit on 2026-07-26 retained seven components: six are
+`boundary-ready`, Attempts remains the sole `candidate`, and no migration
+exceptions remain. Every retained entry point has a focused clean-process load
+proof, every catalog-owned path and focused test resolves inside this
+repository, and the direct-construction guards pass against all production
+Ruby sources.
+
+The component dependency graph has one edge:
+
+```mermaid
+flowchart LR
+  skillpack[Skillpack] --> agent_abi[Agent ABI]
+  attempts[Attempts admission - candidate]
+  user_service[UserService]
+  artifact_firewall[Agent Artifact Firewall]
+  git_gate[Safe Agent Git Gate]
+  work_ledger[WorkLedger]
+```
+
+All other cataloged components depend only on explicitly allowed lower-level
+Hive primitives. The source audit found no retained experimental facade outside
+the catalog: each promoted facade is owned by a catalog row and used by Hive,
+while Attempts is deliberately retained as a guarded candidate rather than
+misrepresented as a complete lifecycle API.
+
+This is an internal architecture verdict, not a packaging verdict. None of the
+six ready components currently has the named non-Hive adopter and independent
+package proof required by the standalone-gem plan.
+
 `Hive::Attempts::API` is the guarded reference admission slice. Its public
 result contracts, focused clean-load proof, and exact internal construction
 sites are enforced while it remains a `candidate`. U8 removed its former

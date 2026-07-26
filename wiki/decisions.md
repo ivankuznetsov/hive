@@ -11,13 +11,26 @@ tags: [decisions, adr]
 
 ## ADR-038: Reusable components stay in the monorepo and earn packaging after Hive-first boundaries
 
-**Status:** Active (strategy recorded 2026-07-25; the component catalog and enforcement harness are implemented, with component refactors following incrementally).
+**Status:** Active (strategy recorded 2026-07-25; the internal-boundary graph was audited on 2026-07-26).
 
 **Context:** Repo-grounded extraction analysis found seven mechanisms with plausible standalone value: RunReceipt, UserService, Agent Artifact Firewall, Agent ABI, Skillpack, Safe Agent Git Gate, and WorkLedger. Splitting them into separate repositories would weaken Hive's most useful maintenance property for humans and agents: one checkout exposes the callers, durable state, compatibility fixtures, integration tests, release machinery, and implementation together. Packaging them immediately inside the monorepo would preserve navigation but still freeze accidental Hive dependencies and create version/release obligations before an external consumer exists.
 
 **Decision:** Hive remains the canonical monorepo and the first and primary consumer of every reusable component. Establish and enforce internal Ruby boundaries first: one supported entry point or facade, structured public values and errors, an acyclic dependency direction, explicit state/schema/lock ownership, clean-process loading, and all Hive production consumers routed through the boundary. Existing module wiki pages plus one component catalog are the canonical agent context; do not add a parallel `.context.md` hierarchy.
 
-Implementation readiness and standalone product value are different rankings. `Hive::Attempts::API` is the guarded reference admission candidate: its focused clean-load behavior, result contracts, and exact internal composition/compatibility sites are enforced without adding generic lifecycle, cancellation, export, or raw-store APIs. It is not `boundary-ready` while Attempts reads WorkLedger projections and WorkLedger-owned `lib/hive/task_projection/store.rb` reaches back into `Hive::Attempts::Store`; the bounded catalog exception assigns removal of that reciprocal edge to U8. UserService is the next low-coupling boundary; Agent ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger follow in readiness order and may each terminate as deferred when a policy-light seam cannot be proven. RunReceipt remains the strongest standalone opportunity without forcing the largest refactor first. Operational status/Statewatch, layout migration, standalone capability probes, separate lease/capsule products, generic status rendering, and a new local-agent framework remain rejected or folded ideas rather than package commitments.
+Implementation readiness and standalone product value are different rankings.
+The final audit retains six `boundary-ready` components: UserService, Agent ABI,
+Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger.
+`Hive::Attempts::API` remains the sole guarded `candidate`: its focused
+clean-load behavior, result contracts, and exact internal composition and
+compatibility sites are enforced without adding generic lifecycle,
+cancellation, export, or raw-store APIs. U8 removed the former reciprocal
+Attempts/WorkLedger catalog edge by keeping `TaskProjection::Store` as a
+Hive-owned adapter rather than WorkLedger-owned source, so the final catalog has
+no migration exceptions. RunReceipt remains the strongest standalone
+opportunity without forcing the largest refactor first. Operational
+status/Statewatch, layout migration, standalone capability probes, separate
+lease/capsule products, generic status rendering, and a new local-agent
+framework remain rejected or folded ideas rather than package commitments.
 
 A component becomes package-eligible only after its internal boundary is stable, a named non-Hive adopter or maintained integration proves demand, the component loads and tests independently without an upward Hive dependency, compatibility and maintenance ownership are explicit, and an exact built gem installs cleanly. A qualifying package stays in this repository under `components/<gem-name>/`, uses independent SemVer, and remains a path dependency for source development while released `hive-cli` declares a normal compatible dependency. Package publication is explicit and component-scoped; path changes may select tests but never publish.
 

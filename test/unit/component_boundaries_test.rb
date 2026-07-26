@@ -229,6 +229,36 @@ class ComponentBoundariesTest < Minitest::Test
     assert_empty work_ledger_load.fetch("forbidden_constants")
   end
 
+  def test_final_graph_and_wiki_inventory_agree_with_the_catalog
+    contract = ComponentBoundaryContract.new(@document, root: ROOT)
+    assert contract.validate_catalog!
+
+    component_page = File.read(File.join(ROOT, "wiki", "component-boundaries.md"))
+    wiki_index = File.read(File.join(ROOT, "wiki", "index.md"))
+    dependencies = {}
+
+    contract.components.each do |component|
+      row = component_page.lines.find do |line|
+        line.start_with?("| #{component.fetch('name')} |")
+      end
+      refute_nil row, "wiki inventory is missing #{component.fetch('name')}"
+      assert_includes row, "`#{component.fetch('state')}`"
+      assert_includes row, "`require \"#{component.dig('entrypoint', 'require')}\"`"
+      assert_includes row, "`#{component.dig('entrypoint', 'constant')}`"
+
+      wiki_link = component.fetch("wiki_page").delete_prefix("wiki/").delete_suffix(".md")
+      assert_includes row, "[[#{wiki_link}]]"
+      assert_includes wiki_index, "[[#{wiki_link}]]"
+      assert_empty component.fetch("migration_exceptions"),
+                   "#{component.fetch('id')} retained an expired migration exception"
+
+      component_dependencies = component.fetch("component_dependencies")
+      dependencies[component.fetch("id")] = component_dependencies unless component_dependencies.empty?
+    end
+
+    assert_equal({ "skillpack" => [ "agent-abi" ] }, dependencies)
+  end
+
   def test_production_consumers_do_not_bypass_artifact_firewall
     allowed = %w[
       lib/hive/artifact_firewall.rb

@@ -100,6 +100,26 @@ tags: [gap, todo, release-proof, agent-skills]
   Sol `ce-code-review` policy, and combined Sol-runner selection are locally
   test-pinned but still need their first paid end-to-end cell.
 
+## Internal component boundary gap
+
+- The final internal graph audit retains seven catalog rows: UserService, Agent
+  ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger
+  are `boundary-ready`; Attempts admission remains the sole `candidate`.
+  Skillpack to Agent ABI is the only component dependency, and no migration
+  exceptions remain. Attempts is not ready because Hive has no demonstrated
+  need for a supported reconciliation, supervision, capacity, loss-processing,
+  cancellation, export, or raw-store lifecycle API.
+- No ready component has yet earned standalone packaging. There is no named
+  non-Hive adopter, independently installed component artifact, separate
+  compatibility promise, or explicit release decision. Those proofs belong to
+  `docs/plans/2026-07-25-002-feat-standalone-component-gems-plan.md`; internal
+  readiness must not be reported as RubyGems publication eligibility.
+- The catalog guard parses literal `require`, `require_relative`, and
+  `Constant.new` edges. Dynamic loading, aliases, reflection, factories, and
+  same-user monkeypatching remain outside that test-only architecture check.
+  A future package candidate still needs an independent package harness and
+  security claims grounded in its own runtime tests.
+
 ## Source-file coverage (representative map)
 
 | Area / file set | Page |

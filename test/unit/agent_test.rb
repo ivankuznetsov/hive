@@ -448,7 +448,7 @@ class AgentTest < Minitest::Test
                               identity_arguments: identity.native_arguments)
 
       cmd = agent.send(:build_cmd)
-      assert_equal profile.permission_flags, agent.send(:permission_flags)
+      profile.permission_flags.each { |argument| assert_includes cmd, argument }
       assert_equal %w[--model gpt-5.6-terra], cmd.each_cons(2).find { |a, _| a == "--model" }
       assert_equal [ "-c", "model_reasoning_effort=medium" ],
                    cmd.each_cons(2).find { |a, _| a == "-c" }

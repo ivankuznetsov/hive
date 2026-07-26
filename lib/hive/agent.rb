@@ -519,12 +519,6 @@ module Hive
       compiled_invocation.argv.dup
     end
 
-    def permission_flags
-      return @runtime_policy.permission_flags if @runtime_policy && !@runtime_policy.permission_flags.nil?
-
-      @profile.permission_flags(@permission_mode)
-    end
-
     def prompt_via_stdin?
       !compiled_invocation.stdin_data.nil?
     end

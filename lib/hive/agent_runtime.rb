@@ -12,6 +12,20 @@ module Hive
   module AgentRuntime
     DIAGNOSTIC_BYTES = 512
 
+    module Immutable
+      module_function
+
+      def string(value)
+        string = value.to_s
+        string.frozen? ? string : string.dup.freeze
+      end
+
+      def values(values)
+        Array(values).map { |value| string(value) }.freeze
+      end
+    end
+    private_constant :Immutable
+
     CapabilityEvidence = Data.define(
       :capability, :supported, :provider, :launcher_identity, :arguments, :diagnostic
     ) do
@@ -21,9 +35,9 @@ module Hive
           capability: capability.to_sym,
           supported: supported == true,
           provider: provider.to_sym,
-          launcher_identity: launcher_identity.to_s.dup.freeze,
-          arguments: Array(arguments).map { |argument| argument.to_s.dup.freeze }.freeze,
-          diagnostic: diagnostic&.to_s&.dup&.freeze
+          launcher_identity: Immutable.string(launcher_identity),
+          arguments: Immutable.values(arguments),
+          diagnostic: diagnostic.nil? ? nil : Immutable.string(diagnostic)
         )
       end
     end
@@ -46,32 +60,27 @@ module Hive
                      include_output_format: true)
         super(
           profile: profile,
-          prompt: prompt.to_s.dup.freeze,
-          permission_mode: permission_mode&.to_s&.dup&.freeze,
+          prompt: Immutable.string(prompt),
+          permission_mode: permission_mode.nil? ? nil : Immutable.string(permission_mode),
           permission_arguments:
-            permission_arguments.nil? ? nil : self.class.send(:freeze_values, permission_arguments),
-          add_dirs: Array(add_dirs).map { |dir| dir.to_s.dup.freeze }.freeze,
+            permission_arguments.nil? ? nil : Immutable.values(permission_arguments),
+          add_dirs: Immutable.values(add_dirs),
           require_add_dirs: require_add_dirs == true,
-          allowed_tools: self.class.send(:freeze_values, allowed_tools),
-          disallowed_tools: self.class.send(:freeze_values, disallowed_tools),
+          allowed_tools: Immutable.values(allowed_tools),
+          disallowed_tools: Immutable.values(disallowed_tools),
           max_budget_usd: max_budget_usd,
-          model: model&.to_s&.dup&.freeze,
-          effort: effort&.to_s&.dup&.freeze,
+          model: model.nil? ? nil : Immutable.string(model),
+          effort: effort.nil? ? nil : Immutable.string(effort),
           pin_model: pin_model != false,
-          identity_arguments: self.class.send(:freeze_values, identity_arguments),
+          identity_arguments: Immutable.values(identity_arguments),
           capabilities: Array(capabilities).map(&:to_sym).uniq.freeze,
-          raw_cli_arguments: self.class.send(:freeze_values, raw_cli_arguments),
-          trusted_cli_arguments: self.class.send(:freeze_values, trusted_cli_arguments),
-          executable: executable&.to_s&.dup&.freeze,
-          command_prefix: self.class.send(:freeze_values, command_prefix),
+          raw_cli_arguments: Immutable.values(raw_cli_arguments),
+          trusted_cli_arguments: Immutable.values(trusted_cli_arguments),
+          executable: executable.nil? ? nil : Immutable.string(executable),
+          command_prefix: Immutable.values(command_prefix),
           include_output_format: include_output_format != false
         )
       end
-
-      def self.freeze_values(values)
-        Array(values).map { |value| value.to_s.dup.freeze }.freeze
-      end
-      private_class_method :freeze_values
     end
 
     CompiledInvocation = Data.define(
@@ -79,10 +88,10 @@ module Hive
     ) do
       def initialize(argv:, stdin_data:, provider:, launcher_identity:, capability_evidence:)
         super(
-          argv: Array(argv).map { |argument| argument.to_s.dup.freeze }.freeze,
-          stdin_data: stdin_data&.to_s&.dup&.freeze,
+          argv: Immutable.values(argv),
+          stdin_data: stdin_data.nil? ? nil : Immutable.string(stdin_data),
           provider: provider.to_sym,
-          launcher_identity: launcher_identity.to_s.dup.freeze,
+          launcher_identity: Immutable.string(launcher_identity),
           capability_evidence: Array(capability_evidence).freeze
         )
       end
@@ -94,8 +103,8 @@ module Hive
       def initialize(provider:, launcher_identity:, version:, capability_evidence:)
         super(
           provider: provider.to_sym,
-          launcher_identity: launcher_identity.to_s.dup.freeze,
-          version: version&.to_s&.dup&.freeze,
+          launcher_identity: Immutable.string(launcher_identity),
+          version: version.nil? ? nil : Immutable.string(version),
           capability_evidence: Array(capability_evidence).freeze
         )
       end
@@ -109,13 +118,13 @@ module Hive
                      status:, usage:, final_message:, diagnostic:)
         super(
           provider: provider.to_sym,
-          launcher_identity: launcher_identity.to_s.dup.freeze,
+          launcher_identity: Immutable.string(launcher_identity),
           exit_code: exit_code,
           timed_out: timed_out == true,
           status: status&.to_sym,
           usage: usage&.dup&.freeze,
-          final_message: final_message&.to_s&.dup&.freeze,
-          diagnostic: diagnostic&.to_s&.dup&.freeze
+          final_message: final_message.nil? ? nil : Immutable.string(final_message),
+          diagnostic: diagnostic.nil? ? nil : Immutable.string(diagnostic)
         )
       end
     end

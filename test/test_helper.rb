@@ -20,6 +20,36 @@ require "stringio"
 require "yaml"
 require "shellwords"
 require "English"
+
+# Never let a normal test subprocess inherit the operator's Hive state, home,
+# XDG roots, agent configuration, GitHub configuration, or global Git config.
+# Set only HOME and remove the optional overrides so production defaults keep
+# following HOME when an individual test replaces it. Authenticated smoke tests
+# opt out explicitly because they exercise the operator's real agent login.
+unless ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
+  HIVE_TEST_USER_ROOT = Dir.mktmpdir("hive-test-user").freeze
+  test_home = File.join(HIVE_TEST_USER_ROOT, "home")
+  FileUtils.mkdir_p(test_home)
+  ENV["HOME"] = test_home
+  %w[
+    HIVE_HOME
+    XDG_CONFIG_HOME
+    XDG_DATA_HOME
+    XDG_STATE_HOME
+    XDG_CACHE_HOME
+    XDG_BIN_HOME
+    CLAUDE_CONFIG_DIR
+    CODEX_HOME
+    PI_CODING_AGENT_DIR
+    GROK_HOME
+    GH_CONFIG_DIR
+    GIT_CONFIG_GLOBAL
+  ].each { |key| ENV.delete(key) }
+  Minitest.after_run do
+    FileUtils.rm_rf(HIVE_TEST_USER_ROOT)
+  end
+end
+
 require "hive"
 require_relative "support/workflow_helpers"
 

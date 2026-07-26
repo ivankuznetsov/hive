@@ -131,6 +131,21 @@ task default: :test
 
 ## Test helpers (`test/test_helper.rb`)
 
+- Normal test processes replace `HOME` with a disposable
+  `hive-test-user*/home` directory before loading Hive, then remove it after
+  the suite. They delete inherited Hive, XDG, Claude/Codex/Pi/Grok, GitHub, and
+  Git global-path overrides instead of pinning them to fixed paths. Production
+  defaults therefore keep following `HOME` when an individual test swaps it,
+  while Git's standard global files remain under that test's disposable home.
+  `GIT_CONFIG_GLOBAL` is removed rather than replaced because the babysitter
+  correctly rejects that caller-controlled execution channel. This keeps
+  subprocesses hermetic even when the caller is a daemon
+  exporting real user paths: tests cannot recreate legacy attempt roots,
+  rewrite managed agent skills, consume real GitHub configuration, or change
+  credential helpers, hooks, and signing settings. The authenticated
+  `rake smoke` task explicitly opts out because it exists to exercise real
+  operator logins; direct smoke-file runs must set
+  `HIVE_TEST_ALLOW_REAL_USER_ENV=1` deliberately.
 - `with_tmp_dir` — `Dir.mktmpdir("hive-test", &block)`.
 - `with_tmp_git_repo` — `git init -b master`, configures user/email and disables GPG signing, makes one initial commit, yields the path.
 - `with_tmp_global_config(home: nil)` — overrides `ENV["HIVE_HOME"]` to a tmp dir, writes an empty `registered_projects: []` YAML, and defaults `HOME` to the same tmp dir so subprocesses and service-installer tests do not touch the operator's real home. Pass `home:` when a test intentionally installs fake user-level skills or plugins under a separate fake HOME.

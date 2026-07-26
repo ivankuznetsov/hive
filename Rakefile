@@ -72,7 +72,11 @@ end
 #
 # Per project CLAUDE.md (Ivan's rule "use real APIs, make real requests"):
 # this is the test bed where claude actually gets called.
-Rake::TestTask.new(:smoke) do |t|
+task "test:allow_real_user_environment" do
+  ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] = "1"
+end
+
+Rake::TestTask.new(smoke: "test:allow_real_user_environment") do |t|
   t.libs << "test"
   t.libs << "lib"
   t.test_files = FileList["test/smoke/**/*_test.rb"]

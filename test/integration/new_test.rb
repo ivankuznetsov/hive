@@ -741,7 +741,9 @@ class NewTest < Minitest::Test
   end
 
   def test_attachments_accept_absolute_sources_outside_tmpdir
-    source_dir = Dir.mktmpdir("hive-new-src-", Dir.home)
+    # The suite's disposable HOME deliberately lives under Dir.tmpdir, so use
+    # the checkout as this fixture's short-lived non-tmp absolute source.
+    source_dir = Dir.mktmpdir(".hive-new-src-", File.expand_path("../..", __dir__))
     begin
       fixture = File.join(source_dir, "fixture.png")
       File.binwrite(fixture, "outside-tmp".b)

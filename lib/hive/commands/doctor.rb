@@ -10,7 +10,7 @@ require "hive/agent_profiles/claude"
 require "hive/agent_profiles/codex"
 require "hive/agent_profiles/pi"
 require "hive/claude_launcher"
-require "hive/agent_skills/inspector"
+require "hive/agent_skills"
 require "hive/web/environment"
 
 module Hive
@@ -75,7 +75,7 @@ module Hive
       end
 
       def managed_skill_rows
-        inspector = @inspector || Hive::AgentSkills::Inspector.new(
+        inspector = @inspector || Hive::AgentSkills.hive_inspector(
           config: @config,
           project_root: @project_root,
           environment: @environment,

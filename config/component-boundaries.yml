@@ -297,16 +297,22 @@ components:
 
   - id: skillpack
     name: Skillpack
-    state: candidate
+    state: boundary-ready
     entrypoint:
       file: lib/hive/agent_skills.rb
       require: hive/agent_skills
       constant: Hive::AgentSkills
     public_contract:
       values:
-        - Hive::AgentSkills
+        - Hive::AgentSkills::Plan
+        - Hive::AgentSkills::Projection
+        - Hive::AgentSkills::ProjectionReport
       errors:
-        - Hive::AgentSkills::Manifest::ValidationError
+        - Hive::AgentSkills::Error
+        - Hive::AgentSkills::ForeignContent
+        - Hive::AgentSkills::StalePlan
+        - Hive::AgentSkills::UnsafePath
+        - Hive::AgentSkills::ValidationError
     owned_paths:
       - lib/hive/agent_skills.rb
       - lib/hive/agent_skills
@@ -319,19 +325,51 @@ components:
       - "Private staging and complete-directory atomic publication"
     component_dependencies:
       - agent-abi
-    allowed_hive_dependencies: []
+    allowed_hive_dependencies:
+      - hive/atomic_file
+      - hive/config
+      - hive/errors
+      - hive/skill_check
+      - hive/version
     internal_collaborators:
+      - Hive::AgentSkills::Adapters::Registry
+      - Hive::AgentSkills::CanonicalSkill
+      - Hive::AgentSkills::CommandRunner
       - Hive::AgentSkills::DirectoryPublisher
+      - Hive::AgentSkills::Inspector
+      - Hive::AgentSkills::Manifest
       - Hive::AgentSkills::Provisioner
-    forbidden_constructions: []
+      - Hive::AgentSkills::TargetResolver
+    forbidden_constructions:
+      - Hive::AgentSkills::Adapters::Registry
+      - Hive::AgentSkills::CanonicalSkill
+      - Hive::AgentSkills::CommandRunner
+      - Hive::AgentSkills::DirectoryPublisher
+      - Hive::AgentSkills::Inspector
+      - Hive::AgentSkills::Manifest
+      - Hive::AgentSkills::Provisioner
+      - Hive::AgentSkills::TargetResolver
     authorized_internal_constructions: []
     hive_consumers:
+      - lib/hive/commands/doctor.rb
+      - lib/hive/commands/init.rb
       - lib/hive/commands/setup_agents.rb
-    mutation_authority: "Hive setup policy chooses destinations; publisher applies a revalidated projection."
-    recovery_surface: "Foreign trees are refused and prior directories are preserved or restored on failure."
+      - lib/hive/web/agent_skills.rb
+    mutation_authority: "Hive adapters choose canonical sources and trusted agent-home roots; the facade applies only its revalidated projection plan."
+    recovery_surface: "Typed refusal and stale-plan errors preserve foreign trees; atomic publication preserves or restores the prior managed directory on failure."
     wiki_page: wiki/commands/setup-agents.md
     focused_tests:
+      - test/unit/agent_skills/facade_test.rb
+      - test/unit/agent_skills/canonical_skill_test.rb
+      - test/unit/agent_skills/directory_publisher_test.rb
+      - test/unit/agent_skills/inspector_test.rb
       - test/unit/agent_skills/manifest_test.rb
+      - test/unit/agent_skills/provisioner_test.rb
+      - test/unit/agent_skills/bundled_skill_test.rb
+      - test/unit/agent_skills/openclaw_test.rb
+      - test/unit/commands/setup_agents_test.rb
+      - test/integration/agent_skill_adapters_test.rb
+      - test/integration/setup_agents_test.rb
     migration_exceptions: []
 
   - id: safe-agent-git-gate

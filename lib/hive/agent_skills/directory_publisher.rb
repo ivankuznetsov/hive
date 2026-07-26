@@ -3,6 +3,8 @@ require "fileutils"
 require "json"
 require "securerandom"
 
+require "hive/agent_skills/errors"
+
 module Hive
   module AgentSkills
     # Verifies and atomically publishes one complete Hive-owned skill
@@ -17,12 +19,40 @@ module Hive
       LOCK_TIMEOUT_SEC = 10
       SAFE_RELATIVE = %r{\A(?!/)(?!.*(?:\A|/)\.\.(?:/|\z))[A-Za-z0-9._/-]+\z}
 
-      class Error < Hive::ConfigError; end
-      class UnsafePath < Error; end
-      class Changed < Error; end
-      class ForeignContent < Error; end
+      Error = Hive::AgentSkills::Error
+      UnsafePath = Hive::AgentSkills::UnsafePath
+      Changed = Hive::AgentSkills::StalePlan
+      ForeignContent = Hive::AgentSkills::ForeignContent
 
-      Report = Data.define(:state, :destination, :manifest, :files, :snapshot, :issues)
+      Report = Data.define(:state, :destination, :manifest, :files, :snapshot, :issues) do
+        def initialize(state:, destination:, manifest:, files:, snapshot:, issues:)
+          super(
+            state: immutable(state),
+            destination: immutable(destination),
+            manifest: immutable(manifest),
+            files: immutable(files),
+            snapshot: immutable(snapshot),
+            issues: immutable(issues)
+          )
+        end
+
+        private
+
+        def immutable(value)
+          case value
+          when Hash
+            value.to_h do |key, item|
+              [ immutable(key), immutable(item) ]
+            end.freeze
+          when Array
+            value.map { |item| immutable(item) }.freeze
+          when String
+            value.dup.freeze
+          else
+            value.freeze
+          end
+        end
+      end
 
       attr_reader :root, :destination, :parent, :projection
 

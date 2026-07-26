@@ -3,7 +3,7 @@ title: hive setup-agents
 type: command
 source: skills/hive/, config/agent-skills.yml, lib/hive/agent_skills/, lib/hive/commands/setup_agents.rb
 created: 2026-07-10
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [command, agents, skills, hive, canonical, provisioning, consent]
 ---
 
@@ -100,16 +100,42 @@ install but keep individual verification rows.
   `config.toml`; a stale, disabled plugin is updated and then enabled in one
   repair plan, rather than being mistaken for a healthy runtime skill or
   requiring a second setup run.
-- The bundled Hive capability for Claude, Codex, and Pi uses
-  `DirectoryPublisher` against each agent's private user root. It verifies the
-  projection manifest and file digests, stages every file in a private sibling,
-  then swaps the whole `skills/hive` directory atomically.
+- The bundled Hive capability for Claude, Codex, and Pi uses the supported
+  `Hive::AgentSkills` projection facade against each agent's private user root.
+  It verifies the projection manifest and file digests, stages every file in a
+  private sibling, then swaps the whole `skills/hive` directory atomically.
 
 All commands execute as argv arrays in dedicated process groups. A deadline
 terminates and reaps the command plus descendants before setup reports a
 timeout, so an installer cannot continue mutating after its operation has
 failed. Missing CLIs are `unavailable` skips; Hive does not install or
 authenticate providers.
+
+## Internal Skillpack boundary
+
+`require "hive/agent_skills"` is the supported policy-light Ruby entry point.
+It clean-loads the canonical compiler and atomic directory projection
+mechanism without loading Hive configuration, agent profiles, workflow stages,
+commands, web code, or native package inventory.
+
+The facade exposes four operations:
+
+1. `render(platform, ...)` returns a deterministic `Projection` for the closed
+   OpenClaw, Claude, Codex, or Pi registry.
+2. `inspect(root:, trusted_root:, projection:)` returns a read-only
+   `ProjectionReport`.
+3. `plan(...)` binds that report and its path/tree identities into a frozen
+   `Plan` with `publish`, `noop`, or `refuse`.
+4. `apply(plan)` revalidates the preview and either atomically publishes the
+   complete directory, returns the unchanged healthy report, or raises a typed
+   `StalePlan` / `ForeignContent` error without mutation.
+
+Hive remains the first consumer. `Inspector`, `Provisioner`, target resolution,
+the package manifest, native CLI adapters, consent, filtering, JSON envelopes,
+and command wording are Hive adapters loaded lazily through the facade; they
+are not supported Skillpack collaborators for commands or web code to require
+or construct directly. This boundary does not add a generic marketplace,
+signature scheme, distribution protocol, gem, or independent version.
 
 ## Ownership and failure safety
 
@@ -176,7 +202,7 @@ hand-edit `openclaw/skills/hive/`.
 
 ## Tests
 
-- `test/unit/agent_skills/{manifest,inspector,provisioner}_test.rb`
+- `test/unit/agent_skills/{facade,manifest,inspector,provisioner}_test.rb`
 - `test/unit/agent_skills/{canonical_skill,directory_publisher}_test.rb`
 - `test/unit/agent_skills/adapters/*_test.rb`
 - `test/unit/commands/setup_agents_test.rb`

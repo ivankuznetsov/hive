@@ -122,8 +122,26 @@ class ComponentBoundariesTest < Minitest::Test
                  artifact_firewall.fetch("internal_collaborators")
     assert_empty artifact_firewall.fetch("migration_exceptions")
 
+    skillpack = contract.component("skillpack")
+    assert_equal "boundary-ready", skillpack.fetch("state")
+    assert_equal "hive/agent_skills", skillpack.dig("entrypoint", "require")
+    assert_equal "Hive::AgentSkills", skillpack.dig("entrypoint", "constant")
+    assert_equal(
+      %w[
+        Hive::AgentSkills::Plan
+        Hive::AgentSkills::Projection
+        Hive::AgentSkills::ProjectionReport
+      ],
+      skillpack.dig("public_contract", "values").sort
+    )
+    assert_includes skillpack.dig("public_contract", "errors"),
+                    "Hive::AgentSkills::StalePlan"
+    assert_includes skillpack.fetch("forbidden_constructions"),
+                    "Hive::AgentSkills::DirectoryPublisher"
+    assert_empty skillpack.fetch("migration_exceptions")
+
     remaining_candidates = contract.components.reject do |component|
-      [ user_service, agent_abi, artifact_firewall ].include?(component)
+      [ user_service, agent_abi, artifact_firewall, skillpack ].include?(component)
     end
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
@@ -146,6 +164,11 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::ArtifactFirewall", artifact_firewall_load.fetch("constant")
     assert_empty artifact_firewall_load.fetch("forbidden_loaded_features")
     assert_empty artifact_firewall_load.fetch("forbidden_constants")
+
+    skillpack_load = contract.validate_clean_load!("skillpack")
+    assert_equal "Hive::AgentSkills", skillpack_load.fetch("constant")
+    assert_empty skillpack_load.fetch("forbidden_loaded_features")
+    assert_empty skillpack_load.fetch("forbidden_constants")
   end
 
   def test_production_consumers_do_not_bypass_artifact_firewall
@@ -164,6 +187,24 @@ class ComponentBoundariesTest < Minitest::Test
 
     assert_empty offenders,
                  "Hive production consumers must use Hive::ArtifactFirewall: #{offenders.join(', ')}"
+  end
+
+  def test_production_consumers_do_not_require_skillpack_internals
+    owned = contract_component_owned_files("skillpack")
+    internal_require = %r{
+      require\ ["']hive/agent_skills/
+      (?:adapters|canonical_skill|command_runner|directory_publisher|
+         errors|filesystem_inventory|inspector|manifest|provisioner|target_resolver)
+    }x
+    offenders = Dir.glob(File.join(ROOT, "lib", "hive", "**", "*.rb")).filter_map do |path|
+      relative = path.delete_prefix("#{ROOT}/")
+      next if owned.include?(relative)
+
+      relative if File.read(path).match?(internal_require)
+    end
+
+    assert_empty offenders,
+                 "Hive production consumers must require hive/agent_skills: #{offenders.join(', ')}"
   end
 
   def test_invalid_catalog_rows_name_the_component_and_field
@@ -682,6 +723,19 @@ class ComponentBoundariesTest < Minitest::Test
   end
 
   private
+
+  def contract_component_owned_files(id)
+    component(@document, id).fetch("owned_paths").flat_map do |relative|
+      absolute = File.join(ROOT, relative)
+      if File.directory?(absolute)
+        Dir.glob(File.join(absolute, "**", "*.rb")).map do |path|
+          path.delete_prefix("#{ROOT}/")
+        end
+      else
+        relative
+      end
+    end
+  end
 
   def component(document, id)
     document.fetch("components").find { |entry| entry.fetch("id") == id }

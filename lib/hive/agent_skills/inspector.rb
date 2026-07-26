@@ -2,9 +2,10 @@ require "json"
 require "rubygems/version"
 
 require "hive/agent_skills"
-require "hive/agent_skills/canonical_skill"
-require "hive/agent_skills/directory_publisher"
+require "hive/agent_skills/command_runner"
 require "hive/agent_skills/filesystem_inventory"
+require "hive/agent_skills/manifest"
+require "hive/agent_skills/target_resolver"
 require "hive/skill_check"
 
 module Hive
@@ -156,7 +157,7 @@ module Hive
 
       def inspect_bundled_target(target, package, contract)
         bundled_spec = package.native_for(target.agent)
-        projection = CanonicalSkill.new.render(target.agent)
+        projection = Hive::AgentSkills.render(target.agent)
         root = config_root_for(bundled_spec)
         destination = File.join(root, projection.destination_relative)
         expected = {
@@ -188,12 +189,11 @@ module Hive
           )
         end
 
-        publisher = DirectoryPublisher.new(
+        report = Hive::AgentSkills.inspect(
           root: root,
           trusted_root: @environment["HOME"] || Dir.home,
           projection: projection
         )
-        report = publisher.report
         cli = inspect_bundled_cli(profile: profile, bin: bin)
         resolution = inspect_bundled_resolution(target, contract, destination)
         issues = cli.fetch("issues").map(&:dup)

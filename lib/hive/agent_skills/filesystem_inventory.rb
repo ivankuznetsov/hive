@@ -2,7 +2,6 @@ require "json"
 require "rubygems/version"
 require "uri"
 
-require "hive"
 require "hive/agent_skills"
 require "hive/skill_check"
 

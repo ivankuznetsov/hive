@@ -763,6 +763,11 @@ private owner receipt proves the same lifecycle token. Cleanup repeats that
 ownership proof before removing runtime state, so a recorder cannot adopt or
 erase an unrelated directory.
 
+The private production server enables Propshaft's asset middleware only for the
+capture runtime, so its externally compiled CSS and JavaScript are served in
+the recording without writing `public/assets` into the source worktree. Normal
+production web service asset handling is unchanged.
+
 The environment is deny-by-default: it gets private HOME/XDG/Hive/storage,
 bundle, assets, and tmp roots plus an ephemeral Rails secret; provider,
 GitHub/Telegram/release, SSH-agent, proxy, Bundler/Gem override, and Ruby hook

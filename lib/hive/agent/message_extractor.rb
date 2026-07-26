@@ -31,7 +31,8 @@ module Hive
             end
           elsif data.nil? && raw_line
             @plain_tail << raw_line
-            @plain_tail = @plain_tail.byteslice(-@max_bytes, @max_bytes) || @plain_tail
+            tail = @plain_tail.byteslice(-@max_bytes, @max_bytes) || @plain_tail
+            @plain_tail = tail.scrub("")
           end
           message
         end

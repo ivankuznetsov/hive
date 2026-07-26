@@ -85,11 +85,6 @@ module Hive
           api_key = [ ENV["XAI_API_KEY"], ENV["GROK_CODE_XAI_API_KEY"] ].any? do |value|
             !value.to_s.strip.empty?
           end
-          explicit_path = [ ENV["GROK_AUTH_PATH"], ENV["GROK_HOME"] ].any? do |value|
-            !value.to_s.strip.empty?
-          end
-
-          grok_auth_path(home:) if api_key && explicit_path
           return true if api_key
 
           credential_present?(grok_auth_path(home:))

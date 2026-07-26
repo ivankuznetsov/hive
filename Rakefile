@@ -30,6 +30,16 @@ Rake::TestTask.new do |t|
   t.warning = false
 end
 
+Rake::TestTask.new("test:agent_cli_runtime") do |t|
+  t.libs << "components/agent-cli-runtime/test"
+  t.libs << "components/agent-cli-runtime/lib"
+  t.test_files = FileList["components/agent-cli-runtime/test/**/*_test.rb"]
+  t.warning = false
+  t.description = "Run the standalone Agent CLI Runtime package tests"
+end
+
+Rake::Task[:test].enhance([ "test:agent_cli_runtime" ])
+
 desc "Run the default suite with merged stdlib Coverage reporting and a 100% line threshold"
 task :coverage do
   root = File.expand_path(__dir__)

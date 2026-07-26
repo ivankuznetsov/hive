@@ -1,0 +1,56 @@
+#!/usr/bin/env ruby
+
+require "json"
+require "open3"
+
+ROOT = File.expand_path("..", __dir__)
+$LOAD_PATH.unshift File.join(ROOT, "lib")
+require "agent_cli_runtime/version"
+
+ref_name = ARGV.fetch(0) {
+  abort "usage: release-preflight TAG EXPECTED_COMMIT [MAIN_REF]"
+}
+expected_commit = ARGV.fetch(1)
+main_ref = ARGV.fetch(2, "origin/main")
+
+match = ref_name.match(
+  %r{\Acomponents/agent-cli-runtime/v(?<version>\d+\.\d+\.\d+)\z}
+)
+abort "invalid component tag: #{ref_name}" unless match
+abort "tag/source version mismatch" unless
+  match[:version] == AgentCliRuntime::VERSION
+abort "expected commit must be a full SHA" unless
+  expected_commit.match?(/\A[0-9a-f]{40}\z/)
+
+repository_root = File.expand_path("../..", ROOT)
+git = lambda do |*arguments|
+  out, err, status = Open3.capture3("git", "-C", repository_root, *arguments)
+  abort err unless status.success?
+  out.strip
+end
+
+head = git.call("rev-parse", "HEAD")
+abort "checkout #{head} does not match expected commit #{expected_commit}" unless
+  head == expected_commit
+
+tag_commit = git.call("rev-parse", "#{ref_name}^{commit}")
+abort "tag #{ref_name} does not resolve to expected commit" unless
+  tag_commit == expected_commit
+
+_out, err, status = Open3.capture3(
+  "git", "-C", repository_root,
+  "merge-base", "--is-ancestor", expected_commit, main_ref
+)
+abort(err.empty? ? "candidate is not reachable from #{main_ref}" : err) unless
+  status.success?
+
+dirty = git.call("status", "--porcelain")
+abort "release checkout is dirty" unless dirty.empty?
+
+puts JSON.generate(
+  schema_version: 1,
+  tag: ref_name,
+  version: AgentCliRuntime::VERSION,
+  commit: expected_commit,
+  main_ref: main_ref
+)

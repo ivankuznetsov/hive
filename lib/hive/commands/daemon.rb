@@ -25,11 +25,11 @@ require "hive/update_check/state"
 require "hive/attempts/store"
 require "hive/attempts/api"
 require "hive/attempts/process_identity"
-require "hive/attempts/legacy_backfiller"
 require "hive/attempts/reconciler"
 require "hive/attempts/lost_outcome"
 require "hive/conditions/attempt_observer"
 require "hive/commands/service_installer/result_presenter"
+require "hive/recovery/migration"
 
 module Hive
   module Commands
@@ -136,6 +136,7 @@ module Hive
 
         # Stale PID file from a prior crash → safe to remove.
         File.delete(pid_file) if File.exist?(pid_file)
+        Hive::Recovery::Migration.ensure!(state_home: @hive_home)
 
         if @detach
           Process.daemon(true, true)
@@ -254,20 +255,16 @@ module Hive
           logger: logger
         )
 
-        attempt_store = Hive::Attempts::Store.new
+        attempt_store = Hive::Attempts::Store.new(
+          root: File.join(@hive_home, "attempts", "v2")
+        )
         attempts_api = Hive::Attempts::API.new(
           store: attempt_store
         )
         attempt_process_identity = Hive::Attempts::ProcessIdentity.new
-        attempt_backfiller = Hive::Attempts::LegacyBackfiller.new(
-          store: attempt_store,
-          process_identity: attempt_process_identity,
-          logger: logger
-        )
         attempt_reconciler = Hive::Attempts::Reconciler.new(
           store: attempt_store,
           process_identity: attempt_process_identity,
-          legacy_backfiller: attempt_backfiller,
           condition_observer: Hive::Conditions::AttemptObserver.new(
             store: attempt_store, logger: logger
           ),

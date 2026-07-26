@@ -19,7 +19,6 @@ module Hive
 
       SCHEMA = "hive-dispatch-request".freeze
       SCHEMA_VERSION = 4
-      SUPPORTED_SCHEMA_VERSIONS = [ 2, 3, 4 ].freeze
       REQUESTORS = %w[
         bot healer web tui cli action daemon recorder operator
       ].freeze
@@ -798,7 +797,7 @@ module Hive
           return :not_a_hash unless data.is_a?(Hash)
           return :wrong_schema unless data["schema"] == SCHEMA
           schema_version = data["schema_version"]
-          return :unknown_schema_version unless SUPPORTED_SCHEMA_VERSIONS.include?(schema_version)
+          return :unknown_schema_version unless schema_version == SCHEMA_VERSION
 
           request_id = data["request_id"].to_s
           return :missing_request_id if request_id.empty?
@@ -822,25 +821,21 @@ module Hive
           return :invalid_created_at if created_at.nil?
           return :invalid_requestor unless REQUESTORS.include?(data["requestor"].to_s)
 
-          if schema_version >= 3
-            required_v3 = %w[task_generation predecessor_attempt_id inherited_outputs]
-            return :missing_v3_fields unless required_v3.all? { |key| data.key?(key) }
-            return :invalid_inherited_outputs unless data["inherited_outputs"].is_a?(Array)
-            begin
-              data["inherited_outputs"].each do |reference|
-                Hive::Attempts::OutputReference.validate_shape!(reference)
-              end
-            rescue Hive::Attempts::InvalidOutputReference
-              return :invalid_inherited_outputs
+          required_attempt_fields = %w[task_generation predecessor_attempt_id inherited_outputs]
+          return :missing_attempt_fields unless required_attempt_fields.all? { |key| data.key?(key) }
+          return :invalid_inherited_outputs unless data["inherited_outputs"].is_a?(Array)
+          begin
+            data["inherited_outputs"].each do |reference|
+              Hive::Attempts::OutputReference.validate_shape!(reference)
             end
+          rescue Hive::Attempts::InvalidOutputReference
+            return :invalid_inherited_outputs
           end
-          if schema_version >= 4
-            return :missing_v4_fields unless data.key?("recovery")
-            begin
-              validate_recovery!(data["recovery"]) unless data["recovery"].nil?
-            rescue ArgumentError
-              return :invalid_recovery
-            end
+          return :missing_recovery unless data.key?("recovery")
+          begin
+            validate_recovery!(data["recovery"]) unless data["recovery"].nil?
+          rescue ArgumentError
+            return :invalid_recovery
           end
 
           Request.new(

@@ -144,6 +144,11 @@ Setup installs both managed services with the invoked user-facing binary, so dae
 
 The web service is separate from the daemon. `hive web install` writes `~/.config/systemd/user/hive-web.service` on Linux or `~/Library/LaunchAgents/local.hive-web.plist` on macOS and pins all six resolved `HIVE_WEB_*` values into the unit; unsupported platforms report a platform exception instead of constructing invalid service-manager argv. When setup receives the installer's successful `unsupported` outcome (including Linux without systemd-user), its service fields remain observationally exact (`enabled`, `running`, and `ready` stay false with `readiness: manager_unavailable`), but the platform-exception phases and process exit remain successful and report foreground `hive web`, WSL-systemd, and Hivebox recovery paths. A genuine install failure, drifted unit, or active-but-not-ready service remains nonzero. Ordinary setup preserves a drifted user-customized unit and points to explicit `hive web install --force` repair. Repeated macOS setup skips `launchctl load` when an unchanged plist is already loaded. Shared installers expose read-only enabled/running probes; mutating setup/install resamples asynchronous launchd lifecycle state before Hive web probes the manager-owned local bind for bounded `/health` readiness, while read-only status stays immediate and reports the separately advertised effective origin. Windows has no separate native service manager in this contract: use WSL with systemd or Hivebox.
 
+The mutating web-install readiness window uses 40 samples at 250 ms intervals,
+so a cold packaged Rails boot can take roughly ten seconds without producing a
+false `active_not_ready` install failure. This longer window does not make
+`hive web status` block; status retains its single immediate health sample.
+
 ## Backlinks
 
 - [[cli]]

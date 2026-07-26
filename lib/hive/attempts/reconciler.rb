@@ -18,11 +18,10 @@ module Hive
       attr_reader :store
 
       def initialize(store:, process_identity: ProcessIdentity.new, logger: nil,
-                     legacy_backfiller: nil, condition_observer: nil)
+                     condition_observer: nil)
         @store = store
         @process_identity = process_identity
         @logger = logger
-        @legacy_backfiller = legacy_backfiller
         @condition_observer = condition_observer
         @logged = {}
       end
@@ -40,7 +39,6 @@ module Hive
       end
 
       def reconcile(now: Time.now.utc)
-        @legacy_backfiller&.backfill(now: now)
         scan = @store.scan
         statuses = []
         newly_lost = []
@@ -78,10 +76,6 @@ module Hive
         return reconciled(record, :terminal, :not_applicable, { receipt: "valid" }) if record.state == "terminal"
         return reconciled(record, :already_lost, :not_applicable, { loss: record["loss"] }) if record.state == "lost"
 
-        if record.compatibility?
-          return reconcile_compatibility(record, now: now)
-        end
-
         if record.state == "launching" && !record.claimed?
           return expire(record, "launch_timeout", now: now) if expired?(record, now)
 
@@ -113,18 +107,6 @@ module Hive
           diagnostics: evidence.merge("owner_status" => owner_status.to_s)
         )
         reconciled(lost, :lost, owner_status, evidence)
-      end
-
-      def reconcile_compatibility(record, now:)
-        owner_status = @process_identity.status(record.wrapper)
-        return reconciled(record, :legacy_adopted, owner_status) if owner_status == :matching
-        return reconciled(record, :legacy_suspect, owner_status) if owner_status == :unverifiable
-
-        lost = @store.mark_lost(
-          record, reason: "legacy_owner_gone", now: now,
-          diagnostics: { "owner_status" => owner_status.to_s }
-        )
-        reconciled(lost, :lost, owner_status, { compatibility: true })
       end
 
       def expire(record, reason, now:, owner_status: :not_applicable)
@@ -214,9 +196,9 @@ module Hive
           case status.classification
           when :terminal then [ :attempt_terminal ]
           when :lost then [ :attempt_lost ]
-          when :suspect, :legacy_suspect then [ :attempt_suspect ]
+          when :suspect then [ :attempt_suspect ]
           when :reserved then [ :attempt_accepted ]
-          when :adopted, :legacy_adopted
+          when :adopted
             status.attempt.state == "launching" ? [ :attempt_claimed ] :
               [ :attempt_running, :attempt_adopted ]
           else []

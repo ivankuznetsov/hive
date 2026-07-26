@@ -2390,6 +2390,10 @@ class SchemaFilesTest < Minitest::Test
     assert_includes doc.fetch("required"), "claim_capability_digest"
     assert_includes doc.fetch("required"), "ownership_generation"
     assert_includes doc.fetch("required"), "task_input_epoch"
+    refute_includes doc.fetch("required"), "compatibility"
+    refute_includes doc.fetch("properties").keys, "compatibility"
+    assert_equal 1, doc.fetch("properties").dig("worker_argv", "minItems")
+    assert_equal "string", doc.fetch("properties").dig("claim_capability_digest", "type")
     assert_equal "^[0-9a-f]{64}$", doc.fetch("properties").dig("claim_capability_digest", "pattern")
     receipt_required = doc.dig("$defs", "Receipt", "required")
     %w[attempt_id task_generation ownership_generation task_input_epoch outcome exit_status started_at ended_at final_checkpoint output_references log_reference].each do |key|
@@ -2398,12 +2402,18 @@ class SchemaFilesTest < Minitest::Test
   end
 
 
-  def test_internal_attempt_v1_schema_remains_for_back_compat
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-attempt", version: 1)))
+  def test_legacy_recovery_schema_files_are_removed_after_one_off_cutover
+    obsolete = {
+      "hive-attempt" => [ 1 ],
+      "hive-dispatch-request" => [ 1, 2, 3 ],
+      "hive-dispatch-result" => [ 1 ]
+    }
 
-    assert_equal 1, doc.fetch("properties").dig("schema_version", "const")
-    refute_includes doc.fetch("properties").keys, "task_input_epoch"
-    refute_includes doc.fetch("properties").keys, "ownership_generation"
+    obsolete.each do |name, versions|
+      versions.each do |version|
+        refute_path_exists Hive::Schemas.schema_path(name, version: version)
+      end
+    end
   end
 
   def test_refactor_patrol_retains_v1_and_v2_while_v3_is_current
@@ -2528,7 +2538,7 @@ class SchemaFilesTest < Minitest::Test
       request_id exit_code command attempt_id attempt_state receipt
     ].sort
     assert_equal producer_required, schema_required,
-                 "schema/producer required-key drift in hive-dispatch-result.v1.json"
+                 "schema/producer required-key drift in hive-dispatch-result.v2.json"
   end
 
   def test_hive_dispatch_result_producer_round_trip_validates

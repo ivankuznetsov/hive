@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/web"
+require "hive/commands/service_installer/outcome"
 
 class WebCommandTest < Minitest::Test
   include HiveTestHelper
@@ -415,6 +416,34 @@ class WebCommandTest < Minitest::Test
       Hive::Commands::Web.send(:remove_const, :ServiceInstaller)
       Hive::Commands::Web.const_set(:ServiceInstaller, original)
     end
+  end
+
+  def test_install_envelope_allows_a_cold_rails_boot_readiness_window
+    installer = Struct.new(:target_path, :messages).new("/tmp/hive-web.service", [])
+    outcome = Hive::Commands::ServiceInstaller::Outcome.new(:written)
+    observed = nil
+    state = {
+      "platform" => "linux", "unit_path" => installer.target_path,
+      "service_installed" => true, "service_enabled" => true,
+      "service_running" => true, "service_manager_available" => true,
+      "url" => "http://127.0.0.1:4567", "ready" => true, "readiness" => "ready"
+    }
+
+    with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot, lambda { |**kwargs|
+      observed = kwargs
+      state
+    }) do
+      envelope = Hive::Commands::Web.new.send(
+        :service_envelope, installer, outcome,
+        config: Hive::Config::DEFAULTS.fetch("web")
+      )
+
+      assert envelope["ok"]
+    end
+
+    assert_equal true, observed.fetch(:wait_for_running)
+    assert_equal Hive::Commands::Web::INSTALL_READINESS_ATTEMPTS, observed.fetch(:attempts)
+    assert_equal Hive::Commands::Web::INSTALL_READINESS_INTERVAL_SEC, observed.fetch(:interval)
   end
 
   def test_install_service_maps_drift_to_invalid_task_path

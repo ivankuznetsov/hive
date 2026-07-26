@@ -544,8 +544,12 @@ behind a sibling `.lock`, and a **fail-closed** load — a torn / partial /
 corrupt / newer-schema file degrades to an empty map and the daemon boots
 normally (worst case: one task is re-baselined once). The controller
 write-throughs on every baseline mutation — first-sight record, dispatch,
-post-completion refresh, AND prune — so there is no batched loss window
-for the critical value; mtimes are stored at microsecond resolution and
+terminal-attempt replay, post-completion refresh, AND prune — so there is no
+batched loss window for the critical value. A terminal replay means the
+durable attempts layer already completed that exact task generation; recording
+the observed state-file mtime prevents the unchanged waiting marker from being
+readmitted on every daemon tick, while a later edit still becomes eligible.
+Mtimes are stored at microsecond resolution and
 `hive status --json` emits task `mtime` / `folder_mtime` with matching
 microsecond precision. Do not truncate status JSON mtimes: an operator
 answer can land in the same wall-clock second as the daemon baseline, and

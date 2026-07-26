@@ -3650,6 +3650,54 @@ def test_success_completion_then_followup_tick_does_not_redispatch_same_stage
                "follow-up tick must NOT re-dispatch the just-completed stage"
 end
 
+def test_terminal_replay_refreshes_edit_baseline_but_keeps_later_edits_eligible
+  observed_mtime = T0 - 60
+  edit_row = row(
+    stage: "6-review", action: "needs_input", marker: "review_waiting",
+    command: "hive review s1 --from 6-review", mtime: observed_mtime
+  )
+  attempt = Struct.new(:attempt_id, :task_generation, :state)
+                  .new("attempt-terminal", "generation-terminal", "terminal")
+  admissions = 0
+  attempt_dispatcher = Object.new
+  attempt_dispatcher.define_singleton_method(:dispatch_request) do |*_args, **_options|
+    admissions += 1
+    Hive::Attempts::DispatchResult.new(
+      status: :terminal_replay, attempt: attempt, receipt: nil,
+      attach_descriptor: nil, reason: nil
+    )
+  end
+  dispatcher, _supervisor, controller, logger = make_dispatcher(
+    rows: [ edit_row ], attempt_dispatcher: attempt_dispatcher
+  )
+  status = dispatcher.instance_variable_get(:@status_consumer)
+  controller.observe_state_file_mtime(
+    project: "p1", slug: "s1", mtime: T0 - 600
+  )
+
+  dispatcher.tick(now: T0)
+  dispatcher.tick(now: T0 + 30)
+
+  assert_equal 1, admissions,
+               "an unchanged successful generation must not be replayed every daemon tick"
+  assert_equal observed_mtime,
+               controller.last_dispatched_state_file_mtime_for(
+                 project: "p1", slug: "s1"
+               )
+  assert_equal 1, logger.events.count { |name, _attrs| name == :attempt_terminal_replay }
+
+  later_edit = edit_row.dup
+  later_edit.state_file_mtime = T0 + 60
+  status.next_result = Hive::Daemon::StatusConsumer::Result.new(
+    ok: true, rows: [ later_edit ],
+    projects: [ Hive::Daemon::StatusConsumer::ProjectInfo.new(name: "p1", legacy_stage_dirs: []) ],
+    error: nil
+  )
+  dispatcher.tick(now: T0 + 120)
+
+  assert_equal 2, admissions, "a genuinely newer edit must remain eligible"
+end
+
 def test_reaped_success_dispatches_successor_within_2s_wall_budget
   # Plan Unit 2: pin the ≤2s end-to-end latency bound as a single test
   # with an injected clock. The bound is composed of (a) the fast-poll

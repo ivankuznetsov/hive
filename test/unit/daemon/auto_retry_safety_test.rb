@@ -5,12 +5,6 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
   include HiveTestHelper
 
   Row = Struct.new(:folder, :stage, :marker, :marker_attrs, :state_file, keyword_init: true)
-  FakeGit = Struct.new(:status) do
-    def status_short
-      status
-    end
-  end
-
   def row(folder:, stage:, marker: "error", marker_attrs: {})
     Row.new(
       folder: folder, stage: stage, marker: marker,
@@ -40,7 +34,7 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
     )
   end
 
-  def test_execute_clean_worktree_is_safe
+  def test_execute_resumes_owned_worktree_without_inspecting_cleanliness
     with_tmp_dir do |dir|
       worktree = File.join(dir, "wt")
       FileUtils.mkdir_p(worktree)
@@ -51,32 +45,16 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
         :owned_worktree_safe?,
         ->(_row) { [ true, "worktree ownership verified", worktree ] }
       ) do
-        with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { FakeGit.new("") }) do
-          ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "4-execute"))
+        with_replaced_singleton_method(
+          Hive::GitOps, :new,
+          ->(*) { raise "execute retry must not inspect worktree cleanliness" }
+        ) do
+          ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(
+            row(folder: dir, stage: "4-execute")
+          )
 
           assert_equal true, ok
-          assert_equal "worktree clean", reason
-        end
-      end
-    end
-  end
-
-  def test_execute_dirty_worktree_is_unsafe
-    with_tmp_dir do |dir|
-      worktree = File.join(dir, "wt")
-      FileUtils.mkdir_p(worktree)
-      write_pointer(dir, worktree)
-
-      with_replaced_singleton_method(
-        Hive::Daemon::AutoRetrySafety,
-        :owned_worktree_safe?,
-        ->(_row) { [ true, "worktree ownership verified", worktree ] }
-      ) do
-        with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { FakeGit.new(" M app.rb\n") }) do
-          ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "4-execute"))
-
-          assert_equal false, ok
-          assert_equal "worktree dirty", reason
+          assert_equal "worktree ownership verified", reason
         end
       end
     end

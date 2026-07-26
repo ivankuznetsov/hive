@@ -62,6 +62,15 @@ module Hive
           project_rows = rows_by_project.fetch(project, [])
           begin
             identity = identity_for(project)
+            unless identity
+              @contexts.delete(project.to_s)
+              @last_observation_results << {
+                status: :skipped, project: project.to_s,
+                reason: "project has no GitHub repository identity; " \
+                        "merge reconciliation is not applicable"
+              }
+              next
+            end
             @contexts[project.to_s] = identity
             issues = []
             outcomes = []
@@ -599,12 +608,15 @@ module Hive
 
         project_path = registration.fetch("path")
         hive_state_path = registration.fetch("hive_state_path")
+        stored = registration.fetch("repository_identity", "").to_s.downcase
+        return nil if stored.empty? || stored.start_with?("local:")
+
         cfg = @config_loader.call(project_path)
         live = @gh.repository_identity(project_path, cfg: cfg)
         host = live.fetch("host").downcase
         repository = live.fetch("repository").downcase
         expected = "#{host}/#{repository}"
-        unless registration.fetch("repository_identity", "").to_s.downcase == expected
+        unless stored == expected
           raise Hive::ConfigError,
                 "registered repository identity must exactly match #{expected}"
         end

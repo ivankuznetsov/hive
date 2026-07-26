@@ -63,6 +63,11 @@ Crash/provider retries, daemon adoption, restart, and project config edits stay 
 9. `EXECUTE_COMPLETE` or `EXECUTE_WAITING reason=...`.
 
 Re-running with `worktree.yml` already present and a `:execute_complete` marker is a no-op announcing 6-review.
+An automatic retry after `ERROR` resumes the exact owned worktree even when it
+contains uncommitted edits from the failed agent. Those edits are durable
+implementation progress; ownership, branch, ancestry, and tamper checks still
+run, and a successful agent exit with remaining dirt pauses as
+`EXECUTE_WAITING reason=dirty_worktree` instead of completing.
 
 ## Implementation sub-agent (`spawn_implementation`)
 

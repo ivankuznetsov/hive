@@ -83,6 +83,104 @@ class WorkLedgerTest < Minitest::Test
     end
   end
 
+  def test_descriptor_validation_rejects_invalid_requests_and_stage_shapes
+    valid = [ stage("inbox", 1, kind: :passive) ]
+    error = assert_raises(Hive::WorkLedger::InvalidRequest) do
+      Hive::WorkLedger.validate_descriptor(
+        identity: "demo",
+        stages: valid,
+        allowed_kinds: []
+      )
+    end
+    assert_includes error.message, "allowed_kinds"
+
+    invalid = [
+      [ [ "not-a-mapping" ], /must be a mapping/ ],
+      [ [ stage("", 1, kind: :passive) ], /name must be a non-empty string/ ],
+      [ [ stage("inbox", 1, kind: :passive, dir: "") ], /dir must be a non-empty string/ ]
+    ]
+    invalid.each do |stages, message|
+      error = assert_raises(Hive::WorkLedger::InvalidDescriptor) do
+        Hive::WorkLedger.validate_descriptor(
+          identity: "demo",
+          stages: stages,
+          allowed_kinds: [ :passive ]
+        )
+      end
+      assert_match message, error.message
+    end
+  end
+
+  def test_journal_rejects_invalid_construction_and_record_identity
+    invalid = [
+      { path: "", lock_path: "/tmp/ledger.lock", record_id: ->(record) { record["id"] } },
+      { path: "/tmp/ledger", lock_path: "", record_id: ->(record) { record["id"] } },
+      { path: "/tmp/ledger", lock_path: "/tmp/ledger.lock", record_id: nil }
+    ]
+    invalid.each do |arguments|
+      assert_raises(Hive::WorkLedger::InvalidRequest) do
+        Hive::WorkLedger.journal(**arguments)
+      end
+    end
+
+    with_tmp_dir do |dir|
+      journal = ledger(File.join(dir, "ledger.jsonl"))
+      assert_raises(Hive::WorkLedger::InvalidRequest) { journal.append([]) }
+      assert_raises(Hive::WorkLedger::InvalidRecord) { journal.append([ record("") ]) }
+
+      strict = Hive::WorkLedger.journal(
+        path: File.join(dir, "strict.jsonl"),
+        lock_path: File.join(dir, ".strict.lock"),
+        record_id: ->(candidate) { candidate.fetch("id") }
+      )
+      assert_raises(Hive::WorkLedger::InvalidRecord) { strict.append([ {} ]) }
+    end
+  end
+
+  def test_idempotent_append_validates_callbacks_and_wraps_callback_failures
+    with_tmp_dir do |dir|
+      journal = ledger(File.join(dir, "ledger.jsonl"))
+      invalid = assert_raises(Hive::WorkLedger::InvalidRequest) do
+        journal.append_idempotent(
+          record("record-1"),
+          idempotency_key: "request-1",
+          key_for: nil,
+          signature_for: ->(candidate) { candidate["value"] }
+        )
+      end
+      assert_includes invalid.message, "key_for"
+
+      journal.append([ record("existing") ])
+      failed = assert_raises(Hive::WorkLedger::AppendFailed) do
+        journal.append_idempotent(
+          record("record-1"),
+          idempotency_key: "request-1",
+          key_for: ->(_candidate) { raise "callback failed" },
+          signature_for: ->(candidate) { candidate["value"] }
+        )
+      end
+      assert_includes failed.message, "RuntimeError: callback failed"
+    end
+  end
+
+  def test_idempotent_append_rejects_existing_record_without_identity
+    with_tmp_dir do |dir|
+      path = File.join(dir, "ledger.jsonl")
+      File.write(path, "#{JSON.generate(record(nil, key: 'request-1'))}\n")
+      journal = ledger(path)
+
+      error = assert_raises(Hive::WorkLedger::InvalidRecord) do
+        journal.append_idempotent(
+          record("record-1", key: "request-1"),
+          idempotency_key: "request-1",
+          key_for: ->(candidate) { candidate["key"] },
+          signature_for: ->(candidate) { candidate["value"] }
+        )
+      end
+      assert_includes error.message, "identity must be a non-empty string"
+    end
+  end
+
   def test_journal_append_is_durable_and_idempotent_with_conflicts_fail_closed
     with_tmp_dir do |dir|
       path = File.join(dir, "ledger.jsonl")
@@ -231,6 +329,26 @@ class WorkLedgerTest < Minitest::Test
       )
     end
     assert_includes missing.message, "record_id must be a non-empty string"
+  end
+
+  def test_replay_validates_callbacks_and_wraps_unexpected_failures
+    assert_raises(Hive::WorkLedger::InvalidRequest) do
+      Hive::WorkLedger::Replay.call(
+        bytes: "",
+        record_id: ->(candidate) { candidate["id"] },
+        source_label: "ledger",
+        record_label: "record_id",
+        validator: Object.new
+      )
+    end
+
+    error = assert_raises(Hive::WorkLedger::ReplayFailed) do
+      Hive::WorkLedger.replay(
+        bytes: "#{JSON.generate(record('record-1'))}\n",
+        record_id: ->(_candidate) { raise "identity failed" }
+      )
+    end
+    assert_includes error.message, "RuntimeError: identity failed"
   end
 
   private

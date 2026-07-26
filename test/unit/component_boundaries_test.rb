@@ -140,8 +140,31 @@ class ComponentBoundariesTest < Minitest::Test
                     "Hive::AgentSkills::DirectoryPublisher"
     assert_empty skillpack.fetch("migration_exceptions")
 
+    git_gate = contract.component("safe-agent-git-gate")
+    assert_equal "boundary-ready", git_gate.fetch("state")
+    assert_equal "hive/agent_git_gate",
+                 git_gate.dig("entrypoint", "require")
+    assert_equal "Hive::AgentGitGate",
+                 git_gate.dig("entrypoint", "constant")
+    assert_equal(
+      %w[
+        Hive::AgentGitGate::MaterializationReceipt
+        Hive::AgentGitGate::PublicationReceipt
+        Hive::AgentGitGate::ReadResult
+        Hive::AgentGitGate::RemoteObservation
+      ],
+      git_gate.dig("public_contract", "values").sort
+    )
+    assert_includes git_gate.dig("public_contract", "errors"),
+                    "Hive::AgentGitGate::RemoteConflict"
+    assert_equal [ "Hive::ManagedGit" ],
+                 git_gate.fetch("internal_collaborators")
+    assert_empty git_gate.fetch("migration_exceptions")
+
     remaining_candidates = contract.components.reject do |component|
-      [ user_service, agent_abi, artifact_firewall, skillpack ].include?(component)
+      [
+        user_service, agent_abi, artifact_firewall, skillpack, git_gate
+      ].include?(component)
     end
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
@@ -169,6 +192,11 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::AgentSkills", skillpack_load.fetch("constant")
     assert_empty skillpack_load.fetch("forbidden_loaded_features")
     assert_empty skillpack_load.fetch("forbidden_constants")
+
+    git_gate_load = contract.validate_clean_load!("safe-agent-git-gate")
+    assert_equal "Hive::AgentGitGate", git_gate_load.fetch("constant")
+    assert_empty git_gate_load.fetch("forbidden_loaded_features")
+    assert_empty git_gate_load.fetch("forbidden_constants")
   end
 
   def test_production_consumers_do_not_bypass_artifact_firewall
@@ -205,6 +233,21 @@ class ComponentBoundariesTest < Minitest::Test
 
     assert_empty offenders,
                  "Hive production consumers must require hive/agent_skills: #{offenders.join(', ')}"
+  end
+
+  def test_production_consumers_do_not_require_managed_git_directly
+    owned = contract_component_owned_files("safe-agent-git-gate")
+    offenders = Dir.glob(File.join(ROOT, "lib", "hive", "**", "*.rb")).filter_map do |path|
+      relative = path.delete_prefix("#{ROOT}/")
+      next if owned.include?(relative)
+
+      source = File.read(path)
+      relative if source.include?("Hive::ManagedGit") ||
+                  source.match?(/require ["']hive\/managed_git["']/)
+    end
+
+    assert_empty offenders,
+                 "Hive production consumers must use Hive::AgentGitGate: #{offenders.join(', ')}"
   end
 
   def test_invalid_catalog_rows_name_the_component_and_field

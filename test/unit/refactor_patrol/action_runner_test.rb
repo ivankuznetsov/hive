@@ -145,7 +145,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
 
     def lookup_prs_for_branch(*, **) = []
 
-    def origin_push_url(_path, cfg:) = @remote_path
+    def origin_push_url(_path, cfg:, managed: false) = @remote_path
 
     def repository_identity_from_remote(_url)
       { "repository" => "acme/polyglot", "host" => "github.com" }

@@ -1,4 +1,4 @@
-require "hive/managed_git"
+require "hive/agent_git_gate"
 require "hive/markers"
 
 module Hive
@@ -88,25 +88,31 @@ module Hive
 
       def validate_repository!(report, context)
         path = context.worktree_path
-        branch = git!(path, "symbolic-ref", "--quiet", "--short", "HEAD").strip
+        branch = git_read!(path, :current_branch).strip
         unless branch == context.task_branch
           raise Hive::StageError,
                 "agent worktree is on branch #{branch.inspect}; expected #{context.task_branch.inspect}"
         end
 
-        ancestry_out, ancestry_err, ancestry_status = Hive::ManagedGit.capture3(
-          path, "merge-base", "--is-ancestor", context.base_oid, "HEAD"
+        head_oid = git_read!(path, :head_oid).strip
+        ancestry = Hive::AgentGitGate.read(
+          path, :ancestor, base_oid: context.base_oid, head_oid: head_oid
         )
-        unless ancestry_status.success?
-          detail = ancestry_err.to_s.strip
-          detail = ancestry_out.to_s.strip if detail.empty?
+        unless ancestry.success?
+          detail = ancestry.stderr.strip
+          detail = ancestry.stdout.strip if detail.empty?
           raise Hive::StageError,
                 "agent worktree HEAD is not descended from recorded base #{context.base_oid}: #{detail}".rstrip
         end
 
-        head_oid = git!(path, "rev-parse", "HEAD").strip
-        commit_count = Integer(git!(path, "rev-list", "--count", "#{context.base_oid}..HEAD").strip, 10)
-        clean = git!(path, "status", "--porcelain=v1", "--untracked-files=all").empty?
+        commit_count = Integer(
+          git_read!(
+            path, :commit_count,
+            base_oid: context.base_oid, head_oid: head_oid
+          ).strip,
+          10
+        )
+        clean = git_read!(path, :status).empty?
 
         case report.decision
         when :ready
@@ -124,6 +130,8 @@ module Hive
         end
 
         RepositoryState.new(head_oid: head_oid, commit_count: commit_count, clean: clean)
+      rescue Hive::AgentGitGate::Error => e
+        raise Hive::StageError, e.message
       rescue ArgumentError => e
         raise Hive::StageError, "could not count agent commits: #{e.message}"
       end
@@ -208,15 +216,17 @@ module Hive
       end
       private_class_method :label_for
 
-      def git!(path, *args)
-        out, err, status = Hive::ManagedGit.capture3(path, *args)
-        return out if status.success?
+      def git_read!(path, operation, **parameters)
+        result = Hive::AgentGitGate.read(path, operation, **parameters)
+        return result.stdout if result.success?
 
-        detail = err.to_s.strip
-        detail = out.to_s.strip if detail.empty?
-        raise Hive::StageError, "git #{args.join(' ')} failed: #{detail}"
+        detail = result.stderr.strip
+        detail = result.stdout.strip if detail.empty?
+        raise Hive::StageError, "hardened Git #{operation} failed: #{detail}"
+      rescue Hive::AgentGitGate::Error => e
+        raise Hive::StageError, e.message
       end
-      private_class_method :git!
+      private_class_method :git_read!
     end
   end
 end

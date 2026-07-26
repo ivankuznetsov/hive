@@ -22,7 +22,7 @@ the first and primary consumer.
 | Agent ABI | `boundary-ready` | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
 | Skillpack | `boundary-ready` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
-| Safe Agent Git Gate | `candidate` | `require "hive/managed_git"` → `Hive::ManagedGit` | [[modules/git_ops]] |
+| Safe Agent Git Gate | `boundary-ready` | `require "hive/agent_git_gate"` → `Hive::AgentGitGate` | [[modules/agent_git_gate]] |
 | WorkLedger | `candidate` | `require "hive/task_journal"` → `Hive::TaskJournal` | [[state-model]] |
 
 `candidate` means the current code is mapped, but callers, dependencies, or
@@ -85,6 +85,22 @@ Production commands and web code require only the facade; the catalog rejects
 new direct requires or construction of the compiler, publisher, inspector,
 provisioner, target resolver, command runner, manifest, or adapter registry.
 This internal boundary is not a gem or a publication commitment.
+
+The `Safe Agent Git Gate` is boundary-ready around post-agent Git process and
+ref authority. Its clean facade exposes immutable read, remote-observation,
+materialization, and publication receipts; a closed read vocabulary; exact
+detached worktree materialization; and exact expected-OID or expected-absence
+publication with before/after remote proof. Hostile hooks, fsmonitor,
+diff/textconv helpers, inherited config/executable selectors, and forbidden
+transports remain neutralized below the facade. `Hive::ManagedGit` is now the
+private executor and the catalog rejects direct production bypasses.
+
+Hive still owns credentials and transport permission, durable mutation intent,
+branch/PR policy, GitHub API behavior, and operator approval. Refactor patrol's
+append-only publication ledger decides which superseded OID is replaceable;
+the gate only enforces that exact authority. Receipts retain a non-secret
+transport fingerprint rather than URLs or command output. This is Git process
+hardening, not an agent, Git, or operating-system sandbox.
 
 ## Catalog contract
 

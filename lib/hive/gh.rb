@@ -2,10 +2,10 @@ require "json"
 require "timeout"
 require "uri"
 require "yaml"
+require "hive/agent_git_gate"
 require "hive/atomic_file"
 require "hive/git_ref"
 require "hive/gh/repository_identity"
-require "hive/managed_git"
 require "hive/secret_patterns"
 
 module Hive
@@ -68,27 +68,29 @@ module Hive
                     remote: "origin", set_upstream: true)
       branch = validated_branch_name(branch)
       remote = validated_remote_target(remote)
+      if expected_remote_oid || expected_remote_absent
+        Hive::AgentGitGate.publish_local_branch(
+          repository_path: worktree_path,
+          branch: branch,
+          remote: remote,
+          expected_remote_oid: expected_remote_oid,
+          expected_remote_absent: expected_remote_absent,
+          allow_local_transport: agent_git_gate_allow_local_transport?(cfg)
+        )
+        return PushResult.new(success: true, stdout: "", stderr: "")
+      end
+
       args = [ "git", "-C", worktree_path, "push" ]
       args << "-u" if set_upstream
       # --force-with-lease (not --force): a concurrent third-party update to
       # the branch aborts the push instead of being clobbered.
-      if expected_remote_oid && expected_remote_absent
-        raise Hive::GhError, "remote branch cannot require both an OID and absence"
-      elsif expected_remote_oid
-        oid = expected_remote_oid.to_s
-        unless oid.match?(/\A[0-9a-f]{40,64}\z/i)
-          raise Hive::GhError, "expected remote branch OID is invalid"
-        end
-        args << "--force-with-lease=refs/heads/#{branch}:#{oid.downcase}"
-      elsif expected_remote_absent
-        args << "--force-with-lease=refs/heads/#{branch}:"
-      elsif force
+      if force
         args << "--force-with-lease"
       end
       args.push(remote, branch)
       out, err, status = capture3(*args, cfg: cfg)
       PushResult.new(success: status.success?, stdout: out, stderr: err)
-    rescue Hive::GhError => e
+    rescue Hive::AgentGitGate::Error, Hive::GhError => e
       PushResult.new(success: false, stdout: "", stderr: e.message)
     end
 
@@ -112,7 +114,11 @@ module Hive
 
       ref = "refs/heads/#{name}"
       out, err, status = if managed
-        Hive::ManagedGit.capture3(worktree_path, "ls-remote", "--heads", remote, ref)
+        observation = Hive::AgentGitGate.observe_remote_branch(
+          repository_path: worktree_path, branch: name, remote: remote,
+          allow_local_transport: agent_git_gate_allow_local_transport?(cfg)
+        )
+        return observation.oid
       else
         capture3("git", "-C", worktree_path, "ls-remote", "--heads", remote, ref, cfg: cfg)
       end
@@ -132,6 +138,8 @@ module Hive
       end
 
       oid.downcase
+    rescue Hive::AgentGitGate::Error => e
+      raise Hive::GhError, e.message
     end
 
     # Publish one immutable, already-scanned commit without naming a mutable
@@ -145,12 +153,16 @@ module Hive
       end
       name = validated_branch_name(branch)
       target = validated_remote_target(remote)
-      refspec = "#{oid}:refs/heads/#{name}"
-      out, err, status = Hive::ManagedGit.capture3(
-        worktree_path, "push", target, refspec
+      Hive::AgentGitGate.publish(
+        repository_path: worktree_path,
+        oid: oid,
+        branch: name,
+        remote: target,
+        expected_remote_absent: true,
+        allow_local_transport: agent_git_gate_allow_local_transport?(cfg)
       )
-      PushResult.new(success: status.success?, stdout: out, stderr: err)
-    rescue Hive::GhError => e
+      PushResult.new(success: true, stdout: "", stderr: "")
+    rescue Hive::AgentGitGate::Error, Hive::GhError => e
       PushResult.new(success: false, stdout: "", stderr: e.message)
     end
 
@@ -331,6 +343,12 @@ module Hive
       value
     end
     private_class_method :validated_remote_target
+
+    def agent_git_gate_allow_local_transport?(cfg)
+      cfg.is_a?(Hash) &&
+        cfg.dig("agent_git_gate", "allow_local_transport") == true
+    end
+    private_class_method :agent_git_gate_allow_local_transport?
 
     def pr_state(pr_url, cfg: nil)
       out, err, status = capture3("gh", "pr", "view", pr_url.to_s, "--json", "state", cfg: cfg)
@@ -516,9 +534,14 @@ module Hive
 
     def origin_push_url(worktree_path, cfg: nil, timeout_sec: nil, managed: false)
       out, err, status = if managed
-        Hive::ManagedGit.capture3(
-          worktree_path, "remote", "get-url", "--push", "--all", "origin"
+        urls = Hive::AgentGitGate.remote_urls(
+          repository_path: worktree_path, remote: "origin", push: true
         )
+        unless urls.one?
+          raise Hive::GhError,
+                "origin push URL lookup returned #{urls.size} records"
+        end
+        return urls.first
       else
         capture3(
           "git", "-C", worktree_path, "remote", "get-url", "--push", "--all", "origin",
@@ -536,6 +559,8 @@ module Hive
       end
 
       urls.first
+    rescue Hive::AgentGitGate::Error => e
+      raise Hive::GhError, e.message
     end
 
     def repository_identity_from_remote(remote_url)

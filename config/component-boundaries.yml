@@ -374,17 +374,26 @@ components:
 
   - id: safe-agent-git-gate
     name: Safe Agent Git Gate
-    state: candidate
+    state: boundary-ready
     entrypoint:
-      file: lib/hive/managed_git.rb
-      require: hive/managed_git
-      constant: Hive::ManagedGit
+      file: lib/hive/agent_git_gate.rb
+      require: hive/agent_git_gate
+      constant: Hive::AgentGitGate
     public_contract:
       values:
-        - Hive::ManagedGit
+        - Hive::AgentGitGate::ReadResult
+        - Hive::AgentGitGate::RemoteObservation
+        - Hive::AgentGitGate::MaterializationReceipt
+        - Hive::AgentGitGate::PublicationReceipt
       errors:
-        - ArgumentError
+        - Hive::AgentGitGate::InvalidRequest
+        - Hive::AgentGitGate::UnsupportedOperation
+        - Hive::AgentGitGate::CommandFailed
+        - Hive::AgentGitGate::RemoteConflict
+        - Hive::AgentGitGate::MaterializationFailed
+        - Hive::AgentGitGate::PublicationFailed
     owned_paths:
+      - lib/hive/agent_git_gate.rb
       - lib/hive/managed_git.rb
     state_contracts:
       - "Repository objects, refs, worktrees, and publication receipts"
@@ -393,19 +402,30 @@ components:
     lock_contracts:
       - "Expected-OID lease is revalidated at publication"
     component_dependencies: []
-    allowed_hive_dependencies: []
+    allowed_hive_dependencies:
+      - hive/errors
+      - hive/git_ref
     internal_collaborators:
-      - Hive::Gh
+      - Hive::ManagedGit
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
+      - lib/hive/gh.rb
+      - lib/hive/worktree.rb
+      - lib/hive/stages/agent_report.rb
       - lib/hive/stages/draft_pr_handoff.rb
       - lib/hive/refactor_patrol/pr_opener.rb
     mutation_authority: "Hive injects credential, transport, branch, PR, and operator-approval policy."
     recovery_surface: "Receipts preserve observed identities; publication failure remains explicit and retryable."
-    wiki_page: wiki/modules/git_ops.md
+    wiki_page: wiki/modules/agent_git_gate.md
     focused_tests:
+      - test/unit/agent_git_gate_test.rb
       - test/unit/managed_git_test.rb
+      - test/unit/gh_test.rb
+      - test/unit/worktree_test.rb
+      - test/unit/stages/agent_report_test.rb
+      - test/unit/stages/draft_pr_handoff_test.rb
+      - test/unit/refactor_patrol/pr_opener_test.rb
     migration_exceptions: []
 
   - id: work-ledger

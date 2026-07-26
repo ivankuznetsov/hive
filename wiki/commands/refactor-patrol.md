@@ -467,6 +467,15 @@ repository ownership. Continuation-only claims may reconcile an existing
 request (or record completion of an already-intended push), but cannot create a
 replacement patch or begin a new push/PR phase.
 
+The Git mechanism for those reads and writes is the boundary-ready
+`Hive::AgentGitGate`. `PrOpener` requests managed URL/OID observations and its
+push compatibility call resolves the local branch once, publishes the
+immutable commit under the ledger-selected exact lease, and independently
+observes the remote afterward. The resulting component receipt records
+expected/before/published/after OIDs and a non-secret transport fingerprint.
+The component cannot invent replacement authority: the append-only patrol
+ledger above it remains the only source for the expected old OID.
+
 After `gh pr create`, an
 exact-host/repository `gh pr view` must prove the returned URL/number, OPEN
 non-draft state, head repository/branch/OID, and the exact base branch/OID from

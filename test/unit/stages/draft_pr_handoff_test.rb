@@ -712,7 +712,10 @@ class StagesDraftPrHandoffTest < Minitest::Test
     fetch = ->(*) { [ "git@github.com:acme/widgets.git\n", "", ok ] }
     with_replaced_singleton_method(Hive::Gh, :ensure_authenticated!, ->(*) { }) do
       with_replaced_singleton_method(Hive::Gh, :repository_identity, identity) do
-        with_replaced_singleton_method(Hive::ManagedGit, :capture3, fetch) do
+        with_replaced_singleton_method(
+          Hive::AgentGitGate, :remote_urls,
+          ->(**) { [ "git@github.com:acme/widgets.git" ] }
+        ) do
           with_replaced_singleton_method(Hive::Gh, :remote_branch_oid, ->(*) { raise Hive::GhError, "offline" }) do
             assert_raises(Hive::Stages::DraftPrHandoff::RecoverableError) do
               Hive::Stages::DraftPrHandoff.send(:preflight_remote!, context, {})
@@ -745,7 +748,7 @@ class StagesDraftPrHandoffTest < Minitest::Test
 
     commits = (1..(Hive::Stages::DraftPrHandoff::MAX_COMMITS + 1)).map { |i| "%040x" % i }.join("\n")
     with_replaced_singleton_method(
-      Hive::Stages::DraftPrHandoff, :git_binary!, ->(*) { commits }
+      Hive::Stages::DraftPrHandoff, :git_read_binary!, ->(*) { commits }
     ) do
       assert_raises(Hive::Stages::DraftPrHandoff::QuarantineError) do
         Hive::Stages::DraftPrHandoff.send(
@@ -762,43 +765,45 @@ class StagesDraftPrHandoffTest < Minitest::Test
     with_tmp_dir do |root|
       task = TaskStub.new(folder: root, slug: "fix", project_root: "/repo")
       target = File.join(root, "worktree")
-      ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
-      failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
 
-      with_replaced_singleton_method(Hive::ManagedGit, :capture3, ->(*) { [ "detail", "", failed ] }) do
+      with_replaced_singleton_method(
+        Hive::AgentGitGate, :remove_materialization,
+        ->(**) { raise Hive::AgentGitGate::MaterializationFailed, "detail" }
+      ) do
         assert_raises(Hive::WorktreeError) do
           Hive::Stages::DraftPrHandoff.send(:cleanup_no_fix_worktree, task, target)
         end
       end
-      with_replaced_singleton_method(Hive::ManagedGit, :capture3, ->(*) { [ "", "", ok ] }) do
+      with_replaced_singleton_method(
+        Hive::AgentGitGate, :remove_materialization, ->(**) { :absent }
+      ) do
         assert_equal :absent,
                      Hive::Stages::DraftPrHandoff.send(:cleanup_no_fix_worktree, task, target)
       end
 
       FileUtils.mkdir_p(target)
-      with_replaced_singleton_method(Hive::ManagedGit, :capture3, ->(*) { [ "", "", ok ] }) do
+      with_replaced_singleton_method(
+        Hive::AgentGitGate, :remove_materialization,
+        ->(**) { raise Hive::AgentGitGate::MaterializationFailed, "not registered" }
+      ) do
         assert_raises(Hive::WorktreeError) do
           Hive::Stages::DraftPrHandoff.send(:cleanup_no_fix_worktree, task, target)
         end
       end
-      calls = 0
-      registered = "worktree #{target}\n"
-      with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |*|
-        calls += 1
-        calls == 1 ? [ registered, "", ok ] : [ "", "", ok ]
-      }) do
+      with_replaced_singleton_method(
+        Hive::AgentGitGate, :remove_materialization, ->(**) { :removed }
+      ) do
         assert_equal :removed,
                      Hive::Stages::DraftPrHandoff.send(:cleanup_no_fix_worktree, task, target)
       end
-      calls = 0
-      with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |*|
-        calls += 1
-        calls == 1 ? [ registered, "", ok ] : [ "remove stdout", "", failed ]
-      }) do
+      with_replaced_singleton_method(
+        Hive::AgentGitGate, :remove_materialization,
+        ->(**) { raise Hive::AgentGitGate::MaterializationFailed, "remove failed" }
+      ) do
         error = assert_raises(Hive::WorktreeError) do
           Hive::Stages::DraftPrHandoff.send(:cleanup_no_fix_worktree, task, target)
         end
-        assert_includes error.message, "remove stdout"
+        assert_includes error.message, "remove failed"
       end
     end
   end
@@ -811,8 +816,11 @@ class StagesDraftPrHandoffTest < Minitest::Test
       end
     end
 
-    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
-    with_replaced_singleton_method(Hive::ManagedGit, :capture3, ->(*) { [ "stdout", "", failed ] }) do
+    failed = Hive::AgentGitGate::ReadResult.new(
+      operation: :status, stdout: "stdout", stderr: "", exitstatus: 1,
+      overflow: false
+    )
+    with_replaced_singleton_method(Hive::AgentGitGate, :read, ->(*) { failed }) do
       assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
         Hive::Stages::DraftPrHandoff.send(:git!, "/repo", "status")
       end

@@ -19,6 +19,33 @@ class AgentRuntimeTest < Minitest::Test
     end
   end
 
+  class CapabilityCompileProfile
+    def initialize(delegate, arguments:)
+      @delegate = delegate
+      @arguments = arguments
+    end
+
+    def require_cli_capability!(_name)
+      @arguments
+    end
+
+    def method_missing(name, ...)
+      return @delegate.public_send(name, ...) if @delegate.respond_to?(name)
+
+      super
+    end
+
+    def respond_to_missing?(name, include_private = false)
+      @delegate.respond_to?(name, include_private) || super
+    end
+  end
+
+  FailingUsageProfile = Struct.new(:name, :launcher_identity, keyword_init: true) do
+    def extract_usage_event(_event)
+      raise "invalid usage payload"
+    end
+  end
+
   def test_existing_custom_profile_constructor_compiles_without_new_keywords
     profile = custom_profile
     request = Hive::AgentRuntime::Request.new(profile: profile, prompt: "work")
@@ -109,6 +136,20 @@ class AgentRuntimeTest < Minitest::Test
     assert invocation.capability_evidence.any? { |item| item.capability == :effort && item.supported }
   end
 
+  def test_supported_named_capability_compiles_arguments_and_evidence
+    profile = CapabilityCompileProfile.new(
+      custom_profile,
+      arguments: [ "--safe-mode" ]
+    )
+
+    invocation = compile(profile, capabilities: [ :safe_mode ])
+
+    assert_includes invocation.argv, "--safe-mode"
+    evidence = invocation.capability_evidence.find { |item| item.capability == :safe_mode }
+    assert_equal true, evidence.supported
+    assert_equal [ "--safe-mode" ], evidence.arguments
+  end
+
   def test_unsupported_headless_and_permission_modes_fail_with_typed_evidence
     no_headless = custom_profile(headless_supported: false)
     error = assert_raises(Hive::AgentRuntime::UnsupportedCapability) do
@@ -141,6 +182,11 @@ class AgentRuntimeTest < Minitest::Test
         model: "grok-4.5",
         effort: "high"
       )
+    end
+    assert_evidence error, :effort
+
+    error = assert_raises(Hive::AgentRuntime::UnsupportedCapability) do
+      compile(custom_profile, effort: "high")
     end
     assert_evidence error, :effort
 
@@ -186,6 +232,34 @@ class AgentRuntimeTest < Minitest::Test
     assert_operator error.evidence.diagnostic.bytesize, :<=, Hive::AgentRuntime::DIAGNOSTIC_BYTES
   end
 
+  def test_prepare_and_capability_preserve_existing_typed_runtime_errors
+    evidence = Hive::AgentRuntime::CapabilityEvidence.new(
+      capability: :synthetic,
+      supported: false,
+      provider: :custom,
+      launcher_identity: "custom/v1",
+      diagnostic: "already typed"
+    )
+    probe_error = Hive::AgentRuntime::ProbeError.new("probe", evidence: evidence)
+    capability_error = Hive::AgentRuntime::UnsupportedCapability.new(
+      "capability", evidence: evidence
+    )
+
+    probe_profile = FailingProbeProfile.new(
+      name: :custom, launcher_identity: "custom/v1", error: probe_error
+    )
+    capability_profile = FailingCapabilityProfile.new(
+      name: :custom, launcher_identity: "custom/v1", error: capability_error
+    )
+
+    assert_same probe_error, assert_raises(Hive::AgentRuntime::ProbeError) {
+      Hive::AgentRuntime.prepare!(probe_profile)
+    }
+    assert_same capability_error, assert_raises(Hive::AgentRuntime::UnsupportedCapability) {
+      Hive::AgentRuntime.require_capability!(capability_profile, :synthetic)
+    }
+  end
+
   def test_observe_normalizes_status_and_usage_without_mutating_legacy_result
     profile = custom_profile
     result = {
@@ -217,6 +291,15 @@ class AgentRuntimeTest < Minitest::Test
       { input: 4, output: 5, cached: 0, model: "provider/model" },
       Hive::AgentRuntime.extract_usage(profile, { "type" => "usage" })
     )
+  end
+
+  def test_usage_extraction_returns_nil_when_profile_rejects_event
+    profile = FailingUsageProfile.new(
+      name: :custom,
+      launcher_identity: "custom/v1"
+    )
+
+    assert_nil Hive::AgentRuntime.extract_usage(profile, { "type" => "usage" })
   end
 
   private

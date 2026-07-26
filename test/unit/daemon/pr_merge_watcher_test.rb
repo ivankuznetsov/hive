@@ -601,6 +601,25 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     end
   end
 
+  def test_github_repository_identity_drift_remains_blocked
+    with_merge_project(stages: [ "5-open-pr" ]) do |tasks, _home|
+      lookup = lambda do |_project|
+        registration_for(tasks.first.project_root).merge(
+          "repository_identity" => "github.com/acme/other"
+        )
+      end
+      watcher, = build_watcher(
+        gh: FakeGh.new, config_lookup: lookup
+      )
+
+      result = watcher.observe([ row_for(tasks.first) ], now: T0).first
+
+      assert_equal :blocked, result.fetch(:status)
+      assert_match(/must exactly match github\.com\/acme\/app/,
+                   result.fetch(:reason))
+    end
+  end
+
   def test_constructor_validation
     assert_raises(ArgumentError) { build_watcher(poll_interval_sec: -1) }
     assert_raises(ArgumentError) { build_watcher(poll_timeout_sec: 0) }

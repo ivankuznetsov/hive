@@ -137,10 +137,12 @@ module Hive
         if moved.empty?
           puts no_move_message
         else
-          puts "hive: migrate complete (#{moved.size} task#{moved.size == 1 ? '' : 's'} moved" \
-               "#{backfilled_count.positive? ? ", #{backfilled_count} id#{backfilled_count == 1 ? '' : 's'} backfilled" : ''}" \
-               "#{recovery_marker_count.positive? ? ", #{recovery_marker_count} recovery marker#{recovery_marker_count == 1 ? '' : 's'} upgraded" : ''}" \
-               "#{workflow_configuration_count.positive? ? ", #{workflow_configuration_count} managed workflow pin#{workflow_configuration_count == 1 ? '' : 's'} updated" : ''})"
+          puts migration_complete_message(
+            moved,
+            backfilled_count: backfilled_count,
+            recovery_marker_count: recovery_marker_count,
+            workflow_configuration_count: workflow_configuration_count
+          )
         end
         if display_name_count.positive?
           puts "hive: migrate backfilled #{display_name_count} display name#{display_name_count == 1 ? '' : 's'}"
@@ -487,6 +489,24 @@ module Hive
         end
       end
 
+      def migration_complete_message(moved, backfilled_count:,
+                                     recovery_marker_count:,
+                                     workflow_configuration_count:)
+        parts = [ "#{moved.size} task#{moved.size == 1 ? '' : 's'} moved" ]
+        if backfilled_count.positive?
+          parts << "#{backfilled_count} id#{backfilled_count == 1 ? '' : 's'} backfilled"
+        end
+        if recovery_marker_count.positive?
+          parts << "#{recovery_marker_count} recovery marker" \
+                   "#{recovery_marker_count == 1 ? '' : 's'} upgraded"
+        end
+        if workflow_configuration_count.positive?
+          pin_label = workflow_configuration_count == 1 ? "pin" : "pins"
+          parts << "#{workflow_configuration_count} managed workflow #{pin_label} updated"
+        end
+        "hive: migrate complete (#{parts.join(', ')})"
+      end
+
       def migration_no_move_message(config_changed:, backfilled_count:,
                                     recovery_marker_count: 0,
                                     workflow_configuration_count: 0)
@@ -499,8 +519,8 @@ module Hive
           actions << "upgraded #{recovery_marker_count} recovery marker#{recovery_marker_count == 1 ? '' : 's'}"
         end
         if workflow_configuration_count.positive?
-          actions << "updated #{workflow_configuration_count} managed workflow pin" \
-                     "#{workflow_configuration_count == 1 ? '' : 's'}"
+          pin_label = workflow_configuration_count == 1 ? "pin" : "pins"
+          actions << "updated #{workflow_configuration_count} managed workflow #{pin_label}"
         end
         "hive: migrate #{actions.join(' and ')}"
       end

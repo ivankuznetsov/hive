@@ -66,10 +66,53 @@ class MigrateTest < Minitest::Test
       [],
       config_only: false,
       backfilled_count: 2,
-      recovery_marker_count: 3
+      recovery_marker_count: 3,
+      workflow_configuration_count: 4
     )
 
-    assert_equal "hive: migrate project state (2 ids, 3 recovery markers)", message
+    assert_equal(
+      "hive: migrate project state (2 ids, 3 recovery markers, " \
+      "4 managed workflow pins)",
+      message
+    )
+  end
+
+  def test_managed_workflow_pin_only_commit_message
+    message = migrate_command("/tmp/project").send(
+      :migrate_commit_message,
+      [],
+      config_only: false,
+      workflow_configuration_count: 1
+    )
+
+    assert_equal "hive: migrate managed workflow pins (1 task)", message
+  end
+
+  def test_managed_workflow_pin_no_move_message
+    message = migrate_command("/tmp/project").send(
+      :migration_no_move_message,
+      config_changed: false,
+      backfilled_count: 0,
+      workflow_configuration_count: 2
+    )
+
+    assert_equal "hive: migrate updated 2 managed workflow pins", message
+  end
+
+  def test_complete_message_reports_every_migration_count
+    message = migrate_command("/tmp/project").send(
+      :migration_complete_message,
+      [ [ "5-review", "6-review", "task-a" ], [ "6-pr", "8-finalize", "task-b" ] ],
+      backfilled_count: 2,
+      recovery_marker_count: 3,
+      workflow_configuration_count: 4
+    )
+
+    assert_equal(
+      "hive: migrate complete (2 tasks moved, 2 ids backfilled, " \
+      "3 recovery markers upgraded, 4 managed workflow pins updated)",
+      message
+    )
   end
 
   def test_rebinds_same_generation_managed_tasks_to_the_selected_configuration

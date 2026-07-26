@@ -23,6 +23,17 @@ require "English"
 require "hive"
 require_relative "support/workflow_helpers"
 
+# Never let a test subprocess inherit the operator's global Git configuration.
+# In particular, `git config --global` prefers an existing XDG config even when
+# a test overrides only HOME. Point Git at one disposable file for the entire
+# process so tests cannot rewrite real credential helpers, hooks, or signing
+# configuration.
+HIVE_TEST_GLOBAL_GIT_CONFIG_ROOT = Dir.mktmpdir("hive-test-git-config").freeze
+ENV["GIT_CONFIG_GLOBAL"] = File.join(HIVE_TEST_GLOBAL_GIT_CONFIG_ROOT, "config")
+Minitest.after_run do
+  FileUtils.rm_rf(HIVE_TEST_GLOBAL_GIT_CONFIG_ROOT)
+end
+
 if ENV.delete("HIVE_REQUIRE_TEST_RUNS") == "1"
   module HiveCiGateRunGuard
     class Reporter < Minitest::StatisticsReporter

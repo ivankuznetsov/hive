@@ -137,7 +137,7 @@ module Hive
           begin
             if previous_moved && (File.exist?(backup) || File.symlink?(backup))
               FileUtils.rm_rf(app_dir) if File.exist?(app_dir) || File.symlink?(app_dir)
-              File.rename(backup, app_dir)
+              renamer.call(backup, app_dir)
               previous_moved = false
             end
           rescue StandardError => rollback_error

@@ -204,6 +204,42 @@ class WebAppBundleTest < Minitest::Test
     end
   end
 
+  def test_force_refresh_reports_activation_and_rollback_failures
+    with_hive_home do
+      app = Hive::Web::AppBundle.app_dir
+      FileUtils.mkdir_p(File.join(app, "config"))
+      File.write(File.join(app, "config", "application.rb"), "# old app\n")
+      File.write(File.join(app, Hive::Web::AppBundle::VERSION_FILE), "#{Hive::VERSION}\n")
+      write_compiled_assets(app)
+
+      renamer = lambda do |source, destination|
+        if source.start_with?("#{app}.tmp.") && destination == app
+          raise Errno::EIO, "synthetic activation failure"
+        end
+        if source.start_with?("#{app}.backup.") && destination == app
+          raise Errno::EIO, "synthetic rollback failure"
+        end
+
+        File.rename(source, destination)
+      end
+
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.ensure!(
+          bundle_url: seed_source_app,
+          output: nil,
+          runner: successful_prepare_runner,
+          force_refresh: true,
+          renamer: renamer
+        )
+      end
+
+      assert_match(/synthetic activation failure/, error.message)
+      assert_match(/rollback failed .*synthetic rollback failure/, error.message)
+      refute File.exist?(app)
+      assert_equal 1, Dir.glob("#{app}.backup.*").length
+    end
+  end
+
   def test_assets_ready_rejects_manifest_paths_outside_the_asset_directory
     Dir.mktmpdir("hive-web-assets") do |app|
       assets = File.join(app, "public", "assets")

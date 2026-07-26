@@ -895,6 +895,13 @@ class HiveCliTest < Minitest::Test
   # constant-swap technique web_command_test.rb uses for Puma::Server). This
   # proves the CLI wires bind/port through to the command and invokes #call,
   # without booting a socket.
+  def test_web_help_discloses_force_refresh_and_service_repair
+    out, = capture_io { Hive::CLI.start([ "help", "web" ]) }
+
+    assert_includes out, "refresh managed bundle"
+    assert_includes out, "overwrite differing service unit"
+  end
+
   def test_web_wires_bind_and_port_into_the_web_command
     require "hive/commands/web"
     captured = []

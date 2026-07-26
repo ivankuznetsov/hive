@@ -137,6 +137,73 @@ class WebAppBundleTest < Minitest::Test
     end
   end
 
+  def test_force_refresh_reprovisions_a_healthy_same_version_bundle
+    with_hive_home do
+      app = Hive::Web::AppBundle.app_dir
+      FileUtils.mkdir_p(File.join(app, "config"))
+      File.write(File.join(app, "config", "application.rb"), "# old app\n")
+      File.write(File.join(app, Hive::Web::AppBundle::VERSION_FILE), "#{Hive::VERSION}\n")
+      write_compiled_assets(app)
+
+      calls = []
+      runner = lambda do |argv, _env|
+        calls << argv
+        write_compiled_assets(Dir.pwd) if argv == %w[bin/rails assets:precompile]
+        true
+      end
+      source = seed_source_app
+
+      Hive::Web::AppBundle.ensure!(bundle_url: source, output: nil, runner: runner)
+      assert_empty calls, "ordinary startup must keep a healthy current bundle"
+      assert_equal "# old app\n", File.read(File.join(app, "config", "application.rb"))
+
+      Hive::Web::AppBundle.ensure!(
+        bundle_url: source,
+        output: nil,
+        runner: runner,
+        force_refresh: true
+      )
+
+      assert_equal [ %w[bundle install], %w[bin/rails assets:precompile] ], calls
+      assert_equal "# app\n", File.read(File.join(app, "config", "application.rb"))
+      assert_equal Hive::VERSION, Hive::Web::AppBundle.installed_version
+    end
+  end
+
+  def test_force_refresh_restores_the_previous_bundle_when_activation_fails
+    with_hive_home do
+      app = Hive::Web::AppBundle.app_dir
+      FileUtils.mkdir_p(File.join(app, "config"))
+      File.write(File.join(app, "config", "application.rb"), "# old app\n")
+      File.write(File.join(app, Hive::Web::AppBundle::VERSION_FILE), "#{Hive::VERSION}\n")
+      write_compiled_assets(app)
+
+      renamer = lambda do |source, destination|
+        if source.start_with?("#{app}.tmp.") && destination == app
+          raise Errno::EIO, "synthetic activation failure"
+        end
+
+        File.rename(source, destination)
+      end
+
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.ensure!(
+          bundle_url: seed_source_app,
+          output: nil,
+          runner: successful_prepare_runner,
+          force_refresh: true,
+          renamer: renamer
+        )
+      end
+
+      assert_match(/could not activate prepared web bundle/, error.message)
+      assert_equal "# old app\n", File.read(File.join(app, "config", "application.rb"))
+      assert_equal Hive::VERSION, Hive::Web::AppBundle.installed_version
+      assert Hive::Web::AppBundle.assets_ready?
+      assert_empty Dir.glob("#{app}.backup.*")
+    end
+  end
+
   def test_assets_ready_rejects_manifest_paths_outside_the_asset_directory
     Dir.mktmpdir("hive-web-assets") do |app|
       assets = File.join(app, "public", "assets")

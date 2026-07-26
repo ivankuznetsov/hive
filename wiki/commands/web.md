@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [command, web, rails, turbo, hivebox-container]
 ---
 
@@ -36,8 +36,10 @@ bootstrap is allowed, it downloads/extracts the versioned web release bundle.
 Managed installation prepares a staging directory with `bundle install` and a
 production `assets:precompile`, requires usable `application.css` and
 `application.js` entrypoints, verifies every Propshaft manifest asset resolves
-to a contained file, and only then atomically activates it. Missing or corrupt
-assets make even a same-version bundle repair itself.
+to a contained file, and only then activates it under a refresh lock. Activation
+keeps the previous generation as a sibling backup until the staged rename
+succeeds; a failed rename restores that generation. Missing or corrupt assets
+make even a same-version bundle repair itself.
 For a managed bundle, provisioning, `db:prepare`, and the Rails server all run
 through the exact Bundler recorded by the authenticated lockfile and the
 current Ruby. A newer host-default Bundler cannot take over after a successful
@@ -70,9 +72,27 @@ internal `HIVEBOX_PRECOMPILED_ASSETS=1` marker so the shared launcher does not
 repeat native web preparation at container startup.
 
 `hive web install [--force] [--json]` installs the separate `hive-web` autostart
-service using the invoked user-facing binary path; `hive web start --detach`
-starts that service and reloads systemd-user first on Linux so a unit written
-while systemd-user was unavailable becomes visible. Foreground
+service using the invoked user-facing binary path. `--force` also forces an
+authenticated, rollback-safe managed-bundle reprovision before replacing the
+service, even when the installed bundle has a current version stamp and healthy
+assets. This matters when separately merged dependencies or web content change
+without a Hive version bump; ordinary foreground/start bootstrap remains a
+no-op for a healthy current bundle. If the service was already running, a
+successful refresh restarts it exactly once even when the unit file itself is
+unchanged. A service-unit upgrade that already restarted it is not restarted a
+second time.
+
+The default managed source is the signed release bundle, so a forced refresh can
+require network access and `cosign`; verification or preparation failure occurs
+before any service-unit mutation and leaves the current bundle and service
+intact. Source-checkout dogfood must set `HIVE_WEB_BUNDLE_URL` to that checkout's
+`web/` directory when it needs unreleased web content. `--no-bootstrap` is
+authoritative and suppresses both managed installation and refresh, including
+when combined with `--force`.
+
+`hive web start --detach` starts that service and reloads
+systemd-user first on Linux so a unit written while systemd-user was unavailable
+becomes visible. Foreground
 `hive web start` is equivalent to `hive web`. `status --json` emits
 `hive-web-status.v1`; `install --json` emits `hive-web-install.v1`. Both carry
 `mode: "managed_service"`, deduplicated environment migration warnings, and
@@ -583,9 +603,15 @@ explicit GitHub connection action. It also covers Tailscale-style forwarded
 client addresses over a loopback socket, arbitrary proxy hostnames reaching
 the GitHub login instead of a Host-authorization 403, mutation rejection before
 side effects, local `hive` branding, optional GitHub connection without owner
-claim, and local logout returning to the usable dashboard. Managed-bundle tests pin staged dependency/asset preparation,
-same-version missing-asset repair, and preservation of the previous bundle on
-precompile failure. Repository setup always invokes the CLI init adapter with
+claim, and local logout returning to the usable dashboard. Managed-bundle tests
+pin staged dependency/asset preparation,
+same-version missing-asset repair, explicit force refresh of a healthy
+same-version bundle, the ordinary-start no-op, install-command propagation, and
+preservation of the previous bundle on preparation or activation failure.
+Command tests additionally pin exactly-once restart after refreshing an
+unchanged running service, no duplicate restart after a unit upgrade, and help
+text that discloses the refresh and service-repair scope. Repository setup
+always invokes the CLI init adapter with
 non-TTY provisioning input. It also pins that
 a red task page shows the diagnostic banner and Retry button, and that the
   route submits the current row to the durable recovery coordinator and renders

@@ -1659,10 +1659,11 @@ module Hive
     desc "web [SUBCOMMAND]", "Run or manage the hive web UI"
     option :bind, type: :string, desc: "override web.bind"
     option :port, type: :numeric, desc: "override web.port"
-    option :no_bootstrap, type: :boolean, default: false, desc: "do not install the managed web app if missing"
+    option :no_bootstrap, type: :boolean, default: false, desc: "do not install or refresh the managed web app"
     option :unsafe, type: :boolean, default: false, desc: "allow non-loopback bind without configured owner"
     option :allow_public, type: :boolean, default: false, desc: "alias for --unsafe"
-    option :force, type: :boolean, default: false, desc: "for install: overwrite existing service unit"
+    option :force, type: :boolean, default: false,
+                   desc: "for install: refresh managed bundle and overwrite differing service unit"
     option :detach, type: :boolean, default: false, desc: "for start: start the managed service instead of foreground Rails"
     option :source_root, type: :string, desc: "for capture/capture-server: exact clean source worktree"
     option :runtime_root, type: :string, desc: "for capture-server: isolated private runtime directory"

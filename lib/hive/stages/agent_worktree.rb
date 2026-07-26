@@ -64,20 +64,21 @@ module Hive
         )
         prompt = render_prompt(task, stage, context, report_path)
         permission_kwargs = stage.permissions.nil? ? {} : { explicit_permission_spec: stage.permissions }
-        prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
-          cfg || {}, task.stage_name, task, profile,
-          prompt: prompt,
-          base_add_dirs: [ context.worktree_path, task.folder ],
-          managed_slot: "stages.#{stage.name}",
-          **permission_kwargs
-        )
         resource_limits = Hive::Stages::Base.stage_resource_limits(cfg || {}, stage)
-
         git_control_paths = git_control_paths!(context.worktree_path)
         git_controls_capture = Hive::ProtectedFiles.capture_paths(git_control_paths)
         git_controls_before = Hive::ProtectedFiles.snapshot_paths(git_control_paths)
         protected_capture = Hive::ProtectedFiles.capture(task.folder, PROTECTED_FILES)
         protected_before = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
+        prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
+          cfg || {}, task.stage_name, task, profile,
+          prompt: prompt,
+          base_add_dirs: [ context.worktree_path, task.folder ],
+          managed_slot: "stages.#{stage.name}",
+          managed_outputs: [ report_path ],
+          **permission_kwargs
+        )
+
         result = nil
         spawn_error = nil
         begin

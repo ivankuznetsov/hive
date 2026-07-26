@@ -95,6 +95,7 @@ module Hive
         Hive::ImplementationIdentity::NativeDefaults.resolve(:grok, **kwargs)
       },
       model_argument_builder: ->(model) { [ "--model", model ] },
+      effort_argument_builder: ->(effort) { [ "--reasoning-effort", effort ] },
       launcher_identity: "grok-cli/v1"
     )
 

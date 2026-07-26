@@ -3,7 +3,7 @@ title: Generic Agent Stage Runner
 type: stage
 source: lib/hive/stages/agent.rb, lib/hive/stages/agent_worktree.rb, lib/hive/stages/agent_report.rb, lib/hive/managed_git.rb, templates/agent_prompt.md.erb, templates/agent_worktree_prompt.md.erb
 created: 2026-06-19
-updated: 2026-07-22
+updated: 2026-07-26
 tags: [stage, agent, workflow]
 ---
 
@@ -59,6 +59,20 @@ terminal Hive outcome.
    unmatched by any loaded permission rule is denied without hanging the
    headless stage. Loaded Claude setting sources can add broader trusted
    operator allow rules; the descriptor does not erase them.
+   A bounded managed Codex or Grok mapping takes a provider-portable path
+   instead: the runner receives only declared read roots, runs read-only, and
+   returns schema-constrained file content. Hive validates that every requested
+   path is covered by a path-qualified `Edit(...)` rule and atomically
+   materializes the exact output set. This lets a multi-file terminal stage
+   produce both its deliverable and verification artifact without granting the
+   provider direct task writes. Invalid, truncated, empty, or extra-file output
+   becomes `ERROR reason=managed_output_invalid`. Controller-trusted
+   `base_add_dirs` remain read-only roots in this portable path: Codex receives
+   them in its named filesystem policy and Grok receives them as bubblewrap
+   `--ro-bind` mounts. This is how a managed `workspace: worktree` actor can
+   inspect its repository checkout. Each root must resolve to an existing
+   directory or compilation fails closed, and these roots never expand the
+   task-confined host output authorization.
 8. Re-read `stage.state_file` and map markers: `WAITING` → `round_waiting`,
    `COMPLETE` → `complete`, `ERROR` → `error`, `NONE` → `nil` (an explicit arm —
    a markerless run has nothing to commit, so `commit_after` skips the commit),
@@ -133,7 +147,8 @@ name-first resolver precedence preserves the current coding runtime.
   branch/ancestry verification, and `ready` / `no-fix` / `blocked` repository
   invariants. Worktree-stage cases in `agent_test.rb` cover one exact-cwd
   mapping spawn, trusted prompt identity, task/Git control-file tampering,
-  symlink-safe error projection, and provider/timeout/runtime failure markers.
+  symlink-safe error projection, portable repository read-root propagation,
+  and provider/timeout/runtime failure markers.
 - `test/unit/managed_git_test.rb` proves fsmonitor and attribute-selected
   external-diff helpers cannot execute after the agent exits.
 

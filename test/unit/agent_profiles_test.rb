@@ -123,17 +123,19 @@ class AgentProfilesTest < Minitest::Test
       model: "google/gemini-2.5-pro", effort: "medium", pin_model: false
     )
     grok = Hive::AgentProfiles.lookup(:grok).identity_arguments(
-      model: "grok-code-fast-1", effort: "high", pin_model: false
+      model: "grok-4.5", effort: "high"
     )
 
     assert_equal %w[--model sonnet --effort medium], claude.native_arguments
     assert_equal [ "--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=high" ],
                  codex.native_arguments
-    [ pi, grok ].each do |result|
-      assert_equal [], result.native_arguments
-      refute result.effort_supported
-      assert_nil result.effective_effort
-    end
+    assert_equal [], pi.native_arguments
+    refute pi.effort_supported
+    assert_nil pi.effective_effort
+    assert_equal [ "--model", "grok-4.5", "--reasoning-effort", "high" ],
+                 grok.native_arguments
+    assert grok.effort_supported
+    assert_equal "high", grok.effective_effort
   end
 
   def test_utility_model_registry_never_crosses_providers

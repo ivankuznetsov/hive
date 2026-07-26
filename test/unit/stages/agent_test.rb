@@ -792,6 +792,99 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_managed_codex_actor_receives_host_output_contract_for_declared_state_file
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      package_root = File.join(project, ".hive-state", "workflows", "demo", "versions", "#{'a' * 40}")
+      File.write(instruction_path, "Return the completed work artifact.\n")
+      FileUtils.mkdir_p(package_root)
+      descriptor = instruction_workflow(
+        instruction_path,
+        permissions: {
+          "preset" => "scoped",
+          "tools" => [ "Read", "Edit(./work.md)" ]
+        }
+      )
+      task = task_for(project, "work", descriptor: descriptor)
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:managed_runtime_context) do |_slot_id|
+        { package_root: package_root, environment: {} }
+      end
+      task.define_singleton_method(:managed_prompt) { |_slot, body, _context| body }
+
+      policy = nil
+      with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        with_stubbed_spawn do |captured|
+          Hive::Stages::Agent.run!(task, { "work" => { "agent" => "codex" } })
+
+          prompt = captured.first.fetch(:prompt)
+          policy = captured.first.fetch(:kwargs).fetch(:runtime_policy)
+          assert_includes prompt, "Hive managed output contract"
+          assert_includes prompt, "`work.md`"
+          assert_equal [ "work.md" ], policy.output_paths.keys
+          assert_equal :codex, captured.first.dig(:kwargs, :profile).name
+        end
+      end
+    ensure
+      policy&.cleanup!
+    end
+  end
+
+  def test_managed_worktree_base_dirs_reach_portable_runtime_read_policy
+    with_tmp_git_repo do |project|
+      package_root = File.join(
+        project, ".hive-state", "workflows", "demo", "versions", "a" * 40
+      )
+      FileUtils.mkdir_p(package_root)
+      descriptor = worktree_workflow(
+        agent: "codex",
+        permissions: {
+          "preset" => "scoped",
+          "tools" => [ "Read", "Edit(./fix-report.md)" ]
+        }
+      )
+      task = task_for(project, "fix", descriptor: descriptor)
+      context = Hive::Stages::AgentWorktree::Context.new(
+        worktree_path: project, task_branch: task.slug, base_branch: "master",
+        base_oid: run!("git", "-C", project, "rev-parse", "HEAD").strip,
+        repository: "github.com/acme/widgets"
+      )
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:managed_runtime_context) do |_slot_id|
+        { package_root: package_root, environment: {} }
+      end
+      task.define_singleton_method(:managed_prompt) { |_slot, body, _runtime_context| body }
+      policy = nil
+
+      with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        with_replaced_singleton_method(Hive::Stages::AgentWorktree, :prepare!, ->(*) { context }) do
+          with_replaced_singleton_method(
+            Hive::DraftPrReceipt, :read,
+            ->(*) { { "phase" => Hive::DraftPrReceipt::INITIAL_PHASE } }
+          ) do
+            with_replaced_singleton_method(
+              Hive::Stages::Base, :spawn_agent,
+              lambda do |_task, **kwargs|
+                policy = kwargs.fetch(:runtime_policy)
+                { status: :error, error_message: "synthetic stop" }
+              end
+            ) do
+              result = Hive::Stages::AgentWorktree.run!(task, {})
+              assert_equal :error, result.fetch(:status)
+            end
+          end
+        end
+      end
+
+      resolved_worktree = File.realpath(project)
+      assert_includes policy.directories, resolved_worktree
+      filesystem_flag = policy.cli_flags.find { |flag| flag.include?("filesystem=") }
+      assert_includes filesystem_flag, "#{JSON.generate(resolved_worktree)}=\"read\""
+    ensure
+      policy&.cleanup!
+    end
+  end
+
   def test_descriptor_permissions_fail_closed_when_runner_cannot_enforce_scope
     with_tmp_dir do |project|
       instruction_path = File.join(project, "workflow-work.md")
@@ -1473,13 +1566,14 @@ class StagesAgentTest < Minitest::Test
       )
     end
 
-    def worktree_workflow(instruction: nil, deliverable: "fix-report.md")
+    def worktree_workflow(instruction: nil, deliverable: "fix-report.md",
+                          agent: nil, permissions: nil)
       Hive::Workflow.new(
         id: :worktree_agent,
         stages: [
           Hive::Workflow::Stage.new(
             name: "fix", index: 1, state_file: "fix-report.md", kind: :agent,
-            instruction: instruction,
+            instruction: instruction, agent: agent, permissions: permissions,
             workspace: :worktree, handoff: :draft_pr, deliverable: deliverable
           )
         ]

@@ -106,6 +106,57 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
     assert_predicate claude, :frozen?
   end
 
+  def test_terminal_events_without_usage_do_not_invent_zero_token_usage
+    {
+      claude: { "type" => "result" },
+      codex: { "type" => "turn.completed" },
+      pi: { "type" => "result" },
+      grok: { "type" => "end" }
+    }.each do |provider, event|
+      assert_nil AgentCliRuntime.extract_usage(provider, event), provider
+    end
+  end
+
+  def test_facade_preserves_unknown_provider_errors
+    request = AgentCliRuntime::Request.new(
+      profile: :unknown,
+      prompt: "hello"
+    )
+
+    assert_raises(AgentCliRuntime::UnknownProvider) do
+      AgentCliRuntime.compile(request)
+    end
+    assert_raises(AgentCliRuntime::UnknownProvider) do
+      AgentCliRuntime.probe(:unknown)
+    end
+    assert_raises(AgentCliRuntime::UnknownProvider) do
+      AgentCliRuntime.prepare!(:unknown)
+    end
+    assert_raises(AgentCliRuntime::UnknownProvider) do
+      AgentCliRuntime.require_capability!(:unknown, :safe_mode)
+    end
+    assert_raises(AgentCliRuntime::UnknownProvider) do
+      AgentCliRuntime.extract_usage(:unknown, {})
+    end
+    assert_raises(AgentCliRuntime::UnknownProvider) do
+      AgentCliRuntime.observe(:unknown, {})
+    end
+  end
+
+  def test_grok_api_key_ignores_unused_relative_auth_paths
+    env = {
+      "XAI_API_KEY" => "configured",
+      "GROK_AUTH_PATH" => "relative/auth.json",
+      "GROK_HOME" => "relative/home"
+    }
+
+    auth = AgentCliRuntime::Profiles.fetch(:grok).auth_configuration(env:)
+
+    assert auth.configured?
+    assert_equal "environment", auth.source
+    assert_nil auth.diagnostic
+  end
+
   def test_diagnostics_are_bounded_and_redacted
     profile = AgentCliRuntime::Profile.new(
       name: :custom,

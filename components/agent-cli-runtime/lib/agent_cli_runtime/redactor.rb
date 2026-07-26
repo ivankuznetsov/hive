@@ -5,13 +5,15 @@ module AgentCliRuntime
       openai_api_key: /\bsk-[A-Za-z0-9]{20,}/,
       anthropic_api_key: /\bsk-ant-[A-Za-z0-9_-]{20,}/,
       generic_api_key:
-        /\bapi[_-]?key\b[\s:=]{0,3}['"]?[A-Za-z0-9_-]{20,}['"]?(?=[\s,;]|$)/i,
+        /\bapi[_-]?key\b['"]?[\s:=]{0,3}['"]?[A-Za-z0-9_-]{20,}['"]?(?=[\s,;}\]]|$)/i,
       password:
-        /\b(?:password|passwd|pwd)\b[\s:=]{0,3}['"]?[^\s'"]{6,}['"]?(?=[\s,;]|$)/i,
+        /\b(?:password|passwd|pwd)\b['"]?[\s:=]{0,3}['"]?[^\s'"]{6,}['"]?(?=[\s,;}\]]|$)/i,
       authorization:
         /\bauthorization\s*[:=]\s*['"]?(?:Bearer|Basic|Token)\s+[A-Za-z0-9._+\/=-]{8,}['"]?/i,
       private_key:
-        /-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY(?: BLOCK)?-----[\s\S]{0,4000}/,
+        /-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY(?: BLOCK)?-----.*?-----END (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY(?: BLOCK)?-----/m,
+      private_key_header:
+        /-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*\z/,
       jwt: /\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/
     }.freeze
 

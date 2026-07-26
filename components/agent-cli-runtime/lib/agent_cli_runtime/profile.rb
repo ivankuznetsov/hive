@@ -10,6 +10,14 @@ module AgentCliRuntime
     CAPTURE_TIMEOUT_SECONDS = 10
     CAPTURE_POLL_SECONDS = 0.01
     CAPTURE_TERM_GRACE_SECONDS = 0.2
+    CAPTURE_REAP_GRACE_SECONDS = 0.2
+    VERSION_TOKEN_PATTERN =
+      /(?<![0-9A-Za-z])v?(\d+\.\d+\.\d+(?:[.-][0-9A-Za-z]+)*)(?![0-9A-Za-z])/
+    RESERVED_CAPABILITY_NAMES = %i[
+      headless version auth_configuration add_directory allowed_tools
+      disallowed_tools model effort budget raw_cli_arguments installation
+    ].freeze
+    private_constant :VERSION_TOKEN_PATTERN, :RESERVED_CAPABILITY_NAMES
 
     attr_reader :name, :bin_default, :env_bin_override_keys, :headless_flag,
                 :permission_skip_flag, :workspace_write_flags,
@@ -17,7 +25,7 @@ module AgentCliRuntime
                 :budget_flag, :output_format_flags, :version_flag,
                 :min_version, :prompt_style, :model_argument_builder,
                 :effort_argument_builder, :launcher_identity,
-                :cli_capabilities
+                :cli_capabilities, :declared_capability_support
 
     def initialize(name:, bin_default:, headless_flag:, version_flag:,
                    env_bin_override_keys: [], permission_skip_flag: nil,
@@ -57,6 +65,7 @@ module AgentCliRuntime
       @auth_configuration_probe = auth_configuration_probe
       @cli_capabilities = normalize_cli_capabilities(cli_capabilities)
       @raw_cli_arguments_supported = raw_cli_arguments_supported == true
+      @declared_capability_support = build_declared_capability_support
       freeze
     end
 
@@ -138,18 +147,24 @@ module AgentCliRuntime
     def check_version!(env: ENV)
       executable = bin(env:)
       out, _err, status = bounded_capture3(
-        executable, @version_flag, timeout_sec: CAPTURE_TIMEOUT_SECONDS
+        executable, @version_flag, timeout_sec: CAPTURE_TIMEOUT_SECONDS, env: env
       )
       unless status.success?
         raise BinaryUnavailable,
               "#{@name} binary not runnable: #{executable}"
       end
 
-      version = out[/\d+\.\d+\.\d+/]
-      unless version
+      versions = out.scan(VERSION_TOKEN_PATTERN).flatten.uniq
+      if versions.empty?
         raise VersionError,
               "could not parse #{@name} #{@version_flag} output"
       end
+      if versions.length > 1
+        raise VersionError,
+              "ambiguous #{@name} #{@version_flag} output: " \
+              "#{versions.join(', ')}"
+      end
+      version = versions.fetch(0)
       if @min_version &&
          Gem::Version.new(version) < Gem::Version.new(@min_version)
         raise VersionError,
@@ -234,11 +249,31 @@ module AgentCliRuntime
       end
 
       capabilities.each_with_object({}) do |(name, flags), normalized|
+        capability_name = name.to_sym
+        if RESERVED_CAPABILITY_NAMES.include?(capability_name)
+          raise ArgumentError,
+                "CLI capability #{name.inspect} collides with a standard capability"
+        end
         values = immutable_strings(flags)
         raise ArgumentError, "CLI capability #{name.inspect} is empty" if values.empty?
 
-        normalized[name.to_sym] = values
+        normalized[capability_name] = values
       end.freeze
+    end
+
+    def build_declared_capability_support
+      support = {
+        headless: true,
+        add_directory: !@add_dir_flag.nil?,
+        allowed_tools: @tool_scope_flags.key?(:allowed),
+        disallowed_tools: @tool_scope_flags.key?(:disallowed),
+        model: !@model_argument_builder.nil?,
+        effort: !@effort_argument_builder.nil?,
+        budget: !@budget_flag.nil?,
+        raw_cli_arguments: @raw_cli_arguments_supported
+      }
+      @cli_capabilities.each_key { |capability| support[capability] = true }
+      support.freeze
     end
 
     def nonempty_value(value, label)
@@ -273,8 +308,10 @@ module AgentCliRuntime
       help.match?(/(?:\A|[\s,])#{Regexp.escape(flag)}(?:[\s,=\[]|$)/)
     end
 
-    def bounded_capture3(*argv, timeout_sec:)
-      stdin, stdout, stderr, waiter = Open3.popen3(*argv, pgroup: true)
+    def bounded_capture3(*argv, timeout_sec:, env: nil)
+      popen_arguments = env ? [ env, *argv ] : argv
+      stdin, stdout, stderr, waiter =
+        Open3.popen3(*popen_arguments, pgroup: true)
       stdin.close
       readers = [ capture_reader(stdout), capture_reader(stderr) ]
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_sec
@@ -292,7 +329,7 @@ module AgentCliRuntime
       end
     rescue Timeout::Error
       terminate_process_group(waiter) if waiter
-      readers&.each { |reader| reader.kill if reader.alive? }
+      stop_capture_readers(readers, stdout, stderr)
       raise
     ensure
       [ stdin, stdout, stderr ].each do |io|
@@ -313,18 +350,41 @@ module AgentCliRuntime
 
     def terminate_process_group(waiter)
       pid = waiter.pid
-      Process.kill("TERM", -pid)
+      signal_process_group("TERM", pid)
       deadline =
         Process.clock_gettime(Process::CLOCK_MONOTONIC) +
         CAPTURE_TERM_GRACE_SECONDS
-      while waiter.alive? &&
+      while process_group_alive?(pid) &&
             Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
         sleep CAPTURE_POLL_SECONDS
       end
-      Process.kill("KILL", -pid) if waiter.alive?
-      waiter.join(CAPTURE_TERM_GRACE_SECONDS)
+      signal_process_group("KILL", pid) if process_group_alive?(pid)
+      waiter.join(CAPTURE_REAP_GRACE_SECONDS)
+    end
+
+    def stop_capture_readers(readers, *streams)
+      Array(readers).each { |reader| reader.join(CAPTURE_REAP_GRACE_SECONDS) }
+      streams.each do |stream|
+        stream.close if stream && !stream.closed?
+      rescue IOError
+        nil
+      end
+      Array(readers).each { |reader| reader.kill if reader.alive? }
+    end
+
+    def signal_process_group(signal, pid)
+      Process.kill(signal, -Integer(pid))
     rescue Errno::ESRCH, Errno::ECHILD
       nil
+    end
+
+    def process_group_alive?(pid)
+      Process.kill(0, -Integer(pid))
+      true
+    rescue Errno::ESRCH, Errno::ECHILD
+      false
+    rescue Errno::EPERM
+      true
     end
   end
 end

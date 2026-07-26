@@ -81,6 +81,8 @@ module AgentCliRuntime
       resolved = Profiles.resolve(profile)
       arguments = resolved.require_cli_capability!(capability)
       supported_evidence(resolved, capability, arguments)
+    rescue UnknownProvider
+      raise
     rescue Error => e
       evidence = unsupported_evidence(
         resolved, capability, Redactor.diagnostic(e)
@@ -94,9 +96,11 @@ module AgentCliRuntime
 
     def extract_usage(profile, event)
       resolved = Profiles.resolve(profile)
-      normalize_usage(resolved.extract_usage_event(event))
-    rescue StandardError
-      nil
+      begin
+        normalize_usage(resolved.extract_usage_event(event))
+      rescue StandardError
+        nil
+      end
     end
 
     def observe(profile, result)

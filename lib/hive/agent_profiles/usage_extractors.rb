@@ -6,10 +6,11 @@ module Hive
       CLAUDE = lambda do |event|
         next nil unless event.is_a?(Hash)
 
-        if event["type"] == "result"
-          usage_result(event, usage_hash(event) || {}, model_from(event))
-        elsif event["type"] == "stream_event" && usage_hash(event)
-          usage_result(event, usage_hash(event), model_from(event))
+        usage = usage_hash(event)
+        if event["type"] == "result" && usage
+          usage_result(event, usage, model_from(event))
+        elsif event["type"] == "stream_event" && usage
+          usage_result(event, usage, model_from(event))
         else
           nil
         end
@@ -19,11 +20,7 @@ module Hive
         next nil unless event.is_a?(Hash)
 
         usage = usage_hash(event)
-        if usage
-          usage_result(event, usage, model_from(event))
-        elsif final_type?(event, %w[turn.completed result response.completed])
-          zero_result(model_from(event))
-        end
+        usage_result(event, usage, model_from(event)) if usage
       end
 
       # Grok's streaming-json currently carries no usage counts. Preserve
@@ -40,15 +37,7 @@ module Hive
         next nil unless event.is_a?(Hash)
 
         usage = usage_hash(event)
-        if usage
-          usage_result(event, usage, model_from(event))
-        elsif final_type?(event, %w[result run.completed task.completed response.completed])
-          zero_result(model_from(event))
-        end
-      end
-
-      def final_type?(event, types)
-        types.include?(event["type"].to_s)
+        usage_result(event, usage, model_from(event)) if usage
       end
 
       def usage_hash(event)
@@ -72,10 +61,6 @@ module Hive
           cached: cached_tokens(usage),
           model: model || model_from_usage(usage) || model_from(event)
         }
-      end
-
-      def zero_result(model)
-        { input: 0, output: 0, cached: 0, model: model }
       end
 
       def cached_tokens(usage)

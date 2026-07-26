@@ -41,6 +41,9 @@ module Hive
     CAPTURE_POLL_INTERVAL_SEC = 0.01
     CAPTURE_TERM_GRACE_SEC = 0.2
     CAPTURE_REAP_GRACE_SEC = 0.2
+    VERSION_TOKEN_PATTERN =
+      /(?<![0-9A-Za-z])v?(\d+\.\d+\.\d+(?:[.-][0-9A-Za-z]+)*)(?![0-9A-Za-z])/
+    private_constant :VERSION_TOKEN_PATTERN
 
     attr_reader :prompt_style
     attr_reader :name, :bin_default, :env_bin_override_key,
@@ -422,8 +425,16 @@ module Hive
       end
       raise Hive::AgentError, "#{@name} binary not runnable: #{bin}" unless status.success?
 
-      version = out[/\d+\.\d+\.\d+/]
-      raise Hive::AgentError, "could not parse #{@name} #{@version_flag} output: #{out.inspect}" unless version
+      versions = out.scan(VERSION_TOKEN_PATTERN).flatten.uniq
+      if versions.empty?
+        raise Hive::AgentError,
+              "could not parse #{@name} #{@version_flag} output: #{out.inspect}"
+      end
+      if versions.length > 1
+        raise Hive::AgentError,
+              "ambiguous #{@name} #{@version_flag} output: #{versions.join(', ')}"
+      end
+      version = versions.fetch(0)
 
       if @min_version
         cmp = version_tuple(version) <=> version_tuple(@min_version)

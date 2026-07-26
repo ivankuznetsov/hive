@@ -202,6 +202,17 @@ class AgentProfileTest < Minitest::Test
     assert_match(/below minimum/, err.message)
   end
 
+  def test_check_version_rejects_ambiguous_version_output
+    profile = make_profile(min_version: "1.0.0")
+    ENV["HIVE_FAKE_CLAUDE_VERSION"] =
+      "wrapper 9.9.9 delegates to claude 2.0.0"
+
+    err = assert_raises(Hive::AgentError) { profile.check_version! }
+
+    assert_match(/ambiguous/, err.message)
+    assert_match(/9\.9\.9, 2\.0\.0/, err.message)
+  end
+
   def test_check_version_raises_when_binary_not_runnable
     profile = make_profile(bin_default: "/this/does/not/exist", env_bin_override_key: nil)
     err = assert_raises(Hive::AgentError) { profile.check_version! }

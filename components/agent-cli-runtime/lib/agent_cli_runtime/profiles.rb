@@ -134,7 +134,6 @@ module AgentCliRuntime
       bin_default: "pi",
       env_bin_override_keys: %w[AGENT_CLI_RUNTIME_PI_BIN HIVE_PI_BIN],
       headless_flag: "-p",
-      tool_scope_flags: { allowed: "--tools" },
       output_format_flags: [ "--mode", "json", "--no-session" ],
       version_flag: "--version",
       min_version: "0.70.2",
@@ -172,8 +171,6 @@ module AgentCliRuntime
       usage_extractor: UsageExtractors::GROK,
       auth_configuration_probe: lambda do |home:, env:|
         if env_configured?(env, "XAI_API_KEY", "GROK_CODE_XAI_API_KEY")
-          grok_auth_path(home: home, env: env) if
-            env_configured?(env, "GROK_AUTH_PATH", "GROK_HOME")
           AuthConfiguration.new(status: :configured, source: "environment")
         else
           auth_from_file(

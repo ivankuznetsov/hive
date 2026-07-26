@@ -67,18 +67,15 @@ module AgentCliRuntime
     end
 
     def capability_evidence(profile, installed:, version:, auth:)
+      declared = profile.declared_capability_support
       capabilities = {
-        headless: true,
+        headless: declared.fetch(:headless),
         version: !version.nil?,
-        auth_configuration: auth.status != :missing,
-        add_directory: !profile.add_dir_flag.nil?,
-        allowed_tools: profile.tool_scope_flags.key?(:allowed),
-        disallowed_tools: profile.tool_scope_flags.key?(:disallowed),
-        model: !profile.model_argument_builder.nil?,
-        effort: !profile.effort_argument_builder.nil?,
-        budget: !profile.budget_flag.nil?,
-        raw_cli_arguments: profile.raw_cli_arguments_supported?
+        auth_configuration: auth.status != :missing
       }
+      declared.each do |capability, supported|
+        capabilities[capability] = supported unless capability == :headless
+      end
       capabilities[:installation] = installed
       capabilities.map do |capability, supported|
         CapabilityEvidence.new(

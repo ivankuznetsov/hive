@@ -42,6 +42,65 @@ Compilation does not execute the returned command. Unsupported requested
 controls raise `AgentCliRuntime::UnsupportedCapability` with typed evidence
 instead of silently widening the request.
 
+`permission_mode: nil` deliberately preserves Hive's existing trusted,
+headless behavior: providers with a bypass flag receive that flag. Consumers
+that do not want this compatibility path should pass `"read-only"` or
+`"workspace-write"` explicitly. A profile raises instead of pretending to
+enforce a mode its CLI cannot represent.
+
+## Public API
+
+- `compile(request)` returns a frozen argv/stdin invocation.
+- `probe(profile)` and `probe_all` report local prerequisite evidence without
+  contacting a provider.
+- `prepare!(profile)` requires that local probe to be ready.
+- `require_capability!(profile, name)` verifies a named CLI capability and
+  returns typed evidence.
+- `extract_usage(profile, event)` normalizes provider usage when present and
+  returns `nil` when usage is absent or malformed.
+- `observe(profile, result)` normalizes bounded, redacted result metadata.
+
+Provider arguments accept a built-in name or an `AgentCliRuntime::Profile`.
+Unknown built-in names raise `AgentCliRuntime::UnknownProvider`; they are not
+converted into generic probe or capability failures.
+
+## Custom profiles
+
+```ruby
+profile = AgentCliRuntime::Profile.new(
+  name: :acme,
+  bin_default: "acme-agent",
+  env_bin_override_keys: ["ACME_AGENT_BIN"],
+  headless_flag: "run",
+  version_flag: "--version",
+  min_version: "1.2.0",
+  prompt_style: :stdin,
+  read_only_flags: ["--sandbox", "read-only"],
+  cli_capabilities: {
+    safe_mode: ["--safe-mode"]
+  },
+  usage_extractor: ->(event) { event["usage"] },
+  auth_configuration_probe: ->(home:, env:) {
+    AgentCliRuntime::AuthConfiguration.new(
+      status: env["ACME_API_KEY"].to_s.empty? ? :missing : :configured,
+      source: "environment"
+    )
+  }
+)
+
+request = AgentCliRuntime::Request.new(
+  profile: profile,
+  prompt: "Inspect the project",
+  permission_mode: "read-only",
+  capabilities: [:safe_mode]
+)
+AgentCliRuntime.compile(request)
+```
+
+Custom capability names cannot shadow the standard capability vocabulary.
+Capability checks use discrete argv, inspect the installed CLI's help, and
+fail closed when a declared option is not advertised.
+
 ## Inspect local prerequisites
 
 ```sh
@@ -82,7 +141,11 @@ bundle exec rake test
 gem build agent-cli-runtime.gemspec
 ```
 
-Release instructions live in the repository’s `docs/RELEASING.md`. Releases
+The root suite includes these package tests plus Hive/package parity coverage;
+run `bundle exec rake test:agent_cli_runtime` from the repository root for the
+standalone component gate alone.
+
+Release instructions live in the repository's `docs/RELEASING.md`. Releases
 use component-scoped tags and publish exact preverified gem bytes through
 RubyGems trusted publishing.
 

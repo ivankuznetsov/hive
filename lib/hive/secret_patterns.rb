@@ -20,7 +20,7 @@ module Hive
       # assignments (`API_KEY=abcdef...`) also trip; the trailing
       # lookahead requires a token boundary so we don't run past the
       # secret into adjacent text.
-      generic_api_key:       /\bapi[_\-]?key\b[\s:=]{0,3}['"]?[A-Za-z0-9_\-]{20,}['"]?(?=[\s,;]|$)/i,
+      generic_api_key:       /\bapi[_\-]?key\b['"]?[\s:=]{0,3}['"]?[A-Za-z0-9_\-]{20,}['"]?(?=[\s,;}\]]|$)/i,
       # PEM-encoded private keys. Block form (/m flag) so the regex
       # spans the full BEGIN ... END envelope including the base64
       # body. The previous header-only regex left the key body in
@@ -30,15 +30,15 @@ module Hive
       # fixed byte budget (DIAGNOSTIC_DETAIL_MAX = 4000) so most leaks
       # appear as BEGIN + partial body with no matching END. The
       # block-form pattern above fails on these; this fallback redacts
-      # BEGIN through up to 4000 trailing bytes so the partial body is
+      # BEGIN through the end of the diagnostic so a long partial body is
       # not surfaced. Ordering matters: the full-block pattern runs
       # first via PATTERNS-iteration so complete PEMs are replaced
       # before this fallback can see them. Resolves issue #88.
-      pem_private_key_header: /-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY( BLOCK)?-----[\s\S]{0,4000}/,
+      pem_private_key_header: /-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY( BLOCK)?-----[\s\S]*\z/,
       # `password=`, `passwd=`, `PASSWORD=` style assignments. Same
       # token-boundary shape as generic_api_key so unquoted shell/env
       # values trip without running past the secret.
-      password_assignment:   /\b(?:password|passwd|pwd)\b[\s:=]{0,3}['"]?[^\s'"]{6,}['"]?(?=[\s,;]|$)/i,
+      password_assignment:   /\b(?:password|passwd|pwd)\b['"]?[\s:=]{0,3}['"]?[^\s'"]{6,}['"]?(?=[\s,;}\]]|$)/i,
       # HTTP Authorization headers with Bearer / Basic / Token scheme.
       # Catches the header value regardless of surrounding format
       # (curl output, header dumps, framework log lines).

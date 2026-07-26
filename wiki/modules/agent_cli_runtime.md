@@ -27,6 +27,24 @@ cannot represent them. Provider profiles and extractors are public,
 SemVer-governed behavior; orchestration policy stays injectable or outside the
 package.
 
+The public facade includes `compile`, `prepare!`, `require_capability!`,
+`extract_usage`, `observe`, `probe`, and `probe_all`. It accepts built-in names
+or custom `Profile` objects, preserves `UnknownProvider` as a typed caller
+error, exposes custom CLI capabilities in static probe evidence, and rejects
+custom names that collide with the standard capability vocabulary. Missing
+usage stays `nil`; terminal events without counters do not become measured
+zero-token events.
+
+For compatibility with Hive's trusted headless launches,
+`permission_mode: nil` still selects a provider's bypass flag. Independent
+consumers should pass `read-only` or `workspace-write` when they require those
+restrictions; unsupported enforcement fails closed. Version probes execute
+with their supplied environment, reject output containing multiple distinct
+version tokens, and terminate the full process group with a TERM/KILL and
+bounded-reader cleanup path on timeout. Grok environment authentication ignores
+unused file-path overrides, while file-backed authentication still validates
+absolute paths.
+
 The `agent-runtime probe [PROVIDER|--all] [--json]` executable checks only
 locally observable executable installation, version output, authentication
 configuration presence, and declared capabilities. Its JSON envelope has
@@ -54,14 +72,21 @@ internal copy only after RubyGems verification and separate merge authority.
 Package tests run directly from the subtree and through the root `rake test`
 task. Candidate tooling builds one gem, records its source commit and dirty
 state, checksums it, installs it into a private gem home, proves a clean require,
-and exercises the executable.
+and exercises the executable. Root parity fixtures cover non-default
+compilation, local probes, named capability evidence, provider usage variants,
+and observable normalization/redaction across all four built-ins.
 
 Only `components/agent-cli-runtime/vX.Y.Z` tags can trigger the component
 workflow. The tag, package version, exact main commit, and clean checkout must
 agree. Candidate and platform-install jobs have no publication identity; the
 `agent-cli-runtime-release` environment grants OIDC only to the publish job,
 which pushes the previously verified bytes without rebuilding. Hive root tags
-use a separate workflow and release surface. See `docs/RELEASING.md`.
+use a separate workflow and release surface. Every component release job has a
+15-minute execution timeout and the exact candidate is retained for 30 days to
+survive reviewer delay. Repository operators must separately enforce a
+component-tag ruleset, required reviewers on the release environment, and an
+environment deployment policy restricted to matching component tags. See
+`docs/RELEASING.md`.
 
 ## Compatibility
 

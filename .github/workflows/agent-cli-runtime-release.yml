@@ -12,6 +12,7 @@ jobs:
   candidate:
     name: Build and verify exact component candidate
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -44,12 +45,13 @@ jobs:
           name: agent-cli-runtime-candidate
           path: dist
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
 
   install:
     name: Install exact candidate / ${{ matrix.os }}
     needs: candidate
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
@@ -76,6 +78,7 @@ jobs:
     name: Publish exact candidate to RubyGems
     needs: [candidate, install]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     environment: agent-cli-runtime-release
     permissions:
       contents: read

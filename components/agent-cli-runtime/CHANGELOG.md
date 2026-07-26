@@ -7,3 +7,8 @@
   capability evidence, usage extraction, and result normalization.
 - Add the `agent-runtime probe` diagnostic executable with versioned JSON and
   stable exit statuses.
+- Keep missing provider usage unknown instead of recording fabricated zero
+  counts, and preserve typed unknown-provider errors through the public facade.
+- Harden local probing around subprocess environments, ambiguous version
+  output, TERM-resistant descendants, custom capability evidence, unused Grok
+  credential paths, and long or JSON-delimited secrets.

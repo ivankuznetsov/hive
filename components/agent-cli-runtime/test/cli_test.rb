@@ -46,4 +46,72 @@ class AgentCliRuntimeCliTest < Minitest::Test
     assert_equal 64, status.exitstatus
     assert_match(/Usage:/, err)
   end
+
+  def test_unknown_provider_exits_64_with_typed_message
+    _out, err, status = run_cli("probe", "not-a-provider", "--json")
+
+    assert_equal 64, status.exitstatus
+    assert_match(/unknown provider/, err)
+    assert_match(/claude, codex, pi, grok/, err)
+    assert_match(/Usage:/, err)
+  end
+
+  def test_unknown_option_exits_64
+    _out, err, status = run_cli("probe", "codex", "--yaml")
+
+    assert_equal 64, status.exitstatus
+    assert_match(/Usage:/, err)
+  end
+
+  def test_ready_json_probe_has_the_complete_v1_shape
+    Dir.mktmpdir do |dir|
+      bin = File.join(dir, "codex")
+      write_executable(bin, <<~RUBY)
+        #!/usr/bin/env ruby
+        puts "codex-cli 0.125.0"
+      RUBY
+      out, err, status = Open3.capture3(
+        {
+          "PATH" => "/usr/bin:/bin",
+          "RUBYLIB" => LIB,
+          "OPENAI_API_KEY" => "configured",
+          "AGENT_CLI_RUNTIME_CODEX_BIN" => bin
+        },
+        Gem.ruby, EXE, "probe", "codex", "--json"
+      )
+
+      assert_equal 0, status.exitstatus
+      assert_empty err
+      payload = JSON.parse(out)
+      assert_equal %w[probes schema_version], payload.keys.sort
+      probe = payload.fetch("probes").fetch(0)
+      assert_equal %w[
+        auth_configuration capabilities diagnostic executable installed
+        minimum_version provider ready version
+      ], probe.keys.sort
+      assert_equal %w[source status],
+                   probe.fetch("auth_configuration").keys.sort
+      assert_equal(
+        %w[
+          headless version auth_configuration add_directory allowed_tools
+          disallowed_tools model effort budget raw_cli_arguments installation
+        ],
+        probe.fetch("capabilities").map { |item| item.fetch("capability") }
+      )
+      assert(
+        probe.fetch("capabilities").all? do |item|
+          item.keys.sort == %w[capability supported]
+        end
+      )
+    end
+  end
+
+  private
+
+  def run_cli(*arguments)
+    Open3.capture3(
+      { "PATH" => "/usr/bin:/bin", "RUBYLIB" => LIB },
+      Gem.ruby, EXE, *arguments
+    )
+  end
 end

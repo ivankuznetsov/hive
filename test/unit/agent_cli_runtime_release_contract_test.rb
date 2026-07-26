@@ -32,6 +32,19 @@ class AgentCliRuntimeReleaseContractTest < Minitest::Test
     end
   end
 
+  def test_every_job_is_bounded_and_candidate_survives_approval_delay
+    workflow = YAML.safe_load_file(WORKFLOW, aliases: true)
+    jobs = workflow.fetch("jobs")
+
+    assert jobs.values.all? { |job| job.fetch("timeout-minutes") == 15 }
+    candidate = jobs.fetch("candidate")
+    upload = candidate.fetch("steps").find do |step|
+      step.fetch("uses", "").start_with?("actions/upload-artifact@")
+    end
+
+    assert_equal 30, upload.fetch("with").fetch("retention-days")
+  end
+
   def test_publish_uses_pinned_oidc_action_and_does_not_rebuild
     content = File.read(WORKFLOW)
 

@@ -1306,7 +1306,20 @@ module Hive
           now: now,
           trigger: trigger
         )
-        dispatch_outcome(dispatch_result)
+        outcome = dispatch_outcome(dispatch_result)
+        if outcome == :attempt_terminal_replay
+          # A successful durable attempt already consumed this exact task
+          # generation. Refresh the edit/run baseline just as a locally
+          # reaped child would, so an unchanged waiting marker does not ask
+          # the attempts layer for the same terminal receipt every tick.
+          # The baseline is persisted by the controller, making the brake
+          # survive daemon restarts while a genuine later edit (newer mtime)
+          # remains eligible for dispatch.
+          @controller.observe_state_file_mtime(
+            project: row.project, slug: row.slug, mtime: row.state_file_mtime
+          )
+        end
+        outcome
       end
 
       def dispatch_outcome(result)

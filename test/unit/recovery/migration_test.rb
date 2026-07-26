@@ -39,6 +39,8 @@ class RecoveryMigrationTest < Minitest::Test
       assert_equal 2, migrated.fetch("schema_version")
       assert_equal "generation-v1", migrated.fetch("ownership_generation")
       assert_equal 0, migrated.fetch("task_input_epoch")
+      assert_equal "generation-v1", migrated.dig("receipt", "ownership_generation")
+      assert_equal 0, migrated.dig("receipt", "task_input_epoch")
       refute migrated.key?("compatibility")
       assert Hive::Attempts::Record.new(migrated)
 
@@ -178,6 +180,123 @@ class RecoveryMigrationTest < Minitest::Test
     end
   end
 
+  def test_wraps_a_malformed_attempt_parse_error
+    with_tmp_dir do |state_home|
+      records = File.join(state_home, "attempts", "v2", "records")
+      FileUtils.mkdir_p(records)
+      File.write(File.join(records, "malformed.json"), "{")
+
+      error = assert_raises(Hive::Recovery::Migration::Error) do
+        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+      end
+
+      assert_includes error.message, "recovery migration failed"
+      assert_includes error.message, "expected object key"
+    end
+  end
+
+  def test_rejects_a_non_attempt_record
+    with_tmp_dir do |state_home|
+      records = File.join(state_home, "attempts", "v2", "records")
+      FileUtils.mkdir_p(records)
+      write_json(
+        File.join(records, "other.json"),
+        { "schema" => "other-record", "schema_version" => 2 }
+      )
+
+      error = assert_raises(Hive::Recovery::Migration::Error) do
+        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+      end
+
+      assert_includes error.message, "is not a hive-attempt record"
+    end
+  end
+
+  def test_refuses_a_live_compatibility_record_already_in_the_current_root
+    with_tmp_dir do |state_home|
+      records = File.join(state_home, "attempts", "v2", "records")
+      FileUtils.mkdir_p(records)
+      write_json(
+        File.join(records, "compat-live.json"),
+        current_attempt(attempt_id: "compat-live").merge("compatibility" => true)
+      )
+
+      error = assert_raises(Hive::Recovery::Migration::Error) do
+        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+      end
+
+      assert_includes error.message, "live legacy compatibility attempt"
+    end
+  end
+
+  def test_rejects_an_unknown_attempt_schema_version
+    with_tmp_dir do |state_home|
+      records = File.join(state_home, "attempts", "v2", "records")
+      FileUtils.mkdir_p(records)
+      write_json(
+        File.join(records, "future.json"),
+        current_attempt(attempt_id: "future").merge("schema_version" => 99)
+      )
+
+      error = assert_raises(Hive::Recovery::Migration::Error) do
+        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+      end
+
+      assert_includes error.message, "unsupported attempt schema 99"
+    end
+  end
+
+  def test_tolerates_the_legacy_records_directory_disappearing_during_preflight
+    with_tmp_dir do |state_home|
+      FileUtils.mkdir_p(File.join(state_home, "attempts", "v1", "records"))
+
+      original = Dir.method(:children)
+      Dir.define_singleton_method(:children) { |*| raise Errno::ENOENT }
+      begin
+        result = Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+      ensure
+        Dir.define_singleton_method(:children, original)
+      end
+
+      assert_equal 0, result.dig("attempts", "migrated")
+      assert_path_exists File.join(state_home, "attempts", "v2")
+    end
+  end
+
+  def test_tolerates_a_queue_directory_disappearing_during_enumeration
+    with_tmp_dir do |state_home|
+      FileUtils.mkdir_p(File.join(state_home, "dispatch_requests"))
+
+      original = Dir.method(:children)
+      Dir.define_singleton_method(:children) { |*| raise Errno::ENOENT }
+      begin
+        result = Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+      ensure
+        Dir.define_singleton_method(:children, original)
+      end
+
+      assert_equal 0, result.dig("dispatch_requests", "migrated")
+      assert_path_exists File.join(state_home, "recovery-migration-v2.json")
+    end
+  end
+
+  def test_refuses_to_overwrite_an_archived_compatibility_record
+    with_tmp_dir do |state_home|
+      records = File.join(state_home, "attempts", "v2", "records")
+      archive = File.join(state_home, "attempts", "legacy-v1-records")
+      FileUtils.mkdir_p(records)
+      FileUtils.mkdir_p(archive)
+      write_json(File.join(records, "compat.json"), final_compatibility_attempt)
+      write_json(File.join(archive, "compat.json"), final_compatibility_attempt)
+
+      error = assert_raises(Hive::Recovery::Migration::Error) do
+        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+      end
+
+      assert_includes error.message, "legacy compatibility archive collision"
+    end
+  end
+
   private
 
   def current_attempt(attempt_id:)
@@ -203,12 +322,14 @@ class RecoveryMigrationTest < Minitest::Test
   end
 
   def legacy_v1_attempt
-    lost_attempt(current_attempt(attempt_id: "v1")).merge(
+    terminal_attempt(current_attempt(attempt_id: "v1")).merge(
       "schema_version" => 1,
       "compatibility" => false
     ).tap do |data|
       data.delete("ownership_generation")
       data.delete("task_input_epoch")
+      data.fetch("receipt").delete("ownership_generation")
+      data.fetch("receipt").delete("task_input_epoch")
     end
   end
 
@@ -226,6 +347,38 @@ class RecoveryMigrationTest < Minitest::Test
       "claim_deadline" => nil,
       "ended_at" => NOW.iso8601(6),
       "loss" => { "reason" => "owner_gone", "at" => NOW.iso8601(6) }
+    )
+  end
+
+  def terminal_attempt(data)
+    checkpoint = { "progress_token" => data.fetch("progress_token") }
+    log_reference = {
+      "path" => "logs/#{data.fetch('attempt_id')}.frames",
+      "size" => 4,
+      "sha256" => "1" * 64
+    }
+    receipt = {
+      "attempt_id" => data.fetch("attempt_id"),
+      "task_generation" => data.fetch("task_generation"),
+      "ownership_generation" => data.fetch("ownership_generation"),
+      "task_input_epoch" => data.fetch("task_input_epoch"),
+      "outcome" => "succeeded",
+      "exit_status" => 0,
+      "started_at" => NOW.iso8601(6),
+      "ended_at" => (NOW + 5).iso8601(6),
+      "final_checkpoint" => checkpoint,
+      "output_references" => [],
+      "log_reference" => log_reference
+    }
+    data.merge(
+      "state" => "terminal",
+      "outcome" => "succeeded",
+      "claim_deadline" => nil,
+      "started_at" => NOW.iso8601(6),
+      "ended_at" => (NOW + 5).iso8601(6),
+      "checkpoint" => checkpoint,
+      "log_reference" => log_reference,
+      "receipt" => receipt
     )
   end
 

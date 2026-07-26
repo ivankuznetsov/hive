@@ -1,5 +1,6 @@
 require "json"
 require "net/http"
+require "rbconfig"
 require "securerandom"
 require "time"
 require "uri"
@@ -51,7 +52,7 @@ module Hive
           bundle = @runtime.prepare!
           port, reservation = @runtime.allocate_port(@requested_port)
           env = @runtime.environment(bundle_path: bundle.bundle_path, port: port)
-          run_bootstrap!(env)
+          run_bootstrap!(env, bundler_executable: bundle.bundler_executable)
           # Revalidate clean source/HEAD after dependency and asset/database
           # bootstrap. A misconfigured build that wrote into the worktree is a
           # contamination failure, never a successful capture server.
@@ -62,7 +63,11 @@ module Hive
 
           reservation.close
           reservation = nil
-          pid = @spawner.call(server_argv(port), env, chdir: File.join(@source_root, "web"))
+          pid = @spawner.call(
+            server_argv(port, bundler_executable: bundle.bundler_executable),
+            env,
+            chdir: File.join(@source_root, "web")
+          )
           start_time = Hive::ProcessKill.process_start_time(pid)
           raise BootstrapError, "capture server process identity is unavailable" if start_time.to_s.empty?
 
@@ -102,18 +107,25 @@ module Hive
 
         private
 
-        def run_bootstrap!(env)
+        def run_bootstrap!(env, bundler_executable:)
           [
-            [ "assets", [ "bin/rails", "assets:precompile" ] ],
-            [ "database", [ "bin/rails", "db:prepare" ] ]
+            [ "assets", rails_argv(bundler_executable, "assets:precompile") ],
+            [ "database", rails_argv(bundler_executable, "db:prepare") ]
           ].each do |name, argv|
             ok = @phase_runner.call(argv, env, chdir: File.join(@source_root, "web"))
             raise BootstrapError, "capture #{name} bootstrap failed" unless ok
           end
         end
 
-        def server_argv(port)
-          [ "bin/rails", "server", "-b", Hive::Web::CaptureRuntime::BIND, "-p", port.to_s ]
+        def server_argv(port, bundler_executable:)
+          rails_argv(
+            bundler_executable,
+            "server", "-b", Hive::Web::CaptureRuntime::BIND, "-p", port.to_s
+          )
+        end
+
+        def rails_argv(bundler_executable, *args)
+          [ RbConfig.ruby, bundler_executable, "exec", "bin/rails", *args ]
         end
 
         def run_phase(argv, env, chdir:)

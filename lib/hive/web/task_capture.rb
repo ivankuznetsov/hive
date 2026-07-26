@@ -205,6 +205,7 @@ module Hive
       def start_server(source_root:, runtime_root:, lifecycle_token:, log_path:)
         control_reader, control_writer = IO.pipe
         readiness_reader, readiness_writer = IO.pipe
+        server_output = readiness_writer.dup
         log = File.open(log_path, File::WRONLY | File::CREAT | File::EXCL, 0o600)
         server = if @server_factory
           @server_factory.call(
@@ -212,7 +213,7 @@ module Hive
             runtime_root: runtime_root,
             lifecycle_token: lifecycle_token,
             control_io: control_reader,
-            output: readiness_writer,
+            output: server_output,
             error: log,
             environment: @environment
           )
@@ -222,16 +223,27 @@ module Hive
             runtime_root: runtime_root,
             lifecycle_token: lifecycle_token,
             control_io: control_reader,
-            output: readiness_writer,
+            output: server_output,
             error: log,
             environment: @environment
           )
         end
-        thread = Thread.new { server.call }
+        server_errors = []
+        thread = Thread.new do
+          server.call
+        rescue StandardError => e
+          server_errors << e
+        ensure
+          server_output.close unless server_output.closed?
+        end
+        thread.report_on_exception = false
         readiness_writer.close
         line = Timeout.timeout(START_TIMEOUT_SEC) { readiness_reader.gets }
         unless line
           thread.value
+          error = server_errors.first
+          raise CaptureError, capture_server_diagnostic(error, log, log_path) if error
+
           raise CaptureError, "capture server exited without a readiness receipt"
         end
         receipt = JSON.parse(line)
@@ -242,6 +254,7 @@ module Hive
           control_reader: control_reader,
           readiness_reader: readiness_reader,
           log: log,
+          server_errors: server_errors,
           base_url: URI(receipt.fetch("readiness_url")).then do |uri|
             "http://127.0.0.1:#{uri.port}"
           end
@@ -251,6 +264,7 @@ module Hive
         control_reader&.close
         readiness_reader&.close
         readiness_writer&.close
+        server_output&.close
         log&.close
         thread&.kill
         thread&.join
@@ -271,6 +285,9 @@ module Hive
         Timeout.timeout(Hive::Web::CaptureRuntime::CLEANUP_TIMEOUT_SEC + 15) do
           session.fetch(:thread).value
         end
+        error = session.fetch(:server_errors).first
+        raise CaptureError, capture_server_diagnostic(error, session.fetch(:log), session.fetch(:log).path) if
+          error
       ensure
         %i[control_writer control_reader readiness_reader log].each do |key|
           io = session[key]
@@ -295,7 +312,8 @@ module Hive
           runtime_root, hive_home, source_root, source_entry.bundle_path
         )
         hive = [
-          "bundle", "exec", RbConfig.ruby, "-I#{File.join(source_root, 'lib')}",
+          RbConfig.ruby, source_entry.bundler_executable, "exec",
+          RbConfig.ruby, "-I#{File.join(source_root, 'lib')}",
           File.join(source_root, "bin", "hive")
         ]
         run_command!([ *hive, "init", project_root ], env: cli_env, chdir: source_root)
@@ -304,7 +322,8 @@ module Hive
           env: cli_env,
           chdir: source_root
         )
-        slug = Dir[File.join(project_root, ".hive-state", "stages", "1-inbox", "*")]
+        inbox_dir = "1-inbox" # coding-scoped: capture fixture uses the default coding workflow
+        slug = Dir[File.join(project_root, ".hive-state", "stages", inbox_dir, "*")]
                .map { |path| File.basename(path) }
                .find { |name| name.match?(/\A[a-z][a-z0-9-]+\z/) }
         raise CaptureError, "synthetic capture fixture task was not created" unless slug
@@ -472,6 +491,19 @@ module Hive
           text.to_s.b.byteslice(0, DIAGNOSTIC_MAX_BYTES).to_s
               .force_encoding(Encoding::UTF_8).scrub
         )
+      end
+
+      def capture_server_diagnostic(error, log, log_path)
+        log.flush
+        tail = File.open(log_path, "rb") do |file|
+          file.seek([ file.size - DIAGNOSTIC_MAX_BYTES, 0 ].max)
+          file.read(DIAGNOSTIC_MAX_BYTES)
+        end
+        [ error.message, tail ].reject { |value| value.to_s.empty? }
+                               .map { |value| bounded_diagnostic(value) }
+                               .join("\n")
+      rescue SystemCallError, IOError
+        bounded_diagnostic(error)
       end
     end
   end

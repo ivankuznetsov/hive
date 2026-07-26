@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/web/task_capture"
 
 class WebTaskCaptureTest < Minitest::Test
+  include HiveTestHelper
+
   FakeBundle = Struct.new(:entry, :calls) do
     def ensure!
       self.calls += 1
@@ -25,7 +27,8 @@ class WebTaskCaptureTest < Minitest::Test
         lock_digests: { "root" => "c" * 64, "web" => "d" * 64 },
         ruby_engine: RUBY_ENGINE,
         ruby_version: RUBY_VERSION,
-        platform: RbConfig::CONFIG.fetch("arch")
+        platform: RbConfig::CONFIG.fetch("arch"),
+        bundler_executable: Gem.bin_path("bundler", "bundle", "= 2.7.2")
       )
       browser_entry = Hive::Web::BrowserBundle::Entry.new(
         cache_key: "e" * 64,
@@ -84,6 +87,584 @@ class WebTaskCaptureTest < Minitest::Test
         assert File.file?(File.join(task_folder, "media", artifact.fetch("file")))
       end
       refute Dir.glob(File.join(task_folder, "media", ".capture-*")).any?
+    end
+  end
+
+  def test_server_readiness_writer_remains_owned_by_the_server_thread
+    Dir.mktmpdir("hive-task-capture-server") do |root|
+      task_folder = File.join(root, ".hive-state", "stages", "7-artifacts", "demo-task")
+      FileUtils.mkdir_p(task_folder)
+      factory = lambda do |output:, control_io:, lifecycle_token:, **|
+        Object.new.tap do |server|
+          server.define_singleton_method(:call) do
+            sleep 0.01
+            output.puts(JSON.generate(
+              "schema" => Hive::Web::CaptureRuntime::SCHEMA,
+              "schema_version" => Hive::Web::CaptureRuntime::SCHEMA_VERSION,
+              "lifecycle_id" => lifecycle_token,
+              "readiness_url" => "http://127.0.0.1:4567/health"
+            ))
+            output.flush
+            control_io.read
+          end
+        end
+      end
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder,
+        server_factory: factory
+      )
+
+      session = capture.send(
+        :start_server,
+        source_root: root,
+        runtime_root: File.join(root, "runtime"),
+        lifecycle_token: "capture-ready",
+        log_path: File.join(root, "capture-server.log")
+      )
+
+      assert_equal "http://127.0.0.1:4567", session.fetch(:base_url)
+      capture.send(:stop_server!, session)
+      refute session.fetch(:thread).alive?
+    ensure
+      capture&.send(:stop_server!, session) if session && session.fetch(:thread).alive?
+    end
+  end
+
+  def test_server_boot_failure_includes_the_isolated_server_log
+    Dir.mktmpdir("hive-task-capture-server") do |root|
+      task_folder = File.join(root, ".hive-state", "stages", "7-artifacts", "demo-task")
+      FileUtils.mkdir_p(task_folder)
+      factory = lambda do |output:, error:, **|
+        Object.new.tap do |server|
+          server.define_singleton_method(:call) do
+            error.puts("locked bundle could not boot Rails")
+            error.flush
+            output.flush
+            raise "bootstrap stopped"
+          end
+        end
+      end
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder,
+        server_factory: factory
+      )
+
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(
+          :start_server,
+          source_root: root,
+          runtime_root: File.join(root, "runtime"),
+          lifecycle_token: "capture-failed",
+          log_path: File.join(root, "capture-server.log")
+        )
+      end
+
+      assert_match(/bootstrap stopped/, error.message)
+      assert_match(/locked bundle could not boot Rails/, error.message)
+    end
+  end
+
+  def test_call_rejects_missing_or_mismatched_immutable_source_head
+    with_capture_task do |root, task_folder, source|
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+      capture.define_singleton_method(:capture_requirement) do
+        { "result" => "required", "implementation_head" => "" }
+      end
+      capture.define_singleton_method(:owned_source_root) { source }
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) { capture.call }
+      assert_match(/no immutable implementation HEAD/, error.message)
+
+      entry = Struct.new(:source_sha).new("b" * 40)
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder, source_bundle: FakeBundle.new(entry, 0)
+      )
+      capture.define_singleton_method(:capture_requirement) do
+        { "result" => "required", "implementation_head" => "a" * 40 }
+      end
+      capture.define_singleton_method(:owned_source_root) { source }
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) { capture.call }
+      assert_match(/does not match requirement/, error.message)
+    end
+  end
+
+  def test_call_rejects_source_drift_before_publication_and_wraps_structural_errors
+    with_capture_task do |_root, task_folder, source|
+      entry_class = Struct.new(
+        :source_sha, :bundle_path, :bundler_executable, :lock_digests, :cache_key,
+        keyword_init: true
+      )
+      correct = entry_class.new(
+        source_sha: "a" * 40, bundle_path: "/bundle",
+        bundler_executable: "/bundle-executable", lock_digests: {}, cache_key: "key"
+      )
+      drifted = correct.dup
+      drifted.source_sha = "b" * 40
+      entries = [ correct, drifted ]
+      source_bundle = Object.new
+      source_bundle.define_singleton_method(:ensure!) { entries.shift }
+      browser_bundle = FakeBundle.new(Struct.new(:cache_key).new("browser"), 0)
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder,
+        source_bundle: source_bundle,
+        browser_bundle: browser_bundle
+      )
+      capture.define_singleton_method(:capture_requirement) do
+        { "result" => "required", "implementation_head" => "a" * 40 }
+      end
+      capture.define_singleton_method(:owned_source_root) { source }
+      capture.define_singleton_method(:start_server) do |**|
+        { base_url: "http://127.0.0.1:4567" }
+      end
+      capture.define_singleton_method(:stop_server!) { |_session| true }
+      capture.define_singleton_method(:seed_fixture!) do |**|
+        { "project" => "fixture", "task" => "fixture-task" }
+      end
+      capture.define_singleton_method(:record_browser!) do |screenshot:, video_directory:, **|
+        File.binwrite(screenshot, Hive::Web::TaskCapture::PNG_SIGNATURE + "image")
+        FileUtils.mkdir_p(video_directory)
+        video = File.join(video_directory, "recording.webm")
+        File.binwrite(video, "playable")
+        {
+          "video_path" => video,
+          "accessibility_assertions" => [ "heading visible" ]
+        }
+      end
+      capture.define_singleton_method(:validate_media!) { |*| true }
+
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) { capture.call }
+      assert_match(/cleanliness changed/, error.message)
+
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+      capture.define_singleton_method(:capture_requirement) do
+        raise JSON::ParserError, "broken requirement"
+      end
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) { capture.call }
+      assert_match(/broken requirement/, error.message)
+    end
+  end
+
+  def test_capture_requirement_uses_the_task_project_name
+    with_capture_task do |root, task_folder, _source|
+      requirement = { "result" => "required", "implementation_head" => "a" * 40 }
+      policy = Struct.new(:requirement) { def ensure! = requirement }.new(requirement)
+      calls = []
+      replacement = lambda do |_task, project:, **|
+        calls << project
+        policy
+      end
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+
+      result = with_replaced_singleton_method(
+        Hive::Artifacts::CapturePolicy, :for_task, replacement
+      ) { capture.send(:capture_requirement) }
+
+      assert_equal requirement, result
+      assert_equal [ File.basename(root) ], calls
+    end
+  end
+
+  def test_owned_source_root_enforces_pointer_and_override_identity
+    with_capture_task do |_root, task_folder, source|
+      other = File.join(File.dirname(source), "other")
+      FileUtils.mkdir_p(other)
+      pointer = ->(*) { { "path" => source } }
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder, source_root: source
+      )
+
+      resolved = with_replaced_singleton_method(
+        Hive::Worktree, :read_owned_pointer, pointer
+      ) { capture.send(:owned_source_root) }
+      assert_equal File.realpath(source), resolved
+
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder, source_root: other
+      )
+      error = with_replaced_singleton_method(
+        Hive::Worktree, :read_owned_pointer, pointer
+      ) do
+        assert_raises(Hive::Web::TaskCapture::CaptureError) do
+          capture.send(:owned_source_root)
+        end
+      end
+      assert_match(/does not match/, error.message)
+
+      error = with_replaced_singleton_method(
+        Hive::Worktree, :read_owned_pointer,
+        ->(*) { raise Hive::WorktreeError, "pointer missing" }
+      ) do
+        assert_raises(Hive::Web::TaskCapture::CaptureError) do
+          capture.send(:owned_source_root)
+        end
+      end
+      assert_match(/worktree is unavailable/, error.message)
+    end
+  end
+
+  def test_default_server_factory_and_readiness_receipt_validation
+    with_capture_task do |root, task_folder, source|
+      factory_calls = []
+      factory = lambda do |output:, control_io:, lifecycle_token:, **options|
+        factory_calls << options
+        Object.new.tap do |server|
+          server.define_singleton_method(:call) do
+            output.puts(JSON.generate(
+              "schema" => Hive::Web::CaptureRuntime::SCHEMA,
+              "schema_version" => Hive::Web::CaptureRuntime::SCHEMA_VERSION,
+              "lifecycle_id" => lifecycle_token,
+              "readiness_url" => "http://127.0.0.1:4568/health"
+            ))
+            output.flush
+            control_io.read
+          end
+        end
+      end
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+
+      session = with_replaced_singleton_method(
+        Hive::Commands::Web::CaptureServer, :new, factory
+      ) do
+        capture.send(
+          :start_server,
+          source_root: source,
+          runtime_root: File.join(root, "runtime"),
+          lifecycle_token: "capture-default",
+          log_path: File.join(root, "capture-server.log")
+        )
+      end
+
+      assert_equal "http://127.0.0.1:4568", session.fetch(:base_url)
+      assert_equal source, factory_calls.first.fetch(:source_root)
+      capture.send(:stop_server!, session)
+    end
+  end
+
+  def test_server_without_receipt_and_invalid_receipt_are_rejected
+    with_capture_task do |root, task_folder, source|
+      silent = lambda do |**|
+        Object.new.tap { |server| server.define_singleton_method(:call) { true } }
+      end
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder, server_factory: silent
+      )
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(
+          :start_server,
+          source_root: source, runtime_root: File.join(root, "runtime-1"),
+          lifecycle_token: "capture-silent",
+          log_path: File.join(root, "silent.log")
+        )
+      end
+      assert_match(/without a readiness receipt/, error.message)
+
+      invalid = lambda do |output:, **|
+        Object.new.tap do |server|
+          server.define_singleton_method(:call) do
+            output.puts("{}")
+            output.flush
+          end
+        end
+      end
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder, server_factory: invalid
+      )
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(
+          :start_server,
+          source_root: source, runtime_root: File.join(root, "runtime-2"),
+          lifecycle_token: "capture-invalid",
+          log_path: File.join(root, "invalid.log")
+        )
+      end
+      assert_match(/invalid ownership receipt/, error.message)
+    end
+  end
+
+  def test_stop_server_tolerates_an_io_that_closes_concurrently
+    with_capture_task do |_root, task_folder, _source|
+      bad_io = Object.new
+      bad_io.define_singleton_method(:closed?) { false }
+      bad_io.define_singleton_method(:close) { raise IOError, "already closed" }
+      thread = Thread.new { true }
+      session = {
+        thread: thread,
+        control_writer: StringIO.new,
+        control_reader: bad_io,
+        readiness_reader: StringIO.new,
+        log: StringIO.new,
+        server_errors: []
+      }
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+
+      assert_nil capture.send(:stop_server!, session)
+    ensure
+      thread&.join
+    end
+  end
+
+  def test_seed_fixture_uses_locked_cli_and_creates_a_deterministic_task
+    with_capture_task do |root, task_folder, source|
+      runtime_root = File.join(root, "runtime")
+      entry = Struct.new(:bundle_path, :bundler_executable).new(
+        "/locked/gems", "/locked/bundle"
+      )
+      calls = []
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder,
+        environment: { "PATH" => "/usr/bin:/bin", "GH_TOKEN" => "secret" }
+      )
+      capture.define_singleton_method(:run_command!) do |argv, env: nil, chdir: nil, **|
+        calls << [ argv, env, chdir ]
+        if argv.include?("new")
+          folder = File.join(
+            runtime_root, "fixture", "hive-capture-fixture",
+            ".hive-state", "stages", "1-inbox", "synthetic-browser-capture-task"
+          )
+          FileUtils.mkdir_p(folder)
+        end
+        true
+      end
+
+      seed = capture.send(
+        :seed_fixture!,
+        source_root: source, runtime_root: runtime_root, source_entry: entry
+      )
+
+      assert_equal "hive-capture-fixture", seed.fetch("project")
+      assert_equal "synthetic-browser-capture-task", seed.fetch("task")
+      hive_calls = calls.select { |argv,| argv.include?("/locked/bundle") }
+      assert_equal 2, hive_calls.length
+      assert hive_calls.all? { |argv,| argv.take(3) == [ RbConfig.ruby, "/locked/bundle", "exec" ] }
+      refute hive_calls.first.fetch(1).key?("GH_TOKEN")
+    end
+  end
+
+  def test_isolated_cli_environment_keeps_only_safe_ambient_values
+    with_capture_task do |root, task_folder, source|
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder,
+        environment: { "PATH" => "/bin", "LANG" => "C", "GH_TOKEN" => "secret" }
+      )
+      env = capture.send(
+        :isolated_cli_environment,
+        File.join(root, "runtime"), File.join(root, "hive-home"), source, "/bundle"
+      )
+
+      assert_equal "/bin", env.fetch("PATH")
+      assert_equal "C", env.fetch("LANG")
+      assert_equal "/bundle", env.fetch("BUNDLE_PATH")
+      refute env.key?("GH_TOKEN")
+      assert_nil env.fetch("GEM_HOME")
+    end
+  end
+
+  def test_browser_recording_is_pinned_and_confined_to_staging
+    with_capture_task do |root, task_folder, source|
+      script = File.join(source, "web", "script", "capture_task_page.cjs")
+      FileUtils.mkdir_p(File.dirname(script))
+      File.write(script, "// fixture")
+      video_directory = File.join(root, "video")
+      FileUtils.mkdir_p(video_directory)
+      video = File.join(video_directory, "capture.webm")
+      File.write(video, "video")
+      entry = Struct.new(:browsers_path, :node_modules_path).new(
+        "/browsers", "/node-modules"
+      )
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+      calls = []
+      capture.define_singleton_method(:run_command!) do |argv, env:, chdir:, capture:|
+        calls << [ argv, env, chdir, capture ]
+        [ JSON.generate(
+          "video_path" => video,
+          "accessibility_assertions" => [ "heading visible" ]
+        ), "" ]
+      end
+
+      result = capture.send(
+        :record_browser!,
+        source_root: source, browser_entry: entry,
+        runtime_root: File.join(root, "runtime"),
+        base_url: "http://127.0.0.1:4567",
+        screenshot: File.join(root, "capture.png"),
+        video_directory: video_directory
+      )
+
+      assert_equal File.realpath(video), result.fetch("video_path")
+      assert_equal "node", calls.first.first.first
+      assert_equal "/browsers", calls.first.fetch(1).fetch("PLAYWRIGHT_BROWSERS_PATH")
+      assert_equal(
+        File.join("/node-modules", "playwright"),
+        calls.first.fetch(1).fetch("HIVE_PLAYWRIGHT_MODULE")
+      )
+    end
+  end
+
+  def test_browser_recording_rejects_missing_script_outside_media_and_invalid_json
+    with_capture_task do |root, task_folder, source|
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+      entry = Struct.new(:browsers_path, :node_modules_path).new("/browsers", "/modules")
+      args = {
+        source_root: source, browser_entry: entry,
+        runtime_root: File.join(root, "runtime"),
+        base_url: "http://127.0.0.1:4567",
+        screenshot: File.join(root, "capture.png"),
+        video_directory: File.join(root, "video")
+      }
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(:record_browser!, **args)
+      end
+      assert_match(/capture script is missing/, error.message)
+
+      script = File.join(source, "web", "script", "capture_task_page.cjs")
+      FileUtils.mkdir_p(File.dirname(script))
+      File.write(script, "// fixture")
+      FileUtils.mkdir_p(args.fetch(:video_directory))
+      outside = File.join(root, "outside.webm")
+      File.write(outside, "video")
+      capture.define_singleton_method(:run_command!) do |*|
+        [ JSON.generate("video_path" => outside), "" ]
+      end
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(:record_browser!, **args)
+      end
+      assert_match(/outside its staging root/, error.message)
+
+      capture.define_singleton_method(:run_command!) { |*| [ "{", "" ] }
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(:record_browser!, **args)
+      end
+      assert_match(/invalid evidence/, error.message)
+    end
+  end
+
+  def test_media_validation_checks_png_video_toolchain_and_duration
+    with_capture_task do |root, task_folder, _source|
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+      screenshot = File.join(root, "capture.png")
+      video = File.join(root, "capture.webm")
+      File.write(screenshot, "not png")
+      File.write(video, "video")
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(:validate_media!, screenshot, video)
+      end
+      assert_match(/valid PNG/, error.message)
+
+      File.binwrite(screenshot, Hive::Web::TaskCapture::PNG_SIGNATURE + "image")
+      FileUtils.rm_f(video)
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(:validate_media!, screenshot, video)
+      end
+      assert_match(/non-empty video/, error.message)
+      File.write(video, "video")
+
+      error = with_replaced_singleton_method(
+        Hive::InvokedBinary, :which, ->(_name) { nil }
+      ) do
+        assert_raises(Hive::Web::TaskCapture::CaptureError) do
+          capture.send(:validate_media!, screenshot, video)
+        end
+      end
+      assert_match(/ffmpeg is required/, error.message)
+
+      error = with_replaced_singleton_method(
+        Hive::InvokedBinary, :which,
+        ->(name) { name == "ffmpeg" ? "/bin/true" : nil }
+      ) do
+        assert_raises(Hive::Web::TaskCapture::CaptureError) do
+          capture.send(:validate_media!, screenshot, video)
+        end
+      end
+      assert_match(/ffprobe is required/, error.message)
+
+      capture.define_singleton_method(:run_command!) do |argv, **|
+        argv.include?("-show_entries") ? [ "1.25\n", "" ] : [ "", "" ]
+      end
+      with_replaced_singleton_method(
+        Hive::InvokedBinary, :which, ->(name) { "/bin/#{name}" }
+      ) do
+        assert_nil capture.send(:validate_media!, screenshot, video)
+      end
+
+      capture.define_singleton_method(:run_command!) do |argv, **|
+        argv.include?("-show_entries") ? [ "0\n", "" ] : [ "", "" ]
+      end
+      error = with_replaced_singleton_method(
+        Hive::InvokedBinary, :which, ->(name) { "/bin/#{name}" }
+      ) do
+        assert_raises(Hive::Web::TaskCapture::CaptureError) do
+          capture.send(:validate_media!, screenshot, video)
+        end
+      end
+      assert_match(/not playable/, error.message)
+    end
+  end
+
+  def test_secret_manifest_and_command_failures_are_rejected_and_redacted
+    with_capture_task do |_root, task_folder, _source|
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder, environment: { "PATH" => ENV.fetch("PATH", "") }
+      )
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(
+          :reject_manifest_secrets!,
+          { "diagnostic" => "ghp_abcdefghijklmnopqrstuvwxyz1234567890" }
+        )
+      end
+      assert_match(/secret-shaped content/, error.message)
+
+      assert capture.send(
+        :run_command!, [ RbConfig.ruby, "-e", "exit 0" ]
+      )
+      output, = capture.send(
+        :run_command!, [ RbConfig.ruby, "-e", "print 'captured'" ], capture: true
+      )
+      assert_equal "captured", output
+
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(
+          :run_command!,
+          [
+            RbConfig.ruby, "-e",
+            "STDERR.write('ghp_abcdefghijklmnopqrstuvwxyz1234567890'); exit 4"
+          ]
+        )
+      end
+      refute_includes error.message, "ghp_"
+      assert_match(/ruby.*failed/, error.message)
+
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(:run_command!, [ "/definitely/missing/capture-tool" ])
+      end
+      assert_match(/dependency is unavailable/, error.message)
+    end
+  end
+
+  def test_capture_server_diagnostic_falls_back_when_log_cannot_be_read
+    with_capture_task do |_root, task_folder, _source|
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+      log = Object.new
+      log.define_singleton_method(:flush) { raise IOError, "closed" }
+      error = RuntimeError.new("bootstrap ghp_abcdefghijklmnopqrstuvwxyz1234567890")
+
+      diagnostic = capture.send(
+        :capture_server_diagnostic, error, log, "/missing/log"
+      )
+
+      refute_includes diagnostic, "ghp_"
+      assert_match(/bootstrap/, diagnostic)
+    end
+  end
+
+  private
+
+  def with_capture_task
+    Dir.mktmpdir("hive-task-capture") do |root|
+      source = File.join(root, "source")
+      task_folder = File.join(
+        root, ".hive-state", "stages", "7-artifacts", "demo-task"
+      )
+      FileUtils.mkdir_p([ source, task_folder ])
+      yield root, task_folder, source
     end
   end
 end

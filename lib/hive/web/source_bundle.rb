@@ -26,7 +26,7 @@ module Hive
 
       Entry = Data.define(
         :cache_key, :cache_root, :bundle_path, :source_sha, :lock_digests,
-        :ruby_engine, :ruby_version, :platform
+        :ruby_engine, :ruby_version, :platform, :bundler_executable
       )
 
       def initialize(source_root:, cache_root: nil, runner: nil, source_validator: nil,
@@ -168,13 +168,18 @@ module Hive
       end
 
       def bundle_install_argv
+        [
+          RbConfig.ruby, locked_bundler_executable,
+          "install", "--jobs", "4", "--retry", "2"
+        ]
+      end
+
+      def locked_bundler_executable
         version = locked_bundler_version
         executable = Gem.bin_path("bundler", "bundle", "= #{version}")
-        unless File.file?(executable)
-          raise BootstrapError, "locked Bundler #{version} executable is unavailable"
-        end
+        return executable if File.file?(executable)
 
-        [ RbConfig.ruby, executable, "install", "--jobs", "4", "--retry", "2" ]
+        raise BootstrapError, "locked Bundler #{version} executable is unavailable"
       rescue Gem::GemNotFoundException
         raise BootstrapError,
               "locked Bundler #{version} is unavailable; install Bundler #{version} before capture"
@@ -239,7 +244,8 @@ module Hive
           lock_digests: lock_state.transform_values { |value| value.fetch("sha256") },
           ruby_engine: RUBY_ENGINE,
           ruby_version: RUBY_VERSION,
-          platform: RbConfig::CONFIG.fetch("arch")
+          platform: RbConfig::CONFIG.fetch("arch"),
+          bundler_executable: locked_bundler_executable
         )
       end
 

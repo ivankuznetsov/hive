@@ -220,7 +220,7 @@ module Hive
         def requested_outcome(task)
           %w[idea.md plan.md task.md].filter_map do |name|
             path = File.join(task.folder, name)
-            File.read(path, 64 * 1024) if File.file?(path)
+            File.read(path, 64 * 1024).gsub(/<!--.*?-->/m, "") if File.file?(path)
           rescue SystemCallError
             nil
           end.join("\n")

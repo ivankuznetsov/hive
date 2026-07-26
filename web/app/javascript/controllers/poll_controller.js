@@ -143,7 +143,7 @@ export default class extends Controller {
   }
 
   nextDelay() {
-    return this.intervalValue if this.failures <= 0
+    if (this.failures <= 0) return this.intervalValue
 
     return Math.min(
       this.maxIntervalValue,

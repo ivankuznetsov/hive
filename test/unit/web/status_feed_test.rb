@@ -722,6 +722,62 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  def test_state_serializes_every_public_field
+    state = Hive::Web::StatusFeed::State.new(
+      payload: { "projects" => [] },
+      availability: "fresh",
+      token: "sha256:demo",
+      last_success_at: "2026-07-26T03:00:00.000000Z",
+      error: nil,
+      scan_count: 2,
+      generation: 3
+    )
+
+    assert_equal(
+      {
+        "payload" => { "projects" => [] },
+        "availability" => "fresh",
+        "token" => "sha256:demo",
+        "last_success_at" => "2026-07-26T03:00:00.000000Z",
+        "error" => nil,
+        "scan_count" => 2,
+        "generation" => 3
+      },
+      state.to_h
+    )
+  end
+
+  def test_each_state_reports_idle_ticks_and_then_yields_a_changed_state
+    first = { "projects" => [ { "name" => "demo" } ] }
+    second = { "projects" => [ { "name" => "changed" } ] }
+    status = CountingStatus.new([ first, first, second ])
+    feed = Hive::Web::StatusFeed.new(interval: 0.01, status_command: status)
+    idle = Queue.new
+    delivered = Queue.new
+
+    subscriber = Thread.new do
+      feed.each_state(on_idle: -> { idle << true }) do |state|
+        delivered << state
+        break if state.payload == second
+      end
+    end
+
+    first_state = Timeout.timeout(2) { delivered.pop }
+    Timeout.timeout(2) { idle.pop }
+    second_state = Timeout.timeout(2) { delivered.pop }
+    subscriber.join(2)
+
+    refute subscriber.alive?
+    assert_equal first, first_state.payload
+    assert_equal second, second_state.payload
+    assert_same second_state, feed.current_state
+    assert_operator status.calls, :>=, 3
+  ensure
+    subscriber&.kill
+    subscriber&.join(2)
+    feed&.stop
+  end
+
   private
 
   def status_token_in_fresh_process(payload)

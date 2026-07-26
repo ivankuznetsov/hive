@@ -42,6 +42,34 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_complete_marker_returns_to_error_when_required_capture_is_missing
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      Hive::Markers.set(task.state_file, :complete)
+      requirement = {
+        "result" => "required",
+        "rationale" => "Visual implementation changed",
+        "task_generation" => "generation-1"
+      }
+      policy = Struct.new(:requirement) do
+        def ensure! = requirement
+        def capture_satisfied? = false
+      end.new(requirement)
+
+      replacement = ->(_task, project:, **) { policy }
+      result = with_replaced_singleton_method(
+        Hive::Artifacts::CapturePolicy, :for_task, replacement
+      ) do
+        Hive::Stages::Artifacts.run!(task, {})
+      end
+
+      assert_equal({ commit: "error", status: :error }, result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "required_capture_missing", marker.attrs.fetch("reason")
+    end
+  end
+
   def test_required_capture_failure_keeps_stage_in_error_with_actionable_reason
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)

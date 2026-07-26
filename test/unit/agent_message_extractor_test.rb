@@ -93,6 +93,15 @@ class AgentMessageExtractorTest < Minitest::Test
     refute plain.truncated?
   end
 
+  def test_accumulator_keeps_plain_tail_valid_when_byte_limit_splits_utf8
+    plain = Hive::Agent::MessageExtractor::Accumulator.new(max_bytes: 3)
+    plain.observe(nil, raw_line: "abααα")
+
+    assert_equal "α", plain.value
+    assert_predicate plain.value, :valid_encoding?
+    assert_equal :plain, plain.source
+  end
+
   def test_budget_failure_omits_an_invalid_observed_cost
     failure = Hive::Agent::MessageExtractor.extract_failure(
       "type" => "result",

@@ -17,7 +17,10 @@ discovery accepts a valid runtime provenance path even when unrelated aggregate
 doctor checks fail, while retaining a dedicated bounded probe. That probe uses
 an ephemeral empty Codex state root rather than scanning the operator's rollout
 archive. Grok mappings also pin normalized reasoning effort via
-`--reasoning-effort`.
+`--reasoning-effort`. Typed launches retain normalized model,
+requested/effective effort, model-pin, and effort-support receipts in the
+private spawn log and `agent_start` event without logging prompt-bearing
+provider argv.
 
 **Safety:** Unbounded file rules, undeclared output paths, unsupported tools,
 truncated/invalid/empty structured output, unavailable provider binaries, and a

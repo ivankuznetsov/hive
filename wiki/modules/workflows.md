@@ -200,6 +200,11 @@ runtime provenance even when unrelated aggregate doctor checks fail, while a
 dedicated bounded probe and executable-path validation remain fail-closed. The
 probe uses an ephemeral empty Codex state root, so executable discovery does
 not scan the operator's rollout archive or inherit its user configuration.
+When a launch is built from typed model/effort selection, its private spawn log
+and `agent_start` event record only the normalized model, requested/effective
+effort, pin state, and effort-support state. They never serialize the provider
+argv or prompt, so short-lived managed reviewers retain an auditable execution
+identity without expanding the secret-bearing log surface.
 Bare/unbounded file edits and unsupported tools still fail admission. Strict `x-hive`
 metadata declares manifest-hashed executable tools, manifest-hashed prompt
 assets exposed as absolute paths in the managed prompt preamble, and optional

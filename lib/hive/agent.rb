@@ -139,7 +139,7 @@ module Hive
                    permission_mode: nil, allowed_tools: nil,
                    disallowed_tools: nil, cli_flags: [], max_tokens: nil,
                    max_turns: nil, identity_arguments: [], runtime_policy: nil,
-                   log_stream: true)
+                   launch_arguments: nil, log_stream: true)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -180,7 +180,18 @@ module Hive
         @runtime_cli_flags = []
         @child_environment = SCRUBBED_CHILD_ENV
       end
-      @identity_arguments = Hive::ImplementationIdentity.validate_native_arguments(identity_arguments).freeze
+      @launch_arguments = normalize_launch_arguments(launch_arguments)
+      supplied_identity_arguments =
+        Hive::ImplementationIdentity.validate_native_arguments(identity_arguments)
+      if @launch_arguments
+        unless supplied_identity_arguments.empty? ||
+               supplied_identity_arguments == @launch_arguments.native_arguments
+          raise ArgumentError,
+                "launch_arguments and identity_arguments describe different native argv"
+        end
+        supplied_identity_arguments = @launch_arguments.native_arguments
+      end
+      @identity_arguments = supplied_identity_arguments.freeze
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -271,7 +282,8 @@ module Hive
         # which runner launched.
         log.puts "[hive] #{Time.now.utc.iso8601} spawn " \
                  "cwd=#{Hive::SecretPatterns.redact(@cwd)} " \
-                 "profile=#{@profile.name} executable=#{File.basename(cmd.first.to_s)} argc=#{cmd.length}"
+                 "profile=#{@profile.name} executable=#{File.basename(cmd.first.to_s)} argc=#{cmd.length}" \
+                 "#{launch_identity_log_fields}"
       end
       r, w = IO.pipe
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
@@ -942,7 +954,7 @@ module Hive
       # worktree-vs-task-folder distinction (e.g. worktree-feat-x vs
       # feat-x-260424-aaaa) and loses that signal in the event log.
       "cwd=#{@cwd} timeout_sec=#{@timeout_sec} max_budget_usd=#{@max_budget_usd} " \
-        "max_tokens=#{@max_tokens} max_turns=#{@max_turns}"
+        "max_tokens=#{@max_tokens} max_turns=#{@max_turns}#{launch_identity_log_fields}"
     end
 
     def agent_end_message(result, exception)
@@ -952,6 +964,24 @@ module Hive
       end
 
       "status=#{result&.dig(:status)} exit_code=#{result&.dig(:exit_code)} pid=#{result&.dig(:pid)}"
+    end
+
+    def normalize_launch_arguments(value)
+      return nil if value.nil?
+      return value if value.is_a?(Hive::ImplementationIdentity::LaunchArguments)
+
+      raise ArgumentError, "launch_arguments must be a Hive::ImplementationIdentity::LaunchArguments"
+    end
+
+    def launch_identity_log_fields
+      return "" unless @launch_arguments
+
+      model = Hive::SecretPatterns.redact(@launch_arguments.model)
+      requested_effort = @launch_arguments.requested_effort || "none"
+      effective_effort = @launch_arguments.effective_effort || "provider-default"
+      " model=#{model} requested_effort=#{requested_effort} " \
+        "effective_effort=#{effective_effort} model_pinned=#{@launch_arguments.model_pinned} " \
+        "effort_supported=#{@launch_arguments.effort_supported}"
     end
   end
 end

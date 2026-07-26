@@ -149,6 +149,36 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_log_and_start_event_record_typed_model_and_effective_effort_without_serializing_argv
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+      profile = Hive::AgentProfiles.lookup(:claude)
+      launch_arguments = profile.identity_arguments(model: "claude-opus-4-8", effort: "high")
+
+      result = Hive::Agent.new(
+        task: task, prompt: "do not log this prompt", max_budget_usd: 1, timeout_sec: 5,
+        profile: profile, launch_arguments: launch_arguments
+      ).run!
+
+      log = File.read(result.fetch(:log_file))
+      start_event = File.readlines(File.join(task.folder, "events.jsonl"), chomp: true)
+                        .map { |line| JSON.parse(line) }
+                        .find { |event| event.fetch("event_type") == "agent_start" }
+      [ log, start_event.fetch("message") ].each do |receipt|
+        assert_includes receipt, "model=claude-opus-4-8"
+        assert_includes receipt, "requested_effort=high"
+        assert_includes receipt, "effective_effort=high"
+        assert_includes receipt, "model_pinned=true"
+        assert_includes receipt, "effort_supported=true"
+        refute_includes receipt, "--model"
+        refute_includes receipt, "do not log this prompt"
+      end
+    end
+  end
+
   def test_private_log_open_refuses_symlinks
     with_tmp_dir do |dir|
       target = File.join(dir, "outside.log")

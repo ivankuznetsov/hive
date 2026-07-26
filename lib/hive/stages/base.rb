@@ -643,14 +643,16 @@ module Hive
         # distinct rather than collapsing both to "empty".
         derive_flags_from_cfg = cli_flags.nil? && identity_arguments.nil?
         cli_flags ||= []
+        launch_arguments = nil
         if identity_arguments.nil? && (model || effort)
           if profile.model_argument_builder
             concrete_model = model || profile.concrete_default_model(
               cfg: cfg, project_root: cfg && cfg["project_root"]
             )
-            identity_arguments = profile.identity_arguments(
+            launch_arguments = profile.identity_arguments(
               model: concrete_model, effort: effort
-            ).native_arguments
+            )
+            identity_arguments = launch_arguments.native_arguments
           else
             # Old-shape custom profiles predate normalized identity
             # capabilities. Preserve their historical launch behavior for
@@ -683,6 +685,7 @@ module Hive
           disallowed_tools: disallowed_tools,
           cli_flags: cli_flags,
           identity_arguments: identity_arguments || [],
+          launch_arguments: launch_arguments,
           runtime_policy: runtime_policy
         ).run!
         if result[:status] == :ok && runtime_policy&.host_outputs?

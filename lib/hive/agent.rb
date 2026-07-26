@@ -168,14 +168,16 @@ module Hive
         @permission_mode = @runtime_policy.permission_mode
         @allowed_tools = @runtime_policy.allowed_tools
         @disallowed_tools = @runtime_policy.disallowed_tools
-        @add_dirs = @runtime_policy.directories
-        @cli_flags = Array(cli_flags) + @runtime_policy.cli_flags
+        @add_dirs = @runtime_policy.agent_add_dirs
+        @cli_flags = Array(cli_flags)
+        @runtime_cli_flags = @runtime_policy.cli_flags
         @child_environment = @runtime_policy.environment.merge(SCRUBBED_CHILD_ENV)
       else
         @permission_mode = permission_mode
         @allowed_tools = allowed_tools
         @disallowed_tools = disallowed_tools
         @cli_flags = Array(cli_flags)
+        @runtime_cli_flags = []
         @child_environment = SCRUBBED_CHILD_ENV
       end
       @identity_arguments = Hive::ImplementationIdentity.validate_native_arguments(identity_arguments).freeze
@@ -499,7 +501,7 @@ module Hive
     # and #test_argv_includes_verbose_when_stream_json which still pass after
     # the refactor — the claude profile's flag set IS today's flag set).
     def build_cmd
-      cmd = [ @profile.bin ]
+      cmd = [ @runtime_policy&.executable || @profile.bin ]
       if @profile.headless_flag
         cmd << @profile.headless_flag
         # Some CLIs' headless flag TAKES the prompt as its value (grok's
@@ -533,12 +535,15 @@ module Hive
         raise ArgumentError, "cli_flags are claude-specific; got #{@cli_flags.inspect} for #{@profile.name}"
       end
       cmd.concat(@cli_flags)
+      cmd.concat(@runtime_cli_flags)
       cmd.concat(@profile.output_format_flags)
       cmd << (@profile.prompt_style == :stdin ? "-" : @prompt) unless @profile.prompt_style == :headless_flag_value
-      cmd
+      Array(@runtime_policy&.command_prefix) + cmd
     end
 
     def permission_flags
+      return @runtime_policy.permission_flags if @runtime_policy && !@runtime_policy.permission_flags.nil?
+
       @profile.permission_flags(@permission_mode)
     end
 

@@ -407,6 +407,46 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_managed_runtime_policy_can_supply_trusted_non_claude_argv
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p(package)
+      output = File.join(task.folder, "result.md")
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit(./result.md)" ]
+          },
+          task_folder: task.folder,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          managed_outputs: [ output ]
+        )
+      end
+      agent = Hive::Agent.new(
+        task: task,
+        prompt: "test",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        profile: Hive::AgentProfiles.lookup(:codex),
+        runtime_policy: policy
+      )
+
+      cmd = agent.send(:build_cmd)
+      assert_equal File.realpath("/bin/true"), cmd.first
+      assert_includes cmd, "default_permissions=\"hive-managed\""
+      assert_includes cmd, "--output-schema"
+      assert_includes cmd, "--ephemeral"
+      assert_includes cmd, "--ignore-user-config"
+      assert_includes cmd, "--ignore-rules"
+      refute_includes cmd, "--dangerously-bypass-approvals-and-sandbox"
+    ensure
+      policy&.cleanup!
+    end
+  end
+
   def test_cli_flags_ride_the_headless_argv
     with_tmp_dir do |dir|
       agent = Hive::Agent.new(task: make_task(dir), prompt: "test",

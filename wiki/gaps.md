@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -678,3 +678,14 @@ dogfood artifact yet shows the affected Content writing task rerun with the
 fixed stage caps, nor a real detached Brainstorm attempt recovering a terminal
 receipt with missing output and then replaying the repaired artifact. Keep
 those live checks separate from this source-level contract.
+
+## Portable managed Grok execution is Linux-only (2026-07-26)
+
+Bounded current-generation Honeycomb actors can now run through Codex or Grok
+without granting either provider direct task writes. Codex relies on its named
+filesystem permission profiles; Grok is confined by bubblewrap because its
+native read-only tool rules do not prevent undeclared reads. The Grok adapter
+therefore fails closed when `/usr/bin/bwrap` is unavailable. No macOS or Windows
+equivalent is implemented yet, and future Codex/Grok CLI changes still require
+the focused policy probes and live managed-workflow dogfood before those
+platform/version combinations are treated as proven.

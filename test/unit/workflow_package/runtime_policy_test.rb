@@ -386,6 +386,404 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
+  def test_scoped_codex_actor_uses_read_only_native_policy_and_host_materializes_exact_outputs
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+      article = File.join(task, "article.md")
+      verification = File.join(task, "verification.md")
+      spec = {
+        "preset" => "scoped",
+        "tools" => [
+          "Read", "LS", "Grep", "Glob", "WebSearch",
+          "Edit(./article.md)", "Edit(./verification.md)"
+        ]
+      }
+
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          spec,
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          managed_outputs: [ article ]
+        )
+      end
+
+      assert policy.host_outputs?
+      assert_equal [], policy.permission_flags
+      assert_equal [], policy.agent_add_dirs
+      assert_equal File.realpath("/bin/true"), policy.executable
+      assert_includes policy.cli_flags, "--output-schema"
+      assert_includes policy.cli_flags, 'web_search="live"'
+      assert_includes policy.decorate_prompt("draft"), "`article.md`"
+      assert_includes policy.decorate_prompt("draft"), "`verification.md`"
+      assert_equal [ "verification.md", "article.md" ], policy.output_paths.keys
+
+      policy.materialize_outputs!(
+        status: :ok,
+        final_message: JSON.generate(
+          "files" => {
+            "article.md" => "Article\n<!-- COMPLETE -->\n",
+            "verification.md" => "grounding: grounded\n<!-- COMPLETE -->\n"
+          }
+        ),
+        final_message_truncated: false
+      )
+      assert_equal "Article\n<!-- COMPLETE -->\n", File.read(article)
+      assert_equal "grounding: grounded\n<!-- COMPLETE -->\n", File.read(verification)
+
+      cleanup = policy.cleanup_paths.first
+      assert File.directory?(cleanup)
+      policy.cleanup!
+      refute File.exist?(cleanup)
+    end
+  end
+
+  def test_host_materialization_rejects_every_invalid_response_without_writing
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+      article = File.join(task, "article.md")
+      verification = File.join(task, "verification.md")
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit(./article.md)", "Edit(./verification.md)" ]
+          },
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          managed_outputs: [ article ]
+        )
+      end
+      valid_files = {
+        "article.md" => "article\n",
+        "verification.md" => "verification\n"
+      }
+      invalid_results = {
+        truncated: {
+          final_message: JSON.generate("files" => valid_files),
+          final_message_truncated: true
+        },
+        malformed: {
+          final_message: '{"files":',
+          final_message_truncated: false
+        },
+        malformed_shape: {
+          final_message: "[]",
+          final_message_truncated: false
+        },
+        missing_key: {
+          final_message: JSON.generate("files" => valid_files.except("verification.md")),
+          final_message_truncated: false
+        },
+        extra_key: {
+          final_message: JSON.generate("files" => valid_files.merge("extra.md" => "extra\n")),
+          final_message_truncated: false
+        },
+        empty_value: {
+          final_message: JSON.generate("files" => valid_files.merge("article.md" => "")),
+          final_message_truncated: false
+        }
+      }
+
+      invalid_results.each do |name, result|
+        error = assert_raises(Hive::ConfigError, name.to_s) do
+          policy.materialize_outputs!(result.merge(status: :ok))
+        end
+        refute_empty error.message
+        refute File.exist?(article), name.to_s
+        refute File.exist?(verification), name.to_s
+      end
+    ensure
+      policy&.cleanup!
+    end
+  end
+
+  def test_host_materialization_restores_earlier_output_when_commit_artifact_write_fails
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+      article = File.join(task, "article.md")
+      verification = File.join(task, "verification.md")
+      File.write(article, "old article\n")
+      File.write(verification, "old verification\n")
+      FileUtils.chmod(0o600, verification)
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit(./article.md)", "Edit(./verification.md)" ]
+          },
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          managed_outputs: [ article ]
+        )
+      end
+      writes = []
+      original_write = Hive::AtomicFile.method(:write)
+      replacement = lambda do |path, content, **kwargs|
+        writes << [ path, content ]
+        raise IOError, "injected commit-artifact failure" if
+          path == article && content == "new article\n"
+
+        original_write.call(path, content, **kwargs)
+      end
+
+      error = with_replaced_singleton_method(Hive::AtomicFile, :write, replacement) do
+        assert_raises(Hive::ConfigError) do
+          policy.materialize_outputs!(
+            status: :ok,
+            final_message: JSON.generate(
+              "files" => {
+                "article.md" => "new article\n",
+                "verification.md" => "new verification\n"
+              }
+            ),
+            final_message_truncated: false
+          )
+        end
+      end
+
+      assert_includes error.message, "injected commit-artifact failure"
+      assert_equal [ verification, article ], writes.first(2).map(&:first)
+      assert_equal "old article\n", File.read(article)
+      assert_equal "old verification\n", File.read(verification)
+      assert_equal 0o600, File.stat(verification).mode & 0o777
+    ensure
+      policy&.cleanup!
+    end
+  end
+
+  def test_codex_doctor_accepts_valid_runtime_provenance_when_aggregate_fails
+    profile = Object.new
+    profile.define_singleton_method(:bin) { "codex-nonzero-doctor" }
+    status = Object.new
+    status.define_singleton_method(:success?) { false }
+    report = {
+      "checks" => {
+        "runtime.provenance" => {
+          "details" => { "current executable" => "/bin/true" }
+        }
+      }
+    }
+    captured_argv = nil
+    captured_timeout = nil
+    capture = lambda do |*argv, timeout_sec:|
+      captured_argv = argv
+      captured_timeout = timeout_sec
+      [ JSON.generate(report), "unrelated doctor failure", status ]
+    end
+    reset_codex_executable_cache
+
+    resolved = with_replaced_singleton_method(
+      Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
+    ) do
+      Hive::WorkflowPackage::RuntimePolicy.codex_executable(profile)
+    end
+
+    assert_equal File.realpath("/bin/true"), resolved
+    assert_equal [ "codex-nonzero-doctor", "doctor", "--json" ], captured_argv
+    assert_equal Hive::WorkflowPackage::RuntimePolicy::CODEX_DOCTOR_TIMEOUT_SEC, captured_timeout
+  ensure
+    reset_codex_executable_cache
+  end
+
+  def test_codex_doctor_probe_is_bounded_and_fails_closed_on_timeout
+    profile = Object.new
+    profile.define_singleton_method(:bin) { "codex-slow-doctor" }
+    captured_timeout = nil
+    capture = lambda do |*_argv, timeout_sec:|
+      captured_timeout = timeout_sec
+      raise Timeout::Error
+    end
+    reset_codex_executable_cache
+
+    error = with_replaced_singleton_method(
+      Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
+    ) do
+      assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::RuntimePolicy.codex_executable(profile)
+      end
+    end
+
+    assert_includes error.message, "timed out after 30s"
+    assert_equal Hive::WorkflowPackage::RuntimePolicy::CODEX_DOCTOR_TIMEOUT_SEC, captured_timeout
+  ensure
+    reset_codex_executable_cache
+  end
+
+  def test_codex_doctor_nonzero_status_without_valid_provenance_fails_closed
+    profile = Object.new
+    profile.define_singleton_method(:bin) { "codex-invalid-doctor" }
+    status = Object.new
+    status.define_singleton_method(:success?) { false }
+    capture = lambda do |*_argv, timeout_sec:|
+      [ JSON.generate("checks" => {}), "aggregate failure", status ]
+    end
+    reset_codex_executable_cache
+
+    error = with_replaced_singleton_method(
+      Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
+    ) do
+      assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::RuntimePolicy.codex_executable(profile)
+      end
+    end
+
+    assert_includes error.message, "aggregate failure"
+  ensure
+    reset_codex_executable_cache
+  end
+
+  def test_scoped_codex_actor_adds_trusted_caller_roots_as_read_only_without_expanding_outputs
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      worktree = File.join(dir, "repository-worktree")
+      FileUtils.mkdir_p([ task, package, worktree ])
+      output = File.join(task, "article.md")
+
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit(./article.md)" ]
+          },
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          base_add_dirs: [ worktree ],
+          managed_outputs: [ output ]
+        )
+      end
+
+      resolved_worktree = File.realpath(worktree)
+      assert_includes policy.directories, resolved_worktree
+      filesystem_flag = policy.cli_flags.find { |flag| flag.include?("filesystem=") }
+      assert_includes filesystem_flag, "#{JSON.generate(resolved_worktree)}=\"read\""
+      assert_equal({ "article.md" => output }, policy.output_paths)
+
+      error = assert_raises(Hive::ConfigError) do
+        with_env("HIVE_CODEX_BIN" => "/bin/true") do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            {
+              "preset" => "scoped",
+              "tools" => [ "Read", "Edit(./article.md)" ]
+            },
+            task_folder: task,
+            package_root: package,
+            profile: Hive::AgentProfiles.lookup(:codex),
+            base_add_dirs: [ worktree ],
+            managed_outputs: [ File.join(worktree, "article.md") ]
+          )
+        end
+      end
+      assert_includes error.message, "escapes the task folder"
+    ensure
+      policy&.cleanup!
+    end
+  end
+
+  def test_portable_actor_rejects_unavailable_or_non_directory_trusted_caller_roots
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      file_root = File.join(dir, "not-a-directory")
+      FileUtils.mkdir_p([ task, package ])
+      File.write(file_root, "fixture")
+
+      [ File.join(dir, "missing"), file_root ].each do |root|
+        error = assert_raises(Hive::ConfigError) do
+          with_env("HIVE_CODEX_BIN" => "/bin/true") do
+            Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+              "read-only",
+              task_folder: task,
+              package_root: package,
+              profile: Hive::AgentProfiles.lookup(:codex),
+              base_add_dirs: [ root ]
+            )
+          end
+        end
+        assert_includes error.message, "trusted read root"
+      end
+    end
+  end
+
+  def test_portable_actor_rejects_outputs_not_covered_by_edit_rules
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+
+      error = assert_raises(Hive::ConfigError) do
+        with_env("HIVE_CODEX_BIN" => "/bin/true") do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            {
+              "preset" => "scoped",
+              "tools" => [ "Read", "Edit(./article.md)" ]
+            },
+            task_folder: task,
+            package_root: package,
+            profile: Hive::AgentProfiles.lookup(:codex),
+            managed_outputs: [ File.join(task, "secret.md") ]
+          )
+        end
+      end
+      assert_includes error.message, "not authorized by an Edit rule"
+    end
+  end
+
+  def test_scoped_grok_actor_is_wrapped_in_bubblewrap_with_isolated_home
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      worktree = File.join(dir, "repository-worktree")
+      auth = File.join(dir, "grok-auth.json")
+      FileUtils.mkdir_p([ task, package, worktree ])
+      File.write(auth, '{"token":"fixture"}')
+      output = File.join(task, "reviews", "adversarial-01.md")
+
+      policy = with_env(
+        "HIVE_GROK_BIN" => "/bin/true",
+        "GROK_AUTH_PATH" => auth
+      ) do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          {
+            "preset" => "scoped",
+            "tools" => [ "Read", "LS", "Grep", "Glob", "Edit(./reviews/**)" ]
+          },
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:grok),
+          base_add_dirs: [ worktree ],
+          managed_outputs: [ output ]
+        )
+      end
+
+      assert_equal "/usr/bin/bwrap", policy.command_prefix.first
+      assert_includes policy.command_prefix, "--ro-bind"
+      assert_includes policy.command_prefix, File.realpath(task)
+      worktree_mount = policy.command_prefix.each_cons(3).find do |flag, source, target|
+        flag == "--ro-bind" && source == File.realpath(worktree) && target == source
+      end
+      refute_nil worktree_mount, "the repository worktree must be mounted read-only"
+      assert_equal "/runtime-home", policy.environment.fetch("HOME")
+      assert_equal "/usr/local/bin/grok", policy.executable
+      assert_includes policy.cli_flags, "--json-schema"
+      assert_includes policy.cli_flags, "--disable-web-search"
+      assert_equal [ "reviews/adversarial-01.md" ], policy.output_paths.keys
+    ensure
+      policy&.cleanup!
+    end
+  end
+
   private
 
   def permissions
@@ -408,5 +806,9 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       policy.policy_path, input: StringIO.new(input), output: output
     )
     JSON.parse(output.string)
+  end
+
+  def reset_codex_executable_cache
+    Hive::WorkflowPackage::RuntimePolicy.instance_variable_set(:@codex_executables, {})
   end
 end

@@ -137,7 +137,8 @@ module Hive
                                  default_allowed_tools: nil,
                                  explicit_permission_spec: MISSING_EXPLICIT_PERMISSION_SPEC,
                                  managed_slot: nil,
-                                 managed_context: nil)
+                                 managed_context: nil,
+                                 managed_outputs: [])
         if task.respond_to?(:managed_workflow?) && task.managed_workflow?
           require "hive/workflow_package/runtime_policy"
           if explicit_permission_spec.equal?(MISSING_EXPLICIT_PERMISSION_SPEC)
@@ -148,7 +149,9 @@ module Hive
           runtime_policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
             explicit_permission_spec,
             task_folder: task.folder, profile: profile,
-            package_root: context.fetch(:package_root), environment: context.fetch(:environment)
+            package_root: context.fetch(:package_root), environment: context.fetch(:environment),
+            base_add_dirs: base_add_dirs,
+            managed_outputs: managed_outputs
           )
           return {
             add_dirs: runtime_policy.directories,
@@ -201,6 +204,8 @@ module Hive
             cfg, stage_name, task, profile,
             managed_slot: managed_slot, managed_context: context, **scope_kwargs
           )
+          prompt = scope[:runtime_policy].decorate_prompt(prompt) if
+            scope[:runtime_policy]&.host_outputs?
           [ prompt, scope ]
         end
       end
@@ -661,6 +666,7 @@ module Hive
         end
 
         started_at = Time.now.utc.iso8601
+        effective_status_mode = runtime_policy&.host_outputs? ? :exit_code_only : status_mode
         result = Hive::Agent.new(
           task: task,
           prompt: prompt,
@@ -671,7 +677,7 @@ module Hive
           log_label: log_label,
           profile: profile,
           expected_output: expected_output,
-          status_mode: status_mode,
+          status_mode: effective_status_mode,
           permission_mode: permission_mode,
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
@@ -679,8 +685,19 @@ module Hive
           identity_arguments: identity_arguments || [],
           runtime_policy: runtime_policy
         ).run!
+        if result[:status] == :ok && runtime_policy&.host_outputs?
+          begin
+            runtime_policy.materialize_outputs!(result)
+          rescue Hive::ConfigError => e
+            result[:status] = :error
+            result[:error_reason] = "managed_output_invalid"
+            result[:error_message] = e.message
+          end
+        end
         record_usage(task, profile, result, started_at)
         result
+      ensure
+        runtime_policy&.cleanup!
       end
 
       def stage_resource_limits(cfg, stage)

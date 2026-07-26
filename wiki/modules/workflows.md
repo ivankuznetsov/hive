@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/workflow_package/
 created: 2026-04-26
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [module, workflow, verbs, selection, honeycomb, registry]
 ---
 
@@ -187,7 +187,18 @@ policy. Managed execution uses each stage/reviewer/reviser descriptor's exact
 `permissions:` block. Explicit `yolo`, scoped shell, and unqualified scoped
 file-write actors are portable only after separate high-risk consent; a v2
 manifest hiding that actor surface behind a narrower disclosure is rejected.
-Bounded actors admit only on profiles that enforce the bound. Strict `x-hive`
+Bounded actors admit only on profiles that enforce the bound. Claude uses its
+native tool rules. Codex and Grok may also execute read-only actors through the
+portable managed-output adapter: Codex gets a generated named filesystem
+profile plus ephemeral user-config/rules isolation, Grok gets a bubblewrap
+mount namespace, both receive a strict JSON output schema, and Hive alone
+writes the path-qualified `Edit(...)` targets. Hive validates the complete
+response before writing, rolls back already-published companion files on a
+later publication failure, and publishes the requested stage/state artifact
+last as the completion commit point. Codex executable discovery accepts valid
+runtime provenance even when unrelated aggregate doctor checks fail, while a
+dedicated bounded probe and executable-path validation remain fail-closed.
+Bare/unbounded file edits and unsupported tools still fail admission. Strict `x-hive`
 metadata declares manifest-hashed executable tools, manifest-hashed prompt
 assets exposed as absolute paths in the managed prompt preamble, and optional
 environment names with authorized stable slots. Package-declared process

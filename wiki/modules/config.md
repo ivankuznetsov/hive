@@ -281,32 +281,9 @@ instead of silently dropping that project. See [[commands/refactor-patrol]].
 
 ## Digest config
 
-Hive no longer owns digest generation configuration. `Hive::Prdigest` loads the
-small scheduler block plus the global bot block and writes a private temporary
-PRDigest config. The relevant Hive keys are:
-
-- `digest.enabled` for daemon scheduling;
-- `digest.max_catchup_days` for Hive's scheduler cursor;
-- `bot.chat_id_allowlist[0]` for the delegated Telegram destination.
-
-`digest.agent`, `budget_usd.digest`, and `timeout_sec.digest` were removed with
-the internal LLM/MarkdownV2 engine. Fetch/render/delivery options belong to
-PRDigest.
-
-`load_global_digest_block` returns only the validated `digest` block for
-`Hive::Commands::Daemon`, which wires `DigestScheduler`. Delivery resolves to
-`bot.chat_id_allowlist[0]`. The digest is **opt-out**: when the operator has not
-set `digest.enabled`, `load_global_digest_block` derives it from the bot config —
-`true` when `bot.enabled == true` and `bot.chat_id_allowlist` has at least one
-integer chat id, else `false` (the predicate is the private
-`Config.telegram_digest_default?(data)` helper). An explicit `digest.enabled`
-(true or false) is always honored; only the unset case is derived. Both
-scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher
-SIGHUP reconfigure) load through `load_global_digest_block`, so the derived
-value applies in both. The block has no `source` field: the sole digest mode is
-the registered-repository PR changelist, and CLI `--repo` is a runtime filter.
-Legacy `digest.source` is rejected even when set to `null`, so recursive config
-merging cannot silently preserve the removed shipped/merged selector.
+Hive has no PR-digest configuration. A top-level `digest:` block in global
+config is rejected when the daemon starts, with guidance to schedule
+`prdigest prose --deliver` directly or use `prdigest facts` from an agent.
 
 ## Screenote config
 
@@ -339,8 +316,7 @@ expiry, client id, issuer, MCP resource URL, base URL, and default
 | `unregister_project(name)` | Index-based delete (not `Array#-`, which would clear duplicate-content rows); `to_s`-symmetric name match so an Integer `name:` in YAML still resolves; rewrites under `config.yml.lock`. |
 | `prune_missing_projects!(dry_run:)` | Drops rows whose `path` is not a directory, whose stored valid `real_path` no longer matches the current target, OR whose shape is invalid (non-Hash, missing `path`); reads and, unless `dry_run`, rewrites under `config.yml.lock`. |
 | `load_global_config(path)` | Reads + `YAML.safe_load`; rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` as `ConfigError` (exit 78) so `chmod 000` on the file surfaces as bad-config, not internal-error. |
-| `load_global_digest_block` | Reads global config, deep-merges the `digest` section over defaults, validates `enabled` and `max_catchup_days`, and returns the scheduler/PRDigest-adapter block. |
-| `telegram_chat_id!` | Returns the first allowlisted Telegram chat or raises a configuration error; shared by PRDigest delegation and the separate answer digest. |
+| `telegram_chat_id!` | Returns the first allowlisted Telegram chat or raises a configuration error; used by Hive's answer digest. |
 | `load_global_web` | Reads global config, deep-merges the `web` section onto web defaults, fills `session_secret_file` with `<state_home>/.web.session_secret` when omitted, validates bind/port/origin/GitHub fields, and returns the merged web config for [[commands/web]]. |
 | `global_web_defaults` | Returns a deep copy of `DEFAULTS["web"]` with the state-home session-secret path injected. |
 | `update_global_config!` | Locks sibling `config.yml.lock`, yields the mutable global config Hash, then writes via tempfile + `fsync` + atomic rename. Use for read-modify-write registry/global-config changes. |
@@ -492,10 +468,10 @@ Tests use `with_tmp_global_config` (`test/test_helper.rb:30`) to point `HIVE_HOM
 
 ## Tests
 
-- `test/unit/config_test.rb` — defaults, recursive deep-merge, register/find round-trip, malformed YAML, reviewer/agent validation, ordinary patrol, architecture-patrol consent/policy validation, babysitter/digest defaults, global digest config merge, and bot digest-chat validation.
+- `test/unit/config_test.rb` — defaults, recursive deep-merge, register/find round-trip, malformed YAML, reviewer/agent validation, ordinary patrol, architecture-patrol consent/policy validation, removed PR-digest config rejection, and answer-digest/bot validation.
 - `test/unit/web/config_test.rb` — global web defaults and invalid web port rejection.
 
 ## Backlinks
 
-- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/babysit]] · [[commands/patrol]] · [[commands/refactor-patrol]] · [[commands/web]] · [[commands/digest]]
-- [[modules/agent]] · [[modules/digest]] · [[state-model]]
+- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/babysit]] · [[commands/patrol]] · [[commands/refactor-patrol]] · [[commands/web]]
+- [[modules/agent]] · [[state-model]]

@@ -78,9 +78,6 @@ Gem::Specification.new do |spec|
   # dependency test-only makes installed gems and hivebox crash on daemon boot.
   spec.add_dependency "json_schemer", "~> 2.5"
   spec.add_dependency "lipgloss", "~> 0.2.2"
-  # PRDigest is the sole merged-PR fetch/render/chunk/delivery engine. Hive
-  # invokes its executable and supplies only registered repository/config data.
-  spec.add_dependency "prdigest", "~> 0.2.0"
   # rexml stopped being a default gem in Ruby 3.4, so it is not guaranteed
   # present. The launchd service-installer drift probe parses plists with
   # REXML::Document; without this declaration `hive daemon install/status`
@@ -89,9 +86,9 @@ Gem::Specification.new do |spec|
   spec.add_dependency "sqlite3", "~> 2.0"
   spec.add_dependency "telegram-bot-ruby", "~> 2.7"
   spec.add_dependency "thor", "~> 1.3"
-  # The PR-only digest is defined by Europe/London calendar days even when the
-  # host runs in another timezone. Declare tzinfo directly rather than relying
-  # on Rails/ActiveSupport to provide this runtime dependency transitively.
+  # Local-date windows must remain stable when the host runs in another
+  # timezone. Declare tzinfo directly rather than relying on Rails/ActiveSupport
+  # to provide this runtime dependency transitively.
   spec.add_dependency "tzinfo", "~> 2.0"
   spec.add_dependency "unicode-display_width", "~> 3.2"
 end

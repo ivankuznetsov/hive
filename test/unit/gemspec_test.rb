@@ -80,12 +80,11 @@ class GemspecTest < Minitest::Test
     assert_equal Gem::Requirement.new("= 2.7.2"), dependency.requirement
   end
 
-  def test_runtime_dependency_requires_prdigest_0_2
+  def test_runtime_dependencies_exclude_prdigest
     spec = Gem::Specification.load(GEMSPEC_PATH)
     dependency = spec.runtime_dependencies.find { |candidate| candidate.name == "prdigest" }
 
-    refute_nil dependency
-    assert_equal Gem::Requirement.new("~> 0.2.0"), dependency.requirement
+    assert_nil dependency
   end
 
   # The web tier is a Rails app under web/, supported only in the Docker

@@ -10,7 +10,7 @@ tags: [daemon, module, automation, dispatcher, operational-status, snapshots]
 **TLDR**: Small modules under `Hive::Daemon::*` that together form
 the auto-advancing dispatcher (ADR-024). Pure logic (`Policy`,
 `ConcurrencyController`) is separated from I/O (`StatusConsumer`,
-`ChildSupervisor`, `Logger`, `PrMergeWatcher`, `DigestScheduler`,
+`ChildSupervisor`, `Logger`, `PrMergeWatcher`, `AnswerDigestScheduler`,
 `StaleAgentHealer`, `DisplayNameBackfiller`) so
 the safety-relevant decisions are unit-testable without forking. Task-stage
 agents are detached durable attempts observed by the daemon;
@@ -55,7 +55,7 @@ writes. See [[modules/conditions]].
 | `Hive::Daemon::RefactorPatrolScheduler` | `lib/hive/daemon/refactor_patrol_scheduler.rb` | Exposes oldest-first discovery/action candidates, validates exact registration and repository ownership, pins new discovery to the freshly fetched committed default branch, reuses a partial job's durable `analysis_sha` independently of the registered checkout, claims discovery with generation/liveness evidence, emits job-bound result paths, durably surfaces unavailable project config, and checkpoints only matching schema-valid completion envelopes. A clean quota-bounded batch checkpoints completed feature results with `complete: false` and no synthetic review error. Retryable failures normally use a 60-second backoff; revoked discovery or action authority is rechecked hourly because it requires a policy/configuration change, while a partial envelope whose every error proves a shared daily token limit, architecture review-launch limit, or architecture-only unmetered daily backstop is exhausted sleeps until the next UTC day. Architecture launch count follows the durable merge queue and is accounted separately from ordinary patrol's daily launch count; per-cycle capacity still bounds each child. |
 | `Hive::Daemon::PatrolArbiter` | `lib/hive/daemon/patrol_arbiter.rb` | Shares each project's patrol-scan capacity between ordinary and architecture patrol and persists alternation state so either ready kind eventually runs. |
 | `Hive::Daemon::DigestSchedulerBase` | `lib/hive/daemon/digest_scheduler_base.rb` | Shared daily-digest lifecycle: one pending date, cancellation, bounded failure backoff, dispatch envelope construction, observable tolerant state reads, and atomic cursor persistence. Concrete schedulers retain their cadence and cursor rules. |
-| `Hive::Daemon::DigestScheduler` | `lib/hive/daemon/digest_scheduler.rb` | Global daily PRDigest cadence. Persists `last_digested_date` in `<state_home>/digest_state.json`, applies a first-run no-history guard, computes owed Europe/London calendar days, caps catch-up with `digest.max_catchup_days`, and emits one `hive digest --date D --json` dispatch at a time. Retryable PRDigest failures back off; `telegram_refused`, `telegram_permanent`, `telegram_ambiguous`, and `delivery_checkpoint_permanent` persist a blocked date without advancing or redispatching. |
+| `Hive::Daemon::AnswerDigestScheduler` | `lib/hive/daemon/answer_digest_scheduler.rb` | Host-local daily answer reminder cadence. Persists `last_fired_date` in `<state_home>/answer_digest_state.json` and emits at most one `hive answer-digest --date D --json` child per day after the configured hour. |
 | `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed delivery queue for all adapters. Runtime readers accept only current v4; the one-off state migration upgrades pending v1-v3 files before opening the queue. V4 adds restartable recovery phases, canonical task/marker/generation identity, owner/remediation, and terminal outcome/time. Requestors are validated against one closed adapter enum, including the explicit `operator` source. Nonterminal recovery requests do not expire; bounded request-keyed lock shards serialize claim, phase CAS, and pruning without accumulating one lock file per request. The dispatcher shares one pending/claimed scan between queue accounting and recovery projection per tick, and runs terminal recovery pruning at most hourly. Request IDs are bounded filesystem-safe identifiers. The single-dispatcher invariant remains: producers write, the daemon dispatches. |
 | `Hive::Daemon::QueueDirectory` | `lib/hive/daemon/queue_directory.rb` | Shared `directory_for(dirname:, state_home:)` helper used by both dispatch queues so the owner-only (0700) per-queue directory invariant — the de-facto auth boundary for the dispatch channel — lives in one place (#253). |
 | `Hive::Commands::Daemon` | `lib/hive/commands/daemon.rb` | Thor subcommand surface (`start` / `stop` / `status` / `reload` / `tail` / `install` / `enable` / `disable` / `queue`). Owns PID/signal lifecycle, service installation, per-project enrollment, and read-only dispatch-request queue inspection. A manual foreground or detached start fills an absent `HIVE_BIN` from `Hive::InvokedBinary`, keeping status probes, backfillers, and dispatched children on the same checkout/package as the daemon itself; an explicit operator/service override still wins. `queue` delegates to `Hive::Commands::Daemon::QueueCommand`. |
@@ -85,7 +85,7 @@ hive daemon start
             ├─ Hive::Daemon::RefactorPatrolMergeProgressStore (restart-safe page/intake cursor)
             ├─ Hive::Daemon::PatrolArbiter       (ordinary/architecture fairness)
             ├─ Hive::Daemon::RefactorPatrolScheduler (durable jobs/actions)
-            ├─ Hive::Daemon::DigestScheduler     (<state_home>/digest_state.json)
+            ├─ Hive::Daemon::AnswerDigestScheduler (<state_home>/answer_digest_state.json)
             ├─ Hive::Daemon::StaleAgentHealer    (AGENT_WORKING repair)
             ├─ Hive::Daemon::DisplayNameBackfiller (missing display_name retry)
             ├─ Hive::Daemon::TaskIdBackfiller    (missing meta id assign)
@@ -200,18 +200,12 @@ restart therefore replaces only the daemon process; detached durable-attempt
 wrappers and workers remain alive for the first reconciliation pass to adopt,
 rather than being killed as cgroup children and replayed.
 
-Digest dispatches happen before status fetch because they are global, not
-project-row driven. The dispatcher tracks them with synthetic project/stage
-`digest/digest`; when the child is reaped, the scheduler advances its cursor
-only on exit 0. Completion also receives the child's `prdigest-result` envelope:
-the four non-replayable error kinds persist `blocked_date` and
-`digest_permanent_failure` without advancing or retrying that day, while other
-nonzero exits retain bounded backoff. The dry-run pseudo-child reap path mirrors
-the same completion hook so dry-run daemons do not wedge after one digest
-dispatch; if the scheduler cursor write fails there, the dispatcher logs
-`:fatal` and keeps the tick alive instead of crashing. Scheduler `tick` and
-`complete` calls are wrapped so digest state I/O failures log `fatal` with
-`keeping_previous: true` instead of crashing the poll loop.
+The answer-digest scheduler dispatches before status fetch because it is global,
+not project-row driven. The dispatcher tracks its synthetic project/stage and
+advances the cursor only on exit 0. The dry-run pseudo-child path uses the same
+completion hook. Scheduler `tick` and `complete` calls are isolated so state I/O
+failures log `fatal` with `keeping_previous: true` instead of crashing the poll
+loop.
 
 Architecture-patrol dispatches are ordinary supervised child processes but
 not ordinary task rows. Discovery and action claims bind owner, exact process

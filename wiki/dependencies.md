@@ -7,7 +7,12 @@ updated: 2026-07-26
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: The `hive-cli` gem delegates merged-PR digests to its direct PRDigest runtime dependency; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or `gtimeout`) for their timeout-governed Git-ref, QMD, and provider operations.
+**TLDR**: Root development/test tooling is declared in `Gemfile`; the Rails
+hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, puma,
+and PRDigest are not `hive-cli` runtime dependencies. The web bundle owns
+Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown
+artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or
+`gtimeout`) for timeout-governed Git-ref, QMD, and provider operations.
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
@@ -33,7 +38,6 @@ as of this refresh.
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
 | `erb` | `>= 4.0` | Template rendering used by stages, task creation, workflows, and display names. Declared because Ruby is unbundling it and packaged installs cannot assume it is present. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
-| `prdigest` | `~> 0.2.0` (locked 0.2.0) | Sole merged-PR digest engine. Hive invokes deterministic `prdigest run` with registered repositories and one explicit date; Hive does not select facts/prose/provider modes. PRDigest owns GitHub fetch, Telegram HTML rendering/chunking, durable delivery resume, and result/exit contracts. Version 0.2.0 retains the 0.1.1 native `Time` normalization and adds facts/prose modes outside Hive, while Hive alone owns catch-up scheduling. |
 | `json_schemer` | `~> 2.5` (locked 2.5.0) | Runtime JSON Schema validation for architecture-patrol manifests in daemon and hivebox supervisor processes; also reused by the e2e schema validator. |
 | `rexml` | `~> 3.2` | Launchd plist parsing for daemon install/status drift checks; explicit because Ruby 3.4 no longer guarantees it as a default gem. |
 | `sqlite3` | `~> 2.0` | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. |

@@ -174,6 +174,48 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_equal input, calls.first.fetch(:input)
   end
 
+  def test_closure_preview_reports_blockers_and_rejects_unexpected_callback_fields
+    input = {
+      "reason" => "already_delivered",
+      "evidence" => [ "acme/app#42" ],
+      "successor" => nil,
+      "attestation" => nil
+    }
+    task = Object.new
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    blocked = ClosurePreview.new(
+      input: input,
+      evidence: [],
+      preview_digest: "d" * 64,
+      errors: [ { "message" => "remote merge is not reachable" } ],
+      blockers: [ { "message" => "a live attempt still owns the task" } ]
+    )
+    payload = closure_callback(
+      "closure_preview",
+      "project" => "app", "slug" => "delivered-task", "input" => input
+    )
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :preview, ->(**) { blocked }
+      ) do
+        result = @handlers.handle(:callback_closure_preview, update(payload))
+        assert_equal :edit_reply, result.action
+        assert_match(/remote merge is not reachable/, result.text)
+        assert_match(/live attempt/, result.text)
+      end
+    end
+
+    malformed = closure_callback(
+      "closure_preview",
+      "project" => "app", "slug" => "delivered-task", "input" => input,
+      "unexpected" => true
+    )
+    result = @handlers.handle(:callback_closure_preview, update(malformed))
+    assert_equal :edit_reply, result.action
+    assert_match(/Closure preview failed: closure callback is malformed/, result.text)
+  end
+
   def test_allowlisted_closure_confirmation_uses_bot_operator_identity
     input = {
       "reason" => "already_delivered",

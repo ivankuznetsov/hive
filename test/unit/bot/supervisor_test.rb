@@ -14,7 +14,8 @@ class HiveBotSupervisorTest < Minitest::Test
   StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, keyword_init: true)
 
   FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears,
-                            :commands_registered, :raise_on_set_my_commands, keyword_init: true) do
+                            :commands_registered, :raise_on_set_my_commands,
+                            :edits, :raise_on_edit, keyword_init: true) do
     def send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
       raise raise_on_send if raise_on_send
 
@@ -23,6 +24,17 @@ class HiveBotSupervisorTest < Minitest::Test
 
     def edit_message_reply_markup(chat_id:, message_id:, reply_markup: nil)
       (self.keyboard_clears ||= []) << { chat_id: chat_id, message_id: message_id, reply_markup: reply_markup }
+    end
+
+    def edit_message_text(chat_id:, message_id:, text:, reply_markup: nil)
+      raise raise_on_edit if raise_on_edit
+
+      (self.edits ||= []) << {
+        chat_id: chat_id,
+        message_id: message_id,
+        text: text,
+        reply_markup: reply_markup
+      }
     end
 
     def set_my_commands(commands:)
@@ -2888,6 +2900,38 @@ class HiveBotSupervisorTest < Minitest::Test
     event = @logger.events.last
     assert_equal :send_failure, event.fetch(:name)
     assert_equal "offline", event.fetch(:payload).fetch(:message)
+  end
+
+  def test_edit_reply_edits_callback_messages_and_falls_back_or_logs_safely
+    result = FakeRouter::Result.new(
+      action: :edit_reply,
+      text: "closure verified",
+      reply_markup: { inline_keyboard: [] }
+    )
+    @supervisor.send(
+      :execute_result,
+      result,
+      Update.new(chat_id: 42, update_id: 1, message_id: 99)
+    )
+    assert_equal "closure verified", @telegram.edits.last.fetch(:text)
+    assert_equal 99, @telegram.edits.last.fetch(:message_id)
+
+    @supervisor.send(
+      :safe_edit_message,
+      Update.new(chat_id: 42, update_id: 2),
+      text: "fallback"
+    )
+    assert_equal "fallback", @telegram.messages.last.fetch(:text)
+
+    @telegram.raise_on_edit = RuntimeError.new("edit offline")
+    assert_nil @supervisor.send(
+      :safe_edit_message,
+      Update.new(chat_id: 42, update_id: 3, message_id: 100),
+      text: "cannot edit"
+    )
+    event = @logger.events.last
+    assert_equal :send_failure, event.fetch(:name)
+    assert_equal "edit_message_text", event.fetch(:payload).fetch(:source)
   end
 
   def test_status_tick_processes_rows_only_when_status_is_ok

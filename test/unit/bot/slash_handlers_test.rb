@@ -135,6 +135,24 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_nil result.reply_markup
   end
 
+  def test_close_rejects_duplicate_and_unknown_options
+    commands = [
+      "/close task --reason superseded --evidence acme/app#42 " \
+        "--successor app:first --successor app:second --attestation shipped",
+      "/close task --reason superseded --evidence acme/app#42 " \
+        "--successor app:next --attestation shipped --attestation twice",
+      "/close task --reason already_delivered --evidence acme/app#42 --mystery value",
+      "/close task --reason unsupported --evidence acme/app#42"
+    ]
+
+    commands.each do |command|
+      result = @handlers.closure(Update.new(text: command, chat_id: 1))
+      assert_equal :reply, result.action
+      assert_match(%r{\AUse /close}, result.text)
+      assert_nil result.reply_markup
+    end
+  end
+
   def test_status_with_json_flag_sets_format_json
     result = @handlers.status(Update.new(text: "/status --json"))
 

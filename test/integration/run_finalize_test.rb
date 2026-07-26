@@ -775,6 +775,81 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
+  def test_finalize_refresh_pr_identity_fails_closed_for_url_head_and_transport_errors
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+
+        result = Hive::Stages::Finalize.refresh_pr_identity!(
+          task, worktree_path, "not-a-pr", {}
+        )
+        assert_equal(
+          { commit: "finalize_pr_url_invalid", status: :error },
+          result
+        )
+        assert_equal "finalize_pr_url_invalid",
+                     Hive::Markers.current(pr_md).attrs.fetch("reason")
+
+        status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+        metadata = Hive::Gh::PrMetadata.new(
+          number: 9,
+          url: "https://github.com/acme/app/pull/9",
+          base_ref_name: "main",
+          head_ref_oid: "b" * 40,
+          is_cross_repository: false,
+          state: "OPEN"
+        )
+        with_stubbed_singleton_method(
+          Hive::Stages::Finalize,
+          :capture_git,
+          ->(*) { [ "a" * 40, status ] }
+        ) do
+          with_stubbed_singleton_method(
+            Hive::Gh, :pr_metadata, ->(*, **) { metadata }
+          ) do
+            result = Hive::Stages::Finalize.refresh_pr_identity!(
+              task,
+              worktree_path,
+              "https://github.com/acme/app/pull/9",
+              {}
+            )
+            assert_equal(
+              { commit: "finalize_pr_head_mismatch", status: :error },
+              result
+            )
+            marker = Hive::Markers.current(pr_md)
+            assert_equal "finalize_pr_head_mismatch",
+                         marker.attrs.fetch("reason")
+            assert_equal "a" * 40, marker.attrs.fetch("local_head")
+            assert_equal "b" * 40, marker.attrs.fetch("remote_head")
+          end
+        end
+
+        with_stubbed_singleton_method(
+          Hive::Stages::Finalize,
+          :capture_git,
+          ->(*) { raise Hive::GhError, "metadata offline" }
+        ) do
+          result = Hive::Stages::Finalize.refresh_pr_identity!(
+            task,
+            worktree_path,
+            "https://github.com/acme/app/pull/9",
+            {}
+          )
+          assert_equal(
+            { commit: "finalize_pr_identity_refresh_failed", status: :error },
+            result
+          )
+          marker = Hive::Markers.current(pr_md)
+          assert_equal "finalize_pr_identity_refresh_failed",
+                       marker.attrs.fetch("reason")
+          assert_equal "metadata offline", marker.attrs.fetch("detail")
+        end
+      end
+    end
+  end
+
   def test_finalize_mark_pr_ready_error_paths
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

@@ -851,6 +851,41 @@ class HiveBotRouterTest < Minitest::Test
     assert_match(/\Aclosure_preview:/, callback)
   end
 
+  def test_closure_confirmation_uses_the_router_allowlist
+    input = {
+      "reason" => "already_delivered",
+      "evidence" => [ "acme/app#42" ],
+      "successor" => nil,
+      "attestation" => nil
+    }
+    callback = Hive::Bot::NotificationBuilders.encode_closure_callback(
+      "closure_confirm",
+      "project" => "hive",
+      "slug" => "delivered-task",
+      "input" => input,
+      "preview_digest" => "d" * 64
+    )
+    task = Object.new
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    calls = []
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(
+        Hive::TaskClosure,
+        :confirm!,
+        lambda do |**kwargs|
+          calls << kwargs
+          { "reason" => "already_delivered", "receipt_digest" => "e" * 64 }
+        end
+      ) do
+        result = @router.handle(update(callback_data: callback))
+        assert_equal :edit_reply, result.action
+      end
+    end
+
+    assert_equal true, calls.first.fetch(:authorized)
+  end
+
   def test_slash_help_returns_commands_reply
     result = @router.handle(update(text: "/help"))
 

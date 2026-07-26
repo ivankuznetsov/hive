@@ -632,7 +632,590 @@ class TaskClosureTest < Minitest::Test
     end
   end
 
+  def test_public_helpers_and_fallbacks_fail_closed
+    with_closure_project do |task, project|
+      input = input_for("acme/app#42")
+      preview = Hive::TaskClosure.preview(
+        task: task, project: project, input: input, gh: FakeGh.new
+      )
+      assert preview.valid?, preview.to_h.inspect
+
+      service = service_for
+      read_result = service.read(task, project: project)
+      assert_equal "absent", read_result.to_h.fetch("status")
+      assert_nil Hive::TaskClosure.transition_evidence(
+        task, receipt_digest: "not-a-digest", project: project
+      )
+
+      marker = Hive::Markers.current(task.state_file)
+      FileUtils.rm_f(task.state_file)
+      assert_match(
+        /\A[0-9a-f]{64}\z/,
+        Hive::TaskClosure.task_generation(task, marker: marker)
+      )
+
+      service.define_singleton_method(:normalize_input) do |*, **|
+        raise Hive::TaskClosure::InvalidInput, "synthetic invalid input"
+      end
+      fallback = service.preview(task: task, project: project, input: input)
+      refute fallback.valid?
+      assert_match(/synthetic invalid input/, fallback.errors.first.fetch("message"))
+    end
+
+    with_closure_project do |task, project|
+      service = service_for
+      input = input_for("acme/app#42")
+      assert_raises(Hive::TaskClosure::StalePreview) do
+        service.confirm!(
+          task: task, project: project, input: input,
+          preview_digest: "short", operator: "tester", channel: "cli",
+          authorized: true
+        )
+      end
+
+      invalid = service.preview(
+        task: task, project: project, input: input_for("not-evidence")
+      )
+      assert_raises(Hive::TaskClosure::VerificationFailed) do
+        service.confirm!(
+          task: task, project: project, input: input_for("not-evidence"),
+          preview_digest: invalid.preview_digest, operator: "tester",
+          channel: "cli", authorized: true
+        )
+      end
+    end
+
+    with_closure_project do |task, project|
+      input = input_for("acme/app#42")
+      preview = Hive::TaskClosure.preview(
+        task: task, project: project, input: input, gh: FakeGh.new
+      )
+      receipt = Hive::TaskClosure.confirm!(
+        task: task,
+        project: project,
+        input: input,
+        preview_digest: preview.preview_digest,
+        operator: "tester",
+        channel: "cli",
+        authorized: true,
+        gh: FakeGh.new
+      )
+      archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+      assert Hive::TaskClosure.valid_for_transition?(
+        archived,
+        receipt_digest: receipt.fetch("receipt_digest"),
+        project: project
+      )
+    end
+
+    with_closure_project do |task, project|
+      receipt = {
+        "receipt_digest" => "a" * 64,
+        "observation" => {
+          "stage" => "1-inbox",
+          "marker_generation" => "b" * 64,
+          "task_generation" => "c" * 64
+        }
+      }
+      read = Hive::TaskClosure::ReadResult.new(
+        status: "valid", receipt: receipt, error: nil, quarantine_path: nil
+      )
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :read, ->(*) { read }
+      ) do
+        assert_nil Hive::TaskClosure.transition_evidence(
+          task, receipt_digest: "a" * 64, project: project
+        )
+      end
+    end
+  end
+
+  def test_input_repository_successor_and_evidence_boundaries
+    with_closure_project(successor: true) do |task, project|
+      service = service_for
+      invalid_encoding_string = Class.new(String) do
+        def encode(*) = raise(EncodingError, "synthetic encoding failure")
+      end.new("statement")
+      invalid_encoding = Object.new
+      invalid_encoding.define_singleton_method(:to_s) { invalid_encoding_string }
+      inputs = [
+        input_for("x" * (Hive::TaskClosure::MAX_REFERENCE_BYTES + 1)),
+        input_for("acme/app#42").merge("successor" => "#{project}:successor-task"),
+        input_for("acme/app#42").merge("reason" => "already\0delivered"),
+        {
+          "reason" => "superseded",
+          "evidence" => [ "other/tool#7" ],
+          "successor" => "#{project}:successor-task",
+          "attestation" => nil
+        },
+        {
+          "reason" => "superseded",
+          "evidence" => [ "acme/app#42" ],
+          "successor" => "not-a-successor",
+          "attestation" => "superseded"
+        },
+        {
+          "reason" => "superseded",
+          "evidence" => [ "acme/app#42" ],
+          "successor" => "#{project}:closure-task",
+          "attestation" => "superseded"
+        },
+        {
+          "reason" => "superseded",
+          "evidence" => [ "acme/app#42" ],
+          "successor" => "missing:successor-task",
+          "attestation" => "superseded"
+        },
+        {
+          "reason" => "superseded",
+          "evidence" => [ "acme/app#42" ],
+          "successor" => "#{project}:successor-task",
+          "attestation" => invalid_encoding
+        },
+        input_for("https://evil.example/acme/app/commit/#{"a" * 40}")
+      ]
+      inputs.each do |input|
+        preview = service.preview(task: task, project: project, input: input)
+        refute preview.valid?, input.inspect
+      end
+
+      commit_url = "https://github.com/acme/app/commit/#{"b" * 40}"
+      assert service.preview(
+        task: task, project: project, input: input_for(commit_url)
+      ).valid?
+
+      mismatch_gh = FakeGh.new
+      mismatch_gh.define_singleton_method(:closure_pr_facts) do |**kwargs|
+        super(**kwargs).merge("repository" => "other/repository")
+      end
+      refute service_for(gh: mismatch_gh).preview(
+        task: task, project: project, input: input_for("acme/app#42")
+      ).valid?
+
+      wrong_oid_gh = FakeGh.new
+      wrong_oid_gh.define_singleton_method(:closure_commit_facts) do |**kwargs|
+        super(**kwargs).merge("oid" => "c" * 40)
+      end
+      refute service_for(gh: wrong_oid_gh).preview(
+        task: task, project: project, input: input_for("b" * 40)
+      ).valid?
+
+      errors = []
+      assert_nil service.send(
+        :resolve_task_repository,
+        task,
+        project,
+        errors
+      ) if begin
+        registration = Hive::Config.find_project(project)
+        registration["path"] = File.join(task.project_root, "elsewhere")
+        service.define_singleton_method(:registered_project) { |_| registration }
+        true
+      end
+      assert errors.any? { |entry| entry.fetch("code") == "registration_mismatch" }
+
+      identity_errors = []
+      identity_service = service_for
+      registration = Hive::Config.find_project(project)
+      registration["repository_identity"] = "local:/tmp/app"
+      identity_service.define_singleton_method(:registered_project) { |_| registration }
+      assert identity_service.send(
+        :resolve_task_repository, task, project, identity_errors
+      )
+      assert identity_errors.any? { |entry| entry.fetch("code") == "identity_mismatch" }
+
+      unresolved_errors = []
+      failing_gh = FakeGh.new
+      failing_gh.define_singleton_method(:repository_identity) do |*, **|
+        raise Hive::Error, "origin unavailable"
+      end
+      assert_nil service_for(gh: failing_gh).send(
+        :resolve_task_repository, task, project, unresolved_errors
+      )
+      assert unresolved_errors.any? { |entry| entry.fetch("code") == "unresolved" }
+
+      assert_equal false, service.send(
+        :same_path?, "/missing/left", "/missing/right"
+      )
+      assert_nil service.send(:safe_read, "/definitely/missing/closure.json")
+      assert_raises(Hive::TaskClosure::InvalidInput) do
+        service.send(:validated_repository, "not/a/repository")
+      end
+      assert_equal "#{project}:successor-task",
+                   service.send(
+                     :successor_reference,
+                     { "project" => project, "slug" => "successor-task" }
+                   )
+    end
+  end
+
+  def test_ownership_and_storage_failures_become_blockers_or_invalid_reads
+    with_closure_project do |task, project|
+      failing_attempts = Object.new
+      failing_attempts.define_singleton_method(:scan) do
+        raise Hive::Error, "attempt ledger unavailable"
+      end
+      preview = service_for(attempt_store: failing_attempts).preview(
+        task: task, project: project, input: input_for("acme/app#42")
+      )
+      assert preview.blockers.any? do |entry|
+        entry.fetch("code") == "ownership_unverifiable"
+      end
+
+      invalid_attempts = Object.new
+      invalid_attempts.define_singleton_method(:scan) do
+        Hive::Attempts::Scan.new(
+          records: [], invalid_records: [ { "error" => "corrupt" } ]
+        )
+      end
+      invalid_preview = service_for(attempt_store: invalid_attempts).preview(
+        task: task, project: project, input: input_for("acme/app#42")
+      )
+      assert invalid_preview.blockers.any? do |entry|
+        entry.fetch("code") == "ownership_unverifiable"
+      end
+
+      File.write(
+        task.lock_file,
+        {
+          "pid" => 2_000_000_000,
+          "process_start_time" => "missing"
+        }.to_yaml
+      )
+      refute service_for.send(:live_task_lock?, task)
+
+      with_replaced_singleton_method(
+        Process, :kill, ->(*) { raise Errno::EPERM }
+      ) do
+        assert service_for.send(:live_task_lock?, task)
+      end
+
+      FileUtils.rm_f(task.lock_file)
+      File.write(File.join(task.folder, "worktree.yml"), "---\npath: [\n")
+      blockers = service_for.send(:worktree_blockers, task)
+      assert_equal "worktree_unverifiable", blockers.first.fetch("code")
+
+      path = File.join(task.folder, "closure.json")
+      File.write(path, "{}")
+      with_replaced_singleton_method(
+        File, :binread, ->(*) { raise Errno::EACCES, path }
+      ) do
+        result = service_for.read(task, project: project, quarantine: false)
+        assert_equal "invalid", result.status
+        assert_match(/EACCES/, result.error)
+      end
+
+      service = service_for
+      with_replaced_singleton_method(
+        File, :open, ->(*) { raise Errno::EACCES, task.folder }
+      ) do
+        assert_raises(Hive::TaskClosure::Error) do
+          service.send(:with_closure_lock, task) { flunk "lock should not yield" }
+        end
+      end
+
+      with_replaced_singleton_method(
+        Hive::AtomicFile, :write, ->(*) { raise Errno::EACCES, "quarantine" }
+      ) do
+        assert_nil service.send(:quarantine!, task, "bad", "invalid")
+      end
+      quarantine_root = service.send(:quarantine_root, task)
+      FileUtils.mkdir_p(quarantine_root)
+      File.write(File.join(quarantine_root, "broken.json"), "bad")
+      assert_nil service.send(:latest_quarantine, task)
+    end
+  end
+
+  def test_receipt_contract_rejects_every_malformed_identity_and_semantic_shape
+    with_closure_project(successor: true) do |task, project|
+      service = service_for
+      preview = service.preview(
+        task: task, project: project, input: input_for("acme/app#42")
+      )
+      base = service.send(
+        :build_receipt, preview, operator: "tester", channel: "cli"
+      )
+
+      mutations = [
+        ->(receipt) { receipt["extra"] = true },
+        ->(receipt) { receipt["receipt_digest"] = "bad"; :keep_digest },
+        ->(receipt) { receipt["task"]["id"] = "one" },
+        ->(receipt) { receipt["observation"]["stage"] = "bad" },
+        ->(receipt) { receipt["task_repository"].delete("host") },
+        ->(receipt) { receipt["task_repository"]["identity"] = "wrong/repo" },
+        ->(receipt) { receipt["task_repository"]["host"] = "not a host" },
+        ->(receipt) do
+          receipt["task_repository"]["repository"] = "other/repo"
+          receipt["task_repository"]["identity"] = "github.com/other/repo"
+        end,
+        ->(receipt) { receipt["evidence"].first["extra"] = true },
+        ->(receipt) { receipt["evidence"].first["reachable_from_default"] = false },
+        ->(receipt) { receipt["evidence"].first["same_repository"] = false },
+        ->(receipt) { receipt["evidence"].first["number"] = 0 },
+        ->(receipt) { receipt["evidence"].first["merged_at"] = "not-a-time" },
+        ->(receipt) { receipt["confirmed_by"]["channel"] = "unknown" },
+        ->(receipt) { receipt["successor"] = { "project" => project } },
+        ->(receipt) { receipt["confirmed_at"] = "not-a-time" }
+      ]
+      mutations.each do |mutation|
+        receipt = deep_copy(base)
+        keep_digest = mutation.call(receipt) == :keep_digest
+        refresh_receipt_digests!(receipt) unless keep_digest
+        assert_raises(Hive::TaskClosure::InvalidReceipt) do
+          service.send(
+            :validate_receipt!, receipt, task: task, project: project
+          )
+        end
+      end
+
+      wrong_evidence_digest = deep_copy(base)
+      wrong_evidence_digest["evidence_digest"] = "f" * 64
+      unsigned = wrong_evidence_digest.reject do |key, _|
+        key == "receipt_digest"
+      end
+      wrong_evidence_digest["receipt_digest"] =
+        Hive::TaskClosure.digest(unsigned)
+      assert_raises(Hive::TaskClosure::InvalidReceipt) do
+        service.send(
+          :validate_receipt!,
+          wrong_evidence_digest,
+          task: task,
+          project: project
+        )
+      end
+
+      missing_registration = service_for
+      missing_registration.define_singleton_method(:registered_project) do |_|
+        raise Hive::ConfigError, "missing project"
+      end
+      assert_raises(Hive::TaskClosure::InvalidReceipt) do
+        missing_registration.send(
+          :validate_receipt_registration!,
+          { "host" => "github.com", "repository" => "acme/app" },
+          task: task,
+          project: project
+        )
+      end
+
+      commit_preview = service.preview(
+        task: task, project: project, input: input_for("b" * 40)
+      )
+      commit_receipt = service.send(
+        :build_receipt, commit_preview, operator: "tester", channel: "cli"
+      )
+      assert_equal commit_receipt,
+                   service.send(
+                     :validate_receipt!, commit_receipt,
+                     task: task,
+                     project: project
+                   )
+      [ [ "state", "MERGED" ], [ "kind", "unknown" ] ].each do |field, value|
+        receipt = deep_copy(commit_receipt)
+        receipt["evidence"].first[field] = value
+        refresh_receipt_digests!(receipt)
+        assert_raises(Hive::TaskClosure::InvalidReceipt) do
+          service.send(
+            :validate_receipt!, receipt, task: task, project: project
+          )
+        end
+      end
+
+      superseded_input = {
+        "reason" => "superseded",
+        "evidence" => [ "other/tool#7" ],
+        "successor" => "#{project}:successor-task",
+        "attestation" => "The successor contains the delivered work."
+      }
+      superseded_preview = service.preview(
+        task: task, project: project, input: superseded_input
+      )
+      superseded_receipt = service.send(
+        :build_receipt, superseded_preview, operator: "tester", channel: "cli"
+      )
+      assert_equal superseded_receipt,
+                   service.send(
+                     :validate_receipt!, superseded_receipt,
+                     task: task,
+                     project: project
+                   )
+      invalid_superseded = deep_copy(superseded_receipt)
+      invalid_superseded["attestation"] = ""
+      refresh_receipt_digests!(invalid_superseded)
+      assert_raises(Hive::TaskClosure::InvalidReceipt) do
+        service.send(
+          :validate_receipt!, invalid_superseded,
+          task: task,
+          project: project
+        )
+      end
+    end
+  end
+
+  def test_existing_receipt_and_final_guard_detect_every_changed_binding
+    with_closure_project do |task, project|
+      service = service_for
+      input = input_for("acme/app#42")
+      preview = service.preview(task: task, project: project, input: input)
+      receipt = service.send(
+        :build_receipt, preview, operator: "tester", channel: "cli"
+      )
+      service.send(:persist_receipt!, task, receipt)
+
+      different = deep_copy(receipt)
+      different["confirmed_by"]["operator"] = "someone-else"
+      refresh_receipt_digests!(different)
+      assert_raises(Hive::TaskClosure::InvalidReceipt) do
+        service.send(:persist_receipt!, task, different)
+      end
+
+      assert_raises(Hive::TaskClosure::StalePreview) do
+        service.send(
+          :resume_existing!,
+          task: task,
+          project: project,
+          input: input,
+          preview_digest: "f" * 64,
+          receipt: receipt
+        )
+      end
+      assert_raises(Hive::TaskClosure::InvalidInput) do
+        service.send(
+          :resume_existing!,
+          task: task,
+          project: project,
+          input: input.merge("reason" => "unsupported"),
+          preview_digest: receipt.fetch("preview_digest"),
+          receipt: receipt
+        )
+      end
+      assert_raises(Hive::TaskClosure::StalePreview) do
+        service.send(
+          :resume_existing!,
+          task: task,
+          project: project,
+          input: {
+            "reason" => "superseded",
+            "evidence" => input.fetch("evidence"),
+            "successor" => "app:successor-task",
+            "attestation" => "different closure"
+          },
+          preview_digest: receipt.fetch("preview_digest"),
+          receipt: receipt
+        )
+      end
+
+      changed_evidence = service_for
+      changed_evidence.define_singleton_method(:verify_evidence) do |*, **|
+        items = receipt.fetch("evidence").map(&:dup)
+        items.first["oid"] = "d" * 40
+        items
+      end
+      assert_raises(Hive::TaskClosure::StalePreview) do
+        changed_evidence.send(
+          :resume_existing!,
+          task: task,
+          project: project,
+          input: input,
+          preview_digest: receipt.fetch("preview_digest"),
+          receipt: receipt
+        )
+      end
+
+      assert_raises(Hive::TaskClosure::VerificationFailed) do
+        service.send(
+          :validate_expected_remote_merge!,
+          receipt.fetch("evidence"),
+          expected_head: "short",
+          expected_merge_oid: "a" * 40
+        )
+      end
+
+      repository_guard = service_for
+      repository_guard.define_singleton_method(:resolve_task_repository) do |*, **|
+        nil
+      end
+      assert_raises(Hive::TaskClosure::StalePreview) do
+        repository_guard.send(
+          :validate_final_transition!, task, project, receipt
+        )
+      end
+
+      evidence_guard = service_for
+      evidence_guard.define_singleton_method(:verify_evidence) do |*, **|
+        []
+      end
+      assert_raises(Hive::TaskClosure::StalePreview) do
+        evidence_guard.send(
+          :validate_final_transition!, task, project, receipt
+        )
+      end
+
+      FileUtils.rm_f(File.join(task.folder, "pr.md"))
+      assert_raises(Hive::TaskClosure::StalePreview) do
+        service.send(:validate_daemon_pr_binding!, task, receipt)
+      end
+
+      File.write(File.join(task.folder, "closure.json"), "{")
+      assert_equal "invalid", service.read(task, project: project).status
+      assert_raises(Hive::TaskClosure::InvalidReceipt) do
+        service.reconcile_remote_merge!(
+          task: task,
+          project: project,
+          pr_url: "https://github.com/acme/app/pull/42",
+          expected_head: "b" * 40,
+          expected_merge_oid: "a" * 40
+        )
+      end
+    end
+
+    with_closure_project do |task, project|
+      preview = Hive::TaskClosure::Preview.new(
+        input: input_for("other/tool#7"),
+        task: {},
+        task_repository: {},
+        evidence: [
+          {
+            "kind" => "pull_request",
+            "same_repository" => false,
+            "head_oid" => "b" * 40,
+            "oid" => "a" * 40
+          }
+        ],
+        successor: nil,
+        authority: "operator_attestation",
+        evidence_digest: "c" * 64,
+        preview_digest: "d" * 64,
+        errors: [],
+        blockers: []
+      )
+      service = service_for
+      service.define_singleton_method(:preview) { |**| preview }
+      assert_raises(Hive::TaskClosure::VerificationFailed) do
+        service.reconcile_remote_merge!(
+          task: task,
+          project: project,
+          pr_url: "https://github.com/other/tool/pull/7",
+          expected_head: "b" * 40,
+          expected_merge_oid: "a" * 40
+        )
+      end
+    end
+  end
+
   private
+
+  def deep_copy(value)
+    Marshal.load(Marshal.dump(value))
+  end
+
+  def refresh_receipt_digests!(receipt)
+    if receipt["evidence"].is_a?(Array)
+      receipt["evidence_digest"] = Hive::TaskClosure.digest(receipt["evidence"])
+    end
+    unsigned = receipt.reject { |key, _| key == "receipt_digest" }
+    receipt["receipt_digest"] = Hive::TaskClosure.digest(unsigned)
+    receipt
+  end
 
   def input_for(*evidence)
     {

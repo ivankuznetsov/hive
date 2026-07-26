@@ -76,6 +76,25 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "d" * 64, archived.fetch("receipt_digest")
   end
 
+  def test_valid_active_closure_projects_as_confirmed_pending_transition
+    receipt = {
+      "schema" => Hive::TaskClosure::SCHEMA,
+      "reason" => "already_delivered",
+      "authority" => "remote_merge",
+      "receipt_digest" => "d" * 64,
+      "evidence" => [ { "url" => "https://github.com/acme/app/pull/42" } ]
+    }
+    result = project(status_payload(
+      task(action: "error", slug: "delivered", closure: receipt)
+    ))
+
+    closure = result.fetch("tasks").first.fetch("closure")
+    assert_equal "confirmed_pending_transition", closure.fetch("status")
+    assert_equal "already_delivered", closure.fetch("reason")
+    assert_equal "remote_merge", closure.fetch("authority")
+    assert_nil closure.fetch("action")
+  end
+
   def test_invalid_closure_keeps_semantic_reason_null_and_exposes_quarantine
     invalid = {
       "status" => "invalid",

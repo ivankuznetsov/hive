@@ -305,4 +305,43 @@ class CommandsStageActionTest < Minitest::Test
     end
     assert_empty out
   end
+
+  def test_closure_receipt_authorizes_only_archive_and_resumes_markerless_terminal_task
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "task.md")
+      File.write(state_file, "# task\n")
+      task = Struct.new(:folder, :state_file, :slug).new(
+        dir, state_file, "task"
+      )
+      wrong_verb = Hive::Commands::StageAction.new(
+        "plan", task.folder, closure_receipt_digest: "a" * 64
+      )
+      assert_raises(Hive::TaskClosure::InvalidReceipt) do
+        wrong_verb.send(
+          :close_with_receipt, task, "4-execute", Hive::Stages::DIRS.last
+        )
+      end
+
+      archive = Hive::Commands::StageAction.new(
+        "archive", task.folder, closure_receipt_digest: "a" * 64
+      )
+      runs = []
+      archive.define_singleton_method(:run_at) do |folder, observation_guard:|
+        runs << [ folder, observation_guard ]
+      end
+      with_replaced_singleton_method(
+        Hive::Conditions::TransitionGuard, :validate_closure!, ->(*) { true }
+      ) do
+        with_replaced_singleton_method(Hive::Task, :new, ->(*) { task }) do
+          archive.send(
+            :close_with_receipt,
+            task,
+            Hive::Stages::DIRS.last,
+            Hive::Stages::DIRS.last
+          )
+        end
+      end
+      assert_equal [ [ task.folder, nil ] ], runs
+    end
+  end
 end

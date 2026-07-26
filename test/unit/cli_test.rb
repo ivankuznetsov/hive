@@ -619,6 +619,54 @@ class HiveCliTest < Minitest::Test
     $stdin = previous_stdin
   end
 
+  def test_archive_closure_interactive_flow_rejects_blocked_preview_and_wrong_phrase
+    task = Struct.new(:project_root, :slug).new("/tmp/app", "task")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    preview_class = Struct.new(:preview_digest, :payload, :valid)
+    previews = [
+      preview_class.new("a" * 64, { "ok" => false }, false),
+      preview_class.new("a" * 64, { "ok" => true }, true)
+    ]
+    previews.each do |preview|
+      preview.define_singleton_method(:to_h) { payload }
+      preview.define_singleton_method(:valid?) { valid }
+    end
+    inputs = [ "ignored\n", "CLOSE wrong\n" ]
+    previous_stdin = $stdin
+
+    with_replaced_singleton_method(
+      Hive::TaskResolver, :new, ->(*) { resolver }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "app", "path" => "/tmp/app" } ] }
+      ) do
+        previews.zip(inputs).each do |preview, input_text|
+          input = StringIO.new(input_text)
+          input.define_singleton_method(:tty?) { true }
+          $stdin = input
+          with_replaced_singleton_method(
+            Hive::TaskClosure, :preview, ->(**) { preview }
+          ) do
+            expected = preview.valid? ?
+              Hive::TaskClosure::Unauthorized :
+              Hive::TaskClosure::VerificationFailed
+            assert_raises(expected) do
+              capture_io do
+                Hive::CLI.start([
+                  "archive", "task", "--reason", "already_delivered",
+                  "--evidence", "acme/app#42"
+                ])
+              end
+            end
+          end
+        end
+      end
+    end
+  ensure
+    $stdin = previous_stdin
+  end
+
   def test_archive_closure_flags_require_target
     error = assert_raises(Hive::InvalidTaskPath) do
       Hive::CLI.start([

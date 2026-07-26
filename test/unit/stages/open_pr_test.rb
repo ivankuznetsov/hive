@@ -89,6 +89,20 @@ class HiveStagesOpenPrTest < Minitest::Test
     end
   end
 
+  def test_pr_markdown_omits_head_identity_when_oid_is_not_full
+    body = Hive::Stages::OpenPr.pr_md_body(
+      pr_url: "https://github.com/acme/app/pull/42",
+      pr_number: 42,
+      head_oid: "short",
+      summary_text: "opened",
+      task_folder: "/tmp/task",
+      marker_text: ""
+    )
+
+    refute_includes body, "head_oid:"
+    assert_includes body, "pr_number: 42"
+  end
+
   def test_run_uses_persisted_implementation_provider_profile
     with_tmp_dir do |root|
       task = make_task(root)

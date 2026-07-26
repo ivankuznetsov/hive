@@ -2395,6 +2395,69 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "archived", completed[1][:reason]
   end
 
+  def test_merge_reconciliation_logs_observation_blocks_and_nonterminal_remote_states
+    rows = [ row(stage: "8-finalize", action: "ready_to_archive") ]
+    dispatcher, _supervisor, _controller, logger, watcher =
+      make_dispatcher(rows: rows, with_merge_watcher: true)
+    watcher.define_singleton_method(:observe) do |*, **|
+      [
+        {
+          status: :blocked,
+          project: "p1",
+          reason: "candidate identity is ambiguous"
+        }
+      ]
+    end
+    watcher.next_results = [
+      { project: "p1", slug: "open", status: :open },
+      { project: "p1", slug: "closed", status: :closed_unmerged },
+      { project: "p1", slug: "dry", status: :dry_run }
+    ]
+
+    dispatcher.tick(now: T0)
+
+    assert logger.events.any? do |name, attrs|
+      name == :blocked &&
+        attrs[:action] == "observe" &&
+        attrs[:reason] == "candidate identity is ambiguous"
+    end
+    assert logger.events.any? do |name, attrs|
+      name == :skipped && attrs[:slug] == "open" &&
+        attrs[:reason] == "pull_request_open"
+    end
+    assert logger.events.any? do |name, attrs|
+      name == :blocked && attrs[:slug] == "closed" &&
+        attrs[:reason] == "pull_request_closed_unmerged"
+    end
+    assert logger.events.any? do |name, attrs|
+      name == :skipped && attrs[:slug] == "dry" &&
+        attrs[:reason] == "dry_run"
+    end
+  end
+
+  def test_merge_reconciliation_recovery_guard_fails_closed
+    observed = row(
+      stage: "6-review",
+      marker: "review_error",
+      action: "recover_review",
+      command: "hive run s1 --stage 6-review --json"
+    )
+    dispatcher, supervisor, _controller, logger, watcher =
+      make_dispatcher(rows: [ observed ], with_merge_watcher: true)
+    watcher.define_singleton_method(:recovery_blocked?) do |**|
+      raise IOError, "ledger unreadable"
+    end
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    assert logger.events.any? do |name, attrs|
+      name == :blocked &&
+        attrs[:action] == "recovery_guard" &&
+        attrs[:reason].include?("ledger unreadable")
+    end
+  end
+
   def test_merge_reconciliation_failures_remain_visible_without_drop
     rows = [ row(stage: "6-review", action: "error") ]
     dispatcher, _sup, _ctrl, logger, mw = make_dispatcher(

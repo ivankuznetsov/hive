@@ -601,7 +601,167 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     assert_raises(ArgumentError) { build_watcher(poll_timeout_sec: 0) }
   end
 
+  def test_recovery_fence_tracks_remote_state_and_store_failures_fail_closed
+    with_merge_project(stages: [ "5-open-pr" ]) do |tasks, _home|
+      watcher, store = build_watcher(gh: FakeGh.new(state: "OPEN"))
+      task = tasks.first
+      watcher.observe([ row_for(task) ], now: T0)
+
+      assert watcher.recovery_blocked?(project: "app", slug: task.slug)
+      assert_equal :open, watcher.tick(now: T0).first.fetch(:status)
+      refute watcher.recovery_blocked?(project: "app", slug: task.slug)
+      refute watcher.recovery_blocked?(project: "app", slug: "missing")
+
+      store.define_singleton_method(:load) do |_identity|
+        raise IOError, "ledger unreadable"
+      end
+      result = watcher.tick(now: T0 + 1).first
+      assert_equal :blocked, result.fetch(:status)
+      assert_match(/ledger unreadable/, result.fetch(:reason))
+      refute watcher.watching?(project: "app", slug: task.slug)
+    end
+  end
+
+  def test_terminal_rows_reconcile_candidates_and_terminal_receipts
+    with_merge_project(stages: [ "5-open-pr" ]) do |tasks, _home|
+      task = tasks.first
+      watcher, store = build_watcher
+      watcher.observe([ row_for(task) ], now: T0)
+
+      terminal = row_for(task)
+      terminal.stage = Hive::Stages::DIRS.last
+      watcher.observe([ terminal ], now: T0 + 1)
+
+      candidate = store.load(identity_for(task.project_root))
+                       .fetch("candidates").values.first
+      assert_equal "blocked", candidate.dig("archive", "status")
+      assert_match(/no valid merge closure receipt/,
+                   candidate.dig("archive", "last_error"))
+
+      valid = Hive::TaskClosure::ReadResult.new(
+        status: "valid",
+        receipt: { "receipt_digest" => "d" * 64 },
+        error: nil,
+        quarantine_path: nil
+      )
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :read, ->(*) { valid }
+      ) do
+        result = watcher.send(
+          :terminal_result,
+          task,
+          identity_for(task.project_root),
+          now: T0
+        )
+        assert_equal :already_archived, result.fetch(:status)
+        assert_equal "d" * 64,
+                     result.dig(:archive, "receipt_digest")
+      end
+
+      missing = deep_copy(candidate)
+      missing["task"]["slug"] = "missing-task"
+      assert_nil watcher.send(
+        :mark_terminal_candidate,
+        missing,
+        identity_for(task.project_root),
+        now: T0
+      )
+    end
+  end
+
+  def test_remote_and_checkpoint_failures_are_persisted_without_losing_candidate
+    with_merge_project(stages: [ "5-open-pr" ]) do |tasks, _home|
+      task = tasks.first
+      watcher, store = build_watcher
+      watcher.observe([ row_for(task) ], now: T0)
+      identity = identity_for(task.project_root)
+      candidate = store.load(identity).fetch("candidates").values.first
+
+      facts = {
+        "state" => "MERGED",
+        "merge_oid" => "short",
+        "merged_at" => T0.iso8601,
+        "head_oid" => candidate.dig("pull_request", "observed_head"),
+        "reachable_from_default" => false
+      }
+      assert_raises(Hive::GhError) do
+        watcher.send(:remote_result, facts, candidate, now: T0)
+      end
+
+      failed = deep_copy(candidate)
+      watcher.send(
+        :apply_result!,
+        failed,
+        { status: :failed, reason: "remote unavailable" },
+        now: T0
+      )
+      assert_equal 1, failed.dig("retry", "failures")
+      assert_match(/remote unavailable/, failed.dig("archive", "last_error"))
+
+      missing = deep_copy(candidate)
+      missing["key"] = "f" * 64
+      assert_raises(Hive::ConcurrentRunError) do
+        watcher.send(
+          :checkpoint!,
+          identity,
+          missing,
+          { status: :open },
+          now: T0
+        )
+      end
+    end
+  end
+
+  def test_binding_merge_helpers_preserve_holds_detect_drift_and_learn_head
+    with_merge_project(stages: [ "5-open-pr" ]) do |tasks, _home|
+      task = tasks.first
+      watcher, store = build_watcher
+      watcher.observe([ row_for(task) ], now: T0)
+      identity = identity_for(task.project_root)
+      base = store.load(identity).fetch("candidates").values.first
+
+      held = deep_copy(base)
+      held["observation"]["hold_reason"] = "pull_request_binding_changed"
+      merged = watcher.send(:merge_observation, held, deep_copy(base))
+      assert_equal true, merged.dig("observation", "held")
+      assert_equal "pull_request_binding_changed",
+                   merged.dig("observation", "hold_reason")
+
+      changed = deep_copy(base)
+      changed["pull_request"]["number"] = 99
+      changed["pull_request"]["url"] =
+        "https://github.com/acme/app/pull/99"
+      merged = watcher.send(:merge_observation, deep_copy(base), changed)
+      assert_equal "pull_request_binding_changed",
+                   merged.dig("observation", "hold_reason")
+
+      without_head = deep_copy(base)
+      without_head["pull_request"]["observed_head"] = nil
+      learned = watcher.send(
+        :merge_observation, without_head, deep_copy(base)
+      )
+      assert_equal base.dig("pull_request", "observed_head"),
+                   learned.dig("pull_request", "observed_head")
+      assert_equal "unknown", learned.dig("remote", "state")
+      assert_equal "pending", learned.dig("archive", "status")
+
+      changed_head = deep_copy(base)
+      changed_head["pull_request"]["observed_head"] = "c" * 40
+      assert watcher.send(:binding_drift?, base, changed_head)
+      assert_equal "observed_head_changed",
+                   watcher.send(:binding_drift_reason, base, changed_head)
+
+      assert_equal base.dig("pull_request", "url"),
+                   watcher.send(:read_pr_url, task)
+      assert_nil watcher.send(:timestamp_for, "not-a-time")
+    end
+  end
+
   private
+
+  def deep_copy(value)
+    Marshal.load(Marshal.dump(value))
+  end
 
   def build_watcher(gh: FakeGh.new, task_closure: FakeClosure.new,
                     merge_intake: nil, store: nil, poll_interval_sec: 0,

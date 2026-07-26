@@ -210,6 +210,42 @@ class HiveDaemonPrMergeReconciliationStoreTest < Minitest::Test
                  ))
   end
 
+  def test_io_failures_invalid_terminal_timestamps_and_quarantine_fail_closed
+    with_tmp_dir do |dir|
+      store = build_store
+      identity = identity_for(dir)
+      store.transaction(identity, now: T0) { |_state| nil }
+      with_replaced_singleton_method(
+        File, :binread, ->(*) { raise Errno::EACCES, "ledger" }
+      ) do
+        error = assert_raises(
+          Hive::Daemon::PrMergeReconciliationStore::Invalid
+        ) { store.load(identity) }
+        assert_match(/cannot read PR merge reconciliation/, error.message)
+      end
+
+      state = store.build(identity, now: T0)
+      candidate = candidate_for(store)
+      candidate["archive"]["status"] = "archived"
+      candidate["updated_at"] = "not-a-time"
+      state["candidates"][candidate.fetch("key")] = candidate
+      store.send(:compact_terminal_candidates!, state, now: T0 + 1_000_000)
+      assert state.fetch("candidates").key?(candidate.fetch("key"))
+
+      with_replaced_singleton_method(
+        Hive::AtomicFile, :write, ->(*) { raise Errno::EACCES, "quarantine" }
+      ) do
+        assert_nil store.send(
+          :quarantine,
+          identity.fetch("hive_state_path"),
+          "bad",
+          reason: "invalid",
+          observed: identity
+        )
+      end
+    end
+  end
+
   private
 
   def build_store(**options)

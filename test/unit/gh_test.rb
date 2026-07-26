@@ -485,6 +485,204 @@ class GhUnitTest < Minitest::Test
     end
   end
 
+  def test_closure_identity_helpers_fail_closed_for_every_invalid_transport_shape
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    oid = "a" * 40
+
+    assert_nil Hive::Gh.parse_pull_request_url("http://[")
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.persist_pr_identity!(
+        "/tmp/unused",
+        pr_url: "https://github.com/acme/app/pull/42",
+        pr_number: 43,
+        head_oid: oid
+      )
+    end
+    assert_match(/not canonical/, error.message)
+    assert_raises(Hive::GhError) do
+      Hive::Gh.persist_pr_identity!(
+        "/tmp/unused",
+        pr_url: "https://github.com/acme/app/pull/42",
+        pr_number: "not-a-number",
+        head_oid: oid
+      )
+    end
+
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ "", "offline", failed ] }
+    ) do
+      error = assert_raises(Hive::GhError) do
+        Hive::Gh.closure_pr_facts(
+          host: "github.com", repository: "acme/app", number: 42,
+          default_branch: "main"
+        )
+      end
+      assert_match(/offline/, error.message)
+    end
+
+    wrong_number = JSON.generate(
+      "number" => 43, "url" => "https://github.com/acme/app/pull/43",
+      "state" => "MERGED", "mergeCommit" => oid, "headRefOid" => "b" * 40
+    )
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ wrong_number, "", ok ] }
+    ) do
+      assert_raises(Hive::GhError) do
+        Hive::Gh.closure_pr_facts(
+          host: "github.com", repository: "acme/app", number: 42,
+          default_branch: "main"
+        )
+      end
+    end
+
+    string_merge = JSON.generate(
+      "number" => 42, "url" => "https://github.com/acme/app/pull/42",
+      "state" => "MERGED", "mergeCommit" => oid, "headRefOid" => "b" * 40
+    )
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ string_merge, "", ok ] }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Gh, :closure_commit_facts,
+        ->(**) { { "reachable_from_default" => true } }
+      ) do
+        facts = Hive::Gh.closure_pr_facts(
+          host: "github.com", repository: "acme/app", number: 42,
+          default_branch: "main"
+        )
+        assert_equal oid, facts.fetch("merge_oid")
+      end
+    end
+
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ "{", "", ok ] }
+    ) do
+      assert_raises(Hive::GhError) do
+        Hive::Gh.closure_pr_facts(
+          host: "github.com", repository: "acme/app", number: 42,
+          default_branch: "main"
+        )
+      end
+    end
+    assert_raises(Hive::GhError) do
+      Hive::Gh.closure_pr_facts(
+        host: "github.com", repository: "acme/app", number: "bad",
+        default_branch: "main"
+      )
+    end
+
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ "", "api down", failed ] }
+    ) do
+      assert_raises(Hive::GhError) do
+        Hive::Gh.closure_default_branch(
+          host: "github.com", repository: "acme/app"
+        )
+      end
+    end
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ "-unsafe\n", "", ok ] }
+    ) do
+      assert_raises(Hive::GhError) do
+        Hive::Gh.closure_default_branch(
+          host: "github.com", repository: "acme/app"
+        )
+      end
+    end
+
+    assert_raises(Hive::GhError) do
+      Hive::Gh.closure_commit_facts(
+        host: "github.com", repository: "acme/app",
+        oid: "short", default_branch: "main"
+      )
+    end
+    assert_raises(Hive::GhError) do
+      Hive::Gh.closure_commit_facts(
+        host: "github.com", repository: "acme/app",
+        oid: oid, default_branch: "-unsafe"
+      )
+    end
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ "", "missing commit", failed ] }
+    ) do
+      assert_raises(Hive::GhError) do
+        Hive::Gh.closure_commit_facts(
+          host: "github.com", repository: "acme/app",
+          oid: oid, default_branch: "main"
+        )
+      end
+    end
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ "#{'b' * 40}\n", "", ok ] }
+    ) do
+      assert_raises(Hive::GhError) do
+        Hive::Gh.closure_commit_facts(
+          host: "github.com", repository: "acme/app",
+          oid: oid, default_branch: "main"
+        )
+      end
+    end
+    responses = [
+      [ "#{oid}\n", "", ok ],
+      [ "", "compare down", failed ]
+    ]
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { responses.shift }
+    ) do
+      error = assert_raises(Hive::GhError) do
+        Hive::Gh.closure_commit_facts(
+          host: "github.com", repository: "acme/app",
+          oid: oid, default_branch: "main"
+        )
+      end
+      assert_match(/compare down/, error.message)
+    end
+
+    [
+      lambda do
+        Hive::Gh.closure_pr_facts(
+          host: "github.com", repository: "acme/app", number: 42,
+          default_branch: "main"
+        )
+      end,
+      lambda do
+        Hive::Gh.closure_default_branch(
+          host: "github.com", repository: "acme/app"
+        )
+      end,
+      lambda do
+        Hive::Gh.closure_commit_facts(
+          host: "github.com", repository: "acme/app",
+          oid: oid, default_branch: "main"
+        )
+      end
+    ].each do |operation|
+      with_replaced_singleton_method(
+        Hive::Gh, :capture3, ->(*, **) { [ "stdout failure", "", failed ] }
+      ) do
+        error = assert_raises(Hive::GhError, &operation)
+        assert_match(/stdout failure/, error.message)
+      end
+    end
+
+    responses = [
+      [ "#{oid}\n", "", ok ],
+      [ "compare stdout failure", "", failed ]
+    ]
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { responses.shift }
+    ) do
+      error = assert_raises(Hive::GhError) do
+        Hive::Gh.closure_commit_facts(
+          host: "github.com", repository: "acme/app",
+          oid: oid, default_branch: "main"
+        )
+      end
+      assert_match(/compare stdout failure/, error.message)
+    end
+  end
+
   def test_pr_metadata_raises_on_gh_pr_view_failure
     ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
     failed = Hive::Gh::CommandStatus.new(exitstatus: 1)

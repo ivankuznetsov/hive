@@ -1152,6 +1152,36 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     assert_equal 2, close_calls
   end
 
+  def test_bounded_capture_preserves_timeout_when_reader_cleanup_fails
+    stdin = StringIO.new
+    stdout = StringIO.new
+    stderr = StringIO.new
+    waiter = Object.new
+    waiter.define_singleton_method(:join) { |_timeout| false }
+    reader = Object.new
+    reader.define_singleton_method(:join) do |_timeout|
+      raise IOError, "stream closed in another thread"
+    end
+
+    popen = ->(*, **) { [ stdin, stdout, stderr, waiter ] }
+    thread = ->(*) { reader }
+    terminate = ->(*) { }
+    error = with_replaced_singleton_method(Open3, :popen3, popen) do
+      with_replaced_singleton_method(Thread, :new, thread) do
+        with_replaced_singleton_method(
+          Hive::WorkflowPackage::RuntimePolicy, :terminate_capture_process_group, terminate
+        ) do
+          assert_raises(Timeout::Error) do
+            Hive::WorkflowPackage::RuntimePolicy.capture3_bounded(
+              "ignored", timeout_sec: 0.01
+            )
+          end
+        end
+      end
+    end
+    assert_instance_of Timeout::Error, error
+  end
+
   def test_capture_group_cleanup_ignores_already_reaped_process
     waiter = Object.new
     waiter.define_singleton_method(:pid) { 123_456 }

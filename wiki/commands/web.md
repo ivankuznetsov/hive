@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [command, web, rails, turbo, hivebox-container]
 ---
 
@@ -66,7 +66,10 @@ internal `HIVEBOX_PRECOMPILED_ASSETS=1` marker so the shared launcher does not
 repeat native web preparation at container startup.
 
 `hive web install [--force] [--json]` installs the separate `hive-web` autostart
-service using the invoked user-facing binary path; `hive web start --detach`
+service using the invoked user-facing binary path. Its thin Hive installer owns
+web environment rendering and output policy while `Hive::UserService` owns
+file drift, plan revalidation, atomic replacement, and manager application;
+`hive web start --detach`
 starts that service and reloads systemd-user first on Linux so a unit written
 while systemd-user was unavailable becomes visible. Foreground
 `hive web start` is equivalent to `hive web`. `status --json` emits

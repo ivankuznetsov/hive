@@ -81,12 +81,35 @@ class ComponentBoundariesTest < Minitest::Test
         [ entry.fetch("constant"), entry.fetch("files") ]
       end
     )
-    assert contract.components.all? { |component| component.fetch("state") == "candidate" }
+    user_service = contract.component("user-service")
+    assert_equal "boundary-ready", user_service.fetch("state")
+    assert_equal "hive/user_service", user_service.dig("entrypoint", "require")
+    assert_equal "Hive::UserService", user_service.dig("entrypoint", "constant")
+    assert_equal(
+      %w[
+        Hive::UserService::Definition
+        Hive::UserService::Plan
+        Hive::UserService::Result
+        Hive::UserService::Status
+      ],
+      user_service.dig("public_contract", "values").sort
+    )
+    assert_equal [ "Hive::UserService::Manager" ],
+                 user_service.fetch("forbidden_constructions")
+    assert_empty user_service.fetch("migration_exceptions")
+
+    remaining_candidates = contract.components.reject { |component| component == user_service }
+    assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
     clean_load = contract.validate_clean_load!("attempts")
     assert_equal "Hive::Attempts::API", clean_load.fetch("constant")
     assert_empty clean_load.fetch("forbidden_loaded_features")
     assert_empty clean_load.fetch("forbidden_constants")
+
+    user_service_load = contract.validate_clean_load!("user-service")
+    assert_equal "Hive::UserService", user_service_load.fetch("constant")
+    assert_empty user_service_load.fetch("forbidden_loaded_features")
+    assert_empty user_service_load.fetch("forbidden_constants")
   end
 
   def test_invalid_catalog_rows_name_the_component_and_field

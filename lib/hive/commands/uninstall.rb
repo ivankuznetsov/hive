@@ -44,7 +44,7 @@ module Hive
       def deregister_daemon
         stop_foreground_daemon
         require "hive/commands/daemon/service_installer"
-        deregister_unit(Hive::Commands::Daemon::ServiceInstaller.new(host_os: @host_os))
+        deregister_unit(Hive::Commands::Daemon::ServiceInstaller.new(**service_installer_options))
       end
 
       # Mirror of deregister_daemon for the opt-in bot autostart service
@@ -52,7 +52,7 @@ module Hive
       def deregister_bot
         stop_foreground_bot
         require "hive/commands/bot/service_installer"
-        deregister_unit(Hive::Commands::Bot::ServiceInstaller.new(host_os: @host_os))
+        deregister_unit(Hive::Commands::Bot::ServiceInstaller.new(**service_installer_options))
       end
 
       def deregister_web
@@ -61,38 +61,43 @@ module Hive
         # Supplying an inert config keeps malformed global web settings from
         # aborting teardown before the unit can be deregistered and the later
         # config/cache/data cleanup can run.
-        deregister_unit(Hive::Commands::Web::ServiceInstaller.new(host_os: @host_os, config: {}))
+        deregister_unit(
+          Hive::Commands::Web::ServiceInstaller.new(config: {}, **service_installer_options)
+        )
       end
 
-      # Deregister a per-user autostart unit using the installer's OWN
-      # identity (`target_path` / `service_name`) as the single source of
-      # truth, so install and uninstall can never drift on paths or names —
-      # if `hive bot install` ever changes where it writes the unit, this
-      # follows automatically. Warn-and-continue on any service-manager
-      # failure so one stuck manager never aborts the rest of the uninstall.
+      # Keep command ordering and presentation here while delegating the
+      # platform-neutral disable/remove/reload transaction to UserService.
       def deregister_unit(installer)
         path = installer.target_path
-        return unless path && File.exist?(path)
+        return unless path
 
-        case @host_os
-        when /darwin/i
-          ok = @runner.call([ "launchctl", "unload", path ])
-          unless ok
+        result = installer.remove!
+        if result.diagnostics.include?(:unsafe_unit_path)
+          @output.puts "hive: refusing to follow symlink at #{path}; remove it manually"
+        elsif result.diagnostics.include?(:manager_disable_failed)
+          if installer.envelope_platform == "macos"
             @output.puts "hive: warning: launchctl unload failed for #{path}; leaving it in place. Fix launchd state and re-run `hive uninstall`."
-            return
-          end
-          safe_unlink(path)
-        when /linux/i
-          service = installer.service_name
-          ok = @runner.call([ "systemctl", "--user", "disable", "--now", service ])
-          unless ok
+          else
+            service = installer.service_name
             @output.puts "hive: warning: systemctl --user disable failed for #{service}; leaving #{path} in place. Fix systemd state and re-run `hive uninstall`."
-            return
           end
-          safe_unlink(path)
-          ok_reload = @runner.call(%w[systemctl --user daemon-reload])
-          @output.puts "hive: warning: systemctl --user daemon-reload failed after removing #{path}; run it manually" unless ok_reload
+        elsif result.diagnostics.include?(:stale_after_manager_change)
+          @output.puts "hive: warning: #{path} changed while its service was being disabled; leaving it in place. Re-run `hive uninstall`."
+        elsif result.diagnostics.include?(:daemon_reload_failed)
+          @output.puts "hive: warning: systemctl --user daemon-reload failed after removing #{path}; run it manually"
+        elsif result.failed?
+          @output.puts "hive: warning: could not remove #{path}; leaving it in place and continuing"
         end
+      end
+
+      def service_installer_options
+        {
+          host_os: @host_os,
+          runner: @runner,
+          systemctl_available: @host_os.match?(/linux/i),
+          launchctl_available: @host_os.match?(/darwin/i)
+        }
       end
 
       def stop_foreground_bot
@@ -122,20 +127,6 @@ module Hive
         # rather than a silent no-op.
         @output.puts "hive: warning: bot pid #{pid} is alive but could not be signalled (EPERM); it may still be running after uninstall"
       rescue Errno::ESRCH, Errno::ENOENT, Psych::Exception
-        nil
-      end
-
-      # Refuse to delete via a symlink: an attacker who pre-plants
-      # `~/Library/LaunchAgents/local.hive-daemon.plist -> /etc/passwd`
-      # would otherwise get an arbitrary user-writable file unlinked.
-      def safe_unlink(path)
-        stat = File.lstat(path)
-        if stat.symlink?
-          @output.puts "hive: refusing to follow symlink at #{path}; remove it manually"
-          return
-        end
-        FileUtils.rm_f(path)
-      rescue Errno::ENOENT
         nil
       end
 

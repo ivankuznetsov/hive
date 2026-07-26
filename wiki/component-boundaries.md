@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -18,7 +18,7 @@ the first and primary consumer.
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
-| UserService | `candidate` | `require "hive/commands/service_installer/base"` → `Hive::Commands::ServiceInstaller::Base` | [[commands/daemon]] |
+| UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `candidate` | `require "hive/agent_profile"` → `Hive::AgentProfile` | [[modules/agent_profile]] |
 | Agent Artifact Firewall | `candidate` | `require "hive/protected_files"` → `Hive::ProtectedFiles` | [[modules/protected_files]] |
 | Skillpack | `candidate` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
@@ -39,6 +39,13 @@ Attempts reads WorkLedger projections while WorkLedger-owned
 `Hive::Attempts::Store`; U8 owns removal of that reciprocal source edge. The
 reference slice does not publish raw storage, reconciliation, supervision,
 capacity, loss-policy, cancellation, export, or generic lifecycle operations.
+
+`Hive::UserService` is the first promoted `boundary-ready` component. Its
+Definition, Plan, Status, and Result values keep file drift, stale observation,
+atomic replacement, backups, manager operations, and removal below one clean
+entry point. The daemon, bot, web, setup, init, status, and uninstall surfaces
+remain Hive-owned adapters for templates, policy, messages, JSON, prompts, and
+global sequencing.
 
 ## Catalog contract
 

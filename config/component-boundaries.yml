@@ -117,45 +117,58 @@ components:
 
   - id: user-service
     name: UserService
-    state: candidate
+    state: boundary-ready
     entrypoint:
-      file: lib/hive/commands/service_installer/base.rb
-      require: hive/commands/service_installer/base
-      constant: Hive::Commands::ServiceInstaller::Base
+      file: lib/hive/user_service.rb
+      require: hive/user_service
+      constant: Hive::UserService
     public_contract:
       values:
-        - Hive::Commands::ServiceInstaller::Outcome
+        - Hive::UserService::Definition
+        - Hive::UserService::Plan
+        - Hive::UserService::Status
+        - Hive::UserService::Result
       errors:
         - ArgumentError
     owned_paths:
-      - lib/hive/commands/service_installer
+      - lib/hive/user_service.rb
+      - lib/hive/user_service
+    state_contracts:
+      - "Per-user systemd unit or launchd plist, manager observations, and timestamped backups"
+    schema_contracts:
+      - "Definition, Plan, Status, and Result are platform-neutral; Hive command JSON and messages remain adapter-owned"
+    lock_contracts:
+      - "No cross-manager transaction; apply and remove revalidate the exact observed file and manager state before mutation"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/atomic_file
+    internal_collaborators:
+      - Hive::UserService::Manager
+    forbidden_constructions:
+      - Hive::UserService::Manager
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/commands/service_installer/base.rb
       - lib/hive/commands/daemon/service_installer.rb
       - lib/hive/commands/bot/service_installer.rb
       - lib/hive/commands/web/service_installer.rb
-    state_contracts:
-      - "Per-user systemd unit or launchd plist plus timestamped backups"
-    schema_contracts:
-      - "Hive command JSON and messages remain adapter-owned"
-    lock_contracts:
-      - "No cross-manager transaction; apply revalidates observed file and manager state"
-    component_dependencies: []
-    allowed_hive_dependencies: []
-    internal_collaborators:
-      - Hive::Commands::ServiceInstaller::Base
-    forbidden_constructions: []
-    authorized_internal_constructions: []
-    hive_consumers:
       - lib/hive/commands/daemon.rb
       - lib/hive/commands/bot.rb
       - lib/hive/commands/web.rb
       - lib/hive/commands/setup.rb
       - lib/hive/commands/init.rb
       - lib/hive/commands/uninstall.rb
+      - lib/hive/web/service_status.rb
     mutation_authority: "Hive command adapters authorize install, force replacement, restart, and remove."
     recovery_surface: "Typed outcomes report backup paths, final observed state, and partial manager/file failures."
-    wiki_page: wiki/commands/daemon.md
+    wiki_page: wiki/modules/user_service.md
     focused_tests:
+      - test/unit/user_service/user_service_test.rb
       - test/unit/commands/service_installer/base_test.rb
+      - test/unit/commands/daemon/service_installer_test.rb
+      - test/unit/commands/bot/service_installer_test.rb
+      - test/unit/commands/web/service_installer_test.rb
+      - test/unit/commands/uninstall_test.rb
     migration_exceptions: []
 
   - id: agent-abi

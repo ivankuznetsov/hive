@@ -47,11 +47,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   class FakeSupervisor
     attr_reader :spawned, :next_pid
-    attr_accessor :next_exits, :identity, :terminate_result, :spawn_error
+    attr_accessor :next_exits, :shutdown_exits, :identity, :terminate_result, :spawn_error
     def initialize
       @spawned = []
       @next_pid = 100
       @next_exits = []
+      @shutdown_exits = []
       @identity = { process_start_time: "start", pgid: 100 }
       @terminate_result = true
     end
@@ -83,6 +84,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
 
     def terminate_all(grace_sec: 600)
+      @shutdown_exits
     end
 
     def update_timeouts(default_timeout_sec:, verb_timeouts:, kill_grace_sec:)
@@ -3341,6 +3343,76 @@ def test_run_forever_reloads_ticks_and_shuts_down_cleanly
   assert events_include?(logger, :dispatcher_started)
   assert events_include?(logger, :dispatcher_stopping)
   assert_equal 0, supervisor.spawned.size
+end
+
+def test_run_forever_routes_shutdown_child_exit_through_architecture_completion
+  architecture = FakeRefactorPatrolScheduler.new
+  architecture.completion_status = :retry
+  dispatcher, supervisor, _ctrl, logger = make_dispatcher(
+    refactor_patrol_scheduler: architecture
+  )
+  token = {
+    kind: :architecture_patrol, phase: :discovery,
+    job_id: "job-7", owner: "daemon", generation: 1
+  }
+  supervisor.shutdown_exits = [
+    ChildExit.new(
+      pid: 100, exit_code: nil, project: "p1",
+      slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      command: "hive refactor-patrol p1", started_at: T0,
+      finished_at: T0 + 1, json_envelope: nil, dispatch_token: token
+    )
+  ]
+
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:tick) { |now:| request_shutdown! }
+  dispatcher.define_singleton_method(:interruptible_sleep) { |_seconds| nil }
+
+  dispatcher.run_forever
+
+  assert_equal 1, architecture.completed.size
+  assert_nil architecture.completed.first.fetch(:exit_code)
+  assert_equal token, architecture.completed.first.fetch(:dispatch_token)
+  assert logger.events.any? { |name, attrs|
+    name == :architecture_patrol_blocked && attrs[:job_id] == "job-7"
+  }
+end
+
+def test_run_forever_marks_signal_reaped_terminal_recovery_failed
+  Dir.mktmpdir("hive-shutdown-recovery") do |state_home|
+    recovery = dispatcher_recovery(phase: "dispatched").merge(
+      "attempt_id" => "attempt-shutdown"
+    )
+    Q.write_request!(
+      project: "p1", slug: "s1", argv: %w[hive run s1 --json],
+      requestor: "daemon", trigger: "recovery",
+      request_id: "recovery-shutdown", recovery: recovery,
+      state_home: state_home, now: T0
+    )
+    coordinator = FakeRecoveryCoordinator.new(status: "queued")
+    dispatcher, supervisor, = make_dispatcher(
+      dispatch_request_state_home: state_home,
+      recovery_coordinator: coordinator
+    )
+    supervisor.shutdown_exits = [
+      ChildExit.new(
+        pid: 101, exit_code: nil, project: "p1", slug: "s1",
+        stage: "4-execute", command: "hive run s1 --json",
+        started_at: T0, finished_at: T0 + 1, json_envelope: nil,
+        request_id: "recovery-shutdown"
+      )
+    ]
+    dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+    dispatcher.define_singleton_method(:tick) { |now:| request_shutdown! }
+    dispatcher.define_singleton_method(:interruptible_sleep) { |_seconds| nil }
+
+    dispatcher.run_forever
+
+    marked = coordinator.marked.fetch(0)
+    assert_equal "attempt-shutdown", marked.fetch(:attempt_id)
+    assert_equal true, marked.fetch(:terminal)
+    assert_equal "failed", marked.fetch(:outcome)
+  end
 end
 
 def test_run_forever_escalates_to_full_tick_when_cheap_probe_detects_change

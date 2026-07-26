@@ -204,12 +204,14 @@ class StagesCouncilTest < Minitest::Test
         { profile: :codex, content: second_review }
       ]
 
-      launches = with_env("GROK_AUTH_PATH" => auth_path) do
-        with_fake_managed_provider_responses(responses) do |captured|
-          result = Hive::Stages::Council.run!(task, portable_agent_cfg)
+      launches = with_available_grok_sandbox do
+        with_env("GROK_AUTH_PATH" => auth_path) do
+          with_fake_managed_provider_responses(responses) do |captured|
+            result = Hive::Stages::Council.run!(task, portable_agent_cfg)
 
-          assert_equal({ commit: "complete", status: :complete }, result)
-          captured
+            assert_equal({ commit: "complete", status: :complete }, result)
+            captured
+          end
         end
       end
 
@@ -784,6 +786,18 @@ class StagesCouncilTest < Minitest::Test
         raise "unused fake provider responses" unless remaining.empty?
 
         result
+      end
+    end
+
+    def with_available_grok_sandbox
+      sandbox = Hive::WorkflowPackage::RuntimePolicy::GROK_SANDBOX_PATH
+      original_file = File.method(:file?)
+      original_executable = File.method(:executable?)
+      file_check = ->(path) { path == sandbox || original_file.call(path) }
+      executable_check = ->(path) { path == sandbox || original_executable.call(path) }
+
+      with_replaced_singleton_method(File, :file?, file_check) do
+        with_replaced_singleton_method(File, :executable?, executable_check) { yield }
       end
     end
 

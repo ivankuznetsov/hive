@@ -179,6 +179,31 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_launch_arguments_reject_invalid_types_and_conflicting_native_argv
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      profile = Hive::AgentProfiles.lookup(:claude)
+      launch_arguments = profile.identity_arguments(model: "claude-opus-4-8", effort: "high")
+
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+          profile: profile, launch_arguments: {}
+        )
+      end
+      assert_includes error.message, "LaunchArguments"
+
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+          profile: profile, launch_arguments: launch_arguments,
+          identity_arguments: [ "--model", "different-model" ]
+        )
+      end
+      assert_includes error.message, "different native argv"
+    end
+  end
+
   def test_private_log_open_refuses_symlinks
     with_tmp_dir do |dir|
       target = File.join(dir, "outside.log")

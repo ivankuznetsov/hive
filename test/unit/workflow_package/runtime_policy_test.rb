@@ -438,6 +438,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       assert File.directory?(cleanup)
       policy.cleanup!
       refute File.exist?(cleanup)
+      policy.cleanup!
     end
   end
 
@@ -761,6 +762,460 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
+  def test_host_materialization_rejects_symlinked_and_unreadable_output_targets
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      outside = File.join(dir, "outside.md")
+      output = File.join(task, "article.md")
+      FileUtils.mkdir_p([ task, package ])
+      File.write(outside, "outside\n")
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit(./article.md)" ]
+          },
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          managed_outputs: [ output ]
+        )
+      end
+      result = {
+        status: :ok,
+        final_message: JSON.generate("files" => { "article.md" => "new\n" }),
+        final_message_truncated: false
+      }
+
+      File.symlink(outside, output)
+      error = assert_raises(Hive::ConfigError) { policy.materialize_outputs!(result) }
+      assert_includes error.message, "cannot be a symlink"
+      File.unlink(output)
+
+      original_lstat = File.method(:lstat)
+      failing_lstat = lambda do |path|
+        raise Errno::EACCES, path if path == output
+
+        original_lstat.call(path)
+      end
+      error = with_replaced_singleton_method(File, :lstat, failing_lstat) do
+        assert_raises(Hive::ConfigError) { policy.materialize_outputs!(result) }
+      end
+      assert_includes error.message, "could not be snapshotted"
+      refute File.exist?(output)
+    ensure
+      policy&.cleanup!
+    end
+  end
+
+  def test_confined_output_rejects_escaping_and_unavailable_parent_resolution
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      outside = File.join(dir, "outside")
+      FileUtils.mkdir_p([ task, outside ])
+      linked = File.join(task, "linked")
+      File.symlink(outside, linked)
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::RuntimePolicy::Policy.ensure_confined_output!(
+          File.realpath(task), File.join(linked, "article.md")
+        )
+      end
+      assert_includes error.message, "parent escapes"
+
+      target = File.join(task, "blocked", "article.md")
+      original_realpath = File.method(:realpath)
+      blocked_realpath = lambda do |path|
+        raise Errno::EACCES, path if path == File.dirname(target)
+
+        original_realpath.call(path)
+      end
+      error = with_replaced_singleton_method(File, :realpath, blocked_realpath) do
+        assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy::Policy.ensure_confined_output!(
+            File.realpath(task), target
+          )
+        end
+      end
+      assert_includes error.message, "parent is unavailable"
+    end
+  end
+
+  def test_host_materialization_removes_new_companion_output_on_commit_failure
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      article = File.join(task, "article.md")
+      verification = File.join(task, "verification.md")
+      FileUtils.mkdir_p([ task, package ])
+      policy = compile_two_output_codex_policy(
+        task: task, package: package, article: article
+      )
+      original_write = Hive::AtomicFile.method(:write)
+      failing_write = lambda do |path, content, **kwargs|
+        raise IOError, "commit failed" if path == article
+
+        original_write.call(path, content, **kwargs)
+      end
+
+      error = with_replaced_singleton_method(Hive::AtomicFile, :write, failing_write) do
+        assert_raises(Hive::ConfigError) do
+          policy.materialize_outputs!(
+            managed_output_result(
+              "article.md" => "new article\n",
+              "verification.md" => "new verification\n"
+            )
+          )
+        end
+      end
+
+      assert_includes error.message, "commit failed"
+      refute File.exist?(article)
+      refute File.exist?(verification)
+    ensure
+      policy&.cleanup!
+    end
+  end
+
+  def test_host_materialization_reports_rollback_failure
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      article = File.join(task, "article.md")
+      verification = File.join(task, "verification.md")
+      FileUtils.mkdir_p([ task, package ])
+      policy = compile_two_output_codex_policy(
+        task: task, package: package, article: article
+      )
+      original_write = Hive::AtomicFile.method(:write)
+      failing_write = lambda do |path, content, **kwargs|
+        raise IOError, "commit failed" if path == article
+
+        original_write.call(path, content, **kwargs)
+      end
+      original_rm_f = FileUtils.method(:rm_f)
+      failing_rm_f = lambda do |path, *args, **kwargs|
+        raise Errno::EACCES, path if path == verification
+
+        original_rm_f.call(path, *args, **kwargs)
+      end
+
+      error = with_replaced_singleton_method(Hive::AtomicFile, :write, failing_write) do
+        with_replaced_singleton_method(FileUtils, :rm_f, failing_rm_f) do
+          assert_raises(Hive::ConfigError) do
+            policy.materialize_outputs!(
+              managed_output_result(
+                "article.md" => "new article\n",
+                "verification.md" => "new verification\n"
+              )
+            )
+          end
+        end
+      end
+
+      assert_includes error.message, "rollback failed"
+      assert_includes error.message, verification
+    ensure
+      FileUtils.rm_f(verification) if verification
+      policy&.cleanup!
+    end
+  end
+
+  def test_portable_admission_and_trusted_roots_fail_closed_without_preparing_a_runtime
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+
+      policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+        "read-only",
+        task_folder: task,
+        package_root: package,
+        profile: Hive::AgentProfiles.lookup(:codex),
+        prepare: false
+      )
+      refute policy.host_outputs?
+      assert_equal "prompt", policy.decorate_prompt("prompt")
+      assert_empty policy.cli_flags
+      assert_nil policy.executable
+      assert_empty policy.cleanup_paths
+      assert_equal({ status: :ok }, policy.materialize_outputs!(status: :ok))
+
+      [ "not-an-array", [ "" ], [ "bad\0root" ] ].each do |roots|
+        error = assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            "read-only",
+            task_folder: task,
+            package_root: package,
+            profile: Hive::AgentProfiles.lookup(:codex),
+            base_add_dirs: roots,
+            prepare: false
+          )
+        end
+        assert_includes error.message, "trusted read root"
+      end
+    end
+  end
+
+  def test_portable_actor_rejects_unsupported_runner_tools_and_output_rule_shapes
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          "read-only",
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:pi),
+          prepare: false
+        )
+      end
+      assert_includes error.message, "cannot enforce managed workflow policy"
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          { "preset" => "scoped", "tools" => [ "Read", "Bash" ] },
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          prepare: false
+        )
+      end
+      assert_includes error.message, "cannot enforce managed tools"
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          { "preset" => "scoped", "tools" => [ "Read", "Write" ] },
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          prepare: false
+        )
+      end
+      assert_includes error.message, "path-qualified Edit"
+    end
+  end
+
+  def test_failed_portable_compile_cleans_runtime_even_when_cleanup_reports_missing
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      output = File.join(task, "article.md")
+      FileUtils.mkdir_p([ task, package ])
+      removed = []
+      original_remove = FileUtils.method(:remove_entry_secure)
+      remove_then_missing = lambda do |path|
+        original_remove.call(path)
+        removed << path
+        raise Errno::ENOENT, path
+      end
+      reset_codex_executable_cache
+
+      error = with_replaced_singleton_method(
+        FileUtils, :remove_entry_secure, remove_then_missing
+      ) do
+        with_env("HIVE_CODEX_BIN" => File.join(dir, "missing-codex")) do
+          assert_raises(Hive::ConfigError) do
+            Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+              {
+                "preset" => "scoped",
+                "tools" => [ "Read", "Edit(./article.md)" ]
+              },
+              task_folder: task,
+              package_root: package,
+              profile: Hive::AgentProfiles.lookup(:codex),
+              managed_outputs: [ output ]
+            )
+          end
+        end
+      end
+
+      assert_includes error.message, "unavailable managed executable"
+      assert_equal 1, removed.length
+      refute File.exist?(removed.first)
+    ensure
+      reset_codex_executable_cache
+    end
+  end
+
+  def test_codex_doctor_rejects_malformed_and_unavailable_success_reports
+    status = ->(success) {
+      Object.new.tap { |value| value.define_singleton_method(:success?) { success } }
+    }
+    cases = [
+      [ "codex-malformed-success", "{", "", status.call(true), "malformed doctor output" ],
+      [ "codex-malformed-failure", "{", "doctor failed", status.call(false), "doctor failed" ],
+      [
+        "codex-missing-runtime", JSON.generate(
+          "checks" => {
+            "runtime.provenance" => {
+              "details" => { "current executable" => "/missing/codex" }
+            }
+          }
+        ), "", status.call(true), "unavailable managed executable"
+      ]
+    ]
+
+    cases.each do |bin, stdout, stderr, exit_status, expected|
+      profile = Object.new
+      profile.define_singleton_method(:bin) { bin }
+      captured_timeout = nil
+      captured_probe_home = nil
+      capture = ->(*, timeout_sec:, environment:) {
+        captured_timeout = timeout_sec
+        captured_probe_home = environment.fetch("CODEX_HOME")
+        [ stdout, stderr, exit_status ]
+      }
+      reset_codex_executable_cache
+
+      error = with_replaced_singleton_method(
+        Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
+      ) do
+        assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy.codex_executable(profile)
+        end
+      end
+      assert_includes error.message, expected
+      assert_equal Hive::WorkflowPackage::RuntimePolicy::CODEX_DOCTOR_TIMEOUT_SEC,
+                   captured_timeout
+      refute_nil captured_probe_home
+      refute File.exist?(captured_probe_home)
+    end
+  ensure
+    reset_codex_executable_cache
+  end
+
+  def test_codex_runtime_root_and_profile_executable_resolution_fail_closed
+    with_tmp_dir do |dir|
+      root = File.join(dir, "codex-package")
+      executable = File.join(root, "bin", "codex")
+      FileUtils.mkdir_p([
+        File.dirname(executable),
+        File.join(root, "codex-resources"),
+        File.join(root, "codex-path")
+      ])
+      File.write(executable, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, executable)
+
+      assert_equal root,
+                   Hive::WorkflowPackage::RuntimePolicy.codex_runtime_root(executable)
+
+      profile = Object.new
+      profile.define_singleton_method(:bin) { "missing-grok-executable" }
+      profile.define_singleton_method(:name) { :grok }
+      error = assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::RuntimePolicy.resolve_profile_executable(profile)
+      end
+      assert_includes error.message, "executable is unavailable"
+    end
+  end
+
+  def test_bounded_capture_handles_success_timeout_and_close_errors
+    stdout, stderr, status = Hive::WorkflowPackage::RuntimePolicy.capture3_bounded(
+      "/bin/sh", "-c", "printf output; printf error >&2",
+      timeout_sec: 2
+    )
+    assert_equal "output", stdout
+    assert_equal "error", stderr
+    assert status.success?
+
+    error = assert_raises(Timeout::Error) do
+      Hive::WorkflowPackage::RuntimePolicy.capture3_bounded(
+        "/bin/sh", "-c", 'trap "" TERM; while :; do sleep 1; done',
+        timeout_sec: 0.01
+      )
+    end
+    assert_instance_of Timeout::Error, error
+
+    close_calls = 0
+    stdin = Object.new
+    stdin.define_singleton_method(:close) do
+      close_calls += 1
+      raise IOError, "already closed" if close_calls > 1
+    end
+    stdin.define_singleton_method(:closed?) { false }
+    out = StringIO.new("out")
+    err = StringIO.new("err")
+    waiter = Object.new
+    waiter.define_singleton_method(:join) { |_timeout| true }
+    waiter.define_singleton_method(:value) { status }
+    popen = ->(*, **) { [ stdin, out, err, waiter ] }
+    captured = with_replaced_singleton_method(Open3, :popen3, popen) do
+      Hive::WorkflowPackage::RuntimePolicy.capture3_bounded(
+        "ignored", timeout_sec: 1
+      )
+    end
+    assert_equal [ "out", "err", status ], captured
+    assert_equal 2, close_calls
+  end
+
+  def test_capture_group_cleanup_ignores_already_reaped_process
+    waiter = Object.new
+    waiter.define_singleton_method(:pid) { 123_456 }
+    kill = ->(*_args) { raise Errno::ESRCH }
+
+    result = with_replaced_singleton_method(Process, :kill, kill) do
+      Hive::WorkflowPackage::RuntimePolicy.terminate_capture_process_group(waiter)
+    end
+
+    assert_nil result
+  end
+
+  def test_scoped_grok_actor_rejects_missing_auth_and_supports_read_only_web_mode
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      auth = File.join(dir, "grok-auth.json")
+      FileUtils.mkdir_p([ task, package ])
+
+      error = with_available_grok_sandbox do
+        with_env(
+          "HIVE_GROK_BIN" => "/bin/true",
+          "GROK_AUTH_PATH" => File.join(dir, "missing-auth.json")
+        ) do
+          assert_raises(Hive::ConfigError) do
+            Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+              "read-only",
+              task_folder: task,
+              package_root: package,
+              profile: Hive::AgentProfiles.lookup(:grok)
+            )
+          end
+        end
+      end
+      assert_includes error.message, "auth file is unavailable"
+
+      File.write(auth, '{"token":"fixture"}')
+      policy = with_available_grok_sandbox do
+        with_env(
+          "HIVE_GROK_BIN" => "/bin/true",
+          "GROK_AUTH_PATH" => auth
+        ) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            {
+              "preset" => "scoped",
+              "tools" => [ "Read", "WebSearch" ]
+            },
+            task_folder: task,
+            package_root: package,
+            profile: Hive::AgentProfiles.lookup(:grok)
+          )
+        end
+      end
+
+      refute policy.host_outputs?
+      refute_includes policy.cli_flags, "--disable-web-search"
+      refute_includes policy.cli_flags, "--json-schema"
+      assert_equal 1, policy.cleanup_paths.length
+      assert File.directory?(policy.cleanup_paths.first)
+    ensure
+      policy&.cleanup!
+    end
+  end
+
   def test_scoped_grok_actor_is_wrapped_in_bubblewrap_with_isolated_home
     with_tmp_dir do |dir|
       task = File.join(dir, "task")
@@ -771,21 +1226,23 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       File.write(auth, '{"token":"fixture"}')
       output = File.join(task, "reviews", "adversarial-01.md")
 
-      policy = with_env(
-        "HIVE_GROK_BIN" => "/bin/true",
-        "GROK_AUTH_PATH" => auth
-      ) do
-        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
-          {
-            "preset" => "scoped",
-            "tools" => [ "Read", "LS", "Grep", "Glob", "Edit(./reviews/**)" ]
-          },
-          task_folder: task,
-          package_root: package,
-          profile: Hive::AgentProfiles.lookup(:grok),
-          base_add_dirs: [ worktree ],
-          managed_outputs: [ output ]
-        )
+      policy = with_available_grok_sandbox do
+        with_env(
+          "HIVE_GROK_BIN" => "/bin/true",
+          "GROK_AUTH_PATH" => auth
+        ) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            {
+              "preset" => "scoped",
+              "tools" => [ "Read", "LS", "Grep", "Glob", "Edit(./reviews/**)" ]
+            },
+            task_folder: task,
+            package_root: package,
+            profile: Hive::AgentProfiles.lookup(:grok),
+            base_add_dirs: [ worktree ],
+            managed_outputs: [ output ]
+          )
+        end
       end
 
       assert_equal "/usr/bin/bwrap", policy.command_prefix.first
@@ -831,5 +1288,40 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
 
   def reset_codex_executable_cache
     Hive::WorkflowPackage::RuntimePolicy.instance_variable_set(:@codex_executables, {})
+  end
+
+  def compile_two_output_codex_policy(task:, package:, article:)
+    with_env("HIVE_CODEX_BIN" => "/bin/true") do
+      Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+        {
+          "preset" => "scoped",
+          "tools" => [ "Read", "Edit(./article.md)", "Edit(./verification.md)" ]
+        },
+        task_folder: task,
+        package_root: package,
+        profile: Hive::AgentProfiles.lookup(:codex),
+        managed_outputs: [ article ]
+      )
+    end
+  end
+
+  def managed_output_result(files)
+    {
+      status: :ok,
+      final_message: JSON.generate("files" => files),
+      final_message_truncated: false
+    }
+  end
+
+  def with_available_grok_sandbox
+    sandbox = Hive::WorkflowPackage::RuntimePolicy::GROK_SANDBOX_PATH
+    original_file = File.method(:file?)
+    original_executable = File.method(:executable?)
+    file_check = ->(path) { path == sandbox || original_file.call(path) }
+    executable_check = ->(path) { path == sandbox || original_executable.call(path) }
+
+    with_replaced_singleton_method(File, :file?, file_check) do
+      with_replaced_singleton_method(File, :executable?, executable_check) { yield }
+    end
   end
 end

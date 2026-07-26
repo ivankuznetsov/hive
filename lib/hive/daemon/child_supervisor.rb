@@ -223,9 +223,12 @@ module Hive
 
       # Send SIGTERM to every tracked child's process group, wait up to
       # `grace_sec`, then SIGKILL anything still running. Used by the
-      # dispatcher's shutdown path.
+      # dispatcher's shutdown path. Returns every child reaped while draining
+      # so the dispatcher can route those exits through the normal completion
+      # lifecycle instead of losing scheduler claims at shutdown.
       def terminate_all(grace_sec: 600)
-        return if @running.empty?
+        completed = []
+        return completed if @running.empty?
 
         pgids = collect_pgids
         pgids.each { |pgid| safe_kill(:TERM, -pgid) }
@@ -233,12 +236,13 @@ module Hive
         deadline = Time.now + grace_sec
         until @running.empty? || Time.now >= deadline
           reaped = reap_all
+          completed.concat(reaped)
           break if reaped.empty? && @running.empty?
 
           sleep 0.1
         end
 
-        return if @running.empty?
+        return completed if @running.empty?
 
         # Anything still alive gets KILL.
         @running.each_key do |pid|
@@ -250,7 +254,8 @@ module Hive
           safe_kill(:KILL, -pgid)
         end
         # One more reap pass to clear out the killed children.
-        reap_all
+        completed.concat(reap_all)
+        completed
       end
 
       def in_flight_pids

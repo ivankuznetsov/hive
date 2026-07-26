@@ -487,7 +487,8 @@ module Hive
         @logger.event(:dispatcher_stopping, in_flight: @controller.in_flight_count,
                                             grace_sec: @shutdown_grace_sec,
                                             reexec_requested: @reexec_requested)
-        @supervisor.terminate_all(grace_sec: @shutdown_grace_sec)
+        shutdown_entries = @supervisor.terminate_all(grace_sec: @shutdown_grace_sec)
+        record_completed(Array(shutdown_entries), now: Time.now)
         # One final reap to catch any last completions
         reap_completed(now: Time.now)
         @logger.close
@@ -628,7 +629,10 @@ module Hive
       end
 
       def reap_completed(now:)
-        entries = @supervisor.reap_all(now: now)
+        record_completed(@supervisor.reap_all(now: now), now: now)
+      end
+
+      def record_completed(entries, now:)
         entries.each do |entry|
           @controller.record_completion(
             pid: entry.pid, exit_code: entry.exit_code, completed_at: now

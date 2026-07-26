@@ -38,7 +38,7 @@ writes. See [[modules/conditions]].
 | `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed rows including `workflow`, canonical `pr_url`, and structured `admission_error`. Missing or malformed admission state is converted to `dependency_validation_failed`, `blocked: true`, action `admission_error`, and no command. Envelope shape is hard-validated while forward schema versions remain best-effort. |
 | `Hive::Daemon::OperationalSnapshot` | `lib/hive/daemon/operational_snapshot.rb` | Private daemon-to-status observation channel. `Assembler` publishes `started`, `failed`, and revalidated `complete` tick records; completion time starts the validity window, SIGHUP recalculates it from the reloaded poll interval, and recovery receipts are overlaid only when task, stage, marker identity, and lifecycle still match. `Store` atomically persists records under owner-private path/inode checks; `Reader` accepts only the live daemon generation, complete phase, supported schema, and unexpired validity window, degrading every other condition to explicit unavailable/stale/invalid evidence. |
 | `Hive::Daemon::StatusReport` | `lib/hive/daemon/status_report.rb` | Shared `hive-daemon-status` producer for `hive daemon status --json` and hivebox. Builds the PID/service/binary/update-nudge envelope as a plain hash, exposes `running_state`, `payload`, and web-safe `safe_payload`, bounds `installed_binary --version` probes to 10s, and owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE` so the CLI producer and web repair affordance read the same enum source. |
-| `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Owns non-task ancillary children such as digest and patrol jobs. Task-stage agents use [[modules/attempts]] and are never adopted with `wait2` or terminated on daemon shutdown. |
+| `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Owns non-task ancillary children such as digest and patrol jobs. Task-stage agents use [[modules/attempts]] and are never adopted with `wait2` or terminated on daemon shutdown. Ancillary exits reaped during graceful shutdown are returned to the dispatcher and use the same scheduler-completion path as ordinary tick reaps. |
 | `Hive::Conditions::AttemptObserver` | `lib/hive/conditions/attempt_observer.rb` | Observes reconciled terminal/lost durable attempts. For coding execute attempts it idempotently journals the current `AgentHealthy` fact and rebuilds the projection: only a terminal `succeeded` receipt is satisfied; failed/cancelled/lost outcomes fail closed. Confirmed deliveries are memoized in-process before task lookup/journal parsing; restart rechecks the durable journal once. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
@@ -105,6 +105,15 @@ directories seen on the last full status scan. A child exit or mtime
 change triggers a full `tick` immediately; otherwise
 `daemon.poll_interval_sec` (default 30s) remains the backstop full-scan
 cadence for changes the cheap probe cannot see.
+
+On graceful shutdown, the supervisor returns every ancillary exit it reaps
+while draining process groups. `Dispatcher#record_completed` then routes those
+exits through the normal controller, patrol, architecture-patrol, digest, and
+request completion lifecycle before closing. A terminated architecture scan
+therefore releases its existing generation-fenced v2 claim with ordinary retry
+backoff instead of remaining `analyzing` until the two-hour lease expires.
+If a process cannot be reaped even after termination, its claim remains fenced
+for the existing lease recovery path rather than permitting overlap.
 
 Each full tick first publishes a `started` record, then reconciles durable
 attempts, processes normalized loss, and publishes lease-first capacity. It

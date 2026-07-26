@@ -380,8 +380,11 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
                 project: "p1", slug: "a", stage: "6-review")
       assert_equal 1, sup.in_flight_count
 
-      sup.terminate_all(grace_sec: 2)
+      completed = sup.terminate_all(grace_sec: 2)
       assert_equal 0, sup.in_flight_count, "TERM (with grace) must reap all running children"
+      assert_equal 1, completed.size
+      assert_nil completed.first.exit_code
+      assert_equal "a", completed.first.slug
     end
   end
 

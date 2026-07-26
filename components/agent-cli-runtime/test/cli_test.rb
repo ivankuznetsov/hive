@@ -66,10 +66,10 @@ class AgentCliRuntimeCliTest < Minitest::Test
   def test_ready_json_probe_has_the_complete_v1_shape
     Dir.mktmpdir do |dir|
       bin = File.join(dir, "codex")
-      write_executable(bin, <<~RUBY)
-        #!/usr/bin/env ruby
-        puts "codex-cli 0.125.0"
-      RUBY
+      write_executable(bin, <<~SH)
+        #!/bin/sh
+        printf '%s\n' 'codex-cli 0.125.0'
+      SH
       out, err, status = Open3.capture3(
         {
           "PATH" => "/usr/bin:/bin",

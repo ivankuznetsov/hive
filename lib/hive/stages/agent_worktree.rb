@@ -202,9 +202,21 @@ module Hive
         paths["global Git config override"] = global unless global.empty?
         system = ENV["GIT_CONFIG_SYSTEM"].to_s
         paths["system Git config override"] = system unless system.empty?
-        paths
+        unique_git_control_paths(paths, worktree_path)
       end
       private_class_method :git_control_paths!
+
+      def unique_git_control_paths(paths, worktree_path)
+        seen = {}
+        paths.each_with_object({}) do |(label, path), unique|
+          expanded = File.expand_path(path, worktree_path)
+          next if seen[expanded]
+
+          seen[expanded] = true
+          unique[label] = expanded
+        end
+      end
+      private_class_method :unique_git_control_paths
 
       def git_path!(worktree_path, *args)
         out, err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", *args)

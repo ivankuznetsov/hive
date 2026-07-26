@@ -330,9 +330,10 @@ the current owner on every request and evict old sessions when
 ownership rotation. A local GitHub connection remains optional for repository
 listing and cloning and does not claim ownership. Hivebox is the distinct
 container distribution of the same owner-gated surface. Managed local installs
-stage `bundle install` plus a production asset precompile and verify the
-CSS/JavaScript manifest before the atomic bundle swap; same-version installs
-with missing assets are repaired.
+stage a locked Bundler install plus a production asset precompile and verify
+the CSS/JavaScript manifest before the atomic bundle swap; both commands run
+through the current Ruby without relying on `bundle` or a matching Ruby shim
+on `PATH`. Same-version installs with missing assets are repaired.
 Reads render
 `Commands::Status#json_payload` snapshots; live updates flow over Turbo
 Streams, with production Action Cable accepting same-origin-as-host and

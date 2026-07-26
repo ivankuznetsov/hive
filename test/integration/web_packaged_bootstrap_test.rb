@@ -74,7 +74,11 @@ class WebPackagedBootstrapTest < Minitest::Test
         "HIVE_WEB_BUNDLE_SHA256" => Digest::SHA256.file(archive).hexdigest,
         "HIVE_EXPECTED_CLI_ROOT" => installed_root,
         "HIVE_PACKAGE_CAPTURE" => capture,
-        "HIVE_SETUP_FIXTURE" => preload
+        "HIVE_SETUP_FIXTURE" => preload,
+        # A managed install must not depend on the `bundle` wrapper being on
+        # PATH. The CLI already runs under the intended Ruby and can resolve
+        # the exact Bundler executable from the authenticated lockfile.
+        "PATH" => "/usr/bin:/bin"
       )
       stdout, setup_stderr, setup_status = Open3.capture3(
         setup_env, File.join(gem_home, "bin", "hive"), "setup", "--no-init", "--yes", "--json",

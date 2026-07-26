@@ -152,6 +152,13 @@ by both root/web lockfile contents plus Ruby engine/version/platform; neither
 linked-worktree lockfile nor its mode may change. Missing browser/media tooling
 is a truthful required-capture error, never a silent `not_applicable` result.
 
+Managed web installation does not require a `bundle` wrapper on `PATH`.
+`Hive::Web::AppBundle` reads the authenticated web `Gemfile.lock`, resolves
+that exact Bundler through RubyGems, and invokes its absolute executable
+through the current `RbConfig.ruby`. Production asset compilation uses the
+same Ruby directly. A missing locked Bundler is therefore an explicit
+bootstrap error rather than an ambiguous command-not-found failure.
+
 ## Ruby version
 
 `Gemfile` declares `ruby "~> 3.4"`. `hive.gemspec` requires Ruby

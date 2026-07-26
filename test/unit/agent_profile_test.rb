@@ -25,6 +25,7 @@ class AgentProfileTest < Minitest::Test
     assert_predicate capable.tool_scope_flags, :frozen?
     assert capable.raw_cli_arguments_supported?
 
+    assert_raises(ArgumentError) { make_profile(tool_scope_flags: []) }
     assert_raises(ArgumentError) { make_profile(tool_scope_flags: { unknown: "--flag" }) }
     assert_raises(ArgumentError) { make_profile(tool_scope_flags: { allowed: "" }) }
   end

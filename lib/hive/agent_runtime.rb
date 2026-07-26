@@ -181,16 +181,8 @@ module Hive
     rescue Error
       raise
     rescue StandardError => e
-      valid_request = request.is_a?(Request)
-      capability =
-        if valid_request && request.model
-          :model
-        elsif valid_request && request.effort
-          :effort
-        else
-          :compilation
-        end
-      compilation_error!(valid_request ? request.profile : nil, capability, e)
+      profile = request.profile if request.is_a?(Request)
+      compilation_error!(profile, :compilation, e)
     end
 
     def prepare!(profile)
@@ -354,13 +346,6 @@ module Hive
       identity = profile.identity_arguments(
         model: request.model, effort: request.effort, pin_model: request.pin_model
       )
-      if request.effort && !identity.effort_supported
-        unsupported!(
-          profile, :effort,
-          "agent profile #{profile_name(profile).inspect} cannot set reasoning effort",
-          evidence
-        )
-      end
       evidence << supported_evidence(profile, :model, identity.native_arguments)
       evidence << supported_evidence(profile, :effort) if request.effort
       arguments.concat(identity.native_arguments)

@@ -104,6 +104,11 @@ module Hive
         end
 
         def validate_task_binding!(record, argv)
+          if record.respond_to?(:module_hook?) && record.module_hook?
+            validate_module_hook_binding!(record, argv)
+            return
+          end
+
           require "hive/task_resolver"
           require "hive/workflows"
           verb = argv[1].to_s
@@ -122,6 +127,21 @@ module Hive
           end
         rescue KeyError, Hive::Error => e
           raise StoreError, "attempt task binding could not be resolved: #{e.message}"
+        end
+
+        def validate_module_hook_binding!(record, argv)
+          subject = record.subject
+          options = argv.each_cons(2).to_h
+          valid = argv[1] == "__module-hook" &&
+                  argv[2] == subject.fetch("module") &&
+                  argv[3] == subject.fetch("hook") &&
+                  options["--project"] == record["project"] &&
+                  options["--event-id"] == subject.fetch("event_id") &&
+                  record["task_id"].nil? &&
+                  record["intended_stage"] == "module-hook"
+          raise StoreError, "attempt module hook binding does not match admission" unless valid
+        rescue KeyError
+          raise StoreError, "attempt module hook binding is incomplete"
         end
 
         def read_inherited(value, limit:)

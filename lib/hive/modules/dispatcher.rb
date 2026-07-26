@@ -8,6 +8,7 @@ require "hive/module_package/managed_store"
 require "hive/modules/decision_journal"
 require "hive/modules/event_scope"
 require "hive/modules/hook_attempt"
+require "hive/modules/migration/patrols"
 require "hive/modules/trigger_evaluator"
 require "hive/workflow_package/canonical_json"
 
@@ -44,6 +45,14 @@ module Hive
 
       def dispatch(module_name:, hook_id:, event:, dry_run: false)
         assert_project!(event)
+        with_migration_admission_lock(module_name, dry_run: dry_run) do
+          dispatch_under_migration_lock(
+            module_name: module_name, hook_id: hook_id, event: event, dry_run: dry_run
+          )
+        end
+      end
+
+      def dispatch_under_migration_lock(module_name:, hook_id:, event:, dry_run:)
         lifecycle = dry_run ? method(:without_lifecycle_lock) : @store.method(:with_admission)
         lifecycle.call(module_name) do |admitted_selection|
           lock = dry_run ? method(:without_hook_lock) : method(:with_hook_lock)
@@ -51,6 +60,22 @@ module Hive
             context = load_context(
               module_name, hook_id, read_only: dry_run, selection: admitted_selection
             )
+            if !dry_run && (recovered_attempt = recoverable_attempt(context, event))
+              evaluation = recovered_launch_evaluation(context, event)
+              decision = persist_decision(
+                context, event, evaluation, attempt_id: recovered_attempt.attempt_id
+              )
+              recover_run(module_name, recovered_attempt)
+              advance_cursor(context, evaluation)
+              attempt_result = Hive::Attempts::DispatchResult.new(
+                status: recovered_attempt.live? ? :existing_live : :terminal_replay,
+                attempt: recovered_attempt, receipt: recovered_attempt.receipt,
+                attach_descriptor: nil, reason: "recovered_launch"
+              )
+              return ModuleDispatchResult.new(
+                decision: decision, attempt_result: attempt_result, event: event
+              )
+            end
             evaluation = evaluate(context, event)
             if dry_run || !evaluation.launch?
               decision = dry_run ? projected_decision(context, event, evaluation) :
@@ -111,6 +136,15 @@ module Hive
       end
 
       def retry(module_name:, hook_attempt:, previous_attempt:)
+        with_migration_admission_lock(module_name, dry_run: false) do
+          retry_under_migration_lock(
+            module_name: module_name, hook_attempt: hook_attempt,
+            previous_attempt: previous_attempt
+          )
+        end
+      end
+
+      def retry_under_migration_lock(module_name:, hook_attempt:, previous_attempt:)
         hook_id = hook_attempt.subject.fetch("hook")
         @store.with_admission(module_name) do |selection|
           with_hook_lock(module_name, hook_id) do
@@ -136,6 +170,17 @@ module Hive
       end
 
       private
+
+      def with_migration_admission_lock(module_name, dry_run:)
+        unless !dry_run && Hive::Modules::Migration::Patrols::MODULES.include?(module_name.to_s)
+          return yield
+        end
+
+        project_root = File.dirname(@store.hive_state_path)
+        Hive::Modules::Migration::Patrols.with_migration_lock(
+          project_root, hive_state_path: @store.hive_state_path, shared: true
+        ) { yield }
+      end
 
       def load_context(module_name, hook_id, read_only: false, selection: UNSET_SELECTION)
         selection = if selection.equal?(UNSET_SELECTION) && read_only
@@ -171,8 +216,9 @@ module Hive
           module_name: context.fetch(:module_name), hook_id: context.fetch(:hook_id),
           event_id: event.fetch("event_id")
         )
-        concurrency_blocked = live_for_hook?(context) && context.fetch(:hook).fetch("concurrency") != "allow"
-        capacity_blocked = @capacity_probe.call(
+        concurrency_blocked = !duplicate && live_for_hook?(context) &&
+                              context.fetch(:hook).fetch("concurrency") != "allow"
+        capacity_blocked = !duplicate && @capacity_probe.call(
           module_name: context.fetch(:module_name),
           hook_id: context.fetch(:hook_id),
           event: event
@@ -187,6 +233,49 @@ module Hive
           concurrency_blocked: concurrency_blocked, capacity_blocked: capacity_blocked,
           secret_availability: availability
         )
+      end
+
+      def recoverable_attempt(context, event)
+        return if @decision_journal.admitted?(
+          module_name: context.fetch(:module_name), hook_id: context.fetch(:hook_id),
+          event_id: event.fetch("event_id")
+        )
+        active = context.dig(:selection, "active")
+        return unless active && context[:configuration] && context[:hook]
+
+        @attempt_store.scan.records.find do |record|
+          subject = record.subject
+          record.module_hook? && subject["project_id"] == @project_id &&
+            subject["module"] == context.fetch(:module_name) &&
+            subject["hook"] == context.fetch(:hook_id) &&
+            subject["event_id"] == event.fetch("event_id") &&
+            subject["event_name"] == event.fetch("event_name") &&
+            subject["module_generation"] == active.fetch("source_commit") &&
+            subject["configuration_digest"] == active.fetch("configuration_digest")
+        end
+      end
+
+      def recovered_launch_evaluation(context, event)
+        TriggerEvaluation.new(
+          outcome: "launch", reason: "admitted",
+          binding_digest: ::Digest::SHA256.hexdigest(canonical(context.fetch(:hook))),
+          cursor_before: context.dig(:hook_state, "cursor"),
+          cursor_after: event.fetch("event_id")
+        )
+      end
+
+      def recover_run(module_name, attempt)
+        path = run_path(module_name, HookAttempt.run_id_for(attempt.subject))
+        return unless File.file?(path)
+
+        data = JSON.parse(File.binread(path))
+        data["status"] = attempt.live? ? "running" : "failed"
+        data["attempt_id"] = attempt.attempt_id
+        data["attempt_ids"] = (Array(data["attempt_ids"]) + [ attempt.attempt_id ]).uniq
+        data["decision_reason"] = "admitted"
+        data["retry_charge"] = attempt["retry_charge"]
+        data["updated_at"] = @clock.call.utc.iso8601(6)
+        Hive::AtomicFile.write(path, canonical(data), mode: 0o600)
       end
 
       def evaluation_for_attempt(evaluation, attempt_result)

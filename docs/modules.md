@@ -22,12 +22,11 @@ templates, and documentation. Package Ruby is never loaded. Current
 `honeycomb-manifest/v1` workflow packages normalize losslessly into one
 hook-free module, so they do not need republishing or manual migration.
 
-Native module workflow targets are validated and snapshotted at activation, but
-execution currently fails closed. They will remain unavailable until task
-metadata can pin module/run/snapshot provenance, admission can idempotently
-attach one task to one hook run, and daemon/status recovery can resolve that
-snapshot after update or uninstall. Registered entrypoints and explicitly
-granted external commands are the executable target kinds in this delivery.
+Native module workflow targets are validated and snapshotted at activation.
+Execution installs an immutable, generation-qualified project workflow
+descriptor and admits one deterministic task per hook occurrence; retries
+reuse that task identity. Registered entrypoints and explicitly granted
+external commands are the other executable target kinds.
 
 ## Preview and lifecycle
 
@@ -115,12 +114,11 @@ immutable manifest and does not add another poller.
 The adapters keep `.hive-state/patrol/`,
 `.hive-state/refactor_patrol/`, global terminal action proofs, budgets,
 dismissals, fingerprints, claims, manifests, artifacts, and recovery receipts
-authoritative in place. Adapter admission preflights the installed
+authoritative in place. Adapter admission checks the installed
 repository-write, GitHub-mutation, command, host, filesystem, and secret grants
-before calling either legacy engine. The legacy engines do not yet receive a
-capability-bound gateway object at every side-effect seam, so module mutator
-cutover remains blocked until that enforcement is structural rather than
-preflight-only. First-party identity grants no consent exemption.
+before calling either legacy engine and passes the same capability-bound
+gateway into the engine for checks at its observation, state-write, and
+mutation boundaries. First-party identity grants no consent exemption.
 
 ## Shadow migration and rollback
 
@@ -140,9 +138,9 @@ The cutover report requires at least seven elapsed UTC days and ten comparable
 decisions per module, one unchanged configuration digest, reviewer sign-off,
 zero unexplained differences, and zero module-side or duplicate effects.
 Fixture timestamps and module self-comparisons test the gate code but are
-explicitly non-comparable. The legacy scheduler/event path does not yet publish
-the required immutable `legacy_mutator_capture` snapshots, so no current
-production path can satisfy the report or authorize cutover.
+explicitly non-comparable. Schedule decisions and the existing merged-PR
+reconciler now publish immutable `legacy_mutator_capture` snapshots; only those
+independently produced snapshots count toward the production evidence window.
 
 ```bash
 hive module migration status --json
@@ -153,9 +151,9 @@ hive module migration rollback --yes --json
 
 Report, cutover, and rollback are administrative human decisions. A request
 first fences both owners; the daemon advances the single durable ownership
-epoch only after exact quiescence and eligible evidence. Before enabling that
-path, scheduler reservation and child registration also need one durable
-handoff barrier so ownership cannot change in the reserve-to-spawn gap.
+epoch only after exact quiescence and eligible evidence. Scheduler reservation
+and child registration hold the same durable migration admission lock, so
+ownership cannot change in the reserve-to-spawn gap.
 Rollback code restores legacy ownership and the previous module
 generation/configuration when available, while retaining unchanged
 checkpoints, high-water marks, events, attempts, and artifacts.

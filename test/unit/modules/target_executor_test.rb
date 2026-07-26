@@ -19,8 +19,10 @@ class ModulesTargetExecutorTest < Minitest::Test
       Hive::Modules::Entrypoints.register("demo.run") { |context| entrypoint_calls << context; 7 }
       executor = Hive::Modules::TargetExecutor.new(
         first_party_loader: -> { true },
-        command_runner: lambda do |argv:, chdir:, environment:|
+        command_runner: lambda do |argv:, chdir:, environment:, grants:, secret_values:|
           assert_empty environment
+          assert_empty secret_values
+          assert_equal [ "git" ], grants.fetch("external_commands")
           command_calls << [ argv, chdir ]
           9
         end
@@ -131,16 +133,32 @@ class ModulesTargetExecutorTest < Minitest::Test
       assert_equal :review, calls.fetch(0).fetch(:workflow).id
       assert calls.fetch(0).fetch(:descriptor_exists)
 
-      blocked = Hive::Modules::TargetExecutor.new(first_party_loader: -> { true })
-      error = assert_raises(Hive::ConfigError) do
-        blocked.call(
+      state = File.join(root, ".hive-state")
+      admitted = []
+      fake_command = Object.new
+      fake_command.define_singleton_method(:call!) { admitted << true }
+      replacement = lambda do |*args, **options|
+        admitted << [ args, options ]
+        fake_command
+      end
+      default_executor = Hive::Modules::TargetExecutor.new(first_party_loader: -> { true })
+      with_replaced_singleton_method(Hive::Commands::New, :new, replacement) do
+        assert_equal 0, default_executor.call(
           target: descriptor.hooks.first.fetch("target"), target_snapshot: snapshot,
-          project: { "name" => "demo", "path" => root }, module_name: "demo",
-          hook_id: "review", event: { "event_id" => "evt-1" },
+          project: { "name" => "demo", "path" => root, "hive_state_path" => state },
+          module_name: "demo", hook_id: "review",
+          event: { "event_id" => "evt-1", "event_name" => "task.completed" },
           configuration: configuration
         )
       end
-      assert_match(/module-pinned workflow task admission is unavailable/, error.message)
+      assert_equal "demo", admitted.fetch(0).fetch(0).fetch(0)
+      assert_match(/\Amodule-demo-review-/, admitted.fetch(0).fetch(1).fetch(:workflow))
+      workflow_path = File.join(
+        state, "workflows", "#{admitted.fetch(0).fetch(1).fetch(:workflow)}.yml"
+      )
+      assert File.file?(workflow_path)
+      assert_equal admitted.fetch(0).fetch(1).fetch(:workflow),
+                   YAML.safe_load(File.read(workflow_path)).fetch("id")
     end
   end
 
@@ -154,6 +172,64 @@ class ModulesTargetExecutorTest < Minitest::Test
 
       assert executor.health_check.call(root, configuration)
     end
+  end
+
+  def test_command_health_rejects_an_unavailable_sandbox_runtime
+    runner = Object.new
+    runner.define_singleton_method(:preflight!) do |grants:|
+      raise Hive::ConfigError, "module command targets require bubblewrap"
+    end
+    with_tmp_dir do |root|
+      configuration = configuration_for(
+        root, hooks: [ hook("command", "git status") ],
+        permissions: permissions("external_commands" => [ "git" ])
+      )
+      executor = Hive::Modules::TargetExecutor.new(
+        first_party_loader: -> { true }, command_runner: runner
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        executor.health_check.call(root, configuration)
+      end
+      assert_match(/require bubblewrap/, error.message)
+    end
+  end
+
+  def test_command_sandbox_binds_only_granted_project_paths_and_redacts_output
+    runner = Hive::Modules::TargetExecutor::CommandRunner.new
+    with_tmp_dir do |root|
+      readable = File.join(root, "docs")
+      writable = File.join(root, ".hive-state", "module")
+      FileUtils.mkdir_p(readable)
+      FileUtils.mkdir_p(writable)
+      grants = permissions(
+        "external_commands" => [ "git" ],
+        "filesystem_read" => [ "docs/**" ],
+        "filesystem_write" => [ ".hive-state/module/**" ]
+      )
+      argv = runner.send(:sandbox_argv, argv: %w[git status], chdir: root, grants: grants)
+
+      refute_includes argv.each_cons(3).to_a, [ "--ro-bind", "/", "/" ]
+      assert_includes argv.each_cons(3).to_a, [ "--ro-bind", readable, readable ]
+      assert_includes argv.each_cons(3).to_a, [ "--bind", writable, writable ]
+      refute_includes argv, "--share-net"
+
+      Tempfile.create("redaction") do |file|
+        file.write("token=super-secret\n")
+        output = StringIO.new
+        runner.send(:emit_redacted, file, output, [ "super-secret" ])
+        assert_equal "token=[REDACTED]\n", output.string
+      end
+    end
+  end
+
+  def test_exact_network_allowlist_fails_activation_until_enforceable
+    runner = Hive::Modules::TargetExecutor::CommandRunner.new
+    grants = permissions("network_hosts" => [ "api.example.test" ])
+
+    error = assert_raises(Hive::ConfigError) { runner.preflight!(grants: grants) }
+    assert_match(/host allowlists/, error.message)
+    assert runner.preflight!(grants: grants.merge("network_hosts" => [ "*" ]))
   end
 
   private

@@ -48,7 +48,7 @@ end
 if ARGV.first == "__module-hook"
   require "hive/commands/module_hook"
   begin
-    unless ENV["HIVE_ATTEMPT_INTERNAL"] == "1" && Hive::Attempts::Context.active?
+    unless Hive::Attempts::Context.active?
       raise Hive::ConfigError, "module hook requires authenticated durable attempt context"
     end
     exit Hive::Commands::ModuleHook.from_argv(ARGV.drop(1)).call
@@ -400,6 +400,12 @@ def json_usage_error_contract(argv)
     when "inspect", "status" then "hive-module-status"
     when "doctor" then "hive-module-doctor"
     when "dry-run" then "hive-module-dry-run"
+    when "migration"
+      migration_action = json_usage_subcommand(
+        argv, argv.index("migration") || command_index,
+        value_options: %w[--reviewer]
+      )
+      migration_action == "report" ? "hive-module-migration-report" : "hive-module-migration"
     else "hive-module-lifecycle"
     end
     return { schema: schema, error_kind: "usage" }

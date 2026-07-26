@@ -202,7 +202,7 @@ class ModulePackageManagedStoreTest < Minitest::Test
     end
   end
 
-  def test_successful_commit_callback_sees_no_live_activation_journal
+  def test_successful_commit_callback_runs_while_activation_recovery_is_live
     with_tmp_dir do |root|
       package = File.join(root, "package")
       resolution, descriptor = write_module_package(package)
@@ -213,11 +213,35 @@ class ModulePackageManagedStoreTest < Minitest::Test
       store.apply(
         preview_for(resolution, descriptor), package_root: package, resolution: resolution,
         commit: lambda do
-          refute File.exist?(journal)
-          refute File.exist?(barrier)
+          assert File.exist?(journal)
+          assert File.exist?(barrier)
         end
       )
       assert store.selected("demo")
+      refute File.exist?(journal)
+      refute File.exist?(barrier)
+    end
+  end
+
+  def test_post_commit_cleanup_failure_is_warning_only
+    with_tmp_dir do |root|
+      package = File.join(root, "package")
+      resolution, descriptor = write_module_package(package)
+      store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
+      store.define_singleton_method(:cleanup_generations_unlocked!) do |*_args|
+        raise Errno::EIO, "unsafe cleanup detail"
+      end
+
+      _out, error = capture_io do
+        selection = store.apply(
+          preview_for(resolution, descriptor), package_root: package, resolution: resolution
+        )
+        assert_equal resolution.source_commit, selection.dig("active", "source_commit")
+      end
+
+      assert_equal resolution.source_commit, store.selected("demo").dig("active", "source_commit")
+      assert_includes error, "post-commit activation cleanup failed"
+      refute_includes error, "unsafe cleanup detail"
     end
   end
 

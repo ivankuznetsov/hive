@@ -94,6 +94,7 @@ class ModulePackageCatalogClientTest < Minitest::Test
       assert_raises(Hive::ModulePackage::CatalogError) do
         @client.fetch("honeycomb/demo", destination: destination)
       end
+      assert_equal "present", File.read(File.join(destination, "keep"))
     end
 
     legacy = Object.new

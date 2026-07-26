@@ -1,12 +1,21 @@
 require "digest"
 require "fileutils"
+require "json"
 require "pathname"
+require "rbconfig"
+require "tempfile"
+require "yaml"
+require "hive/atomic_file"
+require "hive/commands/new"
 require "tmpdir"
 require "hive/module_package/command_target"
 require "hive/modules/capability_context"
 require "hive/modules/entrypoints"
 require "hive/modules/first_party"
 require "hive/workflows/descriptor_parser"
+require "hive/workflows/project"
+require "hive/workflow_package/canonical_yaml"
+require "hive/workflow_package/mutation_lock"
 
 module Hive
   module Modules
@@ -16,18 +25,247 @@ module Hive
     class TargetExecutor
       class CommandRunner
         SAFE_ENV = %w[HOME LANG LC_ALL PATH TMPDIR].freeze
+        MAX_OUTPUT_BYTES = 1_048_576
+        RUNTIME_PATHS = %w[/usr /etc/ld.so.cache /etc/ssl /etc/ca-certificates].freeze
 
-        def call(argv:, chdir:, environment: {})
+        def preflight!(grants:)
+          unless RbConfig::CONFIG.fetch("host_os").include?("linux")
+            raise Hive::ConfigError, "module command targets require Linux bubblewrap"
+          end
+          unless executable_path("bwrap")
+            raise Hive::ConfigError, "module command targets require bubblewrap"
+          end
+          hosts = grants.fetch("network_hosts")
+          unless hosts.empty? || hosts == [ "*" ]
+            raise Hive::ConfigError,
+                  "module command target host allowlists require an unavailable network sandbox"
+          end
+          true
+        end
+
+        def call(argv:, chdir:, environment: {}, grants:, secret_values: [])
+          preflight!(grants: grants)
           env = SAFE_ENV.to_h { |name| [ name, ENV[name] ] }.compact.merge(environment)
-          sandbox = [
-            "bwrap", "--unshare-net", "--die-with-parent", "--ro-bind", "/", "/",
-            "--dev", "/dev", "--proc", "/proc", "--chdir", chdir, "--", *argv
-          ]
-          pid = Process.spawn(env, *sandbox, chdir: chdir, in: :close, unsetenv_others: true)
-          _waited, status = Process.wait2(pid)
-          status.exited? ? status.exitstatus : 128 + status.termsig.to_i
+          Tempfile.create("hive-module-stdout") do |stdout|
+            Tempfile.create("hive-module-stderr") do |stderr|
+              pid = Process.spawn(
+                env, *sandbox_argv(argv: argv, chdir: chdir, grants: grants),
+                chdir: chdir, in: :close, out: stdout, err: stderr, unsetenv_others: true
+              )
+              _waited, status = Process.wait2(pid)
+              emit_redacted(stdout, $stdout, secret_values)
+              emit_redacted(stderr, $stderr, secret_values)
+              status.exited? ? status.exitstatus : 128 + status.termsig.to_i
+            end
+          end
         rescue SystemCallError
           raise Hive::ConfigError, "module command target could not start"
+        end
+
+        private
+
+        def sandbox_argv(argv:, chdir:, grants:)
+          project_root = File.expand_path(chdir)
+          arguments = [ executable_path("bwrap"), "--unshare-all", "--die-with-parent", "--new-session" ]
+          if grants.fetch("filesystem_write") == [ "*" ]
+            arguments.concat([ "--bind", "/", "/" ])
+          elsif grants.fetch("filesystem_read") == [ "*" ]
+            arguments.concat([ "--ro-bind", "/", "/" ])
+          else
+            arguments.concat([ "--tmpfs", "/" ])
+            bind_runtime_paths(arguments)
+          end
+          arguments.concat([ "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp" ])
+          bind_project_paths(arguments, project_root, grants)
+          arguments << "--share-net" unless grants.fetch("network_hosts").empty?
+          arguments.concat([ "--chdir", project_root, "--", *argv ])
+        end
+
+        def bind_runtime_paths(arguments)
+          RUNTIME_PATHS.each do |path|
+            next unless File.exist?(path)
+            ensure_sandbox_parents(arguments, path)
+            arguments.concat([ "--ro-bind", path, path ])
+          end
+          %w[/bin /lib /lib64 /sbin].each do |path|
+            next unless File.symlink?(path)
+            arguments.concat([ "--symlink", File.readlink(path), path ])
+          end
+        end
+
+        def bind_project_paths(arguments, project_root, grants)
+          ensure_sandbox_parents(arguments, project_root)
+          arguments.concat([ "--dir", project_root ])
+          write_patterns = grants.fetch("filesystem_write")
+          read_patterns = grants.fetch("filesystem_read")
+          if grants.fetch("repository_write") || repository_granted?(write_patterns)
+            arguments.concat([ "--bind", project_root, project_root ])
+            return
+          end
+          if repository_granted?(read_patterns)
+            arguments.concat([ "--ro-bind", project_root, project_root ])
+          end
+          bind_patterns(arguments, project_root, read_patterns, "--ro-bind")
+          bind_patterns(arguments, project_root, write_patterns, "--bind")
+        end
+
+        def bind_patterns(arguments, project_root, patterns, option)
+          patterns.grep_v(/\Arepository\z|\A\*\z/).each do |pattern|
+            root = pattern.delete_suffix("/**")
+            paths = Dir.glob(File.join(project_root, pattern), File::FNM_DOTMATCH)
+            paths << File.join(project_root, root) if File.exist?(File.join(project_root, root))
+            paths.uniq.each do |path|
+              absolute = File.expand_path(path)
+              next unless absolute.start_with?("#{project_root}#{File::SEPARATOR}")
+              ensure_sandbox_parents(arguments, absolute)
+              arguments.concat([ option, absolute, absolute ])
+            end
+          end
+        end
+
+        def repository_granted?(patterns)
+          patterns.include?("repository") || patterns == [ "*" ]
+        end
+
+        def ensure_sandbox_parents(arguments, path)
+          parents = Pathname.new(File.dirname(path)).ascend.to_a.reverse
+          parents.each do |parent|
+            value = parent.to_s
+            next if value == "/" || arguments.each_cons(2).any? { |pair| pair == [ "--dir", value ] }
+            arguments.concat([ "--dir", value ])
+          end
+        end
+
+        def emit_redacted(file, output, secrets)
+          file.flush
+          file.rewind
+          bytes = file.read(MAX_OUTPUT_BYTES + 1).to_s
+          truncated = bytes.bytesize > MAX_OUTPUT_BYTES
+          bytes = bytes.byteslice(0, MAX_OUTPUT_BYTES)
+          Array(secrets).reject { |value| value.to_s.empty? }.each do |value|
+            bytes = bytes.gsub(value.to_s, "[REDACTED]")
+          end
+          output.write(bytes)
+          output.write("\n[hive: module command output truncated]\n") if truncated
+        end
+
+        def executable_path(name)
+          ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).filter_map do |dir|
+            path = File.join(dir, name)
+            path if File.file?(path) && File.executable?(path)
+          end.first
+        end
+      end
+
+      class WorkflowRunner
+        def call(project:, module_name:, hook_id:, event:, workflow:, descriptor_path:,
+                 package_root:, target_snapshot:, configuration:)
+          workflow_id = workflow_identity(
+            module_name, workflow.id, configuration.digest, target_snapshot
+          )
+          install_workflow_snapshot(
+            project, workflow_id, descriptor_path, package_root, target_snapshot
+          )
+          Hive::Workflows::Project.reset!
+          slug = workflow_slug(module_name, hook_id, event.fetch("event_id"))
+          return 0 if admitted_task?(project, workflow, slug, workflow_id)
+
+          Hive::Commands::New.new(
+            project.fetch("name"),
+            "Module #{module_name} hook #{hook_id}",
+            slug_override: slug,
+            body_override: JSON.pretty_generate(
+              "module" => module_name, "hook" => hook_id, "event" => event
+            ),
+            workflow: workflow_id
+          ).call!
+          0
+        end
+
+        private
+
+        def install_workflow_snapshot(project, workflow_id, descriptor_path, package_root, snapshot)
+          workflow_dir = File.join(project.fetch("hive_state_path"), "workflows")
+          digest = ::Digest::SHA256.hexdigest(
+            Hive::WorkflowPackage::CanonicalJSON.generate(snapshot)
+          )
+          asset_root = File.join(workflow_dir, ".module-workflows", digest)
+          descriptor_relative = Pathname.new(descriptor_path)
+                                        .relative_path_from(Pathname.new(package_root)).to_s
+          Hive::WorkflowPackage::MutationLock.with_lock(workflow_dir) do
+            snapshot.fetch("files").each do |file|
+              next if file.fetch("path") == descriptor_relative
+
+              write_immutable(
+                File.join(asset_root, file.fetch("path")), file.fetch("content")
+              )
+            end
+            data = YAML.safe_load(File.binread(descriptor_path))
+            data["id"] = workflow_id
+            rewrite_instruction_paths!(
+              data, descriptor_dir: File.dirname(descriptor_relative),
+              asset_prefix: Pathname.new(asset_root).relative_path_from(Pathname.new(workflow_dir)).to_s
+            )
+            write_immutable(
+              File.join(workflow_dir, "#{workflow_id}.yml"),
+              Hive::WorkflowPackage::CanonicalYAML.dump(data)
+            )
+          end
+        end
+
+        def rewrite_instruction_paths!(value, descriptor_dir:, asset_prefix:)
+          case value
+          when Hash
+            value.each do |key, nested|
+              if key.to_s == "instruction" && nested.is_a?(String)
+                value[key] = File.join(asset_prefix, descriptor_dir, nested)
+              else
+                rewrite_instruction_paths!(
+                  nested, descriptor_dir: descriptor_dir, asset_prefix: asset_prefix
+                )
+              end
+            end
+          when Array
+            value.each do |nested|
+              rewrite_instruction_paths!(
+                nested, descriptor_dir: descriptor_dir, asset_prefix: asset_prefix
+              )
+            end
+          end
+        end
+
+        def write_immutable(path, bytes)
+          if File.file?(path)
+            raise Hive::ConfigError, "module workflow snapshot identity collided" unless File.binread(path) == bytes
+            return
+          end
+          FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
+          Hive::AtomicFile.write(path, bytes, mode: 0o400)
+        end
+
+        def admitted_task?(project, workflow, slug, workflow_id)
+          path = File.join(
+            project.fetch("hive_state_path"), "stages", workflow.stages.first.dir, slug
+          )
+          return false unless File.directory?(path)
+
+          meta = Hive::TaskMeta.read_for_admission(path)
+          unless meta.ok? && meta.data[:workflow] == workflow_id
+            raise Hive::ConfigError, "module workflow task identity collided"
+          end
+          true
+        end
+
+        def workflow_identity(module_name, workflow_id, configuration_digest, snapshot)
+          digest = ::Digest::SHA256.hexdigest(
+            [ configuration_digest, Hive::WorkflowPackage::CanonicalJSON.generate(snapshot) ].join("\0")
+          )
+          "module-#{module_name}-#{workflow_id}-#{digest[0, 12]}"
+        end
+
+        def workflow_slug(module_name, hook_id, event_id)
+          prefix = "module-#{module_name}-#{hook_id}".gsub(/[^a-z0-9-]/, "-")[0, 45]
+          "#{prefix}-#{::Digest::SHA256.hexdigest(event_id.to_s)[0, 12]}"[0, 63].sub(/-\z/, "0")
         end
       end
 
@@ -43,7 +281,7 @@ module Hive
         @entrypoints = entrypoints
         @first_party_loader = first_party_loader
         @command_runner = command_runner
-        @workflow_runner = workflow_runner || method(:workflow_admission_unavailable!)
+        @workflow_runner = workflow_runner || WorkflowRunner.new
       end
 
       # ManagedStore's health-check signature is positional. The returned
@@ -58,7 +296,9 @@ module Hive
           target = hook.fetch("target")
           case target.fetch("kind")
           when "entrypoint" then @entrypoints.fetch(target.fetch("id"))
-          when "command" then command_argv!(target, configuration)
+          when "command"
+            command_argv!(target, configuration)
+            @command_runner.preflight!(grants: configuration.grants) if @command_runner.respond_to?(:preflight!)
           when "workflow"
             capture_snapshot(
               target: target, configuration: configuration, package_root: package_root
@@ -135,9 +375,12 @@ module Hive
         unless snapshot.keys.sort == %w[argv id kind] && snapshot.fetch("argv") == argv
           raise Hive::ConfigError, "module command target snapshot is malformed"
         end
+        environment = granted_environment(configuration)
         @command_runner.call(
           argv: argv, chdir: File.expand_path(project.fetch("path")),
-          environment: granted_environment(configuration)
+          environment: environment,
+          grants: configuration.grants,
+          secret_values: environment.values
         )
       end
 
@@ -271,15 +514,6 @@ module Hive
         configuration.contract.fetch("files").to_h do |entry|
           [ entry.fetch("path"), entry.fetch("sha256") ]
         end
-      end
-
-      def workflow_admission_unavailable!(**)
-        raise WorkflowAdmissionUnavailable,
-              "module-pinned workflow task admission is unavailable"
-      end
-
-      class WorkflowAdmissionUnavailable < Hive::ConfigError
-        def reason = "workflow_admission_unavailable"
       end
     end
   end

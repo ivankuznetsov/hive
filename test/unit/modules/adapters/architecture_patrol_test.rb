@@ -106,6 +106,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       assert options.fetch(:actions)
       assert_equal "/project/manifest.json", options.fetch(:job_manifest)
       assert_equal project, options.fetch(:project_entry)
+      assert_instance_of Hive::Modules::CapabilityContext, options.fetch(:capability_context)
       assert_equal true, options.fetch(:config_loader).call(project.fetch("path")).dig("refactor_patrol", "enabled")
       assert_equal "job-7", scheduler.completed.fetch(:dispatch_token).fetch(:job_id)
     end

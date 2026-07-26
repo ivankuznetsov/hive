@@ -61,7 +61,13 @@ module Hive
             migration_authority: mode == :mutator ? :module : :shadow
           )
           candidate = scheduler.candidates(now: Time.iso8601(event.fetch("occurred_at"))).first
-          return shadow(project, configuration, event, candidate ? "due" : "not_due") unless mode == :mutator
+          unless mode == :mutator
+            rationale = candidate ? "due" : "not_due"
+            return shadow(
+              project, configuration, event, rationale,
+              produced_capture: { "decision" => { "rationale" => rationale }, "effects" => [] }
+            )
+          end
           return 0 unless candidate
 
           run_cycle(project, context, cfg, configuration)
@@ -84,6 +90,7 @@ module Hive
           dry_run = configuration.settings.fetch("dry_run")
           unless dry_run
             context.require_repository_write!
+            context.require_filesystem_write!(".hive-state/patrol/**")
             context.require_github_mutation!("pull_requests")
             context.require_external_command!("gh")
             context.require_network_host!("api.github.com")
@@ -92,7 +99,7 @@ module Hive
             project.fetch("name"),
             {
               json: true, dry_run: dry_run, project_entry: project,
-              config_loader: ->(_path) { cfg }
+              config_loader: ->(_path) { cfg }, capability_context: context
             }
           ).call
           result.is_a?(Hash) && result["ok"] == false ? 1 : 0
@@ -124,7 +131,7 @@ module Hive
           )
         end
 
-        def shadow(project, configuration, event, rationale, comparable: true)
+        def shadow(project, configuration, event, rationale, comparable: true, produced_capture: nil)
           record = {
             "module" => "patrol", "hook" => event.fetch("event_name"),
             "event_id" => event.fetch("event_id"), "rationale" => rationale,
@@ -133,7 +140,7 @@ module Hive
           if @shadow_sink
             @shadow_sink.call(record)
           else
-            capture = legacy_capture(event)
+            capture = produced_capture || legacy_capture(event)
             shadow_comparator(project).record!(
               module_name: "patrol", trigger: event,
               legacy_decision: capture ? capture.fetch("decision") : {},

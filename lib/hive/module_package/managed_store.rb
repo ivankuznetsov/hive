@@ -63,11 +63,10 @@ module Hive
           transaction.health_validated!
           failpoint&.call(:health_validated)
           assert_generation_cleanup_safe_unlocked!(resolution.name, selection)
-          transaction.commit!
           commit&.call
-          cleanup_generations_unlocked!(resolution.name, selection)
-          cleanup_configurations_unlocked!(resolution.name, selection)
+          transaction.commit!
           transaction = nil
+          cleanup_after_commit_unlocked(resolution.name, selection)
           clear_failed_activation(resolution.name)
           selection
         rescue StandardError => e
@@ -369,12 +368,23 @@ module Hive
         end
         {
           "schema_version" => 1, "name" => resolution.name,
-          "installed" => true, "enabled" => current ? current.fetch("enabled") : true,
+          "installed" => true,
+          "enabled" => current&.fetch("installed", false) ? current.fetch("enabled") : true,
           "active" => active, "previous" => previous || current&.fetch("previous", nil),
           "epoch" => current ? current.fetch("epoch") + 1 : 1,
           "high_water_at" => high_water || now.utc.iso8601(6),
           "receipt_digest" => receipt_digest
         }
+      end
+
+      def cleanup_after_commit_unlocked(name, selection)
+        cleanup_generations_unlocked!(name, selection)
+        cleanup_configurations_unlocked!(name, selection)
+      rescue StandardError => error
+        warn(
+          "hive module: post-commit activation cleanup failed " \
+          "(#{error.class}); the activation remains committed"
+        )
       end
 
       def generation_identity(resolution, configuration)

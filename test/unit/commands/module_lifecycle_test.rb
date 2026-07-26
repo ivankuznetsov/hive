@@ -59,6 +59,42 @@ class ModuleLifecycleCommandTest < Minitest::Test
     end
   end
 
+  def test_uninstalled_tombstone_can_be_reinstalled_without_replaying_old_events
+    with_fixture do |project, store, package, resolution|
+      install_preview = install_command(project, store, package, resolution, dry_run: true).call!
+      install_command(
+        project, store, package, resolution, yes: true,
+        receipt: install_preview.fetch("preview_receipt")
+      ).call!
+      uninstall_preview = Hive::Commands::Module::StateChange.new(
+        "uninstall", "demo", project_root: project, json: true, stdout: StringIO.new,
+        yes: false, dry_run: true, receipt: nil, store: store, committer: ->(*) { }
+      ).call!
+      Hive::Commands::Module::StateChange.new(
+        "uninstall", "demo", project_root: project, json: true, stdout: StringIO.new,
+        yes: true, dry_run: false, receipt: uninstall_preview.fetch("preview_receipt"),
+        store: store, committer: ->(*) { }
+      ).call!
+      tombstone = store.selected("demo", include_tombstone: true)
+
+      reinstall_preview = install_command(
+        project, store, package, resolution, dry_run: true
+      ).call!
+      reinstalled = install_command(
+        project, store, package, resolution, yes: true,
+        receipt: reinstall_preview.fetch("preview_receipt")
+      ).call!
+
+      assert_equal "installed", reinstalled.fetch("status")
+      assert_equal tombstone.fetch("epoch") + 1, reinstalled.dig("selection", "epoch")
+      assert_operator(
+        Time.iso8601(reinstalled.dig("selection", "high_water_at")),
+        :>=, Time.iso8601(tombstone.fetch("high_water_at"))
+      )
+      assert_equal true, reinstalled.dig("selection", "enabled")
+    end
+  end
+
   def test_native_install_runs_structural_health_and_commits_one_setup_intent
     with_tmp_dir do |project|
       state = File.join(project, ".hive-state")

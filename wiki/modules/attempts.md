@@ -54,7 +54,8 @@ not a requirement of the module design.
 ## Storage and identity
 
 Attempt schema v3 generalizes the execution subject. Existing task attempts
-remain readable through their v1/v2 projections, while module hook attempts use
+remain readable through their v1/v2 projections (including v1 compatibility
+records without modern launch fields), while module hook attempts use
 a first-class `module_hook` subject containing the project, module, hook,
 event/decision identity, generation, configuration, and grant digests. Module
 hooks do not fabricate task folders merely to reuse the supervisor.
@@ -65,10 +66,14 @@ references, reconciliation, and capacity accounting. A module hook retry stays
 attached to its admitted occurrence; disabling or uninstalling the module
 closes pending retry authority instead of replaying it on re-enable.
 The private `hive __module-hook` worker also requires an installed,
-authenticated `HIVE_ATTEMPT_INTERNAL` context; possession of a persisted run
-snapshot alone cannot replay it. Lifecycle mutation and hook admission share
-the module-store lock, and a detached-launch handoff failure remains a bounded
-retrying run without advancing the hook cursor.
+authenticated attempt context; transport environment is deliberately scrubbed
+before routing. Its subject is validated directly against module/hook,
+project, and event identity rather than being misresolved as a task. Lifecycle
+mutation and hook admission share the module-store lock, and a detached-launch
+handoff failure remains a bounded retrying run without advancing the hook
+cursor. If the process is admitted before its decision receipt is appended,
+the next dispatch reconstructs the original launch receipt from the exact
+attempt subject.
 
 ```text
 $HIVE_HOME/attempts/v2/

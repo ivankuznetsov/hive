@@ -68,6 +68,21 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     def scan = @scan
   end
 
+  class SequencedAttemptStore
+    attr_reader :calls
+
+    def initialize(*scans)
+      @scans = scans
+      @calls = 0
+    end
+
+    def scan
+      value = @scans.fetch([ @calls, @scans.length - 1 ].min)
+      @calls += 1
+      value
+    end
+  end
+
   Attempt = Struct.new(:project, :module_name, :finished) do
     def final? = finished
     def module_hook? = true
@@ -148,6 +163,11 @@ class ModulesMigrationPatrolsTest < Minitest::Test
         project.fetch("path"), "patrol", configured_shadow: false,
         hive_state_path: project.fetch("hive_state_path")
       )
+      assert_equal Hive::Config.load(project.fetch("path")),
+                   Hive::Modules::Migration::Patrols.reviewed_config(
+                     project.fetch("path"), "patrol",
+                     hive_state_path: project.fetch("hive_state_path")
+                   )
       path = Hive::Modules::Migration::Patrols.state_file(
         project.fetch("path"), hive_state_path: project.fetch("hive_state_path")
       )
@@ -321,6 +341,27 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_coordinator_rechecks_attempts_for_each_quiescence_decision
+    with_project do |project|
+      store = FakeStore.new
+      supervisor = FakeSupervisor.new
+      supervisor.live = false
+      live_attempt = Attempt.new("demo", "architecture-patrol", false)
+      attempt_store = SequencedAttemptStore.new(
+        Scan.new(records: [], invalid_records: []),
+        Scan.new(records: [ live_attempt ], invalid_records: [])
+      )
+      result = Hive::Modules::Migration::Coordinator.new(
+        supervisor: supervisor, attempt_store: attempt_store,
+        registry: -> { [ project ] }, store_factory: ->(_state) { store }
+      ).tick(now: NOW).fetch(0)
+
+      assert_equal :pending, result.fetch(:status)
+      assert_equal({ "architecture-patrol" => "live" }, result.fetch(:blockers))
+      assert_equal 2, attempt_store.calls
+    end
+  end
+
   def test_coordinator_defaults_and_project_errors_are_bounded
     defaulted = Hive::Modules::Migration::Coordinator.new(
       supervisor: FakeSupervisor.new, attempt_store: FakeAttemptStore.new
@@ -401,6 +442,39 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       )
       assert_raises(Hive::ConfigError) { migration.cutover!(report: stale, now: NOW + 3) }
       assert_raises(Hive::ConfigError) { migration.rollback!(now: NOW + 4) }
+    end
+  end
+
+  def test_rollback_requires_a_fresh_shadow_window_before_recutover
+    with_project do |project|
+      store = FakeStore.new
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: store,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      old_report = Report.new(
+        eligible?: true, blockers: [],
+        configuration_digests: {
+          "patrol" => "a" * 64, "architecture-patrol" => "b" * 64
+        }
+      )
+      migration.adopt!(now: NOW)
+      migration.cutover!(report: old_report, now: NOW + 1)
+      migration.rollback!(now: NOW + 2)
+
+      assert_raises(Hive::ConfigError) do
+        migration.cutover!(report: old_report, now: NOW + 3)
+      end
+      restarted = migration.adopt!(now: NOW + 4)
+
+      assert_equal "shadowing", restarted.status
+      assert_equal((NOW + 4).iso8601(6), restarted.state.fetch("shadow_started_at"))
+      assert_empty restarted.state.fetch("cutover_selections")
+      assert_empty restarted.state.fetch("watermarks")
+      assert_raises(Hive::ConfigError) do
+        migration.cutover!(report: old_report, now: NOW + 5)
+      end
     end
   end
 

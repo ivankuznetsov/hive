@@ -70,6 +70,8 @@ module Hive
 
           def reviewed_config(project_root, module_name, hive_state_path: nil)
             state = read_state(project_root, hive_state_path: hive_state_path)
+            return Hive::Config.load(project_root) unless state
+
             binding = state&.dig("bindings", module_name.to_s)
             config = binding&.fetch("reviewed_config", nil)
             digest = binding&.fetch("reviewed_config_digest", nil)
@@ -93,6 +95,11 @@ module Hive
                 hive_state_path: hive_state_path
               )
             end
+          end
+
+          def with_migration_lock(project_root, hive_state_path: nil, shared: true, &block)
+            dir = File.dirname(state_file(project_root, hive_state_path: hive_state_path))
+            Hive::WorkflowPackage::MutationLock.with_lock(dir, shared: shared, &block)
           end
 
           def read_state(project_root, hive_state_path: nil)
@@ -161,14 +168,16 @@ module Hive
         def adopt!(now: Time.now.utc)
           mutate do
             state = read || initial_state(now)
-            if %w[shadowing module rolled_back].include?(state.fetch("status"))
+            if %w[shadowing module].include?(state.fetch("status"))
               next outcome("already_current", state)
             end
             bindings = module_bindings
             pending = state.merge(
               "status" => "pending", "bindings" => bindings,
               "admissions" => MODULES.to_h { |name| [ name, false ] },
-              "blockers" => {}, "updated_at" => timestamp(now)
+              "blockers" => {}, "cutover_selections" => {}, "watermarks" => {},
+              "shadow_started_at" => nil, "cutover_at" => nil,
+              "updated_at" => timestamp(now)
             )
             write(pending)
             blockers = quiescence_blockers
@@ -196,7 +205,7 @@ module Hive
           end
           mutate do
             state = read or raise Hive::ConfigError, "patrol module migration has not been adopted"
-            unless %w[shadowing cutover_pending rolled_back].include?(state.fetch("status"))
+            unless %w[shadowing cutover_pending].include?(state.fetch("status"))
               raise Hive::ConfigError, "patrol module migration is not ready for cutover"
             end
             assert_report_bindings!(state, report)

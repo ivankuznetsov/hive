@@ -53,22 +53,25 @@ module Hive
         installed_selections = selections.select { |selection| selection.fetch("installed") }
         return result(entry, :idle, 0, 0) if installed_selections.empty?
 
-        decisions = drain_events(
-          installed_selections, store: store, ledger: ledger, journal: journal,
-          dispatcher: dispatcher
-        )
         schedules = dispatch_schedules(
-          installed_selections, store: store, ledger: ledger, dispatcher: dispatcher,
+          installed_selections, store: store, ledger: ledger,
           entry: entry, now: now
+        )
+        decisions = drain_events(
+          installed_selections, store: store, ledger: ledger,
+          dispatcher: dispatcher
         )
         result(entry, :ok, decisions, schedules)
       rescue Hive::Error, SystemCallError, IOError, JSON::ParserError => e
         result(entry, :blocked, 0, 0, reason: "#{e.class}: #{e.message}")
       end
 
-      def drain_events(selections, store:, ledger:, journal:, dispatcher:)
+      def drain_events(selections, store:, ledger:, dispatcher:)
         count = 0
-        ledger.all.each do |event|
+        cursor_path = File.join(ledger.root, "daemon-event-cursor.json")
+        cursor = read_event_cursor(cursor_path)
+        page = ledger.events_after(cursor)
+        page.events.each_with_index do |event, index|
           selections.each do |selection|
             configuration = store.configuration(
               selection.fetch("name"), selection.dig("active", "configuration_digest")
@@ -76,17 +79,13 @@ module Hive
             configuration.contract.fetch("hooks").each do |hook|
               next unless EventScope.matches?(event: event, selection: selection, hook: hook)
 
-              seen = journal.for_binding(
-                module_name: selection.fetch("name"), hook_id: hook.fetch("id"),
-                event_id: event.fetch("event_id")
-              ).any?
-              next if seen
               dispatcher.dispatch(
                 module_name: selection.fetch("name"), hook_id: hook.fetch("id"), event: event
               )
               count += 1
             end
           end
+          write_event_cursor(cursor_path, cursor + index + 1)
         end
         count
       end
@@ -122,31 +121,57 @@ module Hive
         end
       end
 
-      def dispatch_schedules(selections, store:, ledger:, dispatcher:, entry:, now:)
+      def dispatch_schedules(selections, store:, ledger:, entry:, now:)
         schedules = selections.flat_map do |selection|
           configuration = store.configuration(
             selection.fetch("name"), selection.dig("active", "configuration_digest")
           )
           configuration.contract.fetch("hooks").flat_map { |hook| hook.fetch("schedules") }
         end.uniq
-        existing = ledger.all.select { |event| event["event_name"] == "schedule" }
-        router = EventRouter.new(
-          ledger: ledger, dispatcher: dispatcher,
-          project_id: entry.fetch("project_id"), project: entry.fetch("name"), clock: -> { now }
-        )
         schedules.count do |schedule|
-          previous = existing.select { |event| event.dig("payload", "schedule") == schedule }
-                             .map { |event| Time.iso8601(event.fetch("occurred_at")) }.max
+          previous = ledger.latest_schedule(schedule)
           baseline = previous || selections.map { |selection| Time.iso8601(selection.fetch("high_water_at")) }.min
           occurrence = @planner.due(schedule: schedule, after: baseline, now: now)
           next false unless occurrence
 
-          router.schedule(
-            schedule: schedule, due_at: occurrence.due_at,
-            missed_windows: occurrence.missed_windows
+          instant = occurrence.due_at.utc.iso8601(6)
+          ledger.record(
+            project_id: entry.fetch("project_id"), project: entry.fetch("name"),
+            event_name: "schedule", occurred_at: instant,
+            source: { "type" => "daemon_schedule", "id" => "daemon" },
+            idempotency_key: "schedule:#{schedule}:#{instant}",
+            payload: {
+              "schedule" => schedule, "due_at" => instant,
+              "missed_windows" => occurrence.missed_windows
+            },
+            recorded_at: now
           )
           true
         end
+      end
+
+      def read_event_cursor(path)
+        return 0 unless File.file?(path)
+
+        bytes = File.binread(path)
+        data = JSON.parse(bytes)
+        canonical = Hive::WorkflowPackage::CanonicalJSON.generate(data)
+        unless bytes == canonical && data.keys.sort == %w[cursor schema_version] &&
+               data["schema_version"] == 1 && data["cursor"].is_a?(Integer) &&
+               data["cursor"] >= 0
+          raise Hive::ConfigError, "module daemon event cursor is malformed"
+        end
+        data.fetch("cursor")
+      end
+
+      def write_event_cursor(path, cursor)
+        Hive::AtomicFile.write(
+          path,
+          Hive::WorkflowPackage::CanonicalJSON.generate(
+            "schema_version" => 1, "cursor" => cursor
+          ),
+          mode: 0o600
+        )
       end
 
       def reconcile_runs(store, selections, dispatcher:, now:)

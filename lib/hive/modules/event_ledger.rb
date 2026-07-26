@@ -16,6 +16,7 @@ module Hive
       def created? = status == :created
       def duplicate? = status == :duplicate
     end
+    EventPage = Data.define(:events, :cursor)
 
     # Strict project-local occurrence ledger. Each event is one immutable,
     # canonical file; the directory fsync is the append commit point. Unlike
@@ -51,7 +52,9 @@ module Hive
 
             raise ConflictingEvent, "module event idempotency key conflicts with existing occurrence"
           end
+          index = index_unlocked
           Hive::AtomicFile.write(event_path(event.fetch("event_id")), canonical(event), mode: 0o600)
+          update_index_unlocked(event, index)
           Hive::AtomicFile.fsync_directory(events_root)
         end
         EventResult.new(status: :created, event: event.freeze)
@@ -66,14 +69,88 @@ module Hive
       end
 
       def all
-        with_lock(shared: true) do
-          Dir.glob(File.join(events_root, "evt-*.json")).sort.map do |path|
-            parse(File.binread(path), expected_id: File.basename(path, ".json"))
-          end.freeze
+        with_lock do
+          index_unlocked.fetch("event_ids").map { |event_id| fetch_unlocked(event_id) }.freeze
         end
       end
 
+      def events_after(cursor)
+        offset = Integer(cursor)
+        raise EventLedgerError, "module event cursor is malformed" if offset.negative?
+
+        with_lock do
+          ids = index_unlocked.fetch("event_ids")
+          EventPage.new(
+            events: ids.drop(offset).map { |event_id| fetch_unlocked(event_id) }.freeze,
+            cursor: ids.length
+          )
+        end
+      rescue ArgumentError, TypeError
+        raise EventLedgerError, "module event cursor is malformed"
+      end
+
+      def latest_schedule(schedule)
+        value = with_lock do
+          index_unlocked.fetch("latest_schedules")[schedule.to_s]
+        end
+        value && Time.iso8601(value)
+      rescue ArgumentError
+        raise EventLedgerError, "module event schedule index is malformed"
+      end
+
       private
+
+      def update_index_unlocked(event, index)
+        index["event_ids"] << event.fetch("event_id")
+        if event.fetch("event_name") == "schedule"
+          schedule = event.dig("payload", "schedule")
+          current = index.fetch("latest_schedules")[schedule]
+          occurred_at = event.fetch("occurred_at")
+          index["latest_schedules"][schedule] = occurred_at if current.nil? || occurred_at > current
+        end
+        Hive::AtomicFile.write(index_path, canonical(index), mode: 0o600)
+      end
+
+      def index_unlocked
+        paths = Dir.glob(File.join(events_root, "evt-*.json")).sort
+        if File.file?(index_path)
+          bytes = File.binread(index_path)
+          index = JSON.parse(bytes)
+          valid = bytes == canonical(index) && index.is_a?(Hash) &&
+                  index.keys.sort == %w[event_ids latest_schedules schema_version] &&
+                  index["schema_version"] == 1 && index["event_ids"].is_a?(Array) &&
+                  index["event_ids"].uniq == index["event_ids"] &&
+                  index["latest_schedules"].is_a?(Hash)
+          expected = paths.map { |path| File.basename(path, ".json") }
+          return index if valid && index.fetch("event_ids").sort == expected
+        end
+        rebuild_index_unlocked(paths)
+      rescue JSON::ParserError, EncodingError
+        rebuild_index_unlocked(paths)
+      end
+
+      def rebuild_index_unlocked(paths)
+        events = paths.map do |path|
+          parse(File.binread(path), expected_id: File.basename(path, ".json"))
+        end
+        latest = {}
+        events.each do |event|
+          next unless event.fetch("event_name") == "schedule"
+
+          schedule = event.dig("payload", "schedule")
+          occurred_at = event.fetch("occurred_at")
+          latest[schedule] = occurred_at if latest[schedule].nil? || occurred_at > latest[schedule]
+        end
+        index = {
+          "schema_version" => 1,
+          "event_ids" => events.map { |event| event.fetch("event_id") },
+          "latest_schedules" => latest
+        }
+        Hive::AtomicFile.write(index_path, canonical(index), mode: 0o600)
+        index
+      end
+
+      def index_path = File.join(events_root, "index.json")
 
       def build_event(project_id:, project:, event_name:, occurred_at:, source:,
                       idempotency_key:, payload:, recorded_at:)

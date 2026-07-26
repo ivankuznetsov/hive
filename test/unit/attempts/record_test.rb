@@ -177,6 +177,26 @@ class AttemptsRecordTest < Minitest::Test
     refute legacy.key?("subject")
   end
 
+  def test_legacy_v1_compatibility_record_is_normalized_in_memory
+    legacy = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
+    legacy["schema_version"] = 1
+    legacy["compatibility"] = true
+    legacy["worker_argv"] = []
+    legacy["claim_capability_digest"] = nil
+    legacy.delete("subject")
+    legacy.delete("ownership_generation")
+    legacy.delete("task_input_epoch")
+
+    record = Hive::Attempts::Record.new(legacy)
+
+    assert_equal Hive::Attempts::Record::SCHEMA_VERSION, record["schema_version"]
+    assert_equal "generation-1", record.ownership_generation
+    assert_equal 0, record.task_input_epoch
+    assert_equal "task_stage", record.subject_kind
+    assert_equal true, record["diagnostics"].fetch("legacy_compatibility")
+    refute record.to_h.key?("compatibility")
+  end
+
   def test_module_hook_subject_is_first_class_and_strict
     subject = {
       "kind" => "module_hook", "project_id" => "project-1", "module" => "patrol",
@@ -200,7 +220,7 @@ class AttemptsRecordTest < Minitest::Test
   end
 
   def test_unsupported_schema_versions_are_rejected
-    [ 1, 99 ].each do |schema_version|
+    [ 0, 99 ].each do |schema_version|
       invalid = Hive::Attempts::Record.launching(
         **identity, now: NOW, launch_timeout_sec: 30
       ).to_h.merge("schema_version" => schema_version)

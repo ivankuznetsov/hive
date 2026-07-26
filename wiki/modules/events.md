@@ -41,7 +41,11 @@ payload digest. Re-delivery with the same identity and payload returns the
 existing occurrence; conflicting reuse fails closed. Every hook evaluation is
 paired with a `Hive::Modules::DecisionJournal` launch or skip receipt, including
 generation/configuration/grant identity and the linked attempt when admitted.
-The daemon is the sole autonomous dispatcher.
+The daemon is the sole autonomous dispatcher. The ledger maintains a canonical
+event-id and latest-schedule index, while the daemon durably advances an event
+offset after each fully evaluated occurrence. Idle ticks therefore do not
+reparse retained event or decision histories; an absent or crash-stale index is
+rebuilt from the immutable event files before use.
 
 Legacy registry rows derive the same deterministic project UUID during
 read-time projection and daemon persistence, so events written before backfill

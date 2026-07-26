@@ -36,7 +36,7 @@ class RecoveryMigrationTest < Minitest::Test
       migrated = JSON.parse(
         File.binread(File.join(state_home, "attempts", "v2", "records", "v1.json"))
       )
-      assert_equal 2, migrated.fetch("schema_version")
+      assert_equal Hive::Attempts::Record::SCHEMA_VERSION, migrated.fetch("schema_version")
       assert_equal "generation-v1", migrated.fetch("ownership_generation")
       assert_equal 0, migrated.fetch("task_input_epoch")
       assert_equal "generation-v1", migrated.dig("receipt", "ownership_generation")
@@ -85,7 +85,7 @@ class RecoveryMigrationTest < Minitest::Test
         Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
         store = Hive::Attempts::Store.new
 
-        assert_equal 2, store.fetch("v1")["schema_version"]
+        assert_equal Hive::Attempts::Record::SCHEMA_VERSION, store.fetch("v1")["schema_version"]
         assert_equal File.join(state_home, "attempts", "v2"), store.root
       end
       refute_path_exists File.join(state_home, "attempts", "v1")

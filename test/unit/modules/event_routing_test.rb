@@ -85,6 +85,10 @@ class ModulesEventRoutingTest < Minitest::Test
     assert_equal "pull_request.merged", record.fetch(:event_name)
     assert_equal "owner/repo#7", record.dig(:source, "id")
     assert_equal manifest.fetch("manifest_checksum"), record.dig(:payload, "manifest_digest")
+    assert_equal(
+      manifest.fetch("job_id"),
+      record.dig(:payload, "legacy_mutator_capture", "decision", "job_id")
+    )
 
     without_identity = { "name" => "demo", "path" => File.expand_path("/project") }
     with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ without_identity ] }) do
@@ -130,6 +134,7 @@ class ModulesEventRoutingTest < Minitest::Test
         workflow: Workflow.new(id: :coding, stages: [ Stage.new(dir: "8-finalize") ]),
         state_file: File.join(root, "task.md")
       )
+      File.write(task.state_file, "# Task\n")
       publisher = Hive::Modules::EventPublisher.new(
         ledger_factory: ->(_entry) { ledger }, clock: -> { NOW }
       )

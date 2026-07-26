@@ -5,14 +5,14 @@
   "platform": "openclaw",
   "invocation": "/hive",
   "skill_version": "0.1.3",
-  "canonical_digest": "6439717839ad2f916c4d69b43458f33c8f6ad20d4809483c596dcb4ccd47d2d7",
+  "canonical_digest": "25a97d84e6ffd2838c6b4dbe52af5c25fea22902964e7adb40aab8e05bf454b2",
   "hive_version": "0.6.9",
   "files": {
-    "SKILL.md": "47e2016e77c03fa6d85b556aec0aef4644a73398030b856d29b89e418e7111d4",
+    "SKILL.md": "c21eb38d6cb237dfc5b774adae50cd7168c3eabdec0fd33d39910440e8a297e6",
     "references/recovery.md": "feb3a27a582673d87a46742f2935ee6e1067e3123ef865478263375c1bfd125c",
     "references/safety.md": "1f809ee3552c75c07d066c88638f379ba513f0e4133847a100f9439e431de28a",
     "references/setup-and-platforms.md": "f7e3079e8a0b3de79ebce6257c2ab576d22649a97c988043f3053471ee350d8b",
     "references/status-and-watch.md": "9cff9c6eef5344646b682c7f005d56334410f20c6a9a5632b29c2bd7f62b9d49",
-    "references/workflow-actions.md": "fc068619f46d733ffe1ae8a7aafc2edd6869593971bf9666d24fd05f03e2f5e2"
+    "references/workflow-actions.md": "44e8757613a68703ba3c3d58903b7e6c3ac4878ef24eac0711865ba5a6b8b91b"
   }
 }

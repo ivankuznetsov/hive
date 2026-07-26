@@ -58,7 +58,14 @@ module Hive
             "repository" => source.fetch("repository"), "number" => source.fetch("number"),
             "merge_commit" => source.fetch("merge_sha"),
             "manifest_digest" => manifest.fetch("manifest_checksum"),
-            "job_id" => manifest.fetch("job_id")
+            "job_id" => manifest.fetch("job_id"),
+            "legacy_mutator_capture" => {
+              "decision" => {
+                "rationale" => "due", "job_id" => manifest.fetch("job_id"),
+                "phase" => "discovery"
+              },
+              "effects" => [ { "kind" => "job", "id" => manifest.fetch("job_id") } ]
+            }
           },
           recorded_at: @clock.call
         )

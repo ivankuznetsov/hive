@@ -67,6 +67,40 @@ class ModulesDispatcherTest < Minitest::Test
     end
   end
 
+  def test_recovers_launch_receipt_when_attempt_admission_preceded_decision_append
+    with_runtime do |runtime|
+      dispatcher = runtime.fetch(:dispatcher)
+      context = dispatcher.send(:load_context, "demo", "task")
+      hook_attempt = Hive::Modules::HookAttempt.build(
+        project: "demo", project_id: "project-1", module_name: "demo",
+        hook: context.fetch(:hook), selection: context.fetch(:selection),
+        configuration: context.fetch(:configuration), event: runtime.fetch(:event),
+        package_root: runtime.fetch(:store).generation_path(
+          "demo", context.dig(:selection, "active", "source_commit")
+        )
+      )
+      dispatcher.send(:persist_run, "demo", hook_attempt, runtime.fetch(:event))
+      admitted = runtime.fetch(:attempt_dispatcher).dispatch_module_hook(
+        generation: hook_attempt, subject: hook_attempt.subject, argv: hook_attempt.argv,
+        request_id: "module:#{runtime.dig(:event, 'event_id')}:task",
+        provider: "module", interactive: false, now: NOW, project_root: runtime.fetch(:root)
+      )
+      assert admitted.accepted?
+      assert_empty runtime.fetch(:journal).all
+
+      recovered = dispatcher.dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+
+      assert recovered.launched?
+      assert_equal admitted.attempt.attempt_id, recovered.decision.fetch("attempt_id")
+      assert_equal "recovered_launch", recovered.attempt_result.reason
+      assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
+      assert_equal 1, runtime.fetch(:launcher).launches.size
+      assert_equal 1, runtime.fetch(:journal).all.size
+    end
+  end
+
   def test_disable_and_activation_barrier_skip_without_attempt_and_barrier_preserves_cursor
     with_runtime do |runtime|
       store = runtime.fetch(:store)

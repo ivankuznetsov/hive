@@ -25,9 +25,8 @@ module Hive
         end
 
         def tick(now: Time.now.utc)
-          scan = @attempt_store.scan
           Array(@registry.call).filter_map do |entry|
-            coordinate(entry, scan: scan, now: now)
+            coordinate(entry, now: now)
           rescue Hive::Error, SystemCallError, IOError, JSON::ParserError => e
             {
               project: entry && entry["name"], status: :blocked,
@@ -38,7 +37,7 @@ module Hive
 
         private
 
-        def coordinate(entry, scan:, now:)
+        def coordinate(entry, now:)
           store = @store_factory.call(entry.fetch("hive_state_path"))
           selections = store.inspect_selections.to_h { |selection| [ selection.fetch("name"), selection ] }
           return unless Patrols::MODULES.all? { |name| selections.dig(name, "installed") == true }
@@ -51,7 +50,7 @@ module Hive
             project_root: entry.fetch("path"), project: entry.fetch("name"),
             hive_state_path: entry.fetch("hive_state_path"), module_store: store,
             quiescence_probe: lambda do |module_name, _root|
-              quiescence(entry, module_name, scan)
+              quiescence(entry, module_name)
             end
           )
           outcome = case state&.fetch("status")
@@ -69,7 +68,8 @@ module Hive
           }
         end
 
-        def quiescence(entry, module_name, scan)
+        def quiescence(entry, module_name)
+          scan = @attempt_store.scan
           return :ambiguous unless scan.invalid_records.empty?
           return :live if @supervisor.in_flight?(
             project: entry.fetch("name"), stage: STAGES.fetch(module_name)

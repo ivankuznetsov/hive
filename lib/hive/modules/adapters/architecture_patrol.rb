@@ -67,19 +67,30 @@ module Hive
           )
           candidate = select_candidate(scheduler.candidates(now: event_time(event)), hook_id, event)
           rationale = candidate ? "due" : "not_due"
-          return shadow(project, configuration, event, rationale, candidate) if mode == :shadow
+          if mode == :shadow
+            capture = {
+              "decision" => {
+                "rationale" => rationale, "job_id" => candidate && candidate[:job_id],
+                "phase" => candidate && candidate.fetch(:action_phase, :discovery).to_s
+              },
+              "effects" => []
+            }
+            return shadow(
+              project, configuration, event, rationale, candidate, produced_capture: capture
+            )
+          end
           return 0 unless candidate
 
           require_mutation_capabilities!(context) unless configuration.settings.fetch("dry_run")
-          run_candidate(project, cfg, configuration, scheduler, candidate, event)
+          run_candidate(project, cfg, configuration, context, scheduler, candidate, event)
         end
 
-        def run_candidate(project, cfg, configuration, scheduler, candidate, event)
+        def run_candidate(project, cfg, configuration, context, scheduler, candidate, event)
           reserved = scheduler.reserve(candidate, now: event_time(event))
           options = {
             json: true, dry_run: configuration.settings.fetch("dry_run"),
             job_manifest: reserved.fetch(:manifest_path), project_entry: project,
-            config_loader: ->(_path) { cfg }
+            config_loader: ->(_path) { cfg }, capability_context: context
           }
           options[:actions] = true if reserved.fetch(:action_phase, :discovery).to_sym == :action
           envelope = @command_factory.call(project.fetch("name"), options).call
@@ -143,7 +154,8 @@ module Hive
           )
         end
 
-        def shadow(project, configuration, event, rationale, candidate = nil, comparable: true)
+        def shadow(project, configuration, event, rationale, candidate = nil, comparable: true,
+                   produced_capture: nil)
           record = {
             "module" => "architecture-patrol", "hook" => event.fetch("event_name"),
             "event_id" => event.fetch("event_id"), "rationale" => rationale,
@@ -154,7 +166,7 @@ module Hive
           if @shadow_sink
             @shadow_sink.call(record)
           else
-            capture = legacy_capture(event)
+            capture = produced_capture || legacy_capture(event)
             decision = {
               "rationale" => rationale, "job_id" => record["job_id"], "phase" => record["phase"]
             }

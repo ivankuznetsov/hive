@@ -37,8 +37,9 @@ described below.
 Installation and change are preview-bound. First run the exact lifecycle
 command with `--dry-run --json`, review every setting, hook, binding, and
 individual grant, then apply only with the matching receipt and explicit human
-approval. Never infer a missing non-interactive choice or grant. `hive module
-migration status` is read-only; `migration report`, `cutover`, and `rollback`
+approval. Never infer a missing non-interactive choice or grant.
+`hive module migration status --json` is the exact read-only migration
+diagnostic; `migration report`, `cutover`, and `rollback`
 are administrative, human-only transitions and are not `hive act` actions.
 
 For reviewed Honeycomb workflows, preview the exact no-write operation first:

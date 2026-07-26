@@ -14,7 +14,7 @@ module Hive
     class Record
       SCHEMA = "hive-attempt"
       SCHEMA_VERSION = 3
-      SUPPORTED_SCHEMA_VERSIONS = [ 2, SCHEMA_VERSION ].freeze
+      SUPPORTED_SCHEMA_VERSIONS = [ 1, 2, SCHEMA_VERSION ].freeze
       SUBJECT_KINDS = %w[task_stage module_hook].freeze
       STATES = %w[launching running terminal lost].freeze
       TERMINAL_OUTCOMES = %w[succeeded failed cancelled].freeze
@@ -226,7 +226,8 @@ module Hive
         unless worker_argv.is_a?(Array) && worker_argv.all? { |value| value.is_a?(String) && !value.empty? }
           raise InvalidRecord, "attempt record worker_argv must contain only non-empty strings"
         end
-        if worker_argv.empty? || !Capability.valid_digest?(@data["claim_capability_digest"])
+        if !legacy_compatibility? &&
+           (worker_argv.empty? || !Capability.valid_digest?(@data["claim_capability_digest"]))
           raise InvalidRecord, "durable attempt requires worker argv and a capability digest"
         end
         unless @data["inherited_outputs"].is_a?(Array) && @data["current_outputs"].is_a?(Array)
@@ -280,19 +281,38 @@ module Hive
         end
         if state == "running"
           raise InvalidRecord, "running attempt requires wrapper identity" unless @data["wrapper"].is_a?(Hash)
-          raise InvalidRecord, "running attempt requires heartbeat deadline" if @data["heartbeat_deadline"].nil?
+          if @data["heartbeat_deadline"].nil? && !legacy_compatibility?
+            raise InvalidRecord, "running attempt requires heartbeat deadline"
+          end
         end
       end
 
       def normalize_subject_bridge!
         source_version = @data["schema_version"]
-        if source_version == 2
+        if source_version == 1
+          compatibility = @data.delete("compatibility")
+          @data["ownership_generation"] ||= @data["task_generation"]
+          @data["task_input_epoch"] ||= 0
+          if compatibility
+            @data["diagnostics"] ||= {}
+            @data["diagnostics"]["legacy_compatibility"] = true
+          end
+          if @data["receipt"].is_a?(Hash)
+            @data["receipt"]["ownership_generation"] ||= @data["ownership_generation"]
+            @data["receipt"]["task_input_epoch"] ||= @data["task_input_epoch"]
+          end
+        end
+        if source_version <= 2
           @data["subject"] ||= {
             "kind" => "task_stage", "task_id" => @data["task_id"],
             "task_slug" => @data["task_slug"], "intended_stage" => @data["intended_stage"]
           }
         end
         @data["schema_version"] = SCHEMA_VERSION
+      end
+
+      def legacy_compatibility?
+        @data.dig("diagnostics", "legacy_compatibility") == true
       end
 
       def validate_subject!

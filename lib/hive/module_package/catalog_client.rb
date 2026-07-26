@@ -35,6 +35,7 @@ module Hive
       end
 
       def fetch(source, destination:)
+        materialized = false
         name, requested_ref = parse_source(source)
         destination = File.expand_path(destination)
         if File.exist?(destination) && !Dir.empty?(destination)
@@ -48,11 +49,13 @@ module Hive
           catalog_bytes = git!("-C", checkout, "show", "#{catalog_commit}:catalog.json", binary: true)
           schema = catalog_schema(catalog_bytes)
           if schema == Hive::WorkflowPackage::RegistryClient::CATALOG_SCHEMA
+            materialized = true
             return fetch_legacy(source, destination)
           end
 
           catalog = parse_catalog(catalog_bytes)
           resolution = resolve_catalog(catalog, name, requested_ref, catalog_commit)
+          materialized = true
           materialize(checkout, resolution, destination)
           result = Validator.validate!(
             destination, expected_name: name,
@@ -63,7 +66,7 @@ module Hive
           resolution.with(descriptor: result.descriptor)
         end
       rescue StandardError
-        if destination
+        if destination && materialized
           FileUtils.rm_rf(destination)
           FileUtils.mkdir_p(destination, mode: 0o700)
         end

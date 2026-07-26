@@ -82,6 +82,7 @@ class ModulesAdaptersPatrolTest < Minitest::Test
       name, options = calls.fetch(0)
       assert_equal project.fetch("name"), name
       assert_equal project, options.fetch(:project_entry)
+      assert_instance_of Hive::Modules::CapabilityContext, options.fetch(:capability_context)
       effective = options.fetch(:config_loader).call(project.fetch("path"))
       assert_equal "timer", effective.dig("patrol", "trigger")
       assert_equal 14_400, effective.dig("patrol", "poll_interval_sec")

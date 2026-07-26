@@ -162,14 +162,13 @@ Shadow comparison no longer compares a module decision with itself. A
 comparable record requires an independently produced
 `legacy_mutator_capture` in the immutable occurrence, and cutover rebuilds the
 report from the current shadow directory instead of trusting a saved
-`eligible` bit. Production legacy producers do not yet emit that capture, so
-rollout remains hard-closed and the dogfood report is explicitly not delivery
-evidence.
+`eligible` bit. Schedule evaluation and the existing merged-PR reconciler
+produce those captures without adding a second GitHub poller.
 
-`Hive::Modules::CapabilityContext` preflights the project-local installed grants
-before either adapter invokes its legacy engine. First-party modules receive no
-consent bypass. Mutator cutover remains blocked until those engines accept
-capability-bound side-effect gateways.
+`Hive::Modules::CapabilityContext` checks the project-local installed grants
+before either adapter invokes its legacy engine and is passed into both engines
+for repeated checks at observation, state-write, and mutation boundaries.
+First-party modules receive no consent bypass.
 
 ## Safety invariants
 

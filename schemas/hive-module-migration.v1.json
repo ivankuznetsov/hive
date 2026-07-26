@@ -2,31 +2,47 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hivecli.sh/schemas/hive-module-migration.v1.json",
   "title": "Hive patrol module migration v1",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "schema", "schema_version", "project", "project_root", "epoch", "status",
-    "owners", "admissions", "bindings", "blockers", "cutover_selections",
-    "watermarks", "shadow_started_at", "cutover_at", "rollback_at", "updated_at"
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "project", "project_root", "epoch", "status",
+        "owners", "admissions", "bindings", "blockers", "cutover_selections",
+        "watermarks", "shadow_started_at", "cutover_at", "rollback_at", "updated_at"
+      ],
+      "properties": {
+        "schema": {"const": "hive-module-migration"},
+        "schema_version": {"const": 1},
+        "project": {"type": "string", "minLength": 1},
+        "project_root": {"type": "string", "minLength": 1},
+        "epoch": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["pending", "shadowing", "cutover_pending", "module", "rollback_pending", "rolled_back"]},
+        "owners": {"$ref": "#/$defs/owners"},
+        "admissions": {"$ref": "#/$defs/admissions"},
+        "bindings": {"type": "object"},
+        "blockers": {"type": "object"},
+        "cutover_selections": {"type": "object"},
+        "watermarks": {"type": "object"},
+        "shadow_started_at": {"type": ["string", "null"]},
+        "cutover_at": {"type": ["string", "null"]},
+        "rollback_at": {"type": ["string", "null"]},
+        "updated_at": {"type": "string"}
+      }
+    },
+    {
+      "type": "object",
+      "required": ["schema", "schema_version", "ok", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": {"const": "hive-module-migration"},
+        "schema_version": {"const": 1},
+        "ok": {"const": false},
+        "error_kind": {"type": "string"},
+        "exit_code": {"type": "integer"},
+        "message": {"type": "string"}
+      }
+    }
   ],
-  "properties": {
-    "schema": {"const": "hive-module-migration"},
-    "schema_version": {"const": 1},
-    "project": {"type": "string", "minLength": 1},
-    "project_root": {"type": "string", "minLength": 1},
-    "epoch": {"type": "integer", "minimum": 1},
-    "status": {"enum": ["pending", "shadowing", "cutover_pending", "module", "rollback_pending", "rolled_back"]},
-    "owners": {"$ref": "#/$defs/owners"},
-    "admissions": {"$ref": "#/$defs/admissions"},
-    "bindings": {"type": "object"},
-    "blockers": {"type": "object"},
-    "cutover_selections": {"type": "object"},
-    "watermarks": {"type": "object"},
-    "shadow_started_at": {"type": ["string", "null"]},
-    "cutover_at": {"type": ["string", "null"]},
-    "rollback_at": {"type": ["string", "null"]},
-    "updated_at": {"type": "string"}
-  },
   "$defs": {
     "owners": {
       "type": "object", "additionalProperties": false,

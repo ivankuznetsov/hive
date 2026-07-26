@@ -51,7 +51,7 @@ module Hive
             current = store.selected(resolution.name, include_tombstone: true)
             current_configuration = active_configuration(current)
             issued_at, supplied_digest = receipt_parts_for_apply
-            if @operation == "install" && current
+            if @operation == "install" && current&.fetch("installed")
               candidate_configuration = Hive::ModulePackage::Configuration.build(
                 descriptor, generation: resolution, settings: parse_settings(descriptor),
                 hooks: parse_hooks, grants: parse_grants(descriptor, current_configuration)

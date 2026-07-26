@@ -132,14 +132,18 @@ task default: :test
 ## Test helpers (`test/test_helper.rb`)
 
 - Normal test processes replace `HOME`, `HIVE_HOME`, every persisted XDG root,
-  the Claude/Codex/Pi/Grok config roots, `GH_CONFIG_DIR`, and
-  `GIT_CONFIG_GLOBAL` with paths under one disposable `hive-test-user*`
-  directory, then remove it after the suite. This keeps subprocesses hermetic
-  even when the caller is a daemon exporting real user paths: tests cannot
-  recreate legacy attempt roots, rewrite managed agent skills, consume real
-  GitHub configuration, or change credential helpers, hooks, and signing
-  settings. The authenticated `rake smoke` task explicitly opts out because it
-  exists to exercise real operator logins; direct smoke-file runs must set
+  the Claude/Codex/Pi/Grok config roots, and `GH_CONFIG_DIR` with paths under
+  one disposable `hive-test-user*` directory, then remove it after the suite.
+  Git's standard global files follow the temporary `HOME` and
+  `XDG_CONFIG_HOME`; tests explicitly remove any inherited
+  `GIT_CONFIG_GLOBAL`, because the babysitter correctly rejects that
+  caller-controlled execution channel. This keeps subprocesses hermetic even
+  when the caller is a daemon
+  exporting real user paths: tests cannot recreate legacy attempt roots,
+  rewrite managed agent skills, consume real GitHub configuration, or change
+  credential helpers, hooks, and signing settings. The authenticated
+  `rake smoke` task explicitly opts out because it exists to exercise real
+  operator logins; direct smoke-file runs must set
   `HIVE_TEST_ALLOW_REAL_USER_ENV=1` deliberately.
 - `with_tmp_dir` — `Dir.mktmpdir("hive-test", &block)`.
 - `with_tmp_git_repo` — `git init -b master`, configures user/email and disables GPG signing, makes one initial commit, yields the path.

@@ -32,6 +32,10 @@ unless ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
   HIVE_TEST_USER_ROOT = Dir.mktmpdir("hive-test-user").freeze
   test_home = File.join(HIVE_TEST_USER_ROOT, "home")
   FileUtils.mkdir_p(test_home)
+  # HOME and XDG_CONFIG_HOME contain Git's standard global config files.
+  # Remove an inherited override instead of replacing it: the babysitter
+  # correctly rejects any caller-controlled GIT_CONFIG_GLOBAL passthrough.
+  ENV.delete("GIT_CONFIG_GLOBAL")
   {
     "HOME" => test_home,
     "HIVE_HOME" => File.join(HIVE_TEST_USER_ROOT, "hive"),
@@ -44,8 +48,7 @@ unless ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
     "CODEX_HOME" => File.join(test_home, ".codex"),
     "PI_CODING_AGENT_DIR" => File.join(test_home, ".pi", "agent"),
     "GROK_HOME" => File.join(test_home, ".grok"),
-    "GH_CONFIG_DIR" => File.join(HIVE_TEST_USER_ROOT, "gh"),
-    "GIT_CONFIG_GLOBAL" => File.join(HIVE_TEST_USER_ROOT, "gitconfig")
+    "GH_CONFIG_DIR" => File.join(HIVE_TEST_USER_ROOT, "gh")
   }.each { |key, value| ENV[key] = value }
   Minitest.after_run do
     FileUtils.rm_rf(HIVE_TEST_USER_ROOT)

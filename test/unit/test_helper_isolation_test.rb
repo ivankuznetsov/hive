@@ -13,8 +13,7 @@ class TestHelperIsolationTest < Minitest::Test
     "CODEX_HOME" => "home/.codex",
     "PI_CODING_AGENT_DIR" => "home/.pi/agent",
     "GROK_HOME" => "home/.grok",
-    "GH_CONFIG_DIR" => "gh",
-    "GIT_CONFIG_GLOBAL" => "gitconfig"
+    "GH_CONFIG_DIR" => "gh"
   }.freeze
 
   def test_operator_user_environment_is_disposable
@@ -25,5 +24,6 @@ class TestHelperIsolationTest < Minitest::Test
     USER_ENV_PATHS.each do |name, relative|
       assert_equal File.join(root, relative), File.expand_path(ENV.fetch(name)), name
     end
+    refute ENV.key?("GIT_CONFIG_GLOBAL")
   end
 end

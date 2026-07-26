@@ -1,0 +1,120 @@
+#!/usr/bin/env ruby
+
+require "digest"
+require "fileutils"
+require "json"
+require "open3"
+require "rubygems/package"
+require "tmpdir"
+
+ROOT = File.expand_path("..", __dir__)
+$LOAD_PATH.unshift File.join(ROOT, "lib")
+require "agent_cli_runtime/version"
+
+gem_path = File.expand_path(ARGV.fetch(0) {
+  abort "usage: verify-candidate PATH_TO_GEM [EXPECTED_SHA256]"
+})
+expected_sha = ARGV[1]
+abort "candidate gem not found: #{gem_path}" unless File.file?(gem_path)
+
+sha256 = Digest::SHA256.file(gem_path).hexdigest
+if expected_sha && sha256 != expected_sha
+  abort "candidate sha256 mismatch: expected #{expected_sha}, got #{sha256}"
+end
+
+package = Gem::Package.new(gem_path)
+spec = package.spec
+abort "wrong gem name: #{spec.name}" unless spec.name == "agent-cli-runtime"
+abort "wrong gem version: #{spec.version}" unless
+  spec.version.to_s == AgentCliRuntime::VERSION
+abort "wrong executable inventory" unless spec.executables == [ "agent-runtime" ]
+abort "wrong Ruby requirement" unless
+  spec.required_ruby_version == Gem::Requirement.new(">= 3.4.0")
+
+required = %w[
+  README.md
+  CHANGELOG.md
+  LICENSE.txt
+  agent-cli-runtime.gemspec
+  exe/agent-runtime
+  lib/agent_cli_runtime.rb
+  lib/agent_cli_runtime/version.rb
+]
+missing = required - spec.files
+abort "candidate missing files: #{missing.join(', ')}" unless missing.empty?
+unexpected = spec.files.grep(%r{\A(?:test|dist)/})
+abort "candidate contains repository-only files: #{unexpected.join(', ')}" unless
+  unexpected.empty?
+
+dependencies = spec.runtime_dependencies.map(&:name).sort
+abort "wrong runtime dependencies: #{dependencies.inspect}" unless
+  dependencies == %w[json open3 timeout]
+
+Dir.mktmpdir("agent-cli-runtime-candidate") do |sandbox|
+  gem_home = File.join(sandbox, "gems")
+  bin_dir = File.join(sandbox, "bin")
+  FileUtils.mkdir_p([ gem_home, bin_dir ])
+  install_env = {
+    "GEM_HOME" => gem_home,
+    "GEM_PATH" => gem_home,
+    "BUNDLE_GEMFILE" => nil,
+    "RUBYLIB" => nil,
+    "RUBYOPT" => nil
+  }
+  install_command = [
+    Gem.ruby, "-S", "gem", "install", gem_path,
+    "--install-dir", gem_home,
+    "--bindir", bin_dir,
+    "--no-document",
+    "--source", "https://rubygems.org"
+  ]
+  install_out, install_err, install_status =
+    Open3.capture3(install_env, *install_command)
+  abort "#{install_out}\n#{install_err}" unless install_status.success?
+
+  runtime_env = install_env.merge(
+    "PATH" => "#{bin_dir}#{File::PATH_SEPARATOR}#{ENV.fetch('PATH', '')}"
+  )
+  require_script = <<~RUBY
+    require "agent_cli_runtime"
+    abort "Hive loaded unexpectedly" if defined?(Hive)
+    abort "wrong version" unless
+      AgentCliRuntime::VERSION == #{AgentCliRuntime::VERSION.dump}
+    abort "wrong providers" unless AgentCliRuntime::Profiles.names == %i[claude codex pi grok]
+  RUBY
+  _out, err, status = Open3.capture3(
+    runtime_env, Gem.ruby, "-e", require_script
+  )
+  abort err unless status.success?
+
+  version_out, version_err, version_status = Open3.capture3(
+    runtime_env, File.join(bin_dir, "agent-runtime"), "--version"
+  )
+  abort version_err unless version_status.success?
+  abort "wrong CLI version: #{version_out.inspect}" unless
+    version_out == "#{AgentCliRuntime::VERSION}\n"
+
+  probe_env = runtime_env.merge(
+    "AGENT_CLI_RUNTIME_CODEX_BIN" => "/missing/codex"
+  )
+  probe_out, probe_err, probe_status = Open3.capture3(
+    probe_env,
+    File.join(bin_dir, "agent-runtime"),
+    "probe", "codex", "--json"
+  )
+  abort probe_err unless probe_err.empty?
+  abort "missing prerequisite probe should exit 1" unless
+    probe_status.exitstatus == 1
+  payload = JSON.parse(probe_out)
+  abort "wrong CLI schema" unless payload["schema_version"] == 1
+  abort "wrong CLI provider" unless
+    payload.fetch("probes").map { |probe| probe["provider"] } == [ "codex" ]
+end
+
+puts JSON.generate(
+  schema_version: 1,
+  gem: gem_path,
+  name: spec.name,
+  version: spec.version.to_s,
+  sha256: sha256
+)

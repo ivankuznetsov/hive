@@ -69,6 +69,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[index]] — `wiki/index.md`
 - [[log]] — `wiki/log.md`
 - [[modules/agent]] — `wiki/modules/agent.md`
+- [[modules/agent_cli_runtime]] — `wiki/modules/agent_cli_runtime.md`
 - [[modules/agent_profile]] — `wiki/modules/agent_profile.md`
 - [[modules/attempts]] — `wiki/modules/attempts.md`
 - [[modules/atomic_file]] — `wiki/modules/atomic_file.md`

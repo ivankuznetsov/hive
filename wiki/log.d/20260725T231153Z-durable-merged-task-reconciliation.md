@@ -53,3 +53,7 @@
   `hive-operational-status.v3`, and `hive-act.v2` remain. Superseded schemas
   and compatibility assertions were removed so recovery is represented by
   one current contract rather than another legacy branch.
+- Documented the three closure-evidence `gh api` calls as Brakeman false
+  positives: every dynamic value passes the strict repository, host, commit,
+  or branch validator before `Hive::Gh.capture3` gives discrete arguments to
+  `Process.spawn`, so no shell interprets an endpoint.

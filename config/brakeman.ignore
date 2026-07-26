@@ -17,10 +17,6 @@
       "note": "False positive: array-form Open3.capture3 (no shell). slug is a resolved 9-done task slug (ADR-012 regex) interpolated only into the gh PR title/body text, not a shell command. hive bench submit."
     },
     {
-      "fingerprint": "441ba8780a4fcbfa2d292765749020b9457cae8f2e854d8036df4d049ed70781",
-      "note": "False positive. Open3.capture3 array form in Worktree.fetch_origin_branch: each argument is a discrete argv element passed to execve(2), not a shell. branch_name is a hive task slug / dependency branch name interpolated only into a single refspec literal (`+<branch>:refs/remotes/origin/<branch>`) that becomes one argv member; no shell ever sees it. The first arg is a static GIT_* env hash, not a command string."
-    },
-    {
       "fingerprint": "60ec534e2692469dc572935adfb3fe7ab97b9001f64ac38964f73e0594e2fc7d",
       "note": "False positive. Open3.capture3 array form: ref is interpolated only into a single rev-parse <ref>^{commit} argv element passed to git via execve(2); no shell ever sees it."
     },
@@ -115,8 +111,20 @@
     {
       "fingerprint": "dafb16493e6924541463ab6b670f9648bd90f5d7b29bb1ecce9c688b6044ae96",
       "note": "False positive. Commands::Patrol#materializable_commit? rejects anything except a full 40-64 character hexadecimal object ID before passing the <oid>^{commit} revision as one Open3.capture3 argv element. No shell interprets the value."
+    },
+    {
+      "fingerprint": "1227ef974f0c0c8627fbb499beb12b5292e789af871b164d9e71e7f4e2283360",
+      "note": "False positive. Hive::Gh.capture3 passes discrete argv elements to Process.spawn. closure_commit_facts requires a validated GitHub host and owner/repository slug, a full 40- or 64-character hexadecimal commit OID, and a non-empty default branch without option prefixes, whitespace, NUL, or newlines before constructing the compare endpoint. No shell interprets the endpoint."
+    },
+    {
+      "fingerprint": "3325ab76277511e7ebd54b8e00b69bc7c0f10f4df1a1e86729eb02f6ebcdf544",
+      "note": "False positive. Hive::Gh.capture3 passes discrete argv elements to Process.spawn. closure_commit_facts requires a validated GitHub host and owner/repository slug plus a full 40- or 64-character hexadecimal commit OID before constructing the commit endpoint. No shell interprets the endpoint."
+    },
+    {
+      "fingerprint": "bba95826f38fbd8e9da5385ae4ea6b1ee813b3d62d681bcc9a09bcfd81727336",
+      "note": "False positive. Hive::Gh.capture3 passes discrete argv elements to Process.spawn. closure_default_branch requires a validated GitHub host and owner/repository slug before constructing the repository endpoint, so no shell interprets the endpoint."
     }
   ],
-  "updated": "2026-07-19 00:00:00 +0000",
+  "updated": "2026-07-26 01:31:43 +0000",
   "brakeman_version": "8.0.5"
 }

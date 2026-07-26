@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-web-capture-runtime.v1.json",
+  "title": "Hive supervised web capture runtime receipt (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "lifecycle_id", "pid", "process_start_time",
+    "process_group", "port", "readiness_url", "source_sha", "cache_key",
+    "lock_digests", "runtime_root", "storage_root", "started_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-web-capture-runtime" },
+    "schema_version": { "const": 1 },
+    "lifecycle_id": { "type": "string", "minLength": 8 },
+    "pid": { "type": "integer", "minimum": 1 },
+    "process_start_time": { "type": "string", "minLength": 1 },
+    "process_group": { "type": "integer", "minimum": 1 },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "readiness_url": { "type": "string", "pattern": "^http://127\\.0\\.0\\.1:[0-9]+/" },
+    "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "cache_key": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "lock_digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "web"],
+      "properties": {
+        "root": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "web": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "runtime_root": { "type": "string", "minLength": 1 },
+    "storage_root": { "type": "string", "minLength": 1 },
+    "started_at": { "type": "string", "format": "date-time" }
+  }
+}

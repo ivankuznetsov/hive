@@ -1,16 +1,66 @@
 <% content_for(:title, "#{web_product_name} — diff #{@task["slug"]}") %>
 <div class="task-header">
-  <h1>Diff</h1>
+  <h1>
+    <% if @diff_result.state == "empty" %>
+      No task changes
+    <% elsif @diff_result.state == "unavailable" %>
+      Diff unavailable
+    <% else %>
+      Task changes
+    <% end %>
+  </h1>
   <%= stage_badge(@task["stage"]) %>
 </div>
 <p class="task-slug"><%= @project.name %> · <%= @task["slug"] %></p>
 <p><%= link_to "← Back to task", task_path(@project.name, @task["slug"]) %></p>
 
-<% if @diff.strip.empty? %>
-  <div class="empty-state"><p>The worktree has no uncommitted changes.</p></div>
-<% else %>
-  <% if @diff_truncated %>
-    <p class="flash-alert">Diff truncated to the first 512&nbsp;KB — inspect the worktree directly for the full change.</p>
+<section class="diff-result diff-result-<%= @diff_result.state %>"
+         aria-labelledby="diff-state-heading"
+         role="status"
+         aria-live="polite">
+  <h2 id="diff-state-heading"><%= @diff_result.state.humanize %></h2>
+
+  <% if @diff_result.state == "empty" %>
+    <div class="empty-state">
+      <p>The committed task delta and all working-tree layers are clean.</p>
+    </div>
+  <% elsif @diff_result.state == "unavailable" %>
+    <div class="state-banner state-banner-error">
+      <span>
+        <strong><%= @diff_result.reason.to_s.humanize %>.</strong>
+        <% if @diff_result.diagnostic.present? %>
+          <span class="diff-diagnostic"><%= @diff_result.diagnostic %></span>
+        <% end %>
+      </span>
+    </div>
+  <% else %>
+    <% if @diff_result.truncated || @diff_result.invalid_encoding %>
+      <div class="state-banner diff-warning">
+        <span>
+          <strong>Partial diff.</strong>
+          Output exceeded the safe display limit or contained invalid text bytes.
+          The sections below are scrubbed and bounded.
+        </span>
+      </div>
+    <% end %>
+
+    <% {
+      "committed" => "Committed task delta (base to HEAD)",
+      "staged" => "Staged changes",
+      "unstaged" => "Unstaged changes",
+      "untracked" => "Untracked paths"
+    }.each do |key, heading| %>
+      <section class="diff-section" data-diff-section="<%= key %>">
+        <h3><%= heading %></h3>
+        <% content = @diff_result.sections.fetch(key).to_s %>
+        <% if content.empty? %>
+          <p class="muted">None.</p>
+        <% else %>
+          <pre><%= content %></pre>
+        <% end %>
+      </section>
+    <% end %>
   <% end %>
-  <pre><%= @diff %></pre>
-<% end %>
+
+  <p class="diff-next-action"><strong>Next:</strong> <%= @diff_result.next_action %></p>
+</section>

@@ -1,13 +1,12 @@
-require "tempfile"
+require "digest"
 require "hive/web/environment"
 
 class Task
   include TaskMutations
 
   ARTIFACT_ORDER = %w[idea.md brainstorm.md plan.md task.md pr.md summary.md artifact.md].freeze
-  MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif)\z/i
+  MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif|webp|webm|mp4)\z/i
   DIFF_TIMEOUT_SEC = Integer(Hive::Web::Environment.value("HIVE_WEB_DIFF_TIMEOUT_SEC"))
-  DIFF_MAX_BYTES = 512 * 1024
   RECOVERY_ACTIONS = %w[recover_execute recover_review error].freeze
   RECOVERY_LABELS = {
     "queued" => "Recovery queued",
@@ -27,8 +26,6 @@ class Task
     "8" => "ready_to_finalize"
   }.freeze
   PASSABLE_MARKERS = Hive::Commands::Approve::VALID_TERMINAL_MARKERS.map(&:to_s).freeze
-
-  Diff = Data.define(:content, :truncated?)
 
   attr_reader :project
 
@@ -77,6 +74,10 @@ class Task
     self["folder"]
   end
 
+  def project_root
+    project.path
+  end
+
   def worktree_path
     self["worktree_path"].to_s
   end
@@ -92,6 +93,9 @@ class Task
 
   def media_manifest
     return nil unless folder
+
+    capture_path = File.join(folder, "media", "capture-manifest.json")
+    return capture_media_manifest(capture_path) if File.file?(capture_path)
 
     path = File.join(folder, "media", "manifest.json")
     return nil unless File.file?(path)
@@ -237,25 +241,7 @@ class Task
   end
 
   def diff
-    unless worktree?
-      raise Hive::InvalidTaskPath, "no worktree for #{slug}"
-    end
-
-    log = Tempfile.create("hivebox-diff")
-    pid = Process.spawn("git", "-C", worktree_path, "diff", "--",
-                        pgroup: true, out: log.path, err: log.path)
-    deadline = monotonic_now + DIFF_TIMEOUT_SEC
-    status = wait_for_diff(pid, deadline)
-    raise Hive::Error, "git diff failed: #{File.read(log.path).strip}" unless status.success?
-
-    output = File.open(log.path, "rb") { |file| file.read(DIFF_MAX_BYTES + 1) }
-                 .to_s.force_encoding(Encoding::UTF_8).scrub
-    truncated = output.bytesize > DIFF_MAX_BYTES
-    content = truncated ? output.byteslice(0, DIFF_MAX_BYTES).scrub : output
-    Diff.new(content:, truncated?: truncated)
-  ensure
-    log&.close
-    File.unlink(log.path) if log && File.exist?(log.path)
+    Hive::Web::TaskDiff.new(task: self, timeout_sec: DIFF_TIMEOUT_SEC).call
   end
 
   def latest_log
@@ -293,24 +279,6 @@ class Task
     text.strip.lines.first.to_s.strip.presence&.truncate(90)
   end
 
-  def wait_for_diff(pid, deadline)
-    loop do
-      _, status = Process.waitpid2(pid, Process::WNOHANG)
-      return status if status
-
-      if monotonic_now > deadline
-        Process.kill("KILL", -pid) rescue nil
-        Process.waitpid2(pid) rescue nil
-        raise Hive::Error, "git diff timed out after #{DIFF_TIMEOUT_SEC}s"
-      end
-      sleep 0.1
-    end
-  end
-
-  def monotonic_now
-    Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  end
-
   def artifact_order
     return generic_artifact_order unless Hive::Workflows.coding_id?(self["workflow"])
     return ARTIFACT_ORDER unless %w[8-finalize 9-done].include?(self["stage"].to_s)
@@ -346,6 +314,48 @@ class Task
         "caption" => item["caption"].to_s,
         "screenote_url" => url.match?(%r{\Ahttps?://}) ? url : nil
       }
+    end
+  end
+
+  def capture_media_manifest(path)
+    manifest = JSON.parse(File.read(path, 256 * 1024))
+    return nil unless manifest.is_a?(Hash)
+    return nil unless manifest["schema"] == "hive-artifact-capture"
+    return nil unless manifest["schema_version"] == 1
+
+    status = manifest["status"].to_s
+    return nil unless %w[captured failed].include?(status)
+
+    {
+      "status" => status,
+      "reason" => manifest["diagnostic"].to_s,
+      "items" => normalized_capture_items(manifest["artifacts"])
+    }
+  rescue JSON::ParserError, SystemCallError => e
+    Rails.logger.warn("capture manifest unreadable for #{slug}: #{e.class}: #{e.message}")
+    nil
+  end
+
+  def normalized_capture_items(artifacts)
+    Array(artifacts).filter_map do |artifact|
+      next unless artifact.is_a?(Hash)
+
+      file = artifact["file"].to_s
+      next unless File.basename(file) == file && file.match?(MEDIA_FILENAME_RE)
+      path = media_path(file)
+      next unless path
+      next unless File.size(path) == Integer(artifact["bytes"], exception: false)
+      next unless Digest::SHA256.file(path).hexdigest == artifact["sha256"].to_s
+
+      extension = File.extname(file).downcase
+      {
+        "file" => file,
+        "type" => %w[.webm .mp4].include?(extension) ? "video" : "still",
+        "caption" => extension == ".png" ? "Captured browser state" : "Captured browser demo",
+        "screenote_url" => nil
+      }
+    rescue SystemCallError
+      nil
     end
   end
 end

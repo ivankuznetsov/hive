@@ -462,7 +462,9 @@ class RunStageActionTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(artifacts, "artifact.md")
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# Artifacts\nNo extra artifacts.\n<!-- COMPLETE -->\n"
 
-        capture_io { Hive::Commands::StageAction.new("artifacts", slug).call }
+        with_not_applicable_capture_policy do
+          capture_io { Hive::Commands::StageAction.new("artifacts", slug).call }
+        end
 
         assert File.directory?(artifacts), "artifacts must promote 6-review -> 7-artifacts"
         refute File.directory?(review), "source 6-review folder must be gone after promote"
@@ -481,7 +483,9 @@ class RunStageActionTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(artifacts, "artifact.md")
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# Artifacts\nNo extra artifacts.\n<!-- COMPLETE -->\n"
 
-        capture_io { Hive::Commands::StageAction.new("artifacts", slug, from: "7-artifacts").call }
+        with_not_applicable_capture_policy do
+          capture_io { Hive::Commands::StageAction.new("artifacts", slug, from: "7-artifacts").call }
+        end
 
         assert_equal :complete, Hive::Markers.current(File.join(artifacts, "artifact.md")).name
       end

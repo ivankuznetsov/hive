@@ -156,6 +156,26 @@ module HiveTestHelper
     with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) { yield }
   end
 
+  # Tests whose subject is a surrounding workflow transition can opt out of
+  # visual capture explicitly. CapturePolicy has dedicated unit/integration
+  # coverage; letting an unrelated fixture's intentionally synthetic worktree
+  # fail closed would turn those tests into accidental capture tests.
+  def with_not_applicable_capture_policy
+    require "hive/artifacts/capture_policy"
+    receipt = {
+      "result" => "not_applicable",
+      "rationale" => "The test fixture has deterministic nonvisual scope.",
+      "task_generation" => "test-generation"
+    }
+    policy = Object.new
+    policy.define_singleton_method(:ensure!) { receipt }
+    policy.define_singleton_method(:capture_satisfied?) { true }
+    replacement = ->(_task, project:, **) { policy }
+    with_replaced_singleton_method(
+      Hive::Artifacts::CapturePolicy, :for_task, replacement
+    ) { yield }
+  end
+
   def with_env(overrides)
     old = overrides.keys.to_h { |key| [ key, ENV.key?(key) ? ENV[key] : UNSET_ENV ] }
     overrides.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }

@@ -135,7 +135,7 @@ These are not gems but the CLI tools the runtime invokes:
 | `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional TUI capture support; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed. Records a `.cast` only — rendering it to a terminal-demo GIF needs `agg` (or `vhs`), which the hivebox image does NOT ship |
 | `ffmpeg` | any recent | media conversion for manual `web/script/record_box_demo.rb` output (webm/mp4). NOT a terminal-GIF encoder: it cannot read an asciinema `.cast`, so it does not turn TUI recordings into GIFs on its own |
 | `agg` / `vhs` | not shipped in the hivebox image | the terminal-GIF encoders for artifacts-stage TUI/CLI demos (`agg` renders an asciinema `.cast`; `vhs` records straight to GIF). Absent in-box, so a TUI/CLI demo degrades to a `failed` capture unless the agent installs one |
-| agent-browser or Playwright | project/environment specific | optional UI visual capture support for the artifacts prompt; absence records a failed media manifest rather than failing the stage |
+| Playwright | exact npm metadata 1.60.0 in `web/package-lock.json` | supervised Hive web demo recorder; the expected local CLI and Chromium executable are preflighted before required capture |
 
 `HIVE_CLAUDE_BIN` env var overrides the `claude` binary, used by tests with `test/fixtures/fake-claude` and `fake-gh`.
 
@@ -144,6 +144,13 @@ nor `gtimeout` is executable, the llm-wiki runner fails the bounded operation
 closed (status 125) and retains its queued source for recovery. It deliberately
 has no unbounded fallback: limiting provider and Git execution is part of the
 subscription-safety contract.
+
+Source-worktree web capture also requires `bundle`, Node/npm for installing the
+pinned lock when browser dependencies are absent, Chromium for Playwright, and
+both `ffmpeg` and `ffprobe`. Ruby gems are installed into a private cache keyed
+by both root/web lockfile contents plus Ruby engine/version/platform; neither
+linked-worktree lockfile nor its mode may change. Missing browser/media tooling
+is a truthful required-capture error, never a silent `not_applicable` result.
 
 ## Ruby version
 

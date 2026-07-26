@@ -1,65 +1,166 @@
 import { Controller } from "@hotwired/stimulus"
 
-// Reloads a turbo-frame on an interval. Turbo has no native timed refresh,
-// so this is the one place a timer lives; everything it loads renders
-// server-side through the frame.
-//
-// The human always wins over the poll:
-// - a focused field or typed-but-unsent input inside the frame pauses it
-//   (a reload replaces children — or morphs, when the frame opts in via
-//   refresh="morph" — and either way the server renders fields empty);
-// - a [data-tail-follow] pane scrolled away from its bottom pauses it too
-//   (the operator is reading history; reloading would yank the content out
-//   from under them). At the bottom the pane follows like `tail -f`: every
-//   reload re-pins it so the live end stays in view.
-// Polling resumes by itself once the form is empty again or the pane is
-// scrolled back to the bottom.
+// A bounded, one-request-at-a-time poller for server-rendered turbo frames.
+// It uses a chained timeout (never setInterval), pauses while the document is
+// hidden or the operator is reading/editing, and installs an AbortSignal into
+// Turbo's fetch options so disconnect/navigation cancels outstanding work.
 export default class extends Controller {
-  static values = { interval: { type: Number, default: 3000 } }
+  static values = {
+    interval: { type: Number, default: 3000 },
+    maxInterval: { type: Number, default: 30000 },
+    requestTimeout: { type: Number, default: 15000 }
+  }
 
   connect() {
     this.frame = this.frameElement()
     if (!this.frame) return
 
+    this.connected = true
+    this.generation = 0
+    this.failures = 0
+    this.inFlight = false
     this.pinToBottom = this.pinToBottom.bind(this)
-    this.frame.addEventListener("turbo:frame-load", this.pinToBottom)
+    this.requestStarted = this.requestStarted.bind(this)
+    this.requestFinished = this.requestFinished.bind(this)
+    this.requestFailed = this.requestFailed.bind(this)
+    this.visibilityChanged = this.visibilityChanged.bind(this)
+
+    this.frame.addEventListener("turbo:before-fetch-request", this.requestStarted)
+    this.frame.addEventListener("turbo:frame-load", this.requestFinished)
+    this.frame.addEventListener("turbo:fetch-request-error", this.requestFailed)
+    document.addEventListener("visibilitychange", this.visibilityChanged)
     this.pinToBottom()
-    this.timer = setInterval(() => this.reloadUnlessBusy(), this.intervalValue)
+    this.schedule(this.intervalValue)
   }
 
   disconnect() {
-    clearInterval(this.timer)
-    this.frame?.removeEventListener("turbo:frame-load", this.pinToBottom)
+    this.connected = false
+    this.generation += 1
+    this.cancelSchedule()
+    this.abortRequest("disconnect")
+    this.frame?.removeEventListener("turbo:before-fetch-request", this.requestStarted)
+    this.frame?.removeEventListener("turbo:frame-load", this.requestFinished)
+    this.frame?.removeEventListener("turbo:fetch-request-error", this.requestFailed)
+    document.removeEventListener("visibilitychange", this.visibilityChanged)
     this.frame = null
   }
 
-  reloadUnlessBusy() {
-    // Tick beacon: counts every timer firing, INCLUDING paused ones. "The
-    // poll ran and chose not to touch the pane" is otherwise unobservable,
-    // which made the reading-pause untestable without sleeps.
+  schedule(delay) {
+    // A hidden document owns no timer at all. In particular, aborting an
+    // in-flight Turbo request can emit a later fetch-error event; that event
+    // must not quietly restart a wake-up loop while the page stays hidden.
+    if (!this.connected || document.hidden || this.terminal()) return
+
+    this.cancelSchedule()
+    this.timer = setTimeout(() => this.tick(), Math.max(0, delay))
+  }
+
+  cancelSchedule() {
+    clearTimeout(this.timer)
+    this.timer = null
+  }
+
+  tick() {
+    if (!this.connected || this.terminal()) return
+
+    // Observable in system tests and production diagnostics: paused ticks are
+    // counted too, proving no hidden request loop is running.
     this.element.dataset.pollTicks = String(Number(this.element.dataset.pollTicks || 0) + 1)
-    if (this.frameBusy()) return
-    if (this.operatorBusy()) return
+    if (document.hidden || this.inFlight || this.frameBusy() || this.operatorBusy()) {
+      this.schedule(this.nextDelay())
+      return
+    }
     if (this.readerBusy()) {
       const pane = this.tailPane()
       if (pane) pane.dataset.following = "false"
+      this.schedule(this.nextDelay())
       return
     }
 
-    this.frame?.reload()
+    this.inFlight = true
+    this.generation += 1
+    this.activeGeneration = this.generation
+    this.requestController = new AbortController()
+    this.requestDeadline = setTimeout(() => {
+      if (!this.inFlight || this.activeGeneration !== this.generation) return
+
+      this.failures += 1
+      this.abortRequest("timeout")
+      this.schedule(this.nextDelay())
+    }, this.requestTimeoutValue)
+    this.frame.reload()
   }
 
-  // Turbo marks a frame busy for the full request/render lifecycle. A timer
-  // firing during that window must not restart the navigation: on a slow
-  // endpoint, repeated reloads would otherwise keep cancelling the response
-  // that could make the frame current.
+  requestStarted(event) {
+    if (!this.inFlight || event.target !== this.frame || !this.requestController) return
+
+    event.detail.fetchOptions.signal = this.requestController.signal
+    event.detail.fetchOptions.headers = {
+      ...event.detail.fetchOptions.headers,
+      "X-Hive-Poll-Generation": String(this.activeGeneration)
+    }
+  }
+
+  requestFinished(event) {
+    if (!this.connected || event.target !== this.frame) return
+    if (this.inFlight && this.activeGeneration !== this.generation) return
+
+    this.finishRequest(true)
+    this.pinToBottom()
+    this.schedule(this.intervalValue)
+  }
+
+  requestFailed(event) {
+    if (event.target !== this.frame) return
+
+    this.failures += 1
+    this.finishRequest(false)
+    this.schedule(this.nextDelay())
+  }
+
+  finishRequest(success) {
+    clearTimeout(this.requestDeadline)
+    this.requestDeadline = null
+    this.inFlight = false
+    this.requestController = null
+    if (success) this.failures = 0
+  }
+
+  abortRequest(reason) {
+    if (this.requestController && !this.requestController.signal.aborted) {
+      this.requestController.abort(reason)
+    }
+    this.finishRequest(false)
+  }
+
+  visibilityChanged() {
+    if (document.hidden) {
+      this.abortRequest("hidden")
+      this.cancelSchedule()
+    } else {
+      this.schedule(0)
+    }
+  }
+
+  nextDelay() {
+    return this.intervalValue if this.failures <= 0
+
+    return Math.min(
+      this.maxIntervalValue,
+      this.intervalValue * (2 ** Math.min(this.failures, 8))
+    )
+  }
+
+  terminal() {
+    return this.element.dataset.pollTerminal === "true" ||
+      this.frame?.dataset.pollTerminal === "true"
+  }
+
   frameBusy() {
-    return !this.frame || this.frame.hasAttribute("busy") || this.frame.getAttribute("aria-busy") === "true"
+    return !this.frame || this.frame.hasAttribute("busy") ||
+      this.frame.getAttribute("aria-busy") === "true"
   }
 
-  // Most polls own the frame itself. A resource whose polling lifecycle can
-  // finish may instead put this controller on replaceable frame content: the
-  // final response then disconnects the timer without client-side state.
   frameElement() {
     if (this.element.localName === "turbo-frame") return this.element
     return this.element.closest("turbo-frame")
@@ -70,9 +171,6 @@ export default class extends Controller {
     if (!pane) return
 
     pane.scrollTop = pane.scrollHeight
-    // Observable state beacon: "true" while pinned and following, flipped
-    // to "false" by a paused tick. Tests wait on it instead of racing
-    // module load or sleeping through poll intervals.
     pane.dataset.following = "true"
   }
 
@@ -80,9 +178,6 @@ export default class extends Controller {
     return this.element.querySelector("[data-tail-follow]")
   }
 
-  // Scrolled away from the bottom = reading history. The 8px slack means
-  // "close enough to the bottom counts as following" (fractional scroll
-  // positions and zoom levels make exact equality unreliable).
   readerBusy() {
     const pane = this.tailPane()
     if (!pane) return false

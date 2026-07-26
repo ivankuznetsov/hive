@@ -124,6 +124,26 @@ class HivePrdigestTest < Minitest::Test
     )
   end
 
+  def test_hive_catchup_limits_are_not_serialized_to_explicit_date_child_config
+    [ 0, 31 ].each do |max_catchup_days|
+      observed = nil
+      runner = build_runner(
+        cfg: {
+          "digest" => { "max_catchup_days" => max_catchup_days },
+          "bot" => { "chat_id_allowlist" => [ -1001 ] }
+        },
+        process_runner: lambda do |_child_env, *argv|
+          observed = YAML.safe_load_file(argv.fetch(argv.index("--config") + 1))
+          [ JSON.generate(success_payload), "", Status.new(0) ]
+        end
+      )
+
+      assert runner.call.success?
+      assert_equal %w[digest github state telegram timezone], observed.keys.sort
+      refute observed.key?("schedule")
+    end
+  end
+
   def test_dry_run_needs_no_telegram_configuration_or_token
     runner = build_runner(
       dry_run: true,

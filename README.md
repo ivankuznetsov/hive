@@ -204,7 +204,11 @@ That is enough to understand what Hive does: it turns a rough idea into durable 
 registered `github.com` repositories, existing GitHub authentication, and the
 first allowlisted Telegram chat. PRDigest alone fetches, renders safe Telegram
 HTML, chunks, checkpoints, retries, and sends. Hive task and stage state never
-affects inclusion.
+affects inclusion. Hive always invokes PRDigest's deterministic `run` command
+for one explicit date; it does not select PRDigest facts/prose modes, configure
+an AI provider, or forward provider credentials. Hive's own
+`digest.max_catchup_days` controls only daemon scheduling and is not copied into
+the child configuration.
 
 ```bash
 hive digest --dry-run

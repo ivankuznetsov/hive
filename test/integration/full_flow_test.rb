@@ -273,7 +273,9 @@ class FullFlowTest < Minitest::Test
         FileUtils.mv(review_dir, artifacts_dir)
         ENV["HIVE_FLOW_FOLDER"] = artifacts_dir
         ENV["HIVE_FLOW_PHASE"] = "artifacts"
-        capture_io { Hive::Commands::Run.new(artifacts_dir).call }
+        with_not_applicable_capture_policy do
+          capture_io { Hive::Commands::Run.new(artifacts_dir).call }
+        end
         assert_equal :complete, Hive::Markers.current(File.join(artifacts_dir, "artifact.md")).name
 
         # 7-artifacts → 8-finalize

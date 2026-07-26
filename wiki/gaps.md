@@ -692,3 +692,18 @@ dogfood artifact yet shows the affected Content writing task rerun with the
 fixed stage caps, nor a real detached Brainstorm attempt recovering a terminal
 receipt with missing output and then replaying the repaired artifact. Keep
 those live checks separate from this source-level contract.
+
+## Task-local web and worktree capture need installed dogfood (2026-07-25)
+
+Focused source/Rails tests now pin one single-flight status owner, explicit
+unavailable/latest-good degraded rendering, zero fleet scans on task routes,
+bounded typed Git diff results, and abortable chained browser polling. Capture
+unit tests pin clean-source and lockfile identity, private immutable Ruby bundle
+caches, deny-by-default runtime environment, empty-or-same-owner runtime
+admission, ownership-verified lifecycle teardown, fail-closed applicability
+when implementation evidence is unavailable, required-capture enforcement, and
+the three v1 schemas. The
+authenticated supplied diff URL, 15-minute CPU/RSS/scan sample, packaged
+bootstrap from committed `HEAD`, and one real clean ordinary-worktree
+Playwright capture with retained media remain U9 dogfood evidence; source tests
+do not close those live checks.

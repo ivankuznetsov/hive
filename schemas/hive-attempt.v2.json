@@ -10,7 +10,7 @@
     "task_id", "project", "task_slug", "intended_stage", "task_generation",
     "ownership_generation", "task_input_epoch",
     "progress_token", "provider", "worker_argv", "claim_capability_digest",
-    "starting_revision", "retry_charge", "compatibility",
+    "starting_revision", "retry_charge",
     "created_at", "accepted_at", "state", "outcome", "lease_version", "claim_deadline",
     "first_heartbeat_deadline", "heartbeat_deadline", "wrapper", "worker", "heartbeat_at",
     "started_at", "ended_at", "latest_revision", "checkpoint", "log_reference",
@@ -33,15 +33,15 @@
     "provider": { "type": "string", "minLength": 1 },
     "worker_argv": {
       "type": "array",
+      "minItems": 1,
       "items": { "type": "string", "minLength": 1 }
     },
     "claim_capability_digest": {
-      "type": ["string", "null"],
+      "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
     "starting_revision": { "type": ["string", "null"] },
     "retry_charge": { "type": "integer", "minimum": 0 },
-    "compatibility": { "type": "boolean" },
     "created_at": { "type": "string", "format": "date-time" },
     "accepted_at": { "type": "string", "format": "date-time" },
     "state": { "enum": ["launching", "running", "terminal", "lost"] },
@@ -113,21 +113,6 @@
     }
   },
   "allOf": [
-    {
-      "if": { "properties": { "compatibility": { "const": false } } },
-      "then": {
-        "properties": {
-          "worker_argv": { "minItems": 1 },
-          "claim_capability_digest": { "type": "string" }
-        }
-      },
-      "else": {
-        "properties": {
-          "worker_argv": { "maxItems": 0 },
-          "claim_capability_digest": { "type": "null" }
-        }
-      }
-    },
     {
       "if": { "properties": { "state": { "const": "terminal" } } },
       "then": { "required": ["receipt"], "properties": { "receipt": { "$ref": "#/$defs/Receipt" } } }

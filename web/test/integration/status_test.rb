@@ -236,6 +236,66 @@ class StatusTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "first-load status failure renders unavailable rather than an empty fleet" do
+    sign_in!
+    with_daemon_status("running" => true, "service_installed" => true, "binary_drift" => "none") do
+      with_status_snapshot(
+        { "ok" => false, "unavailable" => true, "projects" => [] },
+        availability: "unavailable",
+        error: "Hive::ConfigError: config is mid-edit"
+      ) do
+        get board_path
+
+        assert_response :success
+        assert_select ".status-freshness-warning[data-status-availability=unavailable][role=status]",
+                      text: /No current fleet snapshot has loaded.*retry automatically/m
+        assert_select ".status-content-unavailable", text: /next successful refresh/
+        assert_select "#status-board", 0
+        assert_select ".empty-state", { text: /No projects yet/, count: 0 },
+                      "an unavailable producer must not be presented as a healthy empty fleet"
+      end
+    end
+  end
+
+  test "degraded status keeps latest-good rows visible and disables task mutations" do
+    sign_in!
+    project_name = create_hive_project!("degraded-cache-app")
+    project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
+    payload = {
+      "projects" => [
+        {
+          "name" => project_name,
+          "path" => project_path,
+          "hive_state_path" => File.join(project_path, ".hive-state"),
+          "tasks" => [
+            {
+              "slug" => "ready-card-260721-abcd", "display_name" => "Ready card",
+              "stage" => "3-plan", "workflow" => "coding",
+              "marker" => "complete", "age_seconds" => 120
+            }
+          ]
+        }
+      ]
+    }
+    with_daemon_status("running" => true, "service_installed" => true, "binary_drift" => "none") do
+      with_status_snapshot(
+        payload,
+        availability: "degraded",
+        last_success_at: "2026-07-25T12:00:00.000000Z",
+        error: "Hive::ConfigError: config is mid-edit"
+      ) do
+        get board_path
+
+        assert_response :success
+        assert_select ".status-freshness-warning[data-status-availability=degraded]",
+                      text: /last successful refresh.*2026-07-25.*retry automatically/m
+        assert_select ".kanban-card[data-task-slug='ready-card-260721-abcd']"
+        assert_select ".kanban-card form button[disabled][aria-disabled=true]",
+                      text: "Approve"
+      end
+    end
+  end
+
 
   test "a stopped installed daemon shows the command that resumes it" do
     sign_in!
@@ -282,10 +342,13 @@ class StatusTest < ActionDispatch::IntegrationTest
     Hive::Daemon::StatusReport.define_singleton_method(:new, original_report_new) if original_report_new
   end
 
-  def with_status_snapshot(payload)
+  def with_status_snapshot(payload = nil, availability: nil, last_success_at: nil, error: nil, **payload_keywords)
+    payload ||= payload_keywords
     original_snapshot = StatusBroadcaster.method(:snapshot_with_version)
     StatusBroadcaster.define_singleton_method(:snapshot_with_version) do
-      StatusBroadcaster::PageSnapshot.new(payload:, version: 1)
+      StatusBroadcaster::PageSnapshot.new(
+        payload:, version: 1, availability:, last_success_at:, error:
+      )
     end
     yield
   ensure

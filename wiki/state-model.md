@@ -214,10 +214,10 @@ gesture; ordinary action, web, and bot retry surfaces cannot bypass it.
 
 ## Concurrency files
 
-Durable leases under `$HIVE_HOME/attempts/v1/records/` are the authoritative
+Durable leases under `$HIVE_HOME/attempts/v2/records/` are the authoritative
 execution owner. Records are `launching`, `running`, `terminal`, or `lost`;
 wrapper/worker PID start fingerprints and session/group IDs make adoption and
-cleanup PID-reuse safe. Each non-compatibility record also immutably stores the
+cleanup PID-reuse safe. Each record also immutably stores the
 exact admitted worker argv and only the digest of a random claim capability.
 The secret crosses exec through inherited descriptors, claims once, and gates
 worker context installation until the exact worker identity is durable.
@@ -315,9 +315,10 @@ recovery: null
 Current producers write `hive-dispatch-request.v4`. Ordinary requests leave
 `recovery` null. Coordinator requests persist canonical task/marker/generation
 identity, owner/remediation, retry count, terminal outcome/time, and the
-`admitted → cleared → dispatched → terminal` phase. Consumers continue
-accepting pending v2/v3 delivery records and infer their generation under the
-same admission lock; no current producer emits them. Queue and claim sidecars
+`admitted → cleared → dispatched → terminal` phase. Consumers accept v4 only.
+Daemon/bot startup and explicit `hive migrate` run the one-off global recovery
+migration before opening the queue, rewriting pending v1-v3 requests to v4 and
+v1 results to v2. Queue and claim sidecars
 remain delivery records: after admission the claim stores the attempt
 ID/generation, follows a loss successor, and completes from its terminal
 receipt.
@@ -897,6 +898,21 @@ stateDiagram-v2
 ```
 
 Since 2026-05-22, `Hive::Stages::DIRS` has all nine slots filled in order; `Stages.next_dir(4)` returns `"5-open-pr"`, `Stages.next_dir(6)` returns `"7-artifacts"`, and `Stages.next_dir(8)` returns `"9-done"`. See [[stages/review]] for the autonomous-loop semantics.
+
+## Capture applicability receipts
+
+`7-artifacts/<slug>/capture-requirement.json` is `hive-capture-requirement` v1.
+Its stable identity is the task/project, task generation, implementation
+base/head, changed-path digest, and classifier version. Hive classifies
+user-visible paths or an explicit visual-proof request as `required`; other
+work is `not_applicable`. Agents cannot demote the result. A demotion records a
+confirmed operator, rationale, timestamp, and the same task generation.
+
+When required, `media/capture-manifest.json` is
+`hive-artifact-capture` v1 and must identify the same task and implementation
+head with at least one retained artifact. A `COMPLETE` marker without matching
+capture evidence is not terminal truth: the artifacts runner rewrites it to
+`ERROR reason=required_capture_missing`.
 
 See [[stages/index]] for one page per stage.
 

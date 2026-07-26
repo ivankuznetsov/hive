@@ -35,7 +35,7 @@ steps:
     id: temporary-caller
   - kind: ruby_block
     block: |
-      records = Dir[File.join(run_home, "attempts", "v1", "records", "*.json")].filter_map do |path|
+      records = Dir[File.join(run_home, "attempts", "v2", "records", "*.json")].filter_map do |path|
         candidate = JSON.parse(File.binread(path))
         candidate if candidate["intended_stage"] == "4-execute"
       end
@@ -58,7 +58,7 @@ steps:
       deadline = Time.now + 10
       record = nil
       loop do
-        records = Dir[File.join(run_home, "attempts", "v1", "records", "*.json")].filter_map do |path|
+        records = Dir[File.join(run_home, "attempts", "v2", "records", "*.json")].filter_map do |path|
           candidate = JSON.parse(File.binread(path))
           candidate if candidate["intended_stage"] == "4-execute"
         end

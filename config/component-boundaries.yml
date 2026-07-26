@@ -20,9 +20,9 @@ components:
     owned_paths:
       - lib/hive/attempts
     state_contracts:
-      - "$HIVE_HOME/attempts/v1 records, framed logs, outputs, generation locks, leases, receipts, and lost-outcome evidence"
+      - "$HIVE_HOME/attempts/v2 records, framed logs, outputs, generation locks, leases, receipts, and lost-outcome evidence"
     schema_contracts:
-      - "hive-attempt v1 remains readable; v2 is the current writer"
+      - "hive-attempt v2 is the only runtime reader/writer; Hive::Recovery::Migration owns the one-off cutover"
     lock_contracts:
       - "admission lock before generation lock; record transitions use guarded CAS"
     component_dependencies:
@@ -49,7 +49,6 @@ components:
       - Hive::Attempts::Supervisor
       - Hive::Attempts::Reconciler
       - Hive::Attempts::ProcessIdentity
-      - Hive::Attempts::LegacyBackfiller
       - Hive::Attempts::CapacitySnapshot
       - Hive::Attempts::LostOutcomeStore
       - Hive::Attempts::LostOutcomeProcessor
@@ -63,7 +62,6 @@ components:
       - Hive::Attempts::Supervisor
       - Hive::Attempts::Reconciler
       - Hive::Attempts::ProcessIdentity
-      - Hive::Attempts::LegacyBackfiller
       - Hive::Attempts::CapacitySnapshot
       - Hive::Attempts::LostOutcomeStore
       - Hive::Attempts::LostOutcomeProcessor
@@ -89,10 +87,6 @@ components:
         files:
           - lib/hive/commands/daemon.rb
         reason: "The daemon composition root shares one process-identity verifier across reconciliation and loss handling."
-      - constant: Hive::Attempts::LegacyBackfiller
-        files:
-          - lib/hive/commands/daemon.rb
-        reason: "The daemon composition root wires the legacy compatibility adapter into reconciliation."
       - constant: Hive::Attempts::LostOutcomeStore
         files:
           - lib/hive/commands/daemon.rb

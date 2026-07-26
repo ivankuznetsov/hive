@@ -3,14 +3,14 @@ title: hive migrate
 type: command
 source: lib/hive/commands/migrate.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-07-23
+updated: 2026-07-26
 tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery]
 ---
 
 **TLDR**: `hive migrate [PROJECT_PATH]` is the explicit, idempotent upgrade
 path for legacy project config, tasks created before the PR-first layout and
 later 7-artifacts insertion, task-id/display-name sidecar additions, and the
-one-off recovery-marker identity cutover.
+one-off recovery-state and recovery-marker identity cutovers.
 
 ## Usage
 
@@ -19,6 +19,12 @@ hive migrate [PROJECT_PATH]
 ```
 
 `PROJECT_PATH` defaults to the current directory. The command requires `<project>/.hive-state/stages/` to exist.
+
+Before project-local changes, the command runs the owner-private recovery-state
+cutover for the current Hive state home. Daemon and bot startup run the same
+cutover before opening their stores or queues. A foreground default attempt
+store fails closed while `attempts/v1` remains, so an upgrade cannot silently
+bypass migration or create competing v2 ownership.
 
 ## Task-folder renames
 
@@ -86,6 +92,37 @@ has run. A task whose workflow descriptor is missing or invalid is left
 unchanged because Hive cannot identify its authoritative state file safely;
 restore the workflow, then rerun migrate.
 
+## Durable recovery schema cutover
+
+Runtime recovery supports only the current shapes: attempt v2, dispatch request
+v4, and dispatch result v2. `Hive::Recovery::Migration` moves
+`$HIVE_HOME/attempts/v1` to `attempts/v2`, rewrites v1 attempt generations,
+strips the obsolete compatibility flag, and migrates pending request v1-v3 and
+result v1 documents. It writes `recovery-migration-v2.json` only after every
+active document is current.
+
+Final compatibility leases are moved to
+`$HIVE_HOME/attempts/legacy-v1-records/` as audit history. A live compatibility
+lease, any other live attempt in the old tree, or simultaneous populated
+`attempts/v1` and `attempts/v2` trees fails closed with an actionable error. A
+pre-cutover reader can recreate only the empty v1 directory skeleton after v2
+is authoritative; migrate removes that inert tree with empty-directory-only
+`rmdir` operations. Any file, symlink, or concurrent writer preserves the
+fail-closed dual-root error. An old detached supervisor retains the explicit v1
+path until it terminalizes, so Hive never moves storage underneath live work or
+guesses which process owns it. The migration is idempotent, and runtime readers
+contain no legacy-schema branches.
+
+## Registered repository identity backfill
+
+When the current project is already registered but its registry row predates
+`repository_identity`, migrate resolves the current `origin`, normalizes it,
+and updates that row under the global config lock. An existing identity is
+never overwritten. Local origins are intentionally stored as `local:<path>`;
+GitHub-only services such as the PR babysitter then skip them without making a
+failing `gh` call. If no origin can be resolved, the row remains unresolved and
+can be repaired after adding `origin` by rerunning `hive migrate`.
+
 ## Commit behavior
 
 All changes run under the project commit lock. The command stages and commits changes inside `.hive-state` only when there is a diff:
@@ -105,7 +142,11 @@ A rerun after successful migration prints that there is nothing to move and keep
 - `test/integration/migrate_test.rb` covers stage-dir moves, the legacy
   reviewers relocation/conflict boundary, other config rewrites, task-id
   backfill order, display-name backfill, `ERROR` / `REVIEW_ERROR` identity
-  backfill, idempotency, null-id repair, and counter seeding.
+  backfill, repository-identity backfill, idempotency, null-id repair, and
+  counter seeding.
+- `test/unit/recovery/migration_test.rb` covers the global schema cutover,
+  receipt idempotency, archived final compatibility records, queue upgrades,
+  empty post-cutover v1 skeleton cleanup, and live/ambiguous-state refusal.
 - Status integration scenarios prove hidden legacy tasks surface before migrate and disappear after migration.
 
 ## Backlinks

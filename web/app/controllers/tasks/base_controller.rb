@@ -9,8 +9,21 @@ class Tasks::BaseController < ApplicationController
   end
 
   def load_task
-    page_snapshot = StatusBroadcaster.snapshot_with_version
-    @status_version = page_snapshot.version
-    @task = Task.find!(project: @project, slug: params[:slug], snapshot: page_snapshot.payload)
+    page_snapshot = StatusBroadcaster.current_page_snapshot
+    @status_version = page_snapshot&.version
+    # With no process-wide fleet snapshot yet, the resolver below still
+    # computes this exact task row directly; that is current enough for task
+    # controls without forcing a fleet scan. An explicit feed failure remains
+    # unavailable/degraded and disables those controls.
+    @status_availability = page_snapshot&.availability || "fresh"
+    @status_last_success_at = page_snapshot&.last_success_at
+    @status_error = page_snapshot&.error
+    @status_fresh = @status_availability == "fresh"
+    result = Hive::Web::TaskTargetResolver.new(
+      project: @project.attributes,
+      slug: params[:slug],
+      cached_payload: page_snapshot&.payload
+    ).call
+    @task = Task.new(project: @project, attributes: result.attributes)
   end
 end

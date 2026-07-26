@@ -48,7 +48,6 @@ class ComponentBoundariesTest < Minitest::Test
       Hive::Attempts::DetachedLauncher
       Hive::Attempts::Dispatcher
       Hive::Attempts::Entrypoint
-      Hive::Attempts::LegacyBackfiller
       Hive::Attempts::LostOutcomeProcessor
       Hive::Attempts::LostOutcomeStore
       Hive::Attempts::ProcessIdentity
@@ -62,7 +61,6 @@ class ComponentBoundariesTest < Minitest::Test
                  attempts.fetch("forbidden_constructions").sort
     assert_equal(
       {
-        "Hive::Attempts::LegacyBackfiller" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::LostOutcomeProcessor" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::LostOutcomeStore" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::ProcessIdentity" => [ "lib/hive/commands/daemon.rb" ],

@@ -72,6 +72,39 @@ class MigrateTest < Minitest::Test
     assert_equal "hive: migrate project state (2 ids, 3 recovery markers)", message
   end
 
+  def test_backfills_missing_registered_repository_identity_once
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        entry = Hive::Config.registered_projects.find { |project| project["path"] == dir }
+        assert_nil entry["repository_identity"]
+        run!("git", "-C", dir, "remote", "add", "origin", "https://github.com/acme/demo.git")
+
+        out, = capture_io { migrate_command(dir).call }
+
+        migrated = Hive::Config.registered_projects.find { |project| project["path"] == dir }
+        assert_equal "github.com/acme/demo", migrated["repository_identity"]
+        assert_includes out, "backfilled registered repository identity github.com/acme/demo"
+
+        run!("git", "-C", dir, "remote", "set-url", "origin", "https://github.com/acme/other.git")
+        second_out, = capture_io { migrate_command(dir).call }
+        preserved = Hive::Config.registered_projects.find { |project| project["path"] == dir }
+        assert_equal "github.com/acme/demo", preserved["repository_identity"]
+        refute_includes second_out, "backfilled registered repository identity"
+      end
+    end
+  end
+
+  def test_registered_project_path_comparison_fails_closed_for_missing_paths
+    with_tmp_dir do |dir|
+      refute migrate_command(dir).send(
+        :same_project_path?,
+        File.join(dir, "missing-candidate"),
+        File.join(dir, "missing-expected")
+      )
+    end
+  end
+
   def test_migrates_previous_canonical_finalize_and_done_stage_directories
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

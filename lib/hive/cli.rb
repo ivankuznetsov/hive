@@ -1664,9 +1664,14 @@ module Hive
     option :allow_public, type: :boolean, default: false, desc: "alias for --unsafe"
     option :force, type: :boolean, default: false, desc: "for install: overwrite existing service unit"
     option :detach, type: :boolean, default: false, desc: "for start: start the managed service instead of foreground Rails"
+    option :source_root, type: :string, desc: "for capture/capture-server: exact clean source worktree"
+    option :runtime_root, type: :string, desc: "for capture-server: isolated private runtime directory"
+    option :lifecycle_token, type: :string, desc: "for capture-server: recorder ownership token"
+    option :control_fd, type: :numeric, desc: "for capture-server: inherited lifecycle control file descriptor"
+    option :task_folder, type: :string, desc: "for capture: artifacts-stage task folder"
     def web(subcommand = nil)
       if options[:json]
-        unless %w[install status].include?(subcommand.to_s)
+        unless %w[install status capture-server capture].include?(subcommand.to_s)
           require "json"
           require "hive/commands/web"
           message = "hive web has no JSON output for foreground server commands. " \
@@ -1696,7 +1701,12 @@ module Hive
         unsafe: options[:unsafe] || options[:allow_public],
         force: options[:force],
         json: options[:json],
-        detach: options[:detach]
+        detach: options[:detach],
+        source_root: options[:source_root],
+        runtime_root: options[:runtime_root],
+        lifecycle_token: options[:lifecycle_token],
+        control_fd: options[:control_fd],
+        task_folder: options[:task_folder]
       ).call
     end
 

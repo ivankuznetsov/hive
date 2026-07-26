@@ -398,6 +398,15 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     assert_equal [ [ :TERM, -123 ] ], calls
   end
 
+  def test_process_group_alive_treats_permission_denied_as_alive
+    sup = make
+
+    with_replaced_singleton_method(Process, :kill, ->(*_args) { raise Errno::EPERM }) do
+      assert sup.send(:process_group_alive?, 123),
+             "a group we cannot signal must remain fenced as potentially alive"
+    end
+  end
+
   def test_terminate_all_signals_running_children
     skip "skipping signal test under CI containers" if ENV["CI"] == "true"
 

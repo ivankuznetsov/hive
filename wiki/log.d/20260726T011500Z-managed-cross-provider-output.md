@@ -14,8 +14,10 @@ file mounted. Output-set publication validates every value first, restores
 earlier targets if a later atomic write fails, and writes the requested
 stage/state artifact last as the completion commit point. Codex executable
 discovery accepts a valid runtime provenance path even when unrelated aggregate
-doctor checks fail, while retaining a dedicated bounded probe. Grok mappings
-also pin normalized reasoning effort via `--reasoning-effort`.
+doctor checks fail, while retaining a dedicated bounded probe. That probe uses
+an ephemeral empty Codex state root rather than scanning the operator's rollout
+archive. Grok mappings also pin normalized reasoning effort via
+`--reasoning-effort`.
 
 **Safety:** Unbounded file rules, undeclared output paths, unsupported tools,
 truncated/invalid/empty structured output, unavailable provider binaries, and a

@@ -575,9 +575,15 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     }
     captured_argv = nil
     captured_timeout = nil
-    capture = lambda do |*argv, timeout_sec:|
+    captured_environment = nil
+    probe_home = nil
+    probe_home_visible = false
+    capture = lambda do |*argv, timeout_sec:, environment:|
       captured_argv = argv
       captured_timeout = timeout_sec
+      captured_environment = environment
+      probe_home = environment.fetch("CODEX_HOME")
+      probe_home_visible = File.directory?(probe_home)
       [ JSON.generate(report), "unrelated doctor failure", status ]
     end
     reset_codex_executable_cache
@@ -591,6 +597,9 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     assert_equal File.realpath("/bin/true"), resolved
     assert_equal [ "codex-nonzero-doctor", "doctor", "--json" ], captured_argv
     assert_equal Hive::WorkflowPackage::RuntimePolicy::CODEX_DOCTOR_TIMEOUT_SEC, captured_timeout
+    assert_equal({ "CODEX_HOME" => probe_home }, captured_environment)
+    assert probe_home_visible
+    refute File.exist?(probe_home)
   ensure
     reset_codex_executable_cache
   end
@@ -599,8 +608,12 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     profile = Object.new
     profile.define_singleton_method(:bin) { "codex-slow-doctor" }
     captured_timeout = nil
-    capture = lambda do |*_argv, timeout_sec:|
+    probe_home = nil
+    probe_home_visible = false
+    capture = lambda do |*_argv, timeout_sec:, environment:|
       captured_timeout = timeout_sec
+      probe_home = environment.fetch("CODEX_HOME")
+      probe_home_visible = File.directory?(probe_home)
       raise Timeout::Error
     end
     reset_codex_executable_cache
@@ -615,6 +628,8 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
 
     assert_includes error.message, "timed out after 30s"
     assert_equal Hive::WorkflowPackage::RuntimePolicy::CODEX_DOCTOR_TIMEOUT_SEC, captured_timeout
+    assert probe_home_visible
+    refute File.exist?(probe_home)
   ensure
     reset_codex_executable_cache
   end
@@ -624,7 +639,11 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     profile.define_singleton_method(:bin) { "codex-invalid-doctor" }
     status = Object.new
     status.define_singleton_method(:success?) { false }
-    capture = lambda do |*_argv, timeout_sec:|
+    probe_home = nil
+    probe_home_visible = false
+    capture = lambda do |*_argv, timeout_sec:, environment:|
+      probe_home = environment.fetch("CODEX_HOME")
+      probe_home_visible = File.directory?(probe_home)
       [ JSON.generate("checks" => {}), "aggregate failure", status ]
     end
     reset_codex_executable_cache
@@ -638,6 +657,8 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
 
     assert_includes error.message, "aggregate failure"
+    assert probe_home_visible
+    refute File.exist?(probe_home)
   ensure
     reset_codex_executable_cache
   end

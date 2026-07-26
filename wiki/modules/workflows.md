@@ -197,7 +197,9 @@ response before writing, rolls back already-published companion files on a
 later publication failure, and publishes the requested stage/state artifact
 last as the completion commit point. Codex executable discovery accepts valid
 runtime provenance even when unrelated aggregate doctor checks fail, while a
-dedicated bounded probe and executable-path validation remain fail-closed.
+dedicated bounded probe and executable-path validation remain fail-closed. The
+probe uses an ephemeral empty Codex state root, so executable discovery does
+not scan the operator's rollout archive or inherit its user configuration.
 Bare/unbounded file edits and unsupported tools still fail admission. Strict `x-hive`
 metadata declares manifest-hashed executable tools, manifest-hashed prompt
 assets exposed as absolute paths in the managed prompt preamble, and optional

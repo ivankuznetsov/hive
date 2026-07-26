@@ -495,10 +495,7 @@ module Hive
 
         @codex_executables ||= {}
         @codex_executables[configured] ||= begin
-          stdout, stderr, status = capture3_bounded(
-            configured, "doctor", "--json",
-            timeout_sec: CODEX_DOCTOR_TIMEOUT_SEC
-          )
+          stdout, stderr, status = codex_doctor(configured)
           report = begin
             JSON.parse(stdout)
           rescue JSON::ParserError
@@ -526,6 +523,16 @@ module Hive
         end
       end
 
+      def self.codex_doctor(configured)
+        Dir.mktmpdir("hive-codex-doctor-") do |probe_home|
+          capture3_bounded(
+            configured, "doctor", "--json",
+            timeout_sec: CODEX_DOCTOR_TIMEOUT_SEC,
+            environment: { "CODEX_HOME" => probe_home }
+          )
+        end
+      end
+
       def self.codex_doctor_failure(stderr)
         detail = stderr.to_s.strip[0, 160]
         detail = "doctor exited unsuccessfully without diagnostics" if detail.empty?
@@ -547,8 +554,8 @@ module Hive
           raise(Hive::ConfigError, "runner #{profile.name.inspect} executable is unavailable")
       end
 
-      def self.capture3_bounded(*argv, timeout_sec:)
-        stdin, stdout, stderr, waiter = Open3.popen3(*argv, pgroup: true)
+      def self.capture3_bounded(*argv, timeout_sec:, environment: {})
+        stdin, stdout, stderr, waiter = Open3.popen3(environment, *argv, pgroup: true)
         stdin.close
         out_reader = Thread.new { stdout.read }
         err_reader = Thread.new { stderr.read }

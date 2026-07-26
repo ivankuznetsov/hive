@@ -58,9 +58,16 @@ class WebPackagedBootstrapTest < Minitest::Test
       assert_equal tracked_files.sort, archive_entries.keys.sort,
                    "the release archive must contain every tracked web file exactly once"
 
+      # `gem install hive-cli` installs this exact runtime dependency into the
+      # managed gem home. This fixture keeps the rest of Hive's dependencies
+      # in the parent test bundle, so expose that bundle's gem home explicitly
+      # while still hiding every executable wrapper from PATH.
+      bundler_gem_home = File.expand_path(
+        "../..", Gem.loaded_specs.fetch("bundler").full_gem_path
+      )
       env = {
         "GEM_HOME" => gem_home,
-        "GEM_PATH" => [ gem_home, *Gem.path ].join(File::PATH_SEPARATOR),
+        "GEM_PATH" => [ gem_home, bundler_gem_home, *Gem.path ].uniq.join(File::PATH_SEPARATOR),
         **clean_bundler_environment
       }
 
@@ -76,8 +83,8 @@ class WebPackagedBootstrapTest < Minitest::Test
         "HIVE_PACKAGE_CAPTURE" => capture,
         "HIVE_SETUP_FIXTURE" => preload,
         # A managed install must not depend on the `bundle` wrapper being on
-        # PATH. The CLI already runs under the intended Ruby and can resolve
-        # the exact Bundler executable from the authenticated lockfile.
+        # PATH. The CLI already runs under the intended Ruby and resolves its
+        # exact runtime Bundler from the authenticated lockfile.
         "PATH" => "/usr/bin:/bin"
       )
       stdout, setup_stderr, setup_status = Open3.capture3(

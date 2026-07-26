@@ -57,6 +57,10 @@ Gem::Specification.new do |spec|
   # they have no business being installed for end users.
   spec.add_dependency "base64", ">= 0.2"
   spec.add_dependency "bubbletea", "= 0.1.4"
+  # Managed installs isolate GEM_HOME/GEM_PATH from the operator's gems. Keep
+  # the exact web-lock Bundler inside that managed gem home so web bootstrap
+  # can resolve it without relying on a PATH wrapper or a system default gem.
+  spec.add_dependency "bundler", "= 2.7.2"
   # faraday + faraday-multipart are required and used directly by the voice
   # transcriber (Faraday.new, Faraday::Multipart::FilePart). They resolve
   # transitively through telegram-bot-ruby today, but declaring them directly

@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-07-22
+updated: 2026-07-26
 tags: [dependencies, gems, runtime]
 ---
 
@@ -26,6 +26,7 @@ as of this refresh.
 |-----|---------|---------|
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
 | `base64` | `>= 0.2` | Explicit runtime dependency for framed durable-attempt output and other binary-safe payloads; Ruby is unbundling it from the default gems. |
+| `bundler` | `= 2.7.2` | Exact installer for the authenticated managed web lock. Hive package managers vendor it into Hive's isolated `GEM_HOME`, and `AppBundle` invokes its absolute executable through the current Ruby without consulting `PATH`. |
 | `telegram-bot-ruby` | `~> 2.7` (locked 2.7.0) | Telegram Bot API client for `hive bot`. Chosen because RubyGems shows an April 3, 2026 release, MFA on publish, Ruby >= 2.7 support, and four direct runtime dependencies (`dry-struct`, `faraday`, `faraday-multipart`, `zeitwerk`). The lockfile review keeps the larger dry/faraday transitive set explicit. |
 | `faraday` | `>= 2.14.2, < 3.0` (locked 2.14.2) | HTTP transport used directly by `Hive::Bot::Transcriber` and indirectly through `telegram-bot-ruby`. The lower bound is the bundler-audit floor for CVE-2026-33637 / GHSA-5rv5-xj5j-3484. |
 | `faraday-multipart` | `~> 1.0` (locked 1.2.0) | Multipart upload support for `Hive::Bot::Transcriber` voice-note POSTs and Telegram Bot API file transport. |
@@ -155,9 +156,12 @@ is a truthful required-capture error, never a silent `not_applicable` result.
 Managed web installation does not require a `bundle` wrapper on `PATH`.
 `Hive::Web::AppBundle` reads the authenticated web `Gemfile.lock`, resolves
 that exact Bundler through RubyGems, and invokes its absolute executable
-through the current `RbConfig.ruby`. Production asset compilation uses the
-same Ruby directly. A missing locked Bundler is therefore an explicit
-bootstrap error rather than an ambiguous command-not-found failure.
+through the current `RbConfig.ruby`. `hive-cli` declares that exact Bundler as
+a runtime dependency so isolated gem, Homebrew, and AUR installations carry it
+inside Hive's managed `GEM_HOME`; a system default gem is not assumed.
+Production asset compilation uses the same Ruby directly. A missing locked
+Bundler is therefore an explicit bootstrap error rather than an ambiguous
+command-not-found failure.
 
 ## Ruby version
 

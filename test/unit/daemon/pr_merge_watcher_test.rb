@@ -450,13 +450,17 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       head = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
       gh = FakeGh.new(state: "MERGED")
       gh.head_oid = head
-      watcher, store = build_watcher(gh: gh)
+      watcher, store = build_watcher(gh: gh, task_closure: Hive::TaskClosure)
 
       watcher.observe([ row_for(task) ], now: T0)
 
       candidate = store.load(identity_for(task.project_root)).fetch("candidates").values.first
       assert_equal head, candidate.dig("pull_request", "observed_head")
-      assert_equal :archived, watcher.tick(now: T0).first.fetch(:status)
+      with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(home, "attempts")) do
+        assert_equal :archived, watcher.tick(now: T0).first.fetch(:status)
+      end
+      archived = Hive::TaskResolver.new(task.slug, project_filter: "app").resolve
+      assert_equal "9-done", stage_dir(archived)
     end
   end
 

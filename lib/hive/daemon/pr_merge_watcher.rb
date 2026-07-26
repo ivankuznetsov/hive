@@ -760,23 +760,11 @@ module Hive
       end
 
       def observed_head_for(task, identity, frontmatter)
-        begin
-          pointer = Hive::Worktree.read_owned_pointer(
-            task.folder,
-            project_root: identity.fetch("project_path"),
-            slug: task.slug,
-            expected_root: Hive::Worktree.canonical_root(identity.fetch("project_path"))
-          )
-          head = Hive::GitOps.new(pointer.fetch("path")).head_sha.to_s.downcase
-          return head if head.match?(/\A[a-f0-9]{40,64}\z/)
-        rescue Hive::Error, KeyError, SystemCallError, IOError
-          # A removed owned worktree is expected late in the pipeline. Fall
-          # back to the controller-observed immutable frontmatter binding.
-        end
-        %w[head_sha head_oid headRefOid].filter_map do |field|
-          value = frontmatter[field].to_s.downcase
-          value if value.match?(/\A[a-f0-9]{40,64}\z/)
-        end.first
+        Hive::TaskClosure.local_pr_head_binding(
+          task,
+          frontmatter: frontmatter,
+          project_root: identity.fetch("project_path")
+        )
       end
 
       def stage_dir(task)

@@ -106,7 +106,12 @@ channel: it may write `authority=remote_merge`, `channel=daemon` only for the
 task's own verified same-repository merged PR after the durable reconciler's
 guards pass. The reconciler's observed head and merge OIDs must still equal
 the closure service's final GitHub read, so architecture-intake delay cannot
-race a changed PR binding. That channel is not accepted by the public confirmation API and
+race a changed PR binding. The final locked PR-binding guard rechecks a
+strictly owned canonical worktree when one exists and otherwise uses the
+controller-observed head in current `pr.md` metadata. For tasks created before
+that field existed, only the owned worktree can supply the binding; an
+arbitrary path, missing worktree, or different HEAD remains unverifiable.
+That channel is not accepted by the public confirmation API and
 cannot take over an operator receipt. `closure.json` is mode 0600 and is
 written/fsynced before the centralized move to `9-done`; a restart resumes the
 same receipt idempotently. Projection overlays only a fully validated receipt

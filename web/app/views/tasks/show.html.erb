@@ -20,6 +20,23 @@
         hidden: true, data: { turbo_permanent: true } %>
 <%= render "tasks/state" %>
 
+<% if (closure = @task["closure"]).is_a?(Hash) && closure["schema"] == Hive::TaskClosure::SCHEMA %>
+  <section class="task-closure" aria-labelledby="task-closure-title">
+    <h2 id="task-closure-title">Closure evidence</h2>
+    <p>
+      Archived as <strong><%= closure.fetch("reason").tr("_", " ") %></strong>
+      via <%= closure.fetch("authority").tr("_", " ") %>.
+    </p>
+    <ul>
+      <% Array(closure["evidence"]).each do |item| %>
+        <li><%= link_to "#{item.fetch("repository")} #{item["number"] ? "PR ##{item["number"]}" : item.fetch("oid")[0, 12]}",
+                      item.fetch("url"), rel: "noopener noreferrer" %></li>
+      <% end %>
+    </ul>
+    <p><code><%= closure.fetch("receipt_digest") %></code></p>
+  </section>
+<% end %>
+
 <%= render "tasks/media", media: @media, project: @project, task: @task %>
 
 <% if @files.any? %>

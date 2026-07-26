@@ -483,14 +483,11 @@ module Hive
       end
 
       # When `hive migrate` reshuffles the stage layout, an already-
-      # running daemon still has Ruby constants (most importantly
-      # `Hive::Daemon::PrMergeWatcher::ARCHIVE_VERB_TEMPLATE` and
-      # `ARCHIVE_FROM_STAGE`) frozen at class-load time from the OLD
-      # `Workflows::VERBS`. Its next archive dispatch would emit
-      # `hive archive ... --from <old-stage>` against the post-migrate
-      # disk layout and silently fail with `WrongStage`. Restarting the
-      # daemon process is the only way to refresh those constants
-      # (SIGHUP only re-reads YAML config, not Ruby constants).
+      # running daemon still has stage-derived constants (including the
+      # merge reconciler's supported PR-bearing stages) frozen at class-load
+      # time from the OLD `Workflows::VERBS`. Restarting the daemon process
+      # is the only way to refresh those constants (SIGHUP only re-reads YAML
+      # config, not Ruby constants).
       #
       # Best-effort: skip when no daemon pid file, no live process, or
       # `HIVE_MIGRATE_SKIP_DAEMON_RESTART` is set. On Linux with

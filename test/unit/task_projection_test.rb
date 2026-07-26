@@ -197,6 +197,30 @@ class TaskProjectionTest < Minitest::Test
     assert_equal({}, identity.fetch("stages"))
   end
 
+  def test_validated_closure_overlay_preserves_condition_and_attempt_truth
+    projection = Hive::TaskProjection.project(
+      records: [
+        condition_event(
+          "AgentHealthy", state: "satisfied", event_id: "healthy",
+          evidence: attempt_evidence(1)
+        )
+      ]
+    )
+    receipt = {
+      "schema" => "hive-task-closure",
+      "schema_version" => 1,
+      "reason" => "already_delivered",
+      "receipt_digest" => "d" * 64
+    }
+
+    overlaid = projection.with_closure(receipt)
+
+    assert_nil projection.to_h["closure"], "the replay projection must remain immutable"
+    assert_equal receipt, overlaid.to_h.fetch("closure")
+    assert_equal projection.to_h.fetch("identity"), overlaid.to_h.fetch("identity")
+    assert_equal projection.to_h.fetch("conditions"), overlaid.to_h.fetch("conditions")
+  end
+
   private
 
   def condition_event(name, state: "satisfied", event_id:, attempt_id: "attempt-a",

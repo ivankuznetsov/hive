@@ -1,7 +1,6 @@
 require "json"
 require "hive/commands/approve"
 require "hive/commands/run"
-require "hive/gh"
 require "hive/markers"
 require "hive/stages"
 require "hive/task_resolver"
@@ -33,19 +32,30 @@ module Hive
       include Hive::Schemas::EnvelopeEmitter
       include Hive::Attempts::CommandDispatch
 
+      def self.archive_with_closure(task, project:, receipt_digest:,
+                                    observation_guard: nil)
+        new(
+          "archive", task.folder,
+          project: project,
+          quiet: true,
+          closure_receipt_digest: receipt_digest,
+          observation_guard: observation_guard
+        ).call
+      end
+
       def initialize(verb, target, project: nil, from: nil, json: false,
-                     recover_merged_error_reason: nil, durable: false,
-                     attempt_entrypoint: nil, quiet: false, observation_guard: nil)
+                     durable: false, attempt_entrypoint: nil, quiet: false,
+                     observation_guard: nil, closure_receipt_digest: nil)
         @verb = verb
         @target = target
         @project_filter = project
         @from = from
         @json = json
-        @recover_merged_error_reason = recover_merged_error_reason
         @durable = durable
         @attempts_api = attempt_entrypoint
         @quiet = quiet
         @observation_guard = observation_guard
+        @closure_receipt_digest = closure_receipt_digest
       end
 
       def call
@@ -78,9 +88,6 @@ module Hive
         argv = [ "hive", @verb, task.folder ]
         argv.concat([ "--from", @from ]) if @from
         argv << "--json" if @json
-        if @recover_merged_error_reason
-          argv.concat([ "--recover-merged-error-reason", @recover_merged_error_reason ])
-        end
         argv
       end
 
@@ -91,6 +98,7 @@ module Hive
         target_stage = config.fetch(:target)
         source_stage = config.fetch(:source)
 
+        return close_with_receipt(task, current_stage, target_stage) if @closure_receipt_digest
         return emit_archive_noop(task) if archive_noop?(task, current_stage)
 
         if current_stage == target_stage
@@ -152,7 +160,6 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         Hive::Conditions::TransitionGuard.validate!(task, force: config[:force_source])
         return if terminal_marker?(marker)
-        return if archive_merged_error_recovery_marker?(task, marker, config)
 
         next_command = "hive #{@verb} #{task.slug} --from #{stage_dir(task)}"
         raise Hive::WrongStage.new(
@@ -172,20 +179,49 @@ module Hive
         Hive::Markers::TERMINAL_MARKER_NAMES.include?(marker.name)
       end
 
-      def archive_merged_error_recovery_marker?(task, marker, config)
-        return false unless @verb == "archive"
-        return false unless stage_dir(task) == config.fetch(:source)
-        return false unless marker.name == :error
+      # Evidence closure may retire a task from any active stage, but only
+      # through TaskClosure's private StageAction entrypoint. The dedicated
+      # receipt guard is checked before every move/resume; ordinary archive
+      # keeps its terminal-marker and 8-finalize source rules unchanged.
+      def close_with_receipt(task, current_stage, target_stage)
+        unless @verb == "archive" && target_stage == Hive::Stages::DIRS.last
+          raise Hive::TaskClosure::InvalidReceipt,
+                "closure receipts can authorize only the archive transition"
+        end
+        Hive::Conditions::TransitionGuard.validate_closure!(
+          task,
+          receipt_digest: @closure_receipt_digest,
+          project: @project_filter
+        )
+        if current_stage == target_stage
+          marker = Hive::Markers.current(task.state_file)
+          return emit_archive_noop(task) if marker.name == :complete
 
-        reason = @recover_merged_error_reason.to_s
-        return false if reason.empty?
+          run_at(task.folder, observation_guard: nil)
+          return emit_phase(Hive::Task.new(task.folder), "closure_resumed")
+        end
 
-        return false unless marker.attrs.to_h.fetch("reason", nil).to_s == reason
-
-        pr_url = Hive::Gh.pr_frontmatter(task.state_file)["pr_url"].to_s
-        return false if pr_url.empty?
-
-        Hive::Gh.pr_state(pr_url) == "MERGED"
+        new_folder = File.join(task.hive_state_path, "stages", target_stage, task.slug)
+        closure_guard = lambda do |locked_task|
+          Hive::Conditions::TransitionGuard.validate_closure!(
+            locked_task,
+            receipt_digest: @closure_receipt_digest,
+            project: @project_filter
+          )
+          @observation_guard&.call(locked_task)
+        end
+        Hive::Commands::Approve.new(
+          task.folder,
+          to: target_stage,
+          from: current_stage,
+          project: @project_filter,
+          force: true,
+          json: false,
+          quiet: true,
+          observation_guard: closure_guard
+        ).call
+        run_at(new_folder, observation_guard: nil)
+        emit_phase(Hive::Task.new(new_folder), "closed_with_evidence")
       end
 
       # Inner Approve and Run are silent when the verb is in --json mode;
@@ -197,11 +233,7 @@ module Hive
           to: target_stage,
           from: current_stage,
           project: @project_filter,
-          force: config[:force_source] || archive_merged_error_recovery_marker?(
-            task,
-            Hive::Markers.current(task.state_file),
-            config
-          ),
+          force: config[:force_source],
           json: false,
           quiet: @json || @quiet,
           observation_guard: @observation_guard

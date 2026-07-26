@@ -70,7 +70,11 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "name" => "writero",
       "path" => "/tmp/writero",
       "hive_state_path" => "/tmp/writero/.hive-state",
-      "tasks" => [ task_row(slug: "fix-bug") ]
+      "tasks" => [
+        task_row(slug: "fix-bug").merge(
+          "pr_url" => "https://github.com/acme/writero/pull/42"
+        )
+      ]
     } ])
     with_fake_status(JSON.generate(payload)) do |bin|
       consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
@@ -82,6 +86,7 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_equal "fix-bug", row.slug
       assert_equal "ready_to_brainstorm", row.action
       assert_equal "hive brainstorm slug", row.suggested_command
+      assert_equal "https://github.com/acme/writero/pull/42", row.pr_url
     end
   end
 

@@ -514,6 +514,169 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_archive_closure_json_emits_read_only_preview
+    task = Struct.new(:project_root).new("/tmp/app")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    payload = {
+      "schema" => "hive-task-closure-input",
+      "schema_version" => 1,
+      "ok" => true,
+      "preview_digest" => "a" * 64
+    }
+    preview = Struct.new(:payload) { def to_h = payload }.new(payload)
+
+    with_replaced_singleton_method(
+      Hive::TaskResolver, :new, ->(*) { resolver }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "app", "path" => "/tmp/app" } ] }
+      ) do
+        with_replaced_singleton_method(
+          Hive::TaskClosure, :preview, ->(**) { preview }
+        ) do
+          out, = capture_io do
+            Hive::CLI.start([
+              "archive", "task", "--reason", "already_delivered",
+              "--evidence", "acme/app#42", "--json"
+            ])
+          end
+          assert_equal payload, JSON.parse(out)
+        end
+      end
+    end
+  end
+
+  def test_archive_closure_rejects_noninteractive_confirmation
+    noninteractive_error = assert_raises(Hive::TaskClosure::Unauthorized) do
+      Hive::CLI.start([
+        "archive", "task", "--reason", "already_delivered",
+        "--evidence", "acme/app#42"
+      ])
+    end
+    assert_match(/interactive terminal/, noninteractive_error.message)
+  end
+
+  def test_archive_closure_interactive_confirmation_archives_exact_preview
+    task = Struct.new(:project_root, :slug).new("/tmp/app", "task")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    preview = Struct.new(:preview_digest, :payload) do
+      def valid? = true
+      def to_h = payload
+    end.new(
+      "a" * 64,
+      {
+        "schema" => "hive-task-closure-input",
+        "schema_version" => 1,
+        "ok" => true,
+        "preview_digest" => "a" * 64
+      }
+    )
+    confirmations = []
+    input = StringIO.new("CLOSE aaaaaaaaaaaa\n")
+    input.define_singleton_method(:tty?) { true }
+    previous_stdin = $stdin
+    $stdin = input
+
+    with_replaced_singleton_method(
+      Hive::TaskResolver, :new, ->(*) { resolver }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "app", "path" => "/tmp/app" } ] }
+      ) do
+        with_replaced_singleton_method(
+          Hive::TaskClosure, :preview, ->(**) { preview }
+        ) do
+          with_replaced_singleton_method(
+            Hive::TaskClosure, :confirm!, lambda { |**kwargs|
+              confirmations << kwargs
+              {
+                "reason" => "already_delivered",
+                "receipt_digest" => "b" * 64
+              }
+            }
+          ) do
+            out, = capture_io do
+              Hive::CLI.start([
+                "archive", "task", "--reason", "already_delivered",
+                "--evidence", "https://github.com/acme/app/pull/42"
+              ])
+            end
+
+            assert_includes out, "Type CLOSE aaaaaaaaaaaa"
+            assert_includes out, "archived task as already_delivered"
+          end
+        end
+      end
+    end
+
+    assert_equal 1, confirmations.length
+    assert_equal "a" * 64, confirmations.first.fetch(:preview_digest)
+    assert_equal "cli", confirmations.first.fetch(:channel)
+    assert_equal true, confirmations.first.fetch(:authorized)
+  ensure
+    $stdin = previous_stdin
+  end
+
+  def test_archive_closure_interactive_flow_rejects_blocked_preview_and_wrong_phrase
+    task = Struct.new(:project_root, :slug).new("/tmp/app", "task")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    preview_class = Struct.new(:preview_digest, :payload, :valid)
+    previews = [
+      preview_class.new("a" * 64, { "ok" => false }, false),
+      preview_class.new("a" * 64, { "ok" => true }, true)
+    ]
+    previews.each do |preview|
+      preview.define_singleton_method(:to_h) { payload }
+      preview.define_singleton_method(:valid?) { valid }
+    end
+    inputs = [ "ignored\n", "CLOSE wrong\n" ]
+    previous_stdin = $stdin
+
+    with_replaced_singleton_method(
+      Hive::TaskResolver, :new, ->(*) { resolver }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "app", "path" => "/tmp/app" } ] }
+      ) do
+        previews.zip(inputs).each do |preview, input_text|
+          input = StringIO.new(input_text)
+          input.define_singleton_method(:tty?) { true }
+          $stdin = input
+          with_replaced_singleton_method(
+            Hive::TaskClosure, :preview, ->(**) { preview }
+          ) do
+            expected = preview.valid? ?
+              Hive::TaskClosure::Unauthorized :
+              Hive::TaskClosure::VerificationFailed
+            assert_raises(expected) do
+              capture_io do
+                Hive::CLI.start([
+                  "archive", "task", "--reason", "already_delivered",
+                  "--evidence", "acme/app#42"
+                ])
+              end
+            end
+          end
+        end
+      end
+    end
+  ensure
+    $stdin = previous_stdin
+  end
+
+  def test_archive_closure_flags_require_target
+    error = assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start([
+        "archive", "--reason", "already_delivered",
+        "--evidence", "acme/app#42"
+      ])
+    end
+    assert_match(/require an archive TARGET/, error.message)
+  end
+
   def test_status_approve_findings_and_finding_toggles_pass_options
     with_command_new_stub(Hive::Commands::Status) do |calls|
       Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "2-gather", "--write", "--force", "--json" ])

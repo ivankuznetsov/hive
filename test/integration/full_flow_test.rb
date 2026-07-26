@@ -37,6 +37,8 @@ class FullFlowTest < Minitest::Test
       HIVE_FLOW_FOLDER HIVE_FLOW_PHASE HIVE_FLOW_FINDINGS HIVE_FLOW_PASS
       HIVE_FLOW_DRIVER_LOG HIVE_FAKE_GH_PR_EXISTS
       HIVE_FAKE_GH_PR_EXISTS_FILE HIVE_FAKE_GH_PR_EXISTS_URL HIVE_FAKE_GH_PR_EXISTS_NUMBER
+      HIVE_FAKE_GH_HEAD_REF_OID HIVE_FAKE_GH_PR_METADATA_URL
+      HIVE_FAKE_GH_PR_METADATA_NUMBER
     ].each { |k| ENV.delete(k) }
     Array(@spawned_worktrees).each { |p| FileUtils.rm_rf(p) }
   end
@@ -83,14 +85,14 @@ class FullFlowTest < Minitest::Test
       when "open-pr"
         File.write(File.join(folder, "pr.md"), <<~MD)
           ---
-          pr_url: https://example.com/pr/42
+          pr_url: https://github.com/acme/app/pull/42
           pr_number: 42
           ---
 
           ## Summary
           stub
 
-          <!-- COMPLETE pr_url=https://example.com/pr/42 is_draft=true -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/42 is_draft=true -->
         MD
         # validate_complete_marker (open-pr stage) re-runs `gh pr list`
         # post-spawn and requires the URL to match. Touch the flag
@@ -114,14 +116,14 @@ class FullFlowTest < Minitest::Test
         MD
         File.write(File.join(folder, "pr.md"), <<~MD)
           ---
-          pr_url: https://example.com/pr/42
+          pr_url: https://github.com/acme/app/pull/42
           pr_number: 42
           ---
 
           ## Summary
           finalized
 
-          <!-- COMPLETE pr_url=https://example.com/pr/42 is_draft=false -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/42 is_draft=false -->
         MD
       else
         abort "unknown phase #{phase}"
@@ -229,8 +231,12 @@ class FullFlowTest < Minitest::Test
         # present, and the driver writes it during the open-pr phase.
         flag_file = File.join(@driver_dir, "pr-exists.flag")
         ENV["HIVE_FAKE_GH_PR_EXISTS_FILE"] = flag_file
-        ENV["HIVE_FAKE_GH_PR_EXISTS_URL"] = "https://example.com/pr/42"
+        ENV["HIVE_FAKE_GH_PR_EXISTS_URL"] = "https://github.com/acme/app/pull/42"
         ENV["HIVE_FAKE_GH_PR_EXISTS_NUMBER"] = "42"
+        ENV["HIVE_FAKE_GH_PR_METADATA_URL"] = "https://github.com/acme/app/pull/42"
+        ENV["HIVE_FAKE_GH_PR_METADATA_NUMBER"] = "42"
+        ENV["HIVE_FAKE_GH_HEAD_REF_OID"] =
+          run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
         capture_io { Hive::Commands::Run.new(open_pr_dir).call }
         assert_equal :complete, Hive::Markers.current(File.join(open_pr_dir, "pr.md")).name
 

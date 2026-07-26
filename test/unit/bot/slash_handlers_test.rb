@@ -1,4 +1,6 @@
 require "test_helper"
+require "base64"
+require "json"
 require "hive/bot/handlers/slash_handlers"
 require "hive/bot/handlers/callback_handlers"
 require "hive/bot/idea_draft_store"
@@ -93,6 +95,62 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_includes result.text, "/approve <id|slug>"
     assert_includes result.text, "/autofix <id|slug>"
     assert_includes result.text, "/details <id|slug>"
+    assert_includes result.text, "/close <id|slug>"
+  end
+
+  def test_close_builds_a_bounded_verify_then_confirm_callback
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+    result = handlers.closure(Update.new(
+      text: "/close 9281 --reason already_delivered " \
+            "--evidence https://github.com/ivankuznetsov/hive/pull/42",
+      chat_id: 1
+    ))
+
+    assert_equal :reply, result.action
+    assert_match(/Nothing is archived until verification/, result.text)
+    token = result.reply_markup.dig(0, 0, :callback_data)
+    assert_operator token.bytesize, :<=,
+                    Hive::Bot::NotificationBuilders::CALLBACK_DATA_MAX
+    callback = Hive::Bot::NotificationBuilders.resolve_callback(token)
+    prefix, encoded = callback.split(":", 2)
+    payload = JSON.parse(Base64.urlsafe_decode64(encoded))
+
+    assert_equal "closure_preview", prefix
+    assert_equal "hive", payload.fetch("project")
+    assert_equal REVIEW_ERROR_ROW.slug, payload.fetch("slug")
+    assert_equal "already_delivered", payload.dig("input", "reason")
+    assert_equal [ "https://github.com/ivankuznetsov/hive/pull/42" ],
+                 payload.dig("input", "evidence")
+  end
+
+  def test_close_requires_explicit_reason_and_evidence
+    result = @handlers.closure(Update.new(
+      text: "/close task-260525-abcd --reason already_delivered",
+      chat_id: 1
+    ))
+
+    assert_equal :reply, result.action
+    assert_match(%r{\AUse /close}, result.text)
+    assert_match(/at least one --evidence/, result.text)
+    assert_nil result.reply_markup
+  end
+
+  def test_close_rejects_duplicate_and_unknown_options
+    commands = [
+      "/close task --reason superseded --evidence acme/app#42 " \
+        "--successor app:first --successor app:second --attestation shipped",
+      "/close task --reason superseded --evidence acme/app#42 " \
+        "--successor app:next --attestation shipped --attestation twice",
+      "/close task --reason already_delivered --evidence acme/app#42 --mystery value",
+      "/close task --reason unsupported --evidence acme/app#42"
+    ]
+
+    commands.each do |command|
+      result = @handlers.closure(Update.new(text: command, chat_id: 1))
+      assert_equal :reply, result.action
+      assert_match(%r{\AUse /close}, result.text)
+      assert_nil result.reply_markup
+    end
   end
 
   def test_status_with_json_flag_sets_format_json

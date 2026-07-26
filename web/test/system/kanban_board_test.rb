@@ -267,7 +267,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
       assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
       board_token = status_page_token
 
-      find(".kanban-card[data-task-slug='#{original_slug}'] a").click
+      find(".kanban-card[data-task-slug='#{original_slug}'] .kanban-card-heading a").click
       assert_current_path task_path(project, original_slug)
       execute_script("document.querySelector('#status-stream-owner').remove()")
       wait_for_status_subscribers(0)
@@ -296,7 +296,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
 
       start_status_navigation_request_tracking
       with_status_catch_up_observer do |catch_ups|
-        find(".kanban-card[data-task-slug='#{slug}'] a").click
+        find(".kanban-card[data-task-slug='#{slug}'] .kanban-card-heading a").click
         assert_current_path task_pathname, wait: 10
         assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
         catch_up = Timeout.timeout(10) { catch_ups.pop }
@@ -324,7 +324,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
       start_status_navigation_request_tracking
       with_replaced_singleton_method(StatusBroadcaster, :current_version?, ->(_token) { false }) do
         with_status_catch_up_observer do |catch_ups|
-          find(".kanban-card[data-task-slug='#{slug}'] a").click
+          find(".kanban-card[data-task-slug='#{slug}'] .kanban-card-heading a").click
           assert_current_path task_pathname, wait: 10
 
           first = Timeout.timeout(10) { catch_ups.pop }
@@ -374,7 +374,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
         start_status_navigation_request_tracking
         with_replaced_singleton_method(StatusBroadcaster, :current_version?, ->(_token) { false }) do
           with_status_catch_up_observer do |catch_ups|
-            find(".kanban-card[data-task-slug='#{slug}'] a").click
+            find(".kanban-card[data-task-slug='#{slug}'] .kanban-card-heading a").click
             assert_current_path task_pathname, wait: 10
 
             first = Timeout.timeout(10) { catch_ups.pop }
@@ -482,7 +482,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
       JS
 
       with_status_catch_up_observer do |catch_ups|
-        find(".kanban-card[data-task-slug='#{slug}'] a").click
+        find(".kanban-card[data-task-slug='#{slug}'] .kanban-card-heading a").click
         assert_current_path task_path(project, slug), wait: 10
         assert_equal board_token, status_page_token,
                      "route-only navigation should preserve the semantic status token"

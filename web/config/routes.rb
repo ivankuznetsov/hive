@@ -51,6 +51,8 @@ Rails.application.routes.draw do
     post "drop" => "tasks/drops#create", as: :task_drop
     post "run" => "tasks/runs#create", as: :task_run
     post "recover" => "tasks/recoveries#create", as: :task_recover
+    get  "closure" => "tasks/closures#new", as: :new_task_closure
+    post "closure" => "tasks/closures#create", as: :task_closure
     post "intervene" => "tasks/interventions#create", as: :task_intervene
     post "answers" => "tasks/answers#create", as: :task_answers
   end

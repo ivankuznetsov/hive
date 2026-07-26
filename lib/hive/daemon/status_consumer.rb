@@ -26,7 +26,7 @@ module Hive
                        :condition_task_generation, :commit_generation, :current_attempt,
                        :conditions, :condition_history, :evidence, :condition_overrides, :condition_gate,
                        :condition_migration, :condition_provenance, :shadow_audit,
-                       :condition_warning,
+                       :condition_warning, :pr_url,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
       # project payload's `legacy_stage_dirs` array. The dispatcher uses
@@ -218,6 +218,7 @@ module Hive
               condition_provenance: task["condition_provenance"] || {},
               shadow_audit: task["shadow_audit"] || {},
               condition_warning: task["condition_warning"],
+              pr_url: task["pr_url"],
               diagnostic: task["diagnostic"],
               depends_on: task["depends_on"],
               blocked_by: task["blocked_by"],

@@ -76,6 +76,10 @@ module Hive
         Hive::Gh.ensure_authenticated!(cfg)
         state_result = verify_state!(task, worktree_path, branch, cfg)
         return state_result if state_result
+        identity_result = refresh_pr_identity!(
+          task, worktree_path, pr_url, cfg
+        )
+        return identity_result if identity_result
 
         prompt = render_prompt(task, worktree_path, branch, pr_url)
         profile = Hive::Stages::Base.stage_profile(cfg, "finalize")
@@ -266,6 +270,49 @@ module Hive
                           reason: "unpushed_commits",
                           detail: ((forced&.stderr).to_s.strip.empty? ? push_result.stderr : forced.stderr).to_s.strip[0, 200])
         { commit: "finalize_unpushed_commits", status: :error }
+      end
+
+      def refresh_pr_identity!(task, worktree_path, pr_url, cfg)
+        parsed = Hive::Gh.parse_pull_request_url(pr_url)
+        unless parsed
+          Hive::Markers.set(task.state_file, :error, reason: "finalize_pr_url_invalid")
+          return { commit: "finalize_pr_url_invalid", status: :error }
+        end
+
+        local_head, head_status = capture_git(worktree_path, "rev-parse", "HEAD")
+        metadata = Hive::Gh.pr_metadata(
+          parsed.fetch("number"), cfg: cfg, chdir: worktree_path
+        )
+        local_head = local_head.to_s.strip.downcase
+        remote_head = metadata.head_ref_oid.to_s.downcase
+        unless head_status.success? &&
+               metadata.number == parsed.fetch("number") &&
+               Hive::Gh.parse_pull_request_url(metadata.url) == parsed &&
+               local_head.match?(/\A[a-f0-9]{40,64}\z/) &&
+               remote_head == local_head
+          Hive::Markers.set(
+            task.state_file, :error,
+            reason: "finalize_pr_head_mismatch",
+            local_head: local_head.empty? ? "(unavailable)" : local_head,
+            remote_head: remote_head.empty? ? "(unavailable)" : remote_head
+          )
+          return { commit: "finalize_pr_head_mismatch", status: :error }
+        end
+
+        Hive::Gh.persist_pr_identity!(
+          File.join(task.folder, "pr.md"),
+          pr_url: parsed.fetch("url"),
+          pr_number: parsed.fetch("number"),
+          head_oid: remote_head
+        )
+        nil
+      rescue Hive::GhError => e
+        Hive::Markers.set(
+          task.state_file, :error,
+          reason: "finalize_pr_identity_refresh_failed",
+          detail: e.message.to_s[0, 200]
+        )
+        { commit: "finalize_pr_identity_refresh_failed", status: :error }
       end
 
       # True only when HEAD already contains, by patch-id, every commit on the

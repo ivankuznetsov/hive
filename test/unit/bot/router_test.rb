@@ -58,6 +58,7 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal :slash_approve, @router.classify(update(text: "/approve slug"))
     assert_equal :slash_autofix, @router.classify(update(text: "/autofix slug"))
     assert_equal :slash_details, @router.classify(update(text: "/details slug"))
+    assert_equal :slash_close, @router.classify(update(text: "/close slug"))
     assert_equal :slash_done, @router.classify(update(text: "/done"))
     assert_equal :slash_help, @router.classify(update(text: "/help"))
     assert_equal :slash_start, @router.classify(update(text: "/start")),
@@ -786,6 +787,8 @@ class HiveBotRouterTest < Minitest::Test
       "findings:accept_all:hive:slug-260514-abcd:6-review" => :callback_findings_accept_all,
       "findings:reject_all:hive:slug-260514-abcd:6-review" => :callback_findings_reject_all,
       "idea_project_new:token" => :callback_idea_project_new,
+      "closure_preview:payload" => :callback_closure_preview,
+      "closure_confirm:payload" => :callback_closure_confirm,
       # Retired Codex draft-assist callbacks no longer parse to an intent.
       "codex_write:hive:slug-260514-abcd:1" => :unknown,
       "codex_edit:hive:slug-260514-abcd:1" => :unknown,
@@ -819,6 +822,70 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal [ "hive", "approve", "slug-260514-abcd", "--json" ], result.command_argv
   end
 
+  def test_slash_close_produces_a_resolvable_verification_button
+    row = Hive::Bot::StatusWatcher::Row.new(
+      project: "hive",
+      slug: "delivered-260514-abcd",
+      id: 9812,
+      stage: "6-review",
+      workflow: "coding",
+      marker: "review_error",
+      attrs: { "reason" => "timeout" },
+      action: "recover_review"
+    )
+    router = build_test_router(
+      bot_config: { "chat_id_allowlist" => [ 12345 ] },
+      status_snapshot_provider: -> { [ row ] }
+    )
+
+    result = router.handle(update(
+      text: "/close 9812 --reason already_delivered " \
+            "--evidence https://github.com/ivankuznetsov/hive/pull/42"
+    ))
+
+    assert_equal :reply, result.action
+    token = result.reply_markup.dig(0, 0, :callback_data)
+    callback = Hive::Bot::NotificationBuilders.resolve_callback(token)
+    assert_equal :callback_closure_preview,
+                 router.classify(update(callback_data: token))
+    assert_match(/\Aclosure_preview:/, callback)
+  end
+
+  def test_closure_confirmation_uses_the_router_allowlist
+    input = {
+      "reason" => "already_delivered",
+      "evidence" => [ "acme/app#42" ],
+      "successor" => nil,
+      "attestation" => nil
+    }
+    callback = Hive::Bot::NotificationBuilders.encode_closure_callback(
+      "closure_confirm",
+      "project" => "hive",
+      "slug" => "delivered-task",
+      "input" => input,
+      "preview_digest" => "d" * 64
+    )
+    task = Object.new
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    calls = []
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(
+        Hive::TaskClosure,
+        :confirm!,
+        lambda do |**kwargs|
+          calls << kwargs
+          { "reason" => "already_delivered", "receipt_digest" => "e" * 64 }
+        end
+      ) do
+        result = @router.handle(update(callback_data: callback))
+        assert_equal :edit_reply, result.action
+      end
+    end
+
+    assert_equal true, calls.first.fetch(:authorized)
+  end
+
   def test_slash_help_returns_commands_reply
     result = @router.handle(update(text: "/help"))
 
@@ -826,6 +893,7 @@ class HiveBotRouterTest < Minitest::Test
     assert_includes result.text, "/status"
     assert_includes result.text, "/waiting"
     assert_includes result.text, "/approve <id|slug>"
+    assert_includes result.text, "/close <id|slug>"
   end
 
   def test_legacy_callback_update_without_with_still_dispatches

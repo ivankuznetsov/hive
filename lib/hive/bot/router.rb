@@ -22,6 +22,7 @@ module Hive
         slash_approve
         slash_autofix
         slash_details
+        slash_close
         slash_done
         slash_help
         slash_start
@@ -44,6 +45,8 @@ module Hive
         callback_findings_accept_all
         callback_findings_reject_all
         callback_idea_project_new
+        callback_closure_preview
+        callback_closure_confirm
         callback_expired
         idea_voice
         idea_voice_during_draft
@@ -64,7 +67,7 @@ module Hive
                           :attachment, :recovery, keyword_init: true)
 
       ALLOWED_ACTIONS = %i[
-        noop reply dispatch_then_reply dispatch_commands dispatch_recovery start_answer
+        noop reply edit_reply dispatch_then_reply dispatch_commands dispatch_recovery start_answer
         write_answer_then_reply
         stage_attachment transcribe_voice commit_idea
       ].freeze
@@ -112,6 +115,7 @@ module Hive
           projects_provider: @projects_provider,
           status_snapshot_provider: status_snapshot_provider,
           last_project: -> { @last_project },
+          closure_authorizer: ->(update) { allowed?(update.chat_id) },
           logger: @logger
         )
         @free_text_handler = Handlers::FreeTextHandler.new(
@@ -154,6 +158,7 @@ module Hive
         when %r{\A/approve\b} then :slash_approve
         when %r{\A/autofix\b} then :slash_autofix
         when %r{\A/details\b} then :slash_details
+        when %r{\A/close\b} then :slash_close
         when %r{\A/done\b} then :slash_done
         when %r{\A/help\b} then :slash_help
         # Telegram sends /start automatically on first contact with a bot —
@@ -274,6 +279,8 @@ module Hive
         when /\Afindings:accept_all:/ then :callback_findings_accept_all
         when /\Afindings:reject_all:/ then :callback_findings_reject_all
         when /\Aidea_project_new:/ then :callback_idea_project_new
+        when /\Aclosure_preview:/ then :callback_closure_preview
+        when /\Aclosure_confirm:/ then :callback_closure_confirm
         # A `#`-prefixed token that survived resolve_callback is a compacted
         # callback whose registry entry is gone (bot restart, or TTL/size
         # eviction) — the long approve_plan:/rerun: callbacks on this project's
@@ -342,6 +349,7 @@ module Hive
         when :slash_approve then @slash_handlers.approve(update)
         when :slash_autofix then @slash_handlers.autofix(update)
         when :slash_details then @slash_handlers.details(update)
+        when :slash_close then @slash_handlers.closure(update)
         when :slash_done then @slash_handlers.done(update, @conversation_store)
         when :slash_help then @slash_handlers.help(update)
         when :slash_start then @slash_handlers.start(update)

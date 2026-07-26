@@ -331,6 +331,18 @@ module Hive
                         keeping_previous: true)
         end
 
+        # Reconcile task-bound merged PRs before automatic error recovery.
+        # This prevents an already-delivered task from launching another
+        # provider attempt merely because its final local marker is an error.
+        # The watcher persists one fair candidate cursor per project and the
+        # architecture intake it invokes gets first use of its bounded budget;
+        # repository-wide catch-up runs immediately afterwards with whatever
+        # budget remains.
+        run_pr_merge_reconciliation(
+          result.rows, projects: result.projects, now: now
+        )
+        run_refactor_patrol_merge_reconciler_tick(now: now)
+
         # Heal AGENT_WORKING markers whose backing agent isn't alive
         # BEFORE per-row dispatch — a healed row classifies as :error on
         # the next status read, and we don't want the dispatcher to try
@@ -341,7 +353,7 @@ module Hive
         # StartLimitBurst=3 in the unit's restart-loop cap.
         begin
           @stale_agent_healer.heal(
-            result.rows,
+            rows_eligible_for_error_recovery(result.rows),
             now: now,
             legacy_layout_projects: @legacy_layout_projects,
             auto_retry_projects: enabled_auto_retry_projects(result.rows)
@@ -363,38 +375,6 @@ module Hive
           @logger.event(:fatal,
                         message: "display_name_backfiller raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
-        end
-
-        # 3. Reconcile architecture-patrol merge intake before processing the
-        # immediate finalize watcher. The collaborator owns its slow cadence,
-        # so a normal ~30s dispatcher tick does not hammer GitHub.
-        run_refactor_patrol_merge_reconciler_tick(now: now)
-
-        # A merge watch may have been enqueued on a previous clear snapshot.
-        # Remove every newly-held row before the watcher polls or archives it;
-        # both admission errors and ordinary below-gate waits suppress all
-        # forward daemon work.
-        drop_held_merge_watches(result.rows)
-
-        # 3a. PrMergeWatcher tick (if present): check pending merges
-        # first. Archive dispatches MUST flow through the same enable +
-        # cap checks that advance dispatches use, so a project disabled
-        # after enqueue can't sneak through and N concurrent merges
-        # can't blow past the global / per-project caps.
-        # PR-40 review P2 #4.
-        @merge_watcher&.tick(now: now)&.each do |archive_dispatch|
-          dispatch_archive_with_gates(archive_dispatch, now: now)
-        end
-        # Surface entries the watcher dropped after exhausting
-        # GH_MAX_FAILURES so the operator sees the give-up signal in
-        # daemon.log instead of the task silently sitting at
-        # ready_to_archive forever (ce-code-review P1 #9).
-        @merge_watcher&.last_tick_dropped&.each do |drop|
-          @logger.event(:merge_watcher_dropped,
-                        project: drop[:project], slug: drop[:slug],
-                        pr_url: drop[:pr_url],
-                        failure_count: drop[:failure_count],
-                        last_error: drop[:last_error])
         end
 
         # 3b. Dispatch-request queue (plan 2026-05-28-002). Process
@@ -814,7 +794,7 @@ module Hive
             next if enqueued.empty?
 
             @logger.event(
-              :merge_watcher_polled,
+              :architecture_patrol_progress,
               project: result.fetch(:project),
               source: "catch_up",
               enqueued_prs: enqueued
@@ -825,6 +805,57 @@ module Hive
         @logger.event(
           :fatal,
           message: "refactor patrol merge reconciliation failed: #{e.class}: #{e.message}"
+        )
+      end
+
+      def run_pr_merge_reconciliation(rows, projects:, now:)
+        return unless @merge_watcher
+
+        projects = Array(projects).map(&:name).map(&:to_s).uniq.select do |project|
+          project_enabled?(project) && !@legacy_layout_projects.key?(project)
+        end
+        eligible_rows = rows.select { |row| projects.include?(row.project) }
+        @merge_watcher.observe(
+          eligible_rows, now: now, projects: projects
+        ).each do |result|
+          next unless result.fetch(:status) == :blocked
+
+          @logger.event(
+            :blocked,
+            project: result.fetch(:project),
+            stage: "merge_reconciliation",
+            action: "observe",
+            reason: result.fetch(:reason)
+          )
+        end
+        @merge_watcher.tick(now: now, projects: projects).each do |result|
+          status = result.fetch(:status)
+          payload = {
+            project: result.fetch(:project),
+            slug: result[:slug],
+            stage: "merge_reconciliation",
+            action: "archive_merged_task"
+          }
+          case status
+          when :archived, :already_archived
+            @logger.event(:completed, **payload, reason: status.to_s)
+          when :open
+            @logger.event(:skipped, **payload, reason: "pull_request_open")
+          when :closed_unmerged
+            @logger.event(:blocked, **payload, reason: "pull_request_closed_unmerged")
+          when :dry_run
+            @logger.event(:skipped, **payload, reason: "dry_run")
+          else
+            @logger.event(
+              :blocked, **payload,
+              reason: result[:reason] || status.to_s
+            )
+          end
+        end
+      rescue StandardError => e
+        @logger.event(
+          :fatal,
+          message: "task merge reconciliation failed: #{e.class}: #{e.message}"
         )
       end
 
@@ -973,11 +1004,20 @@ module Hive
           )
           return
         end
-        if merged_pr_recoverable_finalize_error?(row)
-          enqueue_merge_watch(row, error_reason: row.marker_attrs.to_h["reason"].to_s)
+        if merge_reconciliation_blocks_recovery?(row)
+          @logger.event(
+            :skipped,
+            project: row.project,
+            slug: row.slug,
+            stage: row.stage,
+            action: row.action,
+            reason: "merge_reconciliation_pending"
+          )
           observe_operational_disposition(
-            row, decision: :merge_watch, owner: "scheduler",
-            reason: "merged pull request is queued for recovery finalization"
+            row,
+            decision: :merge_reconciliation_pending,
+            owner: "hive",
+            reason: "task-bound pull request delivery is being reconciled"
           )
           return
         end
@@ -1075,7 +1115,9 @@ module Hive
                                   dependency_stage: row.dependency_stage)
           observe_policy_disposition(row, decision)
         when :poll_for_merge
-          enqueue_merge_watch(row)
+          @logger.event(:skipped, project: row.project, slug: row.slug,
+                                  stage: row.stage, action: row.action,
+                                  reason: "pull_request_merge_pending")
           observe_policy_disposition(row, decision)
         when :markerless_stalled
           # A generic :agent stage exited 0 without writing a WAITING/COMPLETE
@@ -1094,14 +1136,27 @@ module Hive
         end
       end
 
-      def drop_held_merge_watches(rows)
-        return unless @merge_watcher
+      def rows_eligible_for_error_recovery(rows)
+        Array(rows).reject { |row| merge_reconciliation_blocks_recovery?(row) }
+      end
 
-        rows.each do |row|
-          next unless row.blocked == true || row.admission_error
+      def merge_reconciliation_blocks_recovery?(row)
+        return false unless @merge_watcher
+        return false unless auto_retry_error_row?(row)
 
-          @merge_watcher.drop(project: row.project, slug: row.slug)
-        end
+        @merge_watcher.recovery_blocked?(
+          project: row.project, slug: row.slug
+        )
+      rescue StandardError => e
+        @logger.event(
+          :blocked,
+          project: row.project,
+          slug: row.slug,
+          stage: "merge_reconciliation",
+          action: "recovery_guard",
+          reason: "#{e.class}: #{e.message}".to_s[0, 500]
+        )
+        true
       end
 
       def log_admission_error(row)
@@ -1527,77 +1582,6 @@ module Hive
         @attempt_snapshot&.capacity&.task_reserved?(
           project: row.project, task_slug: row.slug
         ) == true
-      end
-
-      # PR-40 review P2 #4: archive dispatches must respect both
-      # `daemon.enabled` (the project may have been disabled after the
-      # PR-merge enqueue) and the concurrency caps (multiple PRs
-      # merging at once would otherwise spawn N archives ignoring the
-      # global / per-project ceiling).
-      def dispatch_archive_with_gates(archive_dispatch, now:)
-        project = archive_dispatch[:project]
-        slug = archive_dispatch[:slug]
-
-        unless project_enabled?(project)
-          @logger.event(:skipped, project: project, slug: slug,
-                                  stage: archive_dispatch[:stage],
-                                  action: "archive",
-                                  reason: "project_disabled_after_enqueue")
-          return
-        end
-
-        # Mirror handle_row's @legacy_layout_projects guard: if the
-        # project is mid-migration, the archive command's --from stage
-        # may not match the current on-disk layout (the watcher's
-        # ARCHIVE_VERB_TEMPLATE is frozen at class load). Skip the
-        # dispatch and let handle_row re-enqueue once the half-migrated
-        # state clears on a future tick. ce-code-review P1 #10.
-        if @legacy_layout_projects.key?(project)
-          @logger.event(:skipped, project: project, slug: slug,
-                                  stage: archive_dispatch[:stage],
-                                  action: "archive",
-                                  reason: "legacy_layout_detected",
-                                  note: "skipping archive while project layout is half-migrated; " \
-                                        "next tick will re-enqueue once migration completes")
-          return
-        end
-
-        gate = @controller.can_dispatch?(
-          project: project, slug: slug, now: now,
-          external_global_count: @external_active_agent_total,
-          external_project_count: external_active_agent_count_for(project)
-        )
-        if gate == :ok
-          dispatch_command(
-            archive_dispatch[:command],
-            project: project, slug: slug, stage: archive_dispatch[:stage],
-            state_file_mtime: archive_dispatch[:state_file_mtime],
-            state_file_path: nil, # archive doesn't track an mtime baseline
-            now: now
-          )
-        else
-          # Archive will retry on the next tick if the gate clears.
-          # The watcher already cleared this entry from its pending
-          # set when it returned MERGED, so we need to re-enqueue so
-          # the next tick attempts the dispatch again.
-          @merge_watcher&.enqueue(
-            project: project, slug: slug,
-            task_folder: File.join(
-              Hive::Config.find_project(project)["hive_state_path"],
-              "stages", archive_dispatch[:stage], slug
-            ),
-            error_reason: archive_dispatch[:error_reason]
-          ) if Hive::Config.find_project(project)
-          @logger.event(:blocked, project: project, slug: slug,
-                                  stage: archive_dispatch[:stage],
-                                  action: "archive",
-                                  reason: gate.to_s)
-        end
-      rescue StandardError => e
-        # Defensive: re-enqueue path uses File.join + Config lookup
-        # which can throw on edge cases. Don't let it crash the tick.
-        @logger.event(:fatal, message: "archive dispatch error: #{e.class}: #{e.message}",
-                              project: project, slug: slug)
       end
 
       def dispatch_patrol_with_gates(patrol_dispatch, now:)
@@ -2699,26 +2683,6 @@ module Hive
           admission_status: result.status.to_s,
           reason: result.reason
         )
-      end
-
-      def enqueue_merge_watch(row, error_reason: nil)
-        return unless @merge_watcher
-
-        @merge_watcher.enqueue(project: row.project, slug: row.slug,
-                               task_folder: row.folder,
-                               error_reason: error_reason)
-        @logger.event(:merge_watcher_enqueued, project: row.project, slug: row.slug,
-                                               folder: row.folder,
-                                               error_reason: error_reason)
-      end
-
-      def merged_pr_recoverable_finalize_error?(row)
-        return false unless row.stage.to_s == Hive::Daemon::PrMergeWatcher::ARCHIVE_FROM_STAGE
-        return false unless row.marker.to_s == "error"
-        return false unless row.action.to_s == "error"
-
-        reason = row.marker_attrs.to_h["reason"].to_s
-        Hive::Daemon::PrMergeWatcher::MERGED_PR_RECOVERABLE_ERROR_REASONS.include?(reason)
       end
 
       def reset_active_agent_snapshot

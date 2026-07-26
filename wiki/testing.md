@@ -131,11 +131,16 @@ task default: :test
 
 ## Test helpers (`test/test_helper.rb`)
 
-- The test process unconditionally points `GIT_CONFIG_GLOBAL` at a disposable
-  `hive-test-git-config*` directory and removes it after the suite. This keeps
-  subprocesses hermetic even when the caller exports a real
-  `XDG_CONFIG_HOME`: `git config --global` cannot rewrite the operator's
-  credential helpers, hooks, signing settings, or other global controls.
+- Normal test processes replace `HOME`, `HIVE_HOME`, every persisted XDG root,
+  the Claude/Codex/Pi/Grok config roots, `GH_CONFIG_DIR`, and
+  `GIT_CONFIG_GLOBAL` with paths under one disposable `hive-test-user*`
+  directory, then remove it after the suite. This keeps subprocesses hermetic
+  even when the caller is a daemon exporting real user paths: tests cannot
+  recreate legacy attempt roots, rewrite managed agent skills, consume real
+  GitHub configuration, or change credential helpers, hooks, and signing
+  settings. The authenticated `rake smoke` task explicitly opts out because it
+  exists to exercise real operator logins; direct smoke-file runs must set
+  `HIVE_TEST_ALLOW_REAL_USER_ENV=1` deliberately.
 - `with_tmp_dir` — `Dir.mktmpdir("hive-test", &block)`.
 - `with_tmp_git_repo` — `git init -b master`, configures user/email and disables GPG signing, makes one initial commit, yields the path.
 - `with_tmp_global_config(home: nil)` — overrides `ENV["HIVE_HOME"]` to a tmp dir, writes an empty `registered_projects: []` YAML, and defaults `HOME` to the same tmp dir so subprocesses and service-installer tests do not touch the operator's real home. Pass `home:` when a test intentionally installs fake user-level skills or plugins under a separate fake HOME.

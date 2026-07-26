@@ -23,15 +23,33 @@ require "English"
 require "hive"
 require_relative "support/workflow_helpers"
 
-# Never let a test subprocess inherit the operator's global Git configuration.
-# In particular, `git config --global` prefers an existing XDG config even when
-# a test overrides only HOME. Point Git at one disposable file for the entire
-# process so tests cannot rewrite real credential helpers, hooks, or signing
-# configuration.
-HIVE_TEST_GLOBAL_GIT_CONFIG_ROOT = Dir.mktmpdir("hive-test-git-config").freeze
-ENV["GIT_CONFIG_GLOBAL"] = File.join(HIVE_TEST_GLOBAL_GIT_CONFIG_ROOT, "config")
-Minitest.after_run do
-  FileUtils.rm_rf(HIVE_TEST_GLOBAL_GIT_CONFIG_ROOT)
+# Never let a normal test subprocess inherit the operator's Hive state, home,
+# XDG roots, agent configuration, GitHub configuration, or global Git config.
+# A caller can export any of these into a daemon or terminal; tests must remain
+# hermetic anyway. Authenticated smoke tests opt out explicitly in the Rake
+# task because their purpose is to exercise the operator's real agent login.
+unless ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
+  HIVE_TEST_USER_ROOT = Dir.mktmpdir("hive-test-user").freeze
+  test_home = File.join(HIVE_TEST_USER_ROOT, "home")
+  FileUtils.mkdir_p(test_home)
+  {
+    "HOME" => test_home,
+    "HIVE_HOME" => File.join(HIVE_TEST_USER_ROOT, "hive"),
+    "XDG_CONFIG_HOME" => File.join(HIVE_TEST_USER_ROOT, "config"),
+    "XDG_DATA_HOME" => File.join(HIVE_TEST_USER_ROOT, "data"),
+    "XDG_STATE_HOME" => File.join(HIVE_TEST_USER_ROOT, "state"),
+    "XDG_CACHE_HOME" => File.join(HIVE_TEST_USER_ROOT, "cache"),
+    "XDG_BIN_HOME" => File.join(HIVE_TEST_USER_ROOT, "bin"),
+    "CLAUDE_CONFIG_DIR" => File.join(test_home, ".claude"),
+    "CODEX_HOME" => File.join(test_home, ".codex"),
+    "PI_CODING_AGENT_DIR" => File.join(test_home, ".pi", "agent"),
+    "GROK_HOME" => File.join(test_home, ".grok"),
+    "GH_CONFIG_DIR" => File.join(HIVE_TEST_USER_ROOT, "gh"),
+    "GIT_CONFIG_GLOBAL" => File.join(HIVE_TEST_USER_ROOT, "gitconfig")
+  }.each { |key, value| ENV[key] = value }
+  Minitest.after_run do
+    FileUtils.rm_rf(HIVE_TEST_USER_ROOT)
+  end
 end
 
 if ENV.delete("HIVE_REQUIRE_TEST_RUNS") == "1"

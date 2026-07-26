@@ -159,9 +159,10 @@ that exact Bundler through RubyGems, and invokes its absolute executable
 through the current `RbConfig.ruby`. `hive-cli` declares that exact Bundler as
 a runtime dependency so isolated gem, Homebrew, and AUR installations carry it
 inside Hive's managed `GEM_HOME`; a system default gem is not assumed.
-Production asset compilation uses the same Ruby directly. A missing locked
-Bundler is therefore an explicit bootstrap error rather than an ambiguous
-command-not-found failure.
+Production asset compilation runs as locked `bundle exec` over that same Ruby,
+so Rails cannot activate a newer host Bundler while reading the managed lock.
+A missing locked Bundler is therefore an explicit bootstrap error rather than
+an ambiguous command-not-found failure.
 
 ## Ruby version
 

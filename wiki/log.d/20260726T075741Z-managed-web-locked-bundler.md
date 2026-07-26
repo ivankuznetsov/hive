@@ -11,7 +11,7 @@ modules:
   through the current Ruby.
 - `hive-cli` now carries that exact Bundler as a runtime dependency, including
   when its package manager isolates Hive from system gems.
-- Production asset compilation also uses that Ruby directly, preventing a
-  system `ruby` elsewhere on `PATH` from silently taking over.
+- Production asset compilation uses locked `bundle exec` over that Ruby,
+  preventing a system Ruby or newer host Bundler from silently taking over.
 - The packaged bootstrap gate now runs with only `/usr/bin:/bin` on `PATH` and
   still installs the real Rails bundle and compiles its assets.

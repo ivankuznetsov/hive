@@ -722,7 +722,9 @@ installing the real Rails bundle and compiling assets. Exact-head CI then
 exposed the second half of the boundary: an isolated candidate `GEM_HOME` did
 not contain Bundler at all. The gemspec now makes the web lock's exact Bundler
 a runtime dependency, while the package fixture exposes that dependency's gem
-home without restoring any executable wrapper. The remaining evidence is one
-installed-main service upgrade from the merged fix, followed by a real
+home without restoring any executable wrapper. Local replay then caught Rails
+activating a newer host Bundler during asset compilation; that phase now runs
+through locked `bundle exec` and the current Ruby too. The remaining evidence
+is one installed-main service upgrade from the merged fix, followed by a real
 worktree capture; keep those operational checks distinct from the packaged
 fixture.

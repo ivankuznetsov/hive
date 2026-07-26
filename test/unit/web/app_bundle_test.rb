@@ -498,7 +498,10 @@ class WebAppBundleTest < Minitest::Test
       assert_equal(
         [
           [ RbConfig.ruby, "/locked/bundler/exe/bundle", "install" ],
-          [ RbConfig.ruby, File.join(app, "bin", "rails"), "assets:precompile" ]
+          [
+            RbConfig.ruby, "/locked/bundler/exe/bundle", "exec",
+            RbConfig.ruby, File.join(app, "bin", "rails"), "assets:precompile"
+          ]
         ],
         calls
       )

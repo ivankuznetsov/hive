@@ -169,7 +169,10 @@ module Hive
           "HIVE_WEB_STORAGE_DIR" => asset_storage
         }
         command = if default_commands
-          [ RbConfig.ruby, File.join(dir, "bin", "rails"), "assets:precompile" ]
+          bundle_argv(
+            dir, "exec", RbConfig.ruby,
+            File.join(dir, "bin", "rails"), "assets:precompile"
+          )
         else
           %w[bin/rails assets:precompile]
         end
@@ -197,6 +200,10 @@ module Hive
       end
 
       def bundle_install_argv(dir)
+        bundle_argv(dir, "install")
+      end
+
+      def bundle_argv(dir, *arguments)
         version = File.read(File.join(dir, "Gemfile.lock"))[
           /^BUNDLED WITH\s*\n\s+(\S+)\s*$/m, 1
         ].to_s
@@ -206,7 +213,7 @@ module Hive
         end
 
         executable = Gem.bin_path("bundler", "bundle", "= #{version}")
-        [ RbConfig.ruby, executable, "install" ]
+        [ RbConfig.ruby, executable, *arguments ]
       rescue Errno::ENOENT
         raise Hive::Error, "hive web: downloaded web bundle does not contain a Gemfile.lock"
       rescue Gem::GemNotFoundException

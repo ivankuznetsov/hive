@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -48,6 +48,16 @@ tags: [gap, todo, release-proof, agent-skills]
   stronger boundary requires a broker under a separate OS identity (or
   equivalent protected signing/storage authority), not another in-process
   Ruby guard.
+
+- `Hive::ArtifactFirewall` now proves before/after custody for declared anchors,
+  rejects non-regular or outside-root required outputs, and verifies
+  reconstructable restoration. Baseline identity comes from the same
+  descriptor as captured bytes, and restoration refuses a changed protected
+  parent. It still runs under the controller's OS user: it cannot prevent
+  concurrent same-UID writes, observe undeclared paths, or provide
+  process/mount/network isolation or an atomic multi-file rollback. Stronger
+  hostile-agent containment remains an OS/Hivebox or separate-identity
+  concern, not a future widening of the in-process report contract.
 
 - Hive now resolves and verifies the current `honeycomb-catalog/v2` and
   `packages/NAME/VERSION/manifest.yml` contract, but the manifest's coarse

@@ -7,6 +7,7 @@ require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/agent_limit"
 require "hive/agent/message_extractor"
+require "hive/artifact_firewall"
 require "hive/events"
 require "hive/lock"
 require "hive/permission_scope"
@@ -764,9 +765,7 @@ module Hive
 
     def completed_output_file?
       effective_status_mode == :output_file_exists &&
-        !@expected_output.to_s.empty? &&
-        File.exist?(@expected_output) &&
-        File.size(@expected_output).positive?
+        expected_output_report&.valid?
     end
 
     def completed_state_file_artifact?
@@ -844,13 +843,37 @@ module Hive
         return
       end
 
-      unless File.exist?(path) && File.size(path) > 0
+      unless expected_output_report&.valid?
         result[:status] = :error
         result[:error_message] = "expected output file missing or empty: #{path}"
         return
       end
 
       result[:status] = :ok
+    end
+
+    def expected_output_report
+      manifest = expected_output_manifest
+      return nil unless manifest
+
+      Hive::ArtifactFirewall.validate_required_outputs(manifest)
+    rescue Hive::ArtifactFirewall::Error
+      nil
+    end
+
+    def expected_output_manifest
+      return nil if @expected_output.nil? || @expected_output.to_s.empty?
+
+      @expected_output_manifest ||= begin
+        path = File.expand_path(@expected_output.to_s)
+        root = File.dirname(path)
+        Hive::ArtifactFirewall::Manifest.new(
+          root: root,
+          protected_anchors: {},
+          permitted_writable_roots: [ root ],
+          required_outputs: { File.basename(path) => path }
+        )
+      end
     end
 
     def extract_final_message(data)

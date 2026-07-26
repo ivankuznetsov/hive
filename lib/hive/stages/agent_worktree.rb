@@ -1,9 +1,9 @@
 require "hive/config"
+require "hive/artifact_firewall"
 require "hive/atomic_file"
 require "hive/draft_pr_receipt"
 require "hive/gh"
 require "hive/markers"
-require "hive/protected_files"
 require "hive/stages/agent"
 require "hive/stages/agent_report"
 require "hive/stages/draft_pr_handoff"
@@ -23,7 +23,7 @@ module Hive
       MAX_INSTRUCTION_BYTES = MAX_INSTRUCTION_CHARS * 4
       MANAGED_AGENT_FAILURE_REASON = "managed_agent_failed".freeze
       PROTECTED_FILES = (
-        Hive::ProtectedFiles::ORCHESTRATOR_OWNED + %w[meta.yml handoff.yml pr.md]
+        Hive::ArtifactFirewall::ORCHESTRATOR_OWNED + %w[meta.yml handoff.yml pr.md]
       ).uniq.freeze
 
       Context = Data.define(
@@ -74,55 +74,63 @@ module Hive
         resource_limits = Hive::Stages::Base.stage_resource_limits(cfg || {}, stage)
 
         git_control_paths = git_control_paths!(context.worktree_path)
-        git_controls_capture = Hive::ProtectedFiles.capture_paths(git_control_paths)
-        git_controls_before = Hive::ProtectedFiles.snapshot_paths(git_control_paths)
-        protected_capture = Hive::ProtectedFiles.capture(task.folder, PROTECTED_FILES)
-        protected_before = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
+        task_control_paths = PROTECTED_FILES.to_h do |name|
+          [ name, File.join(task.folder, name) ]
+        end
+        custody_manifest = Hive::ArtifactFirewall::Manifest.new(
+          root: task.folder,
+          protected_anchors: task_control_paths.merge(git_control_paths),
+          permitted_writable_roots: [ task.folder, context.worktree_path ],
+          required_outputs: { File.basename(report_path) => report_path }
+        )
+        custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
         result = nil
         spawn_error = nil
         begin
-          result = Hive::Stages::Base.spawn_agent(
-            task,
-            prompt: prompt,
-            add_dirs: scope.fetch(:add_dirs),
-            cwd: context.worktree_path,
-            **resource_limits,
-            log_label: task.stage_name,
-            profile: profile,
-            model: stage.model,
-            effort: stage.effort,
-            **Hive::Stages::Base.tool_scope_kwargs(scope),
-            status_mode: :exit_code_only,
-            cfg: cfg || {}
-          )
-        rescue StandardError => e
-          spawn_error = e
+          begin
+            result = Hive::Stages::Base.spawn_agent(
+              task,
+              prompt: prompt,
+              add_dirs: scope.fetch(:add_dirs),
+              cwd: context.worktree_path,
+              **resource_limits,
+              log_label: task.stage_name,
+              profile: profile,
+              model: stage.model,
+              effort: stage.effort,
+              **Hive::Stages::Base.tool_scope_kwargs(scope),
+              status_mode: :exit_code_only,
+              cfg: cfg || {}
+            )
+          rescue StandardError => e
+            spawn_error = e
+          end
         ensure
-          protected_after = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
-          git_controls_after = Hive::ProtectedFiles.snapshot_paths(git_control_paths)
-        end
-        tampered = Hive::ProtectedFiles.diff(protected_before, protected_after)
-        unless tampered.empty?
-          restored, restore_error = Hive::ProtectedFiles.restore_safely(
-            task.folder, protected_capture, tampered
+          custody_report = Hive::ArtifactFirewall.validate_and_restore(
+            custody_manifest, custody_snapshot
           )
+        end
+        task_tampered = custody_report.tampered_labels & task_control_paths.keys
+        unless task_tampered.empty?
           raise Hive::StageError,
-                "worktree agent modified protected task files: #{tampered.join(', ')}; " \
-                "restored=#{restored}#{": #{restore_error}" if restore_error}"
+                "worktree agent modified protected task files: #{task_tampered.join(', ')}; " \
+                "restored=#{custody_report.restored?}" \
+                "#{": #{custody_report.restore_diagnostic}" if custody_report.restore_diagnostic}"
         end
-        git_tampered = Hive::ProtectedFiles.diff(git_controls_before, git_controls_after)
+        git_tampered = custody_report.tampered_labels & git_control_paths.keys
         unless git_tampered.empty?
-          restored, restore_error = Hive::ProtectedFiles.restore_paths_safely(
-            git_control_paths, git_controls_capture, git_tampered
-          )
           raise Hive::StageError,
                 "worktree agent modified protected Git control files: #{git_tampered.join(', ')}; " \
-                "restored=#{restored}#{": #{restore_error}" if restore_error}"
+                "restored=#{custody_report.restored?}" \
+                "#{": #{custody_report.restore_diagnostic}" if custody_report.restore_diagnostic}"
         end
         return managed_failure_result(task, error: spawn_error, context: context) if spawn_error
 
         unless result.is_a?(Hash) && result[:status] == :ok
           return managed_failure_result(task, result: result, context: context)
+        end
+        unless custody_report.required_outputs_valid?
+          raise Hive::StageError, custody_report.diagnostic
         end
 
         report_source = Hive::Stages::AgentReport.read_source(report_path)
@@ -135,7 +143,7 @@ module Hive
           worktree_context: context, report: report,
           repository_state: repository_state, agent_result: result
         )
-      rescue Hive::StageError, Hive::WorktreeError, Hive::GhError => e
+      rescue Hive::ArtifactFirewall::Error, Hive::StageError, Hive::WorktreeError, Hive::GhError => e
         managed_failure_result(task, error: e)
       end
 

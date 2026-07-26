@@ -34,3 +34,9 @@ deduplicated before manifest construction. This keeps strict duplicate-anchor
 rejection in the public firewall while accepting CI environments where
 `XDG_CONFIG_HOME` or `GIT_CONFIG_GLOBAL` names the same file already derived
 from `HOME`.
+
+**Coverage follow-up:** Added direct contract coverage for bounded and
+duplicate manifest rejection, normalization and internal-error translation,
+capture-time parent instability, descriptor type changes, unreadable paths,
+legacy capture verification, no-op stale restoration, and Agent, Claude, and
+review-triage fail-closed adapters. Production firewall behavior is unchanged.

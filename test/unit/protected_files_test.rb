@@ -213,4 +213,74 @@ class ProtectedFilesTest < Minitest::Test
       assert_includes error.message, "must stay relative"
     end
   end
+
+  def test_capture_and_observe_bind_the_opened_descriptor_type
+    with_tmp_dir do |dir|
+      path = File.join(dir, "anchor")
+      File.write(path, "trusted\n")
+      opened_stat = Struct.new(:file?, :ftype, :mode).new(false, "directory", 0o40755)
+      opened_file = Struct.new(:stat).new(opened_stat)
+      original_open = File.method(:open)
+      descriptor_substitution = lambda do |candidate, *args, **kwargs, &block|
+        if candidate == path
+          block.call(opened_file)
+        else
+          original_open.call(candidate, *args, **kwargs, &block)
+        end
+      end
+
+      with_replaced_singleton_method(File, :open, descriptor_substitution) do
+        captured = Hive::ProtectedFiles.capture_paths("anchor" => path)
+        observed = Hive::ProtectedFiles.observe_paths("anchor" => path)
+
+        assert_equal :unrestorable, captured.fetch("anchor").fetch(:kind)
+        assert_equal :directory,
+                     captured.fetch("anchor").fetch(:identity).fetch(:kind)
+        assert_equal :directory, observed.fetch("anchor").fetch(:kind)
+      end
+    end
+  end
+
+  def test_observe_classifies_other_and_unreadable_file_types
+    path = "/synthetic-control"
+    original_lstat = File.method(:lstat)
+    fifo_stat = Struct.new(:ftype, :mode).new("fifo", 0o10600)
+    with_replaced_singleton_method(
+      File,
+      :lstat,
+      ->(candidate) { candidate == path ? fifo_stat : original_lstat.call(candidate) }
+    ) do
+      observed = Hive::ProtectedFiles.observe_paths("control" => path)
+      assert_equal :fifo, observed.fetch("control").fetch(:kind)
+    end
+
+    with_replaced_singleton_method(
+      File,
+      :lstat,
+      lambda { |candidate|
+        raise Errno::EACCES, candidate if candidate == path
+
+        original_lstat.call(candidate)
+      }
+    ) do
+      observed = Hive::ProtectedFiles.observe_paths("control" => path)
+      assert_equal :unreadable, observed.fetch("control").fetch(:kind)
+      assert_equal "Errno::EACCES",
+                   observed.fetch("control").fetch(:error_class)
+    end
+  end
+
+  def test_restore_accepts_legacy_capture_without_structured_identity
+    with_tmp_dir do |dir|
+      path = File.join(dir, "missing")
+      restored = Hive::ProtectedFiles.restore_paths(
+        { "missing" => path },
+        { "missing" => { kind: :missing, fingerprint: nil } },
+        [ "missing" ]
+      )
+
+      assert_equal true, restored
+      refute_path_exists path
+    end
+  end
 end

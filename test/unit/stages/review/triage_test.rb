@@ -393,6 +393,28 @@ class TriageTest < Minitest::Test
     end
   end
 
+  def test_successful_spawn_without_escalations_is_rejected_by_firewall
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder)
+      File.write(
+        File.join(task_folder, "reviews", "claude-ce-code-review-01.md"),
+        "## Nit\n- [ ] x: y\n"
+      )
+      successful_spawn = lambda do |_task, _cfg, **_kwargs|
+        { status: :ok, log_label: "review-triage-pass01" }
+      end
+
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :spawn_claude!, successful_spawn
+      ) do
+        result = Hive::Stages::Review::Triage.run!(cfg: default_cfg, ctx: ctx)
+
+        assert_equal :error, result.status
+        assert_includes result.error_message, "required output"
+      end
+    end
+  end
+
   def test_error_result_preserves_spawn_limit_text
     with_triage_dir do |dir, task_folder|
       ctx = make_ctx(dir, task_folder)

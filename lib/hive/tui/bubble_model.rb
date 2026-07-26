@@ -9,6 +9,7 @@ require "thread"
 require "time"
 require "yaml"
 require "hive"
+require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/config"
 require "hive/commands/new"
@@ -1521,8 +1522,7 @@ module Hive
         cfg = Hive::Config.load(task.project_root)
         agent_name = cfg.dig("execute", "agent") || "claude"
         profile = Hive::AgentProfiles.lookup(agent_name, cfg: cfg)
-        profile.check_version!
-        profile.preflight!
+        Hive::AgentRuntime.prepare!(profile)
 
         context_paths = agent_context_paths(task)
         argv = agent_steer_argv(profile, context_paths)

@@ -4,6 +4,7 @@ require "open3"
 require "time"
 require "yaml"
 
+require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/agent_limit"
 require "hive/config"
@@ -433,7 +434,7 @@ module Hive
 
     def preflight!(profile, runner)
       preflight_tmux!
-      profile.check_version!
+      Hive::AgentRuntime.prepare!(profile)
       if runner.session_exists?
         raise Hive::AgentError,
               "tmux session #{runner.name} already exists; attach with `tmux attach -t #{runner.name}` " \

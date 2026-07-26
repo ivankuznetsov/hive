@@ -213,6 +213,16 @@ class AgentProfileTest < Minitest::Test
     assert_match(/9\.9\.9, 2\.0\.0/, err.message)
   end
 
+  def test_check_version_rejects_output_without_a_version
+    profile = make_profile(min_version: "1.0.0")
+    ENV["HIVE_FAKE_CLAUDE_VERSION"] = "version unavailable"
+
+    err = assert_raises(Hive::AgentError) { profile.check_version! }
+
+    assert_match(/could not parse/, err.message)
+    assert_match(/version unavailable/, err.message)
+  end
+
   def test_check_version_raises_when_binary_not_runnable
     profile = make_profile(bin_default: "/this/does/not/exist", env_bin_override_key: nil)
     err = assert_raises(Hive::AgentError) { profile.check_version! }

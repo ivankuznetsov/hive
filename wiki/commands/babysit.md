@@ -65,6 +65,14 @@ For each enabled project, the babysitter:
 
 `PrFixer` first checks `gh pr view --json mergeable,mergeStateStatus,statusCheckRollup`. If the PR is mergeable and checks are successful or queued (green), it normally records a `noop`/`already-green` event and does not spawn an agent. The exception: a green PR whose `mergeStateStatus` is `BEHIND` cannot merge under strict "branch must be up-to-date" protection. When `auto_rebase` is enabled (default), `PrFixer#handle_green` materializes the PR worktree, runs `GhOps.rebase_onto_base` (resolve `git remote get-url --push origin`, fetch `<base>` from that source with fallback to `origin`, then `git rebase FETCH_HEAD`), and on a clean rebase force-pushes the rebased HEAD to the PR's **real head branch** (`headRefName`, not the internal `hive-babysitter/pr-<n>` worktree branch) with an explicit `--force-with-lease=<headRefName>:<headRefOid>` so the PR becomes `CLEAN`/mergeable (emits `rebase`/`success`, counted as `fixed`). A rebase that conflicts is aborted and left for a human: no force-push, no fix agent, no label (emits `rebase`/`conflict`, counted as `needs_human`); it is re-evaluated cheaply on the next tick. With `auto_rebase: false` a green-but-`BEHIND` PR just `noop`s. If the PR is not green, `PrFixer` materializes the worktree, gathers failing-job logs plus diff stats, renders `templates/babysitter_pr_fix_prompt.md.erb`, and spawns the configured `execute.agent` through `Hive::Stages::Base.spawn_agent` with `status_mode: :exit_code_only`.
 
+Materialization replaces the prior `.hive-state/babysitter/worktrees/<pr>/`
+checkout before fetching the exact PR head. If a container or interrupted tool
+left files that the Hive user cannot delete, the surviving directory is moved
+to `.hive-state/babysitter/quarantine/worktrees/` and reported on stderr. Git
+administrative state is then pruned immediately with `--expire now`. Failure to
+quarantine or prune aborts the pass explicitly; it cannot leave the same opaque
+`worktree add` error repeating on every tick.
+
 On success, the babysitter is silent on the PR. On failure, timeout, or budget exhaustion it applies `babysitter/needs-human` and posts one give-up comment per PR per UTC hour.
 
 ## Dry Run
@@ -102,7 +110,7 @@ warning, but the permissive file is left untouched and receives no new argv.
 
 - `test/unit/commands/babysit_test.rb` covers CLI flag validation, lifecycle helpers, foreground `restart`, detached restart re-exec into `start --detach`, stale-runtime status recommendations, stale-runtime reload warnings, refused-stop failures, PID-file cleanup races, and bounded PID-lock behavior.
 - `test/unit/babysitter/dry_run_env_test.rb` includes a PTY-backed `git log` regression with `PAGER`, `GIT_PAGER`, and repo-local `core.pager` pointed at a marker-writing helper; the marker must not be created because dry-run passthrough forces `--no-pager`. It also configures a repo-local `man.viewer` helper and asserts `git status --help` is skipped before that helper can run.
-- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization, shared stub environment scrubbing, dry-run PATH wrappers, and deliberately invalid/non-UTF-8 skipped argv, plus the default-deny command/env/log boundaries described above.
+- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization including undeletable-residue quarantine and prune failures, shared stub environment scrubbing, dry-run PATH wrappers, and deliberately invalid/non-UTF-8 skipped argv, plus the default-deny command/env/log boundaries described above.
 - `test/babysitter/run.rb` runs the acceptance smoke suite for early-green, ignored-label, dry-run, and give-up paths.
 
 ## Backlinks

@@ -576,8 +576,13 @@ module Hive
         rescue IOError
           nil
         end
-        out_reader&.join(0.2)
-        err_reader&.join(0.2)
+        [ out_reader, err_reader ].each do |reader|
+          reader&.join(0.2)
+        rescue IOError
+          # A bounded timeout closes the capture streams while their reader
+          # threads unwind. Preserve the primary Timeout::Error.
+          nil
+        end
       end
 
       def self.terminate_capture_process_group(waiter)

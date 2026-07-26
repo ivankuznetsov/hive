@@ -1216,6 +1216,30 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
+  def test_scoped_grok_actor_rejects_missing_bubblewrap
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+
+      sandbox = Hive::WorkflowPackage::RuntimePolicy::GROK_SANDBOX_PATH
+      original_file = File.method(:file?)
+      file_check = ->(path) { path == sandbox ? false : original_file.call(path) }
+
+      error = with_replaced_singleton_method(File, :file?, file_check) do
+        assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            "read-only",
+            task_folder: task,
+            package_root: package,
+            profile: Hive::AgentProfiles.lookup(:grok)
+          )
+        end
+      end
+      assert_includes error.message, "requires bubblewrap"
+    end
+  end
+
   def test_scoped_grok_actor_is_wrapped_in_bubblewrap_with_isolated_home
     with_tmp_dir do |dir|
       task = File.join(dir, "task")

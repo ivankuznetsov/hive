@@ -223,6 +223,30 @@ module Hive
         )
       end
 
+      # One fail-closed local PR-head resolver shared by candidate observation
+      # and the final closure guard. Prefer the exact HEAD of a strictly owned
+      # task worktree; late-stage tasks whose worktree was removed may use the
+      # controller-observed immutable binding persisted in pr.md.
+      def local_pr_head_binding(task, frontmatter:, project_root: task.project_root)
+        begin
+          pointer = Hive::Worktree.read_owned_pointer(
+            task.folder,
+            project_root: project_root,
+            slug: task.slug,
+            expected_root: Hive::Worktree.canonical_root(project_root)
+          )
+          head = Hive::GitOps.new(pointer.fetch("path")).head_sha.to_s.downcase
+          return head if head.match?(FULL_OID_RE)
+        rescue Hive::Error, KeyError, SystemCallError, IOError
+          # Missing or unverifiable legacy worktree falls through to the
+          # immutable controller observation, never an arbitrary git path.
+        end
+        %w[head_oid head_sha headRefOid].filter_map do |field|
+          value = frontmatter[field].to_s.downcase
+          value if value.match?(FULL_OID_RE)
+        end.first
+      end
+
       def validate_active_cas!(task, receipt)
         observation = receipt.fetch("observation")
         current_stage = "#{task.stage_index}-#{task.stage_name}"
@@ -1256,10 +1280,7 @@ module Hive
       evidence = receipt.fetch("evidence").find do |item|
         item["kind"] == "pull_request"
       end
-      head = %w[head_oid head_sha headRefOid].filter_map do |field|
-        value = frontmatter[field].to_s.downcase
-        value if value.match?(FULL_OID_RE)
-      end.first
+      head = self.class.local_pr_head_binding(task, frontmatter: frontmatter)
       unless current && evidence &&
              current.fetch("url") == evidence.fetch("url") &&
              current.fetch("number") == evidence.fetch("number") &&

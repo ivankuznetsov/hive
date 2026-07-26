@@ -29,21 +29,27 @@ module Hive
     end
 
     Request = Data.define(
-      :profile, :prompt, :permission_mode, :add_dirs, :require_add_dirs,
+      :profile, :prompt, :permission_mode, :permission_arguments,
+      :add_dirs, :require_add_dirs,
       :allowed_tools, :disallowed_tools, :max_budget_usd,
       :model, :effort, :pin_model, :identity_arguments,
-      :capabilities, :raw_cli_arguments, :include_output_format
+      :capabilities, :raw_cli_arguments, :trusted_cli_arguments,
+      :executable, :command_prefix, :include_output_format
     ) do
-      def initialize(profile:, prompt:, permission_mode: nil, add_dirs: [],
+      def initialize(profile:, prompt:, permission_mode: nil, permission_arguments: nil, add_dirs: [],
                      require_add_dirs: false, allowed_tools: nil,
                      disallowed_tools: nil, max_budget_usd: nil,
                      model: nil, effort: nil, pin_model: true,
                      identity_arguments: [], capabilities: [],
-                     raw_cli_arguments: [], include_output_format: true)
+                     raw_cli_arguments: [], trusted_cli_arguments: [],
+                     executable: nil, command_prefix: [],
+                     include_output_format: true)
         super(
           profile: profile,
           prompt: prompt.to_s.dup.freeze,
           permission_mode: permission_mode&.to_s&.dup&.freeze,
+          permission_arguments:
+            permission_arguments.nil? ? nil : self.class.send(:freeze_values, permission_arguments),
           add_dirs: Array(add_dirs).map { |dir| dir.to_s.dup.freeze }.freeze,
           require_add_dirs: require_add_dirs == true,
           allowed_tools: self.class.send(:freeze_values, allowed_tools),
@@ -55,6 +61,9 @@ module Hive
           identity_arguments: self.class.send(:freeze_values, identity_arguments),
           capabilities: Array(capabilities).map(&:to_sym).uniq.freeze,
           raw_cli_arguments: self.class.send(:freeze_values, raw_cli_arguments),
+          trusted_cli_arguments: self.class.send(:freeze_values, trusted_cli_arguments),
+          executable: executable&.to_s&.dup&.freeze,
+          command_prefix: self.class.send(:freeze_values, command_prefix),
           include_output_format: include_output_format != false
         )
       end
@@ -135,14 +144,19 @@ module Hive
       evidence = []
       require_headless!(profile, evidence)
 
-      argv = [ profile.bin ]
+      argv = [ request.executable || profile.bin ]
       prompt_style = profile_prompt_style(profile)
       if profile.headless_flag
         argv << profile.headless_flag
         argv << request.prompt if prompt_style == :headless_flag_value
       end
 
-      argv.concat(permission_arguments(profile, request.permission_mode, evidence))
+      argv.concat(
+        permission_arguments(
+          profile, request.permission_mode, evidence,
+          trusted_arguments: request.permission_arguments
+        )
+      )
       argv.concat(directory_arguments(profile, request, evidence))
       argv.concat(tool_scope_arguments(profile, request))
       argv.concat(budget_arguments(profile, request.max_budget_usd))
@@ -165,6 +179,7 @@ module Hive
         evidence << supported_evidence(profile, :raw_cli_arguments, request.raw_cli_arguments)
         argv.concat(request.raw_cli_arguments)
       end
+      argv.concat(request.trusted_cli_arguments)
 
       if request.include_output_format && profile.respond_to?(:output_format_flags)
         argv.concat(Array(profile.output_format_flags))
@@ -172,7 +187,7 @@ module Hive
       argv << (prompt_style == :stdin ? "-" : request.prompt) unless prompt_style == :headless_flag_value
 
       CompiledInvocation.new(
-        argv: argv,
+        argv: request.command_prefix + argv,
         stdin_data: prompt_style == :stdin ? request.prompt : nil,
         provider: profile_name(profile),
         launcher_identity: launcher_identity(profile),
@@ -255,9 +270,11 @@ module Hive
     end
     private_class_method :require_headless!
 
-    def permission_arguments(profile, permission_mode, evidence)
+    def permission_arguments(profile, permission_mode, evidence, trusted_arguments: nil)
       arguments =
-        if profile.respond_to?(:permission_flags)
+        if trusted_arguments
+          trusted_arguments
+        elsif profile.respond_to?(:permission_flags)
           profile.permission_flags(permission_mode)
         elsif profile.respond_to?(:permission_skip_flag) && profile.permission_skip_flag
           [ profile.permission_skip_flag ]

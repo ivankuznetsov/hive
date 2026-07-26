@@ -52,7 +52,7 @@ class ComponentBoundariesTest < Minitest::Test
     remaining_candidates = contract.components.reject { |component| component == agent_abi }
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
-    agent_abi_load = contract.validate_clean_load!("agent-abi")
+    agent_abi_load = contract.validate_clean_loads!.fetch("agent-abi")
     assert_equal "Hive::AgentRuntime", agent_abi_load.fetch("constant")
     assert_empty agent_abi_load.fetch("forbidden_loaded_features")
     assert_empty agent_abi_load.fetch("forbidden_constants")

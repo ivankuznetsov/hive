@@ -544,12 +544,16 @@ module Hive
           profile: @profile,
           prompt: @prompt,
           permission_mode: @permission_mode,
+          permission_arguments: @runtime_policy&.permission_flags,
           add_dirs: @add_dirs,
           allowed_tools: @allowed_tools,
           disallowed_tools: @disallowed_tools,
           max_budget_usd: @max_budget_usd,
           identity_arguments: @identity_arguments,
-          raw_cli_arguments: @cli_flags
+          raw_cli_arguments: @cli_flags,
+          trusted_cli_arguments: @runtime_cli_flags,
+          executable: @runtime_policy&.executable,
+          command_prefix: @runtime_policy&.command_prefix
         )
       )
     end

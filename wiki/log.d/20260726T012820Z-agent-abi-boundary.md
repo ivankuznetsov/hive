@@ -12,5 +12,8 @@
   artifact acceptance, and stage success in Hive.
 - Unsupported requested capabilities now fail closed with typed evidence;
   probe diagnostics are bounded and secret-redacted.
+- Trusted Hive adapters can inject a managed executable, permission argv,
+  sandbox prefix, and policy-owned CLI arguments without reopening the
+  untrusted raw-argument path or moving workflow policy into the runtime.
 - Promoted `agent-abi` to `boundary-ready` in the component catalog. Shared
   `Hive::SecretPatterns` is no longer claimed as artifact-firewall-owned state.

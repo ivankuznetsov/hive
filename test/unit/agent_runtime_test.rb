@@ -150,6 +150,24 @@ class AgentRuntimeTest < Minitest::Test
     assert_equal [ "--safe-mode" ], evidence.arguments
   end
 
+  def test_trusted_policy_arguments_decorate_the_compiled_invocation
+    invocation = compile(
+      custom_profile,
+      permission_arguments: [],
+      trusted_cli_arguments: [ "--settings", "/trusted/settings.json" ],
+      executable: "/trusted/custom-agent",
+      command_prefix: [ "/usr/bin/sandbox", "--" ]
+    )
+
+    assert_equal(
+      [
+        "/usr/bin/sandbox", "--", "/trusted/custom-agent",
+        "-p", "--settings", "/trusted/settings.json", "do work"
+      ],
+      invocation.argv
+    )
+  end
+
   def test_unsupported_headless_and_permission_modes_fail_with_typed_evidence
     no_headless = custom_profile(headless_supported: false)
     error = assert_raises(Hive::AgentRuntime::UnsupportedCapability) do
@@ -177,11 +195,7 @@ class AgentRuntimeTest < Minitest::Test
     assert_evidence error, :model
 
     error = assert_raises(Hive::AgentRuntime::UnsupportedCapability) do
-      compile(
-        Hive::AgentProfiles.lookup(:grok),
-        model: "grok-4.5",
-        effort: "high"
-      )
+      compile(Hive::AgentProfiles.lookup(:pi), model: "provider/model", effort: "high")
     end
     assert_evidence error, :effort
 

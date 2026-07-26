@@ -110,6 +110,25 @@ class AgentGitGateTest < Minitest::Test
     end
   end
 
+  def test_repository_selected_transport_and_credential_helpers_fail_closed
+    dangerous = {
+      "credential.helper" => "!false",
+      "url.ext::false.insteadOf" => "https://example.com/",
+      "remote.origin.uploadpack" => "/tmp/agent-selected-upload-pack"
+    }
+
+    with_tmp_git_repo do |repo|
+      dangerous.each do |name, value|
+        run!("git", "-C", repo, "config", "--local", name, value)
+        error = assert_raises(Hive::AgentGitGate::InvalidRequest, name) do
+          Hive::AgentGitGate.read(repo, :head_oid)
+        end
+        assert_includes error.message, "executable Git helpers", name
+        run!("git", "-C", repo, "config", "--local", "--unset", name)
+      end
+    end
+  end
+
   def test_exact_publication_requires_expected_state_and_returns_remote_proof
     with_local_remote do |repo, remote|
       first = commit_file(repo, "first.txt", "first\n", "first")

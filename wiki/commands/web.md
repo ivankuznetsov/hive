@@ -38,6 +38,10 @@ production `assets:precompile`, requires usable `application.css` and
 `application.js` entrypoints, verifies every Propshaft manifest asset resolves
 to a contained file, and only then atomically activates it. Missing or corrupt
 assets make even a same-version bundle repair itself.
+For a managed bundle, provisioning, `db:prepare`, and the Rails server all run
+through the exact Bundler recorded by the authenticated lockfile and the
+current Ruby. A newer host-default Bundler cannot take over after a successful
+install when systemd starts the service.
 Relative `HIVE_WEB_APP_DIR` values are accepted but normalized before the
 Rails env is built, so `BUNDLE_GEMFILE` points at the real app Gemfile after
 the command changes into the app directory.

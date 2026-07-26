@@ -368,14 +368,29 @@ class WebCommandTest < Minitest::Test
         true
       end
       replacement = ->(env, *argv) { raise ExecCaught.new(env, argv) }
-      caught = with_replaced_singleton_method(Kernel, :exec, replacement) do
-        assert_raises(ExecCaught) { capture_io { command.call } }
+      exact_rails = [
+        "/exact/ruby", "/exact/bundle", "exec", "/exact/ruby",
+        File.join(dir, "bin", "rails")
+      ]
+      rails_argv_calls = []
+      caught = with_replaced_singleton_method(
+        Hive::Web::AppBundle, :rails_argv, ->(actual_dir, *arguments) {
+          rails_argv_calls << [ actual_dir, arguments ]
+          exact_rails
+        }
+      ) do
+        with_replaced_singleton_method(Kernel, :exec, replacement) do
+          assert_raises(ExecCaught) { capture_io { command.call } }
+        end
       end
 
       assert_equal Hive::Web::AppBundle.hive_cli_root, caught.env["HIVE_CLI_ROOT"]
       assert_equal Hive::Web::AppBundle.dependency_dir, caught.env["BUNDLE_PATH"]
-      assert_equal [ %w[bin/rails db:prepare] ], system_calls.map { |call| call.last(2) },
-                   "the validated managed bundle should not recompile assets at every restart"
+      assert_equal [ [ dir, [] ] ], rails_argv_calls
+      assert_equal [ [ *exact_rails, "db:prepare" ] ], system_calls.map { |call| call.drop(1) },
+                   "managed database preparation must run through the locked Bundler"
+      assert_equal [ *exact_rails, "server", "-b", "127.0.0.1", "-p", "4567" ], caught.argv,
+                   "managed Rails server must run through the locked Bundler"
     end
   end
 

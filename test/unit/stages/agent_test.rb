@@ -412,8 +412,8 @@ class StagesAgentTest < Minitest::Test
         with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
           with_replaced_singleton_method(
             Hive::ProtectedFiles,
-            :restore_safely,
-            ->(_root, _captured, _names) { [ false, "synthetic restore failure" ] }
+            :restore_paths_safely,
+            ->(_paths, _captured, _labels) { [ false, "synthetic restore failure" ] }
           ) do
             result = Hive::Stages::AgentWorktree.run!(task, {})
 
@@ -483,10 +483,10 @@ class StagesAgentTest < Minitest::Test
   end
 
   def test_worktree_stage_protects_controller_handoff_files_without_changing_global_stage_ownership
-    expected = (Hive::ProtectedFiles::ORCHESTRATOR_OWNED + %w[meta.yml handoff.yml pr.md]).uniq
+    expected = (Hive::ArtifactFirewall::ORCHESTRATOR_OWNED + %w[meta.yml handoff.yml pr.md]).uniq
 
     assert_equal expected, Hive::Stages::AgentWorktree::PROTECTED_FILES
-    refute_includes Hive::ProtectedFiles::ORCHESTRATOR_OWNED, "pr.md"
+    refute_includes Hive::ArtifactFirewall::ORCHESTRATOR_OWNED, "pr.md"
   end
 
   def test_worktree_stage_rejects_symlinked_report

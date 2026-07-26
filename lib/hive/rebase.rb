@@ -2,7 +2,6 @@ require "yaml"
 require "fileutils"
 require "hive/git_ops"
 require "hive/gh"
-require "hive/protected_files"
 require "hive/stages/base"
 
 module Hive

@@ -229,39 +229,64 @@ components:
 
   - id: agent-artifact-firewall
     name: Agent Artifact Firewall
-    state: candidate
+    state: boundary-ready
     entrypoint:
-      file: lib/hive/protected_files.rb
-      require: hive/protected_files
-      constant: Hive::ProtectedFiles
+      file: lib/hive/artifact_firewall.rb
+      require: hive/artifact_firewall
+      constant: Hive::ArtifactFirewall
     public_contract:
       values:
-        - Hive::ProtectedFiles
+        - Hive::ArtifactFirewall::Manifest
+        - Hive::ArtifactFirewall::Snapshot
+        - Hive::ArtifactFirewall::Violation
+        - Hive::ArtifactFirewall::Restoration
+        - Hive::ArtifactFirewall::Report
       errors:
-        - Hive::Error
-        - ArgumentError
+        - Hive::ArtifactFirewall::Error
+        - Hive::ArtifactFirewall::InvalidManifest
+        - Hive::ArtifactFirewall::CaptureError
+        - Hive::ArtifactFirewall::InvalidSnapshot
     owned_paths:
+      - lib/hive/artifact_firewall.rb
       - lib/hive/protected_files.rb
     state_contracts:
-      - "In-memory protected-file capture plus post-spawn custody report"
+      - "In-memory no-follow protected-anchor capture plus bounded post-spawn custody report"
     schema_contracts:
-      - "Stage marker and outcome policy remains Hive-owned"
+      - "Manifest, Snapshot, Violation, Restoration, and Report schema v1; stage markers and outcomes remain Hive-owned"
     lock_contracts:
-      - "No-follow fingerprints and atomic per-file restore; no filesystem transaction claim"
+      - "No-follow identity checks and atomic per-file restore; same-user application custody only, with no sandbox or filesystem transaction claim"
     component_dependencies: []
-    allowed_hive_dependencies: []
+    allowed_hive_dependencies:
+      - hive/atomic_file
+      - hive/secret_patterns
     internal_collaborators:
-      - Hive::SecretPatterns
+      - Hive::ProtectedFiles
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
+      - lib/hive/agent.rb
+      - lib/hive/claude_launcher.rb
+      - lib/hive/stages/execute.rb
+      - lib/hive/stages/finalize.rb
+      - lib/hive/stages/open_pr.rb
+      - lib/hive/stages/review.rb
+      - lib/hive/stages/review/ci_fix.rb
+      - lib/hive/stages/review/triage.rb
       - lib/hive/stages/agent_worktree.rb
-      - lib/hive/stages/agent_report.rb
     mutation_authority: "Hive stage adapters declare protected, allowed, and required paths."
-    recovery_surface: "Validation and restore report only what application-level custody can prove."
+    recovery_surface: "Typed reports distinguish tampering, output rejection, verified restoration, and restoration failure with bounded redacted diagnostics."
     wiki_page: wiki/modules/protected_files.md
     focused_tests:
+      - test/unit/artifact_firewall_test.rb
+      - test/unit/agent_profile_modes_test.rb
+      - test/unit/claude_launcher_test.rb
       - test/unit/protected_files_test.rb
+      - test/unit/secret_patterns_test.rb
+      - test/unit/stages/agent_test.rb
+      - test/unit/stages/execute_test.rb
+      - test/unit/stages/open_pr_test.rb
+      - test/unit/stages/review/ci_fix_test.rb
+      - test/unit/stages/review/triage_test.rb
     migration_exceptions: []
 
   - id: skillpack

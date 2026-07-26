@@ -121,12 +121,8 @@ class HiveStagesOpenPrTest < Minitest::Test
             Hive::AgentProfiles, :lookup,
             ->(provider, cfg:) { looked_up << [ provider, cfg ]; :persisted_profile }
           ) do
-            with_replaced_singleton_method(Hive::ProtectedFiles, :snapshot, ->(_folder) { Object.new }) do
-              with_replaced_singleton_method(Hive::ProtectedFiles, :diff, ->(_before, _after) { [ "worktree.yml" ] }) do
-                with_replaced_singleton_method(Hive::Stages::OpenPr, :spawn_open_pr_agent, ->(*_args, **_kwargs) { }) do
-                  capture_io { Hive::Stages::OpenPr.run!(task, cfg) }
-                end
-              end
+            with_replaced_singleton_method(Hive::Stages::OpenPr, :spawn_open_pr_agent, ->(*_args, **_kwargs) { }) do
+              capture_io { Hive::Stages::OpenPr.run!(task, cfg) }
             end
           end
         end
@@ -144,18 +140,14 @@ class HiveStagesOpenPrTest < Minitest::Test
       write_pointer(task, worktree)
 
       with_basic_open_pr_run_stubs do
-        with_replaced_singleton_method(Hive::ProtectedFiles, :snapshot, ->(_folder) { Object.new }) do
-          with_replaced_singleton_method(Hive::ProtectedFiles, :diff, ->(_before, _after) { [] }) do
-            with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
-              Hive::Markers.set(task.state_file, :review_waiting, reason: "human")
-            }) do
-              result = nil
-              capture_io { result = Hive::Stages::OpenPr.run!(task, cfg) }
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
+          Hive::Markers.set(task.state_file, :review_waiting, reason: "human")
+        }) do
+          result = nil
+          capture_io { result = Hive::Stages::OpenPr.run!(task, cfg) }
 
-              assert_equal({ commit: nil, status: :review_waiting }, result)
-              assert_equal :review_waiting, Hive::Markers.current(task.state_file).name
-            end
-          end
+          assert_equal({ commit: nil, status: :review_waiting }, result)
+          assert_equal :review_waiting, Hive::Markers.current(task.state_file).name
         end
       end
     end
@@ -402,25 +394,21 @@ class HiveStagesOpenPrTest < Minitest::Test
               with_replaced_singleton_method(Hive::Gh, :scan_pr_for_secrets, ->(state_file:, pr_url:, cfg:) { scan }) do
                 with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(_cfg, _stage) { :profile }) do
                   with_replaced_singleton_method(Hive::Stages::Base, :render, ->(_template, _bindings) { "prompt" }) do
-                    with_replaced_singleton_method(Hive::ProtectedFiles, :snapshot, ->(_folder) { Object.new }) do
-                      with_replaced_singleton_method(Hive::ProtectedFiles, :diff, ->(_before, _after) { [] }) do
-                        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |spawned_task, **_kwargs|
-                          Hive::Markers.set(spawned_task.state_file, :complete,
-                                            pr_url: new_pr.fetch("url"), is_draft: "true")
-                        }) do
-                          result = Hive::Stages::OpenPr.run!(task, cfg)
+                    with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |spawned_task, **_kwargs|
+                      Hive::Markers.set(spawned_task.state_file, :complete,
+                                        pr_url: new_pr.fetch("url"), is_draft: "true")
+                    }) do
+                      result = Hive::Stages::OpenPr.run!(task, cfg)
 
-                          assert_equal({ commit: "pr_opened_draft", status: :complete }, result)
-                          assert pushed, "mismatched historical merged PR must not skip the normal push/create path"
-                          refute File.exist?(File.join(task.folder, "summary.md"))
-                          marker = Hive::Markers.current(task.state_file)
-                          assert_equal "https://github.com/acme/app/pull/135",
-                                       marker.attrs.fetch("pr_url")
-                          frontmatter = Hive::Gh.pr_frontmatter(task.state_file)
-                          assert_equal local_head, frontmatter.fetch("head_oid")
-                          assert_equal 135, frontmatter.fetch("pr_number")
-                        end
-                      end
+                      assert_equal({ commit: "pr_opened_draft", status: :complete }, result)
+                      assert pushed, "mismatched historical merged PR must not skip the normal push/create path"
+                      refute File.exist?(File.join(task.folder, "summary.md"))
+                      marker = Hive::Markers.current(task.state_file)
+                      assert_equal "https://github.com/acme/app/pull/135",
+                                   marker.attrs.fetch("pr_url")
+                      frontmatter = Hive::Gh.pr_frontmatter(task.state_file)
+                      assert_equal local_head, frontmatter.fetch("head_oid")
+                      assert_equal 135, frontmatter.fetch("pr_number")
                     end
                   end
                 end
@@ -472,26 +460,22 @@ class HiveStagesOpenPrTest < Minitest::Test
               with_replaced_singleton_method(Hive::Gh, :scan_pr_for_secrets, ->(state_file:, pr_url:, cfg:) { scan }) do
                 with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(_cfg, _stage) { :profile }) do
                   with_replaced_singleton_method(Hive::Stages::Base, :render, ->(_template, _bindings) { "prompt" }) do
-                    with_replaced_singleton_method(Hive::ProtectedFiles, :snapshot, ->(_folder) { Object.new }) do
-                      with_replaced_singleton_method(Hive::ProtectedFiles, :diff, ->(_before, _after) { [] }) do
-                        with_replaced_singleton_method(Hive::Gh, :lookup_existing_pr, lambda { |_worktree, _branch, cfg:| new_pr }) do
-                          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |spawned_task, **_kwargs|
-                            Hive::Markers.set(spawned_task.state_file, :complete,
-                                              pr_url: new_pr.fetch("url"), is_draft: "true")
-                          }) do
-                            result = Hive::Stages::OpenPr.run!(task, cfg)
+                    with_replaced_singleton_method(Hive::Gh, :lookup_existing_pr, lambda { |_worktree, _branch, cfg:| new_pr }) do
+                      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |spawned_task, **_kwargs|
+                        Hive::Markers.set(spawned_task.state_file, :complete,
+                                          pr_url: new_pr.fetch("url"), is_draft: "true")
+                      }) do
+                        result = Hive::Stages::OpenPr.run!(task, cfg)
 
-                            assert_equal({ commit: "pr_opened_draft", status: :complete }, result)
-                            assert pushed, "stale OPEN PR with mismatched headRefOid must not skip the normal push/create path"
-                            marker = Hive::Markers.current(task.state_file)
-                            assert_equal :complete, marker.name
-                            assert_equal "https://github.com/acme/app/pull/201",
-                                         marker.attrs.fetch("pr_url"),
-                                         "the freshly-opened PR's url must land on the marker, not the stale OPEN PR's"
-                            assert_equal local_head,
-                                         Hive::Gh.pr_frontmatter(task.state_file).fetch("head_oid")
-                          end
-                        end
+                        assert_equal({ commit: "pr_opened_draft", status: :complete }, result)
+                        assert pushed, "stale OPEN PR with mismatched headRefOid must not skip the normal push/create path"
+                        marker = Hive::Markers.current(task.state_file)
+                        assert_equal :complete, marker.name
+                        assert_equal "https://github.com/acme/app/pull/201",
+                                     marker.attrs.fetch("pr_url"),
+                                     "the freshly-opened PR's url must land on the marker, not the stale OPEN PR's"
+                        assert_equal local_head,
+                                     Hive::Gh.pr_frontmatter(task.state_file).fetch("head_oid")
                       end
                     end
                   end

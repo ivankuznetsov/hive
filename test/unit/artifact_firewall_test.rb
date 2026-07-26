@@ -1,0 +1,459 @@
+require "test_helper"
+require "hive/artifact_firewall"
+
+class ArtifactFirewallTest < Minitest::Test
+  include HiveTestHelper
+
+  def test_protected_anchor_reports_added_changed_deleted_and_unchanged
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "changed"), "before\n")
+      File.write(File.join(dir, "deleted"), "before\n")
+      File.write(File.join(dir, "unchanged"), "same\n")
+      manifest = build_manifest(
+        dir,
+        protected: {
+          "added" => "added",
+          "changed" => "changed",
+          "deleted" => "deleted",
+          "unchanged" => "unchanged"
+        }
+      )
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+
+      File.write(File.join(dir, "added"), "new\n")
+      File.write(File.join(dir, "changed"), "after\n")
+      File.delete(File.join(dir, "deleted"))
+      report = Hive::ArtifactFirewall.validate(manifest, snapshot)
+
+      assert_equal :tampered, report.status
+      assert_equal(
+        {
+          "added" => :protected_added,
+          "changed" => :protected_changed,
+          "deleted" => :protected_deleted
+        },
+        report.violations.to_h { |violation| [ violation.label, violation.kind ] }
+      )
+      refute_includes report.tampered_labels, "unchanged"
+      assert_nil report.restored?
+    end
+  end
+
+  def test_protected_anchor_reports_symlink_directory_and_mode_substitution
+    with_tmp_dir do |dir|
+      paths = %w[symlink directory mode].to_h do |name|
+        path = File.join(dir, name)
+        File.write(path, "trusted\n")
+        [ name, path ]
+      end
+      manifest = build_manifest(dir, protected: paths)
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+
+      outside = File.join(dir, "outside")
+      File.write(outside, "trusted\n")
+      File.unlink(paths.fetch("symlink"))
+      File.symlink(outside, paths.fetch("symlink"))
+      File.unlink(paths.fetch("directory"))
+      FileUtils.mkdir_p(paths.fetch("directory"))
+      File.chmod(0o600, paths.fetch("mode"))
+
+      report = Hive::ArtifactFirewall.validate(manifest, snapshot)
+      kinds = report.violations.to_h { |violation| [ violation.label, violation.kind ] }
+
+      assert_equal :protected_symlink_substitution, kinds.fetch("symlink")
+      assert_equal :protected_directory_substitution, kinds.fetch("directory")
+      assert_equal :protected_mode_changed, kinds.fetch("mode")
+    end
+  end
+
+  def test_required_outputs_must_be_nonempty_regular_files
+    with_tmp_dir do |dir|
+      valid = File.join(dir, "valid.md")
+      empty = File.join(dir, "empty.md")
+      symlink = File.join(dir, "symlink.md")
+      directory = File.join(dir, "directory.md")
+      File.write(valid, "accepted\n")
+      File.write(empty, "")
+      File.symlink(valid, symlink)
+      FileUtils.mkdir_p(directory)
+
+      manifest = build_manifest(
+        dir,
+        outputs: {
+          "valid" => valid,
+          "missing" => File.join(dir, "missing.md"),
+          "empty" => empty,
+          "symlink" => symlink,
+          "directory" => directory
+        },
+        roots: [ dir ]
+      )
+      report = Hive::ArtifactFirewall.validate(
+        manifest, Hive::ArtifactFirewall.capture(manifest)
+      )
+      kinds = report.required_output_violations.to_h do |violation|
+        [ violation.label, violation.kind ]
+      end
+
+      assert_equal :rejected, report.status
+      assert_equal :required_output_missing, kinds.fetch("missing")
+      assert_equal :required_output_empty, kinds.fetch("empty")
+      assert_equal :required_output_symlink, kinds.fetch("symlink")
+      assert_equal :required_output_non_regular, kinds.fetch("directory")
+      refute kinds.key?("valid")
+    end
+  end
+
+  def test_required_output_outside_permitted_root_is_rejected
+    with_tmp_dir do |dir|
+      allowed = File.join(dir, "allowed")
+      FileUtils.mkdir_p(allowed)
+      outside = File.join(dir, "outside.md")
+      File.write(outside, "content\n")
+      manifest = build_manifest(
+        dir,
+        outputs: { "outside" => outside },
+        roots: [ allowed ]
+      )
+
+      report = Hive::ArtifactFirewall.validate(
+        manifest, Hive::ArtifactFirewall.capture(manifest)
+      )
+
+      assert_equal :required_output_outside_root,
+                   report.required_output_violations.fetch(0).kind
+    end
+  end
+
+  def test_required_output_cannot_escape_through_symlinked_parent
+    with_tmp_dir do |dir|
+      allowed = File.join(dir, "allowed")
+      outside = File.join(dir, "outside")
+      FileUtils.mkdir_p([ allowed, outside ])
+      File.symlink(outside, File.join(allowed, "escape"))
+      output = File.join(allowed, "escape", "report.md")
+      File.write(File.join(outside, "report.md"), "content\n")
+      manifest = build_manifest(
+        dir,
+        outputs: { "report" => output },
+        roots: [ allowed ]
+      )
+
+      report = Hive::ArtifactFirewall.validate(
+        manifest, Hive::ArtifactFirewall.capture(manifest)
+      )
+
+      assert_equal :required_output_outside_root,
+                   report.required_output_violations.fetch(0).kind
+    end
+  end
+
+  def test_validate_and_restore_recreates_changed_deleted_and_added_anchors
+    with_tmp_dir do |dir|
+      changed = File.join(dir, "changed")
+      deleted = File.join(dir, "deleted")
+      added = File.join(dir, "added")
+      File.write(changed, "trusted changed\n")
+      File.chmod(0o600, changed)
+      File.write(deleted, "trusted deleted\n")
+      manifest = build_manifest(
+        dir,
+        protected: { "changed" => changed, "deleted" => deleted, "added" => added }
+      )
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+
+      File.write(changed, "tampered\n")
+      File.chmod(0o644, changed)
+      File.unlink(deleted)
+      File.write(added, "forged\n")
+      report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+
+      assert_equal :tampered_restored, report.status
+      assert_equal true, report.restored?
+      assert_equal "trusted changed\n", File.read(changed)
+      assert_equal 0o600, File.stat(changed).mode & 0o777
+      assert_equal "trusted deleted\n", File.read(deleted)
+      refute File.exist?(added)
+    end
+  end
+
+  def test_restore_refuses_agent_created_directory_without_recursive_deletion
+    with_tmp_dir do |dir|
+      path = File.join(dir, "anchor")
+      File.write(path, "trusted\n")
+      manifest = build_manifest(dir, protected: { "anchor" => path })
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+      File.unlink(path)
+      FileUtils.mkdir_p(File.join(path, "nested"))
+
+      report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+
+      assert_equal :restore_failed, report.status
+      assert_equal false, report.restored?
+      assert_includes report.restore_diagnostic, "refusing to replace protected path directory"
+      assert File.directory?(File.join(path, "nested"))
+    end
+  end
+
+  def test_restore_does_not_claim_reconstruction_for_original_non_file
+    with_tmp_dir do |dir|
+      first = File.join(dir, "first")
+      second = File.join(dir, "second")
+      anchor = File.join(dir, "anchor")
+      File.write(first, "first\n")
+      File.write(second, "second\n")
+      File.symlink(first, anchor)
+      manifest = build_manifest(dir, protected: { "anchor" => anchor })
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+      File.unlink(anchor)
+      File.symlink(second, anchor)
+
+      report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+
+      assert_equal :restore_failed, report.status
+      assert_equal false, report.restored?
+      assert_includes report.restore_diagnostic, "cannot be reconstructed safely"
+      assert_equal second, File.readlink(anchor)
+    end
+  end
+
+  def test_report_diagnostics_are_redacted_and_bounded
+    with_tmp_dir do |dir|
+      secret = "sensitive-capability-value"
+      label = "#{secret}-#{"x" * 2_000}"
+      path = File.join(dir, secret)
+      manifest = build_manifest(
+        dir,
+        protected: { label => path },
+        redactor: ->(text) { text.gsub(secret, "[FILTERED]") }
+      )
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+      File.write(path, "forged\n")
+
+      report = Hive::ArtifactFirewall.validate(manifest, snapshot)
+      violation = report.violations.fetch(0)
+
+      refute_includes report.to_h.to_s, secret
+      assert_operator report.diagnostic.bytesize, :<=, Hive::ArtifactFirewall::DIAGNOSTIC_BYTES
+      assert_operator violation.label.bytesize, :<=, Hive::ArtifactFirewall::DIAGNOSTIC_BYTES
+      assert_operator violation.path.bytesize, :<=, Hive::ArtifactFirewall::DIAGNOSTIC_BYTES
+      assert_operator violation.diagnostic.bytesize, :<=, Hive::ArtifactFirewall::DIAGNOSTIC_BYTES
+      assert_includes report.diagnostic, "[FILTERED]"
+    end
+  end
+
+  def test_restore_uses_raw_custody_labels_not_redacted_report_labels
+    with_tmp_dir do |dir|
+      secret = "sensitive-capability-value"
+      path = File.join(dir, "anchor")
+      File.write(path, "trusted\n")
+      manifest = build_manifest(
+        dir,
+        protected: { secret => path },
+        redactor: ->(text) { text.gsub(secret, "[FILTERED]") }
+      )
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+      File.write(path, "forged\n")
+
+      report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+
+      assert_equal :tampered_restored, report.status
+      assert_equal true, report.restored?
+      assert_equal "trusted\n", File.read(path)
+      assert_equal [ "[FILTERED]" ], report.tampered_labels
+      refute_includes report.to_h.to_s, secret
+    end
+  end
+
+  def test_redactor_failure_fails_closed_without_echoing_input
+    with_tmp_dir do |dir|
+      manifest = build_manifest(
+        dir,
+        protected: { "secret-label" => "anchor" },
+        redactor: ->(_text) { raise "redactor failed" }
+      )
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+      File.write(File.join(dir, "anchor"), "forged\n")
+
+      report = Hive::ArtifactFirewall.validate(manifest, snapshot)
+
+      assert_equal "[REDACTION_FAILED]", report.diagnostic
+      assert_equal "[REDACTION_FAILED]", report.violations.fetch(0).label
+    end
+  end
+
+  def test_snapshot_and_report_are_bound_to_their_manifest
+    with_tmp_dir do |dir|
+      first = build_manifest(dir, protected: { "anchor" => "anchor" })
+      second = build_manifest(dir, protected: { "anchor" => "anchor" })
+      snapshot = Hive::ArtifactFirewall.capture(first)
+
+      error = assert_raises(Hive::ArtifactFirewall::InvalidSnapshot) do
+        Hive::ArtifactFirewall.validate(second, snapshot)
+      end
+      assert_includes error.message, "does not belong"
+
+      report = Hive::ArtifactFirewall.validate(first, snapshot)
+      other_snapshot = Hive::ArtifactFirewall.capture(first)
+      error = assert_raises(Hive::ArtifactFirewall::InvalidSnapshot) do
+        Hive::ArtifactFirewall.restore(first, other_snapshot, report)
+      end
+      assert_includes error.message, "report does not belong"
+    end
+  end
+
+  def test_snapshot_captured_bytes_and_identities_are_immutable
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "anchor"), "trusted\n")
+      manifest = build_manifest(dir, protected: { "anchor" => "anchor" })
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+
+      assert_raises(FrozenError) do
+        snapshot.captured.fetch("anchor").fetch(:content) << "tampered"
+      end
+      assert_raises(FrozenError) do
+        snapshot.observed.fetch("anchor")[:mode] = 0o777
+      end
+      assert_raises(FrozenError) do
+        snapshot.captured["new"] = {}
+      end
+      assert_raises(FrozenError) do
+        snapshot.parent_identities.fetch("anchor")[:mode] = 0o777
+      end
+      assert_raises(FrozenError) do
+        snapshot.parent_identities.fetch("anchor").fetch(:realpath) << "/redirected"
+      end
+
+      target = File.join(dir, "target")
+      symlink = File.join(dir, "symlink")
+      File.write(target, "target\n")
+      File.symlink(target, symlink)
+      symlink_manifest = build_manifest(
+        dir, protected: { "symlink" => symlink }
+      )
+      symlink_snapshot = Hive::ArtifactFirewall.capture(symlink_manifest)
+      assert_raises(FrozenError) do
+        symlink_snapshot.observed.fetch("symlink").fetch(:target) << "-changed"
+      end
+    end
+  end
+
+  def test_capture_binds_observed_identity_to_the_captured_bytes
+    original_capture = Hive::ProtectedFiles.method(:capture_paths)
+    with_tmp_dir do |dir|
+      anchor = File.join(dir, "anchor")
+      File.write(anchor, "trusted\n")
+      manifest = build_manifest(dir, protected: { "anchor" => "anchor" })
+      Hive::ProtectedFiles.define_singleton_method(:capture_paths) do |paths|
+        captured = original_capture.call(paths)
+        File.write(anchor, "replaced after capture\n")
+        captured
+      end
+
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+
+      assert_equal "trusted\n", snapshot.captured.fetch("anchor").fetch(:content)
+      assert_equal snapshot.captured.fetch("anchor").fetch(:identity),
+                   snapshot.observed.fetch("anchor")
+    end
+  ensure
+    Hive::ProtectedFiles.define_singleton_method(:capture_paths, original_capture)
+  end
+
+  def test_parent_substitution_is_detected_and_blocks_restore
+    with_tmp_dir do |dir|
+      parent = File.join(dir, "controller")
+      original_parent = File.join(dir, "controller-original")
+      outside = File.join(dir, "outside")
+      FileUtils.mkdir_p([ parent, outside ])
+      File.write(File.join(parent, "anchor"), "trusted\n")
+      File.write(File.join(outside, "anchor"), "trusted\n")
+      manifest = build_manifest(
+        dir,
+        protected: { "anchor" => File.join(parent, "anchor") }
+      )
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+
+      File.rename(parent, original_parent)
+      File.symlink(outside, parent)
+      report = Hive::ArtifactFirewall.validate(manifest, snapshot)
+
+      assert_equal [ :protected_parent_changed ], report.violations.map(&:kind)
+
+      File.write(File.join(outside, "anchor"), "outside must survive\n")
+      restored_report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+
+      assert_equal :restore_failed, restored_report.status
+      assert_equal false, restored_report.restored?
+      assert_includes restored_report.restore_diagnostic, "parent substitution"
+      assert_equal "outside must survive\n", File.read(File.join(outside, "anchor"))
+      assert_equal "trusted\n", File.read(File.join(original_parent, "anchor"))
+    end
+  end
+
+  def test_required_output_inspection_uses_a_stable_non_spawn_id
+    with_tmp_dir do |dir|
+      manifest = build_manifest(
+        dir,
+        outputs: { "report" => "missing.md" },
+        roots: [ dir ]
+      )
+
+      first = Hive::ArtifactFirewall.validate_required_outputs(manifest)
+      second = Hive::ArtifactFirewall.validate_required_outputs(manifest)
+
+      assert_equal Hive::ArtifactFirewall::REQUIRED_OUTPUT_INSPECTION_ID,
+                   first.snapshot_id
+      assert_equal first.snapshot_id, second.snapshot_id
+    end
+  end
+
+  def test_manifest_rejects_conflicting_paths_invalid_encoding_and_invalid_redactor
+    with_tmp_dir do |dir|
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        build_manifest(
+          dir,
+          protected: { "anchor" => "same" },
+          outputs: { "report" => "same" }
+        )
+      end
+      assert_includes error.message, "cannot also be a protected anchor"
+
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        build_manifest(dir, redactor: Object.new)
+      end
+      assert_includes error.message, "respond to #call"
+
+      invalid_path = "invalid-\xFF".b
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        build_manifest(dir, protected: { "anchor" => invalid_path })
+      end
+      assert_includes error.message, "valid UTF-8"
+    end
+  end
+
+  def test_manifest_wraps_without_freezing_the_callers_redactor
+    with_tmp_dir do |dir|
+      redactor = Object.new
+      redactor.define_singleton_method(:call) { |text| text }
+
+      manifest = build_manifest(dir, redactor: redactor)
+
+      refute redactor.frozen?
+      assert manifest.redactor.frozen?
+      assert_equal "value", manifest.redactor.call("value")
+    end
+  end
+
+  private
+
+  def build_manifest(dir, protected: {}, outputs: {}, roots: [], redactor: Hive::SecretPatterns.method(:redact))
+    Hive::ArtifactFirewall::Manifest.new(
+      root: dir,
+      protected_anchors: protected,
+      permitted_writable_roots: roots,
+      required_outputs: outputs,
+      redactor: redactor
+    )
+  end
+end

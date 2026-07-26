@@ -323,7 +323,7 @@ module Hive
               structured_failure = Hive::Agent::MessageExtractor.extract_failure(json)
             end
             if @log_stream
-              safe_line = if message
+              safe_line = if message || Hive::Agent::MessageExtractor.sensitive_payload_event?(json)
                 "[structured message omitted type=#{json.fetch('type', 'unknown')}]\n"
               else
                 Hive::SecretPatterns.redact(line)

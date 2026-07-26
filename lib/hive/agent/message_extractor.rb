@@ -103,6 +103,9 @@ module Hive
         case data["type"]
         when "text"
           text_chunk(data["data"])
+        when "end"
+          structured_output = data["structuredOutput"]
+          JSON.generate(structured_output) if structured_output.is_a?(Hash)
         when "result"
           text_value(data["result"])
         when "item.completed"
@@ -125,6 +128,10 @@ module Hive
 
       def streaming_text_event?(data)
         data.is_a?(Hash) && data["type"] == "text"
+      end
+
+      def sensitive_payload_event?(data)
+        data.is_a?(Hash) && data["type"] == "end" && data.key?("structuredOutput")
       end
 
       def parse_json_line(line)

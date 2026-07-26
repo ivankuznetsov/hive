@@ -1188,6 +1188,25 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_expected_output_firewall_error_is_treated_as_missing
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      output = File.join(dir, "findings.json")
+      agent = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1,
+        timeout_sec: 5, status_mode: :output_file_exists,
+        expected_output: output
+      )
+      failure = ->(_manifest) { raise Hive::ArtifactFirewall::InvalidManifest, "invalid" }
+
+      with_replaced_singleton_method(
+        Hive::ArtifactFirewall, :validate_required_outputs, failure
+      ) do
+        assert_nil agent.send(:expected_output_report)
+      end
+    end
+  end
+
   def test_completed_output_is_a_terminal_signal_on_the_write_result_event
     with_tmp_dir do |dir|
       task = make_task(dir)

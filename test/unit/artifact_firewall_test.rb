@@ -335,6 +335,17 @@ class ArtifactFirewallTest < Minitest::Test
       assert_raises(FrozenError) do
         symlink_snapshot.observed.fetch("symlink").fetch(:target) << "-changed"
       end
+
+      nested_snapshot = Hive::ArtifactFirewall::Snapshot.new(
+        id: "nested",
+        manifest: manifest,
+        captured: { "anchor" => { history: [ "trusted" ] } },
+        observed: {},
+        parent_identities: {}
+      )
+      assert_raises(FrozenError) do
+        nested_snapshot.captured.fetch("anchor").fetch(:history) << "tampered"
+      end
     end
   end
 
@@ -429,7 +440,231 @@ class ArtifactFirewallTest < Minitest::Test
         build_manifest(dir, protected: { "anchor" => invalid_path })
       end
       assert_includes error.message, "valid UTF-8"
+
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        build_manifest(dir, protected: Object.new)
+      end
+      assert_includes error.message, "label-to-path mapping"
+
+      too_many = (0..Hive::ArtifactFirewall::MAX_ENTRIES).to_h do |index|
+        [ "anchor-#{index}", "path-#{index}" ]
+      end
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        build_manifest(dir, protected: too_many)
+      end
+      assert_includes error.message, "exceeds"
+
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        build_manifest(
+          dir,
+          protected: { "first" => "same", "second" => "same" }
+        )
+      end
+      assert_includes error.message, "duplicate paths"
+
+      roots = Array.new(Hive::ArtifactFirewall::MAX_ENTRIES + 1) do |index|
+        "root-#{index}"
+      end
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        build_manifest(dir, roots: roots)
+      end
+      assert_includes error.message, "permitted_writable_roots exceeds"
+
+      long_path = "a" * (Hive::ArtifactFirewall::MAX_PATH_BYTES + 1)
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        build_manifest(dir, protected: { "anchor" => long_path })
+      end
+      assert_includes error.message, "path exceeds"
     end
+  end
+
+  def test_manifest_wraps_path_normalization_encoding_failures
+    with_tmp_dir do |dir|
+      original_expand_path = File.method(:expand_path)
+      invalid_result = lambda do |path, *rest|
+        path == "invalid-result" ? "invalid-\xFF".b : original_expand_path.call(path, *rest)
+      end
+      with_replaced_singleton_method(File, :expand_path, invalid_result) do
+        error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+          build_manifest(dir, protected: { "anchor" => "invalid-result" })
+        end
+        assert_includes error.message, "valid UTF-8"
+      end
+
+      encoding_failure = lambda do |path, *rest|
+        if path == "encoding-failure"
+          raise Encoding::CompatibilityError, "synthetic incompatible encoding"
+        end
+
+        original_expand_path.call(path, *rest)
+      end
+      with_replaced_singleton_method(File, :expand_path, encoding_failure) do
+        error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+          build_manifest(dir, protected: { "anchor" => "encoding-failure" })
+        end
+        assert_includes error.message, "path encoding is invalid"
+      end
+    end
+  end
+
+  def test_capture_rejects_unstable_parents_and_wraps_internal_failures
+    with_tmp_dir do |dir|
+      manifest = build_manifest(dir, protected: { "anchor" => "anchor" })
+      identities = [
+        { "anchor" => { kind: :directory, inode: 1 }.freeze }.freeze,
+        { "anchor" => { kind: :directory, inode: 2 }.freeze }.freeze
+      ]
+      observer = ->(_manifest) { identities.shift }
+      with_replaced_singleton_method(
+        Hive::ArtifactFirewall, :observe_parent_identities, observer
+      ) do
+        error = assert_raises(Hive::ArtifactFirewall::CaptureError) do
+          Hive::ArtifactFirewall.capture(manifest)
+        end
+        assert_includes error.message, "parents changed during capture"
+      end
+
+      capture_failure = ->(_paths) { raise IOError, "synthetic capture failure" }
+      with_replaced_singleton_method(
+        Hive::ProtectedFiles, :capture_paths, capture_failure
+      ) do
+        error = assert_raises(Hive::ArtifactFirewall::CaptureError) do
+          Hive::ArtifactFirewall.capture(manifest)
+        end
+        assert_instance_of IOError, error.cause
+      end
+
+      bounding_failure = ->(*_args) { raise "synthetic bounding failure" }
+      with_replaced_singleton_method(
+        Hive::ProtectedFiles, :capture_paths, capture_failure
+      ) do
+        with_replaced_singleton_method(
+          Hive::ArtifactFirewall, :bounded, bounding_failure
+        ) do
+          error = assert_raises(Hive::ArtifactFirewall::CaptureError) do
+            Hive::ArtifactFirewall.capture(manifest)
+          end
+          assert_equal "[REDACTION_FAILED]", error.message
+        end
+      end
+    end
+  end
+
+  def test_validation_wraps_internal_failures_and_rejects_invalid_manifests
+    with_tmp_dir do |dir|
+      manifest = build_manifest(dir, protected: { "anchor" => "anchor" })
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+      observe_failure = ->(_paths) { raise "synthetic observation failure" }
+      with_replaced_singleton_method(
+        Hive::ProtectedFiles, :observe_paths, observe_failure
+      ) do
+        error = assert_raises(Hive::ArtifactFirewall::InvalidSnapshot) do
+          Hive::ArtifactFirewall.validate(manifest, snapshot)
+        end
+        assert_instance_of RuntimeError, error.cause
+      end
+
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        Hive::ArtifactFirewall.validate_required_outputs(Object.new)
+      end
+      assert_includes error.message, "manifest must be"
+
+      output = File.join(dir, "output.md")
+      output_manifest = build_manifest(
+        dir,
+        outputs: { "output" => output },
+        roots: [ dir ]
+      )
+      original_lstat = File.method(:lstat)
+      lstat_failure = lambda do |path|
+        raise "synthetic lstat failure" if path == output
+
+        original_lstat.call(path)
+      end
+      with_replaced_singleton_method(File, :lstat, lstat_failure) do
+        error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+          Hive::ArtifactFirewall.validate_required_outputs(output_manifest)
+        end
+        assert_instance_of RuntimeError, error.cause
+      end
+    end
+  end
+
+  def test_restore_accepts_a_stale_tamper_report_when_nothing_remains_changed
+    with_tmp_dir do |dir|
+      anchor = File.join(dir, "anchor")
+      File.write(anchor, "trusted\n")
+      manifest = build_manifest(dir, protected: { "anchor" => anchor })
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+      violation = Hive::ArtifactFirewall::Violation.new(
+        kind: :protected_changed,
+        label: "anchor",
+        path: anchor,
+        diagnostic: "previously changed"
+      )
+      report = Hive::ArtifactFirewall::Report.new(
+        snapshot_id: snapshot.id,
+        status: :tampered,
+        violations: [ violation ],
+        restoration: Hive::ArtifactFirewall::Restoration.new(
+          attempted: false, succeeded: nil
+        ),
+        diagnostic: "previously changed"
+      )
+
+      restored = Hive::ArtifactFirewall.restore(manifest, snapshot, report)
+
+      assert_equal :tampered_restored, restored.status
+      assert_equal true, restored.restored?
+      assert_equal "trusted\n", File.read(anchor)
+    end
+  end
+
+  def test_unreadable_parent_and_required_output_are_typed
+    with_tmp_dir do |dir|
+      anchor = File.join(dir, "anchor")
+      parent = File.dirname(anchor)
+      manifest = build_manifest(dir, protected: { "anchor" => anchor })
+      original_realpath = File.method(:realpath)
+      inaccessible_parent = lambda do |path, *rest|
+        raise Errno::EACCES, path if path == parent
+
+        original_realpath.call(path, *rest)
+      end
+      with_replaced_singleton_method(File, :realpath, inaccessible_parent) do
+        snapshot = Hive::ArtifactFirewall.capture(manifest)
+        assert_equal :unreadable,
+                     snapshot.parent_identities.fetch("anchor").fetch(:kind)
+      end
+
+      output = File.join(dir, "output.md")
+      output_manifest = build_manifest(
+        dir,
+        outputs: { "output" => output },
+        roots: [ dir ]
+      )
+      original_lstat = File.method(:lstat)
+      inaccessible_output = lambda do |path|
+        raise Errno::EACCES, path if path == output
+
+        original_lstat.call(path)
+      end
+      with_replaced_singleton_method(File, :lstat, inaccessible_output) do
+        report = Hive::ArtifactFirewall.validate_required_outputs(output_manifest)
+        assert_equal :required_output_unreadable,
+                     report.required_output_violations.fetch(0).kind
+      end
+    end
+  end
+
+  def test_violation_rejects_unknown_kind
+    error = assert_raises(ArgumentError) do
+      Hive::ArtifactFirewall::Violation.new(
+        kind: :unknown, label: "x", path: "x", diagnostic: "x"
+      )
+    end
+
+    assert_includes error.message, "unknown artifact custody violation"
   end
 
   def test_manifest_wraps_without_freezing_the_callers_redactor

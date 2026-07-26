@@ -12,19 +12,27 @@ module Hive
       # no access to claims, cursors, repositories, or external gateways.
       class ShadowComparator
         MODULES = %w[patrol architecture-patrol].freeze
+        EVIDENCE_SOURCES = %w[legacy_mutator_capture].freeze
         IGNORED_KEYS = %w[duration_ms engine owner recorded_at representation].freeze
 
         attr_reader :root
 
-        def initialize(root:)
+        def initialize(root:, clock: -> { Time.now.utc })
           @root = File.expand_path(root)
+          @clock = clock
         end
 
         def record!(module_name:, trigger:, legacy_decision:, module_decision:,
                     configuration_digest:, occurred_at:, legacy_effects: [],
-                    module_effects: [], explained_paths: [], comparable: true)
+                    module_effects: [], explained_paths: [], comparable: true,
+                    evidence_source: nil)
           validate_identity!(module_name, configuration_digest)
           timestamp = time(occurred_at)
+          recorded_at = time(@clock.call)
+          source = evidence_source&.to_s
+          unless source.nil? || EVIDENCE_SOURCES.include?(source)
+            raise Hive::ConfigError, "module shadow evidence source is unsupported"
+          end
           normalized_legacy = normalize(legacy_decision)
           normalized_module = normalize(module_decision)
           all_differences = differences(normalized_legacy, normalized_module)
@@ -39,8 +47,10 @@ module Hive
             "schema" => "hive-module-shadow-decision", "schema_version" => 1,
             "module" => module_name, "decision_id" => decision_id,
             "trigger_digest" => trigger_digest, "occurred_at" => timestamp.iso8601(6),
+            "recorded_at" => recorded_at.iso8601(6), "evidence_source" => source,
             "configuration_digest" => configuration_digest,
-            "comparable" => comparable == true, "legacy" => normalized_legacy,
+            "comparable" => comparable == true && source == "legacy_mutator_capture",
+            "legacy" => normalized_legacy,
             "module_decision" => normalized_module,
             "explained_differences" => explained,
             "unexplained_differences" => unexplained,
@@ -114,8 +124,9 @@ module Hive
           path = File.join(root, record.fetch("module"), "#{record.fetch('decision_id')}.json")
           bytes = canonical(record)
           if File.file?(path)
-            existing = File.binread(path)
-            return read(path) if existing == bytes
+            existing = read(path)
+            return existing if canonical(existing) == bytes ||
+                               existing.merge("recorded_at" => record.fetch("recorded_at")) == record
             raise Hive::ConfigError, "module shadow decision identity conflicts with existing evidence"
           end
           Hive::AtomicFile.write(path, bytes, mode: 0o600)
@@ -126,10 +137,29 @@ module Hive
         def read(path)
           bytes = File.binread(path)
           data = JSON.parse(bytes)
+          expected = %w[
+            comparable configuration_digest decision_id duplicate_effects
+            evidence_source explained_differences legacy legacy_effects module
+            module_decision module_effects occurred_at recorded_at schema
+            schema_version trigger_digest unexplained_differences
+          ]
           unless bytes == canonical(data) && data["schema"] == "hive-module-shadow-decision" &&
-                 data["schema_version"] == 1 && MODULES.include?(data["module"])
+                 data["schema_version"] == 1 && data.keys.sort == expected &&
+                 MODULES.include?(data["module"]) &&
+                 data["decision_id"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                 data["trigger_digest"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                 data["configuration_digest"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                 [ true, false ].include?(data["comparable"]) &&
+                 (data["evidence_source"].nil? || EVIDENCE_SOURCES.include?(data["evidence_source"])) &&
+                 (!data["comparable"] || data["evidence_source"] == "legacy_mutator_capture") &&
+                 %w[
+                   duplicate_effects explained_differences legacy_effects module_effects
+                   unexplained_differences
+                 ].all? { |key| data[key].is_a?(Array) }
             raise Hive::ConfigError, "module shadow evidence is malformed"
           end
+          time(data.fetch("occurred_at"))
+          time(data.fetch("recorded_at"))
           data
         rescue JSON::ParserError, EncodingError, SystemCallError
           raise Hive::ConfigError, "module shadow evidence is malformed"

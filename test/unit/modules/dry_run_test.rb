@@ -21,12 +21,17 @@ class ModulesDryRunTest < Minitest::Test
         }
       ]
       package = File.join(root, "package")
-      resolution, descriptor = write_module_package(package, hooks: hooks)
+      settings = [
+        { "name" => "mode", "type" => "enum", "required" => true,
+          "default" => "safe", "values" => %w[safe fast] },
+        { "name" => "api_token", "type" => "secret", "required" => true, "secret" => true }
+      ]
+      resolution, descriptor = write_module_package(package, hooks: hooks, settings: settings)
       store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
       preview = Hive::ModulePackage::Preview.build(
         operation: "install", descriptor: descriptor, generation: resolution,
         current: nil, current_configuration: nil,
-        settings: { "mode" => "safe", "api_token" => nil }, hooks: { "task" => true },
+        settings: { "mode" => "safe", "api_token" => "MODULE_DRY_TOKEN" }, hooks: { "task" => true },
         grants: exact_grants(descriptor), now: NOW - 60
       )
       store.apply(preview, package_root: package, resolution: resolution, now: NOW - 60)
@@ -37,7 +42,9 @@ class ModulesDryRunTest < Minitest::Test
         clock: -> { NOW }
       )
 
-      result = dry_run.evaluate(module_name: "demo", event_name: "task.completed", occurred_at: NOW)
+      result = with_env("MODULE_DRY_TOKEN" => "present") do
+        dry_run.evaluate(module_name: "demo", event_name: "task.completed", occurred_at: NOW)
+      end
 
       decision = result.fetch("decisions").first
       assert_equal "launch", decision.fetch("outcome")
@@ -45,6 +52,50 @@ class ModulesDryRunTest < Minitest::Test
       assert_nil decision.fetch("decision_id")
       assert_equal before, tree_digest(root)
       refute File.exist?(File.join(store.hive_state_path, "module-runtime"))
+
+      capacity = Hive::Modules::DryRun.new(
+        store: store, project_id: "project-1", project: "demo",
+        attempt_store: Hive::Attempts::Store.new(
+          root: File.join(root, "attempts"), create_directories: false
+        ),
+        capacity_probe: ->(**) { true }, clock: -> { NOW }
+      )
+      blocked = with_env("MODULE_DRY_TOKEN" => "present") do
+        capacity.evaluate(
+          module_name: "demo", hook_id: "task",
+          event_name: "task.completed", occurred_at: NOW
+        )
+      end
+      assert_equal "capacity_blocked", blocked.dig("decisions", 0, "reason")
+      assert_equal before, tree_digest(root)
+    end
+  end
+
+  def test_hook_specific_and_schedule_events_use_strict_pure_envelopes
+    with_tmp_dir do |root|
+      store = Struct.new(:hive_state_path).new(root)
+      dry_run = Hive::Modules::DryRun.new(store: store, project_id: "project-1", project: "demo")
+      dispatch = Struct.new(:decision).new({ "outcome" => "skip", "reason" => "disabled" })
+      dispatcher = Object.new
+      dispatcher.define_singleton_method(:dispatch) { |**_attributes| dispatch }
+      dry_run.instance_variable_set(:@dispatcher, dispatcher)
+
+      result = dry_run.evaluate(
+        module_name: "demo", hook_id: "task", event_name: "schedule",
+        schedule: "0 * * * *"
+      )
+      assert_equal "0 * * * *", result.dig("event", "payload", "schedule")
+      assert_equal "skip", result.fetch("decisions").first.fetch("outcome")
+
+      assert_raises(Hive::ConfigError) do
+        dry_run.evaluate(module_name: "demo", hook_id: "task", event_name: "schedule", occurred_at: NOW)
+      end
+      assert_raises(Hive::ConfigError) do
+        dry_run.evaluate(
+          module_name: "demo", hook_id: "task", event_name: "task.completed",
+          occurred_at: "not-a-time"
+        )
+      end
     end
   end
 

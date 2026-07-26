@@ -7,8 +7,10 @@ require "hive/git_ops"
 require "hive/lock"
 require "hive/module_package/managed_store"
 require "hive/module_package/preview"
+require "hive/module_package/workflow_compatibility"
 require "hive/modules/inspector"
 require "hive/workflow_package/canonical_json"
+require "hive/workflow_package/managed_store"
 
 module Hive
   module Commands
@@ -53,8 +55,22 @@ module Hive
           @store ||= Hive::ModulePackage::ManagedStore.new(hive_state_path)
         end
 
+        def workflow_store
+          @workflow_store ||= Hive::WorkflowPackage::ManagedStore.new(hive_state_path)
+        end
+
+        def workflow_compatibility
+          @workflow_compatibility ||= Hive::ModulePackage::WorkflowCompatibility.new(
+            store: workflow_store, project_config: project_config
+          )
+        end
+
         def inspector
-          @inspector ||= Hive::Modules::Inspector.new(store: store)
+          @inspector ||= Hive::Modules::Inspector.new(
+            store: store, workflow_store: workflow_store,
+            project_config: project_config,
+            project_id: registered_project_identity.fetch("project_id")
+          )
         end
 
         def project_config
@@ -63,6 +79,19 @@ module Hive
 
         def hive_state_path
           @hive_state_path ||= File.expand_path(project_config.fetch("hive_state_path"), @project_root)
+        end
+
+        def registered_project_identity
+          root = File.realpath(@project_root)
+          entry = Hive::Config.registered_projects.find do |candidate|
+            File.realpath(candidate.fetch("path")) == root
+          rescue SystemCallError
+            false
+          end
+          unless entry
+            raise Hive::ConfigError, "module inspection requires a registered project identity"
+          end
+          entry
         end
 
         def emit(payload, human_lines:)
@@ -102,6 +131,21 @@ module Hive
             ops.hive_commit(
               stage_name: "modules", slug: name, action: action,
               pathspecs: [ File.join("modules", name) ]
+            )
+          end
+        end
+
+        def commit_workflow_state(name, action)
+          relative = File.join("workflows", name)
+          if @committer
+            @committer.call(action, name, relative)
+            return
+          end
+          ops = Hive::GitOps.new(@project_root)
+          Hive::Lock.with_commit_lock(hive_state_path) do
+            ops.hive_commit(
+              stage_name: "workflows", slug: name, action: action,
+              pathspecs: [ relative ]
             )
           end
         end
@@ -148,7 +192,7 @@ module Hive
             "expires_at" => (issued_at.utc + Hive::ModulePackage::Preview::TTL_SECONDS).iso8601(6),
             "current" => current
           }
-          digest = Digest::SHA256.hexdigest(Hive::WorkflowPackage::CanonicalJSON.generate(data))
+          digest = ::Digest::SHA256.hexdigest(Hive::WorkflowPackage::CanonicalJSON.generate(data))
           { data: data, digest: digest, receipt: "#{issued_at.to_i}.#{digest}" }
         end
 

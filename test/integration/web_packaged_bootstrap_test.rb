@@ -1,5 +1,6 @@
 require "test_helper"
 require "digest"
+require "fileutils"
 require "json"
 require "open3"
 require "rbconfig"
@@ -74,8 +75,11 @@ class WebPackagedBootstrapTest < Minitest::Test
       preload = File.join(tmp, "setup-fixtures.rb")
       capture = File.join(tmp, "setup-capture")
       setup_home = File.join(tmp, "setup-home")
+      agent_home = File.join(tmp, "agent-home")
+      FileUtils.mkdir_p(agent_home)
       File.write(preload, setup_fixture_source)
       setup_env = env.merge(
+        "HOME" => agent_home,
         "HIVE_HOME" => setup_home,
         "HIVE_WEB_BUNDLE_URL" => archive,
         "HIVE_WEB_BUNDLE_SHA256" => Digest::SHA256.file(archive).hexdigest,

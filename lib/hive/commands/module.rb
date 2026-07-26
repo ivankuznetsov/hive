@@ -20,6 +20,7 @@ module Hive
 
       def initialize(subcommand, subject = nil, project_root: Dir.pwd, json: false, stdout: $stdout,
                      yes: false, dry_run: false, receipt: nil, settings: [], hooks: [], grants: [],
+                     mappings: [], input_bindings: [], allow_escalation: false,
                      event_name: nil, schedule: nil, occurred_at: nil, reviewer: nil)
         @subcommand = subcommand
         @subject = subject
@@ -32,6 +33,9 @@ module Hive
         @settings = settings
         @hooks = hooks
         @grants = grants
+        @mappings = mappings
+        @input_bindings = input_bindings
+        @allow_escalation = allow_escalation
         @event_name = event_name
         @schedule = schedule
         @occurred_at = occurred_at
@@ -63,6 +67,9 @@ module Hive
             value: @subcommand, expected: SUBCOMMANDS
           )
         end
+        if @subcommand == "list" && !@subject.nil?
+          raise UsageError, "module list does not accept a source or name"
+        end
         if @subcommand == "migration"
           raise UsageError, "module migration requires status, report, cutover, or rollback" if @subject.to_s.empty?
           require "hive/commands/module/migration"
@@ -91,10 +98,18 @@ module Hive
         case @subcommand
         when "install"
           require "hive/commands/module/install"
-          Install.new(@subject, **common, settings: @settings, hooks: @hooks, grants: @grants)
+          Install.new(
+            @subject, **common, settings: @settings, hooks: @hooks, grants: @grants,
+            mapping_overrides: @mappings, input_bindings: @input_bindings,
+            allow_escalation: @allow_escalation
+          )
         when "update"
           require "hive/commands/module/update"
-          Update.new(@subject, **common, settings: @settings, hooks: @hooks, grants: @grants)
+          Update.new(
+            @subject, **common, settings: @settings, hooks: @hooks, grants: @grants,
+            mapping_overrides: @mappings, input_bindings: @input_bindings,
+            allow_escalation: @allow_escalation
+          )
         when "dry-run"
           raise UsageError, "module dry-run requires --event" if @event_name.to_s.empty?
           require "hive/commands/module/dry_run"

@@ -1,0 +1,16 @@
+name: module_fresh_install
+description: Reviewed first-party modules activate project-locally and CLI/Web consume identical redacted status.
+tags: [modules, acceptance, lifecycle]
+steps:
+  - kind: seed_state
+    stage: 1-inbox
+    slug: module-fresh-install-task
+    state_file: idea.md
+    content: "# Module acceptance fixture\n"
+  - kind: ruby_block
+    block: |
+      require "module_scenario_support"
+      Hive::E2E::ModuleScenarioSupport.fresh_install!(sandbox: sandbox, run_home: run_home)
+  - kind: state_assert
+    path: "{run_home}/module-fresh-install.json"
+    contains: '"ok": true'

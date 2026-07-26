@@ -8,12 +8,14 @@ module Hive
       JOURNAL_FILE = "activation.json".freeze
       PHASES = %w[prepared pointer_provisional health_validated committed].freeze
 
-      attr_reader :module_dir, :selection_path, :hooks_path, :barrier_path, :journal_path
+      attr_reader :module_dir, :selection_path, :hooks_path, :setup_outbox_path,
+                  :barrier_path, :journal_path
 
       def initialize(module_dir)
         @module_dir = File.expand_path(module_dir)
         @selection_path = File.join(@module_dir, "selection.json")
         @hooks_path = File.join(@module_dir, "runtime", "hooks.json")
+        @setup_outbox_path = File.join(@module_dir, "runtime", "setup-outbox.json")
         @barrier_path = File.join(@module_dir, "runtime", "activation-barrier.json")
         @journal_path = File.join(@module_dir, JOURNAL_FILE)
       end
@@ -22,14 +24,16 @@ module Hive
         write_journal(
           "schema_version" => 1, "phase" => "prepared",
           "old_selection" => read_bytes(selection_path), "old_hooks" => read_bytes(hooks_path),
+          "old_setup_outbox" => read_bytes(setup_outbox_path),
           "candidate_path" => candidate_path, "candidate_created" => !!candidate_created
         )
         write_barrier("prepared")
       end
 
-      def provisional!(selection_bytes:, hooks_bytes:)
+      def provisional!(selection_bytes:, hooks_bytes:, setup_outbox_bytes: nil)
         restore(selection_path, selection_bytes)
         restore(hooks_path, hooks_bytes)
+        restore(setup_outbox_path, setup_outbox_bytes)
         update_phase("pointer_provisional")
         write_barrier("pointer_provisional")
       end
@@ -53,6 +57,7 @@ module Hive
         return false unless data
         restore(selection_path, data["old_selection"])
         restore(hooks_path, data["old_hooks"])
+        restore(setup_outbox_path, data["old_setup_outbox"])
         remove_candidate(data) if data.fetch("candidate_created")
         clear
         true

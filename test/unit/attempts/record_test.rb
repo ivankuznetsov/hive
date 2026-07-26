@@ -194,6 +194,9 @@ class AttemptsRecordTest < Minitest::Test
     assert_raises(Hive::Attempts::InvalidRecord) do
       Hive::Attempts::Record.new(record.to_h.merge("subject" => subject.merge("grant_digest" => "secret")))
     end
+    assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(record.to_h.merge("subject" => { "kind" => "future" }))
+    end
   end
 
   def test_unsupported_schema_versions_are_rejected

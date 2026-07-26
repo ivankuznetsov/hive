@@ -150,8 +150,21 @@ class ModulePackageManagedStoreTest < Minitest::Test
       File.write(run_path, JSON.generate(
         "status" => "running", "source_commit" => "a" * 40,
         "execution_snapshot" => {
-          "descriptor" => { "name" => "demo" }, "configuration" => { "mode" => "safe" },
-          "grants" => { "filesystem_read" => [ "repository" ] }
+          "schema_version" => 1,
+          "descriptor" => {
+            "id" => "run", "target" => { "kind" => "entrypoint", "id" => "demo.run" }
+          },
+          "configuration" => { "mode" => "safe" },
+          "grants" => { "filesystem_read" => [ "repository" ] },
+          "subject" => {
+            "kind" => "module_hook", "project_id" => "project-1",
+            "module" => "demo", "hook" => "run",
+            "event_id" => "evt-1", "occurrence_id" => "evt-1",
+            "event_name" => "task.completed", "module_generation" => "a" * 40,
+            "configuration_digest" => "b" * 64, "grant_digest" => "c" * 64
+          },
+          "target" => { "kind" => "entrypoint", "id" => "demo.run" },
+          "ownership_generation" => "1:#{'a' * 40}", "task_input_epoch" => 1
         }
       ))
       store.apply(preview_for(third_resolution, third_descriptor, store: store),
@@ -159,6 +172,213 @@ class ModulePackageManagedStoreTest < Minitest::Test
 
       assert_equal %w[bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccccccccccccccccccc],
                    store.generation_commits("demo").sort
+    end
+  end
+
+  def test_health_rejection_existing_generation_and_commit_rollback_are_atomic
+    with_tmp_dir do |root|
+      package = File.join(root, "package")
+      resolution, descriptor = write_module_package(package)
+      store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
+      preview = preview_for(resolution, descriptor)
+
+      assert_raises(Hive::ConfigError) do
+        store.apply(
+          preview, package_root: package, resolution: resolution,
+          health_check: ->(_path, _configuration) { false }
+        )
+      end
+      assert_nil store.selected("demo", include_tombstone: true)
+
+      store.apply(preview, package_root: package, resolution: resolution)
+      assert_equal store.generation_path("demo", resolution.source_commit),
+                   store.send(:place_generation_unlocked, package, resolution)
+
+      before = store.selected("demo")
+      assert_raises(RuntimeError) do
+        store.disable("demo", commit: -> { raise "commit failed" })
+      end
+      assert_equal before, store.selected("demo")
+    end
+  end
+
+  def test_inspection_rejects_corrupt_state_and_returns_empty_missing_hooks
+    with_tmp_dir do |root|
+      store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
+      assert_equal({}, store.inspect_hooks("demo").fetch("hooks"))
+      assert_raises(Hive::ConfigError) { store.configuration("demo", "a" * 64) }
+
+      hooks_path = File.join(store.runtime_path("demo"), "hooks.json")
+      FileUtils.mkdir_p(File.dirname(hooks_path))
+      File.write(hooks_path, JSON.pretty_generate("schema_version" => 1, "hooks" => {}))
+      assert_raises(Hive::ConfigError) { store.inspect_hooks("demo") }
+      File.write(hooks_path, "{bad")
+      assert_raises(Hive::ConfigError) { store.inspect_hooks("demo") }
+      assert_equal({}, store.send(:read_hooks, "missing"))
+
+      FileUtils.mkdir_p(store.modules_dir)
+      with_replaced_singleton_method(Dir, :children, ->(_path) { raise Errno::EACCES, "blocked" }) do
+        assert_raises(Hive::ConfigError) { store.module_names }
+      end
+    end
+  end
+
+  def test_reconcile_and_cleanup_fail_closed_on_corrupt_runtime_evidence
+    with_tmp_dir do |root|
+      store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
+      module_dir = File.join(store.modules_dir, "demo")
+      candidate = File.join(module_dir, "generations", "a" * 40)
+      FileUtils.mkdir_p(candidate)
+      transaction = Hive::ModulePackage::Transaction.new(module_dir)
+      transaction.begin!(candidate_path: candidate, candidate_created: true)
+
+      assert store.reconcile!
+      refute File.exist?(transaction.journal_path)
+
+      runs = File.join(store.runtime_path("demo"), "runs")
+      FileUtils.mkdir_p(runs)
+      File.write(File.join(runs, "broken.json"), "{bad")
+      assert_raises(Hive::ConfigError) { store.send(:run_generation_references, "demo") }
+    end
+  end
+
+  def test_diagnostic_cleanup_io_failures_are_bounded
+    with_tmp_dir do |root|
+      store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
+      with_replaced_singleton_method(
+        Hive::AtomicFile, :write, ->(*_args, **_options) { raise Errno::EACCES, "blocked" }
+      ) do
+        assert_nil store.send(:write_failed_activation, "demo", RuntimeError.new("secret"), Time.now.utc)
+      end
+
+      path = store.failed_activation_path("demo")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "diagnostic")
+      with_replaced_singleton_method(FileUtils, :rm_f, ->(_path) { raise Errno::EACCES, "blocked" }) do
+        assert_nil store.send(:clear_failed_activation, "demo")
+      end
+    end
+  end
+
+  def test_rejects_malformed_resolution_and_selection_identities
+    with_tmp_dir do |root|
+      package = File.join(root, "package")
+      resolution, descriptor = write_module_package(package)
+      store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
+      preview = preview_for(resolution, descriptor)
+
+      assert_raises(Hive::ConfigError) do
+        store.apply(preview, package_root: package, resolution: resolution.with(version: "latest"))
+      end
+      assert_raises(Hive::ConfigError) { store.generation_path("demo", "short") }
+
+      store.apply(preview, package_root: package, resolution: resolution)
+      selection_path = File.join(store.modules_dir, "demo", "selection.json")
+      current = store.selected("demo")
+      File.write(selection_path, Hive::WorkflowPackage::CanonicalJSON.generate("schema_version" => 1))
+      assert_raises(Hive::ConfigError) { store.inspect_selection("demo") }
+
+      invalid_generation = JSON.parse(JSON.generate(current))
+      invalid_generation.fetch("active")["version"] = "latest"
+      File.write(selection_path, Hive::WorkflowPackage::CanonicalJSON.generate(invalid_generation))
+      assert_raises(Hive::ConfigError) { store.inspect_selection("demo") }
+    end
+  end
+
+  def test_install_setup_outbox_is_activation_atomic_and_generation_scoped
+    with_tmp_dir do |root|
+      hooks = [
+        {
+          "id" => "setup", "target" => { "kind" => "entrypoint", "id" => "demo.setup" },
+          "default_enabled" => true, "schedules" => [],
+          "events" => [ "project.registered" ], "concurrency" => "drop"
+        }
+      ]
+      package = File.join(root, "package")
+      resolution, descriptor = write_module_package(package, hooks: hooks)
+      store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
+      preview = Hive::ModulePackage::Preview.build(
+        operation: "install", descriptor: descriptor, generation: resolution,
+        current: nil, current_configuration: nil,
+        settings: { "mode" => "safe", "api_token" => nil },
+        hooks: { "setup" => true }, grants: exact_grants(descriptor),
+        now: Time.utc(2026, 7, 22, 10)
+      )
+
+      store.apply(
+        preview, package_root: package, resolution: resolution,
+        setup_context: { project_id: "project-1", project: "demo" },
+        now: Time.utc(2026, 7, 22, 10)
+      )
+
+      intent = store.inspect_setup_outbox("demo")
+      assert_equal [ "setup" ], intent.fetch("hooks")
+      assert_equal resolution.source_commit, intent.fetch("source_commit")
+      assert_equal preview.digest, intent.fetch("receipt_digest")
+      yielded = nil
+      promoted = store.promote_setup_outbox("demo") do |pending|
+        yielded = pending
+        :persisted
+      end
+      assert_equal intent, yielded
+      assert_equal :published, promoted.fetch(:status)
+      assert_equal :persisted, promoted.fetch(:result)
+      assert_nil store.inspect_setup_outbox("demo")
+      assert_equal :none, store.promote_setup_outbox("demo") { flunk }.fetch(:status)
+    end
+  end
+
+  def test_disable_discards_pending_setup_and_failed_update_restores_it
+    with_tmp_dir do |root|
+      hooks = [
+        {
+          "id" => "setup", "target" => { "kind" => "entrypoint", "id" => "demo.setup" },
+          "default_enabled" => true, "schedules" => [],
+          "events" => [ "project.registered" ], "concurrency" => "drop"
+        }
+      ]
+      package = File.join(root, "package")
+      resolution, descriptor = write_module_package(package, hooks: hooks)
+      store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
+      preview = Hive::ModulePackage::Preview.build(
+        operation: "install", descriptor: descriptor, generation: resolution,
+        current: nil, current_configuration: nil,
+        settings: { "mode" => "safe", "api_token" => nil },
+        hooks: { "setup" => true }, grants: exact_grants(descriptor),
+        now: Time.utc(2026, 7, 22, 10)
+      )
+      store.apply(
+        preview, package_root: package, resolution: resolution,
+        setup_context: { project_id: "project-1", project: "demo" },
+        now: Time.utc(2026, 7, 22, 10)
+      )
+      original = store.inspect_setup_outbox("demo")
+
+      update_root = File.join(root, "update")
+      update_resolution, update_descriptor = write_module_package(
+        update_root, hooks: hooks, version: "1.1.0", commit: "b" * 40
+      )
+      current = store.selected("demo")
+      current_configuration = store.configuration(
+        "demo", current.dig("active", "configuration_digest")
+      )
+      update_preview = Hive::ModulePackage::Preview.build(
+        operation: "update", descriptor: update_descriptor, generation: update_resolution,
+        current: current, current_configuration: current_configuration,
+        settings: {}, hooks: {}, grants: exact_grants(update_descriptor)
+      )
+      assert_raises(Hive::ConfigError) do
+        store.apply(
+          update_preview, package_root: update_root, resolution: update_resolution,
+          health_check: ->(*) { false }
+        )
+      end
+      assert_equal original, store.inspect_setup_outbox("demo")
+
+      store.disable("demo")
+      stale = store.promote_setup_outbox("demo") { flunk }
+      assert_equal :stale, stale.fetch(:status)
+      assert_nil store.inspect_setup_outbox("demo")
     end
   end
 

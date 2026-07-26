@@ -1,5 +1,6 @@
 require "test_helper"
 require_relative "../../support/module_helpers"
+require "hive/modules/entrypoints"
 require "hive/web/module_lifecycle"
 
 class WebModuleLifecycleTest < Minitest::Test
@@ -11,6 +12,10 @@ class WebModuleLifecycleTest < Minitest::Test
       FileUtils.cp_r(File.join(package_root, "."), destination)
       resolution
     end
+  end
+
+  def setup
+    Hive::Modules::Entrypoints.register("demo.run") { 0 }
   end
 
   def test_preview_apply_status_and_state_changes_share_the_domain_engine
@@ -77,12 +82,29 @@ class WebModuleLifecycleTest < Minitest::Test
     end
   end
 
+  def test_defaults_are_constructible_and_unknown_operations_fail_closed
+    lifecycle = Hive::Web::ModuleLifecycle.new
+    assert_raises(Hive::ConfigError) do
+      lifecycle.preview(
+        {
+          "name" => "demo", "path" => Dir.pwd,
+          "hive_state_path" => File.join(Dir.pwd, ".hive-state"),
+          "project_id" => "project-1"
+        },
+        operation: "future"
+      )
+    end
+  end
+
   private
 
   def project_fixture(root)
     state = File.join(root, ".hive-state")
     FileUtils.mkdir_p(state)
     File.write(File.join(state, "config.yml"), { "hive_state_path" => ".hive-state" }.to_yaml)
-    { "name" => "demo", "path" => root, "hive_state_path" => state }
+    {
+      "name" => "demo", "path" => root, "hive_state_path" => state,
+      "project_id" => "project-1"
+    }
   end
 end

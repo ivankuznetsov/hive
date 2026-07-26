@@ -92,6 +92,22 @@ still visible and the unrelated dirty-state fingerprint unchanged.
 
 ## Managed Honeycomb overlay
 
+Managed Honeycombs also normalize through `Hive::ModulePackage`. An unchanged
+`honeycomb-manifest/v1` package becomes a one-workflow, hook-free module with
+the same identity, source commit, manifest digest, mappings, inputs, and
+permission disclosure. `hive workflow install|list|update|remove` remains the
+0.x compatibility projection; the generalized project-local lifecycle is
+available through `hive module` and uses the same reviewed-catalog trust
+boundary. No package republish or state migration is required.
+
+Native `hive-module/v1` descriptors can add registered entrypoint hooks,
+schedules, the three named module events, typed settings, grants, templates,
+and docs. They remain declarative: packages cannot load Ruby code, and all
+side effects require a registered entrypoint or an explicitly granted external
+command. Declared workflow targets are activation-validated and snapshotted but
+execution remains fail-closed until task provenance, idempotent admission,
+module-pinned recovery, and permission intersection are durable.
+
 `Hive::WorkflowPackage` defines a second, stricter trust boundary without
 weakening owner-authored descriptor compatibility:
 

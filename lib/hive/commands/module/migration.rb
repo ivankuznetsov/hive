@@ -42,7 +42,7 @@ module Hive
           raise Hive::ConfigError, "module migration report requires --reviewer" if reviewer.empty?
 
           records = comparator.records.select do |record|
-            Time.iso8601(record.fetch("occurred_at")) >= Time.iso8601(state.fetch("shadow_started_at"))
+            Time.iso8601(record.fetch("recorded_at")) >= Time.iso8601(state.fetch("shadow_started_at"))
           end
           report = Hive::Modules::Migration::Report.build(
             records: records, reviewer: reviewer, reviewed_at: Time.now.utc

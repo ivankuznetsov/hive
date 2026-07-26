@@ -31,4 +31,17 @@ class ModulePackageNormalizerTest < Minitest::Test
     assert_equal [ "repository" ], descriptor.permissions.fetch("filesystem_read")
     assert_match(/\A[0-9a-f]{64}\z/, descriptor.digest)
   end
+
+  def test_adapts_the_original_directory_command_and_credential_permissions
+    permissions = Hive::ModulePackage::Normalizer.normalize_honeycomb_permissions(
+      "directories" => [ "repository" ], "commands" => [ "bin/test" ],
+      "domains" => [ "example.test" ], "credentials" => [ "TOKEN" ]
+    )
+
+    assert_equal true, permissions.fetch("repository_write")
+    assert_equal [ "repository" ], permissions.fetch("filesystem_write")
+    assert_equal [ "bin/test" ], permissions.fetch("external_commands")
+    assert_equal [ "example.test" ], permissions.fetch("network_hosts")
+    assert_equal [ "TOKEN" ], permissions.fetch("secrets")
+  end
 end

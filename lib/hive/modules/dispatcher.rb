@@ -6,6 +6,7 @@ require "hive/atomic_file"
 require "hive/attempts/dispatcher"
 require "hive/module_package/managed_store"
 require "hive/modules/decision_journal"
+require "hive/modules/event_scope"
 require "hive/modules/hook_attempt"
 require "hive/modules/trigger_evaluator"
 require "hive/workflow_package/canonical_json"
@@ -23,6 +24,7 @@ module Hive
       def initialize(store:, attempt_store:, attempt_dispatcher:, project_id:, project:,
                      evaluator: TriggerEvaluator.new, decision_journal: nil,
                      secret_availability: ->(name) { ENV.key?(name.to_s) },
+                     capacity_probe: ->(**) { false },
                      clock: -> { Time.now.utc })
         @store = store
         @attempt_store = attempt_store
@@ -34,6 +36,7 @@ module Hive
           root: File.join(store.hive_state_path, "module-runtime")
         )
         @secret_availability = secret_availability
+        @capacity_probe = capacity_probe
         @clock = clock
       end
 
@@ -52,7 +55,10 @@ module Hive
           hook_attempt = HookAttempt.build(
             project: @project, project_id: @project_id, module_name: module_name,
             hook: context.fetch(:hook), selection: context.fetch(:selection),
-            configuration: context.fetch(:configuration), event: event
+            configuration: context.fetch(:configuration), event: event,
+            package_root: @store.generation_path(
+              module_name, context.dig(:selection, "active", "source_commit")
+            )
           )
           persist_run(module_name, hook_attempt, event)
           attempt_result = @attempt_dispatcher.dispatch_module_hook(
@@ -80,7 +86,9 @@ module Hive
           configuration = @store.configuration(
             selection.fetch("name"), active.fetch("configuration_digest")
           )
-          configuration.contract.fetch("hooks").map do |hook|
+          configuration.contract.fetch("hooks").filter_map do |hook|
+            next unless EventScope.matches?(event: event, selection: selection, hook: hook)
+
             dispatch(
               module_name: selection.fetch("name"), hook_id: hook.fetch("id"),
               event: event, dry_run: dry_run
@@ -148,6 +156,11 @@ module Hive
           event_id: event.fetch("event_id")
         )
         concurrency_blocked = live_for_hook?(context) && context.fetch(:hook).fetch("concurrency") != "allow"
+        capacity_blocked = @capacity_probe.call(
+          module_name: context.fetch(:module_name),
+          hook_id: context.fetch(:hook_id),
+          event: event
+        ) == true
         availability = required_secret_bindings(context.fetch(:configuration)).to_h do |binding|
           [ binding, @secret_availability.call(binding) == true ]
         end
@@ -155,7 +168,8 @@ module Hive
           selection: selection, configuration: context.fetch(:configuration),
           hook: context.fetch(:hook), hook_state: context[:hook_state], event: event,
           activation_fenced: context.fetch(:activation_fenced), duplicate: duplicate,
-          concurrency_blocked: concurrency_blocked, secret_availability: availability
+          concurrency_blocked: concurrency_blocked, capacity_blocked: capacity_blocked,
+          secret_availability: availability
         )
       end
 
@@ -211,7 +225,7 @@ module Hive
 
       def advance_cursor(context, evaluation)
         return unless context[:hooks] && evaluation.cursor_after
-        hooks = Marshal.load(Marshal.dump(context.fetch(:hooks)))
+        hooks = JSON.parse(canonical(context.fetch(:hooks)))
         row = hooks.dig("hooks", context.fetch(:hook_id))
         return unless row
         row["cursor"] = evaluation.cursor_after

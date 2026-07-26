@@ -18,6 +18,8 @@ module Hive
                    activation_fenced: false, duplicate: false,
                    capacity_blocked: false, concurrency_blocked: false,
                    secret_availability: {})
+        raise TypeError, "hook must be an object" unless hook.is_a?(Hash)
+
         binding_digest = digest(hook)
         cursor = hook_state && hook_state["cursor"]
         after = event.fetch("event_id")

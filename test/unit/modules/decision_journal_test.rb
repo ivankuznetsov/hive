@@ -24,6 +24,70 @@ class ModulesDecisionJournalTest < Minitest::Test
     end
   end
 
+  def test_receipt_shape_identity_and_timestamp_errors_are_typed
+    with_tmp_dir do |root|
+      journal = Hive::Modules::DecisionJournal.new(root: root, id_generator: -> { "decision-1" })
+      decision = journal.append(attributes)
+
+      assert_raises(Hive::Modules::DecisionJournalError) do
+        journal.send(:normalize, attributes.reject { |key, _value| key == "project_id" })
+      end
+      assert_raises(Hive::Modules::DecisionJournalError) do
+        journal.send(:validate!, decision.merge("binding_digest" => "bad"))
+      end
+      assert_raises(Hive::Modules::DecisionJournalError) do
+        journal.send(:validate!, decision.merge("artifacts" => [ "bad" ]))
+      end
+      assert_raises(Hive::Modules::DecisionJournalError) do
+        journal.send(:validate!, decision.merge("evaluated_at" => "not-a-time"))
+      end
+      assert_raises(Hive::Modules::DecisionJournalError) do
+        journal.send(:parse, JSON.pretty_generate(decision), expected_id: decision.fetch("decision_id"))
+      end
+      assert_raises(Hive::Modules::DecisionJournalError) do
+        journal.send(:parse, "{bad", expected_id: decision.fetch("decision_id"))
+      end
+      assert_raises(Hive::Modules::DecisionJournalError) { journal.send(:decision_path, "bad") }
+      assert_raises(Hive::Modules::DecisionJournalError) { journal.send(:timestamp, "not-a-time") }
+    end
+  end
+
+  def test_filesystem_failures_are_bounded_at_initialization_append_and_lock
+    with_tmp_dir do |root|
+      with_replaced_singleton_method(
+        FileUtils, :mkdir_p, ->(*_args, **_options) { raise Errno::EACCES, "blocked" }
+      ) do
+        assert_raises(Hive::Modules::DecisionJournalError) do
+          Hive::Modules::DecisionJournal.new(root: File.join(root, "unavailable"))
+        end
+      end
+
+      journal = Hive::Modules::DecisionJournal.new(
+        root: File.join(root, "journal"), id_generator: -> { SecureRandom.uuid }
+      )
+      with_replaced_singleton_method(
+        Hive::AtomicFile, :write, ->(*_args, **_options) { raise Errno::ENOSPC, "full" }
+      ) do
+        assert_raises(Hive::Modules::DecisionJournalError) { journal.append(attributes) }
+      end
+      unlocked_journal = Hive::Modules::DecisionJournal.new(
+        root: File.join(root, "unlocked-journal"), id_generator: -> { SecureRandom.uuid }
+      )
+      unlocked_journal.define_singleton_method(:with_lock) { |**_options, &block| block.call }
+      with_replaced_singleton_method(
+        Hive::AtomicFile, :write, ->(*_args, **_options) { raise Errno::ENOSPC, "full" }
+      ) do
+        error = assert_raises(Hive::Modules::DecisionJournalError) { unlocked_journal.append(attributes) }
+        assert_match(/could not be persisted/, error.message)
+      end
+      with_replaced_singleton_method(
+        File, :open, ->(*_args, **_options) { raise Errno::EACCES, "blocked" }
+      ) do
+        assert_raises(Hive::Modules::DecisionJournalError) { journal.all }
+      end
+    end
+  end
+
   private
 
   def event_id = "evt-#{'a' * 64}"

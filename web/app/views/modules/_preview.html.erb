@@ -41,10 +41,16 @@
       <%= check_box_tag :consent, "module_#{change.operation}", false, required: true %>
       Apply this exact <%= change.operation %> transaction
     </label>
-    <% change.required_grants.each do |category| %>
+    <% change.permission_consents.each do |permission| %>
       <label class="check">
-        <%= check_box_tag "grant_consents[]", category, false, required: true %>
-        Separately grant <%= category.humanize %>
+        <%= check_box_tag "permission_atom_tokens[]", permission.fetch("token"), false,
+              required: true,
+              data: {
+                permission_category: permission.fetch("category"),
+                permission_value: permission.fetch("value") == true ? "enabled" : permission.fetch("value")
+              } %>
+        Separately grant <%= permission.fetch("category").humanize %>:
+        <%= permission.fetch("value") == true ? "enabled" : permission.fetch("value") %>
       </label>
     <% end %>
     <p><%= f.submit "Apply #{change.operation}", data: { turbo_submits_with: "Applying…" } %></p>

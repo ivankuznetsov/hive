@@ -3,7 +3,7 @@ title: Hive::Events
 type: module
 source: lib/hive/events.rb
 created: 2026-05-23
-updated: 2026-07-17
+updated: 2026-07-22
 tags: [module, events, observability, status, append-only]
 ---
 
@@ -26,6 +26,22 @@ for versioned condition/generation/evidence/audit records. See
 | `round_complete` | same | Brainstorm or plan stage closed with `:complete` marker |
 
 `ROUND_EVENT_STAGES = %w[brainstorm plan]` is the registry that gates round events — adding a new stage that publishes `:waiting` / `:complete` round markers requires extending this list so `emit_marker_event` stays in sync with the producers.
+
+## Durable module events are separate
+
+`Hive::Modules::EventLedger` is the strict, project-local launch ledger. It is
+separate from the fail-soft `Hive::Events` telemetry described below. Its v1
+vocabulary is intentionally closed to `task.completed`,
+`pull_request.merged`, and `project.registered`; schedules use the same
+dispatcher but are represented as explicit scheduled occurrences.
+
+Each persisted occurrence binds immutable project identity, occurrence and
+recording time, source identity, event id, idempotency key, and a canonical
+payload digest. Re-delivery with the same identity and payload returns the
+existing occurrence; conflicting reuse fails closed. Every hook evaluation is
+paired with a `Hive::Modules::DecisionJournal` launch or skip receipt, including
+generation/configuration/grant identity and the linked attempt when admitted.
+The daemon is the sole autonomous dispatcher.
 
 ## Record shape
 

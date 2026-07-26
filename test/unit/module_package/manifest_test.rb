@@ -50,11 +50,119 @@ class ModulePackageManifestTest < Minitest::Test
     end
   end
 
+  def test_validates_workflow_descriptors_and_rejects_invalid_nested_shapes
+    with_module_package do |root, document|
+      document["workflows"] = [ { "id" => "review", "descriptor" => "README.md" } ]
+      manifest = rewrite_manifest(root, document)
+      assert_equal [ { "id" => "review", "descriptor" => "README.md" } ], manifest.workflows
+    end
+
+    assert_mutation("manifest.invalid_workflow") { |document| document["workflows"] = [ { "id" => "review" } ] }
+    assert_mutation("manifest.invalid_hook") { |document| document["hooks"].first.delete("concurrency") }
+    assert_mutation("manifest.invalid_schedule") do |document|
+      document["hooks"].first["schedules"] = [ "0 * * * *", "0 * * * *" ]
+    end
+    assert_mutation("manifest.invalid_target") { |document| document["hooks"].first["target"] = [] }
+    assert_mutation("manifest.invalid_target") do |document|
+      document["hooks"].first["target"] = { "kind" => "entrypoint", "id" => "INVALID" }
+    end
+  end
+
+  def test_hook_targets_bind_to_declared_workflows_and_reviewed_command_executables
+    with_module_package do |root, document|
+      document["workflows"] = [ { "id" => "review", "descriptor" => "README.md" } ]
+      document["hooks"].first["target"] = { "kind" => "workflow", "id" => "review" }
+
+      manifest = rewrite_manifest(root, document)
+
+      assert_equal "review", manifest.hooks.first.dig("target", "id")
+    end
+
+    assert_mutation("manifest.invalid_target") do |document|
+      document["hooks"].first["target"] = { "kind" => "workflow", "id" => "missing" }
+    end
+
+    with_module_package do |root, document|
+      document["permissions"]["external_commands"] = [ "git" ]
+      document["hooks"].first["target"] = { "kind" => "command", "id" => "git status --short" }
+
+      manifest = rewrite_manifest(root, document)
+
+      assert_equal "git status --short", manifest.hooks.first.dig("target", "id")
+    end
+
+    assert_mutation("manifest.invalid_target") do |document|
+      document["permissions"]["external_commands"] = [ "git" ]
+      document["hooks"].first["target"] = { "kind" => "command", "id" => "git 'unterminated" }
+    end
+    assert_mutation("manifest.permission_mismatch") do |document|
+      document["permissions"]["external_commands"] = [ "git" ]
+      document["hooks"].first["target"] = { "kind" => "command", "id" => "gh pr create" }
+    end
+  end
+
+  def test_rejects_each_typed_setting_and_permission_disclosure_violation
+    assert_mutation("manifest.invalid_setting") { |document| document["settings"].first.delete("required") }
+    assert_mutation("manifest.invalid_setting") { |document| document["settings"].first["secret"] = "yes" }
+    assert_mutation("manifest.invalid_setting") do |document|
+      document["settings"].first["values"] = %w[low low]
+    end
+    assert_mutation("manifest.invalid_setting") { |document| document["settings"].first["default"] = "missing" }
+    assert_mutation("manifest.invalid_setting") do |document|
+      document["settings"].last["values"] = [ "unsupported" ]
+    end
+    assert_mutation("manifest.invalid_permissions") { |document| document["permissions"].delete("secrets") }
+    assert_mutation("manifest.invalid_permissions") { |document| document["permissions"]["repository_write"] = "yes" }
+    assert_mutation("manifest.invalid_permissions") do |document|
+      document["permissions"]["network_hosts"] = [ "github.com", "github.com" ]
+    end
+    assert_mutation("manifest.invalid_permissions") do |document|
+      document["permissions"]["network_hosts"] = [ "*", "github.com" ]
+    end
+  end
+
+  def test_rejects_invalid_inventory_references_and_urls
+    assert_mutation("manifest.invalid_files") do |document|
+      document["files"] = { "z.txt" => "a" * 64, "README.md" => document["files"].fetch("README.md") }
+    end
+    assert_mutation("manifest.self_hash") { |document| document["files"]["module.yml"] = "a" * 64 }
+    assert_mutation("manifest.invalid_value") { |document| document["templates"] = [ "README.md", "README.md" ] }
+    assert_mutation("manifest.invalid_author") { |document| document["author"] = { "name" => "Hive" } }
+    assert_mutation("manifest.invalid_source") { |document| document["source"] = { "url" => "https://example.test" } }
+    assert_mutation("manifest.invalid_url") { |document| document["author"]["url"] = "mailto:hive@example.test" }
+    assert_mutation("manifest.invalid_url") { |document| document["author"]["url"] = "http://[" }
+  end
+
+  def test_reports_digest_yaml_and_read_failures_with_typed_diagnostics
+    with_module_package do |root, document|
+      document["description"] = "Changed without rebinding the digest"
+      File.binwrite(File.join(root, "module.yml"), Hive::WorkflowPackage::CanonicalYAML.dump(document))
+      assert_rule("manifest.release_digest_mismatch") do
+        Hive::ModulePackage::Manifest.load(File.join(root, "module.yml"))
+      end
+    end
+
+    with_tmp_dir do |root|
+      path = File.join(root, "module.yml")
+      File.binwrite(path, "--- !ruby/object:Object {}\n")
+      assert_rule("manifest.invalid_yaml") { Hive::ModulePackage::Manifest.load(path) }
+      FileUtils.rm_f(path)
+      assert_rule("manifest.unreadable") { Hive::ModulePackage::Manifest.load(path) }
+    end
+  end
+
   private
 
   def assert_rule(expected)
     error = assert_raises(Hive::WorkflowPackage::PackageError) { yield }
     assert_equal expected, error.diagnostic.rule_id
+  end
+
+  def assert_mutation(expected)
+    with_module_package do |root, document|
+      yield document
+      assert_rule(expected) { rewrite_manifest(root, document) }
+    end
   end
 
   def with_module_package

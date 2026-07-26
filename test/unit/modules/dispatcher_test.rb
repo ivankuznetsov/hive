@@ -28,6 +28,24 @@ class ModulesDispatcherTest < Minitest::Test
     end
   end
 
+  class ResultDispatcher
+    attr_reader :calls
+
+    def initialize(result)
+      @result = result
+      @calls = []
+    end
+
+    def dispatch_module_hook(**arguments)
+      @calls << arguments
+      @result
+    end
+  end
+
+  PreviousAttempt = Struct.new(:attempt_id, :retry_charge) do
+    def [](key) = key == "retry_charge" ? retry_charge : nil
+  end
+
   def test_replay_creates_one_attempt_and_two_explainable_decisions
     with_runtime do |runtime|
       first = runtime.fetch(:dispatcher).dispatch(
@@ -93,9 +111,197 @@ class ModulesDispatcherTest < Minitest::Test
     end
   end
 
+  def test_dispatch_event_projects_and_dispatches_every_active_hook
+    with_runtime do |runtime|
+      projected = runtime.fetch(:dispatcher).dispatch_event(runtime.fetch(:event), dry_run: true)
+      assert_equal [ "admitted" ], projected.map { |result| result.decision.fetch("reason") }
+      assert_empty runtime.fetch(:journal).all
+
+      dispatched = runtime.fetch(:dispatcher).dispatch_event(runtime.fetch(:event))
+      assert_equal 1, dispatched.size
+      assert dispatched.first.launched?
+      assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
+    end
+  end
+
+  def test_missing_module_or_hook_uses_a_closed_null_configuration
+    with_runtime do |runtime|
+      missing_module = runtime.fetch(:dispatcher).dispatch(
+        module_name: "missing", hook_id: "task", event: runtime.fetch(:event)
+      )
+      missing_hook = runtime.fetch(:dispatcher).dispatch(
+        module_name: "demo", hook_id: "missing", event: runtime.fetch(:event)
+      )
+
+      assert_equal "not_installed", missing_module.decision.fetch("reason")
+      assert_equal "invalid_binding", missing_hook.decision.fetch("reason")
+      assert_nil missing_module.decision.fetch("configuration_digest")
+      assert_nil missing_hook.decision.fetch("concurrency")
+    end
+  end
+
+  def test_attempt_admission_outcomes_are_recorded_as_skip_reasons
+    rows = {
+      existing_live: [ nil, "duplicate", "running" ],
+      terminal_replay: [ nil, "terminal_replay", "failed" ],
+      deferred_capacity: [ "capacity", "capacity_blocked", "failed" ],
+      deferred_other: [ "provider", "concurrency_blocked", "failed" ]
+    }
+    rows.each do |name, (reason, expected_reason, expected_status)|
+      status = name.to_s.start_with?("deferred") ? :deferred : name
+      result = Hive::Attempts::DispatchResult.new(
+        status: status, attempt: nil, receipt: nil, attach_descriptor: nil, reason: reason
+      )
+      result_dispatcher = ResultDispatcher.new(result)
+      with_runtime(attempt_dispatcher: result_dispatcher) do |runtime|
+        dispatch = runtime.fetch(:dispatcher).dispatch(
+          module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+        )
+
+        assert_equal expected_reason, dispatch.decision.fetch("reason"), name
+        run = JSON.parse(Dir[File.join(runtime.fetch(:store).runtime_path("demo"), "runs", "*.json")].then do |paths|
+          File.binread(paths.fetch(0))
+        end)
+        assert_equal expected_status, run.fetch("status"), name
+      end
+    end
+  end
+
+  def test_required_secret_uses_default_environment_availability_without_exposing_value
+    with_env("MODULE_TEST_TOKEN" => "available") do
+      with_runtime(secret_required: true) do |runtime|
+        result = runtime.fetch(:dispatcher).dispatch(
+          module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+        )
+
+        assert result.launched?
+        refute_includes JSON.generate(result.decision), "available"
+        refute_includes JSON.generate(result.decision), "MODULE_TEST_TOKEN"
+      end
+    end
+  end
+
+  def test_retry_closes_when_disabled_and_records_capacity_retry_when_enabled
+    with_runtime do |runtime|
+      context = runtime.fetch(:dispatcher).send(:load_context, "demo", "task")
+      hook_attempt = Hive::Modules::HookAttempt.build(
+        project: "demo", project_id: "project-1", module_name: "demo",
+        hook: context.fetch(:hook), selection: context.fetch(:selection),
+        configuration: context.fetch(:configuration), event: runtime.fetch(:event)
+      )
+      runtime.fetch(:dispatcher).send(:persist_run, "demo", hook_attempt, runtime.fetch(:event))
+      runtime.fetch(:store).disable("demo", now: NOW)
+
+      assert_nil runtime.fetch(:dispatcher).retry(
+        module_name: "demo", hook_attempt: hook_attempt,
+        previous_attempt: PreviousAttempt.new("attempt-before", 0)
+      )
+      run = JSON.parse(File.binread(File.join(
+        runtime.fetch(:store).runtime_path("demo"), "runs", "#{hook_attempt.run_id}.json"
+      )))
+      assert_equal "retry_closed", run.dig("retry", "reason")
+    end
+
+    capacity = Hive::Attempts::DispatchResult.new(
+      status: :deferred, attempt: nil, receipt: nil, attach_descriptor: nil, reason: "capacity"
+    )
+    result_dispatcher = ResultDispatcher.new(capacity)
+    with_runtime(attempt_dispatcher: result_dispatcher) do |runtime|
+      context = runtime.fetch(:dispatcher).send(:load_context, "demo", "task")
+      hook_attempt = Hive::Modules::HookAttempt.build(
+        project: "demo", project_id: "project-1", module_name: "demo",
+        hook: context.fetch(:hook), selection: context.fetch(:selection),
+        configuration: context.fetch(:configuration), event: runtime.fetch(:event)
+      )
+      runtime.fetch(:dispatcher).send(:persist_run, "demo", hook_attempt, runtime.fetch(:event))
+
+      result = runtime.fetch(:dispatcher).retry(
+        module_name: "demo", hook_attempt: hook_attempt,
+        previous_attempt: PreviousAttempt.new("attempt-before", 2)
+      )
+      run = JSON.parse(File.binread(File.join(
+        runtime.fetch(:store).runtime_path("demo"), "runs", "#{hook_attempt.run_id}.json"
+      )))
+      assert_equal capacity, result
+      assert_equal "retrying", run.fetch("status")
+      assert_equal 3, result_dispatcher.calls.fetch(0).fetch(:retry_charge)
+    end
+  end
+
+  def test_malformed_hook_state_lock_failure_and_foreign_event_fail_closed
+    with_runtime do |runtime|
+      hooks_path = File.join(runtime.fetch(:store).runtime_path("demo"), "hooks.json")
+      File.write(hooks_path, "{bad")
+      error = assert_raises(Hive::ConfigError) do
+        runtime.fetch(:dispatcher).dispatch(
+          module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+        )
+      end
+      assert_match(/runtime state is malformed/, error.message)
+    end
+
+    with_runtime do |runtime|
+      foreign = runtime.fetch(:event).merge("project_id" => "another-project")
+      assert_raises(Hive::ConfigError) do
+        runtime.fetch(:dispatcher).dispatch_event(foreign)
+      end
+
+      original_open = File.method(:open)
+      File.define_singleton_method(:open) { |*| raise Errno::EACCES, "denied" }
+      begin
+        error = assert_raises(Hive::ConfigError) do
+          runtime.fetch(:dispatcher).dispatch(
+            module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+          )
+        end
+        assert_match(/admission lock is unavailable/, error.message)
+      ensure
+        File.define_singleton_method(:open, original_open)
+      end
+    end
+  end
+
+  def test_missing_and_structurally_malformed_hook_state_are_distinguished
+    with_runtime do |runtime|
+      hooks_path = File.join(runtime.fetch(:store).runtime_path("demo"), "hooks.json")
+      FileUtils.rm_f(hooks_path)
+      missing = runtime.fetch(:dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      assert_equal "hook_disabled", missing.decision.fetch("reason")
+    end
+
+    with_runtime do |runtime|
+      hooks_path = File.join(runtime.fetch(:store).runtime_path("demo"), "hooks.json")
+      File.write(
+        hooks_path,
+        Hive::WorkflowPackage::CanonicalJSON.generate("schema_version" => 1, "hooks" => [])
+      )
+      assert_raises(Hive::ConfigError) do
+        runtime.fetch(:dispatcher).dispatch(
+          module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+        )
+      end
+    end
+  end
+
+  def test_default_clock_is_used_for_decision_receipts
+    with_runtime do |runtime|
+      dispatcher = Hive::Modules::Dispatcher.new(
+        store: runtime.fetch(:store), attempt_store: runtime.fetch(:attempt_store),
+        attempt_dispatcher: runtime.fetch(:attempt_dispatcher),
+        project_id: "project-1", project: "demo", decision_journal: runtime.fetch(:journal)
+      )
+      result = dispatcher.dispatch(
+        module_name: "missing", hook_id: "task", event: runtime.fetch(:event)
+      )
+      refute_nil result.decision.fetch("evaluated_at")
+    end
+  end
+
   private
 
-  def with_runtime
+  def with_runtime(attempt_dispatcher: nil, secret_required: false)
     with_tmp_dir do |root|
       hooks = [
         {
@@ -105,18 +311,26 @@ class ModulesDispatcherTest < Minitest::Test
         }
       ]
       package = File.join(root, "package")
-      resolution, descriptor = write_module_package(package, hooks: hooks)
+      settings = [
+        { "name" => "mode", "type" => "enum", "required" => true,
+          "default" => "safe", "values" => %w[safe fast] },
+        { "name" => "api_token", "type" => "secret", "required" => secret_required,
+          "secret" => true }
+      ]
+      resolution, descriptor = write_module_package(package, hooks: hooks, settings: settings)
       store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
       preview = Hive::ModulePackage::Preview.build(
         operation: "install", descriptor: descriptor, generation: resolution,
         current: nil, current_configuration: nil,
-        settings: { "mode" => "safe", "api_token" => nil }, hooks: { "task" => true },
+        settings: {
+          "mode" => "safe", "api_token" => secret_required ? "MODULE_TEST_TOKEN" : nil
+        }, hooks: { "task" => true },
         grants: exact_grants(descriptor), now: NOW - 60
       )
       store.apply(preview, package_root: package, resolution: resolution, now: NOW - 60)
       attempt_store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
       launcher = Launcher.new
-      attempt_dispatcher = Hive::Attempts::Dispatcher.new(
+      attempt_dispatcher ||= Hive::Attempts::Dispatcher.new(
         store: attempt_store, launcher: launcher,
         id_generator: -> { "attempt-1" }, capability_generator: -> { "c" * 64 }
       )
@@ -132,7 +346,8 @@ class ModulesDispatcherTest < Minitest::Test
       )
       runtime = {
         root: root, store: store, attempt_store: attempt_store, launcher: launcher,
-        ledger: ledger, journal: journal, dispatcher: dispatcher
+        attempt_dispatcher: attempt_dispatcher, ledger: ledger, journal: journal,
+        dispatcher: dispatcher
       }
       runtime[:event] = record_event(runtime, idempotency_key: "task-7", occurred_at: NOW + 1)
       yield runtime

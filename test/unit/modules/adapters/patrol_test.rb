@@ -49,6 +49,12 @@ class ModulesAdaptersPatrolTest < Minitest::Test
       assert_empty calls
       assert_equal "due", shadow.fetch(0).fetch("rationale")
       refute File.exist?(File.join(project.fetch("path"), ".hive-state", "patrol", "state.json"))
+
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "task-completed",
+        event: task_event("coding"), configuration: configuration(shadow: true)
+      )
+      assert_equal "matched", shadow.fetch(1).fetch("rationale")
     end
   end
 
@@ -98,6 +104,98 @@ class ModulesAdaptersPatrolTest < Minitest::Test
         )
       end
       assert_empty calls
+    end
+  end
+
+  def test_setup_adopts_the_existing_state_store_and_default_factories_are_constructible
+    with_project do |project|
+      defaulted = Hive::Modules::Adapters::Patrol.new
+      assert_equal 0, defaulted.call(
+        project: project, hook_id: "setup", event: event("project.registered"),
+        configuration: configuration(shadow: false)
+      )
+      assert File.directory?(File.join(project.fetch("path"), ".hive-state", "patrol"))
+    end
+  end
+
+  def test_mutator_schedule_runs_only_due_candidates_and_propagates_engine_failure
+    with_project do |project|
+      calls = []
+      due = Hive::Modules::Adapters::Patrol.new(
+        command_factory: ->(*args) { calls << args; FakeCommand.new("ok" => false) },
+        scheduler_factory: lambda do |**options|
+          assert_equal [ project ], options.fetch(:registry).call
+          assert_equal true, options.fetch(:config_loader).call(project.fetch("path")).dig("patrol", "enabled")
+          FakeScheduler.new(project: project.fetch("name"))
+        end
+      )
+      assert_equal 1, due.call(
+        project: project, hook_id: "scheduled-scan", event: schedule_event,
+        configuration: configuration(shadow: false)
+      )
+      assert_equal 1, calls.size
+
+      not_due = Hive::Modules::Adapters::Patrol.new(
+        command_factory: ->(*args) { calls << args; FakeCommand.new },
+        scheduler_factory: ->(**) { FakeScheduler.new(nil) }
+      )
+      assert_equal 0, not_due.call(
+        project: project, hook_id: "scheduled-scan", event: schedule_event,
+        configuration: configuration(shadow: false)
+      )
+      assert_equal 1, calls.size
+    end
+  end
+
+  def test_default_shadow_journal_and_hook_event_validation_fail_closed
+    with_project do |project|
+      adapter = Hive::Modules::Adapters::Patrol.new(
+        scheduler_factory: ->(**) { FakeScheduler.new(nil) }
+      )
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "scheduled-scan", event: schedule_event,
+        configuration: configuration(shadow: true)
+      )
+      shadow_files = Dir.glob(File.join(
+        project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
+      ))
+      refute_empty shadow_files
+
+      assert_raises(Hive::ConfigError) do
+        adapter.call(
+          project: project, hook_id: "unknown", event: schedule_event,
+          configuration: configuration(shadow: true)
+        )
+      end
+      assert_raises(Hive::ConfigError) do
+        adapter.call(
+          project: project, hook_id: "setup", event: schedule_event,
+          configuration: configuration(shadow: true)
+        )
+      end
+    end
+  end
+
+  def test_default_command_factory_forwards_to_the_legacy_command
+    with_project do |project|
+      calls = []
+      original = Hive::Commands::Patrol.method(:new)
+      Hive::Commands::Patrol.define_singleton_method(:new) do |name, **options|
+        calls << [ name, options ]
+        FakeCommand.new
+      end
+      begin
+        adapter = Hive::Modules::Adapters::Patrol.new(
+          scheduler_factory: ->(**) { FakeScheduler.new(project: project.fetch("name")) }
+        )
+        assert_equal 0, adapter.call(
+          project: project, hook_id: "scheduled-scan", event: schedule_event,
+          configuration: configuration(shadow: false)
+        )
+      ensure
+        Hive::Commands::Patrol.define_singleton_method(:new, original)
+      end
+      assert_equal "demo", calls.fetch(0).fetch(0)
     end
   end
 

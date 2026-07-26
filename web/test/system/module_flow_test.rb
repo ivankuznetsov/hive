@@ -38,7 +38,12 @@ class ModuleFlowTest < ApplicationSystemTestCase
             { "id" => "scan", "enabled" => true, "target" => { "kind" => "entrypoint", "id" => "demo.run" },
               "schedules" => [], "events" => [], "concurrency" => "drop", "default_enabled" => false }
           ],
-          "grants" => { "repository_write" => true }
+          "grants" => {
+            "repository_write" => true, "github_mutations" => [],
+            "external_commands" => [], "network_hosts" => [],
+            "filesystem_read" => [], "filesystem_write" => [], "secrets" => []
+          },
+          "permission_digest" => "d" * 64
         }
       }
     end
@@ -74,7 +79,7 @@ class ModuleFlowTest < ApplicationSystemTestCase
     end
     assert_selector "#module-preview-heading", text: "Review install: demo", wait: 5
     check "Apply this exact install transaction"
-    check "Separately grant Repository write"
+    check "Separately grant Repository write: enabled"
     click_button "Apply install"
 
     assert_selector ".flash-notice", text: "demo installed", wait: 5

@@ -6,7 +6,8 @@
   "additionalProperties": false,
   "required": [
     "schema", "schema_version", "module", "decision_id", "trigger_digest",
-    "occurred_at", "configuration_digest", "comparable", "legacy",
+    "occurred_at", "recorded_at", "evidence_source", "configuration_digest",
+    "comparable", "legacy",
     "module_decision", "explained_differences", "unexplained_differences",
     "legacy_effects", "module_effects", "duplicate_effects"
   ],
@@ -17,6 +18,11 @@
     "decision_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "trigger_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "occurred_at": {"type": "string"},
+    "recorded_at": {"type": "string"},
+    "evidence_source": {
+      "type": ["string", "null"],
+      "enum": ["legacy_mutator_capture", null]
+    },
     "configuration_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "comparable": {"type": "boolean"},
     "legacy": {},

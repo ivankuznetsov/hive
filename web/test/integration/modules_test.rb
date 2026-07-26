@@ -35,7 +35,8 @@ class ModulesTest < ActionDispatch::IntegrationTest
             "repository_write" => true, "github_mutations" => [], "external_commands" => [],
             "network_hosts" => [], "filesystem_read" => [ "repository" ], "filesystem_write" => [],
             "secrets" => [ "MODULE_TOKEN" ]
-          }
+          },
+          "permission_digest" => "d" * 64
         }
       end
       {
@@ -102,6 +103,7 @@ class ModulesTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "nav a.nav-link-active", text: "Modules"
     assert_select "[data-module-name='demo'][data-module-state='active']", text: /MODULE_TOKEN.*available/m
+    assert_select ".module-details", text: /Generation and integrity.*entrypoint:demo\.run.*duplicate/m
     refute_includes response.body, "raw-secret-value"
 
     get modules_path, params: { project: @other }
@@ -119,20 +121,23 @@ class ModulesTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "#module-preview-heading", text: /Review install: demo/
     assert_select ".permission-grid", text: /api_token.*MODULE_TOKEN/m
-    assert_select "input[name='grant_consents[]'][value='repository_write'][required]"
-    assert_select "input[name='grant_consents[]'][value='filesystem_read'][required]"
-    assert_select "input[name='grant_consents[]'][value='secrets'][required]"
+    assert_select "input[name='permission_atom_tokens[]'][data-permission-category='repository_write'][required]"
+    assert_select "input[name='permission_atom_tokens[]'][data-permission-category='filesystem_read'][data-permission-value='repository'][required]"
+    assert_select "input[name='permission_atom_tokens[]'][data-permission-category='secrets'][data-permission-value='MODULE_TOKEN'][required]"
     token = preview_token(apply_module_install_path)
+    atom_tokens = css_select("input[name='permission_atom_tokens[]']").map { |input| input["value"] }
+    assert_equal 3, atom_tokens.length
+    refute_includes atom_tokens, "repository_write"
 
     post apply_module_install_path, params: {
-      preview_token: token, consent: "module_install", grant_consents: [ "repository_write" ]
+      preview_token: token, consent: "module_install", permission_atom_tokens: [ "repository_write" ]
     }
     assert_response :unprocessable_entity
     refute @lifecycle.calls.any? { |call| call.first == :apply }
 
     post apply_module_install_path, params: {
       preview_token: token, consent: "module_install",
-      grant_consents: %w[filesystem_read repository_write secrets]
+      permission_atom_tokens: atom_tokens
     }
     assert_redirected_to modules_path(project: @project)
     apply = @lifecycle.calls.find { |call| call.first == :apply }

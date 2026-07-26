@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-07-19
+updated: 2026-07-22
 tags: [command, workflow, authoring, honeycomb, registry]
 ---
 
@@ -29,6 +29,13 @@ hive workflow publish my-flow --version 1.0.0
 ```
 
 ## Honeycomb Lifecycle
+
+The lifecycle implementation now normalizes a managed Honeycomb into a
+one-workflow installable module. The existing workflow command flags, human
+messages, exit codes, lock behavior, and JSON schemas remain the 0.x
+compatibility contract. Operators who need hooks, schedules, typed settings,
+or lifecycle status use `hive module`; current Honeycombs do not need
+republishing or manual migration.
 
 The official-source grammar is closed: `honeycomb/NAME`, a catalog semantic
 version, or its catalog-listed full upstream source SHA. Mutable refs,

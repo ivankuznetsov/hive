@@ -21,15 +21,20 @@ class ModuleStatusCommandTest < Minitest::Test
       list = call(Hive::Commands::Module::List, project, store, inspector)
       inspect = call(Hive::Commands::Module::Inspect, project, store, inspector, "demo")
       status = call(Hive::Commands::Module::Status, project, store, inspector, "")
+      named_status = call(Hive::Commands::Module::Status, project, store, inspector, "demo")
       doctor = call(Hive::Commands::Module::Doctor, project, store, inspector, "demo")
 
       assert_equal inspect.fetch("modules"), status.fetch("modules")
+      assert_equal inspect.fetch("modules"), named_status.fetch("modules")
       assert_equal list.fetch("modules"), status.fetch("modules")
       assert_equal inspect.fetch("modules").first, doctor.fetch("status")
       [ list, inspect, status, doctor ].each do |payload|
         refute_includes JSON.generate(payload), "secret-value"
         schema = JSONSchemer.schema(Pathname(Hive::Schemas.schema_path(payload.fetch("schema"))))
         assert schema.valid?(payload), schema.validate(payload).to_a.inspect
+      end
+      assert_raises(Hive::ConfigError) do
+        call(Hive::Commands::Module::Status, project, store, inspector, "missing")
       end
     end
   end
@@ -59,7 +64,7 @@ class ModuleStatusCommandTest < Minitest::Test
       )
       store.apply(preview, package_root: package, resolution: resolution, now: NOW - 60)
       inspector = Hive::Modules::Inspector.new(
-        store: store,
+        store: store, project_id: "project-1",
         attempt_store: Hive::Attempts::Store.new(root: File.join(project, "attempts"), create_directories: false),
         secret_availability: ->(_name) { false }, clock: -> { NOW }
       )

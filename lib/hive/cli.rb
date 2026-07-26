@@ -530,6 +530,12 @@ module Hive
                   desc: "module hook choice ID=enabled|disabled (repeatable)"
     option :grant, type: :array, default: [],
                    desc: "module permission grant CATEGORY=VALUE (repeatable)"
+    option :mapping, type: :array, default: [],
+                     desc: "legacy Honeycomb actor mapping SLOT=AGENT[,model=...][,effort=...]"
+    option :input_binding, type: :array, default: [],
+                           desc: "legacy Honeycomb optional input binding NAME=ENV_VAR"
+    option :allow_escalation, type: :boolean, default: false,
+                              desc: "separately approve a legacy Honeycomb security escalation"
     option :event, type: :string,
                    desc: "for `dry-run`: schedule or a supported named event"
     option :schedule, type: :string,
@@ -544,6 +550,8 @@ module Hive
         subcommand, subject, project_root: Dir.pwd, json: options[:json],
         yes: options[:yes], dry_run: options[:dry_run], receipt: options[:receipt],
         settings: options[:setting], hooks: options[:hook], grants: options[:grant],
+        mappings: options[:mapping], input_bindings: options[:input_binding],
+        allow_escalation: options[:allow_escalation],
         event_name: options[:event], schedule: options[:schedule], occurred_at: options[:occurred_at],
         reviewer: options[:reviewer]
       ).call

@@ -6,6 +6,8 @@ require "hive/atomic_file"
 require "hive/module_package/configuration"
 require "hive/module_package/transaction"
 require "hive/module_package/validator"
+require "hive/modules/hook_attempt"
+require "hive/stringify_keys"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/mutation_lock"
 
@@ -14,6 +16,7 @@ module Hive
     class ManagedStore
       SELECTION_FILE = "selection.json".freeze
       HOOKS_FILE = "hooks.json".freeze
+      SETUP_OUTBOX_FILE = "setup-outbox.json".freeze
 
       attr_reader :hive_state_path, :modules_dir
 
@@ -22,7 +25,8 @@ module Hive
         @modules_dir = File.join(@hive_state_path, "modules")
       end
 
-      def apply(preview, package_root:, resolution:, health_check: nil, failpoint: nil, commit: nil, now: Time.now.utc)
+      def apply(preview, package_root:, resolution:, health_check: nil, failpoint: nil,
+                commit: nil, setup_context: nil, now: Time.now.utc)
         validate_resolution!(resolution)
         raise Hive::ConfigError, "module preview generation does not match resolution" unless same_generation?(
           preview.configuration.generation, resolution
@@ -40,8 +44,12 @@ module Hive
           failpoint&.call(:prepared)
           selection = activation_selection(current, resolution, preview.configuration, preview.digest, now)
           hooks = activation_hooks(current, preview.configuration, now)
+          setup_outbox = activation_setup_outbox(
+            current, selection, preview.configuration, setup_context, now
+          )
           transaction.provisional!(
-            selection_bytes: canonical(selection), hooks_bytes: canonical(hooks)
+            selection_bytes: canonical(selection), hooks_bytes: canonical(hooks),
+            setup_outbox_bytes: setup_outbox && canonical(setup_outbox)
           )
           failpoint&.call(:pointer_provisional)
           begin
@@ -125,6 +133,32 @@ module Hive
         { "schema_version" => 1, "configuration_digest" => nil, "updated_at" => nil, "hooks" => {} }
       rescue JSON::ParserError, EncodingError
         raise Hive::ConfigError, "module hook runtime state is malformed"
+      end
+
+      def inspect_setup_outbox(name)
+        read_setup_outbox(name)
+      end
+
+      # Publish an install-time setup occurrence while the module mutation lock
+      # still proves that the pending intent belongs to the current executable
+      # epoch. The yielded publisher must be idempotent: a crash after ledger
+      # persistence but before outbox removal will invoke it again.
+      def promote_setup_outbox(name)
+        with_mutation do
+          reconcile_unlocked!(name)
+          intent = read_setup_outbox(name)
+          return { status: :none, result: nil } unless intent
+
+          selection = selected_unlocked(name, include_tombstone: true)
+          unless setup_outbox_current?(intent, selection)
+            remove_setup_outbox(name)
+            return { status: :stale, result: nil }
+          end
+
+          result = yield(intent)
+          remove_setup_outbox(name)
+          { status: :published, result: result }
+        end
       end
 
       def configuration(name, digest)
@@ -225,6 +259,7 @@ module Hive
       end
 
       def runtime_path(name) = File.join(module_path(name), "runtime")
+      def setup_outbox_path(name) = File.join(runtime_path(name), SETUP_OUTBOX_FILE)
       def failed_activation_path(name) = File.join(module_path(name), "diagnostics", "failed-activation.json")
 
       def reconcile!
@@ -344,6 +379,85 @@ module Hive
         }
       end
 
+      def activation_setup_outbox(current, selection, configuration, context, now)
+        return nil unless context && (current.nil? || !current.fetch("installed"))
+
+        setup_hooks = configuration.contract.fetch("hooks").filter_map do |hook|
+          id = hook.fetch("id")
+          id if configuration.hooks.fetch(id) && hook.fetch("events").include?("project.registered")
+        end
+        return nil if setup_hooks.empty?
+
+        context = Hive::StringifyKeys.call(context)
+        project_id = context.fetch("project_id").to_s
+        project = context.fetch("project").to_s
+        if project_id.empty? || project.empty?
+          raise Hive::ConfigError, "module setup context requires project identity"
+        end
+
+        active = selection.fetch("active")
+        receipt = selection.fetch("receipt_digest")
+        {
+          "schema_version" => 1,
+          "module" => selection.fetch("name"),
+          "project_id" => project_id,
+          "project" => project,
+          "source_commit" => active.fetch("source_commit"),
+          "configuration_digest" => active.fetch("configuration_digest"),
+          "receipt_digest" => receipt,
+          "target_epoch" => selection.fetch("epoch"),
+          "hooks" => setup_hooks.sort,
+          "occurred_at" => now.utc.iso8601(6),
+          "idempotency_key" => "module-install:#{selection.fetch('name')}:#{receipt}"
+        }
+      end
+
+      def read_setup_outbox(name)
+        bytes = File.binread(setup_outbox_path(name))
+        data = JSON.parse(bytes)
+        expected = %w[
+          configuration_digest hooks idempotency_key module occurred_at project
+          project_id receipt_digest schema_version source_commit target_epoch
+        ]
+        unless bytes == canonical(data) && data.is_a?(Hash) && data.keys.sort == expected &&
+               data["schema_version"] == 1 && data["module"] == name.to_s &&
+               Manifest::REVISION.match?(data["source_commit"].to_s) &&
+               Manifest::SHA256.match?(data["configuration_digest"].to_s) &&
+               Manifest::SHA256.match?(data["receipt_digest"].to_s) &&
+               data["target_epoch"].is_a?(Integer) && data["target_epoch"].positive? &&
+               data["project_id"].is_a?(String) && !data["project_id"].empty? &&
+               data["project"].is_a?(String) && !data["project"].empty? &&
+               data["hooks"].is_a?(Array) && data["hooks"].uniq == data["hooks"] &&
+               data["hooks"].all? { |id| Manifest::NAME.match?(id.to_s) } &&
+               data["idempotency_key"].is_a?(String) && !data["idempotency_key"].empty?
+          raise Hive::ConfigError, "module setup outbox is malformed"
+        end
+        Time.iso8601(data.fetch("occurred_at"))
+        data
+      rescue Errno::ENOENT
+        nil
+      rescue JSON::ParserError, ArgumentError, EncodingError
+        raise Hive::ConfigError, "module setup outbox is malformed"
+      end
+
+      def setup_outbox_current?(intent, selection)
+        return false unless selection&.fetch("installed") && selection.fetch("enabled")
+
+        active = selection.fetch("active")
+        selection.fetch("epoch") == intent.fetch("target_epoch") &&
+          selection.fetch("receipt_digest") == intent.fetch("receipt_digest") &&
+          active.fetch("source_commit") == intent.fetch("source_commit") &&
+          active.fetch("configuration_digest") == intent.fetch("configuration_digest")
+      end
+
+      def remove_setup_outbox(name)
+        path = setup_outbox_path(name)
+        return unless File.exist?(path)
+
+        FileUtils.rm_f(path)
+        Hive::AtomicFile.fsync_directory(File.dirname(path))
+      end
+
       def read_hooks(name)
         return {} unless name
         JSON.parse(File.read(File.join(runtime_path(name), HOOKS_FILE)))
@@ -388,9 +502,10 @@ module Hive
       end
 
       def complete_snapshot?(snapshot)
-        snapshot.is_a?(Hash) && %w[descriptor configuration grants].all? do |key|
-          snapshot[key].is_a?(Hash) && !snapshot[key].empty?
-        end
+        Hive::Modules::HookAttempt.validate_execution_snapshot!(snapshot)
+        true
+      rescue Hive::ConfigError
+        false
       end
 
       def mutate_state(name, commit: nil)

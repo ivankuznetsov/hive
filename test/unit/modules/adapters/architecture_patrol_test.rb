@@ -14,11 +14,22 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
     def call = @result
   end
 
+  class RaisingCommand
+    def call = raise("engine failed")
+  end
+
+  class FakeStateStore
+    attr_reader :ensured
+
+    def ensure! = @ensured = true
+  end
+
   class FakeScheduler
     attr_reader :reserved, :completed, :cancelled
 
-    def initialize(candidates)
+    def initialize(candidates, complete_status: :classified)
       @candidates = candidates
+      @complete_status = complete_status
     end
 
     def candidates(now:) = @candidates.map { |candidate| candidate.merge(now: now) }
@@ -36,7 +47,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
 
     def complete(**options)
       @completed = options
-      { status: :classified }
+      { status: @complete_status }
     end
 
     def cancel(*args, **options) = @cancelled = [ args, options ]
@@ -137,6 +148,130 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
     end
   end
 
+  def test_setup_uses_authoritative_state_store_and_default_factories_are_constructible
+    with_project do |project|
+      state_store = FakeStateStore.new
+      adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
+        state_store_factory: ->(_root) { state_store }
+      )
+
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "setup", event: event("project.registered"),
+        configuration: configuration(shadow: false)
+      )
+      assert state_store.ensured
+      refute_nil Hive::Modules::Adapters::ArchitecturePatrol.new
+
+      shadow = []
+      shadow_adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
+        state_store_factory: ->(_root) { state_store }, shadow_sink: ->(row) { shadow << row }
+      )
+      assert_equal 0, shadow_adapter.call(
+        project: project, hook_id: "setup", event: event("project.registered"),
+        configuration: configuration(shadow: true)
+      )
+      assert_equal "setup", shadow.fetch(0).fetch("rationale")
+    end
+  end
+
+  def test_retry_result_and_engine_exception_preserve_scheduler_lifecycle
+    with_project do |project|
+      retrying = FakeScheduler.new([ candidate ], complete_status: :retry)
+      adapter = adapter_for(retrying)
+      assert_equal 1, adapter.call(
+        project: project, hook_id: "scheduled-discovery", event: schedule_event,
+        configuration: configuration(shadow: false)
+      )
+
+      failing = FakeScheduler.new([ candidate ])
+      adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
+        command_factory: ->(*) { RaisingCommand.new },
+        scheduler_factory: ->(**) { failing }, shadow_sink: ->(_record) { }
+      )
+      error = assert_raises(RuntimeError) do
+        adapter.call(
+          project: project, hook_id: "scheduled-discovery", event: schedule_event,
+          configuration: configuration(shadow: false)
+        )
+      end
+      assert_equal "engine failed", error.message
+      assert_equal "module_hook_error", failing.cancelled.fetch(1).fetch(:reason)
+    end
+  end
+
+  def test_no_candidate_dry_run_shadow_and_hook_validation_are_side_effect_free
+    with_project do |project|
+      shadow = []
+      scheduler = FakeScheduler.new([])
+      adapter = adapter_for(scheduler, shadow: shadow)
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "scheduled-discovery", event: schedule_event,
+        configuration: configuration(shadow: true)
+      )
+      assert_equal "not_due", shadow.fetch(0).fetch("rationale")
+      assert_nil scheduler.reserved
+
+      assert_raises(Hive::ConfigError) do
+        adapter.call(
+          project: project, hook_id: "unknown", event: schedule_event,
+          configuration: configuration(shadow: true)
+        )
+      end
+      assert_raises(Hive::ConfigError) do
+        adapter.call(
+          project: project, hook_id: "setup", event: schedule_event,
+          configuration: configuration(shadow: true)
+        )
+      end
+    end
+  end
+
+  def test_default_shadow_comparator_records_nonmatching_merged_job
+    with_project do |project|
+      scheduler = FakeScheduler.new([ candidate.merge(job_id: "other") ])
+      adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
+        scheduler_factory: ->(**) { scheduler }
+      )
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "merged-pr-discovery", event: merged_event,
+        configuration: configuration(shadow: true)
+      )
+      files = Dir.glob(File.join(
+        project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
+      ))
+      refute_empty files
+    end
+  end
+
+  def test_default_command_and_scheduler_factories_forward_to_legacy_components
+    with_project do |project|
+      scheduler = FakeScheduler.new([ candidate ])
+      calls = []
+      test_case = self
+      original_command = Hive::Commands::RefactorPatrol.method(:new)
+      original_scheduler = Hive::Daemon::RefactorPatrolScheduler.method(:new)
+      Hive::Commands::RefactorPatrol.define_singleton_method(:new) do |name, **options|
+        calls << [ name, options ]
+        FakeCommand.new
+      end
+      Hive::Daemon::RefactorPatrolScheduler.define_singleton_method(:new) do |**options|
+        test_case.assert_equal [ project ], options.fetch(:registry).call
+        scheduler
+      end
+      begin
+        adapter = Hive::Modules::Adapters::ArchitecturePatrol.new
+        assert_equal 0, adapter.call(
+          project: project, hook_id: "scheduled-discovery", event: schedule_event,
+          configuration: configuration(shadow: false)
+        )
+      ensure
+        Hive::Commands::RefactorPatrol.define_singleton_method(:new, original_command)
+        Hive::Daemon::RefactorPatrolScheduler.define_singleton_method(:new, original_scheduler)
+      end
+      assert_equal "demo", calls.fetch(0).fetch(0)
+    end
+  end
+
   private
 
   def adapter_for(scheduler, commands: [], shadow: [])
@@ -145,7 +280,10 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
         commands << [ name, options ]
         FakeCommand.new
       end,
-      scheduler_factory: ->(**) { scheduler },
+      scheduler_factory: lambda do |**options|
+        options.fetch(:registry).call
+        scheduler
+      end,
       shadow_sink: ->(record) { shadow << record }
     )
   end

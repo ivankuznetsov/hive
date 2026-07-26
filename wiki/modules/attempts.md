@@ -53,6 +53,18 @@ not a requirement of the module design.
 
 ## Storage and identity
 
+Attempt schema v3 generalizes the execution subject. Existing task attempts
+remain readable through their v1/v2 projections, while module hook attempts use
+a first-class `module_hook` subject containing the project, module, hook,
+event/decision identity, generation, configuration, and grant digests. Module
+hooks do not fabricate task folders merely to reuse the supervisor.
+
+Both subjects share the same CAS record store, leases, capabilities,
+heartbeats, detached ownership, bounded retry accounting, receipts, output
+references, reconciliation, and capacity accounting. A module hook retry stays
+attached to its admitted occurrence; disabling or uninstalling the module
+closes pending retry authority instead of replaying it on re-enable.
+
 ```text
 $HIVE_HOME/attempts/v2/
 ├── records/<attempt-id>.json

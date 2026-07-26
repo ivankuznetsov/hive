@@ -91,7 +91,7 @@ module Hive
         def module_summary(module_name)
           records = @records.select { |row| row["module"] == module_name }
           comparable = records.select { |row| row["comparable"] == true }
-          times = comparable.filter_map { |row| parse_time(row["occurred_at"]) }
+          times = comparable.filter_map { |row| parse_time(row["recorded_at"]) }
           digests = comparable.filter_map { |row| row["configuration_digest"] }.uniq
           unexplained = comparable.sum { |row| Array(row["unexplained_differences"]).length }
           duplicates = comparable.sum { |row| Array(row["duplicate_effects"]).length }

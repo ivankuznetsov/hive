@@ -29,6 +29,25 @@ agent. For real isolation, run Hive under a sandboxed user or choose the
 
 ## Managed Honeycomb Policy
 
+The module lifecycle adds a separate runtime grant contract around package
+hooks and first-party Patrol adapters. These grants are not workflow-stage
+`permissions:` presets. A preview discloses and records each of:
+
+- repository write authority;
+- GitHub mutation kinds;
+- external command names;
+- network hosts;
+- filesystem read and write patterns;
+- secret binding names.
+
+Permission growth, a new network host, or a new hook requires renewed explicit
+consent. The immutable grant snapshot is checked again at hook execution; no
+first-party module receives a consent bypass. The Patrol adapters currently
+preflight that snapshot before invoking their legacy engines, but complete
+gateway-bound enforcement remains a cutover blocker as documented in
+[modules.md](modules.md). Status exposes only grant digests and secret binding
+names/availability, never values.
+
 Reviewed Honeycomb packages do not inherit the owner-authored default above.
 The current `honeycomb-manifest/v1` declares a generated coarse disclosure:
 risk, capabilities, network hosts, filesystem read/write sets, and secrets.

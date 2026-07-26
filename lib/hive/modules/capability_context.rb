@@ -1,4 +1,5 @@
 require "uri"
+require "pathname"
 
 module Hive
   module Modules
@@ -36,7 +37,11 @@ module Hive
       def validate!
         expected = [ "repository_write", *SET_GRANTS ].sort
         unless grants.keys.sort == expected && [ true, false ].include?(grants["repository_write"]) &&
-               SET_GRANTS.all? { |key| grants[key].is_a?(Array) && grants[key].all? { |item| item.is_a?(String) } }
+               SET_GRANTS.all? do |key|
+                 values = grants[key]
+                 values.is_a?(Array) && values.all? { |item| item.is_a?(String) } &&
+                   values.uniq == values && (!values.include?("*") || values == [ "*" ])
+               end
           raise CapabilityDenied, "module capability grant snapshot is malformed"
         end
       end
@@ -52,10 +57,21 @@ module Hive
         value = path.to_s.tr("\\", "/")
         allowed = grants.fetch(category)
         matches = allowed == [ "*" ] || allowed.any? do |pattern|
-          pattern == value || pattern == "repository" || File.fnmatch?(pattern, value, File::FNM_PATHNAME)
+          pattern == value ||
+            (pattern == "repository" && repository_relative?(value)) ||
+            (repository_relative?(value) && File.fnmatch?(pattern, value, File::FNM_PATHNAME))
         end
         deny!(category, value) unless matches
         true
+      end
+
+      def repository_relative?(value)
+        return true if value == "repository"
+        return false if value.empty? || value.include?("\0") ||
+                        Pathname.new(value).absolute? || /\A[A-Za-z]:\//.match?(value)
+
+        clean = Pathname.new(value).cleanpath.to_s
+        clean != ".." && !clean.start_with?("../")
       end
 
       def executable(command)

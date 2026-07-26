@@ -7,6 +7,7 @@ require "hive/modules/decision_journal"
 require "hive/modules/dispatcher"
 require "hive/modules/event_ledger"
 require "hive/modules/event_router"
+require "hive/modules/event_scope"
 require "hive/modules/hook_attempt"
 require "hive/modules/schedule_planner"
 
@@ -35,7 +36,7 @@ module Hive
 
       def tick_project(entry, now:)
         store = Hive::ModulePackage::ManagedStore.new(entry.fetch("hive_state_path"))
-        selections = store.selections
+        selections = store.selections(include_tombstones: true)
         return result(entry, :idle, 0, 0) if selections.empty?
 
         runtime_root = File.join(entry.fetch("hive_state_path"), "module-runtime")
@@ -48,12 +49,16 @@ module Hive
           decision_journal: journal, clock: -> { now }
         )
         reconcile_runs(store, selections, dispatcher: dispatcher, now: now)
+        promote_setup_outboxes(store, selections, ledger: ledger, entry: entry, now: now)
+        installed_selections = selections.select { |selection| selection.fetch("installed") }
+        return result(entry, :idle, 0, 0) if installed_selections.empty?
+
         decisions = drain_events(
-          selections, store: store, ledger: ledger, journal: journal,
+          installed_selections, store: store, ledger: ledger, journal: journal,
           dispatcher: dispatcher
         )
         schedules = dispatch_schedules(
-          selections, store: store, ledger: ledger, dispatcher: dispatcher,
+          installed_selections, store: store, ledger: ledger, dispatcher: dispatcher,
           entry: entry, now: now
         )
         result(entry, :ok, decisions, schedules)
@@ -69,6 +74,8 @@ module Hive
               selection.fetch("name"), selection.dig("active", "configuration_digest")
             )
             configuration.contract.fetch("hooks").each do |hook|
+              next unless EventScope.matches?(event: event, selection: selection, hook: hook)
+
               seen = journal.for_binding(
                 module_name: selection.fetch("name"), hook_id: hook.fetch("id"),
                 event_id: event.fetch("event_id")
@@ -82,6 +89,37 @@ module Hive
           end
         end
         count
+      end
+
+      def promote_setup_outboxes(store, selections, ledger:, entry:, now:)
+        selections.each do |selection|
+          store.promote_setup_outbox(selection.fetch("name")) do |intent|
+            unless intent.fetch("project_id") == entry.fetch("project_id").to_s &&
+                   intent.fetch("project") == entry.fetch("name").to_s
+              raise Hive::ConfigError, "module setup outbox belongs to another project"
+            end
+
+            ledger.record(
+              project_id: intent.fetch("project_id"),
+              project: intent.fetch("project"),
+              event_name: "project.registered",
+              occurred_at: intent.fetch("occurred_at"),
+              source: {
+                "type" => "module_install",
+                "id" => "#{intent.fetch('module')}:#{intent.fetch('receipt_digest')}"
+              },
+              idempotency_key: intent.fetch("idempotency_key"),
+              payload: {
+                "target_module" => intent.fetch("module"),
+                "target_generation" => intent.fetch("source_commit"),
+                "target_configuration_digest" => intent.fetch("configuration_digest"),
+                "target_hooks" => intent.fetch("hooks"),
+                "install_receipt_digest" => intent.fetch("receipt_digest")
+              },
+              recorded_at: now
+            )
+          end
+        end
       end
 
       def dispatch_schedules(selections, store:, ledger:, dispatcher:, entry:, now:)

@@ -387,7 +387,10 @@ def json_usage_error_contract(argv)
   when "module"
     subcommand = json_usage_subcommand(
       argv, command_index,
-      value_options: %w[--receipt --setting --hook --grant --event --schedule --occurred-at]
+      value_options: %w[
+        --receipt --setting --hook --grant --mapping --input-binding
+        --event --schedule --occurred-at
+      ]
     )
     schema = case subcommand
     when "list" then "hive-module-list"

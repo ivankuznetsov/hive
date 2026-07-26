@@ -3,18 +3,28 @@ require "json"
 require "time"
 require "hive/attempts/store"
 require "hive/module_package/managed_store"
+require "hive/module_package/normalizer"
 require "hive/modules/decision_journal"
 require "hive/modules/schedule_planner"
 require "hive/modules/status"
 require "hive/workflow_package/canonical_json"
+require "hive/workflow_package/managed_store"
 
 module Hive
   module Modules
     class Inspector
-      def initialize(store:, attempt_store: nil, decision_journal: nil,
+      def initialize(store:, project_id:, attempt_store: nil, decision_journal: nil,
+                     workflow_store: nil, project_config: {},
                      secret_availability: ->(name) { ENV.key?(name.to_s) },
                      planner: SchedulePlanner.new, clock: -> { Time.now.utc })
+        raise Hive::ConfigError, "module inspector project identity is required" if project_id.to_s.empty?
+
         @store = store
+        @workflow_store = workflow_store || Hive::WorkflowPackage::ManagedStore.new(
+          store.hive_state_path
+        )
+        @project_config = project_config
+        @project_id = project_id.to_s.freeze
         @attempt_store = attempt_store || Hive::Attempts::Store.new(create_directories: false)
         @decision_journal = decision_journal || DecisionJournal.new(
           root: File.join(store.hive_state_path, "module-runtime"), create_directories: false
@@ -25,15 +35,32 @@ module Hive
       end
 
       def all(include_tombstones: false)
-        @store.module_names.filter_map do |name|
+        names = (
+          @store.module_names + legacy_workflow_names(
+            include_tombstones: include_tombstones
+          )
+        ).uniq.sort
+        names.filter_map do |name|
           status = inspect(name, include_tombstone: include_tombstones)
-          status if status && (include_tombstones || status["installed"])
+          status if status && (
+            include_tombstones || status["installed"] ||
+            status["lifecycle_state"] == "corrupt"
+          )
         end.freeze
       end
 
       def inspect(name, include_tombstone: true)
         now = @clock.call.utc
         selection = @store.inspect_selection(name, include_tombstone: include_tombstone)
+        legacy = @workflow_store.inspect_selected(name, cfg: @project_config)
+        if selection && legacy
+          return Status.corrupt(
+            name: name, generated_at: now.iso8601(6),
+            failure_reason: "ownership_conflict"
+          )
+        end
+        return build_legacy_status(legacy, now) if legacy
+        return build_legacy_history(name, now) if !selection && include_tombstone
         return nil unless selection
 
         build_status(selection, now)
@@ -50,7 +77,9 @@ module Hive
         hooks_state = @store.inspect_hooks(name)
         attempts = module_attempts(name)
         latest_attempt = attempts.max_by { |attempt| attempt["created_at"].to_s }
-        decisions = @decision_journal.all.select { |decision| decision["module"] == name }
+        decisions = @decision_journal.all.select do |decision|
+          decision["project_id"] == @project_id && decision["module"] == name
+        end
         latest_decision = decisions.max_by { |decision| decision.fetch("evaluated_at") }
         run = latest_run(name)
         activation = activation_evidence(name)
@@ -65,7 +94,10 @@ module Hive
           "settings" => configuration ? setting_rows(configuration) : [],
           "grants" => configuration&.grants,
           "grant_digest" => configuration && digest(configuration.grants),
-          "hooks" => configuration ? hook_rows(configuration, hooks_state, now) : [],
+          "hooks" => configuration ? hook_rows(
+            configuration, hooks_state, now,
+            scheduling_enabled: selection.fetch("installed") && selection.fetch("enabled")
+          ) : [],
           "latest_decision" => decision_summary(latest_decision),
           "latest_attempt" => attempt_summary(latest_attempt),
           "retry" => retry_summary(run, latest_attempt), "artifacts" => artifacts,
@@ -108,11 +140,15 @@ module Hive
         end
       end
 
-      def hook_rows(configuration, hooks_state, now)
+      def hook_rows(configuration, hooks_state, now, scheduling_enabled: true)
         configuration.contract.fetch("hooks").sort_by { |hook| hook.fetch("id") }.map do |hook|
           state = hooks_state.dig("hooks", hook.fetch("id")) || {}
           schedules = hook.fetch("schedules")
-          next_at = schedules.filter_map { |schedule| @planner.next_after(schedule: schedule, now: now) }.min
+          next_at = if scheduling_enabled && state.fetch("enabled", false)
+            schedules.filter_map do |schedule|
+              @planner.next_after(schedule: schedule, now: now)
+            end.min
+          end
           {
             "id" => hook.fetch("id"), "enabled" => state.fetch("enabled", false),
             "cursor" => state["cursor"], "binding_digest" => state["binding_digest"],
@@ -125,7 +161,8 @@ module Hive
 
       def module_attempts(name)
         @attempt_store.scan.records.select do |attempt|
-          attempt.module_hook? && attempt.subject["module"] == name
+          attempt.module_hook? && attempt.subject["project_id"] == @project_id &&
+            attempt.subject["module"] == name
         end
       end
 
@@ -150,14 +187,26 @@ module Hive
 
       def bounded_artifacts(attempt)
         Array(attempt["current_outputs"]).first(50).map do |reference|
-          reference.slice("kind", "path", "sha256", "size_bytes", "media_type")
+          reference.slice("path", "size", "sha256")
         end
       end
 
       def retry_summary(run, attempt)
-        return run["retry"] if run.is_a?(Hash) && run["retry"].is_a?(Hash)
+        if run.is_a?(Hash) && run["retry"].is_a?(Hash)
+          retry_state = run.fetch("retry")
+          status = retry_state["status"].to_s
+          return {
+            "status" => %w[closed complete exhausted pending retrying].include?(status) ? status : "unknown",
+            "charge" => nonnegative_integer(retry_state["charge"]),
+            "max" => nonnegative_integer(retry_state["max"]),
+            "reason" => retry_state["reason"] == "retry_closed" ? "retry_closed" : nil
+          }
+        end
         return nil unless attempt && attempt["retry_charge"].positive?
-        { "status" => attempt.final? ? "finished" : "pending", "charge" => attempt["retry_charge"] }
+        {
+          "status" => attempt.final? ? "finished" : "pending",
+          "charge" => attempt["retry_charge"], "max" => nil, "reason" => nil
+        }
       end
 
       def failure_reason(activation, attempt)
@@ -171,8 +220,12 @@ module Hive
       def latest_run(name)
         paths = Dir.glob(File.join(@store.runtime_path(name), "runs", "*.json"))
         paths.filter_map do |path|
-          data = JSON.parse(File.binread(path))
-          data if data.is_a?(Hash)
+          begin
+            data = JSON.parse(File.binread(path))
+            data if data.is_a?(Hash)
+          rescue JSON::ParserError, SystemCallError, IOError
+            nil
+          end
         end.max_by { |run| [ run["updated_at"].to_s, run["created_at"].to_s ] }
       end
 
@@ -189,7 +242,8 @@ module Hive
         bytes = File.binread(@store.failed_activation_path(name))
         data = JSON.parse(bytes)
         expected = %w[error_class failed_at reason schema_version]
-        return nil unless data.keys.sort == expected && data["schema_version"] == 1 &&
+        return nil unless bytes == Hive::WorkflowPackage::CanonicalJSON.generate(data) &&
+                          data.keys.sort == expected && data["schema_version"] == 1 &&
                           data["reason"] == "activation_failed"
         data.slice("failed_at", "reason", "error_class")
       rescue Errno::ENOENT
@@ -204,6 +258,107 @@ module Hive
 
       def digest(value)
         ::Digest::SHA256.hexdigest(Hive::WorkflowPackage::CanonicalJSON.generate(value))
+      end
+
+      def nonnegative_integer(value)
+        value if value.is_a?(Integer) && value >= 0
+      end
+
+      def legacy_workflow_names(include_tombstones:)
+        names = @workflow_store.inspect_selections(cfg: @project_config).map do |selection|
+          selection.fetch("name")
+        end
+        if include_tombstones
+          names.concat(
+            @workflow_store.inspect_task_references.map do |reference|
+              reference.fetch(:name)
+            end
+          )
+        end
+        names
+      end
+
+      def build_legacy_status(selection, now)
+        name = selection.fetch("name")
+        configuration = @workflow_store.configuration(
+          name, selection.fetch("configuration_digest"), cfg: @project_config
+        )
+        generation = legacy_generation(selection)
+        valid = @workflow_store.verify_generation(
+          name, selection.fetch("source_commit"),
+          selection.fetch("manifest_digest")
+        ).valid?
+        grants = Hive::ModulePackage::Normalizer.normalize_honeycomb_permissions(
+          selection.fetch("permissions")
+        )
+        Status.new(
+          "name" => name, "lifecycle_state" => valid ? "active" : "corrupt",
+          "installed" => true, "enabled" => true, "epoch" => nil,
+          "high_water_at" => nil, "generated_at" => now.iso8601(6),
+          "active" => generation, "previous" => nil,
+          "integrity" => {
+            "configuration_valid" => configuration.digest ==
+              selection.fetch("configuration_digest"),
+            "generation_present" => valid, "activation_fenced" => false,
+            "journal_present" => false
+          },
+          "settings" => [], "grants" => grants,
+          "grant_digest" => digest(grants), "hooks" => [],
+          "latest_decision" => nil, "latest_attempt" => nil, "retry" => nil,
+          "artifacts" => [], "failure_reason" => valid ? nil : "state_corrupt",
+          "history_available" => true
+        )
+      end
+
+      def build_legacy_history(name, now)
+        references = @workflow_store.inspect_task_references(name)
+        return nil if references.empty?
+
+        reference = references.sort_by do |item|
+          [ item.fetch(:commit), item[:configuration_digest].to_s ]
+        end.last
+        present = File.directory?(
+          @workflow_store.generation_path(name, reference.fetch(:commit))
+        )
+        Status.new(
+          "name" => name, "lifecycle_state" => "uninstalled_history",
+          "installed" => false, "enabled" => false, "epoch" => nil,
+          "high_water_at" => nil, "generated_at" => now.iso8601(6),
+          "active" => nil,
+          "previous" => {
+            "source_commit" => reference.fetch(:commit),
+            "manifest_digest" => reference.fetch(:digest),
+            "configuration_digest" => reference[:configuration_digest],
+            "origin" => "legacy_workflow"
+          },
+          "integrity" => {
+            "configuration_valid" => !reference[:configuration_digest] ||
+              File.file?(
+                @workflow_store.configuration_path(
+                  name, reference.fetch(:configuration_digest)
+                )
+              ),
+            "generation_present" => present, "activation_fenced" => false,
+            "journal_present" => false
+          },
+          "settings" => [], "grants" => nil, "grant_digest" => nil,
+          "hooks" => [], "latest_decision" => nil, "latest_attempt" => nil,
+          "retry" => nil, "artifacts" => [],
+          "failure_reason" => present ? nil : "state_corrupt",
+          "history_available" => true
+        )
+      rescue Hive::ConfigError
+        Status.corrupt(
+          name: name, generated_at: now.iso8601(6),
+          failure_reason: "state_corrupt"
+        )
+      end
+
+      def legacy_generation(selection)
+        selection.slice(
+          "version", "catalog_commit", "source_commit",
+          "manifest_digest", "configuration_digest", "summary"
+        ).merge("origin" => "legacy_workflow")
       end
     end
   end

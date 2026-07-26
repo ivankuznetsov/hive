@@ -31,9 +31,9 @@ module HiveModuleTestHelper
       "hive_min_version" => "0.6.7", "source" => { "url" => "https://example.test/#{name}", "revision" => commit },
       "workflows" => [], "hooks" => hooks, "settings" => settings, "permissions" => permissions,
       "templates" => [], "docs" => [ "README.md" ],
-      "files" => { "README.md" => Digest::SHA256.file(File.join(root, "README.md")).hexdigest }
+      "files" => { "README.md" => ::Digest::SHA256.file(File.join(root, "README.md")).hexdigest }
     }
-    data["release_sha256"] = Digest::SHA256.hexdigest(Hive::WorkflowPackage::CanonicalYAML.dump(data))
+    data["release_sha256"] = ::Digest::SHA256.hexdigest(Hive::WorkflowPackage::CanonicalYAML.dump(data))
     File.binwrite(File.join(root, "module.yml"), Hive::WorkflowPackage::CanonicalYAML.dump(data))
     result = Hive::ModulePackage::Validator.validate!(root, catalog_commit: commit)
     resolution = Hive::ModulePackage::CatalogClient::Resolution.new(

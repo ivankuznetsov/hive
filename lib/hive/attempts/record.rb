@@ -305,7 +305,7 @@ module Hive
           expected = %w[intended_stage kind task_id task_slug]
           unless value.keys.sort == expected && value["task_id"] == @data["task_id"] &&
                  value["task_slug"] == @data["task_slug"] && value["intended_stage"] == @data["intended_stage"]
-            raise InvalidRecord, "attempt task subject does not match legacy identity"
+            raise InvalidRecord, "attempt task subject has incompatible identity with legacy fields"
           end
         when "module_hook"
           expected = %w[

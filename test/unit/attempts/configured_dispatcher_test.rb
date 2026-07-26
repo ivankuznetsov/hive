@@ -147,4 +147,30 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     assert_equal [ 1, 3 ], dispatcher_options.map { |options| options.dig(:limits, :max_per_project) }
     assert_equal [ 2, 8 ], dispatcher_options.map { |options| options.dig(:limits, :max_daily) }
   end
+
+  def test_module_hook_uses_the_project_dispatcher_without_a_task_resolver
+    call = nil
+    downstream = Object.new
+    downstream.define_singleton_method(:dispatch_module_hook) do |argv:, **attributes|
+      call = attributes.merge(argv: argv)
+      :accepted
+    end
+    launcher_class = Class.new
+    launcher_class.define_singleton_method(:new) { |**_options| :launcher }
+    dispatcher_class = Class.new
+    dispatcher_class.define_singleton_method(:new) { |**_options| downstream }
+    adapter = Hive::Attempts::ConfiguredDispatcher.new(
+      store: :store, config_loader: ->(_root) { Hive::Config.merge_defaults({}) },
+      daemon_config_loader: -> { Hive::Config::DEFAULTS.fetch("daemon") },
+      launcher_class: launcher_class, dispatcher_class: dispatcher_class
+    )
+
+    assert_equal :accepted,
+                 adapter.dispatch_module_hook(
+                   project_root: "/projects/demo", argv: %w[hive module-hook],
+                   subject: { "kind" => "module_hook" }, request_id: "request-1"
+                 )
+    assert_equal %w[hive module-hook], call.fetch(:argv)
+    assert_equal "request-1", call.fetch(:request_id)
+  end
 end

@@ -133,6 +133,30 @@ suffix stay pinned for retry.
 
 `Hive::Daemon::PatrolScheduler` still consumes the lower-level `patrol.trigger` modes. `continuous` dispatches when either the default branch SHA changed or `poll_interval_sec` has elapsed, allowing patrol to keep reviewing existing feature slices between infrequent merges. Each cycle persists a SHA-bound feature cursor; `last_scanned_sha` advances only after the full mapped sweep succeeds. `new_commits` therefore keeps dispatching successive batches until that sweep completes. `timer` dispatches solely from `last_run_at` age.
 
+## First-party module adapters and ownership
+
+`modules/patrol` and `modules/architecture-patrol` package the existing engines
+as reviewed first-party modules. Their registered adapters translate immutable
+module trigger snapshots into the existing command/engine seams; package code
+is never loaded. Ordinary Patrol accepts schedule and `task.completed`, while
+Architecture Patrol accepts schedule and `pull_request.merged`. The existing
+merge reconciler remains the only GitHub intake producer.
+
+The adapters deliberately do not relocate durable product state.
+`.hive-state/patrol/`, `.hive-state/refactor_patrol/`, global architecture
+action proofs, budgets, fingerprints, dismissals, claims, artifacts, and
+recovery receipts remain authoritative. A durable migration ownership epoch
+keeps legacy scheduling as the sole mutator during shadow comparison. Cutover
+is fail-closed until both modules have seven elapsed days, ten comparable
+decisions, reviewer sign-off, and no unexplained or duplicate effects; rollback
+restores legacy ownership without moving checkpoints or replaying events.
+
+`Hive::Modules::CapabilityContext` preflights the project-local installed grants
+before either adapter invokes its legacy engine. First-party modules receive no
+consent bypass. Mutator cutover remains blocked until those engines accept
+capability-bound side-effect gateways and the scheduler reservation-to-child
+handoff shares a durable ownership barrier.
+
 ## Safety invariants
 
 - Patrol is opt-in at the scheduler gate AND at config resolution: a missing patrol section, a missing `mode:`, `patrol.mode: off`, or `patrol.enabled: false` all leave patrol disabled and prevent daemon dispatch, and the daemon still requires `daemon.enabled`.

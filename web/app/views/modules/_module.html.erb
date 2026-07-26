@@ -14,13 +14,27 @@
       <% end %>
     </p>
     <details class="module-details">
-      <summary>Hooks, settings, grants, and runtime status</summary>
+      <summary>Integrity, hooks, settings, grants, and runtime status</summary>
+      <h3>Generation and integrity</h3>
+      <dl class="permission-grid">
+        <% if (generation = hive_module.active || hive_module.previous) %>
+          <% generation.each do |field, value| %>
+            <dt><%= field.humanize %></dt><dd><%= value || "—" %></dd>
+          <% end %>
+        <% end %>
+        <% hive_module.fetch("integrity", {}).each do |check, value| %>
+          <dt><%= check.humanize %></dt><dd><%= value ? "yes" : "no" %></dd>
+        <% end %>
+      </dl>
       <h3>Hooks</h3>
       <ul>
         <% hive_module.hooks.each do |hook| %>
           <li><code><%= hook.fetch("id") %></code> — <%= hook.fetch("enabled") ? "enabled" : "disabled" %>;
+            target: <code><%= hook.dig("target", "kind") %>:<%= hook.dig("target", "id") %></code>;
+            concurrency: <%= hook.fetch("concurrency") %>;
             schedules: <%= hook.fetch("schedules").presence&.join(", ") || "none" %>;
             events: <%= hook.fetch("event_bindings").presence&.join(", ") || "none" %>
+            <% if hook["cursor"] %>; cursor <code><%= hook["cursor"] %></code><% end %>
             <% if hook["next_trigger_at"] %>; next <%= hook["next_trigger_at"] %><% end %></li>
         <% end %>
       </ul>
@@ -38,6 +52,29 @@
       <dl class="permission-grid">
         <% hive_module.grants.each do |category, value| %>
           <dt><%= category.humanize %></dt><dd><%= value.is_a?(Array) ? (value.presence&.join(", ") || "none") : value %></dd>
+        <% end %>
+      </dl>
+      <h3>Latest runtime evidence</h3>
+      <dl class="permission-grid">
+        <% if hive_module.latest_decision %>
+          <% hive_module.latest_decision.each do |field, value| %>
+            <dt>Decision <%= field.humanize %></dt><dd><%= value || "—" %></dd>
+          <% end %>
+        <% end %>
+        <% if hive_module["latest_attempt"] %>
+          <% hive_module["latest_attempt"].each do |field, value| %>
+            <dt>Attempt <%= field.humanize %></dt><dd><%= value || "—" %></dd>
+          <% end %>
+        <% end %>
+        <% if hive_module["retry"] %>
+          <% hive_module["retry"].each do |field, value| %>
+            <dt>Retry <%= field.humanize %></dt><dd><%= value || "—" %></dd>
+          <% end %>
+        <% end %>
+        <% hive_module.fetch("artifacts", []).each do |artifact| %>
+          <dt>Artifact</dt>
+          <dd><code><%= artifact.fetch("path") %></code>
+            (<%= artifact.fetch("size") %> bytes; sha256 <%= artifact.fetch("sha256")[0, 12] %>…)</dd>
         <% end %>
       </dl>
       <% if hive_module["failure_reason"] %><p class="flash-alert">Failure: <%= hive_module["failure_reason"].humanize %></p><% end %>

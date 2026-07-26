@@ -1,6 +1,9 @@
 require "digest"
 require "time"
+require "hive/attempts/capacity_snapshot"
+require "hive/attempts/launch_policy"
 require "hive/attempts/store"
+require "hive/config"
 require "hive/modules/decision_journal"
 require "hive/modules/dispatcher"
 require "hive/modules/event_ledger"
@@ -14,19 +17,22 @@ module Hive
 
       def initialize(store:, project_id:, project:, attempt_store: nil,
                      secret_availability: ->(name) { ENV.key?(name.to_s) },
+                     capacity_probe: nil,
                      clock: -> { Time.now.utc })
         @store = store
         @project_id = project_id.to_s
         @project = project.to_s
         @clock = clock
         attempts = attempt_store || Hive::Attempts::Store.new(create_directories: false)
+        capacity_probe ||= capacity_probe_for(attempts)
         journal = DecisionJournal.new(
           root: File.join(store.hive_state_path, "module-runtime"), create_directories: false
         )
         @dispatcher = Dispatcher.new(
           store: store, attempt_store: attempts, attempt_dispatcher: nil,
           project_id: @project_id, project: @project, decision_journal: journal,
-          secret_availability: secret_availability, clock: clock
+          secret_availability: secret_availability, capacity_probe: capacity_probe,
+          clock: clock
         )
       end
 
@@ -50,6 +56,19 @@ module Hive
       end
 
       private
+
+      def capacity_probe_for(attempts)
+        lambda do |module_name:, hook_id:, event:|
+          now = @clock.call
+          limits = Hive::Attempts::LaunchPolicy.limits(
+            daemon: Hive::Config.load_global_daemon
+          )
+          task_slug = "module-#{module_name}-#{hook_id}-#{event.fetch('event_id')[0, 12]}"
+          Hive::Attempts::CapacitySnapshot.build(store: attempts, now: now).at_limit?(
+            project: @project, task_slug: task_slug, date: now.to_date, **limits
+          )
+        end
+      end
 
       def event(name, occurred_at, schedule, payload)
         name = name.to_s

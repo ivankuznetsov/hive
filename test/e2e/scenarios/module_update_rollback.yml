@@ -1,0 +1,16 @@
+name: module_update_rollback
+description: A failed candidate is removed and both automatic and explicit previous-generation rollback preserve state.
+tags: [modules, acceptance, lifecycle]
+steps:
+  - kind: seed_state
+    stage: 1-inbox
+    slug: module-update-rollback-task
+    state_file: idea.md
+    content: "# Module acceptance fixture\n"
+  - kind: ruby_block
+    block: |
+      require "module_scenario_support"
+      Hive::E2E::ModuleScenarioSupport.update_rollback!(sandbox: sandbox, run_home: run_home)
+  - kind: state_assert
+    path: "{run_home}/module-update-rollback.json"
+    contains: '"ok": true'

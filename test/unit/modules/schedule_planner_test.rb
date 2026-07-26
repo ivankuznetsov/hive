@@ -22,4 +22,17 @@ class ModulesSchedulePlannerTest < Minitest::Test
       end
     end
   end
+
+  def test_ranges_empty_searches_and_invalid_timestamps_are_explicit
+    planner = Hive::Modules::SchedulePlanner.new
+    assert planner.match?("1-5 * * * *", Time.utc(2026, 7, 22, 10, 3))
+
+    no_matches = Hive::Modules::SchedulePlanner.new
+    no_matches.define_singleton_method(:match?) { |_schedule, _time| false }
+    assert_nil no_matches.next_after(schedule: "* * * * *", now: Time.utc(2026, 7, 22))
+
+    assert_raises(Hive::ConfigError) do
+      planner.next_after(schedule: "* * * * *", now: "not-a-time")
+    end
+  end
 end

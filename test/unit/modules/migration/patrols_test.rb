@@ -63,6 +63,18 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     def scan = Scan.new(records: [], invalid_records: [])
   end
 
+  class ConfiguredAttemptStore
+    def initialize(scan) = @scan = scan
+    def scan = @scan
+  end
+
+  Attempt = Struct.new(:project, :module_name, :finished) do
+    def final? = finished
+    def module_hook? = true
+    def subject = { "module" => module_name }
+    def [](key) = key == "project" ? project : nil
+  end
+
   def test_fences_live_adoption_then_cuts_over_and_rolls_back_one_epoch
     with_project do |project|
       store = FakeStore.new
@@ -83,6 +95,10 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       probe_state = :quiescent
       shadowing = migration.adopt!(now: NOW + 60)
       assert_equal "shadowing", shadowing.status
+      assert_equal :shadow, Hive::Modules::Migration::Patrols.module_mode(
+        project.fetch("path"), "patrol", configured_shadow: false,
+        hive_state_path: project.fetch("hive_state_path")
+      )
       assert_equal "legacy", Hive::Modules::Migration::Patrols.owner_for(
         project.fetch("path"), "patrol", hive_state_path: project.fetch("hive_state_path")
       )
@@ -90,6 +106,9 @@ class ModulesMigrationPatrolsTest < Minitest::Test
         project.fetch("path"), "architecture-patrol", authority: :legacy,
         hive_state_path: project.fetch("hive_state_path")
       )
+      assert_match(/report\.json\z/, Hive::Modules::Migration::Patrols.report_file(
+        project.fetch("path"), hive_state_path: project.fetch("hive_state_path")
+      ))
 
       report = Report.new(
         eligible?: true, blockers: [],
@@ -139,6 +158,9 @@ class ModulesMigrationPatrolsTest < Minitest::Test
         project.fetch("path"), "patrol", configured_shadow: false,
         hive_state_path: project.fetch("hive_state_path")
       )
+      assert_equal "none", Hive::Modules::Migration::Patrols.owner_for(
+        project.fetch("path"), "patrol", hive_state_path: project.fetch("hive_state_path")
+      )
     end
   end
 
@@ -180,6 +202,234 @@ class ModulesMigrationPatrolsTest < Minitest::Test
         hive_state_path: project.fetch("hive_state_path")
       )
       assert_empty coordinator.tick(now: NOW + 60)
+    end
+  end
+
+  def test_coordinator_blocks_invalid_attempt_state_and_live_module_attempts
+    with_project do |project|
+      store = FakeStore.new
+      supervisor = FakeSupervisor.new
+      supervisor.live = false
+      invalid = Hive::Modules::Migration::Coordinator.new(
+        supervisor: supervisor,
+        attempt_store: ConfiguredAttemptStore.new(Scan.new(records: [], invalid_records: [ "bad" ])),
+        registry: -> { [ project ] }, store_factory: ->(_state) { store }
+      ).tick(now: NOW).fetch(0)
+      assert_equal({ "patrol" => "ambiguous", "architecture-patrol" => "ambiguous" }, invalid.fetch(:blockers))
+
+      FileUtils.rm_f(Hive::Modules::Migration::Patrols.state_file(
+        project.fetch("path"), hive_state_path: project.fetch("hive_state_path")
+      ))
+      live_attempt = Attempt.new("demo", "patrol", false)
+      active = Hive::Modules::Migration::Coordinator.new(
+        supervisor: supervisor,
+        attempt_store: ConfiguredAttemptStore.new(Scan.new(records: [ live_attempt ], invalid_records: [])),
+        registry: -> { [ project ] }, store_factory: ->(_state) { store }
+      ).tick(now: NOW).fetch(0)
+      assert_equal({ "patrol" => "live" }, active.fetch(:blockers))
+    end
+  end
+
+  def test_coordinator_defaults_and_project_errors_are_bounded
+    defaulted = Hive::Modules::Migration::Coordinator.new(
+      supervisor: FakeSupervisor.new, attempt_store: FakeAttemptStore.new
+    )
+    assert_instance_of Hive::ModulePackage::ManagedStore,
+                       defaulted.instance_variable_get(:@store_factory).call("/state")
+
+    entry = { "name" => "broken", "hive_state_path" => "/state" }
+    blocked = Hive::Modules::Migration::Coordinator.new(
+      supervisor: FakeSupervisor.new, attempt_store: FakeAttemptStore.new,
+      registry: -> { [ entry ] },
+      store_factory: ->(_state) { raise Hive::ConfigError, "broken state" }
+    ).tick(now: NOW).fetch(0)
+    assert_equal :blocked, blocked.fetch(:status)
+    assert_equal "broken", blocked.fetch(:project)
+    assert_match(/broken state/, blocked.fetch(:reason))
+  end
+
+
+  def test_coordinator_resumes_cutover_and_rollback_pending_states
+    with_project do |project|
+      store = FakeStore.new
+      probe = :quiescent
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: store,
+        quiescence_probe: ->(_name, _root) { probe }
+      )
+      report = Report.new(
+        eligible?: true, blockers: [],
+        configuration_digests: { "patrol" => "a" * 64, "architecture-patrol" => "b" * 64 }
+      )
+      migration.adopt!(now: NOW)
+      probe = :live
+      assert_equal "cutover_pending", migration.cutover!(report: report, now: NOW + 1).status
+
+      supervisor = FakeSupervisor.new
+      supervisor.live = false
+      coordinator = Hive::Modules::Migration::Coordinator.new(
+        supervisor: supervisor, attempt_store: FakeAttemptStore.new,
+        registry: -> { [ project ] }, store_factory: ->(_state) { store }
+      )
+      with_replaced_singleton_method(Hive::Modules::Migration::Report, :load, ->(_path) { report }) do
+        assert_equal :module, coordinator.tick(now: NOW + 2).fetch(0).fetch(:status)
+      end
+
+      rollback = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: store,
+        quiescence_probe: ->(_name, _root) { :live }
+      ).rollback!(now: NOW + 3)
+      assert_equal "rollback_pending", rollback.status
+      assert_equal :rolled_back, coordinator.tick(now: NOW + 4).fetch(0).fetch(:status)
+    end
+  end
+
+  def test_migration_state_machine_rejects_stale_evidence_and_invalid_transitions
+    with_project do |project|
+      store = FakeStore.new
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: store,
+        quiescence_probe: ->(_name, _root) { :quiescent }
+      )
+      first = migration.adopt!(now: NOW)
+      assert_equal "shadowing", first.status
+      assert_equal "already_current", migration.adopt!(now: NOW + 1).status
+
+      invalid_report = Object.new
+      error = assert_raises(Hive::ConfigError) do
+        migration.cutover!(report: invalid_report, now: NOW + 2)
+      end
+      assert_match(/report_invalid/, error.message)
+
+      stale = Report.new(
+        eligible?: true, blockers: [],
+        configuration_digests: { "patrol" => "0" * 64, "architecture-patrol" => "b" * 64 }
+      )
+      assert_raises(Hive::ConfigError) { migration.cutover!(report: stale, now: NOW + 3) }
+      assert_raises(Hive::ConfigError) { migration.rollback!(now: NOW + 4) }
+    end
+  end
+
+  def test_pending_transitions_and_invalid_installation_or_probe_fail_closed
+    with_project do |project|
+      store = FakeStore.new
+      pending = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: store,
+        quiescence_probe: ->(_name, _root) { :live }
+      )
+      assert_equal "pending", pending.adopt!(now: NOW).status
+      report = Report.new(
+        eligible?: true, blockers: [],
+        configuration_digests: { "patrol" => "a" * 64, "architecture-patrol" => "b" * 64 }
+      )
+      assert_raises(Hive::ConfigError) { pending.cutover!(report: report, now: NOW + 1) }
+      assert_raises(Hive::ConfigError) { pending.rollback!(now: NOW + 1) }
+    end
+
+    with_project do |project|
+      store = FakeStore.new
+      store.instance_variable_get(:@selections).delete("patrol")
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: store
+      )
+      assert_raises(Hive::ConfigError) { migration.adopt!(now: NOW) }
+    end
+
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: FakeStore.new,
+        quiescence_probe: ->(_name, _root) { raise "unknown owner" }
+      )
+      assert_equal(
+        { "patrol" => "ambiguous", "architecture-patrol" => "ambiguous" },
+        migration.adopt!(now: NOW).blockers
+      )
+    end
+  end
+
+  def test_state_reader_rejects_noncanonical_and_structurally_invalid_documents
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: FakeStore.new,
+        quiescence_probe: ->(_name, _root) { :quiescent }
+      )
+      migration.adopt!(now: NOW)
+      path = Hive::Modules::Migration::Patrols.state_file(
+        project.fetch("path"), hive_state_path: project.fetch("hive_state_path")
+      )
+      state = JSON.parse(File.binread(path))
+      File.write(path, JSON.pretty_generate(state))
+      assert_raises(Hive::ConfigError) { migration.read }
+
+      File.write(path, Hive::Modules::Migration::Patrols.canonical(state.merge("owners" => nil)))
+      assert_raises(Hive::ConfigError) { migration.read }
+    end
+  end
+
+  def test_cutover_and_rollback_wait_for_quiescence_without_moving_ownership
+    with_project do |project|
+      store = FakeStore.new
+      probe = :quiescent
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: store,
+        quiescence_probe: ->(_name, _root) { probe }
+      )
+      migration.adopt!(now: NOW)
+      report = Report.new(
+        eligible?: true, blockers: [],
+        configuration_digests: { "patrol" => "a" * 64, "architecture-patrol" => "b" * 64 }
+      )
+
+      probe = :live
+      pending = migration.cutover!(report: report, now: NOW + 1)
+      assert_equal "cutover_pending", pending.status
+      assert_equal "legacy", pending.state.dig("owners", "patrol")
+      refute pending.state.dig("admissions", "patrol")
+
+      probe = :quiescent
+      assert_equal "module", migration.cutover!(report: report, now: NOW + 2).status
+      probe = :live
+      rollback = migration.rollback!(now: NOW + 3)
+      assert_equal "rollback_pending", rollback.status
+      assert_equal "module", rollback.state.dig("owners", "patrol")
+      refute rollback.state.dig("admissions", "patrol")
+    end
+  end
+
+  def test_default_probe_and_unreadable_legacy_state_are_conservative
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: FakeStore.new
+      )
+      assert_equal(
+        { "patrol" => "ambiguous", "architecture-patrol" => "ambiguous" },
+        migration.adopt!(now: NOW).blockers
+      )
+    end
+
+    with_project do |project|
+      legacy = File.join(project.fetch("hive_state_path"), "patrol")
+      FileUtils.mkdir_p(legacy)
+      File.chmod(0o000, legacy)
+      begin
+        migration = Hive::Modules::Migration::Patrols.new(
+          project_root: project.fetch("path"), project: "demo",
+          hive_state_path: project.fetch("hive_state_path"), module_store: FakeStore.new,
+          quiescence_probe: ->(_name, _root) { :quiescent }
+        )
+        assert_raises(Hive::ConfigError) { migration.adopt!(now: NOW) }
+      ensure
+        File.chmod(0o700, legacy)
+      end
     end
   end
 

@@ -29,10 +29,11 @@ class ModulesDoctorTest < Minitest::Test
       File.write(File.join(run_root, "run.json"), JSON.generate(
         "run_id" => "run", "status" => "running", "execution_snapshot" => {}
       ))
+      File.write(File.join(run_root, "corrupt.json"), "{bad")
       barrier = File.join(store.runtime_path("demo"), "activation-barrier.json")
       File.write(barrier, "{}")
       inspector = Hive::Modules::Inspector.new(
-        store: store,
+        store: store, project_id: "project-1",
         attempt_store: Hive::Attempts::Store.new(root: File.join(root, "attempts"), create_directories: false),
         secret_availability: ->(_name) { false }, clock: -> { NOW }
       )
@@ -43,7 +44,9 @@ class ModulesDoctorTest < Minitest::Test
       refute result.fetch("healthy")
       assert_equal "error", check(result, "secret_binding").fetch("status")
       assert_equal "error", check(result, "execution_snapshot").fetch("status")
-      assert_equal "warning", check(result, "activation_barrier").fetch("status")
+      assert result.fetch("checks").any? { |row| row["subject"] == "corrupt" && row["status"] == "error" }
+      assert_equal "error", check(result, "activation_barrier").fetch("status")
+      assert_equal "error", check(result, "target_bindings").fetch("status")
       assert_equal before, tree_digest(root)
       assert File.exist?(barrier)
     end

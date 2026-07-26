@@ -13,11 +13,20 @@ fixture gates are present, but no live seven-day observation window is claimed
 by this commit. Fixture timestamps exercise the gate parser only and are not
 accepted as operational evidence.
 
-The daemon automatically adopts installed Patrol and Architecture Patrol
-modules into one-mutator shadow mode after exact legacy children and module
-attempts quiesce. Shadow decisions are written under
+The daemon can adopt installed Patrol and Architecture Patrol modules into
+one-mutator shadow mode after exact legacy children and module attempts
+quiesce. Module-side shadow decisions are written under
 `.hive-state/module-runtime/migration/shadow/`; they cannot claim work, move
-legacy cursors or budgets, spawn agents, or invoke side-effect gateways.
+legacy cursors or budgets, spawn agents, or invoke side-effect gateways. These
+self-comparisons are deliberately marked non-comparable.
+
+The production legacy schedulers do not yet publish an immutable
+`legacy_mutator_capture` snapshot into the comparator, so the observation
+counter remains zero. Capability checks around the adapters are also
+preflight-only until the legacy engines accept capability-bound gateways, and
+the reserve-to-spawn ownership handoff still needs a durable barrier. All three
+are implementation blockers in addition to the elapsed-time and hosted
+delivery gates; this report must not be used to request cutover.
 
 Before a reviewer runs `hive module migration report --reviewer ID --yes`, the
 project must have all of the following:

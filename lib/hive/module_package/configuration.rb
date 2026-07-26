@@ -30,9 +30,11 @@ module Hive
         normalized_grants = normalize_grants(descriptor.permissions, grants)
         generation_data = normalize_generation(generation)
         contract = {
+          "files" => descriptor.files,
           "hooks" => descriptor.hooks,
           "settings" => descriptor.settings,
-          "permissions" => descriptor.permissions
+          "permissions" => descriptor.permissions,
+          "workflows" => descriptor.workflows
         }
         data = {
           "schema_version" => SCHEMA_VERSION,

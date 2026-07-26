@@ -192,6 +192,16 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
 
 ## Surfaces
 
+The project-filtered **Modules** surface presents installed and historical
+module rows using the same redacted `Hive::Modules::Status` object as CLI
+list/status/inspect. Rails does not parse generation locks or patrol stores.
+Install, update, enable, disable, settings changes, and uninstall use the same
+preview-bound lifecycle service as CLI: signed receipts bind candidate/current
+identity, settings, hooks, bindings, cursors, and individual grants, and any
+drift returns a no-write preview-again response. `/workflows` remains the
+workflow authoring/selection surface and preserves its existing managed
+Honeycomb projections.
+
 - **Status board and grid (`/board`, `/grid`, `/`)** — Board is the first-visit
   default. The view-switch forms store a signed browser preference that `/`
   follows thereafter; read-only visits and Turbo refreshes of either explicit

@@ -52,6 +52,30 @@ class ModulesTriggerEvaluatorTest < Minitest::Test
     end
   end
 
+  def test_uninstalled_and_malformed_bindings_fail_closed
+    with_fixture do |selection, configuration, hook|
+      evaluator = Hive::Modules::TriggerEvaluator.new
+      uninstalled = evaluator.evaluate(
+        selection: selection.merge("installed" => false), configuration: configuration,
+        hook: hook, hook_state: hook_state, event: event("task.completed")
+      )
+      assert_equal "uninstalled", uninstalled.reason
+
+      invalid = evaluator.evaluate(
+        selection: selection, configuration: configuration,
+        hook: nil, hook_state: hook_state, event: event("task.completed")
+      )
+      assert_equal "invalid_binding", invalid.reason
+
+      malformed_time = evaluator.evaluate(
+        selection: selection, configuration: configuration,
+        hook: hook, hook_state: hook_state,
+        event: event("task.completed", "occurred_at" => "not-a-time")
+      )
+      assert_equal "cursor_stale", malformed_time.reason
+    end
+  end
+
   private
 
   def with_fixture(secret_required: false)

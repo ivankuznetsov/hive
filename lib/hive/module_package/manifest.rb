@@ -2,6 +2,7 @@ require "digest"
 require "pathname"
 require "psych"
 require "uri"
+require "hive/module_package/command_target"
 require "hive/workflow_package/canonical_yaml"
 require "hive/workflow_package/diagnostic"
 require "hive/workflow_package/manifest"
@@ -78,6 +79,7 @@ module Hive
         validate_hooks!(data["hooks"], file_name)
         validate_settings!(data["settings"], file_name)
         validate_permissions!(data["permissions"], file_name)
+        validate_target_contracts!(data, file_name)
         validate_path_set!(data["templates"], "templates", file_name)
         validate_path_set!(data["docs"], "docs", file_name)
         validate_files!(data["files"], file_name)
@@ -147,6 +149,32 @@ module Hive
         required_string!(target["id"], "hook target id", file_name)
         if target["kind"] != "command" && !/\A[a-z0-9][a-z0-9.-]*\z/.match?(target["id"])
           fail!("manifest.invalid_target", file_name, "registered hook target id is malformed")
+        end
+      end
+
+      def self.validate_target_contracts!(data, file_name)
+        workflow_ids = data.fetch("workflows").map { |workflow| workflow.fetch("id") }
+        commands = data.dig("permissions", "external_commands")
+        data.fetch("hooks").each do |hook|
+          target = hook.fetch("target")
+          case target.fetch("kind")
+          when "workflow"
+            unless workflow_ids.include?(target.fetch("id"))
+              fail!("manifest.invalid_target", file_name, "workflow hook target is not declared by this module")
+            end
+          when "command"
+            argv = begin
+              CommandTarget.argv(target.fetch("id"))
+            rescue Hive::ConfigError
+              fail!("manifest.invalid_target", file_name, "command hook target is malformed")
+            end
+            unless commands.include?(argv.first)
+              fail!(
+                "manifest.permission_mismatch", file_name,
+                "command hook executable is absent from reviewed external command permissions"
+              )
+            end
+          end
         end
       end
 

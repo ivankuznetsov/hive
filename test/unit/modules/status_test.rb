@@ -12,6 +12,36 @@ class ModulesStatusTest < Minitest::Test
 
   NOW = Time.utc(2026, 7, 22, 12, 15, 0)
 
+  class FakeAttempt
+    attr_reader :attempt_id, :subject, :state, :outcome
+
+    def initialize(state:, outcome:, final:, retry_charge: 1, outputs: [],
+                   project_id: "project-1", attempt_id: "attempt-1", created_at: NOW)
+      @attempt_id = attempt_id
+      @subject = {
+        "kind" => "module_hook", "project_id" => project_id,
+        "module" => "demo", "hook" => "schedule", "event_id" => "event-1"
+      }
+      @state = state
+      @outcome = outcome
+      @final = final
+      @data = {
+        "retry_charge" => retry_charge, "created_at" => created_at.iso8601(6),
+        "started_at" => NOW.iso8601(6), "ended_at" => final ? NOW.iso8601(6) : nil,
+        "current_outputs" => outputs
+      }
+    end
+
+    def [](key) = @data[key]
+    def final? = @final
+    def module_hook? = true
+  end
+
+  FakeScan = Data.define(:records)
+  FakeAttemptStore = Data.define(:records) do
+    def scan = FakeScan.new(records: records)
+  end
+
   def test_projects_one_redacted_status_with_next_trigger
     with_installed_module do |root, store|
       inspector = inspector(store, root, available: { "MODULE_TOKEN" => true })
@@ -61,6 +91,123 @@ class ModulesStatusTest < Minitest::Test
     end
   end
 
+  def test_status_projection_rejects_incomplete_shapes
+    assert_raises(Hive::ConfigError) { Hive::Modules::Status.new("name" => "demo") }
+  end
+
+  def test_inspector_summarizes_decisions_attempts_retries_artifacts_and_failures
+    with_installed_module do |_root, store|
+      inspector = Hive::Modules::Inspector.new(store: store, project_id: "project-1")
+      decision = {
+        "decision_id" => "decision-1", "hook" => "schedule", "event_id" => "event-1",
+        "event_name" => "schedule", "evaluated_at" => NOW.iso8601(6),
+        "outcome" => "launch", "reason" => "admitted", "binding_digest" => "a" * 64,
+        "cursor_before" => nil, "cursor_after" => "event-1", "attempt_id" => "attempt-1",
+        "secret" => "not-projected"
+      }
+      summary = inspector.send(:decision_summary, decision)
+      refute summary.key?("secret")
+      assert_equal "schedule", summary.fetch("hook")
+
+      outputs = [
+        {
+          "path" => "artifacts/result.json", "sha256" => "b" * 64,
+          "size" => 10, "raw" => "hidden"
+        }
+      ]
+      pending = FakeAttempt.new(state: "running", outcome: nil, final: false, outputs: outputs)
+      finished = FakeAttempt.new(state: "terminal", outcome: "failed", final: true, outputs: outputs)
+      assert_equal "attempt-1", inspector.send(:attempt_summary, pending).fetch("attempt_id")
+      assert_equal %w[path sha256 size],
+                   inspector.send(:bounded_artifacts, pending).first.keys.sort
+      assert_equal "pending", inspector.send(:retry_summary, nil, pending).fetch("status")
+      assert_equal "finished", inspector.send(:retry_summary, nil, finished).fetch("status")
+      retry_state = inspector.send(
+        :retry_summary,
+        { "retry" => { "status" => "secret stderr", "reason" => "token=hidden" } },
+        pending
+      )
+      assert_equal(
+        { "status" => "unknown", "charge" => nil, "max" => nil, "reason" => nil },
+        retry_state
+      )
+      assert_equal "attempt_lost",
+                   inspector.send(:failure_reason, { "failure" => nil }, FakeAttempt.new(state: "lost", outcome: nil, final: true))
+      assert_equal "hook_failed", inspector.send(:failure_reason, { "failure" => nil }, finished)
+      assert_nil inspector.send(
+        :failure_reason, { "failure" => nil }, FakeAttempt.new(state: "terminal", outcome: "succeeded", final: true)
+      )
+
+      diagnostic = {
+        "schema_version" => 1, "failed_at" => NOW.iso8601(6),
+        "reason" => "activation_failed", "error_class" => "Hive::ConfigError"
+      }
+      path = store.failed_activation_path("demo")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, Hive::WorkflowPackage::CanonicalJSON.generate(diagnostic))
+      assert_equal "Hive::ConfigError", inspector.send(:safe_failed_activation, "demo").fetch("error_class")
+      File.write(path, "{bad")
+      assert_equal({ "reason" => "activation_failed" }, inspector.send(:safe_failed_activation, "demo"))
+    end
+  end
+
+  def test_default_read_dependencies_power_installed_list_and_attempt_filtering
+    with_installed_module do |_root, store|
+      attempt = FakeAttempt.new(state: "running", outcome: nil, final: false)
+      attempt_store = FakeAttemptStore.new(records: [ attempt ])
+      with_env("MODULE_TOKEN" => "present") do
+        inspector = Hive::Modules::Inspector.new(
+          store: store, project_id: "project-1", attempt_store: attempt_store
+        )
+        statuses = inspector.all
+
+        assert_equal [ "demo" ], statuses.map { |status| status.fetch("name") }
+        token = statuses.first.fetch("settings").find do |setting|
+          setting.fetch("name") == "api_token"
+        end
+        assert_equal true, token.fetch("available")
+        assert_equal [ attempt ], inspector.send(:module_attempts, "demo")
+        assert_empty inspector.send(:module_attempts, "another")
+      end
+    end
+  end
+
+  def test_attempt_projection_is_isolated_by_project_identity
+    with_installed_module do |_root, store|
+      local = FakeAttempt.new(
+        state: "running", outcome: nil, final: false,
+        project_id: "project-1", attempt_id: "local-attempt"
+      )
+      foreign = FakeAttempt.new(
+        state: "terminal", outcome: "failed", final: true,
+        project_id: "project-2", attempt_id: "foreign-attempt",
+        created_at: NOW + 60,
+        outputs: [ { "kind" => "artifact", "path" => "foreign/secret.txt" } ]
+      )
+      inspector = Hive::Modules::Inspector.new(
+        store: store, project_id: "project-1",
+        attempt_store: FakeAttemptStore.new(records: [ local, foreign ])
+      )
+
+      status = inspector.inspect("demo")
+
+      assert_equal [ local ], inspector.send(:module_attempts, "demo")
+      assert_equal "local-attempt", status.dig("latest_attempt", "attempt_id")
+      refute_includes JSON.generate(status.to_h), "foreign"
+    end
+  end
+
+  def test_disabled_module_does_not_advertise_a_next_trigger
+    with_installed_module do |root, store|
+      store.disable("demo", now: NOW)
+
+      status = inspector(store, root).inspect("demo")
+
+      assert_equal "disabled", status["lifecycle_state"]
+      assert_nil status.fetch("hooks").first.fetch("next_trigger_at")
+    end
+  end
+
   private
 
   def with_installed_module
@@ -81,7 +228,7 @@ class ModulesStatusTest < Minitest::Test
 
   def inspector(store, root, available: {})
     Hive::Modules::Inspector.new(
-      store: store,
+      store: store, project_id: "project-1",
       attempt_store: Hive::Attempts::Store.new(root: File.join(root, "attempts"), create_directories: false),
       secret_availability: ->(name) { available.fetch(name, false) }, clock: -> { NOW }
     )

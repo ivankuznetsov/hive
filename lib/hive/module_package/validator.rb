@@ -3,6 +3,7 @@ require "rubygems/version"
 require "hive/module_package/manifest"
 require "hive/module_package/normalizer"
 require "hive/workflow_package/manifest"
+require "hive/workflows/descriptor_parser"
 
 module Hive
   module ModulePackage
@@ -49,6 +50,7 @@ module Hive
         )
         compare_inventory(manifest.file_entries, actual, diagnostics)
         validate_file_modes(manifest, diagnostics)
+        validate_workflows(manifest, diagnostics)
         descriptor = Normalizer.from_manifest(manifest, catalog_commit: @catalog_commit)
         Result.new(manifest: manifest, descriptor: descriptor, manifest_digest: manifest.digest,
                    diagnostics: diagnostics.freeze)
@@ -93,6 +95,19 @@ module Hive
           if (mode & 0o111).positive?
             diagnostics << diagnostic("package.executable_file", path, "module payload files must not be executable")
           end
+        end
+      end
+
+      def validate_workflows(manifest, diagnostics)
+        manifest.workflows.each do |workflow|
+          path = workflow.fetch("descriptor")
+          Hive::Workflows::DescriptorParser.parse_package_file(
+            File.join(@root, path), package_name: workflow.fetch("id")
+          )
+        rescue Hive::ConfigError
+          diagnostics << diagnostic(
+            "workflow.invalid", path, "module workflow descriptor is invalid"
+          )
         end
       end
 

@@ -51,6 +51,64 @@ class ModulesEventLedgerTest < Minitest::Test
     end
   end
 
+  def test_identity_timestamp_and_canonical_evidence_validation_is_strict
+    with_tmp_dir do |root|
+      ledger = Hive::Modules::EventLedger.new(root: root)
+      assert_raises(Hive::Modules::EventLedgerError) do
+        ledger.record(**attributes.merge(source: { type: "task" }), recorded_at: NOW)
+      end
+      assert_raises(Hive::Modules::EventLedgerError) do
+        ledger.record(**attributes.merge(occurred_at: "not-a-time"), recorded_at: NOW)
+      end
+      assert_raises(Hive::Modules::EventLedgerError) { ledger.fetch("bad") }
+
+      event = ledger.record(**attributes, recorded_at: NOW).event
+      path = File.join(ledger.events_root, "#{event.fetch('event_id')}.json")
+      File.write(path, JSON.pretty_generate(event))
+      assert_raises(Hive::Modules::EventLedgerError) { ledger.fetch(event.fetch("event_id")) }
+
+      malformed_time = event.merge("occurred_at" => "not-a-time")
+      File.write(path, Hive::WorkflowPackage::CanonicalJSON.generate(malformed_time))
+      assert_raises(Hive::Modules::EventLedgerError) { ledger.fetch(event.fetch("event_id")) }
+    end
+  end
+
+  def test_filesystem_failures_are_typed_at_initialization_persistence_and_locking
+    with_tmp_dir do |root|
+      with_replaced_singleton_method(
+        FileUtils, :mkdir_p, ->(*_args, **_options) { raise Errno::EACCES, "blocked" }
+      ) do
+        assert_raises(Hive::Modules::EventLedgerError) do
+          Hive::Modules::EventLedger.new(root: File.join(root, "unavailable"))
+        end
+      end
+
+      ledger = Hive::Modules::EventLedger.new(root: File.join(root, "ledger"))
+      with_replaced_singleton_method(
+        Hive::AtomicFile, :write, ->(*_args, **_options) { raise Errno::ENOSPC, "full" }
+      ) do
+        assert_raises(Hive::Modules::EventLedgerError) do
+          ledger.record(**attributes, recorded_at: NOW)
+        end
+      end
+      unlocked_ledger = Hive::Modules::EventLedger.new(root: File.join(root, "unlocked-ledger"))
+      unlocked_ledger.define_singleton_method(:with_lock) { |**_options, &block| block.call }
+      with_replaced_singleton_method(
+        Hive::AtomicFile, :write, ->(*_args, **_options) { raise Errno::ENOSPC, "full" }
+      ) do
+        error = assert_raises(Hive::Modules::EventLedgerError) do
+          unlocked_ledger.record(**attributes, recorded_at: NOW)
+        end
+        assert_match(/could not be persisted/, error.message)
+      end
+      with_replaced_singleton_method(
+        File, :open, ->(*_args, **_options) { raise Errno::EACCES, "blocked" }
+      ) do
+        assert_raises(Hive::Modules::EventLedgerError) { ledger.all }
+      end
+    end
+  end
+
   private
 
   def attributes

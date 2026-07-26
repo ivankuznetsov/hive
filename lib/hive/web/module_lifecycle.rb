@@ -7,6 +7,7 @@ require "hive/config"
 require "hive/module_package/catalog_client"
 require "hive/module_package/managed_store"
 require "hive/modules/inspector"
+require "hive/workflow_package/managed_store"
 
 module Hive
   module Web
@@ -17,11 +18,13 @@ module Hive
       OPERATIONS = %w[install update enable disable uninstall].freeze
 
       def initialize(catalog_client_factory: -> { Hive::ModulePackage::CatalogClient.new },
-                     committer: nil, attempt_store: nil, clock: -> { Time.now.utc })
+                     committer: nil, attempt_store: nil, clock: -> { Time.now.utc },
+                     activation_health_check: nil)
         @catalog_client_factory = catalog_client_factory
         @committer = committer
         @attempt_store = attempt_store
         @clock = clock
+        @activation_health_check = activation_health_check
       end
 
       def list(project, include_history: false)
@@ -58,6 +61,11 @@ module Hive
             subject, **common, settings: Array(choices[:settings] || choices["settings"]),
             hooks: Array(choices[:hooks] || choices["hooks"]),
             grants: Array(choices[:grants] || choices["grants"]),
+            activation_health_check: @activation_health_check,
+            setup_context: {
+              "project_id" => project.fetch("project_id"),
+              "project" => project.fetch("name")
+            },
             catalog_client: @catalog_client_factory.call
           )
         else
@@ -67,7 +75,12 @@ module Hive
 
       def inspector(project)
         Hive::Modules::Inspector.new(
-          store: store(project), attempt_store: @attempt_store,
+          store: store(project), project_id: project.fetch("project_id"),
+          workflow_store: Hive::WorkflowPackage::ManagedStore.new(
+            project.fetch("hive_state_path")
+          ),
+          project_config: Hive::Config.load(project_root(project)),
+          attempt_store: @attempt_store,
           clock: @clock
         )
       end

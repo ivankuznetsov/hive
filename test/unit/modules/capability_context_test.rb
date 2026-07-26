@@ -21,6 +21,12 @@ class ModulesCapabilityContextTest < Minitest::Test
     assert_raises(Hive::Modules::CapabilityDenied) { context.require_external_command!("bash") }
     assert_raises(Hive::Modules::CapabilityDenied) { context.require_network_host!("example.com") }
     assert_raises(Hive::Modules::CapabilityDenied) { context.require_secret!("OTHER_TOKEN") }
+    assert_raises(Hive::Modules::CapabilityDenied) do
+      context.require_filesystem_read!("/etc/passwd")
+    end
+    assert_raises(Hive::Modules::CapabilityDenied) do
+      context.require_filesystem_read!("../another-project/secret")
+    end
   end
 
   def test_wildcards_are_explicit_and_malformed_snapshots_fail_closed
@@ -36,5 +42,12 @@ class ModulesCapabilityContextTest < Minitest::Test
     assert_raises(Hive::Modules::CapabilityDenied) do
       Hive::Modules::CapabilityContext.new(grants.reject { |key, _value| key == "network_hosts" })
     end
+    assert_raises(Hive::Modules::CapabilityDenied) do
+      Hive::Modules::CapabilityContext.new(grants.merge("network_hosts" => [ "*", "api.github.com" ]))
+    end
+    assert_raises(Hive::Modules::CapabilityDenied) do
+      Hive::Modules::CapabilityContext.new(grants.merge("network_hosts" => [ "api.github.com", "api.github.com" ]))
+    end
+    assert_equal "http://[", context.send(:normalized_host, "http://[")
   end
 end

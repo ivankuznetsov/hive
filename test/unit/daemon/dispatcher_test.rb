@@ -3378,6 +3378,43 @@ def test_run_forever_routes_shutdown_child_exit_through_architecture_completion
   }
 end
 
+def test_run_forever_marks_signal_reaped_terminal_recovery_failed
+  Dir.mktmpdir("hive-shutdown-recovery") do |state_home|
+    recovery = dispatcher_recovery(phase: "dispatched").merge(
+      "attempt_id" => "attempt-shutdown"
+    )
+    Q.write_request!(
+      project: "p1", slug: "s1", argv: %w[hive run s1 --json],
+      requestor: "daemon", trigger: "recovery",
+      request_id: "recovery-shutdown", recovery: recovery,
+      state_home: state_home, now: T0
+    )
+    coordinator = FakeRecoveryCoordinator.new(status: "queued")
+    dispatcher, supervisor, = make_dispatcher(
+      dispatch_request_state_home: state_home,
+      recovery_coordinator: coordinator
+    )
+    supervisor.shutdown_exits = [
+      ChildExit.new(
+        pid: 101, exit_code: nil, project: "p1", slug: "s1",
+        stage: "4-execute", command: "hive run s1 --json",
+        started_at: T0, finished_at: T0 + 1, json_envelope: nil,
+        request_id: "recovery-shutdown"
+      )
+    ]
+    dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+    dispatcher.define_singleton_method(:tick) { |now:| request_shutdown! }
+    dispatcher.define_singleton_method(:interruptible_sleep) { |_seconds| nil }
+
+    dispatcher.run_forever
+
+    marked = coordinator.marked.fetch(0)
+    assert_equal "attempt-shutdown", marked.fetch(:attempt_id)
+    assert_equal true, marked.fetch(:terminal)
+    assert_equal "failed", marked.fetch(:outcome)
+  end
+end
+
 def test_run_forever_escalates_to_full_tick_when_cheap_probe_detects_change
   # Drive the fast-poll escalation branch in run_forever (dispatcher.rb
   # 323-324): on a fast poll where no full tick is due, a cheap probe

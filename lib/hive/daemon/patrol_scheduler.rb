@@ -103,7 +103,7 @@ module Hive
 
       def complete(project:, exit_code:, now: Time.now)
         @pending.delete(project)
-        if exit_code.to_i.zero?
+        if exit_code == Hive::ExitCodes::SUCCESS
           @failures.delete(project)
         else
           count = @failures.dig(project, :count).to_i + 1

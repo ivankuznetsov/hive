@@ -106,14 +106,19 @@ change triggers a full `tick` immediately; otherwise
 `daemon.poll_interval_sec` (default 30s) remains the backstop full-scan
 cadence for changes the cheap probe cannot see.
 
-On graceful shutdown, the supervisor returns every ancillary exit it reaps
-while draining process groups. `Dispatcher#record_completed` then routes those
-exits through the normal controller, patrol, architecture-patrol, digest, and
-request completion lifecycle before closing. A terminated architecture scan
-therefore releases its existing generation-fenced v2 claim with ordinary retry
-backoff instead of remaining `analyzing` until the two-hour lease expires.
-If a process cannot be reaped even after termination, its claim remains fenced
-for the existing lease recovery path rather than permitting overlap.
+On graceful shutdown, the supervisor snapshots each ancillary child's verified
+descendant tree and original process group before sending TERM, then escalates
+survivors to KILL. It returns a reaped direct-child exit only after the captured
+tree and group are both proven gone. `Dispatcher#record_completed` routes those
+safe exits through the normal controller, patrol, architecture-patrol, digest,
+and request completion lifecycle before closing. A terminated architecture
+scan therefore releases its existing generation-fenced v2 claim with ordinary
+retry backoff instead of remaining `analyzing` until the two-hour lease
+expires. If tree identity cannot be verified or any captured process survives,
+the exit is withheld and its claim remains fenced for the existing lease
+recovery path rather than permitting overlapping generations. Signal-derived
+nil exits are failures for terminal recovery and ordinary patrol; only an
+explicit success exit clears failure state.
 
 Each full tick first publishes a `started` record, then reconciles durable
 attempts, processes normalized loss, and publishes lease-first capacity. It

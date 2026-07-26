@@ -674,7 +674,7 @@ module Hive
                 attempt_id: request.recovery["attempt_id"],
                 terminal: true,
                 outcome: entry.json_envelope&.dig("result", "outcome") ||
-                  (entry.exit_code.zero? ? "succeeded" : "failed"),
+                  (entry.exit_code == Hive::ExitCodes::SUCCESS ? "succeeded" : "failed"),
                 now: now
               )
             end

@@ -20,40 +20,38 @@ require "stringio"
 require "yaml"
 require "shellwords"
 require "English"
-require "hive"
-require_relative "support/workflow_helpers"
 
 # Never let a normal test subprocess inherit the operator's Hive state, home,
 # XDG roots, agent configuration, GitHub configuration, or global Git config.
-# A caller can export any of these into a daemon or terminal; tests must remain
-# hermetic anyway. Authenticated smoke tests opt out explicitly in the Rake
-# task because their purpose is to exercise the operator's real agent login.
+# Set only HOME and remove the optional overrides so production defaults keep
+# following HOME when an individual test replaces it. Authenticated smoke tests
+# opt out explicitly because they exercise the operator's real agent login.
 unless ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
   HIVE_TEST_USER_ROOT = Dir.mktmpdir("hive-test-user").freeze
   test_home = File.join(HIVE_TEST_USER_ROOT, "home")
   FileUtils.mkdir_p(test_home)
-  # HOME and XDG_CONFIG_HOME contain Git's standard global config files.
-  # Remove an inherited override instead of replacing it: the babysitter
-  # correctly rejects any caller-controlled GIT_CONFIG_GLOBAL passthrough.
-  ENV.delete("GIT_CONFIG_GLOBAL")
-  {
-    "HOME" => test_home,
-    "HIVE_HOME" => File.join(HIVE_TEST_USER_ROOT, "hive"),
-    "XDG_CONFIG_HOME" => File.join(HIVE_TEST_USER_ROOT, "config"),
-    "XDG_DATA_HOME" => File.join(HIVE_TEST_USER_ROOT, "data"),
-    "XDG_STATE_HOME" => File.join(HIVE_TEST_USER_ROOT, "state"),
-    "XDG_CACHE_HOME" => File.join(HIVE_TEST_USER_ROOT, "cache"),
-    "XDG_BIN_HOME" => File.join(HIVE_TEST_USER_ROOT, "bin"),
-    "CLAUDE_CONFIG_DIR" => File.join(test_home, ".claude"),
-    "CODEX_HOME" => File.join(test_home, ".codex"),
-    "PI_CODING_AGENT_DIR" => File.join(test_home, ".pi", "agent"),
-    "GROK_HOME" => File.join(test_home, ".grok"),
-    "GH_CONFIG_DIR" => File.join(HIVE_TEST_USER_ROOT, "gh")
-  }.each { |key, value| ENV[key] = value }
+  ENV["HOME"] = test_home
+  %w[
+    HIVE_HOME
+    XDG_CONFIG_HOME
+    XDG_DATA_HOME
+    XDG_STATE_HOME
+    XDG_CACHE_HOME
+    XDG_BIN_HOME
+    CLAUDE_CONFIG_DIR
+    CODEX_HOME
+    PI_CODING_AGENT_DIR
+    GROK_HOME
+    GH_CONFIG_DIR
+    GIT_CONFIG_GLOBAL
+  ].each { |key| ENV.delete(key) }
   Minitest.after_run do
     FileUtils.rm_rf(HIVE_TEST_USER_ROOT)
   end
 end
+
+require "hive"
+require_relative "support/workflow_helpers"
 
 if ENV.delete("HIVE_REQUIRE_TEST_RUNS") == "1"
   module HiveCiGateRunGuard

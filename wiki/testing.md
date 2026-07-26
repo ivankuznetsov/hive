@@ -131,14 +131,15 @@ task default: :test
 
 ## Test helpers (`test/test_helper.rb`)
 
-- Normal test processes replace `HOME`, `HIVE_HOME`, every persisted XDG root,
-  the Claude/Codex/Pi/Grok config roots, and `GH_CONFIG_DIR` with paths under
-  one disposable `hive-test-user*` directory, then remove it after the suite.
-  Git's standard global files follow the temporary `HOME` and
-  `XDG_CONFIG_HOME`; tests explicitly remove any inherited
-  `GIT_CONFIG_GLOBAL`, because the babysitter correctly rejects that
-  caller-controlled execution channel. This keeps subprocesses hermetic even
-  when the caller is a daemon
+- Normal test processes replace `HOME` with a disposable
+  `hive-test-user*/home` directory before loading Hive, then remove it after
+  the suite. They delete inherited Hive, XDG, Claude/Codex/Pi/Grok, GitHub, and
+  Git global-path overrides instead of pinning them to fixed paths. Production
+  defaults therefore keep following `HOME` when an individual test swaps it,
+  while Git's standard global files remain under that test's disposable home.
+  `GIT_CONFIG_GLOBAL` is removed rather than replaced because the babysitter
+  correctly rejects that caller-controlled execution channel. This keeps
+  subprocesses hermetic even when the caller is a daemon
   exporting real user paths: tests cannot recreate legacy attempt roots,
   rewrite managed agent skills, consume real GitHub configuration, or change
   credential helpers, hooks, and signing settings. The authenticated

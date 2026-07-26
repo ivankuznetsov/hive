@@ -3,7 +3,7 @@ title: hive migrate
 type: command
 source: lib/hive/commands/migrate.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-07-23
+updated: 2026-07-26
 tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery]
 ---
 
@@ -103,11 +103,15 @@ active document is current.
 
 Final compatibility leases are moved to
 `$HIVE_HOME/attempts/legacy-v1-records/` as audit history. A live compatibility
-lease, any other live attempt in the old tree, or simultaneous `attempts/v1`
-and `attempts/v2` trees fails closed with an actionable error. An old detached
-supervisor retains the explicit v1 path until it terminalizes, so Hive never
-moves storage underneath live work or guesses which process owns it. The
-migration is idempotent, and runtime readers contain no legacy-schema branches.
+lease, any other live attempt in the old tree, or simultaneous populated
+`attempts/v1` and `attempts/v2` trees fails closed with an actionable error. A
+pre-cutover reader can recreate only the empty v1 directory skeleton after v2
+is authoritative; migrate removes that inert tree with empty-directory-only
+`rmdir` operations. Any file, symlink, or concurrent writer preserves the
+fail-closed dual-root error. An old detached supervisor retains the explicit v1
+path until it terminalizes, so Hive never moves storage underneath live work or
+guesses which process owns it. The migration is idempotent, and runtime readers
+contain no legacy-schema branches.
 
 ## Registered repository identity backfill
 
@@ -142,7 +146,7 @@ A rerun after successful migration prints that there is nothing to move and keep
   counter seeding.
 - `test/unit/recovery/migration_test.rb` covers the global schema cutover,
   receipt idempotency, archived final compatibility records, queue upgrades,
-  and live/ambiguous-state refusal.
+  empty post-cutover v1 skeleton cleanup, and live/ambiguous-state refusal.
 - Status integration scenarios prove hidden legacy tasks surface before migrate and disappear after migration.
 
 ## Backlinks

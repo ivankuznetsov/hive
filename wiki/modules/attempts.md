@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [attempts, ownership, leases, daemon, recovery]
 ---
 
@@ -100,9 +100,13 @@ compatibility flag, and leaves a receipt in the state home. Final compatibility
 leases are archived outside the active store. Any live attempt in the old tree
 blocks the rename because its detached old-binary supervisor still owns the v1
 path; a live compatibility lease is likewise never guessed into the new
-ownership model. Old schema files and in-memory normalization paths are removed. Every condition event must
-name a durable attempt whose task/stage ownership matches the record. Retry and
-adoption reuse the numeric epoch when accepted inputs are unchanged.
+ownership model. If an old reader recreates only empty directories beside the
+current v2 tree, migration prunes them with empty-only `rmdir`; a file, symlink,
+or concurrent writer remains an ambiguous dual root and fails closed. Old
+schema files and in-memory normalization paths are removed. Every condition
+event must name a durable attempt whose task/stage ownership matches the
+record. Retry and adoption reuse the numeric epoch when accepted inputs are
+unchanged.
 
 ## State protocol
 

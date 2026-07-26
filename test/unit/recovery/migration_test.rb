@@ -152,7 +152,9 @@ class RecoveryMigrationTest < Minitest::Test
 
   def test_refuses_ambiguous_attempt_roots
     with_tmp_dir do |state_home|
-      FileUtils.mkdir_p(File.join(state_home, "attempts", "v1"))
+      legacy_root = File.join(state_home, "attempts", "v1")
+      FileUtils.mkdir_p(legacy_root)
+      File.write(File.join(legacy_root, "unknown-state"), "preserve me")
       FileUtils.mkdir_p(File.join(state_home, "attempts", "v2"))
 
       error = assert_raises(Hive::Recovery::Migration::Error) do
@@ -160,6 +162,75 @@ class RecoveryMigrationTest < Minitest::Test
       end
 
       assert_includes error.message, "both legacy and current attempt roots exist"
+      assert_equal "preserve me", File.read(File.join(legacy_root, "unknown-state"))
+    end
+  end
+
+  def test_prunes_an_empty_legacy_skeleton_recreated_after_cutover
+    with_tmp_dir do |state_home|
+      current_records = File.join(state_home, "attempts", "v2", "records")
+      FileUtils.mkdir_p(current_records)
+      write_json(
+        File.join(current_records, "current.json"),
+        lost_attempt(current_attempt(attempt_id: "current"))
+      )
+      Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+
+      legacy_root = File.join(state_home, "attempts", "v1")
+      %w[records logs outputs generation-locks].each do |entry|
+        FileUtils.mkdir_p(File.join(legacy_root, entry))
+      end
+
+      result = Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW + 60)
+
+      refute_path_exists legacy_root
+      assert_path_exists File.join(current_records, "current.json")
+      assert_equal (NOW + 60).iso8601(6), result.fetch("completed_at")
+    end
+  end
+
+  def test_refuses_a_legacy_root_symlink_beside_the_current_root
+    with_tmp_dir do |state_home|
+      attempts = File.join(state_home, "attempts")
+      legacy_target = File.join(state_home, "legacy-target")
+      FileUtils.mkdir_p(legacy_target)
+      FileUtils.mkdir_p(File.join(attempts, "v2"))
+      File.symlink(legacy_target, File.join(attempts, "v1"))
+
+      error = assert_raises(Hive::Recovery::Migration::Error) do
+        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+      end
+
+      assert_includes error.message, "both legacy and current attempt roots exist"
+      assert File.symlink?(File.join(attempts, "v1"))
+    end
+  end
+
+  def test_refuses_an_empty_legacy_skeleton_that_gains_state_during_prune
+    with_tmp_dir do |state_home|
+      legacy_records = File.join(state_home, "attempts", "v1", "records")
+      FileUtils.mkdir_p(legacy_records)
+      FileUtils.mkdir_p(File.join(state_home, "attempts", "v2"))
+
+      original = Dir.method(:rmdir)
+      injected = false
+      Dir.define_singleton_method(:rmdir) do |path|
+        unless injected
+          File.write(File.join(path, "late-state"), "preserve me")
+          injected = true
+        end
+        original.call(path)
+      end
+      begin
+        error = assert_raises(Hive::Recovery::Migration::Error) do
+          Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+        end
+      ensure
+        Dir.define_singleton_method(:rmdir, original)
+      end
+
+      assert_includes error.message, "both legacy and current attempt roots exist"
+      assert_equal "preserve me", File.read(File.join(legacy_records, "late-state"))
     end
   end
 

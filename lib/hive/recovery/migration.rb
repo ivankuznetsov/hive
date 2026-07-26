@@ -90,9 +90,11 @@ module Hive
 
       def migrate_attempts!
         if File.exist?(legacy_attempt_root) && File.exist?(current_attempt_root)
-          raise Error,
-                "both legacy and current attempt roots exist; preserve them and resolve " \
-                "#{legacy_attempt_root} versus #{current_attempt_root} before retrying"
+          unless remove_empty_legacy_attempt_skeleton!
+            raise Error,
+                  "both legacy and current attempt roots exist; preserve them and resolve " \
+                  "#{legacy_attempt_root} versus #{current_attempt_root} before retrying"
+          end
         end
 
         if File.exist?(legacy_attempt_root)
@@ -146,6 +148,35 @@ module Hive
           write_json!(path, record.to_h)
         end
         attempt_count_result(migrated: migrated, normalized: normalized, archived: archived)
+      end
+
+      # A pre-cutover reader can recreate the old store's directory skeleton
+      # after v2 has already become authoritative. Remove only a tree made
+      # entirely of empty real directories. Any file, symlink, or concurrent
+      # writer makes rmdir fail closed and preserves the ambiguous root.
+      def remove_empty_legacy_attempt_skeleton!
+        directories = []
+        pending = [ legacy_attempt_root ]
+        until pending.empty?
+          directory = pending.pop
+          return false unless File.lstat(directory).directory?
+
+          directories << directory
+          Dir.children(directory).each do |entry|
+            path = File.join(directory, entry)
+            return false unless File.lstat(path).directory?
+
+            pending << path
+          end
+        end
+
+        directories.sort_by { |path| -path.count(File::SEPARATOR) }.each do |directory|
+          Dir.rmdir(directory)
+        end
+        Hive::AtomicFile.fsync_directory(attempts_parent)
+        true
+      rescue Errno::ENOENT, Errno::ENOTEMPTY
+        !File.exist?(legacy_attempt_root)
       end
 
       # Detached supervisors admitted by the old binary retain an explicit

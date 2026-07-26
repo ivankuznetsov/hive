@@ -128,10 +128,9 @@ module Hive
         end
 
         def effective_config(project)
-          Hive::Config.deep_merge(
-            Hive::Config.load(project.fetch("path")),
-            "daemon" => { "enabled" => true },
-            "refactor_patrol" => { "enabled" => true }
+          Hive::Modules::Migration::Patrols.reviewed_config(
+            project.fetch("path"), "architecture-patrol",
+            hive_state_path: project["hive_state_path"]
           )
         end
 
@@ -155,14 +154,19 @@ module Hive
           if @shadow_sink
             @shadow_sink.call(record)
           else
+            capture = legacy_capture(event)
             decision = {
               "rationale" => rationale, "job_id" => record["job_id"], "phase" => record["phase"]
             }
             shadow_comparator(project).record!(
               module_name: "architecture-patrol", trigger: event,
-              legacy_decision: decision, module_decision: decision,
+              legacy_decision: capture ? capture.fetch("decision") : {},
+              module_decision: decision,
+              legacy_effects: capture ? Array(capture["effects"]) : [],
               configuration_digest: configuration.digest,
-              occurred_at: event.fetch("occurred_at"), comparable: comparable
+              occurred_at: event.fetch("occurred_at"),
+              comparable: comparable && !capture.nil?,
+              evidence_source: capture && "legacy_mutator_capture"
             )
           end
           0
@@ -173,6 +177,17 @@ module Hive
           Hive::Modules::Migration::ShadowComparator.new(
             root: File.join(state, "module-runtime", "migration", "shadow")
           )
+        end
+
+        def legacy_capture(event)
+          capture = event.dig("payload", "legacy_mutator_capture")
+          return nil if capture.nil?
+          unless capture.is_a?(Hash) && capture["decision"].is_a?(Hash) &&
+                 (capture["effects"].nil? || capture["effects"].is_a?(Array))
+            raise Hive::ConfigError, "Architecture Patrol legacy shadow capture is malformed"
+          end
+
+          capture
         end
 
         def validate_hook!(hook_id, event)

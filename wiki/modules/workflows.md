@@ -108,6 +108,16 @@ command. Declared workflow targets are activation-validated and snapshotted but
 execution remains fail-closed until task provenance, idempotent admission,
 module-pinned recovery, and permission intersection are durable.
 
+Native module activation removes its activation journal before the external
+source-state callback, so a committed source snapshot cannot rematerialize a
+live rollback journal. Generation cleanup follows the durable pointer commit,
+configuration-only updates retain the immediate previous configuration, and
+reinstall or changed hook bindings start at a fresh high-water mark. Command
+targets receive only explicitly granted secret bindings, discard the ambient
+environment, and run in a network-unshared bubblewrap boundary. The
+still-unimplemented packaged-workflow runner fails with the typed
+`workflow_admission_unavailable` reason.
+
 `Hive::WorkflowPackage` defines a second, stricter trust boundary without
 weakening owner-authored descriptor compatibility:
 

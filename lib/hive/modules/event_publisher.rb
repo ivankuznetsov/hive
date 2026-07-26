@@ -32,7 +32,7 @@ module Hive
         task_id = task.id || task.slug
         ledger(entry).record(
           project_id: entry.fetch("project_id"), project: entry.fetch("name"),
-          event_name: "task.completed", occurred_at: @clock.call,
+          event_name: "task.completed", occurred_at: File.mtime(task.state_file).utc,
           source: { "type" => "task", "id" => task_id.to_s },
           idempotency_key: "task:#{task_id}:#{token}:completed",
           payload: {

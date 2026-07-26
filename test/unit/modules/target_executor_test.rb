@@ -19,7 +19,8 @@ class ModulesTargetExecutorTest < Minitest::Test
       Hive::Modules::Entrypoints.register("demo.run") { |context| entrypoint_calls << context; 7 }
       executor = Hive::Modules::TargetExecutor.new(
         first_party_loader: -> { true },
-        command_runner: lambda do |argv:, chdir:|
+        command_runner: lambda do |argv:, chdir:, environment:|
+          assert_empty environment
           command_calls << [ argv, chdir ]
           9
         end

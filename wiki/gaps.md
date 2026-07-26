@@ -335,13 +335,13 @@ Dependency lock uncertainty is unchanged: the root bundle has
 The package, lifecycle, event, attempt, adapter, migration, comparison, and
 rollback contracts have deterministic fixture coverage. Those fixtures prove
 the gate logic but intentionally do not satisfy the operational rollout gate.
-The official runtime currently emits only non-comparable module-side
-self-comparisons: legacy Patrol schedulers do not yet publish the immutable
-`legacy_mutator_capture` input/decision snapshot required by the report.
-Adapter permission checks are preflight-only until the existing Patrol engines
-accept capability-bound side-effect gateways, and patrol ownership still needs
-a durable reservation-to-child-registration barrier before an eligible
-cutover can be race-free.
+The adapters now refuse self-comparison and admit comparable evidence only
+from an independently supplied immutable `legacy_mutator_capture`, but the
+legacy Patrol producers do not yet publish that snapshot. Adapter permission
+checks are still preflight-only until the existing Patrol engines accept
+capability-bound side-effect gateways. Reservation-to-child registration now
+shares the migration lock with cutover, removing that ownership race without
+claiming the remaining evidence and capability gates are complete.
 
 Native module workflow targets also remain execution-disabled. Activation
 validates and snapshots their package files, but safe admission still needs

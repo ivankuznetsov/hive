@@ -1633,6 +1633,29 @@ module Hive
       end
 
       def dispatch_patrol_with_gates(patrol_dispatch, now:)
+        entry = patrol_dispatch[:migration_entry] || patrol_dispatch[:entry]
+        return dispatch_patrol_with_admission(patrol_dispatch, now: now) unless entry
+
+        architecture = patrol_dispatch[:patrol_kind]&.to_sym == :architecture
+        module_name = architecture ? "architecture-patrol" : "patrol"
+        Hive::Modules::Migration::Patrols.with_admission(
+          entry.fetch("path"), module_name, authority: :legacy,
+          hive_state_path: entry["hive_state_path"]
+        ) do |allowed|
+          unless allowed
+            @logger.event(
+              :skipped, project: patrol_dispatch[:project],
+              slug: patrol_dispatch[:slug] || Hive::Daemon::PatrolScheduler::PATROL_SLUG,
+              stage: patrol_dispatch[:stage], action: "patrol",
+              reason: "migration_ownership_changed"
+            )
+            return
+          end
+          dispatch_patrol_with_admission(patrol_dispatch, now: now)
+        end
+      end
+
+      def dispatch_patrol_with_admission(patrol_dispatch, now:)
         project = patrol_dispatch[:project]
         slug = patrol_dispatch[:slug] || Hive::Daemon::PatrolScheduler::PATROL_SLUG
         architecture = patrol_dispatch[:patrol_kind]&.to_sym == :architecture

@@ -4,6 +4,7 @@ require "time"
 require "hive/atomic_file"
 require "hive/config"
 require "hive/module_package/managed_store"
+require "hive/modules/migration/report"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/mutation_lock"
 
@@ -44,12 +45,54 @@ module Hive
 
           def module_mode(project_root, module_name, configured_shadow:, hive_state_path: nil)
             state = read_state(project_root, hive_state_path: hive_state_path)
-            return configured_shadow ? :shadow : :mutator unless state
+            return configured_shadow ? :shadow : :fenced unless state
             return :fenced unless state.fetch("admissions").fetch(module_name.to_s)
 
             state.fetch("owners").fetch(module_name.to_s) == "module" ? :mutator : :shadow
           rescue Hive::ConfigError, KeyError
             :fenced
+          end
+
+          def diagnostic(project_root, module_name, hive_state_path: nil)
+            state = read_state(project_root, hive_state_path: hive_state_path)
+            return { "status" => "unadopted", "owner" => "legacy", "admission" => false } unless state
+
+            {
+              "status" => state.fetch("status"),
+              "owner" => state.fetch("owners").fetch(module_name.to_s),
+              "admission" => state.fetch("admissions").fetch(module_name.to_s),
+              "blocker" => state.fetch("blockers")[module_name.to_s]
+            }
+          rescue Hive::ConfigError, KeyError => e
+            { "status" => "corrupt", "owner" => "none", "admission" => false,
+              "blocker" => e.message }
+          end
+
+          def reviewed_config(project_root, module_name, hive_state_path: nil)
+            state = read_state(project_root, hive_state_path: hive_state_path)
+            binding = state&.dig("bindings", module_name.to_s)
+            config = binding&.fetch("reviewed_config", nil)
+            digest = binding&.fetch("reviewed_config_digest", nil)
+            unless config.is_a?(Hash) && digest.to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                   ::Digest::SHA256.hexdigest(canonical(config)) == digest
+              raise Hive::ConfigError, "patrol module reviewed configuration is unavailable"
+            end
+
+            JSON.parse(canonical(config))
+          end
+
+          # Hold the migration state lock from final ownership validation
+          # through child registration. Cutover/rollback take this lock
+          # exclusively, so a precomputed legacy candidate cannot cross an
+          # ownership epoch while it is being reserved and spawned.
+          def with_admission(project_root, module_name, authority:, hive_state_path: nil)
+            dir = File.dirname(state_file(project_root, hive_state_path: hive_state_path))
+            Hive::WorkflowPackage::MutationLock.with_lock(dir, shared: true) do
+              yield admission_allowed?(
+                project_root, module_name, authority: authority,
+                hive_state_path: hive_state_path
+              )
+            end
           end
 
           def read_state(project_root, hive_state_path: nil)
@@ -157,6 +200,7 @@ module Hive
               raise Hive::ConfigError, "patrol module migration is not ready for cutover"
             end
             assert_report_bindings!(state, report)
+            assert_current_report!(report, now)
             pending = state.merge(
               "status" => "cutover_pending",
               "admissions" => MODULES.to_h { |name| [ name, false ] },
@@ -249,6 +293,8 @@ module Hive
               "source_commit" => active.fetch("source_commit"),
               "configuration_digest" => active.fetch("configuration_digest"),
               "legacy_config_digest" => digest(cfg.fetch(config_key)),
+              "reviewed_config" => cfg,
+              "reviewed_config_digest" => digest(cfg),
               "state_roots" => legacy_state_roots(name)
             } ]
           end
@@ -294,12 +340,38 @@ module Hive
           end
         end
 
+        def assert_current_report!(report, now)
+          return unless report.respond_to?(:payload)
+
+          payload = report.payload
+          comparator = Hive::Modules::Migration::ShadowComparator.new(
+            root: File.join(@migration_dir, "shadow")
+          )
+          current = Hive::Modules::Migration::Report.build(
+            records: comparator.records,
+            reviewer: payload.fetch("reviewer"),
+            reviewed_at: payload.fetch("reviewed_at"),
+            generated_at: now
+          )
+          return if current.eligible? && current.configuration_digests == report.configuration_digests
+
+          raise Hive::ConfigError,
+                "patrol module cutover evidence is stale: #{current.blockers.join(', ')}"
+        end
+
         def restore_previous_selections(state, now)
           MODULES.to_h do |name|
             expected = state.fetch("cutover_selections").fetch(name)
             before = store.inspect_selection(name, include_tombstone: true)
-            after = store.restore_previous(name, expected_active: expected, now: now)
-            [ name, before.fetch("active") != after.fetch("active") ? "previous" : "no_previous" ]
+            if before.fetch("active") == expected
+              after = store.restore_previous(name, expected_active: expected, now: now)
+              value = before.fetch("active") != after.fetch("active") ? "previous" : "no_previous"
+            elsif before.fetch("previous", nil) == expected
+              value = "already_restored"
+            else
+              raise Hive::ConfigError, "module rollback active generation changed"
+            end
+            [ name, value ]
           end
         end
 

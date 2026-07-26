@@ -202,6 +202,149 @@ class ModulePackageManagedStoreTest < Minitest::Test
     end
   end
 
+  def test_successful_commit_callback_sees_no_live_activation_journal
+    with_tmp_dir do |root|
+      package = File.join(root, "package")
+      resolution, descriptor = write_module_package(package)
+      store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
+      journal = File.join(store.modules_dir, "demo", "activation.json")
+      barrier = File.join(store.runtime_path("demo"), "activation-barrier.json")
+
+      store.apply(
+        preview_for(resolution, descriptor), package_root: package, resolution: resolution,
+        commit: lambda do
+          refute File.exist?(journal)
+          refute File.exist?(barrier)
+        end
+      )
+      assert store.selected("demo")
+    end
+  end
+
+  def test_failed_third_generation_commit_preserves_rollback_generation
+    with_tmp_dir do |root|
+      store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
+      packages = %w[first second third].each_with_index.map do |name, index|
+        package = File.join(root, name)
+        resolution, descriptor = write_module_package(
+          package, version: "1.#{index}.0", commit: (index + 10).to_s(16) * 40
+        )
+        [ package, resolution, descriptor ]
+      end
+      packages.first(2).each do |package, resolution, descriptor|
+        store.apply(
+          preview_for(resolution, descriptor, store: store),
+          package_root: package, resolution: resolution
+        )
+      end
+      before = store.selected("demo")
+      old_previous = before.dig("previous", "source_commit")
+
+      package, resolution, descriptor = packages.fetch(2)
+      assert_raises(RuntimeError) do
+        store.apply(
+          preview_for(resolution, descriptor, store: store),
+          package_root: package, resolution: resolution,
+          commit: -> { raise "commit failed" }
+        )
+      end
+
+      assert_equal before, store.selected("demo")
+      assert File.directory?(store.generation_path("demo", old_previous))
+    end
+  end
+
+  def test_configuration_only_update_retains_immediate_rollback_target
+    with_tmp_dir do |root|
+      package = File.join(root, "package")
+      resolution, descriptor = write_module_package(package)
+      store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
+      store.apply(
+        preview_for(resolution, descriptor), package_root: package, resolution: resolution
+      )
+      current = store.selected("demo")
+      current_configuration = store.configuration(
+        "demo", current.dig("active", "configuration_digest")
+      )
+      update = Hive::ModulePackage::Preview.build(
+        operation: "update", descriptor: descriptor, generation: resolution,
+        current: current, current_configuration: current_configuration,
+        settings: { "mode" => "fast" }, hooks: {},
+        grants: exact_grants(descriptor)
+      )
+
+      store.apply(update, package_root: package, resolution: resolution)
+      selected = store.selected("demo")
+
+      assert_equal current.fetch("active"), selected.fetch("previous")
+      refute_equal selected.dig("active", "configuration_digest"),
+                   selected.dig("previous", "configuration_digest")
+    end
+  end
+
+  def test_reinstall_and_changed_binding_start_at_current_high_water
+    with_tmp_dir do |root|
+      first_root = File.join(root, "first")
+      first_resolution, first_descriptor = write_module_package(first_root)
+      store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))
+      store.apply(
+        preview_for(first_resolution, first_descriptor),
+        package_root: first_root, resolution: first_resolution,
+        now: Time.utc(2026, 7, 22, 10)
+      )
+      hooks_path = File.join(store.runtime_path("demo"), "hooks.json")
+      hooks = JSON.parse(File.binread(hooks_path))
+      hooks.fetch("hooks").fetch("schedule")["cursor"] = "evt-old"
+      File.write(hooks_path, Hive::WorkflowPackage::CanonicalJSON.generate(hooks))
+
+      changed_hooks = [
+        {
+          "id" => "schedule", "target" => { "kind" => "entrypoint", "id" => "demo.changed" },
+          "default_enabled" => true, "schedules" => [ "0 * * * *" ],
+          "events" => [], "concurrency" => "drop"
+        }
+      ]
+      second_root = File.join(root, "second")
+      second_resolution, second_descriptor = write_module_package(
+        second_root, version: "1.1.0", commit: "b" * 40, hooks: changed_hooks
+      )
+      current = store.selected("demo")
+      current_configuration = store.configuration(
+        "demo", current.dig("active", "configuration_digest")
+      )
+      update = Hive::ModulePackage::Preview.build(
+        operation: "update", descriptor: second_descriptor, generation: second_resolution,
+        current: current, current_configuration: current_configuration,
+        settings: {}, hooks: {}, grants: exact_grants(second_descriptor),
+        now: Time.utc(2026, 7, 22, 11)
+      )
+      store.apply(
+        update, package_root: second_root, resolution: second_resolution,
+        now: Time.utc(2026, 7, 22, 11)
+      )
+      assert_equal "watermark:2026-07-22T11:00:00.000000Z",
+                   store.inspect_hooks("demo").dig("hooks", "schedule", "cursor")
+
+      store.uninstall("demo", now: Time.utc(2026, 7, 22, 12))
+      tombstone = store.selected("demo", include_tombstone: true)
+      tombstone_configuration = store.configuration(
+        "demo", tombstone.dig("previous", "configuration_digest")
+      )
+      reinstall = Hive::ModulePackage::Preview.build(
+        operation: "update", descriptor: second_descriptor, generation: second_resolution,
+        current: tombstone, current_configuration: tombstone_configuration,
+        settings: {}, hooks: {}, grants: exact_grants(second_descriptor),
+        now: Time.utc(2026, 7, 22, 13)
+      )
+      store.apply(
+        reinstall, package_root: second_root, resolution: second_resolution,
+        now: Time.utc(2026, 7, 22, 13)
+      )
+      assert_equal "2026-07-22T13:00:00.000000Z",
+                   store.selected("demo").fetch("high_water_at")
+    end
+  end
+
   def test_inspection_rejects_corrupt_state_and_returns_empty_missing_hooks
     with_tmp_dir do |root|
       store = Hive::ModulePackage::ManagedStore.new(File.join(root, ".hive-state"))

@@ -37,6 +37,10 @@ class ConfigTest < Minitest::Test
       assert Hive::Config.ensure_project_identities!(now: Time.utc(2026, 7, 22))
       row = YAML.safe_load(File.read(path)).fetch("registered_projects").first
       assert_match(Hive::Config::PROJECT_UUID, row.fetch("project_id"))
+      before_backfill = Hive::Config.send(:registry_project_id, {
+        "name" => "old", "path" => "/tmp/old"
+      })
+      assert_equal before_backfill, row.fetch("project_id")
       assert_equal "legacy:#{row.fetch('project_id')}", row.fetch("registration_id")
       assert_equal false, Hive::Config.ensure_project_identities!(now: Time.utc(2026, 7, 23))
     end

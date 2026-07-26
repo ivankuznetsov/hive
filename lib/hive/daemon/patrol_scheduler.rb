@@ -105,6 +105,8 @@ module Hive
 
       def reserve(candidate, now: Time.now)
         project = candidate.fetch(:project)
+        entry = candidate.fetch(:migration_entry)
+        return nil unless @migration_ownership.call(entry, "patrol", @migration_authority)
         return nil if pending?(project)
 
         @pending[project] = { started_at: now }
@@ -207,7 +209,8 @@ module Hive
           patrol_kind: :ordinary,
           state_file_mtime: nil,
           state_file_path: nil,
-          hive_state_path: entry["hive_state_path"]
+          hive_state_path: entry["hive_state_path"],
+          migration_entry: entry
         }
       end
 

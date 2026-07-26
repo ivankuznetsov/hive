@@ -91,7 +91,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
   end
 
   def test_scheduled_action_reserves_existing_lifecycle_and_invokes_internal_mode
-    with_project do |project|
+    with_project(owner: "module") do |project|
       scheduler = FakeScheduler.new([ candidate.merge(action_phase: :action) ])
       commands = []
       adapter = adapter_for(scheduler, commands: commands)
@@ -112,7 +112,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
   end
 
   def test_permission_denial_precedes_claim_and_engine
-    with_project do |project|
+    with_project(owner: "module") do |project|
       scheduler = FakeScheduler.new([ candidate ])
       commands = []
       denied = configuration(shadow: false)
@@ -149,7 +149,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
   end
 
   def test_setup_uses_authoritative_state_store_and_default_factories_are_constructible
-    with_project do |project|
+    with_project(owner: "module") do |project|
       state_store = FakeStateStore.new
       adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
         state_store_factory: ->(_root) { state_store }
@@ -162,6 +162,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       assert state_store.ensured
       refute_nil Hive::Modules::Adapters::ArchitecturePatrol.new
 
+      write_migration_state(project, "legacy")
       shadow = []
       shadow_adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
         state_store_factory: ->(_root) { state_store }, shadow_sink: ->(row) { shadow << row }
@@ -175,7 +176,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
   end
 
   def test_retry_result_and_engine_exception_preserve_scheduler_lifecycle
-    with_project do |project|
+    with_project(owner: "module") do |project|
       retrying = FakeScheduler.new([ candidate ], complete_status: :retry)
       adapter = adapter_for(retrying)
       assert_equal 1, adapter.call(
@@ -244,7 +245,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
   end
 
   def test_default_command_and_scheduler_factories_forward_to_legacy_components
-    with_project do |project|
+    with_project(owner: "module") do |project|
       scheduler = FakeScheduler.new([ candidate ])
       calls = []
       test_case = self
@@ -288,13 +289,50 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
     )
   end
 
-  def with_project
+  def with_project(owner: "legacy")
     with_tmp_dir do |root|
       state = File.join(root, ".hive-state")
       FileUtils.mkdir_p(state)
-      File.write(File.join(state, "config.yml"), { "hive_state_path" => ".hive-state" }.to_yaml)
-      yield({ "name" => "demo", "path" => root, "hive_state_path" => state })
+      File.write(
+        File.join(state, "config.yml"),
+        {
+          "hive_state_path" => ".hive-state",
+          "patrol" => { "enabled" => true },
+          "refactor_patrol" => { "enabled" => true }
+        }.to_yaml
+      )
+      project = { "name" => "demo", "path" => root, "hive_state_path" => state }
+      write_migration_state(project, owner)
+      yield(project)
     end
+  end
+
+  def write_migration_state(project, owner)
+    cfg = Hive::Config.load(project.fetch("path"))
+    timestamp = NOW.iso8601(6)
+    state = {
+      "schema" => "hive-module-migration", "schema_version" => 1,
+      "project" => project.fetch("name"), "project_root" => project.fetch("path"),
+      "epoch" => 1, "status" => owner == "module" ? "module" : "shadowing",
+      "owners" => Hive::Modules::Migration::Patrols::MODULES.to_h { |name| [ name, owner ] },
+      "admissions" => Hive::Modules::Migration::Patrols::MODULES.to_h { |name| [ name, true ] },
+      "bindings" => Hive::Modules::Migration::Patrols::MODULES.to_h do |name|
+        [ name, {
+          "reviewed_config" => cfg,
+          "reviewed_config_digest" => Digest::SHA256.hexdigest(
+            Hive::Modules::Migration::Patrols.canonical(cfg)
+          )
+        } ]
+      end,
+      "blockers" => {}, "cutover_selections" => {}, "watermarks" => {},
+      "shadow_started_at" => timestamp, "cutover_at" => nil, "rollback_at" => nil,
+      "updated_at" => timestamp
+    }
+    path = Hive::Modules::Migration::Patrols.state_file(
+      project.fetch("path"), hive_state_path: project.fetch("hive_state_path")
+    )
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, Hive::Modules::Migration::Patrols.canonical(state))
   end
 
   def candidate

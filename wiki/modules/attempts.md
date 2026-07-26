@@ -64,6 +64,11 @@ heartbeats, detached ownership, bounded retry accounting, receipts, output
 references, reconciliation, and capacity accounting. A module hook retry stays
 attached to its admitted occurrence; disabling or uninstalling the module
 closes pending retry authority instead of replaying it on re-enable.
+The private `hive __module-hook` worker also requires an installed,
+authenticated `HIVE_ATTEMPT_INTERNAL` context; possession of a persisted run
+snapshot alone cannot replay it. Lifecycle mutation and hook admission share
+the module-store lock, and a detached-launch handoff failure remains a bounded
+retrying run without advancing the hook cursor.
 
 ```text
 $HIVE_HOME/attempts/v2/

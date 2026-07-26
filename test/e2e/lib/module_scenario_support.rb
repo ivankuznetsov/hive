@@ -1,14 +1,18 @@
 require "digest"
 require "fileutils"
 require "json"
+require "time"
 require "hive/attempts/dispatcher"
 require "hive/attempts/store"
+require "hive/commands/module/install"
+require "hive/commands/module/update"
 require "hive/module_package/catalog_client"
 require "hive/module_package/managed_store"
 require "hive/module_package/preview"
 require "hive/module_package/validator"
 require "hive/modules/decision_journal"
 require "hive/modules/dispatcher"
+require "hive/modules/entrypoints"
 require "hive/modules/event_ledger"
 require "hive/modules/inspector"
 require "hive/web/module_lifecycle"
@@ -37,6 +41,13 @@ module Hive
         def launch(record, claim_capability:)
           @launches << [ record, claim_capability ]
           { "claimed" => true }
+        end
+      end
+
+      FakeCatalog = Data.define(:package_root, :resolution) do
+        def fetch(_source, destination:)
+          FileUtils.cp_r(File.join(package_root, "."), destination)
+          resolution
         end
       end
 
@@ -91,6 +102,7 @@ module Hive
       end
 
       def update_rollback!(sandbox:, run_home:)
+        register_demo_entrypoint!
         store = module_store(sandbox)
         packages = File.join(state_path(sandbox), "e2e-packages")
         first_root = File.join(packages, "v1")
@@ -132,17 +144,22 @@ module Hive
       def disable_uninstall!(sandbox:, run_home:)
         runtime = demo_runtime(sandbox:, run_home:, installed_at: START)
         store = runtime.fetch(:store)
-        store.disable("demo", now: START + 60)
-        disabled_event = record_event(runtime, key: "disabled-interval", occurred_at: START + 120)
+        baseline = Time.iso8601(store.selected("demo").fetch("high_water_at"))
+        store.disable("demo", now: baseline + 60)
+        disabled_event = record_event(
+          runtime, key: "disabled-interval", occurred_at: baseline + 120
+        )
         disabled = runtime.fetch(:dispatcher).dispatch(
           module_name: "demo", hook_id: "task", event: disabled_event
         )
-        store.enable("demo", now: START + 180)
+        store.enable("demo", now: baseline + 180)
         stale = runtime.fetch(:dispatcher).dispatch(
           module_name: "demo", hook_id: "task", event: disabled_event
         )
-        store.uninstall("demo", now: START + 240)
-        uninstalled_event = record_event(runtime, key: "after-uninstall", occurred_at: START + 300)
+        store.uninstall("demo", now: baseline + 240)
+        uninstalled_event = record_event(
+          runtime, key: "after-uninstall", occurred_at: baseline + 300
+        )
         uninstalled = runtime.fetch(:dispatcher).dispatch(
           module_name: "demo", hook_id: "task", event: uninstalled_event
         )
@@ -162,6 +179,7 @@ module Hive
       end
 
       def demo_runtime(sandbox:, run_home:, installed_at:)
+        register_demo_entrypoint!
         store = module_store(sandbox)
         package = File.join(state_path(sandbox), "e2e-packages", "runtime")
         resolution, descriptor = write_demo_package(package, version: "1.0.0", commit: "d" * 40)
@@ -191,6 +209,10 @@ module Hive
       end
 
       def record_event(runtime, key:, occurred_at:)
+        selection = runtime.fetch(:store).selected("demo", include_tombstone: true)
+        watermark = selection && selection["high_water_at"] &&
+          Time.iso8601(selection.fetch("high_water_at")) + 1
+        occurred_at = [ occurred_at, watermark ].compact.max
         runtime.fetch(:ledger).record(
           project_id: PROJECT_ID, project: "sandbox", event_name: "task.completed",
           occurred_at: occurred_at, source: { type: "task", id: key },
@@ -198,28 +220,64 @@ module Hive
         ).event
       end
 
+      def register_demo_entrypoint!
+        Hive::Modules::Entrypoints.register("demo.run") { 0 }
+      end
+
       def install!(store, package, resolution, descriptor, now:)
-        preview = Hive::ModulePackage::Preview.build(
-          operation: "install", descriptor: descriptor, generation: resolution,
-          current: nil, current_configuration: nil,
-          settings: default_settings(descriptor), hooks: default_hooks(descriptor),
-          grants: descriptor.permissions, now: now
-        )
-        store.apply(preview, package_root: package, resolution: resolution, now: now)
+        options = lifecycle_options(store, package, resolution, descriptor)
+        preview = Hive::Commands::Module::Install.new(
+          "honeycomb/#{descriptor.name}", **options,
+          yes: false, dry_run: true, receipt: nil
+        ).call!
+        Hive::Commands::Module::Install.new(
+          "honeycomb/#{descriptor.name}", **options,
+          yes: true, dry_run: false, receipt: preview.fetch("preview_receipt")
+        ).call!
       end
 
       def update!(store, package, resolution, descriptor, now:, health_check: nil)
-        current = store.selected(descriptor.name, include_tombstone: true)
-        current_configuration = store.configuration(
-          descriptor.name, current.dig("active", "configuration_digest")
+        options = lifecycle_options(
+          store, package, resolution, descriptor,
+          activation_health_check: health_check
         )
-        preview = Hive::ModulePackage::Preview.build(
-          operation: "update", descriptor: descriptor, generation: resolution,
-          current: current, current_configuration: current_configuration,
-          settings: {}, hooks: {}, grants: descriptor.permissions, now: now
-        )
-        store.apply(preview, package_root: package, resolution: resolution,
-                    health_check: health_check, now: now)
+        preview = Hive::Commands::Module::Update.new(
+          "honeycomb/#{descriptor.name}", **options,
+          yes: false, dry_run: true, receipt: nil
+        ).call!
+        Hive::Commands::Module::Update.new(
+          "honeycomb/#{descriptor.name}", **options,
+          yes: true, dry_run: false, receipt: preview.fetch("preview_receipt")
+        ).call!
+      end
+
+      def lifecycle_options(store, package, resolution, descriptor, activation_health_check: nil)
+        {
+          project_root: File.dirname(store.hive_state_path), json: true,
+          stdout: StringIO.new, settings: default_settings(descriptor).map { |key, value|
+            "#{key}=#{value}"
+          },
+          hooks: default_hooks(descriptor).map { |key, value|
+            "#{key}=#{value ? 'enabled' : 'disabled'}"
+          },
+          grants: grant_choices(descriptor.permissions),
+          catalog_client: FakeCatalog.new(package, resolution), store: store,
+          committer: ->(*) { },
+          setup_context: {
+            "project_id" => PROJECT_ID, "project" => File.basename(File.dirname(store.hive_state_path))
+          },
+          activation_health_check: activation_health_check
+        }
+      end
+
+      def grant_choices(permissions)
+        permissions.flat_map do |key, value|
+          if key == "repository_write"
+            [ "#{key}=#{value}" ]
+          else
+            Array(value).map { |item| "#{key}=#{item}" }
+          end
+        end
       end
 
       def default_settings(descriptor)

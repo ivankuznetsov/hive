@@ -15,8 +15,15 @@ module Hive
     # until task metadata can durably pin a module generation.
     class TargetExecutor
       class CommandRunner
-        def call(argv:, chdir:)
-          pid = Process.spawn(*argv, chdir: chdir, in: :close)
+        SAFE_ENV = %w[HOME LANG LC_ALL PATH TMPDIR].freeze
+
+        def call(argv:, chdir:, environment: {})
+          env = SAFE_ENV.to_h { |name| [ name, ENV[name] ] }.compact.merge(environment)
+          sandbox = [
+            "bwrap", "--unshare-net", "--die-with-parent", "--ro-bind", "/", "/",
+            "--dev", "/dev", "--proc", "/proc", "--chdir", chdir, "--", *argv
+          ]
+          pid = Process.spawn(env, *sandbox, chdir: chdir, in: :close, unsetenv_others: true)
           _waited, status = Process.wait2(pid)
           status.exited? ? status.exitstatus : 128 + status.termsig.to_i
         rescue SystemCallError
@@ -128,7 +135,23 @@ module Hive
         unless snapshot.keys.sort == %w[argv id kind] && snapshot.fetch("argv") == argv
           raise Hive::ConfigError, "module command target snapshot is malformed"
         end
-        @command_runner.call(argv: argv, chdir: File.expand_path(project.fetch("path")))
+        @command_runner.call(
+          argv: argv, chdir: File.expand_path(project.fetch("path")),
+          environment: granted_environment(configuration)
+        )
+      end
+
+      def granted_environment(configuration)
+        bindings = configuration.grants.fetch("secrets")
+        configuration.contract.fetch("settings").filter_map do |setting|
+          next unless setting.fetch("type") == "secret"
+          binding = configuration.settings.fetch(setting.fetch("name"))
+          next unless binding && bindings.include?(binding)
+
+          [ binding, ENV.fetch(binding) ]
+        end.to_h
+      rescue KeyError
+        raise CapabilityDenied, "module command target secret binding is unavailable"
       end
 
       def capture_workflow(target, configuration, package_root)
@@ -251,8 +274,12 @@ module Hive
       end
 
       def workflow_admission_unavailable!(**)
-        raise Hive::ConfigError,
+        raise WorkflowAdmissionUnavailable,
               "module-pinned workflow task admission is unavailable"
+      end
+
+      class WorkflowAdmissionUnavailable < Hive::ConfigError
+        def reason = "workflow_admission_unavailable"
       end
     end
   end

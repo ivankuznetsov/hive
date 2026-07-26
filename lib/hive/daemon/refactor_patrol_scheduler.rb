@@ -134,6 +134,11 @@ module Hive
 
       def reserve(candidate, now: Time.now)
         entry = candidate.fetch(:entry)
+        unless @migration_ownership.call(
+          entry, "architecture-patrol", @migration_authority
+        )
+          raise ReservationBlocked.new("migration_ownership_changed")
+        end
         phase = candidate.fetch(:action_phase, :discovery).to_sym
         store = store_for(entry)
         aggregate = store.read_job(candidate.fetch(:job_id))

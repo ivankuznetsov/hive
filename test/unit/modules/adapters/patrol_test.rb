@@ -59,7 +59,7 @@ class ModulesAdaptersPatrolTest < Minitest::Test
   end
 
   def test_matching_task_uses_existing_engine_with_effective_config_and_unmatched_task_is_noop
-    with_project do |project|
+    with_project(owner: "module") do |project|
       calls = []
       adapter = Hive::Modules::Adapters::Patrol.new(
         command_factory: lambda do |name, options|
@@ -89,7 +89,7 @@ class ModulesAdaptersPatrolTest < Minitest::Test
   end
 
   def test_permission_denial_happens_before_mutating_engine
-    with_project do |project|
+    with_project(owner: "module") do |project|
       calls = []
       denied = configuration(shadow: false)
       denied.grants["repository_write"] = false
@@ -108,7 +108,7 @@ class ModulesAdaptersPatrolTest < Minitest::Test
   end
 
   def test_setup_adopts_the_existing_state_store_and_default_factories_are_constructible
-    with_project do |project|
+    with_project(owner: "module") do |project|
       defaulted = Hive::Modules::Adapters::Patrol.new
       assert_equal 0, defaulted.call(
         project: project, hook_id: "setup", event: event("project.registered"),
@@ -119,7 +119,7 @@ class ModulesAdaptersPatrolTest < Minitest::Test
   end
 
   def test_mutator_schedule_runs_only_due_candidates_and_propagates_engine_failure
-    with_project do |project|
+    with_project(owner: "module") do |project|
       calls = []
       due = Hive::Modules::Adapters::Patrol.new(
         command_factory: ->(*args) { calls << args; FakeCommand.new("ok" => false) },
@@ -177,7 +177,7 @@ class ModulesAdaptersPatrolTest < Minitest::Test
   end
 
   def test_default_command_factory_forwards_to_the_legacy_command
-    with_project do |project|
+    with_project(owner: "module") do |project|
       calls = []
       original = Hive::Commands::Patrol.method(:new)
       Hive::Commands::Patrol.define_singleton_method(:new) do |name, **options|
@@ -201,13 +201,50 @@ class ModulesAdaptersPatrolTest < Minitest::Test
 
   private
 
-  def with_project
+  def with_project(owner: "legacy")
     with_tmp_dir do |root|
       state = File.join(root, ".hive-state")
       FileUtils.mkdir_p(state)
-      File.write(File.join(state, "config.yml"), { "hive_state_path" => ".hive-state" }.to_yaml)
-      yield({ "name" => "demo", "path" => root, "hive_state_path" => state })
+      File.write(
+        File.join(state, "config.yml"),
+        {
+          "hive_state_path" => ".hive-state",
+          "patrol" => { "enabled" => true },
+          "refactor_patrol" => { "enabled" => true }
+        }.to_yaml
+      )
+      project = { "name" => "demo", "path" => root, "hive_state_path" => state }
+      write_migration_state(project, owner)
+      yield(project)
     end
+  end
+
+  def write_migration_state(project, owner)
+    cfg = Hive::Config.load(project.fetch("path"))
+    timestamp = NOW.iso8601(6)
+    state = {
+      "schema" => "hive-module-migration", "schema_version" => 1,
+      "project" => project.fetch("name"), "project_root" => project.fetch("path"),
+      "epoch" => 1, "status" => owner == "module" ? "module" : "shadowing",
+      "owners" => Hive::Modules::Migration::Patrols::MODULES.to_h { |name| [ name, owner ] },
+      "admissions" => Hive::Modules::Migration::Patrols::MODULES.to_h { |name| [ name, true ] },
+      "bindings" => Hive::Modules::Migration::Patrols::MODULES.to_h do |name|
+        [ name, {
+          "reviewed_config" => cfg,
+          "reviewed_config_digest" => Digest::SHA256.hexdigest(
+            Hive::Modules::Migration::Patrols.canonical(cfg)
+          )
+        } ]
+      end,
+      "blockers" => {}, "cutover_selections" => {}, "watermarks" => {},
+      "shadow_started_at" => timestamp, "cutover_at" => nil, "rollback_at" => nil,
+      "updated_at" => timestamp
+    }
+    path = Hive::Modules::Migration::Patrols.state_file(
+      project.fetch("path"), hive_state_path: project.fetch("hive_state_path")
+    )
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, Hive::Modules::Migration::Patrols.canonical(state))
   end
 
   def configuration(shadow:, workflows: "*")

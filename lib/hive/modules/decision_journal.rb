@@ -21,6 +21,7 @@ module Hive
         admitted activation_fenced capacity_blocked concurrency_blocked cursor_stale
         disabled duplicate hook_disabled invalid_binding no_match not_installed
         permission_blocked terminal_replay uninstalled
+        launch_handoff_failed
       ].freeze
 
       attr_reader :root, :decisions_root
@@ -52,6 +53,10 @@ module Hive
           raise DecisionJournalError, "module decision identity already exists" if File.exist?(path)
           Hive::AtomicFile.write(path, canonical(data), mode: 0o600)
           Hive::AtomicFile.fsync_directory(decisions_root)
+          if @all_cache
+            @all_cache = (@all_cache.dup << data.freeze).freeze
+            @all_cache_signature = decisions_signature
+          end
         end
         data.freeze
       rescue DecisionJournalError
@@ -61,6 +66,9 @@ module Hive
       end
 
       def all
+        signature = decisions_signature
+        return @all_cache if @all_cache && @all_cache_signature == signature
+
         reader = lambda do
           next [].freeze unless File.directory?(decisions_root)
 
@@ -70,7 +78,10 @@ module Hive
         end
         return reader.call if @read_only
 
-        with_lock(shared: true, &reader)
+        @all_cache, @all_cache_signature = with_lock(shared: true) do
+          [ reader.call, decisions_signature ]
+        end
+        @all_cache
       end
 
       def for_binding(module_name:, hook_id:, event_id: nil)
@@ -86,6 +97,13 @@ module Hive
       end
 
       private
+
+      def decisions_signature
+        stat = File.stat(decisions_root)
+        [ stat.mtime.to_r, stat.size, stat.ino ]
+      rescue Errno::ENOENT
+        nil
+      end
 
       def normalize(data)
         now = data.delete("evaluated_at") || Time.now.utc

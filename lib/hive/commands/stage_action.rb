@@ -204,10 +204,15 @@ module Hive
         )
         if current_stage == target_stage
           marker = Hive::Markers.current(task.state_file)
-          return emit_archive_noop(task) if marker.name == :complete
+          if marker.name == :complete
+            publish_task_completed(task)
+            return emit_archive_noop(task)
+          end
 
           run_at(task.folder, observation_guard: nil)
-          return emit_phase(Hive::Task.new(task.folder), "closure_resumed")
+          resumed = Hive::Task.new(task.folder)
+          publish_task_completed(resumed)
+          return emit_phase(resumed, "closure_resumed")
         end
 
         new_folder = File.join(task.hive_state_path, "stages", target_stage, task.slug)
@@ -230,7 +235,9 @@ module Hive
           observation_guard: closure_guard
         ).call
         run_at(new_folder, observation_guard: nil)
-        emit_phase(Hive::Task.new(new_folder), "closed_with_evidence")
+        closed = Hive::Task.new(new_folder)
+        publish_task_completed(closed)
+        emit_phase(closed, "closed_with_evidence")
       end
 
       # Inner Approve and Run are silent when the verb is in --json mode;

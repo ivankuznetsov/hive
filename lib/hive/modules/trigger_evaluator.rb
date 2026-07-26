@@ -33,7 +33,7 @@ module Hive
         return result("skip", "hook_disabled", binding_digest, cursor, after) unless enabled
         return result("skip", "no_match", binding_digest, cursor, after) unless binding_matches?(hook, event)
         return result("skip", "duplicate", binding_digest, cursor, after) if duplicate
-        if stale?(selection, event) || cursor == after
+        if stale?(selection, event, cursor: cursor) || cursor == after
           return result("skip", "cursor_stale", binding_digest, cursor, after)
         end
         unless required_secrets_available?(configuration, secret_availability)
@@ -59,8 +59,10 @@ module Hive
         end
       end
 
-      def stale?(selection, event)
+      def stale?(selection, event, cursor:)
         high_water = selection["high_water_at"]
+        binding_watermark = cursor.to_s.delete_prefix("watermark:")
+        high_water = [ high_water, binding_watermark.match?(/\A\d{4}-/) ? binding_watermark : nil ].compact.max
         occurred_at = event.fetch("occurred_at")
         occurred_at = Time.iso8601(occurred_at) unless occurred_at.is_a?(Time)
         high_water && occurred_at < Time.iso8601(high_water)

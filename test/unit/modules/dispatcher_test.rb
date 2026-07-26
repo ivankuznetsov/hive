@@ -145,6 +145,7 @@ class ModulesDispatcherTest < Minitest::Test
       existing_live: [ nil, "duplicate", "running" ],
       terminal_replay: [ nil, "terminal_replay", "failed" ],
       deferred_capacity: [ "capacity", "capacity_blocked", "failed" ],
+      deferred_handoff: [ "launch_handoff_failed", "launch_handoff_failed", "retrying" ],
       deferred_other: [ "provider", "concurrency_blocked", "failed" ]
     }
     rows.each do |name, (reason, expected_reason, expected_status)|

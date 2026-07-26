@@ -44,6 +44,7 @@ module Hive
       end
 
       def commit!
+        @committed_snapshot = read_journal
         update_phase("committed")
         FileUtils.rm_f(barrier_path)
         Hive::AtomicFile.fsync_directory(File.dirname(barrier_path))
@@ -53,13 +54,14 @@ module Hive
       end
 
       def rollback!
-        data = read_journal
+        data = read_journal || @committed_snapshot
         return false unless data
         restore(selection_path, data["old_selection"])
         restore(hooks_path, data["old_hooks"])
         restore(setup_outbox_path, data["old_setup_outbox"])
         remove_candidate(data) if data.fetch("candidate_created")
         clear
+        @committed_snapshot = nil
         true
       end
 

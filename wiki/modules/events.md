@@ -3,7 +3,7 @@ title: Hive::Events
 type: module
 source: lib/hive/events.rb
 created: 2026-05-23
-updated: 2026-07-22
+updated: 2026-07-26
 tags: [module, events, observability, status, append-only]
 ---
 
@@ -42,6 +42,16 @@ existing occurrence; conflicting reuse fails closed. Every hook evaluation is
 paired with a `Hive::Modules::DecisionJournal` launch or skip receipt, including
 generation/configuration/grant identity and the linked attempt when admitted.
 The daemon is the sole autonomous dispatcher.
+
+Legacy registry rows derive the same deterministic project UUID during
+read-time projection and daemon persistence, so events written before backfill
+do not become foreign afterward. Every successful evidence-closure terminal
+path publishes `task.completed`; archive no-op redelivery derives its
+occurrence time from the unchanged task state file, keeping the canonical
+payload stable under the same idempotency key. Decision-journal readers cache
+the parsed immutable history behind a directory signature and invalidate on
+another writer, avoiding a full history parse for every event/module/hook
+tuple without hiding cross-process appends.
 
 ## Record shape
 

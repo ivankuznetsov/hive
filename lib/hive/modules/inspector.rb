@@ -7,6 +7,7 @@ require "hive/module_package/normalizer"
 require "hive/modules/decision_journal"
 require "hive/modules/schedule_planner"
 require "hive/modules/status"
+require "hive/modules/migration/patrols"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/managed_store"
 
@@ -101,7 +102,8 @@ module Hive
           "latest_decision" => decision_summary(latest_decision),
           "latest_attempt" => attempt_summary(latest_attempt),
           "retry" => retry_summary(run, latest_attempt), "artifacts" => artifacts,
-          "failure_reason" => failure_reason(activation, latest_attempt),
+          "failure_reason" => migration_failure(name) ||
+            failure_reason(activation, latest_attempt),
           "history_available" => history_available?(name, decisions, attempts)
         )
       end
@@ -214,6 +216,19 @@ module Hive
         return nil unless attempt
         return "attempt_lost" if attempt.state == "lost"
         return "hook_failed" if attempt.state == "terminal" && attempt.outcome != "succeeded"
+        nil
+      end
+
+      def migration_failure(name)
+        return unless Hive::Modules::Migration::Patrols::MODULES.include?(name)
+
+        diagnostic = Hive::Modules::Migration::Patrols.diagnostic(
+          File.dirname(@store.hive_state_path), name,
+          hive_state_path: @store.hive_state_path
+        )
+        return "migration_state_corrupt" if diagnostic.fetch("status") == "corrupt"
+        return "migration_fenced" unless diagnostic.fetch("admission")
+
         nil
       end
 

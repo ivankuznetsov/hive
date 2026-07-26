@@ -1,6 +1,6 @@
 ---
 title: Installable Patrol Modules Shadow Report
-status: collecting
+status: blocked-not-delivery-evidence
 ---
 
 # Installable Patrol Modules shadow report
@@ -8,25 +8,29 @@ status: collecting
 This document is the human review companion to the machine report stored per
 project at `.hive-state/module-runtime/migration/report.json`.
 
-Current delivery status: **not eligible for mutator cutover**. The code and
-fixture gates are present, but no live seven-day observation window is claimed
-by this commit. Fixture timestamps exercise the gate parser only and are not
-accepted as operational evidence.
+Current delivery status: **hard-blocked and not delivery evidence**. No live
+seven-day observation window, cutover drill, rollback drill, hosted exact-head
+CI proof, or reviewed non-draft merge-ready PR is claimed by this commit.
+Fixture timestamps exercise the gate parser only and are not accepted as
+operational evidence.
 
 The daemon can adopt installed Patrol and Architecture Patrol modules into
 one-mutator shadow mode after exact legacy children and module attempts
 quiesce. Module-side shadow decisions are written under
 `.hive-state/module-runtime/migration/shadow/`; they cannot claim work, move
-legacy cursors or budgets, spawn agents, or invoke side-effect gateways. These
-self-comparisons are deliberately marked non-comparable.
+legacy cursors or budgets, spawn agents, or invoke side-effect gateways.
+Comparison is admitted only when the trigger carries a separately persisted
+`legacy_mutator_capture`; missing captures remain non-comparable.
 
 The production legacy schedulers do not yet publish an immutable
 `legacy_mutator_capture` snapshot into the comparator, so the observation
 counter remains zero. Capability checks around the adapters are also
-preflight-only until the legacy engines accept capability-bound gateways, and
-the reserve-to-spawn ownership handoff still needs a durable barrier. All three
-are implementation blockers in addition to the elapsed-time and hosted
-delivery gates; this report must not be used to request cutover.
+preflight-only until the legacy engines accept capability-bound gateways.
+That blocker, the missing production captures, the elapsed-time gate, the
+drills, and the hosted delivery gates mean this report must not be used to
+request cutover. Machine eligibility remains false until current evidence is
+rebuilt and re-reviewed; cutover re-evaluates the live shadow directory rather
+than trusting this document or a saved `eligible` bit.
 
 Before a reviewer runs `hive module migration report --reviewer ID --yes`, the
 project must have all of the following:
@@ -57,3 +61,5 @@ place.
 - Reviewer and review time: pending
 - Cutover ownership epoch: not attempted
 - Rollback result: not attempted
+- Hosted exact-head required checks: not captured
+- PR review/draft/mergeability/auto-merge state: not captured

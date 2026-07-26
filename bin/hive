@@ -48,6 +48,9 @@ end
 if ARGV.first == "__module-hook"
   require "hive/commands/module_hook"
   begin
+    unless ENV["HIVE_ATTEMPT_INTERNAL"] == "1" && Hive::Attempts::Context.active?
+      raise Hive::ConfigError, "module hook requires authenticated durable attempt context"
+    end
     exit Hive::Commands::ModuleHook.from_argv(ARGV.drop(1)).call
   rescue Hive::Error => e
     warn "hive: #{e.message}"

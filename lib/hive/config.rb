@@ -1212,7 +1212,7 @@ module Hive
           next unless valid_registry_entry?(entry)
           next if valid_project_id?(entry["project_id"])
 
-          project_id = SecureRandom.uuid
+          project_id = registry_project_id(entry)
           entry["project_id"] = project_id
           entry["registration_id"] ||= "legacy:#{project_id}"
           entry["registered_at"] ||= now.utc.iso8601(6)
@@ -1736,7 +1736,11 @@ module Hive
         abs_path = File.expand_path(path)
         hive_state_path = File.join(abs_path, ".hive-state")
         existing = data["registered_projects"].find { |p| p.is_a?(Hash) && p["name"] == name }
-        project_id = existing && valid_project_id?(existing["project_id"]) ? existing["project_id"] : SecureRandom.uuid
+        project_id = if existing
+          registry_project_id(existing)
+        else
+          SecureRandom.uuid
+        end
         entry = {
           "name" => name, "path" => abs_path, "hive_state_path" => hive_state_path,
           "project_id" => project_id,

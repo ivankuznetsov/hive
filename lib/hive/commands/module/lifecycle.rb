@@ -159,6 +159,7 @@ module Hive
             input_bindings: @input_bindings, previous: previous_configuration
           )
           grants = parse_grants(resolution.descriptor, nil)
+          require_explicit_legacy_grants!(resolution.descriptor, grants)
           issued_at, supplied_digest = receipt_parts_for_apply
           preview = legacy_preview(
             candidate: candidate, current: current, resolver: resolver,
@@ -480,6 +481,19 @@ module Hive
             end
           end
           grants
+        end
+
+        def require_explicit_legacy_grants!(descriptor, grants)
+          return if interactive?
+
+          requested = descriptor.permissions.transform_keys(&:to_s)
+          normalized = requested.to_h do |key, value|
+            [ key, value.is_a?(Array) ? value.sort : value ]
+          end
+          return if grants == normalized
+
+          raise ConsentRequired,
+                "noninteractive legacy module install requires every reviewed permission grant explicitly"
         end
 
         def collect_interactive_install_choices!(descriptor)

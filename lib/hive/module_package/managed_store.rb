@@ -62,11 +62,13 @@ module Hive
           end
           transaction.health_validated!
           failpoint&.call(:health_validated)
-          cleanup_generations_unlocked!(resolution.name, selection)
-          commit&.call
+          assert_generation_cleanup_safe_unlocked!(resolution.name, selection)
           transaction.commit!
-          clear_failed_activation(resolution.name)
+          commit&.call
+          cleanup_generations_unlocked!(resolution.name, selection)
           cleanup_configurations_unlocked!(resolution.name, selection)
+          transaction = nil
+          clear_failed_activation(resolution.name)
           selection
         rescue StandardError => e
           begin
@@ -199,6 +201,19 @@ module Hive
         end
       end
 
+      # Lifecycle mutations and hook admission share this lock. Callers must
+      # use the yielded immutable selection rather than re-entering #selected.
+      def with_admission(name)
+        Hive::WorkflowPackage::MutationLock.with_lock(modules_dir) do
+          reconcile_unlocked!(name)
+        end
+        Hive::WorkflowPackage::MutationLock.with_lock(modules_dir, shared: true) do
+          yield selected_unlocked(name, include_tombstone: true)
+        end
+      rescue Hive::ConcurrentRunError => e
+        raise Hive::ConfigError, "module lifecycle admission lock is unavailable: #{e.message}"
+      end
+
       # Migration rollback may restore the previously reviewed executable and
       # configuration, but never runtime ledgers. The active-generation CAS
       # prevents a stale rollback request from overwriting a later operator
@@ -233,9 +248,10 @@ module Hive
           )
           transaction.provisional!(selection_bytes: canonical(restored), hooks_bytes: canonical(hooks))
           transaction.health_validated!
+          transaction.commit!
+          transaction = nil
           cleanup_generations_unlocked!(name, restored)
           cleanup_configurations_unlocked!(name, restored)
-          transaction.commit!
           restored
         rescue StandardError
           transaction&.rollback!
@@ -345,13 +361,18 @@ module Hive
 
       def activation_selection(current, resolution, configuration, receipt_digest, now)
         active = generation_identity(resolution, configuration)
-        previous = current && current["active"] unless current&.dig("active", "source_commit") == resolution.source_commit
+        previous = current && current["active"] unless current&.fetch("active", nil) == active
+        high_water = if current&.fetch("installed", false)
+          current.fetch("high_water_at")
+        else
+          now.utc.iso8601(6)
+        end
         {
           "schema_version" => 1, "name" => resolution.name,
           "installed" => true, "enabled" => current ? current.fetch("enabled") : true,
           "active" => active, "previous" => previous || current&.fetch("previous", nil),
           "epoch" => current ? current.fetch("epoch") + 1 : 1,
-          "high_water_at" => current&.fetch("high_water_at", nil) || now.utc.iso8601(6),
+          "high_water_at" => high_water || now.utc.iso8601(6),
           "receipt_digest" => receipt_digest
         }
       end
@@ -368,9 +389,17 @@ module Hive
         old = read_hooks(current&.fetch("name", nil))
         rows = configuration.hooks.to_h do |id, enabled|
           previous = old.dig("hooks", id) || {}
+          digest = binding_digest(configuration, id)
+          cursor = if current.nil?
+            nil
+          elsif previous["binding_digest"] == digest
+            previous["cursor"]
+          else
+            "watermark:#{now.utc.iso8601(6)}"
+          end
           [ id, {
-            "enabled" => enabled, "cursor" => previous["cursor"],
-            "binding_digest" => binding_digest(configuration, id)
+            "enabled" => enabled, "cursor" => cursor,
+            "binding_digest" => digest
           } ]
         end
         {
@@ -471,7 +500,15 @@ module Hive
       end
 
       def cleanup_generations_unlocked!(name, selection)
-        keep = [ selection["active"], selection["previous"] ].compact.map { |row| row.fetch("source_commit") }
+        assert_generation_cleanup_safe_unlocked!(name, selection)
+        keep = retained_generation_commits(selection)
+        generation_commits(name).each do |commit|
+          remove_generation_tree(generation_path(name, commit)) unless keep.include?(commit)
+        end
+      end
+
+      def assert_generation_cleanup_safe_unlocked!(name, selection)
+        keep = retained_generation_commits(selection)
         run_generation_references(name).each do |reference|
           next if keep.include?(reference.fetch("source_commit"))
           snapshot = reference["execution_snapshot"]
@@ -479,9 +516,10 @@ module Hive
             raise Hive::ConfigError, "module generation pruning requires a complete nonterminal run snapshot"
           end
         end
-        generation_commits(name).each do |commit|
-          remove_generation_tree(generation_path(name, commit)) unless keep.include?(commit)
-        end
+      end
+
+      def retained_generation_commits(selection)
+        [ selection["active"], selection["previous"] ].compact.map { |row| row.fetch("source_commit") }
       end
 
       def cleanup_configurations_unlocked!(name, selection)

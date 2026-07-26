@@ -27,11 +27,16 @@ module Hive
         def call(project:, hook_id:, event:, configuration:, **)
           validate_hook!(hook_id, event)
           context = CapabilityContext.new(configuration.grants)
-          cfg = effective_config(project, configuration)
           case hook_id
           when "setup" then setup(project, context, configuration, event)
-          when "scheduled-scan" then scheduled_scan(project, context, cfg, configuration, event)
-          when "task-completed" then task_completed(project, context, cfg, configuration, event)
+          when "scheduled-scan"
+            scheduled_scan(
+              project, context, effective_config(project, configuration), configuration, event
+            )
+          when "task-completed"
+            task_completed(
+              project, context, effective_config(project, configuration), configuration, event
+            )
           end
         end
 
@@ -94,10 +99,12 @@ module Hive
         end
 
         def effective_config(project, configuration)
-          current = Hive::Config.load(project.fetch("path"))
+          current = Hive::Modules::Migration::Patrols.reviewed_config(
+            project.fetch("path"), "patrol", hive_state_path: project["hive_state_path"]
+          )
           settings = configuration.settings
           overrides = {
-            "enabled" => true, "trigger" => settings.fetch("trigger"),
+            "trigger" => settings.fetch("trigger"),
             "poll_interval_sec" => settings.fetch("poll_interval_sec")
           }
           Hive::Config.deep_merge(current, "patrol" => overrides)
@@ -126,12 +133,16 @@ module Hive
           if @shadow_sink
             @shadow_sink.call(record)
           else
+            capture = legacy_capture(event)
             shadow_comparator(project).record!(
               module_name: "patrol", trigger: event,
-              legacy_decision: { "rationale" => rationale },
+              legacy_decision: capture ? capture.fetch("decision") : {},
               module_decision: { "rationale" => rationale },
+              legacy_effects: capture ? Array(capture["effects"]) : [],
               configuration_digest: configuration.digest,
-              occurred_at: event.fetch("occurred_at"), comparable: comparable
+              occurred_at: event.fetch("occurred_at"),
+              comparable: comparable && !capture.nil?,
+              evidence_source: capture && "legacy_mutator_capture"
             )
           end
           0
@@ -142,6 +153,17 @@ module Hive
           Hive::Modules::Migration::ShadowComparator.new(
             root: File.join(state, "module-runtime", "migration", "shadow")
           )
+        end
+
+        def legacy_capture(event)
+          capture = event.dig("payload", "legacy_mutator_capture")
+          return nil if capture.nil?
+          unless capture.is_a?(Hash) && capture["decision"].is_a?(Hash) &&
+                 (capture["effects"].nil? || capture["effects"].is_a?(Array))
+            raise Hive::ConfigError, "Patrol legacy shadow capture is malformed"
+          end
+
+          capture
         end
 
         def validate_hook!(hook_id, event)

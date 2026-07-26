@@ -4,6 +4,7 @@ require "hive/module_package/validator"
 require "hive/modules/hook_attempt"
 require "hive/modules/inspector"
 require "hive/modules/target_executor"
+require "hive/modules/migration/patrols"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -19,7 +20,8 @@ module Hive
         raise Hive::ConfigError, "module #{name.inspect} is not installed and has no history" unless status
 
         checks = base_checks(status) + setting_checks(status) +
-          module_integrity_checks(name, status) + runtime_checks(name)
+          module_integrity_checks(name, status) + runtime_checks(name) +
+          migration_checks(name)
         {
           "status" => status.to_h, "healthy" => checks.none? { |row| row.fetch("status") == "error" },
           "checks" => checks
@@ -62,6 +64,18 @@ module Hive
         rescue JSON::ParserError, SystemCallError, IOError
           check_row("execution_snapshot", "error", subject: File.basename(path, ".json"))
         end
+      end
+
+      def migration_checks(name)
+        return [] unless Hive::Modules::Migration::Patrols::MODULES.include?(name.to_s)
+
+        diagnostic = Hive::Modules::Migration::Patrols.diagnostic(
+          File.dirname(@store.hive_state_path), name,
+          hive_state_path: @store.hive_state_path
+        )
+        healthy = diagnostic.fetch("status") != "corrupt" && diagnostic.fetch("admission")
+        [ check_row("migration_ownership", healthy ? "ok" : "error",
+                    subject: diagnostic["blocker"] || diagnostic.fetch("status")) ]
       end
 
       def module_integrity_checks(name, status)

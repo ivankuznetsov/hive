@@ -21,6 +21,8 @@ module Hive
     # state, binding cursor, dedupe/concurrency evidence, attempt admission,
     # and the immutable decision receipt.
     class Dispatcher
+      UNSET_SELECTION = Object.new.freeze
+
       def initialize(store:, attempt_store:, attempt_dispatcher:, project_id:, project:,
                      evaluator: TriggerEvaluator.new, decision_journal: nil,
                      secret_availability: ->(name) { ENV.key?(name.to_s) },
@@ -42,39 +44,50 @@ module Hive
 
       def dispatch(module_name:, hook_id:, event:, dry_run: false)
         assert_project!(event)
-        lock = dry_run ? method(:without_hook_lock) : method(:with_hook_lock)
-        lock.call(module_name, hook_id) do
-          context = load_context(module_name, hook_id, read_only: dry_run)
-          evaluation = evaluate(context, event)
-          if dry_run || !evaluation.launch?
-            decision = dry_run ? projected_decision(context, event, evaluation) : persist_decision(context, event, evaluation)
-            advance_cursor(context, evaluation) unless dry_run || evaluation.reason == "activation_fenced"
-            return ModuleDispatchResult.new(decision: decision, attempt_result: nil, event: event)
-          end
-
-          hook_attempt = HookAttempt.build(
-            project: @project, project_id: @project_id, module_name: module_name,
-            hook: context.fetch(:hook), selection: context.fetch(:selection),
-            configuration: context.fetch(:configuration), event: event,
-            package_root: @store.generation_path(
-              module_name, context.dig(:selection, "active", "source_commit")
+        lifecycle = dry_run ? method(:without_lifecycle_lock) : @store.method(:with_admission)
+        lifecycle.call(module_name) do |admitted_selection|
+          lock = dry_run ? method(:without_hook_lock) : method(:with_hook_lock)
+          lock.call(module_name, hook_id) do
+            context = load_context(
+              module_name, hook_id, read_only: dry_run, selection: admitted_selection
             )
-          )
-          persist_run(module_name, hook_attempt, event)
-          attempt_result = @attempt_dispatcher.dispatch_module_hook(
-            generation: hook_attempt, subject: hook_attempt.subject,
-            argv: hook_attempt.argv, request_id: "module:#{event.fetch('event_id')}:#{hook_id}",
-            provider: "module", interactive: false, now: @clock.call,
-            project_root: File.dirname(@store.hive_state_path)
-          )
-          final_evaluation = evaluation_for_attempt(evaluation, attempt_result)
-          update_run(module_name, hook_attempt, attempt_result, final_evaluation)
-          decision = persist_decision(
-            context, event, final_evaluation,
-            attempt_id: attempt_result.attempt&.attempt_id
-          )
-          advance_cursor(context, final_evaluation)
-          ModuleDispatchResult.new(decision: decision, attempt_result: attempt_result, event: event)
+            evaluation = evaluate(context, event)
+            if dry_run || !evaluation.launch?
+              decision = dry_run ? projected_decision(context, event, evaluation) :
+                persist_decision(context, event, evaluation)
+              advance_cursor(context, evaluation) unless dry_run ||
+                %w[activation_fenced launch_handoff_failed].include?(evaluation.reason)
+              return ModuleDispatchResult.new(decision: decision, attempt_result: nil, event: event)
+            end
+
+            hook_attempt = HookAttempt.build(
+              project: @project, project_id: @project_id, module_name: module_name,
+              hook: context.fetch(:hook), selection: context.fetch(:selection),
+              configuration: context.fetch(:configuration), event: event,
+              package_root: @store.generation_path(
+                module_name, context.dig(:selection, "active", "source_commit")
+              )
+            )
+            persist_run(module_name, hook_attempt, event)
+            attempt_result = @attempt_dispatcher.dispatch_module_hook(
+              generation: hook_attempt, subject: hook_attempt.subject,
+              argv: hook_attempt.argv, request_id: "module:#{event.fetch('event_id')}:#{hook_id}",
+              provider: "module", interactive: false, now: @clock.call,
+              project_root: File.dirname(@store.hive_state_path)
+            )
+            final_evaluation = evaluation_for_attempt(evaluation, attempt_result)
+            update_run(module_name, hook_attempt, attempt_result, final_evaluation)
+            decision = persist_decision(
+              context, event, final_evaluation,
+              attempt_id: attempt_result.attempt&.attempt_id
+            )
+            unless final_evaluation.reason == "launch_handoff_failed"
+              advance_cursor(context, final_evaluation)
+            end
+            ModuleDispatchResult.new(
+              decision: decision, attempt_result: attempt_result, event: event
+            )
+          end
         end
       end
 
@@ -99,35 +112,38 @@ module Hive
 
       def retry(module_name:, hook_attempt:, previous_attempt:)
         hook_id = hook_attempt.subject.fetch("hook")
-        with_hook_lock(module_name, hook_id) do
-          selection = @store.selected(module_name, include_tombstone: true)
-          unless selection&.fetch("installed") && selection.fetch("enabled")
-            close_run(module_name, hook_attempt.run_id, "retry_closed")
-            return nil
+        @store.with_admission(module_name) do |selection|
+          with_hook_lock(module_name, hook_id) do
+            unless selection&.fetch("installed") && selection.fetch("enabled")
+              close_run(module_name, hook_attempt.run_id, "retry_closed")
+              return nil
+            end
+            charge = previous_attempt["retry_charge"] + 1
+            retry_attempt = hook_attempt.retry(charge)
+            result = @attempt_dispatcher.dispatch_module_hook(
+              generation: retry_attempt, subject: retry_attempt.subject,
+              argv: retry_attempt.argv,
+              request_id: "module-retry:#{retry_attempt.subject.fetch('event_id')}:#{hook_id}:#{charge}",
+              provider: "module", interactive: false,
+              predecessor_attempt_id: previous_attempt.attempt_id,
+              retry_charge: charge, now: @clock.call,
+              project_root: File.dirname(@store.hive_state_path)
+            )
+            update_run(module_name, retry_attempt, result, nil)
+            result
           end
-          charge = previous_attempt["retry_charge"] + 1
-          retry_attempt = hook_attempt.retry(charge)
-          result = @attempt_dispatcher.dispatch_module_hook(
-            generation: retry_attempt, subject: retry_attempt.subject,
-            argv: retry_attempt.argv,
-            request_id: "module-retry:#{retry_attempt.subject.fetch('event_id')}:#{hook_id}:#{charge}",
-            provider: "module", interactive: false,
-            predecessor_attempt_id: previous_attempt.attempt_id,
-            retry_charge: charge, now: @clock.call,
-            project_root: File.dirname(@store.hive_state_path)
-          )
-          update_run(module_name, retry_attempt, result, nil)
-          result
         end
       end
 
       private
 
-      def load_context(module_name, hook_id, read_only: false)
-        selection = if read_only
+      def load_context(module_name, hook_id, read_only: false, selection: UNSET_SELECTION)
+        selection = if selection.equal?(UNSET_SELECTION) && read_only
           @store.inspect_selection(module_name, include_tombstone: true)
-        else
+        elsif selection.equal?(UNSET_SELECTION)
           @store.selected(module_name, include_tombstone: true)
+        else
+          selection
         end
         return { module_name: module_name.to_s, hook_id: hook_id.to_s, selection: nil } unless selection
         active = selection["active"]
@@ -182,7 +198,11 @@ module Hive
         when :terminal_replay
           evaluation.with(outcome: "skip", reason: "terminal_replay")
         else
-          reason = attempt_result.reason == "capacity" ? "capacity_blocked" : "concurrency_blocked"
+          reason = case attempt_result.reason
+          when "capacity" then "capacity_blocked"
+          when "launch_handoff_failed" then "launch_handoff_failed"
+          else "concurrency_blocked"
+          end
           evaluation.with(outcome: "skip", reason: reason)
         end
       end
@@ -263,7 +283,8 @@ module Hive
         data = JSON.parse(File.binread(path))
         data["status"] = if attempt_result.live?
           "running"
-        elsif evaluation.nil? && attempt_result.reason == "capacity"
+        elsif (evaluation.nil? && attempt_result.reason == "capacity") ||
+              attempt_result.reason == "launch_handoff_failed"
           "retrying"
         else
           "failed"
@@ -322,6 +343,10 @@ module Hive
 
       def without_hook_lock(_module_name, _hook_id)
         yield
+      end
+
+      def without_lifecycle_lock(_module_name)
+        yield UNSET_SELECTION
       end
 
       def assert_project!(event)

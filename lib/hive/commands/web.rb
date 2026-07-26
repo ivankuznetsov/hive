@@ -42,6 +42,8 @@ module Hive
       end
 
       VALID_SUBCOMMANDS = %w[install start stop status capture capture-server].freeze
+      INSTALL_READINESS_ATTEMPTS = 40
+      INSTALL_READINESS_INTERVAL_SEC = 0.25
 
       def initialize(subcommand = nil, bind: nil, port: nil, no_bootstrap: false,
                      unsafe: false, force: false, json: false, detach: false,
@@ -410,7 +412,9 @@ module Hive
       def service_envelope(installer, outcome, config: Hive::Config.load_global_web)
         state = Hive::Web::ServiceStatus.snapshot(
           installer: installer, config: config, environment: @environment,
-          wait_for_running: true
+          wait_for_running: true,
+          attempts: INSTALL_READINESS_ATTEMPTS,
+          interval: INSTALL_READINESS_INTERVAL_SEC
         )
         {
           "schema" => "hive-web-install",

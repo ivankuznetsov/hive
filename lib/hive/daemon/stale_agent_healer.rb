@@ -119,7 +119,6 @@ module Hive
         end
 
         attempts.each do |attempt|
-          next if attempt.compatibility?
           next unless @project_auto_retry_enabled.call(attempt["project"])
 
           outcome = @lost_outcome_processor.process(attempt, now: now)

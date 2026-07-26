@@ -77,7 +77,10 @@ state on success and pre-dispatch/runtime errors. Readiness probes the local
 managed Rails endpoint even when the advertised origin points at DNS or a
 reverse proxy. Install success requires the observed service to be installed,
 enabled, running, and ready; an inactive or active-but-not-ready service emits
-`ok: false` before the command exits non-zero. Configuration failures from
+`ok: false` before the command exits non-zero. Mutating install uses 40 health
+samples at 250 ms intervals, allowing a cold Rails/bundle boot roughly ten
+seconds before reporting `active_not_ready`; read-only status still takes one
+immediate sample. Configuration failures from
 `status --json` retain the versioned status error envelope on stdout.
 Bootstrap and service-install exceptions from `install --json` likewise emit
 exactly one versioned install error envelope, distinguished by

@@ -10,6 +10,8 @@ require "hive/markers"
 require "hive/paths"
 require "hive/process_kill"
 require "hive/recovery"
+require "hive/recovery/migration"
+require "hive/repository_identity"
 require "hive/stages"
 require "hive/task"
 require "hive/task_counter"
@@ -62,6 +64,7 @@ module Hive
         stages = File.join(hive_state, "stages")
         raise Hive::InvalidTaskPath, "not a hive project: #{hive_state}" unless Dir.exist?(stages)
 
+        Hive::Recovery::Migration.ensure!
         moved = []
         backfilled_count = 0
         recovery_marker_count = 0
@@ -114,6 +117,7 @@ module Hive
             commit_display_name_backfill(hive_state, display_name_count)
           end
         end
+        repository_identity = backfill_registered_repository_identity
 
         if moved.empty?
           puts no_move_message
@@ -125,11 +129,40 @@ module Hive
         if display_name_count.positive?
           puts "hive: migrate backfilled #{display_name_count} display name#{display_name_count == 1 ? '' : 's'}"
         end
+        if repository_identity
+          puts "hive: migrate backfilled registered repository identity #{repository_identity}"
+        end
         restart_daemon_if_running! if moved.any?
         moved
       end
 
       private
+
+      def backfill_registered_repository_identity
+        project = Hive::Config.registered_projects.find do |entry|
+          same_project_path?(entry["path"], @project_path)
+        end
+        return nil unless project
+        return nil unless project["repository_identity"].to_s.empty?
+
+        identity = Hive::RepositoryIdentity.current(@project_path)
+        return nil unless identity
+
+        Hive::Config.register_project(
+          name: project.fetch("name"),
+          path: project.fetch("path"),
+          repository_identity: identity
+        )
+        identity
+      end
+
+      def same_project_path?(candidate, expected)
+        return true if File.expand_path(candidate.to_s) == expected
+
+        File.realpath(candidate.to_s) == File.realpath(expected)
+      rescue SystemCallError
+        false
+      end
 
       def build_migration_plan(stages)
         ops = []

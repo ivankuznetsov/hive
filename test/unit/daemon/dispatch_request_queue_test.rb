@@ -1372,7 +1372,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
-  def test_v4_round_trips_generation_and_v2_remains_readable
+  def test_v4_round_trips_generation_and_rejects_v2_written_after_cutover
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       Q.write_request!(
         project: "hive", slug: "task", argv: [ "hive", "run", "task" ],
@@ -1384,9 +1384,13 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       write_request(dir, request_id: "v2request", created_at: Time.utc(2026, 7, 16, 11, 0, 0),
                     schema_version: 2)
 
-      v2, v4 = Q.pending(state_home: dir)
-      assert_nil v2.task_generation
-      assert_equal 2, v2.schema_version
+      rejected = []
+      pending = Q.pending(
+        state_home: dir,
+        bad_handler: ->(path:, reason:) { rejected << reason }
+      )
+      assert_equal [ "unknown_schema_version" ], rejected
+      v4 = pending.fetch(0)
       assert_equal "generation-1", v4.task_generation
       assert_equal "attempt-zero", v4.predecessor_attempt_id
       assert_equal 4, v4.schema_version
@@ -1395,7 +1399,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
-  def test_v3_rejects_invalid_output_references_at_write_and_read_boundaries
+  def test_v4_rejects_invalid_output_references_at_write_and_read_boundaries
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       bad_reference = { "path" => "../escape", "size" => 1, "sha256" => "0" * 64 }
       error = assert_raises(ArgumentError) do

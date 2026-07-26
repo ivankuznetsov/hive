@@ -28,7 +28,12 @@ class BabysitterCoverageGapsTest < Minitest::Test
   end
 
   def project_entry(dir)
-    { "name" => "demo", "path" => dir, "hive_state_path" => File.join(dir, ".hive-state") }
+    {
+      "name" => "demo",
+      "path" => dir,
+      "hive_state_path" => File.join(dir, ".hive-state"),
+      "repository_identity" => "github.com/acme/demo"
+    }
   end
 
   def cfg(overrides = {})

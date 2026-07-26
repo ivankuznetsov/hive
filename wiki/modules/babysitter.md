@@ -71,6 +71,13 @@ Closed outcome enum: `success`, `failure`, `conflict`, `timeout`, `budget_exhaus
 - Separate from `Hive::Daemon`; no shared `ConcurrencyController` and no task-folder dispatch.
 - Separate PID and log files: `$HIVE_HOME/.babysitter.pid`, `$HIVE_HOME/logs/babysitter.log`. Detached restarts re-exec the stable wrapper resolved by `Hive::InvokedBinary.path` as `hive babysit start --detach` before daemonizing, so the recorded process command is canonical and later restarts do not wait on a child that is still running under the old `restart --detach` argv. Restart aborts when stop leaves a potentially live PID file behind. Stop keeps a long 600-second drain because an active tick can be inside a synchronous PR repair agent with child processes and temporary worktrees; start reservation and successful cleanup take the same bounded sidecar lock and compare the current PID-file payload before removing it so a concurrent replacement start keeps its lock.
 - Per-project opt-in only: `babysitter.enabled`.
+- Registry repository identity is an admission boundary. Enabled rows with no
+  identity emit `project_skipped/repository_identity_unresolved`; rows whose
+  normalized origin is `local:<path>` emit
+  `project_skipped/repository_local`. Neither reaches `ProjectTick` or `gh`.
+  Run `hive migrate <project>` after adding an origin to backfill an older
+  unresolved registration. Network identities remain eligible, including
+  GitHub Enterprise hosts supported by `gh`.
 - `hive babysit reload` is config/log-setting only. The detached process keeps Ruby code loaded from its original start; after checkout updates or release upgrades, use `hive babysit restart --detach`. `hive babysit status` compares the PID-file `started_at` to the current source mtime and prints a restart recommendation when the running process predates the checkout. This prevents stale validators from silently skipping projects after config enum changes such as `patrol.trigger: continuous`.
 - `ProjectTick` asks `gh pr list` for `mergeStateStatus` and sorts selected candidates by actionability before applying `babysitter.max_concurrent_prs`: `DIRTY` / `BLOCKED` / `UNSTABLE` first, then `BEHIND` / `UNKNOWN`, then clean or missing states. Updated time remains the tie-breaker. This prevents a large old backlog of neutral PRs from starving conflicted/red PRs such as patrol output that needs immediate repair.
 - Draft PRs are skipped before worktree materialization; `labels_ignore: [draft]` is not relied on because draft status is not a GitHub label.

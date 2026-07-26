@@ -3,7 +3,7 @@ title: hive uninstall
 type: command
 source: lib/hive/commands/uninstall.rb, lib/hive/paths.rb
 created: 2026-05-21
-updated: 2026-07-22
+updated: 2026-07-26
 tags: [command, install, uninstall, xdg]
 ---
 
@@ -27,6 +27,7 @@ hive uninstall --force-purge-state
    - macOS: unload and remove the matching `local.hive-*.plist` files.
    - Linux: disable/stop the matching user services, remove their `~/.config/systemd/user/*.service` units, then daemon-reload. Each teardown warns and continues on failure so one stuck service manager never aborts the rest.
    - Hive Web identity lookup uses an explicit inert installer config, so a malformed global `web:` section cannot abort identity-only deregistration or prevent later cleanup.
+   - Each thin installer delegates no-follow inspection, exact-state revalidation, manager disable, unlink, and Linux daemon-reload to `Hive::UserService`. Uninstall retains foreground-stop and multi-service/global cleanup ordering plus warning presentation.
 4. Remove XDG config/cache and versioned data payload directories, unless `HIVE_HOME` collapses config/data/state/cache onto one path.
 5. Remove user symlinks `hive` and `hv` under `${XDG_BIN_HOME:-~/.local/bin}` when they are symlinks.
 6. Preserve or remove state according to `--purge` / `--force-purge-state`.

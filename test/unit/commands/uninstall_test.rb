@@ -53,7 +53,10 @@ class UninstallCommandTest < Minitest::Test
         host_os: "darwin"
       ).call
 
-      assert_equal [ [ "launchctl", "unload", plist ] ], calls
+      mutations = calls.reject { |argv| argv == %w[launchctl list local.hive-daemon] }
+      assert_equal [ [ "launchctl", "unload", plist ] ], mutations
+      assert calls.any? { |argv| argv == %w[launchctl list local.hive-daemon] },
+             "removal should observe launchd before mutating it"
       refute File.exist?(plist)
     end
   end
@@ -122,14 +125,6 @@ class UninstallCommandTest < Minitest::Test
       end
 
       assert File.symlink?(link)
-    end
-  end
-
-  def test_safe_unlink_tolerates_disappearing_file
-    with_xdg_home do |dir|
-      missing = File.join(dir, "already-gone")
-
-      Hive::Commands::Uninstall.new(output: StringIO.new).send(:safe_unlink, missing)
     end
   end
 
@@ -604,17 +599,21 @@ class UninstallCommandTest < Minitest::Test
       unit = File.expand_path("~/.config/systemd/user/hive-daemon.service")
       FileUtils.mkdir_p(File.dirname(unit))
       File.write(unit, "unit\n")
-      calls = 0
+      calls = []
       out = StringIO.new
 
       Hive::Commands::Uninstall.new(
         purge: true,
         output: out,
-        runner: ->(_argv) { calls += 1; calls == 1 },
+        runner: lambda do |argv|
+          calls << argv
+          argv != %w[systemctl --user daemon-reload]
+        end,
         host_os: "linux"
       ).call
 
       refute File.exist?(unit)
+      assert_includes calls, %w[systemctl --user daemon-reload]
       assert_match(/daemon-reload failed/, out.string)
     end
   end

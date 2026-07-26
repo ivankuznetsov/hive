@@ -72,8 +72,11 @@ internal `HIVEBOX_PRECOMPILED_ASSETS=1` marker so the shared launcher does not
 repeat native web preparation at container startup.
 
 `hive web install [--force] [--json]` installs the separate `hive-web` autostart
-service using the invoked user-facing binary path. `--force` also forces an
-authenticated, rollback-safe managed-bundle reprovision before replacing the
+service using the invoked user-facing binary path. Its thin Hive installer owns
+web environment rendering and output policy while `Hive::UserService` owns
+file drift, plan revalidation, atomic replacement, and manager application.
+`--force` also forces an authenticated, rollback-safe managed-bundle
+reprovision before replacing the
 service, even when the installed bundle has a current version stamp and healthy
 assets. This matters when separately merged dependencies or web content change
 without a Hive version bump; ordinary foreground/start bootstrap remains a

@@ -211,7 +211,7 @@ module Hive
       end
 
       def installed_prdigest_binary
-        path = Gem.bin_path("prdigest", "prdigest", "~> 0.1.1")
+        path = Gem.bin_path("prdigest", "prdigest", "~> 0.2.0")
         path if File.file?(path) && File.executable?(path)
       rescue Gem::Exception
         nil

@@ -1,3 +1,4 @@
+require "hive/conditions/policy"
 require "hive/workflow"
 
 module Hive

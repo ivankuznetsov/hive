@@ -717,6 +717,19 @@ read-through alias has not been selected. Remove it only after warned projects
 have had a migration window and release notes make the strict boundary
 explicit; no version or publication decision is implied by the source change.
 
+## WorkLedger is an internal boundary, not a published format (2026-07-26)
+
+`Hive::WorkLedger` now has clean-load, structural descriptor, durable append,
+rollback, idempotency-conflict, replay, adapter-compatibility, historical
+fixture, and component-graph tests. This proves the internal mechanism seam; it
+does not establish external demand, a stable public journal/projection disk
+schema, cross-platform crash semantics beyond Hive's supported filesystem
+tests, or independent release/version ownership. The Hive task journal,
+projection snapshots, attempts, conditions, workflow overlays, and migrations
+remain Hive-owned compatibility contracts. Do not infer a gem or repository
+split from `boundary-ready`; future packaging still needs a real non-Hive
+consumer and explicit release direction.
+
 ## Typed budget and Brainstorm artifact repair need live dogfood (2026-07-25)
 
 Focused source tests pin Claude's structured `error_max_budget_usd` result as a

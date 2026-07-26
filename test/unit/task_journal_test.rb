@@ -290,7 +290,9 @@ class TaskJournalTest < Minitest::Test
 
   def test_idempotent_append_wraps_low_level_io_failures
     with_writer do |writer, _dir|
-      writer.define_singleton_method(:append_records) { |_records| raise Errno::ENOSPC }
+      ledger = writer.instance_variable_get(:@ledger)
+      journal = ledger.instance_variable_get(:@journal)
+      journal.define_singleton_method(:append_idempotent) { |*| raise Errno::ENOSPC }
 
       error = assert_raises(Hive::TaskJournal::Error) do
         writer.append_idempotent(

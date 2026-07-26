@@ -20,6 +20,14 @@ tags: [module, workflow, verbs, selection, honeycomb, registry]
   - `#stage_for_dir(dir)` — soft lookup by `index-name` dir, returns the `Stage` or nil.
   - `#resolve_stage_ref(ref)` — accepts a full dir (`3-plan`) or short name (`plan`) and returns the canonical `Stage#dir` (or nil); used by `Approve` to canonicalize `--to`/`--from`.
   - `#has_stage?(ref)` — predicate wrapper around `#resolve_stage_ref`. An additive affordance (U6.3) for coding-scoped consumers to skip absent-stage behavior; it has no production call sites yet and is currently exercised only by its own unit test.
+- Workflow construction maps only `id`, stage name/index/dir/kind, and incoming
+  advance-verb presence into `Hive::WorkLedger.validate_descriptor`.
+  WorkLedger rejects empty identities/stage lists, gapped ordering, duplicate
+  names/dirs, unknown caller-supplied kinds, and a leading advance verb without
+  loading condition or coding policy. `Hive::Workflow` preserves its
+  `ArgumentError` compatibility surface. YAML slug/filename rules, agent and
+  permission lookup, conditions, terminal/deliverable/workspace/handoff rules,
+  and built-in kind policy remain in Hive's descriptor adapters.
 - `Hive::Workflow::Stage` — frozen stage value object. `#dir` returns `"#{index}-#{name}"`; metadata such as `kind`, `skill`, `instruction`, `permissions`, `status_mode`, `budget_usd`, `timeout_sec`, `capability`, `agent`, `model`, `effort`, `input`, `reviewers`, `council`, and `deliverable` is carried for runner selection, prompt rendering, and status classification. The generic runner path consumes `kind: :agent` (for runner selection), `state_file` (`agent.rb:20`), `skill`, `instruction`, descriptor-level `permissions`, `budget_usd`, `timeout_sec`, and per-stage `agent`/`model`/`effort` overrides. `kind: :council` routes to [[stages/council]] and carries typed `Workflow::Reviewer`, `Workflow::Council`, and optional `Workflow::Revise` values. Coding's action classifier consumes `kind: :execute`, `kind: :review_council`, and `kind: :finalize`; project-authored descriptors still expose only parser-supported user-facing kinds. As of U6 the runner also honors the descriptor's `status_mode`, falling back to `:state_file_marker` only when the stage leaves it unset (`agent.rb:53`); terminal agent/council stages can declare `deliverable` (defaulting to `state_file`) and classify as archived only when that artifact is non-empty.
 - `Hive::Workflow::AdvanceVerb` — frozen value object for the verb that advances into a stage, with `force_source` and `interactive` flags defaulting false.
 - `Hive::Workflows::Coding::DESCRIPTOR` — the default built-in descriptor (`id: :coding`), matching the current nine-stage pipeline exactly. Its action semantics for coding `:agent`/`:inert` stages live in `Hive::Workflows::Coding::ACTION_DISPATCH`; execute/review/finalize route by their runtime primitive kinds.

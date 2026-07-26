@@ -1,4 +1,4 @@
-require "hive/conditions/policy"
+require "hive/work_ledger"
 
 module Hive
   Workflow = Data.define(:id, :stages) do
@@ -157,34 +157,22 @@ module Hive
     # one load-time error at the descriptor that introduced the typo. Coding and
     # every test fixture satisfy it with no behavior change.
     def validate_structure!
-      raise ArgumentError, "workflow #{id.inspect} must declare at least one stage" if stages.empty?
-
-      expected = (1..stages.length).to_a
-      actual = map(&:index)
-      actual == expected or
-        raise ArgumentError,
-              "workflow #{id.inspect} stage indices must be #{expected.inspect} in order, got #{actual.inspect}"
-
-      reject_duplicates!(map(&:name), "stage names")
-      reject_duplicates!(map(&:dir), "stage dirs")
-
-      each do |stage|
-        KNOWN_KINDS.include?(stage.kind) or
-          raise ArgumentError,
-                "workflow #{id.inspect} stage #{stage.name.inspect} has unknown kind #{stage.kind.inspect} " \
-                "(known: #{KNOWN_KINDS.map(&:inspect).join(', ')})"
+      structural_stages = stages.map do |stage|
+        {
+          name: stage.name,
+          index: stage.index,
+          dir: stage.dir,
+          kind: stage.kind,
+          advance_verb: stage.advance_verb
+        }
       end
-
-      stages.first.advance_verb.nil? or
-        raise ArgumentError,
-              "workflow #{id.inspect} first stage #{stages.first.name.inspect} must not declare an " \
-              "advance_verb (no stage precedes it to advance from)"
-    end
-
-    def reject_duplicates!(values, label)
-      return if values.uniq.length == values.length
-
-      raise ArgumentError, "workflow #{id.inspect} has duplicate #{label}: #{values.inspect}"
+      Hive::WorkLedger.validate_descriptor(
+        identity: id,
+        stages: structural_stages,
+        allowed_kinds: KNOWN_KINDS
+      )
+    rescue Hive::WorkLedger::InvalidDescriptor => e
+      raise ArgumentError, "workflow #{id.inspect} #{e.message}"
     end
   end
 end

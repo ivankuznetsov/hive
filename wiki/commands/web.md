@@ -739,7 +739,10 @@ manifest; the text form reports the retained artifact count and destination.
 `hive web capture-server` is an internal recorder interface. It requires an
 exact clean source root, private runtime root, lifecycle token, and inherited
 control descriptor. A lockfile-keyed `SourceBundle` cache installs the web gems
-outside the source worktree under a private flock and atomic rename, then the
+outside the source worktree under a private flock and atomic rename. It invokes
+the exact `BUNDLED WITH` version through RubyGems rather than assuming the
+`bundle` shim is on the service or agent PATH; a missing locked Bundler fails
+before cache population. The
 supervisor prepares isolated assets/databases, binds literal `127.0.0.1` on an
 allocated port, and emits `hive-web-capture-runtime` v1 readiness JSON. Closing
 the control channel tears down the owned process group and runtime.

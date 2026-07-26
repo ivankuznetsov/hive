@@ -4,6 +4,7 @@ require "find"
 require "json"
 require "open3"
 require "rbconfig"
+require "rubygems"
 require "securerandom"
 require "tmpdir"
 require "time"
@@ -138,11 +139,7 @@ module Hive
           "RUBYOPT" => nil,
           "RUBYLIB" => nil
         }.compact
-        ok = @runner.call(
-          %w[bundle install --jobs 4 --retry 2],
-          env,
-          chdir: File.join(@source_root, "web")
-        )
+        ok = @runner.call(bundle_install_argv, env, chdir: File.join(@source_root, "web"))
         raise BootstrapError, "locked web bundle install failed (dependency may be unavailable offline)" unless ok
         assert_lockfiles_unchanged!(before)
 
@@ -168,6 +165,31 @@ module Hive
           err: $stderr,
           unsetenv_others: true
         )
+      end
+
+      def bundle_install_argv
+        version = locked_bundler_version
+        executable = Gem.bin_path("bundler", "bundle", "= #{version}")
+        unless File.file?(executable)
+          raise BootstrapError, "locked Bundler #{version} executable is unavailable"
+        end
+
+        [ RbConfig.ruby, executable, "install", "--jobs", "4", "--retry", "2" ]
+      rescue Gem::GemNotFoundException
+        raise BootstrapError,
+              "locked Bundler #{version} is unavailable; install Bundler #{version} before capture"
+      end
+
+      def locked_bundler_version
+        lockfile = File.join(@source_root, "web", "Gemfile.lock")
+        version = File.read(lockfile)[/^BUNDLED WITH\s*\n\s+(\S+)\s*$/m, 1].to_s
+        unless version.match?(/\A\d+(?:\.\d+){1,3}(?:[.-][0-9A-Za-z]+)*\z/)
+          raise BootstrapError, "#{lockfile} has no valid BUNDLED WITH version"
+        end
+
+        version
+      rescue Errno::ENOENT
+        raise BootstrapError, "required locked web dependency file is missing: #{lockfile}"
       end
 
       def cache_valid?(destination, key, lock_state)

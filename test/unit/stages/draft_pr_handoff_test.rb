@@ -840,6 +840,66 @@ class StagesDraftPrHandoffTest < Minitest::Test
     end
   end
 
+  def test_local_identity_translates_direct_ancestry_gate_errors
+    context = Hive::Stages::AgentWorktree::Context.new(
+      worktree_path: "/repo", task_branch: "fix", base_branch: "main",
+      base_oid: "a" * 40, repository: "github.com/acme/widgets"
+    )
+    fake_git = lambda do |_path, operation, **_kwargs|
+      raise Hive::AgentGitGate::CommandFailed, "ancestry unavailable" if operation == :ancestor
+
+      stdout = case operation
+      when :current_branch then "fix\n"
+      when :head_oid then "#{'b' * 40}\n"
+      else ""
+      end
+      Hive::AgentGitGate::ReadResult.new(
+        operation: operation, stdout: stdout, stderr: "",
+        exitstatus: 0, overflow: false
+      )
+    end
+
+    with_replaced_singleton_method(Hive::AgentGitGate, :read, fake_git) do
+      error = assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+        Hive::Stages::DraftPrHandoff.send(
+          :assert_local_identity!, context, "b" * 40
+        )
+      end
+      assert_includes error.message, "ancestry unavailable"
+    end
+  end
+
+  def test_hardened_read_helpers_translate_gate_and_binary_process_failures
+    with_replaced_singleton_method(
+      Hive::AgentGitGate, :read,
+      ->(*) { raise Hive::AgentGitGate::CommandFailed, "gate unavailable" }
+    ) do
+      assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+        Hive::Stages::DraftPrHandoff.send(:git_read!, "/repo", :head_oid)
+      end
+      assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+        Hive::Stages::DraftPrHandoff.send(
+          :git_read_binary!, "/repo", :diff, max_bytes: 10,
+          base_oid: "a" * 40, head_oid: "b" * 40
+        )
+      end
+    end
+
+    failed = Hive::AgentGitGate::ReadResult.new(
+      operation: :diff, stdout: "", stderr: "\xFF".b,
+      exitstatus: 1, overflow: false
+    )
+    with_replaced_singleton_method(Hive::AgentGitGate, :read, ->(*) { failed }) do
+      error = assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+        Hive::Stages::DraftPrHandoff.send(
+          :git_read_binary!, "/repo", :diff, max_bytes: 10,
+          base_oid: "a" * 40, head_oid: "b" * 40
+        )
+      end
+      assert_includes error.message, "?"
+    end
+  end
+
   private
 
   def with_handoff_fixture(create_visible: true)

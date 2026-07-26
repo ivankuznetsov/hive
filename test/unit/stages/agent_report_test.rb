@@ -291,6 +291,40 @@ class StagesAgentReportTest < Minitest::Test
     assert_operator calls, :>=, 4
   end
 
+  def test_repository_validation_translates_direct_ancestry_gate_errors
+    fake_git = lambda do |_path, operation, **_kwargs|
+      raise Hive::AgentGitGate::CommandFailed, "ancestry unavailable" if operation == :ancestor
+
+      stdout = operation == :current_branch ? "fix-task\n" : "#{'b' * 40}\n"
+      Hive::AgentGitGate::ReadResult.new(
+        operation: operation, stdout: stdout, stderr: "",
+        exitstatus: 0, overflow: false
+      )
+    end
+    context = context_for("/tmp/repo", "a" * 40)
+    with_replaced_singleton_method(Hive::AgentGitGate, :read, fake_git) do
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::AgentReport.validate_repository!(
+          Hive::Stages::AgentReport.parse(VALID_REPORT), context
+        )
+      end
+      assert_includes error.message, "ancestry unavailable"
+    end
+  end
+
+  def test_git_read_failure_uses_stdout_when_stderr_is_empty
+    failed = Hive::AgentGitGate::ReadResult.new(
+      operation: :head_oid, stdout: "missing object", stderr: "",
+      exitstatus: 1, overflow: false
+    )
+    with_replaced_singleton_method(Hive::AgentGitGate, :read, ->(*) { failed }) do
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::AgentReport.send(:git_read!, "/tmp/repo", :head_oid)
+      end
+      assert_includes error.message, "missing object"
+    end
+  end
+
   private
 
   def context_for(repo, base, branch: "fix-task")

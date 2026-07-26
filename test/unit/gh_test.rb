@@ -949,6 +949,38 @@ def test_managed_origin_push_url_uses_hardened_git_boundary
   assert captured.fetch(:push)
 end
 
+def test_managed_git_boundary_failures_are_translated_to_gh_errors
+  with_replaced_singleton_method(
+    Hive::AgentGitGate, :observe_remote_branch,
+    ->(**) { raise Hive::AgentGitGate::CommandFailed, "observation failed" }
+  ) do
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.remote_branch_oid("/tmp/wt", "feature", managed: true)
+    end
+    assert_includes error.message, "observation failed"
+  end
+
+  with_replaced_singleton_method(
+    Hive::AgentGitGate, :remote_urls,
+    ->(**) { %w[https://one.example/repo.git https://two.example/repo.git] }
+  ) do
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.origin_push_url("/tmp/wt", managed: true)
+    end
+    assert_includes error.message, "2 records"
+  end
+
+  with_replaced_singleton_method(
+    Hive::AgentGitGate, :remote_urls,
+    ->(**) { raise Hive::AgentGitGate::CommandFailed, "URL lookup failed" }
+  ) do
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.origin_push_url("/tmp/wt", managed: true)
+    end
+    assert_includes error.message, "URL lookup failed"
+  end
+end
+
 def test_managed_remote_branch_lookup_uses_hardened_git_boundary
   captured = nil
   observation = Hive::AgentGitGate::RemoteObservation.new(

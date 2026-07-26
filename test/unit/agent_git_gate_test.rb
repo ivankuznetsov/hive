@@ -4,6 +4,12 @@ require "hive/agent_git_gate"
 class AgentGitGateTest < Minitest::Test
   include HiveTestHelper
 
+  GateStatus = Data.define(:exitstatus) do
+    def success?
+      exitstatus.zero?
+    end
+  end
+
   def test_closed_reads_reject_unknown_operations_and_arguments_before_spawn
     assert_raises(Hive::AgentGitGate::UnsupportedOperation) do
       Hive::AgentGitGate.read("/tmp", :config)
@@ -298,7 +304,356 @@ class AgentGitGateTest < Minitest::Test
     end
   end
 
+  def test_closed_read_vocabulary_covers_object_history_and_diff_queries
+    with_tmp_git_repo do |repo|
+      base = commit_file(repo, "one.txt", "one\n", "one")
+      head = commit_file(repo, "two.txt", "two\n", "two")
+
+      assert_equal head, Hive::AgentGitGate.read(repo, :commit_oid, oid: head).stdout.strip
+      assert Hive::AgentGitGate.read(repo, :ancestor, base_oid: base, head_oid: head).success?
+      assert_equal "1", Hive::AgentGitGate.read(
+        repo, :commit_count, base_oid: base, head_oid: head
+      ).stdout.strip
+      assert_equal [ head ], Hive::AgentGitGate.read(
+        repo, :commits, base_oid: base, head_oid: head
+      ).stdout.lines.map(&:strip)
+      assert_predicate Hive::AgentGitGate.read(
+        repo, :object_list, base_oid: base, head_oid: head
+      ).stdout, :frozen?
+      assert_equal "commit", Hive::AgentGitGate.read(repo, :object_type, oid: head).stdout.strip
+      assert_operator Integer(
+        Hive::AgentGitGate.read(repo, :object_size, oid: head).stdout.strip, 10
+      ), :positive?
+      assert_equal "two\n", Hive::AgentGitGate.read(
+        repo, :object_content, oid: head, path: "two.txt"
+      ).stdout
+      assert_equal [ "two.txt" ], Hive::AgentGitGate.read(
+        repo, :changed_paths, base_oid: base, head_oid: head
+      ).stdout.split("\0")
+      assert_includes Hive::AgentGitGate.read(
+        repo, :diff, base_oid: base, head_oid: head
+      ).stdout, "two.txt"
+      assert_includes Hive::AgentGitGate.read(repo, :commit_patch, oid: head).stdout, "two"
+
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate.read(repo, :object_content, oid: head, path: "/etc/passwd")
+      end
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate.read(repo, :status, max_stdout_bytes: Object.new)
+      end
+    end
+  end
+
+  def test_materialization_rejects_mismatched_objects_and_unsafe_destinations
+    with_tmp_git_repo do |repo|
+      first = commit_file(repo, "one.txt", "one\n", "one")
+      second = commit_file(repo, "two.txt", "two\n", "two")
+      Dir.mktmpdir("agent-git-materialization-errors") do |root|
+        occupied = File.join(root, "occupied")
+        File.write(occupied, "not a worktree\n")
+        assert_raises(Hive::AgentGitGate::MaterializationFailed) do
+          Hive::AgentGitGate.materialize(
+            repository_path: repo, oid: first,
+            destination: occupied, destination_root: root
+          )
+        end
+
+        attached = File.join(root, "attached")
+        run!("git", "-C", repo, "branch", "agent-attached", first)
+        run!("git", "-C", repo, "worktree", "add", attached, "agent-attached")
+        assert_raises(Hive::AgentGitGate::MaterializationFailed) do
+          Hive::AgentGitGate.materialize(
+            repository_path: repo, oid: first,
+            destination: attached, destination_root: root
+          )
+        end
+
+        mismatched = File.join(root, "mismatched")
+        run!("git", "-C", repo, "worktree", "add", "--detach", mismatched, first)
+        assert_raises(Hive::AgentGitGate::MaterializationFailed) do
+          Hive::AgentGitGate.materialize(
+            repository_path: repo, oid: second,
+            destination: mismatched, destination_root: root
+          )
+        end
+
+        assert_raises(Hive::AgentGitGate::InvalidRequest) do
+          Hive::AgentGitGate.materialize(
+            repository_path: repo, oid: first,
+            destination: File.join(root, "missing", "exact"),
+            destination_root: File.join(root, "missing")
+          )
+        end
+
+        outside = Dir.mktmpdir("agent-git-materialization-outside")
+        File.symlink(outside, File.join(root, "outside-link"))
+        assert_raises(Hive::AgentGitGate::InvalidRequest) do
+          Hive::AgentGitGate.materialize(
+            repository_path: repo, oid: first,
+            destination: File.join(root, "outside-link"), destination_root: root
+          )
+        end
+        File.symlink(File.join(root, "missing-target"), File.join(root, "broken-link"))
+        assert_raises(Hive::AgentGitGate::InvalidRequest) do
+          Hive::AgentGitGate.materialize(
+            repository_path: repo, oid: first,
+            destination: File.join(root, "broken-link"), destination_root: root
+          )
+        end
+        File.symlink(root, File.join(root, "root-link"))
+        assert_raises(Hive::AgentGitGate::InvalidRequest) do
+          Hive::AgentGitGate.materialize(
+            repository_path: repo, oid: first,
+            destination: File.join(root, "root-link"), destination_root: root
+          )
+        end
+        FileUtils.remove_entry(outside)
+      end
+
+      with_replaced_singleton_method(
+        Hive::AgentGitGate, :command!, ->(*) { "f" * 40 }
+      ) do
+        Dir.mktmpdir("agent-git-resolution-mismatch") do |root|
+          assert_raises(Hive::AgentGitGate::MaterializationFailed) do
+            Hive::AgentGitGate.materialize(
+              repository_path: repo, oid: first,
+              destination: File.join(root, "exact"), destination_root: root
+            )
+          end
+        end
+      end
+      with_replaced_singleton_method(
+        Hive::AgentGitGate, :contained_destination,
+        ->(*) { raise Errno::EACCES, "blocked" }
+      ) do
+        assert_raises(Hive::AgentGitGate::MaterializationFailed) do
+          Hive::AgentGitGate.materialize(
+            repository_path: repo, oid: first,
+            destination: "/tmp/exact", destination_root: "/tmp"
+          )
+        end
+      end
+    end
+  end
+
+  def test_materialization_removal_requires_repository_registration
+    with_tmp_git_repo do |repo|
+      oid = commit_file(repo, "one.txt", "one\n", "one")
+      Dir.mktmpdir("agent-git-materialization-removal") do |root|
+        destination = File.join(root, "exact")
+        Hive::AgentGitGate.materialize(
+          repository_path: repo, oid: oid,
+          destination: destination, destination_root: root
+        )
+        assert_equal :removed, Hive::AgentGitGate.remove_materialization(
+          repository_path: repo, destination: destination, destination_root: root
+        )
+        assert_equal :absent, Hive::AgentGitGate.remove_materialization(
+          repository_path: repo,
+          destination: File.join(root, "absent"), destination_root: root
+        )
+
+        unregistered = File.join(root, "unregistered")
+        FileUtils.mkdir_p(unregistered)
+        assert_raises(Hive::AgentGitGate::MaterializationFailed) do
+          Hive::AgentGitGate.remove_materialization(
+            repository_path: repo,
+            destination: unregistered, destination_root: root
+          )
+        end
+      end
+    end
+  end
+
+  def test_remote_observation_rejects_ambiguous_invalid_and_changed_targets
+    absent = Hive::AgentGitGate::RemoteObservation.new(
+      remote_fingerprint: "f" * 64, branch: "main",
+      ref: "refs/heads/main", oid: nil
+    )
+    assert_raises(Hive::AgentGitGate::InvalidRequest) do
+      Hive::AgentGitGate.materialize_remote(
+        repository_path: "/tmp", remote: "https://example.com/repo.git",
+        observation: absent, destination: "/tmp/root/exact",
+        destination_root: "/tmp/root"
+      )
+    end
+
+    present = absent.with(oid: "a" * 40)
+    assert_raises(Hive::AgentGitGate::RemoteConflict) do
+      Hive::AgentGitGate.materialize_remote(
+        repository_path: "/tmp", remote: "https://example.com/repo.git",
+        observation: present, destination: "/tmp/root/exact",
+        destination_root: "/tmp/root"
+      )
+    end
+
+    with_replaced_singleton_method(
+      Hive::AgentGitGate, :remote_urls, ->(**) { %w[https://one.example/repo.git https://two.example/repo.git] }
+    ) do
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate.observe_remote_branch(
+          repository_path: "/tmp", branch: "main", remote: "origin"
+        )
+      end
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate.send(
+          :resolve_remote_target, "/tmp", "origin",
+          push: true, allow_local_transport: false
+        )
+      end
+    end
+    with_replaced_singleton_method(
+      Hive::AgentGitGate, :remote_urls, ->(**) { [ "https://one.example/repo.git" ] }
+    ) do
+      assert_equal "https://one.example/repo.git", Hive::AgentGitGate.send(
+        :resolve_remote_target, "/tmp", "origin",
+        push: false, allow_local_transport: false
+      )
+    end
+
+    successful = GateStatus.new(exitstatus: 0)
+    outputs = [
+      "#{'a' * 40}\trefs/heads/main\n#{'b' * 40}\trefs/heads/main\n",
+      "not-an-oid\trefs/heads/main\n"
+    ]
+    with_replaced_singleton_method(
+      Hive::AgentGitGate, :capture,
+      ->(*) { [ outputs.shift, "", successful, false ] }
+    ) do
+      2.times do
+        assert_raises(Hive::AgentGitGate::CommandFailed) do
+          Hive::AgentGitGate.observe_remote_branch(
+            repository_path: "/tmp", branch: "main",
+            remote: "https://example.com/repo.git"
+          )
+        end
+      end
+    end
+
+    failed = Hive::AgentGitGate::ReadResult.new(
+      operation: :remote_urls, stdout: "", stderr: "failed",
+      exitstatus: 1, overflow: false
+    )
+    with_replaced_singleton_method(
+      Hive::AgentGitGate, :read_result, ->(*) { failed }
+    ) do
+      assert_raises(Hive::AgentGitGate::CommandFailed) do
+        Hive::AgentGitGate.remote_urls(repository_path: "/tmp")
+      end
+    end
+  end
+
+  def test_transport_and_branch_validation_cover_supported_and_refused_shapes
+    scp = Hive::AgentGitGate.send(
+      :validate_transport_target, "git@example.com:acme/repo.git",
+      allow_local_transport: false
+    )
+    https = Hive::AgentGitGate.send(
+      :validate_transport_target, "https://example.com/acme/repo.git",
+      allow_local_transport: false
+    )
+    assert_predicate scp, :frozen?
+    assert_predicate https, :frozen?
+
+    [ "-bad", "http://example.com/repo.git" ].each do |target|
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate.send(
+          :validate_transport_target, target, allow_local_transport: false
+        )
+      end
+    end
+    assert_raises(Hive::AgentGitGate::InvalidRequest) do
+      Hive::AgentGitGate.observe_remote_branch(
+        repository_path: "/tmp", branch: "bad//branch",
+        remote: "https://example.com/repo.git"
+      )
+    end
+  end
+
+  def test_publication_refuses_unverifiable_local_and_remote_outcomes
+    oid = "a" * 40
+    with_replaced_singleton_method(
+      Hive::AgentGitGate, :command!, ->(*) { "b" * 40 }
+    ) do
+      assert_raises(Hive::AgentGitGate::PublicationFailed) do
+        Hive::AgentGitGate.publish(
+          repository_path: "/tmp", oid: oid, branch: "agent/change",
+          remote: "https://example.com/repo.git",
+          expected_remote_absent: true
+        )
+      end
+    end
+
+    assert_stubbed_publication_failure(
+      before_oid: nil, after_oid: "b" * 40, exitstatus: 1,
+      error_class: Hive::AgentGitGate::RemoteConflict,
+      message: "changed during exact publication"
+    )
+    assert_stubbed_publication_failure(
+      before_oid: nil, after_oid: nil, exitstatus: 0,
+      error_class: Hive::AgentGitGate::PublicationFailed,
+      message: "was not observable"
+    )
+    assert_stubbed_publication_failure(
+      before_oid: nil, after_oid: nil, exitstatus: 1,
+      error_class: Hive::AgentGitGate::PublicationFailed,
+      message: "publication failed"
+    )
+
+    with_replaced_singleton_method(
+      Hive::AgentGitGate, :publication_expectation,
+      ->(*) { raise TypeError, "invalid expectation type" }
+    ) do
+      error = assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate.publish(
+          repository_path: "/tmp", oid: oid, branch: "agent/change",
+          remote: "https://example.com/repo.git",
+          expected_remote_absent: true
+        )
+      end
+      assert_includes error.message, "invalid expectation type"
+    end
+  end
+
   private
+
+  def assert_stubbed_publication_failure(before_oid:, after_oid:, exitstatus:,
+                                         error_class:, message:)
+    oid = "a" * 40
+    observations = [ before_oid, after_oid ].map do |observed_oid|
+      Hive::AgentGitGate::RemoteObservation.new(
+        remote_fingerprint: "f" * 64, branch: "agent/change",
+        ref: "refs/heads/agent/change", oid: observed_oid
+      )
+    end
+    with_replaced_singleton_method(
+      Hive::AgentGitGate, :command!, ->(*) { oid }
+    ) do
+      with_replaced_singleton_method(
+        Hive::AgentGitGate, :resolve_remote_target,
+        ->(*) { "https://example.com/repo.git" }
+      ) do
+        with_replaced_singleton_method(
+          Hive::AgentGitGate, :observe_resolved_remote,
+          ->(*) { observations.shift }
+        ) do
+          with_replaced_singleton_method(
+            Hive::AgentGitGate, :capture,
+            ->(*) { [ "", "", GateStatus.new(exitstatus: exitstatus), false ] }
+          ) do
+            error = assert_raises(error_class) do
+              Hive::AgentGitGate.publish(
+                repository_path: "/tmp", oid: oid, branch: "agent/change",
+                remote: "https://example.com/repo.git",
+                expected_remote_absent: true
+              )
+            end
+            assert_includes error.message, message
+          end
+        end
+      end
+    end
+  end
 
   def with_local_remote
     Dir.mktmpdir("agent-git-remote") do |root|

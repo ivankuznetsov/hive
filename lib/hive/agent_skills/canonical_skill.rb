@@ -4,6 +4,9 @@ require "pathname"
 require "rubygems/version"
 require "yaml"
 
+require "hive/version"
+require "hive/agent_skills/errors"
+
 module Hive
   module AgentSkills
     # Loads the gem-packaged Hive operating policy and renders deterministic
@@ -21,7 +24,7 @@ module Hive
         "pi" => { invocation: "/skill:hive", destination_relative: "skills/hive" }
       }.freeze
 
-      class ValidationError < Hive::ConfigError; end
+      ValidationError = Hive::AgentSkills::ValidationError
 
       Projection = Data.define(
         :platform, :invocation, :destination_relative, :skill_version,

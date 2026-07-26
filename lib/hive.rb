@@ -1,5 +1,7 @@
+require_relative "hive/version"
+require_relative "hive/errors"
+
 module Hive
-  VERSION = "0.6.9".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
   # Canonical GitHub org + repo. Referenced by the release probe
   # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.
@@ -485,25 +487,6 @@ module Hive
   #
   # Subclasses below override `exit_code` so any `raise Hive::SomeError` ->
   # `bin/hive` rescue path produces the right code automatically.
-  module ExitCodes
-    SUCCESS = 0
-    GENERIC = 1
-    ALREADY_INITIALIZED = 2
-    TASK_IN_ERROR = 3
-    WRONG_STAGE = 4
-    USAGE = 64
-    UNAVAILABLE = 69
-    SOFTWARE = 70
-    TEMPFAIL = 75
-    CONFIG = 78
-  end
-
-  class Error < StandardError
-    def exit_code
-      ExitCodes::GENERIC
-    end
-  end
-
   class InvalidTaskPath < Error
     def exit_code
       ExitCodes::USAGE
@@ -579,12 +562,6 @@ module Hive
   end
 
   class TmuxError < AgentError
-  end
-
-  class ConfigError < Error
-    def exit_code
-      ExitCodes::CONFIG
-    end
   end
 
   # A project config reached the shared loader with unsupported root keys.

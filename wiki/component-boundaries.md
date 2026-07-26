@@ -21,7 +21,7 @@ the first and primary consumer.
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
-| Skillpack | `candidate` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
+| Skillpack | `boundary-ready` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
 | Safe Agent Git Gate | `candidate` | `require "hive/managed_git"` → `Hive::ManagedGit` | [[modules/git_ops]] |
 | WorkLedger | `candidate` | `require "hive/task_journal"` → `Hive::TaskJournal` | [[state-model]] |
 
@@ -90,6 +90,20 @@ atomic replacement, backups, manager operations, and removal below one clean
 entry point. The daemon, bot, web, setup, init, status, and uninstall surfaces
 remain Hive-owned adapters for templates, policy, messages, JSON, prompts, and
 global sequencing.
+
+`Skillpack` is boundary-ready around canonical compilation and atomic
+projection. The clean entry point exposes deterministic `Projection`,
+`ProjectionReport`, and `Plan` values plus typed validation, unsafe-path,
+stale-plan, and foreign-content errors. `render`, `inspect`, and `plan` are
+non-mutating; `apply` accepts only a preview-bound plan and revalidates it
+before a private staged whole-directory swap. OpenClaw, Claude, Codex, and Pi
+share one closed projection registry. Hive configuration, workflow target
+selection, native plugin/package inventory, consent, CLI JSON, and
+presentation remain lazily loaded Hive adapters above that mechanism.
+Production commands and web code require only the facade; the catalog rejects
+new direct requires or construction of the compiler, publisher, inspector,
+provisioner, target resolver, command runner, manifest, or adapter registry.
+This internal boundary is not a gem or a publication commitment.
 
 ## Catalog contract
 

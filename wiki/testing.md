@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release}.yml, packaging/live_agent_skills/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, release-proof]
 ---
 
@@ -57,6 +57,21 @@ bundle exec rake test:babysitter_dry_run_security_matrix
 The packaged-web gate is commit-bound: it archives `HEAD:web` to reproduce the
 release artifact. Commit relevant web changes before using that task locally;
 otherwise it deliberately tests the previously committed tree.
+
+The standalone Agent CLI Runtime component suite is part of the root `test`
+dependency graph and also has an explicit task:
+
+```bash
+bundle exec rake test:agent_cli_runtime
+bundle exec ruby -Itest -Ilib test/unit/agent_cli_runtime_component_test.rb
+bundle exec ruby -Itest -Ilib test/unit/agent_cli_runtime_release_contract_test.rb
+```
+
+The first command runs the package's own tests. The two root files pin
+Hive/package behavioral parity and the component release workflow contract.
+Parity covers non-default compilation, successful local probes, custom named
+capabilities, nested/missing usage variants, and observable redaction across
+Claude, Codex, Pi, and Grok.
 
 ## Component boundary contract
 

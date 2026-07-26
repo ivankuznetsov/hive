@@ -11,6 +11,25 @@ tags: [gap, todo, release-proof, agent-skills]
 
 ## Current release gap
 
+- `agent-cli-runtime` 0.1.0 has a self-contained package, exact-artifact
+  verifier, Linux/macOS install matrix, and component-scoped trusted-publishing
+  workflow. Repository-hosted controls remain operator work: the
+  `components/agent-cli-runtime/v*` tag ruleset must restrict creation, update,
+  deletion, and bypass; the `agent-cli-runtime-release` environment must
+  require release reviewers and permit only matching component tags; and the
+  RubyGems pending publisher must match that environment identity. Until the
+  package PR is merged, those controls are verified, the component tag workflow
+  succeeds, and a fresh remote install matches the retained checksum, this is
+  release-ready source evidence rather than proof of a public gem. Hive
+  intentionally keeps its internal
+  implementation authoritative and does not depend on the unpublished package;
+  the separately authorized cutover follows remote verification.
+  Candidate/install/publish jobs have a 15-minute job timeout and retain the
+  exact candidate for 30 days. The install verifier does not add a second,
+  per-subprocess timeout around each gem command; a hung child can therefore
+  consume the remainder of its bounded job before cancellation. This narrow
+  operational risk is accepted for 0.1.0 rather than duplicating process
+  supervision in release shell.
 - Native package-layout integration now proves that an installed gem plus
   authenticated, real `git archive` managed bundle resolves `hive-cli` from
   the package root and reaches the setup service seam without a parent

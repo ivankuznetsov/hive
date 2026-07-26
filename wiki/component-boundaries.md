@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -19,7 +19,7 @@ the first and primary consumer.
 |-----------|-------|---------------------|-------------------|
 | Attempts admission / future RunReceipt | `candidate` | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | UserService | `candidate` | `require "hive/commands/service_installer/base"` → `Hive::Commands::ServiceInstaller::Base` | [[commands/daemon]] |
-| Agent ABI | `boundary-ready` | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_profile]] |
+| Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `candidate` | `require "hive/protected_files"` → `Hive::ProtectedFiles` | [[modules/protected_files]] |
 | Skillpack | `candidate` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
 | Safe Agent Git Gate | `candidate` | `require "hive/managed_git"` → `Hive::ManagedGit` | [[modules/git_ops]] |
@@ -45,6 +45,14 @@ lifetime, timeouts, retries, workflow selection, artifact acceptance, and
 stage success. `Hive::SecretPatterns` remains shared Hive infrastructure rather
 than component-owned state: both the ABI's bounded diagnostics and the future
 artifact firewall consume it.
+
+The package-only extraction lives at `components/agent-cli-runtime/` and
+publishes the neutral `AgentCliRuntime` namespace plus the bounded
+`agent-runtime` diagnostic executable. Until the separately held Hive cutover,
+`Hive::AgentRuntime` remains Hive's authoritative implementation and package
+parity tests prevent the temporary publication-window copy from drifting.
+Landing the package does not change Hive's gem dependency graph. See
+[[modules/agent_cli_runtime]] for the public surface and release boundary.
 
 ## Catalog contract
 
@@ -98,5 +106,7 @@ Change one component per PR. Update its catalog row, focused consumer tests,
 narrative wiki page, this page, and a `wiki/log.d/` fragment together. Promote
 to `boundary-ready` only after clean loading, dependency direction, direct
 consumer routing, focused tests, the broad Hive suite, and exact-head hosted CI
-all pass. Packaging remains a separate, later decision gated by demonstrated
-non-Hive demand and explicit release authority.
+all pass. Packaging remains a separate decision gated by demonstrated non-Hive
+demand and explicit release authority. Agent CLI Runtime has passed that gate
+with HiveBench as the named adopter; no other catalog row inherits that
+decision.

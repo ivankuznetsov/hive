@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [decisions, adr]
 ---
 
@@ -21,7 +21,21 @@ Implementation readiness and standalone product value are different rankings. `H
 
 A component becomes package-eligible only after its internal boundary is stable, a named non-Hive adopter or maintained integration proves demand, the component loads and tests independently without an upward Hive dependency, compatibility and maintenance ownership are explicit, and an exact built gem installs cleanly. A qualifying package stays in this repository under `components/<gem-name>/`, uses independent SemVer, and remains a path dependency for source development while released `hive-cli` declares a normal compatible dependency. Package publication is explicit and component-scoped; path changes may select tests but never publish.
 
-**Consequences:** The immediate work changes module ownership and dependency discipline, not repository layout or release topology. Each component lands in its own reviewable PR with focused tests, a full Hive integration checkpoint, hosted CI, and wiki updates. No gem name, namespace, version, package directory, tag, or publication is implied by reaching an internal boundary.
+**Consequences:** The initial work changes module ownership and dependency
+discipline before release topology. Each component lands in its own reviewable
+PR with focused tests, a full Hive integration checkpoint, hosted CI, and wiki
+updates. No gem name, namespace, version, package directory, tag, or publication
+is implied by reaching an internal boundary.
+
+Agent ABI is the first component to pass the later package gate. It has the
+approved public identity `agent-cli-runtime` 0.1.0, namespace
+`AgentCliRuntime`, require path `agent_cli_runtime`, and executable
+`agent-runtime`, with HiveBench as its named non-Hive adopter. The package
+remains under `components/agent-cli-runtime/`; its package-only landing does not
+change Hive's dependency graph. Publication uses the disjoint
+`components/agent-cli-runtime/vX.Y.Z` tag and exact-artifact trusted publishing.
+Hive's dependency cutover remains separate and follows only after remote
+RubyGems verification.
 
 `config/component-boundaries.yml` is the canonical machine-readable inventory,
 and [[component-boundaries]] explains its states and enforcement. A test-only

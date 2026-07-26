@@ -276,9 +276,13 @@ class AgentProfilesTest < Minitest::Test
     end
   end
 
-  def test_grok_logged_in_rejects_relative_auth_path_even_with_api_key
-    with_env("GROK_AUTH_PATH" => "auth.json", "XAI_API_KEY" => "test-key") do
-      refute Hive::AgentProfiles.logged_in?(:grok)
+  def test_grok_logged_in_ignores_unused_relative_paths_with_api_key
+    with_env(
+      "GROK_AUTH_PATH" => "auth.json",
+      "GROK_HOME" => "relative/grok-home",
+      "XAI_API_KEY" => "test-key"
+    ) do
+      assert Hive::AgentProfiles.logged_in?(:grok)
     end
   end
 

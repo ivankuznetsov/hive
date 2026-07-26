@@ -6,3 +6,5 @@
   and points operators to standalone `prdigest prose --deliver` or agent-owned
   `prdigest facts`.
 - Kept the unrelated `hive answer-digest` command and its host-local scheduler.
+- Moved the retained scheduler-base contract assertion into a dedicated test so
+  its abstraction remains independently covered after the PRDigest tests leave.

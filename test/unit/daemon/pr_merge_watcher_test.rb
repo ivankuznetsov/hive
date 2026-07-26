@@ -573,26 +573,50 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     end
   end
 
-  def test_invalid_identity_and_corrupt_store_block_only_observation
+  def test_non_github_identity_is_skipped_and_corrupt_store_blocks_only_observation
     with_merge_project(stages: [ "5-open-pr" ]) do |tasks, _home|
       gh = FakeGh.new
-      bad_lookup = lambda do |_project|
-        registration_for(tasks.first.project_root).merge(
-          "repository_identity" => "local:/tmp/app"
-        )
+      gh.define_singleton_method(:repository_identity) do |*, **|
+        raise "local registrations must not inspect a GitHub remote"
       end
-      watcher, = build_watcher(gh: gh, config_lookup: bad_lookup)
-      result = watcher.observe([ row_for(tasks.first) ], now: T0).first
-      assert_equal :blocked, result.fetch(:status)
-      assert_match(/repository identity/, result.fetch(:reason))
+      [ nil, "local:/tmp/app" ].each do |repository_identity|
+        lookup = lambda do |_project|
+          registration_for(tasks.first.project_root).merge(
+            "repository_identity" => repository_identity
+          )
+        end
+        watcher, = build_watcher(gh: gh, config_lookup: lookup)
+        result = watcher.observe([ row_for(tasks.first) ], now: T0).first
+        assert_equal :skipped, result.fetch(:status)
+        assert_match(/not applicable/, result.fetch(:reason))
+      end
 
-      watcher, store = build_watcher(gh: gh)
+      watcher, store = build_watcher(gh: FakeGh.new)
       watcher.observe([ row_for(tasks.first) ], now: T0)
       identity = identity_for(tasks.first.project_root)
       File.binwrite(store.path(identity.fetch("hive_state_path")), "{")
       result = watcher.observe([ row_for(tasks.first) ], now: T0 + 1).first
       assert_equal :blocked, result.fetch(:status)
       assert_match(/cannot continue/, result.fetch(:reason))
+    end
+  end
+
+  def test_github_repository_identity_drift_remains_blocked
+    with_merge_project(stages: [ "5-open-pr" ]) do |tasks, _home|
+      lookup = lambda do |_project|
+        registration_for(tasks.first.project_root).merge(
+          "repository_identity" => "github.com/acme/other"
+        )
+      end
+      watcher, = build_watcher(
+        gh: FakeGh.new, config_lookup: lookup
+      )
+
+      result = watcher.observe([ row_for(tasks.first) ], now: T0).first
+
+      assert_equal :blocked, result.fetch(:status)
+      assert_match(/must exactly match github\.com\/acme\/app/,
+                   result.fetch(:reason))
     end
   end
 

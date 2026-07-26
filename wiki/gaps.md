@@ -697,3 +697,16 @@ authenticated supplied diff URL, 15-minute CPU/RSS/scan sample, packaged
 bootstrap from committed `HEAD`, and one real clean ordinary-worktree
 Playwright capture with retained media remain U9 dogfood evidence; source tests
 do not close those live checks.
+
+## Recovery pipeline follow-ups need installed-main replay (2026-07-26)
+
+Focused tests pin three failures exposed by the current-main dogfood: an owned
+dirty execute worktree is retryable without weakening execute's clean committed
+completion boundary; `hive migrate` preflights and rebinds same-generation
+managed workflow configuration pins without partial rewrites; and merge
+reconciliation quietly skips registrations that have no GitHub identity while
+retaining strict identity-drift refusal. The remaining evidence is operational:
+merge and install the exact head, replay the stranded patrol execute task and
+the stale writing workflow pin, and observe at least one daemon tick with the
+local-only registrations present and no merge-reconciliation error. Keep this
+gap open until those three live checks are recorded.

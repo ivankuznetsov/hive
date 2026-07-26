@@ -9,8 +9,9 @@ tags: [command, migration, config, reviewers, stages, task-id, display-name, rec
 
 **TLDR**: `hive migrate [PROJECT_PATH]` is the explicit, idempotent upgrade
 path for legacy project config, tasks created before the PR-first layout and
-later 7-artifacts insertion, task-id/display-name sidecar additions, and the
-one-off recovery-state and recovery-marker identity cutovers.
+later 7-artifacts insertion, task-id/display-name sidecar additions, managed
+workflow configuration pins, and the one-off recovery-state and
+recovery-marker identity cutovers.
 
 ## Usage
 
@@ -69,6 +70,8 @@ After any stage-directory movement, or on an otherwise no-op migrated project, `
 
 - Existing numeric ids are skipped and never reassigned.
 - Existing display names are preserved when a null-id sidecar is repaired.
+- Id repair uses `TaskMeta.update_id`, preserving dependency, base-branch, and
+  complete managed workflow provenance rather than reconstructing `meta.yml`.
 - The global counter is first seeded above the maximum existing id in the scanned project, so cloned or partially migrated state continues from the highest committed sidecar id instead of restarting at 1.
 - Backfill order is deterministic: tasks sort by `idea.md` frontmatter `created_at`, then slug; tasks with no parseable `created_at` sort last by slug.
 
@@ -123,6 +126,27 @@ GitHub-only services such as the PR babysitter then skip them without making a
 failing `gh` call. If no origin can be resolved, the row remains unresolved and
 can be repaired after adding `origin` by rerunning `hive migrate`.
 
+## Managed workflow configuration pin cutover
+
+A managed workflow mapping can change agent, model, effort, or profile
+fingerprint without changing the immutable package generation. Existing tasks
+on that same source commit and manifest would otherwise remain pinned to an
+obsolete execution snapshot and fail closed forever after the old profile
+disappears.
+
+`hive migrate` compares each managed task with the currently selected
+configuration. When the workflow name, source commit, and manifest digest
+match, it validates the selected configuration against the installed package
+before changing any task, rewrites only
+`workflow_configuration_digest`, and preserves the rest of `meta.yml`.
+After every candidate validates, it updates all matching tasks and removes
+configuration snapshots that are no longer selected or referenced. Tasks on a
+different package generation are intentionally untouched because changing
+their descriptor or instructions requires a workflow-specific migration.
+
+The cutover is idempotent. Updating one or more pins restarts a running daemon
+so its managed-workflow cache observes the new selection immediately.
+
 ## Commit behavior
 
 All changes run under the project commit lock. The command stages and commits changes inside `.hive-state` only when there is a diff:
@@ -131,7 +155,8 @@ All changes run under the project commit lock. The command stages and commits ch
 - `hive: migrate config keys (no tasks moved)` for config-only rewrites.
 - `hive: migrate task ids (N tasks)` for id-only backfills.
 - `hive: migrate recovery markers (N tasks)` for recovery-only identity backfills.
-- `hive: migrate project state (N ids, M recovery markers)` when multiple non-stage upgrades land together.
+- `hive: migrate managed workflow pins (N tasks)` for a configuration-pin-only cutover.
+- `hive: migrate project state (N ids, M recovery markers, P managed workflow pins)` when multiple non-stage upgrades land together; zero-value categories are omitted.
 - `hive: migrate display names (N tasks)` for display-name-only backfills.
 
 A rerun after successful migration prints that there is nothing to move and keeps the current stage directories in place.
@@ -142,7 +167,8 @@ A rerun after successful migration prints that there is nothing to move and keep
 - `test/integration/migrate_test.rb` covers stage-dir moves, the legacy
   reviewers relocation/conflict boundary, other config rewrites, task-id
   backfill order, display-name backfill, `ERROR` / `REVIEW_ERROR` identity
-  backfill, repository-identity backfill, idempotency, null-id repair, and
+  backfill, managed same-generation configuration rebinding and all-candidate
+  preflight, repository-identity backfill, idempotency, null-id repair, and
   counter seeding.
 - `test/unit/recovery/migration_test.rb` covers the global schema cutover,
   receipt idempotency, archived final compatibility records, queue upgrades,

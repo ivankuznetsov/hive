@@ -3,12 +3,12 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [attempts, ownership, leases, daemon, recovery]
 ---
 
 **TLDR**: Every accepted task-stage launch has one immutable attempt ID and
-one versioned JSON lease/receipt under `$HIVE_HOME/attempts/v1/`. A detached
+one versioned JSON lease/receipt under `$HIVE_HOME/attempts/v2/`. A detached
 supervisor wrapper—not the CLI, bot, web process, or daemon—owns the worker
 group, heartbeat, framed output, exit status, and terminal receipt. The daemon
 reconciles and applies policy; it does not own or reap task agents.
@@ -19,7 +19,7 @@ reconciles and applies policy; it does not own or reap task agents.
 |--------|----------------|
 | `API` | Provide Hive commands, bot delivery, and daemon recovery with the stable admission operations `dispatch`, `dispatch_request`, and `dispatch_successor`, while keeping one injected store shared by its foreground and daemon adapters. |
 | `Contracts` | Define the public `ClientResult`, `DispatchResult`, and `UnsupportedDetachment` values independently of the internal client, dispatcher, and launcher implementations. |
-| `Record`, `Store` | Write v2 records, ingest v1/v2, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. |
+| `Record`, `Store` | Read and write only v2 records, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. The default store fails closed while an old v1 root remains; daemon/bot startup or explicit `hive migrate` owns the one-off mutation. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, and expose process-local compatibility projections after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
 | `Dispatcher` | Resolve receipt replay, live duplicate attachment, loss deferral, capacity, fresh admission, and explicit successors. |
@@ -29,7 +29,6 @@ reconciles and applies policy; it does not own or reap task agents.
 | `CommandDispatch` | Give `hive run` and workflow stage commands one attach-result policy: shared durable dispatch, lost-attempt translation, receipt exit propagation, and single-document JSON fallback when a failed worker emitted no stdout. |
 | `Reconciler`, `ProcessIdentity` | Adopt without `wait2`, detect PID/start/session/group mismatch, preserve suspects, expire launches, and normalize loss. |
 | `DirtyStateCapture`, `LostOutcomeStore` | Inventory partial git/untracked/binary work without mutation and make cleanup/successor policy restart-idempotent. |
-| `LegacyBackfiller` | Create a compatibility lease only when legacy task/PID/start identity is trustworthy. |
 
 ## Admission API boundary
 
@@ -55,7 +54,7 @@ not a requirement of the module design.
 ## Storage and identity
 
 ```text
-$HIVE_HOME/attempts/v1/
+$HIVE_HOME/attempts/v2/
 ├── records/<attempt-id>.json
 ├── logs/<attempt-id>.frames
 ├── outputs/<attempt-id>/...
@@ -94,11 +93,20 @@ it.
 
 Condition projection adds an explicit numeric `task_input_epoch` to attempt
 records/context while retaining the prerequisite's opaque ownership generation
-as `ownership_generation`. That wire shape is `hive-attempt` v2; the original
-v1 schema remains unchanged. Old v1 records remain readable and bridge to
-epoch 0 in memory; they are not rewritten. Every non-legacy condition event must
-name a durable attempt whose task/stage ownership matches the record. Retry and
-adoption reuse the numeric epoch when accepted inputs are unchanged.
+as `ownership_generation`. `hive-attempt` v2 is now the sole runtime shape.
+`Hive::Recovery::Migration` moves the old `attempts/v1` tree once, rewrites v1
+records with `ownership_generation` and epoch 0, removes the obsolete
+compatibility flag, and leaves a receipt in the state home. Final compatibility
+leases are archived outside the active store. Any live attempt in the old tree
+blocks the rename because its detached old-binary supervisor still owns the v1
+path; a live compatibility lease is likewise never guessed into the new
+ownership model. If an old reader recreates only empty directories beside the
+current v2 tree, migration prunes them with empty-only `rmdir`; a file, symlink,
+or concurrent writer remains an ambiguous dual root and fails closed. Old
+schema files and in-memory normalization paths are removed. Every condition
+event must name a durable attempt whose task/stage ownership matches the
+record. Retry and adoption reuse the numeric epoch when accepted inputs are
+unchanged.
 
 ## State protocol
 
@@ -120,8 +128,9 @@ worker.
 ## Admission and execution
 
 Public `hive run` and workflow verbs enter `Attempts::API`, which delegates to
-its foreground adapter. Bot/web v3 requests, daemon queue/auto-advance, and
-recovery use the same API boundary; pending v2 requests remain readable. The
+its foreground adapter. Bot/web v4 requests, daemon queue/auto-advance, and
+recovery use the same API boundary. Runtime queue readers accept v4 only; the
+same one-off migration upgrades pending v1-v3 files before they are opened. The
 launcher double-forks into a distinct session. The dispatcher gives the wrapper
 a one-time random capability through an inherited pipe; the private
 `__attempt-supervise` route accepts no worker command argv and can claim only

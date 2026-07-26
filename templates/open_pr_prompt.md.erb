@@ -29,7 +29,8 @@ Behavior:
   gh pr create --draft --title "<title>" --body-file <path-to-body-file> --head <%= branch %><%= defined?(base_branch) && base_branch ? " --base #{base_branch}" : "" %>
 
 - After `gh pr create --draft` succeeds, write `pr.md` in the task folder with
-  frontmatter `pr_url: <url>` and `pr_number: <number when known>`.
+  frontmatter `pr_url: <url>`, `pr_number: <number when known>`, and
+  `head_oid: <full git rev-parse HEAD>`.
 - Mirror the PR body into `pr.md` and end with a single trailing marker line:
 
   <!-- COMPLETE pr_url=<url> is_draft=true -->

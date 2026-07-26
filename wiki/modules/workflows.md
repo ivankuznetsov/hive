@@ -160,7 +160,13 @@ weakening owner-authored descriptor compatibility:
   descriptors while rejecting id collisions and reloading when its managed
   fingerprint changes. Task-pinned generations bypass the single-id overlay and
   validate/load directly from `ManagedStore` by id, source commit, manifest
-  digest, and configuration digest. Profile fingerprint drift fails closed.
+  digest, and configuration digest. Profile fingerprint drift fails closed at
+  runtime. `hive migrate` is the explicit one-way mapping cutover: when a task
+  and the selected workflow still share the same package source commit and
+  manifest digest, it preflights the selected configuration, rebinds the task
+  to that configuration digest, and cleans snapshots no task references.
+  Tasks on another package generation remain pinned for a workflow-specific
+  migration rather than silently changing instructions.
   For a legacy lock-schema-v1 selection, task creation derives the compatibility
   snapshot with the effective project agent profiles and writes that
   digest-addressed snapshot before `meta.yml` can pin it. The snapshot therefore

@@ -10,6 +10,8 @@ require "hive/markers"
 # the per-callback methods so changes to reply/argv shape cannot regress
 # silently.
 class HiveBotCallbackHandlersTest < Minitest::Test
+  include HiveTestHelper
+
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :stage, :question_n, :answer_text, :mode,
                       :intent, :alert_reset, :clear_keyboard, :format,
@@ -20,6 +22,12 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     end
   end
   StatusRow = Hive::Bot::StatusWatcher::Row
+  ClosurePreview = Struct.new(
+    :input, :evidence, :preview_digest, :errors, :blockers,
+    keyword_init: true
+  ) do
+    def valid? = errors.empty? && blockers.empty?
+  end
 
   def setup
     @pending_ideas = {}
@@ -36,6 +44,10 @@ class HiveBotCallbackHandlersTest < Minitest::Test
 
   def update(callback_data)
     Struct.new(:callback_data).new(callback_data)
+  end
+
+  def closure_callback(prefix, payload)
+    "#{prefix}:#{Base64.urlsafe_encode64(JSON.generate(payload), padding: false)}"
   end
 
   def with_plan_row(marker_name)
@@ -111,6 +123,171 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       assert_equal :reply, result.action
       assert_equal text, result.text
     end
+  end
+
+  def test_closure_preview_reverifies_and_edits_the_message_with_exact_confirm_digest
+    input = {
+      "reason" => "already_delivered",
+      "evidence" => [ "acme/app#42" ],
+      "successor" => nil,
+      "attestation" => nil
+    }
+    payload = closure_callback(
+      "closure_preview",
+      "project" => "app", "slug" => "delivered-task", "input" => input
+    )
+    task = Object.new
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    preview = ClosurePreview.new(
+      input: input,
+      evidence: [
+        { "repository" => "acme/app", "number" => 42, "oid" => "a" * 40 }
+      ],
+      preview_digest: "d" * 64,
+      errors: [],
+      blockers: []
+    )
+    calls = []
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :preview, lambda { |**kwargs|
+          calls << kwargs
+          preview
+        }
+      ) do
+        result = @handlers.handle(
+          :callback_closure_preview,
+          Struct.new(:callback_data, :chat_id, :from_id).new(payload, 7, 8)
+        )
+
+        assert_equal :edit_reply, result.action
+        assert_match(/Verified already delivered/, result.text)
+        assert_match(/Digest d{12}/, result.text)
+        callback = result.reply_markup.first.first.fetch(:callback_data)
+        assert_operator callback.bytesize, :<=, 64
+      end
+    end
+
+    assert_equal task, calls.first.fetch(:task)
+    assert_equal "app", calls.first.fetch(:project)
+    assert_equal input, calls.first.fetch(:input)
+  end
+
+  def test_closure_preview_reports_blockers_and_rejects_unexpected_callback_fields
+    input = {
+      "reason" => "already_delivered",
+      "evidence" => [ "acme/app#42" ],
+      "successor" => nil,
+      "attestation" => nil
+    }
+    task = Object.new
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    blocked = ClosurePreview.new(
+      input: input,
+      evidence: [],
+      preview_digest: "d" * 64,
+      errors: [ { "message" => "remote merge is not reachable" } ],
+      blockers: [ { "message" => "a live attempt still owns the task" } ]
+    )
+    payload = closure_callback(
+      "closure_preview",
+      "project" => "app", "slug" => "delivered-task", "input" => input
+    )
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :preview, ->(**) { blocked }
+      ) do
+        result = @handlers.handle(:callback_closure_preview, update(payload))
+        assert_equal :edit_reply, result.action
+        assert_match(/remote merge is not reachable/, result.text)
+        assert_match(/live attempt/, result.text)
+      end
+    end
+
+    malformed = closure_callback(
+      "closure_preview",
+      "project" => "app", "slug" => "delivered-task", "input" => input,
+      "unexpected" => true
+    )
+    result = @handlers.handle(:callback_closure_preview, update(malformed))
+    assert_equal :edit_reply, result.action
+    assert_match(/Closure preview failed: closure callback is malformed/, result.text)
+  end
+
+  def test_allowlisted_closure_confirmation_uses_bot_operator_identity
+    input = {
+      "reason" => "already_delivered",
+      "evidence" => [ "acme/app#42" ],
+      "successor" => nil,
+      "attestation" => nil
+    }
+    payload = closure_callback(
+      "closure_confirm",
+      "project" => "app", "slug" => "delivered-task", "input" => input,
+      "preview_digest" => "d" * 64
+    )
+    task = Object.new
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    calls = []
+    handlers = Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: {}, set_last_project: ->(_project) { },
+      conversation_store: nil, result_class: Result, logger: @logger,
+      closure_authorizer: ->(_update) { true }
+    )
+    confirmer = lambda do |**kwargs|
+      calls << kwargs
+      { "reason" => "already_delivered", "receipt_digest" => "e" * 64 }
+    end
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(Hive::TaskClosure, :confirm!, confirmer) do
+        result = handlers.handle(
+          :callback_closure_confirm,
+          Struct.new(:callback_data, :chat_id, :from_id).new(payload, 7, 99)
+        )
+
+        assert_equal :edit_reply, result.action
+        assert_match(/Archived app\/delivered-task/, result.text)
+      end
+    end
+
+    assert_equal true, calls.first.fetch(:authorized)
+    assert_equal "bot", calls.first.fetch(:channel)
+    assert_equal "telegram:99", calls.first.fetch(:operator)
+    assert_equal "d" * 64, calls.first.fetch(:preview_digest)
+  end
+
+  def test_non_allowlisted_closure_confirmation_fails_closed
+    payload = closure_callback(
+      "closure_confirm",
+      "project" => "app", "slug" => "delivered-task",
+      "input" => {
+        "reason" => "already_delivered", "evidence" => [ "acme/app#42" ],
+        "successor" => nil, "attestation" => nil
+      },
+      "preview_digest" => "d" * 64
+    )
+    resolver = Struct.new(:task) { def resolve = task }.new(Object.new)
+    authorizations = []
+    confirmer = lambda do |**kwargs|
+      authorizations << kwargs.fetch(:authorized)
+      raise Hive::TaskClosure::Unauthorized, "not allowlisted"
+    end
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(Hive::TaskClosure, :confirm!, confirmer) do
+        result = @handlers.handle(
+          :callback_closure_confirm,
+          Struct.new(:callback_data, :chat_id, :from_id).new(payload, 7, 99)
+        )
+
+        assert_equal :edit_reply, result.action
+        assert_match(/confirmation failed: not allowlisted/, result.text)
+      end
+    end
+    assert_equal [ false ], authorizations
   end
 
   def test_legacy_path_a_callbacks_route_to_retirement_notice

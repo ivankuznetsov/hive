@@ -424,7 +424,7 @@ Meanwhile the system grew its own load-bearing safety net: `hive approve` (`wiki
   1. **Q&A waits** (`:waiting`, `:execute_waiting`) — agent asked questions, user answers in the file.
   2. **Triage waits** (`:review_waiting`, including `reason=fix_guardrail`) — user ticks `[x]` on accepted findings or removes rogue commits.
   3. **Recovery waits** (`:execute_stale`, `:review_stale`, `:review_ci_stale`, `:review_error`, `:error`) — these markers EXIST to demand human intervention; skipping them is correct.
-  4. **External-state waits** — 8-finalize/`:complete` whose PR is open on GitHub. Daemon polls `gh pr view --json state` and auto-archives on `MERGED`. The merge itself remains a human gesture (the green button on GitHub); the daemon detects the merge and removes the bookkeeping burden.
+  4. **External-state waits** — any task-bound PR in coding stages 5–8 that is still open on GitHub. The daemon durably observes the exact task generation, verifies repository/head/reachable merge facts, checkpoints required architecture intake, and uses an evidence-bound closure receipt on `MERGED`. The merge itself remains a human gesture (the green button on GitHub); the daemon detects delivery and removes the bookkeeping burden without a marker-reason bypass.
 
 `3-plan`/`:waiting` is not a Q&A wait. It is the plan-approval pause
 used by the manual TUI/editor flow. For daemon-enabled projects,
@@ -596,6 +596,29 @@ Legacy in-flight Hive delivery state is reconciled manually rather than guessed,
 because automatic conversion could duplicate a Telegram chunk whose response
 was lost. See [[commands/digest]], [[modules/digest]], [[dependencies]], and
 [[modules/daemon]].
+
+## ADR-039: Pre-1.0 recovery/status migrations replace legacy contracts
+
+**Status:** Active
+
+**Context:** Hive has few external consumers, while retaining every historical
+status/recovery schema encouraged adapters to keep branching on old lifecycle
+shapes. The universal recovery and evidence-closure rollout needs one truthful
+projection, not another compatibility layer beside the earlier mechanisms.
+
+**Decision:** Migrate every in-repository producer and consumer in one change,
+then publish only the current `hive-status.v7`,
+`hive-operational-status.v3`, and `hive-act.v2` contracts. Remove their
+superseded schema files and compatibility assertions instead of accepting or
+translating older recovery/status documents. Older persisted task state is
+migrated at the task/state layer; wire-schema compatibility is not a second
+recovery mechanism.
+
+**Consequences:** A stale daemon, bot, TUI, or external validator receives an
+explicit schema-skew failure and must upgrade. The current contracts stay
+smaller and closed, and tests assert that superseded versions do not reappear.
+This supersedes ADR-028's decision to retain historical `hive-status` files;
+that earlier decision remains useful history but is no longer current policy.
 
 ## Source
 

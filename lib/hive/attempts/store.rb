@@ -25,6 +25,7 @@ module Hive
 
       def initialize(root: Hive::Paths.attempts_root, create_directories: true)
         @root = File.expand_path(root)
+        reject_legacy_default_store!
         @records_root = File.join(@root, "records")
         @logs_root = File.join(@root, "logs")
         @outputs_root = File.join(@root, "outputs")
@@ -34,17 +35,6 @@ module Hive
 
       def create_launching(**attributes)
         record = Record.launching(**attributes)
-        path = record_path(record.attempt_id)
-        with_record_lock(record.attempt_id) do
-          raise StoreError, "attempt #{record.attempt_id} already exists" if File.exist?(path)
-
-          persist(record)
-        end
-        record
-      end
-
-      def create_compatibility_running(**attributes)
-        record = Record.compatibility_running(**attributes)
         path = record_path(record.attempt_id)
         with_record_lock(record.attempt_id) do
           raise StoreError, "attempt #{record.attempt_id} already exists" if File.exist?(path)
@@ -249,6 +239,16 @@ module Hive
       end
 
       private
+
+      def reject_legacy_default_store!
+        return unless @root == File.expand_path(Hive::Paths.attempts_root)
+        legacy_root = File.join(Hive::Paths.state_home, "attempts", "v1")
+        return unless File.exist?(legacy_root)
+
+        raise StoreError,
+              "legacy attempt state remains at #{legacy_root}; run `hive migrate` " \
+              "or restart the current Hive daemon before opening attempts/v2"
+      end
 
       def mutate(observed, allowed_states:)
         with_generation_lock(observed.task_generation) do

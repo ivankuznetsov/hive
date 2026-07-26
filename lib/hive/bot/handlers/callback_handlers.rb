@@ -4,6 +4,10 @@ require "hive/bot/handlers/recovery_result_builder"
 require "hive/recovery/retry_policy"
 require "hive/daemon/plan_approval"
 require "shellwords"
+require "base64"
+require "json"
+require "hive/task_closure"
+require "hive/task_resolver"
 
 module Hive
   module Bot
@@ -14,6 +18,7 @@ module Hive
                        projects_provider: -> { [] },
                        status_snapshot_provider: -> { [] },
                        last_project: -> { nil },
+                       closure_authorizer: ->(_update) { false },
                        logger: nil)
           @pending_ideas = pending_ideas
           @set_last_project = set_last_project
@@ -23,6 +28,7 @@ module Hive
           @projects_provider = projects_provider
           @status_snapshot_provider = status_snapshot_provider
           @last_project = last_project
+          @closure_authorizer = closure_authorizer
           @logger = logger
         end
 
@@ -54,6 +60,8 @@ module Hive
           when :callback_findings_accept_all then findings_toggle(data, "accept-finding")
           when :callback_findings_reject_all then findings_toggle(data, "reject-finding")
           when :callback_idea_project_new then idea_project_new(data)
+          when :callback_closure_preview then closure_preview(data)
+          when :callback_closure_confirm then closure_confirm(data, update)
           else @result_class.new(action: :reply, text: "Bot got confused - please retry from /queue.")
           end
         rescue ArgumentError => e
@@ -62,6 +70,92 @@ module Hive
         end
 
         private
+
+        def closure_preview(data)
+          payload = decode_closure_callback(data, "closure_preview")
+          task = Hive::TaskResolver.new(
+            payload.fetch("slug"), project_filter: payload.fetch("project")
+          ).resolve
+          preview = Hive::TaskClosure.preview(
+            task: task,
+            project: payload.fetch("project"),
+            input: payload.fetch("input")
+          )
+          unless preview.valid?
+            details = (preview.errors + preview.blockers).map { |entry| entry.fetch("message") }
+            return closure_edit_result("Closure blocked:\n#{details.join("\n")}")
+          end
+
+          confirm_payload = payload.merge("preview_digest" => preview.preview_digest)
+          callback = Hive::Bot::NotificationBuilders.encode_closure_callback(
+            "closure_confirm", confirm_payload
+          )
+          evidence = preview.evidence.map do |item|
+            "#{item.fetch('repository')} #{item['number'] ? "PR ##{item['number']}" : item.fetch('oid')[0, 12]}"
+          end
+          closure_edit_result(
+            "Verified #{preview.input.fetch('reason').tr('_', ' ')} closure for " \
+            "#{payload.fetch('project')}/#{payload.fetch('slug')}.\n" \
+            "#{evidence.join("\n")}\nDigest #{preview.preview_digest[0, 12]}",
+            reply_markup: [
+              [
+                Hive::Bot::NotificationBuilders.button("Confirm and archive", callback)
+              ]
+            ]
+          )
+        rescue Hive::Error, KeyError, JSON::ParserError, ArgumentError => e
+          closure_edit_result("Closure preview failed: #{e.message}")
+        end
+
+        def closure_confirm(data, update)
+          payload = decode_closure_callback(data, "closure_confirm")
+          authorized = @closure_authorizer.call(update) == true
+          task = Hive::TaskResolver.new(
+            payload.fetch("slug"), project_filter: payload.fetch("project")
+          ).resolve
+          receipt = Hive::TaskClosure.confirm!(
+            task: task,
+            project: payload.fetch("project"),
+            input: payload.fetch("input"),
+            preview_digest: payload.fetch("preview_digest"),
+            operator: bot_operator(update),
+            channel: "bot",
+            authorized: authorized
+          )
+          closure_edit_result(
+            "Archived #{payload.fetch('project')}/#{payload.fetch('slug')} as " \
+            "#{receipt.fetch('reason').tr('_', ' ')}.\n" \
+            "Receipt #{receipt.fetch('receipt_digest')[0, 16]}"
+          )
+        rescue Hive::Error, KeyError, JSON::ParserError, ArgumentError => e
+          closure_edit_result("Closure confirmation failed: #{e.message}")
+        end
+
+        def closure_edit_result(text, reply_markup: nil)
+          @result_class.new(action: :edit_reply, text: text, reply_markup: reply_markup)
+        end
+
+        def decode_closure_callback(data, prefix)
+          encoded = data.to_s.delete_prefix("#{prefix}:")
+          raise ArgumentError, "closure callback is malformed" if encoded.empty? || encoded.bytesize > 20 * 1024
+
+          payload = JSON.parse(Base64.urlsafe_decode64(encoded))
+          raise ArgumentError, "closure callback must contain an object" unless payload.is_a?(Hash)
+          unless payload.keys.all? { |key| %w[project slug input preview_digest].include?(key) }
+            raise ArgumentError, "closure callback contains unexpected fields"
+          end
+          payload
+        rescue ArgumentError => e
+          raise ArgumentError, "closure callback is malformed: #{e.message}"
+        end
+
+        def bot_operator(update)
+          identity = update.respond_to?(:from_id) ? update.from_id : nil
+          identity ||= update.respond_to?(:chat_id) ? update.chat_id : nil
+          raise Hive::TaskClosure::Unauthorized, "bot operator identity is unavailable" if identity.nil?
+
+          "telegram:#{identity}"
+        end
 
         def approve(data)
           _prefix, verb, project, slug, stage = split_callback(data, 5)

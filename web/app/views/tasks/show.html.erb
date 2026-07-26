@@ -18,7 +18,28 @@
 <% end %>
   <%= status_stream_source id: "status-stream-source",
         hidden: true, data: { turbo_permanent: true } %>
+<%= render "status/freshness_warning",
+      availability: @status_availability,
+      last_success_at: @status_last_success_at,
+      error: @status_error %>
 <%= render "tasks/state" %>
+
+<% if (closure = @task["closure"]).is_a?(Hash) && closure["schema"] == Hive::TaskClosure::SCHEMA %>
+  <section class="task-closure" aria-labelledby="task-closure-title">
+    <h2 id="task-closure-title">Closure evidence</h2>
+    <p>
+      Archived as <strong><%= closure.fetch("reason").tr("_", " ") %></strong>
+      via <%= closure.fetch("authority").tr("_", " ") %>.
+    </p>
+    <ul>
+      <% Array(closure["evidence"]).each do |item| %>
+        <li><%= link_to "#{item.fetch("repository")} #{item["number"] ? "PR ##{item["number"]}" : item.fetch("oid")[0, 12]}",
+                      item.fetch("url"), rel: "noopener noreferrer" %></li>
+      <% end %>
+    </ul>
+    <p><code><%= closure.fetch("receipt_digest") %></code></p>
+  </section>
+<% end %>
 
 <%= render "tasks/media", media: @media, project: @project, task: @task %>
 
@@ -70,6 +91,7 @@
     </div>
     <%= button_to "Reject", task_reject_path(@project.name, @task["slug"]),
           params: { from: @task["stage"] }, class: "btn-danger",
+          disabled: !@status_fresh, aria: { disabled: (!@status_fresh).to_s },
           data: { turbo_confirm: "Send #{@task["slug"]} back a stage?" } %>
   </div>
   <% unless @task.passable? %>
@@ -80,6 +102,7 @@
       </div>
       <%= button_to "Force approve", task_approve_path(@project.name, @task["slug"]),
             params: { from: @task["stage"], force: "1" }, class: "btn-secondary",
+            disabled: !@status_fresh, aria: { disabled: (!@status_fresh).to_s },
             data: { turbo_confirm: "Advance #{@task["slug"]} even though the stage isn't marked complete?" } %>
     </div>
   <% end %>
@@ -90,6 +113,7 @@
     </div>
     <%= button_to "Drop", task_drop_path(@project.name, @task["slug"]),
           params: { from: @task["stage"] }, class: "btn-danger",
+          disabled: !@status_fresh, aria: { disabled: (!@status_fresh).to_s },
           data: { turbo_confirm: "Permanently delete #{@task["slug"]}? This cannot be undone." } %>
   </div>
 </details>

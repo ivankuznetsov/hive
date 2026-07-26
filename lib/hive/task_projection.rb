@@ -204,6 +204,15 @@ module Hive
       self.class.from_data(copy)
     end
 
+    # Closure is a dedicated task-local authority, not a journal fact. Status
+    # overlays its validated public receipt on a projection after replay so a
+    # corrupt receipt can never alter condition or attempt truth.
+    def with_closure(closure)
+      copy = to_h
+      copy["closure"] = Hive::StringifyKeys.call(closure)
+      self.class.from_data(copy)
+    end
+
     private
 
     def authoritative_records

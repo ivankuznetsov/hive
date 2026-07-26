@@ -41,11 +41,15 @@ module Hive
         }
       end
 
-      VALID_SUBCOMMANDS = %w[install start stop status].freeze
+      VALID_SUBCOMMANDS = %w[install start stop status capture capture-server].freeze
+      INSTALL_READINESS_ATTEMPTS = 40
+      INSTALL_READINESS_INTERVAL_SEC = 0.25
 
       def initialize(subcommand = nil, bind: nil, port: nil, no_bootstrap: false,
                      unsafe: false, force: false, json: false, detach: false,
-                     environment: ENV, error: nil)
+                     environment: ENV, error: nil, output: nil,
+                     source_root: nil, runtime_root: nil,
+                     lifecycle_token: nil, control_fd: nil, task_folder: nil)
         @subcommand = subcommand
         @bind = bind
         @port = port
@@ -56,6 +60,12 @@ module Hive
         @detach = detach
         @environment = environment
         @error = error
+        @output = output
+        @source_root = source_root
+        @runtime_root = runtime_root
+        @lifecycle_token = lifecycle_token
+        @control_fd = control_fd
+        @task_folder = task_folder
       end
 
       # Bare `hive web` (and `start` without --detach) runs the Rails server
@@ -73,6 +83,8 @@ module Hive
         when "start" then @detach ? start_service : run_foreground
         when "stop" then stop_service
         when "status" then status_service
+        when "capture" then capture_task_command
+        when "capture-server" then capture_server_command
         else
           raise Hive::InvalidTaskPath,
                 "hive web: unknown subcommand #{@subcommand.inspect} (expected: #{VALID_SUBCOMMANDS.join(', ')})"
@@ -80,6 +92,66 @@ module Hive
       end
 
       private
+
+      def capture_task_command
+        if @task_folder.to_s.empty?
+          raise Hive::InvalidTaskPath,
+                "hive web capture requires --task-folder"
+        end
+
+        require "hive/web/task_capture"
+        manifest = Hive::Web::TaskCapture.new(
+          task_folder: @task_folder,
+          source_root: @source_root,
+          output: @output || $stdout,
+          error: @error || $stderr,
+          environment: @environment
+        ).call
+        destination = File.join(File.expand_path(@task_folder), "media", "capture-manifest.json")
+        if @json
+          (@output || $stdout).puts(JSON.generate(manifest))
+        else
+          (@output || $stdout).puts(
+            "captured #{manifest.fetch('artifacts').length} local artifacts for " \
+            "#{manifest.fetch('task')} at #{destination}"
+          )
+        end
+        manifest
+      end
+
+      def capture_server_command
+        missing = {
+          "--source-root" => @source_root,
+          "--runtime-root" => @runtime_root,
+          "--lifecycle-token" => @lifecycle_token
+        }.filter_map { |name, value| name if value.to_s.empty? }
+        unless missing.empty?
+          raise Hive::InvalidTaskPath,
+                "hive web capture-server requires #{missing.join(', ')}"
+        end
+
+        require "hive/commands/web/capture_server"
+        control_io = capture_control_io
+        Hive::Commands::Web::CaptureServer.new(
+          source_root: @source_root,
+          runtime_root: @runtime_root,
+          lifecycle_token: @lifecycle_token,
+          port: @port || 0,
+          control_io: control_io,
+          output: @output || $stdout,
+          error: @error || $stderr,
+          environment: @environment
+        ).call
+      end
+
+      def capture_control_io
+        return $stdin unless @control_fd
+
+        IO.for_fd(Integer(@control_fd, 10), autoclose: false)
+      rescue ArgumentError, RangeError, Errno::EBADF
+        raise Hive::InvalidTaskPath,
+              "hive web capture-server --control-fd must be an open integer file descriptor"
+      end
 
       def run_foreground
         cfg = Hive::Config.load_global_web
@@ -129,6 +201,11 @@ module Hive
           env["HIVE_CLI_ROOT"] = Hive::Web::AppBundle.hive_cli_root
           env["BUNDLE_PATH"] = Hive::Web::AppBundle.dependency_dir
         end
+        rails_argv = if managed_bundle
+          Hive::Web::AppBundle.rails_argv(app_dir)
+        else
+          [ "bin/rails" ]
+        end
         # The loopback no-auth bypass is opt-out: an operator can set
         # web.local_loopback: false to force GitHub login even on a loopback
         # bind. Only signal the bypass when both the bind is loopback AND the
@@ -152,7 +229,7 @@ module Hive
           if env.fetch("RAILS_ENV") == "production" && !precompiled_assets
             compiled = Dir.mktmpdir("hive-web-assets") do |asset_storage|
               asset_env = env.merge("HIVE_WEB_STORAGE_DIR" => asset_storage)
-              system(asset_env, "bin/rails", "assets:precompile")
+              system(asset_env, *rails_argv, "assets:precompile")
             end
             unless compiled && Hive::Web::AppBundle.assets_ready?(app_dir)
               raise Hive::Error,
@@ -164,7 +241,7 @@ module Hive
           # first boot, no-ops afterwards. Array form — no shell involved.
           # Typed error so a persistent failure surfaces as guidance, not a
           # raw backtrace looping on every restart under the service manager.
-          unless system(env, "bin/rails", "db:prepare")
+          unless system(env, *rails_argv, "db:prepare")
             raise Hive::Error,
                   "hive web: db:prepare failed — check that " \
                   "#{env.fetch("HIVE_WEB_STORAGE_DIR")} is writable " \
@@ -173,7 +250,7 @@ module Hive
           puts "hive web: listening on http://#{bind}:#{port}"
           # Replace this process with the Rails server (array form, env hash;
           # Kernel#exec never touches a shell when given an argv list).
-          Kernel.exec env, "bin/rails", "server", "-b", bind, "-p", port.to_s
+          Kernel.exec env, *rails_argv, "server", "-b", bind, "-p", port.to_s
         end
       end
 
@@ -340,7 +417,9 @@ module Hive
       def service_envelope(installer, outcome, config: Hive::Config.load_global_web)
         state = Hive::Web::ServiceStatus.snapshot(
           installer: installer, config: config, environment: @environment,
-          wait_for_running: true
+          wait_for_running: true,
+          attempts: INSTALL_READINESS_ATTEMPTS,
+          interval: INSTALL_READINESS_INTERVAL_SEC
         )
         {
           "schema" => "hive-web-install",

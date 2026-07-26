@@ -36,6 +36,90 @@ class OperationalStatusTest < Minitest::Test
     refute result.fetch("tasks").any? { |row| row.dig("identity", "slug") == "archived" }
   end
 
+  def test_closure_projection_advertises_operator_confirmation_and_retains_archived_receipt
+    receipt = {
+      "schema" => Hive::TaskClosure::SCHEMA,
+      "schema_version" => 1,
+      "reason" => "already_delivered",
+      "authority" => "remote_merge",
+      "receipt_digest" => "d" * 64,
+      "evidence" => [
+        {
+          "repository" => "acme/app",
+          "url" => "https://github.com/acme/app/pull/42",
+          "oid" => "a" * 40
+        }
+      ]
+    }
+    result = project(status_payload(
+      task(action: "error", slug: "candidate"),
+      task(
+        action: "archived", slug: "delivered", stage: "9-done",
+        marker: "complete", closure: receipt
+      )
+    ))
+
+    candidate = result.fetch("tasks").find do |row|
+      row.dig("identity", "slug") == "candidate"
+    end
+    assert_equal "operator_required", candidate.dig("closure", "status")
+    assert_equal "workflow.close_with_evidence",
+                 candidate.dig("closure", "action", "action_id")
+    assert candidate.dig("closure", "action", "confirmation_required")
+    refute candidate.dig("closure", "action").key?("observation_token")
+
+    closures = result.dig("archive", "closures")
+    assert_equal 1, closures.size
+    archived = closures.first
+    assert_equal "delivered", archived.fetch("slug")
+    assert_equal "already_delivered", archived.fetch("reason")
+    assert_equal "d" * 64, archived.fetch("receipt_digest")
+  end
+
+  def test_valid_active_closure_projects_as_confirmed_pending_transition
+    receipt = {
+      "schema" => Hive::TaskClosure::SCHEMA,
+      "reason" => "already_delivered",
+      "authority" => "remote_merge",
+      "receipt_digest" => "d" * 64,
+      "evidence" => [ { "url" => "https://github.com/acme/app/pull/42" } ]
+    }
+    result = project(status_payload(
+      task(action: "error", slug: "delivered", closure: receipt)
+    ))
+
+    closure = result.fetch("tasks").first.fetch("closure")
+    assert_equal "confirmed_pending_transition", closure.fetch("status")
+    assert_equal "already_delivered", closure.fetch("reason")
+    assert_equal "remote_merge", closure.fetch("authority")
+    assert_nil closure.fetch("action")
+  end
+
+  def test_invalid_closure_keeps_semantic_reason_null_and_exposes_quarantine
+    invalid = {
+      "status" => "invalid",
+      "reason" => "closure receipt digest does not match",
+      "quarantine_path" => "/tmp/hive/closure-quarantine/task/deadbeef.json"
+    }
+    result = project(status_payload(
+      task(action: "error", slug: "candidate", closure: invalid)
+    ))
+    closure = result.fetch("tasks").first.fetch("closure")
+
+    assert_equal "blocked", closure.fetch("status")
+    assert_nil closure.fetch("reason")
+    assert_equal invalid.fetch("reason"), closure.fetch("diagnostic")
+    assert_equal invalid.fetch("quarantine_path"),
+                 closure.fetch("quarantine_path")
+
+    schema = JSONSchemer.schema(
+      JSON.parse(
+        File.read(Hive::Schemas.schema_path("hive-operational-status"))
+      )
+    )
+    assert_empty schema.validate(result).to_a
+  end
+
   def test_running_precedence_retains_provider_hold_as_secondary_reason
     row = task(
       action: "agent_running", slug: "overlap", live_task_lock: true,
@@ -234,7 +318,16 @@ class OperationalStatusTest < Minitest::Test
 
     error = assert_raises(ArgumentError) { project(payload) }
 
-    assert_equal "operational status requires a successful hive-status payload", error.message
+    assert_equal "operational status requires a successful hive-status v7 payload", error.message
+  end
+
+  def test_rejects_an_older_status_schema
+    payload = status_payload
+    payload["schema_version"] = 6
+
+    error = assert_raises(ArgumentError) { project(payload) }
+
+    assert_equal "operational status requires a successful hive-status v7 payload", error.message
   end
 
   def test_noncurrent_scheduler_snapshot_propagates_its_freshness
@@ -762,7 +855,9 @@ class OperationalStatusTest < Minitest::Test
       } ]
     end
     {
-      "schema" => "hive-status", "schema_version" => 6, "ok" => true,
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true,
       "generated_at" => "2026-07-20T10:00:00Z", "projects" => projects
     }
   end
@@ -770,7 +865,7 @@ class OperationalStatusTest < Minitest::Test
   def task(action:, slug:, stage: "1-inbox", marker: "waiting", attrs: {}, held: nil,
            live_task_lock: false, task_lock_pid: nil, unanswered_questions: 0,
            blocked: false, depends_on: nil, blocked_by: nil, dependency_stage: nil,
-           admission_error: nil)
+           admission_error: nil, closure: nil)
     attrs = attrs.dup
     if Hive::Recovery.recoverable_marker?(marker) && !attrs.key?("marker_id")
       attrs["marker_id"] = "marker-#{slug}"
@@ -809,6 +904,7 @@ class OperationalStatusTest < Minitest::Test
       "conditions" => [],
       "condition_history" => [],
       "evidence" => [],
+      "closure" => closure,
       "condition_overrides" => [],
       "condition_gate" => nil,
       "condition_migration" => nil,

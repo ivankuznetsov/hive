@@ -27,6 +27,33 @@ class OperationalActionTest < Minitest::Test
     end
   end
 
+  def test_closure_is_advertised_but_cannot_be_executed_with_an_observation_token
+    row = {
+      "slug" => "delivered-task",
+      "action" => "error",
+      "marker" => "error",
+      "attrs" => { "reason" => "no_commits_between_main_and_head" }
+    }
+
+    descriptor = Hive::OperationalAction.closure_descriptor(project: "app", row: row)
+    assert_equal "workflow.close_with_evidence", descriptor.fetch("action_id")
+    assert_equal "app:delivered-task", descriptor.fetch("target")
+    assert descriptor.fetch("confirmation_required")
+    assert_equal %w[already_delivered superseded], descriptor.fetch("supported_reasons")
+    refute_includes Hive::OperationalAction::EXECUTABLE_ACTION_IDS, descriptor.fetch("action_id")
+    refute descriptor.key?("observation_token")
+
+    executor = Hive::OperationalAction::Executor.new
+    error = assert_raises(Hive::OperationalActionUsageError) do
+      executor.execute(
+        action_id: descriptor.fetch("action_id"),
+        target: descriptor.fetch("target"),
+        observation_token: "agent-held-token"
+      )
+    end
+    assert_match(/unknown operational action/, error.message)
+  end
+
   def test_retry_action_uses_coordinator_token_and_forwards_it_to_locked_admission
     observed = {
       "project" => "demo",

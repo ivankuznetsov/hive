@@ -70,6 +70,16 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_nil notification.keyboard
   end
 
+  def test_closure_callback_encoder_rejects_unknown_prefix
+    error = assert_raises(ArgumentError) do
+      Hive::Bot::NotificationBuilders.encode_closure_callback(
+        "delete_task", "slug" => "task"
+      )
+    end
+
+    assert_equal "unsupported closure callback", error.message
+  end
+
   def test_legacy_stage_dirs_notification_renders_singular_and_command_fallback
     notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs(task_count: 1, command: nil))
 

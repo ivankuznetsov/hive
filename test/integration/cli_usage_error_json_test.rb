@@ -121,7 +121,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
       payload = JSON.parse(out)
       assert_equal "hive-status", payload.fetch("schema")
-      assert_equal 6, payload.fetch("schema_version")
+      assert_equal 7, payload.fetch("schema_version")
       assert_equal false, payload.fetch("ok")
       assert_match(/--full cannot be combined with --json/, payload.fetch("message"))
 

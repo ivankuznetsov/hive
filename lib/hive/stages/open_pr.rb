@@ -83,6 +83,7 @@ module Hive
           File.write(task.state_file, pr_md_body(
             pr_url: pr_url,
             pr_number: merged["number"],
+            head_oid: head_oid,
             summary_text: "PR already merged for this task.",
             task_folder: task.folder,
             marker_text: ""
@@ -251,6 +252,25 @@ module Hive
           Hive::Markers.set(task.state_file, :error, reason: "open_pr_not_draft")
           return { commit: "open_pr_not_draft", status: :error }
         end
+        local_head = local_head_oid(worktree_path).to_s.downcase
+        remote_head = real["headRefOid"].to_s.downcase
+        unless local_head.match?(/\A[a-f0-9]{40,64}\z/) &&
+               remote_head == local_head
+          remediate_orphan_pr!(marker_url)
+          Hive::Markers.set(
+            task.state_file, :error,
+            reason: "open_pr_head_mismatch",
+            local_head: local_head.empty? ? "(unavailable)" : local_head,
+            remote_head: remote_head.empty? ? "(unavailable)" : remote_head
+          )
+          return { commit: "open_pr_head_mismatch", status: :error }
+        end
+        Hive::Gh.persist_pr_identity!(
+          task.state_file,
+          pr_url: marker_url,
+          pr_number: real["number"],
+          head_oid: remote_head
+        )
 
         nil
       rescue Hive::GhError => e
@@ -326,6 +346,7 @@ module Hive
         File.write(task.state_file, pr_md_body(
           pr_url: pr_url,
           pr_number: pr_number,
+          head_oid: existing["headRefOid"],
           summary_text: "PR already open for this task.",
           task_folder: task.folder,
           marker_text: "<!-- COMPLETE pr_url=#{pr_url} is_draft=#{is_draft}#{suffix} -->"
@@ -338,12 +359,18 @@ module Hive
       # `Hive::Markers.set` after downstream short-circuit markers land
       # (so a partial failure leaves pr.md non-terminal — see the
       # commit-point comment in `run!`).
-      def pr_md_body(pr_url:, pr_number:, summary_text:, task_folder:, marker_text:)
+      def pr_md_body(pr_url:, pr_number:, head_oid:, summary_text:, task_folder:, marker_text:)
+        normalized_head = head_oid.to_s.downcase
+        head_line = if normalized_head.match?(/\A[a-f0-9]{40,64}\z/)
+          "head_oid: #{normalized_head}\n"
+        else
+          ""
+        end
         <<~MD
           ---
           pr_url: #{pr_url}
           pr_number: #{pr_number}
-          ---
+          #{head_line}---
 
           ## Summary
           #{summary_text}

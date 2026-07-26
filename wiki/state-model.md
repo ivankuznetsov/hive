@@ -1,13 +1,13 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_closure.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
 updated: 2026-07-25
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, dependencies, admission, web]
 ---
 
-**TLDR**: Hive's workflow state has no application database. Task/project state lives in `.hive-state` and feature worktrees; durable task execution ownership lives in versioned attempt records under the global state home. Global config/queues remain filesystem records. Token metrics alone use SQLite. Hivebox reads status snapshots and writes delivery requests; leases, not web/daemon process lifetime, own accepted agents.
+**TLDR**: Hive's workflow state has no application database. Task/project state lives in `.hive-state` and feature worktrees; durable task execution ownership lives in versioned attempt records under the global state home. Evidence-bound delivered/superseded closure is a separate task-local authority retained with an archived task, never fabricated attempt success.
 
 ## Stage directory layout
 
@@ -75,6 +75,75 @@ depends_on: api:base-task-260716-abcd
 `hive status` v5 projects strict evidence into a three-state read model: clear; benign below-gate wait (`blocked_by`/`dependency_stage`); or structured admission error (`reason_code`, `offending_ref`, `safe_correction`). Raw folder moves remain possible, but the next status or supported dispatch boundary observes and holds invalid state.
 
 `workflow:` is pinned by `hive new` only for an explicit override or non-coding project default. `hive migrate` backfills legacy ids/names. Daemon display-name and id backfillers skip admission-error rows and strict-read failures, so background healing cannot erase dependency evidence. Patrol review handoff writes a normal id and display name because the task joins the standard review flow.
+
+## Evidence-bound task closure
+
+`Hive::TaskClosure` owns `<task>/closure.json`
+(`hive-task-closure.v1`) for the exceptional case where immutable remote
+evidence proves that work was delivered elsewhere. It is deliberately
+separate from the append-only task journal and durable attempt records: a
+merged PR can authorize operator closure, but cannot retroactively turn an
+agent attempt into success.
+
+The receipt records:
+
+- `already_delivered` or `superseded`, with authority `remote_merge` or
+  `operator_attestation`;
+- exact task/project/workflow identity plus task and marker generation;
+- canonical task repository identity and default branch;
+- at most 16 canonical merged-PR/full-commit facts, including full PR head and
+  merge OIDs where applicable, default-branch reachability, and one canonical
+  evidence digest;
+- the registered successor and bounded attestation for supersession;
+- exact preview digest, operator/channel, timestamp, and canonical receipt
+  digest.
+
+Preview is read-only. Public confirmation requires an authenticated
+CLI/web/bot operator, names the exact preview digest, and re-verifies
+repository, remote, owner, attempt, marker, generation, and owned-worktree
+facts under an adjacent private lock. The daemon has one narrower internal
+channel: it may write `authority=remote_merge`, `channel=daemon` only for the
+task's own verified same-repository merged PR after the durable reconciler's
+guards pass. The reconciler's observed head and merge OIDs must still equal
+the closure service's final GitHub read, so architecture-intake delay cannot
+race a changed PR binding. That channel is not accepted by the public confirmation API and
+cannot take over an operator receipt. `closure.json` is mode 0600 and is
+written/fsynced before the centralized move to `9-done`; a restart resumes the
+same receipt idempotently. Projection overlays only a fully validated receipt
+and never rewrites journal facts.
+
+Invalid receipt bytes move to
+`$HIVE_HOME/state/closure-quarantine/<project-key>/<slug>/` with a bounded
+reason. The active task remains in place, status retains the quarantine
+blocker, and no receipt digest is admitted by the closure transition guard.
+The preserved bytes are audit material, not authority.
+
+## Durable task-bound merge reconciliation
+
+Each registered project owns
+`.hive-state/daemon/pr-merge-reconciliation.json`
+(`hive-pr-merge-reconciliation.v1`). This is distinct from architecture
+patrol's repository-wide catch-up checkpoint and from the task-local closure
+receipt. The ledger binds registration, canonical project/state paths,
+GitHub host/repository, and default branch. It stores a backlog watermark,
+per-project fair cursor, and candidates keyed by project, slug, and exact task
+generation.
+
+Each candidate retains its stage/marker generation, dependency/admission
+hold, canonical PR and observed head, remote state and immutable merge facts,
+architecture request/receipt, archive receipt, next eligible time, uncapped
+failure count, and bounded diagnostic. GitHub verification and accepted
+architecture intake are separately checkpointed before archive. `OPEN`,
+closed-unmerged, held, unsafe, superseded-generation, and retrying candidates
+therefore remain explainable across restart; none is discarded after a fixed
+failure count.
+
+An adjacent mode-0600 lock serializes readers and writers. State writes use
+owner-private atomic replacement plus directory fsync. Malformed,
+unsupported, or identity-drifted authoritative bytes are not rewritten:
+conflict evidence is copied to
+`.hive-state/daemon/quarantine/pr-merge-reconciliation/`, that project blocks,
+and other registrations continue.
 
 Task ids are allocated from the global counter file `<state_home>/task-counter.yml` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`). The counter is protected by `<state_home>/.task-counter.lock` (`flock LOCK_EX`, default 30s timeout, 0.2s polling) and stores the next id as YAML:
 
@@ -145,10 +214,10 @@ gesture; ordinary action, web, and bot retry surfaces cannot bypass it.
 
 ## Concurrency files
 
-Durable leases under `$HIVE_HOME/attempts/v1/records/` are the authoritative
+Durable leases under `$HIVE_HOME/attempts/v2/records/` are the authoritative
 execution owner. Records are `launching`, `running`, `terminal`, or `lost`;
 wrapper/worker PID start fingerprints and session/group IDs make adoption and
-cleanup PID-reuse safe. Each non-compatibility record also immutably stores the
+cleanup PID-reuse safe. Each record also immutably stores the
 exact admitted worker argv and only the digest of a random claim capability.
 The secret crosses exec through inherited descriptors, claims once, and gates
 worker context installation until the exact worker identity is durable.
@@ -246,9 +315,10 @@ recovery: null
 Current producers write `hive-dispatch-request.v4`. Ordinary requests leave
 `recovery` null. Coordinator requests persist canonical task/marker/generation
 identity, owner/remediation, retry count, terminal outcome/time, and the
-`admitted → cleared → dispatched → terminal` phase. Consumers continue
-accepting pending v2/v3 delivery records and infer their generation under the
-same admission lock; no current producer emits them. Queue and claim sidecars
+`admitted → cleared → dispatched → terminal` phase. Consumers accept v4 only.
+Daemon/bot startup and explicit `hive migrate` run the one-off global recovery
+migration before opening the queue, rewriting pending v1-v3 requests to v4 and
+v1 results to v2. Queue and claim sidecars
 remain delivery records: after admission the claim stores the attempt
 ID/generation, follows a loss successor, and completes from its terminal
 receipt.
@@ -828,6 +898,21 @@ stateDiagram-v2
 ```
 
 Since 2026-05-22, `Hive::Stages::DIRS` has all nine slots filled in order; `Stages.next_dir(4)` returns `"5-open-pr"`, `Stages.next_dir(6)` returns `"7-artifacts"`, and `Stages.next_dir(8)` returns `"9-done"`. See [[stages/review]] for the autonomous-loop semantics.
+
+## Capture applicability receipts
+
+`7-artifacts/<slug>/capture-requirement.json` is `hive-capture-requirement` v1.
+Its stable identity is the task/project, task generation, implementation
+base/head, changed-path digest, and classifier version. Hive classifies
+user-visible paths or an explicit visual-proof request as `required`; other
+work is `not_applicable`. Agents cannot demote the result. A demotion records a
+confirmed operator, rationale, timestamp, and the same task generation.
+
+When required, `media/capture-manifest.json` is
+`hive-artifact-capture` v1 and must identify the same task and implementation
+head with at least one retained artifact. A `COMPLETE` marker without matching
+capture evidence is not terminal truth: the artifacts runner rewrites it to
+`ERROR reason=required_capture_missing`.
 
 See [[stages/index]] for one page per stage.
 

@@ -193,6 +193,21 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_signal_exit_uses_failure_backoff
+    with_tmp_dir do |dir|
+      write_state(dir, "last_scanned_sha" => "old")
+      sched = scheduler(project_entry(dir), enabled_cfg)
+      assert_equal 1, sched.tick(now: T0).size
+
+      sched.complete(project: "p1", exit_code: nil, now: T0 + 10)
+
+      assert_empty sched.tick(now: T0 + 30),
+                   "a signal-terminated patrol must not be recorded as success"
+      assert_equal 1, sched.tick(now: T0 + 71).size,
+                   "a signal-terminated patrol retries on failure backoff"
+    end
+  end
+
   # Finding U2/poll_interval_sec: the new_commits trigger must run its
   # `git rev-parse` due-check on the slow patrol cadence, not every
   # daemon tick. Without the throttle the scheduler shelled out to git on

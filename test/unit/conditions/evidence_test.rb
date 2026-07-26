@@ -9,7 +9,9 @@ class ConditionsEvidenceTest < Minitest::Test
       { type: "commit", sha: "a" * 40, branch: "feature" },
       { type: "file", path: "artifact.md", digest: "b" * 64 },
       { type: "pull_request", url: "https://example.test/pull/1", number: 1,
-        observed_head_sha: "c" * 40, state: "OPEN" }
+        observed_head_sha: "c" * 40, state: "OPEN" },
+      { type: "task_closure", receipt_digest: "d" * 64, evidence_digest: "e" * 64,
+        reason: "already_delivered", authority: "remote_merge" }
     ]
 
     variants.each do |variant|
@@ -43,6 +45,18 @@ class ConditionsEvidenceTest < Minitest::Test
       Hive::Conditions::Evidence.validate!(
         { type: "pull_request", url: "https://example.test/pull/1", number: 0,
           observed_head_sha: "a" * 40, state: "OPEN" }
+      )
+    end
+    assert_raises(Hive::Conditions::InvalidEvidence) do
+      Hive::Conditions::Evidence.validate!(
+        { type: "task_closure", receipt_digest: "short", evidence_digest: "e" * 64,
+          reason: "already_delivered", authority: "remote_merge" }
+      )
+    end
+    assert_raises(Hive::Conditions::InvalidEvidence) do
+      Hive::Conditions::Evidence.validate!(
+        { type: "task_closure", receipt_digest: "d" * 64, evidence_digest: "e" * 64,
+          reason: "equal_refs", authority: "remote_merge" }
       )
     end
   end

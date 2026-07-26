@@ -22,6 +22,11 @@ class TuiSnapshotTest < Minitest::Test
       "folder" => "/tmp/hive/#{slug}",
       "state_file" => "/tmp/hive/#{slug}/idea.md",
       "pr_url" => nil,
+      "closure" => {
+        "status" => "complete",
+        "reason" => "already_delivered",
+        "receipt_digest" => "a" * 64
+      },
       "marker" => marker,
       "attrs" => {},
       "mtime" => "2026-04-27T12:00:00Z",
@@ -83,6 +88,7 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal "/tmp/hive/first-task", first.folder
     assert_equal "/tmp/hive/first-task/idea.md", first.state_file
     assert_nil first.pr_url
+    assert_equal "already_delivered", first.closure.fetch("reason")
     assert_equal "waiting", first.marker
     assert_equal({}, first.attrs)
     assert_equal "2026-04-27T12:00:00Z", first.mtime

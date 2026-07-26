@@ -20,9 +20,9 @@ components:
     owned_paths:
       - lib/hive/attempts
     state_contracts:
-      - "$HIVE_HOME/attempts/v1 records, logs, outputs, generation locks, leases, and receipts"
+      - "$HIVE_HOME/attempts/v2 records, logs, outputs, generation locks, leases, and receipts"
     schema_contracts:
-      - "hive-attempt v1 remains readable; v2 is the current writer"
+      - "hive-attempt v2 is the only runtime reader/writer; Hive::Recovery::Migration owns the one-off cutover"
     lock_contracts:
       - "admission lock before generation lock; record transitions use guarded CAS"
     component_dependencies: []

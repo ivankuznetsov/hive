@@ -7,8 +7,28 @@ require "hive/daemon/dispatch_request_queue"
 require "hive/recovery/api"
 require "hive/stages"
 require "hive/task_action"
+require "hive/task_closure"
+require "hive/task_resolver"
 
 module TaskMutations
+  def closure_preview(input)
+    Hive::TaskClosure.preview(
+      task: native_task_for_closure, project: project.name, input: normalized_closure_input(input)
+    )
+  end
+
+  def close_with_evidence!(input:, preview_digest:, operator:, authorized:)
+    Hive::TaskClosure.confirm!(
+      task: native_task_for_closure,
+      project: project.name,
+      input: normalized_closure_input(input),
+      preview_digest: preview_digest,
+      operator: operator,
+      channel: "web",
+      authorized: authorized
+    )
+  end
+
   extend ActiveSupport::Concern
 
   STAGE_VERB_BY_ACTION = Hive::TaskAction::READY_COMMANDS.select do |_action, verb|
@@ -125,6 +145,22 @@ module TaskMutations
   end
 
   private
+
+  def native_task_for_closure
+    Hive::TaskResolver.new(folder, project_filter: project.name).resolve
+  end
+
+  def normalized_closure_input(input)
+    values = input.respond_to?(:to_h) ? input.to_h : {}
+    values = values.transform_keys(&:to_s)
+    evidence = Array(values["evidence"]).flat_map { |entry| entry.to_s.lines }
+    {
+      "reason" => values["reason"],
+      "evidence" => Array(evidence).map(&:strip).reject(&:empty?),
+      "successor" => values["successor"],
+      "attestation" => values["attestation"]
+    }
+  end
 
   def prior_gate(from)
     return Hive::Stages::DIRS.first if from.blank?

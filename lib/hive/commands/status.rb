@@ -17,6 +17,7 @@ require "hive/diagnostic_helpers"
 require "hive/secret_patterns"
 require "hive/task_action"
 require "hive/task_projection/store"
+require "hive/task_closure"
 require "hive/implementation_identity/resolver"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
@@ -186,7 +187,7 @@ module Hive
         ).to_h
       end
 
-      # Canonical recovery receipts for adapters that already hold a v6
+      # Canonical recovery receipts for adapters that already hold a current
       # status graph. Unlike #operational_payload, this does not build task
       # classifications, reasons, actions, summaries, or archive metadata.
       def operational_recoveries(projects, scheduler_snapshot: AUTO_SCHEDULER_SNAPSHOT, status_payload: nil)
@@ -226,7 +227,7 @@ module Hive
 
       def validate_mode_combinations!
         if @full && @json
-          raise Hive::InvalidTaskPath, "--full cannot be combined with --json; omit --full for hive-status.v6"
+          raise Hive::InvalidTaskPath, "--full cannot be combined with --json; omit --full for hive-status.v7"
         end
         if @full && @operational
           raise Hive::InvalidTaskPath, "--full cannot be combined with --operational"
@@ -406,7 +407,13 @@ module Hive
             # every row. Schema mandates the field.
             config = task_action_config(path)
             rows = annotate_implementation_identities(
-              collect_rows(hive_state, stages: stages, exclude_archived: exclude_archived), config
+              collect_rows(
+                hive_state,
+                stages: stages,
+                exclude_archived: exclude_archived,
+                project_name: project["name"]
+              ),
+              config
             )
             rows = annotate_actions(
               rows,
@@ -515,6 +522,7 @@ module Hive
           "condition_migration" => row[:condition_migration],
           "condition_provenance" => row.dig(:projection_data, "provenance") || {},
           "shadow_audit" => row.dig(:projection_data, "shadow_audit") || {},
+          "closure" => row.dig(:projection_data, "closure"),
           "condition_warning" => row[:condition_warning],
           "implementation_identity" => row[:implementation_identity],
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
@@ -748,7 +756,10 @@ module Hive
         # I/O that TaskAction#diagnostic performs per red row. JSON path
         # still pays the full cost via project_payload.
         config = task_action_config(path)
-        rows = annotate_implementation_identities(collect_rows(hive_state), config)
+        rows = annotate_implementation_identities(
+          collect_rows(hive_state, project_name: project["name"]),
+          config
+        )
         rows = annotate_actions(
           rows, project, project_count,
           config: config, with_diagnostic: false
@@ -951,7 +962,7 @@ module Hive
         exclude_archived ? dirs - [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ] : dirs
       end
 
-      def collect_rows(hive_state, stages: nil, exclude_archived: false)
+      def collect_rows(hive_state, stages: nil, exclude_archived: false, project_name: nil)
         rows = []
         Array(stages || default_stage_dirs(exclude_archived)).each do |stage|
           stage_dir = File.join(hive_state, "stages", stage)
@@ -980,7 +991,9 @@ module Hive
                 next
               end
               marker = Hive::Markers.current(task.state_file)
-              marker, projection = status_projection(task, marker)
+              marker, projection = status_projection(
+                task, marker, project: project_name || project_name_for(task)
+              )
               folder_mtime = File.mtime(entry)
               mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
               # Generic markerless tasks still carry meta.yml. Use that stable
@@ -1088,8 +1101,11 @@ module Hive
         drop_transient_stage_moves(rows)
       end
 
-      def status_projection(task, marker)
+      def status_projection(task, marker, project: nil)
         projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
+        project ||= project_name_for(task)
+        closure = Hive::TaskClosure.projection(task, project: project)
+        projection = projection.with_closure(closure) if closure
         [ marker, projection ]
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
              SystemCallError, IOError => e

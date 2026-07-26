@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-07-22
+updated: 2026-07-26
 tags: [dependencies, gems, runtime]
 ---
 
@@ -26,6 +26,7 @@ as of this refresh.
 |-----|---------|---------|
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
 | `base64` | `>= 0.2` | Explicit runtime dependency for framed durable-attempt output and other binary-safe payloads; Ruby is unbundling it from the default gems. |
+| `bundler` | `= 2.7.2` | Exact installer for the authenticated managed web lock. Hive package managers vendor it into Hive's isolated `GEM_HOME`, and `AppBundle` invokes its absolute executable through the current Ruby without consulting `PATH`. |
 | `telegram-bot-ruby` | `~> 2.7` (locked 2.7.0) | Telegram Bot API client for `hive bot`. Chosen because RubyGems shows an April 3, 2026 release, MFA on publish, Ruby >= 2.7 support, and four direct runtime dependencies (`dry-struct`, `faraday`, `faraday-multipart`, `zeitwerk`). The lockfile review keeps the larger dry/faraday transitive set explicit. |
 | `faraday` | `>= 2.14.2, < 3.0` (locked 2.14.2) | HTTP transport used directly by `Hive::Bot::Transcriber` and indirectly through `telegram-bot-ruby`. The lower bound is the bundler-audit floor for CVE-2026-33637 / GHSA-5rv5-xj5j-3484. |
 | `faraday-multipart` | `~> 1.0` (locked 1.2.0) | Multipart upload support for `Hive::Bot::Transcriber` voice-note POSTs and Telegram Bot API file transport. |
@@ -135,7 +136,7 @@ These are not gems but the CLI tools the runtime invokes:
 | `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional TUI capture support; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed. Records a `.cast` only — rendering it to a terminal-demo GIF needs `agg` (or `vhs`), which the hivebox image does NOT ship |
 | `ffmpeg` | any recent | media conversion for manual `web/script/record_box_demo.rb` output (webm/mp4). NOT a terminal-GIF encoder: it cannot read an asciinema `.cast`, so it does not turn TUI recordings into GIFs on its own |
 | `agg` / `vhs` | not shipped in the hivebox image | the terminal-GIF encoders for artifacts-stage TUI/CLI demos (`agg` renders an asciinema `.cast`; `vhs` records straight to GIF). Absent in-box, so a TUI/CLI demo degrades to a `failed` capture unless the agent installs one |
-| agent-browser or Playwright | project/environment specific | optional UI visual capture support for the artifacts prompt; absence records a failed media manifest rather than failing the stage |
+| Playwright | exact npm metadata 1.60.0 in `web/package-lock.json` | supervised Hive web demo recorder; the expected local CLI and Chromium executable are preflighted before required capture |
 
 `HIVE_CLAUDE_BIN` env var overrides the `claude` binary, used by tests with `test/fixtures/fake-claude` and `fake-gh`.
 
@@ -144,6 +145,27 @@ nor `gtimeout` is executable, the llm-wiki runner fails the bounded operation
 closed (status 125) and retains its queued source for recovery. It deliberately
 has no unbounded fallback: limiting provider and Git execution is part of the
 subscription-safety contract.
+
+Source-worktree web capture also requires `bundle`, Node/npm for installing the
+pinned lock when browser dependencies are absent, Chromium for Playwright, and
+both `ffmpeg` and `ffprobe`. Ruby gems are installed into a private cache keyed
+by both root/web lockfile contents plus Ruby engine/version/platform; neither
+linked-worktree lockfile nor its mode may change. Missing browser/media tooling
+is a truthful required-capture error, never a silent `not_applicable` result.
+
+Managed web installation does not require a `bundle` wrapper on `PATH`.
+`Hive::Web::AppBundle` reads the authenticated web `Gemfile.lock`, resolves
+that exact Bundler through RubyGems, and invokes its absolute executable
+through the current `RbConfig.ruby`. `hive-cli` declares that exact Bundler as
+a runtime dependency so isolated gem, Homebrew, and AUR installations carry it
+inside Hive's managed `GEM_HOME`; a system default gem is not assumed.
+Production asset compilation runs as locked `bundle exec` over that same Ruby,
+so Rails cannot activate a newer host Bundler while reading the managed lock.
+The managed service uses the identical launcher for `db:prepare` and the
+long-running Rails server; provisioning and runtime therefore cannot diverge
+when another Bundler version is the host default.
+A missing locked Bundler is therefore an explicit bootstrap error rather than
+an ambiguous command-not-found failure.
 
 ## Ruby version
 

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-dispatch-request.v4.json",
   "title": "hive dispatch request (v4)",
-  "description": "Delivery request for the shared durable task-attempt dispatcher. v4 adds a restartable generation-safe recovery transition; normal requests carry recovery=null. Consumers continue accepting pending v2 and v3 files.",
+  "description": "Delivery request for the shared durable task-attempt dispatcher. v4 adds a restartable generation-safe recovery transition; normal requests carry recovery=null. The one-off recovery migration rewrites older queued requests before current readers open them.",
   "type": "object",
   "additionalProperties": false,
   "required": [

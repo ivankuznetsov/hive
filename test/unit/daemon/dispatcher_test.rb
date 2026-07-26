@@ -47,11 +47,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   class FakeSupervisor
     attr_reader :spawned, :next_pid
-    attr_accessor :next_exits, :identity, :terminate_result, :spawn_error
+    attr_accessor :next_exits, :shutdown_exits, :identity, :terminate_result, :spawn_error
     def initialize
       @spawned = []
       @next_pid = 100
       @next_exits = []
+      @shutdown_exits = []
       @identity = { process_start_time: "start", pgid: 100 }
       @terminate_result = true
     end
@@ -83,6 +84,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
 
     def terminate_all(grace_sec: 600)
+      @shutdown_exits
     end
 
     def update_timeouts(default_timeout_sec:, verb_timeouts:, kill_grace_sec:)
@@ -115,34 +117,34 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   class FakeMergeWatcher
-    attr_reader :enqueued, :dropped
-    attr_accessor :next_archives, :next_dropped
+    attr_reader :observed, :tick_projects, :observed_projects
+    attr_accessor :next_results, :observe_error, :tick_error,
+                  :recovery_blocked
     def initialize
-      @enqueued = []
-      @next_archives = []
-      @last_tick_dropped = []
-      @next_dropped = []
-      @dropped = []
+      @observed = []
+      @next_results = []
     end
 
-    def enqueue(project:, slug:, task_folder:, error_reason: nil)
-      @enqueued << { project: project, slug: slug, task_folder: task_folder, error_reason: error_reason }
+    def observe(rows, now:, projects: nil)
+      raise observe_error if observe_error
+
+      @observed << { rows: rows, now: now }
+      @observed_projects = projects
+      []
     end
 
-    def tick(now:)
-      out = @next_archives
-      @next_archives = []
-      @last_tick_dropped = @next_dropped
-      @next_dropped = []
+    def tick(now:, projects: nil)
+      raise tick_error if tick_error
+
+      @tick_projects = projects
+      out = @next_results
+      @next_results = []
       out
     end
 
-    def drop(project:, slug:)
-      @dropped << { project: project, slug: slug }
-      @next_archives.reject! { |entry| entry[:project] == project && entry[:slug] == slug }
+    def recovery_blocked?(project:, slug:)
+      recovery_blocked == true
     end
-
-    attr_reader :last_tick_dropped
   end
 
   class FakePatrolScheduler
@@ -765,7 +767,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert logger.events.any? do |name, attrs|
       name == :skipped && attrs[:action] == "refactor_patrol_intake" && attrs[:reason] == "baseline_seeded"
     end
-    catch_up = logger.events.find { |name, attrs| name == :merge_watcher_polled && attrs[:source] == "catch_up" }
+    catch_up = logger.events.find do |name, attrs|
+      name == :architecture_patrol_progress && attrs[:source] == "catch_up"
+    end
     assert_equal [ 7, 8 ], catch_up.last.fetch(:enqueued_prs)
   end
 
@@ -2309,11 +2313,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher, sup, _ctrl, _logger, mw = make_dispatcher(rows: rows, with_merge_watcher: true)
     dispatcher.tick(now: T0)
     assert_equal 0, sup.spawned.size, "archive must NOT spawn directly"
-    assert_equal 1, mw.enqueued.size
-    assert_equal "s1", mw.enqueued.first[:slug]
+    assert_equal rows, mw.observed.first.fetch(:rows)
+    assert_equal [ "p1" ], mw.tick_projects
   end
 
-  def test_admission_error_drops_merge_watch_and_never_spawns
+  def test_admission_error_remains_observed_and_never_spawns
     error = Hive::DependencyAdmission::AdmissionError.new(
       reason_code: "dependency_repository_mismatch",
       offending_ref: "data:base",
@@ -2322,16 +2326,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
     rows = [ row(stage: "8-finalize", action: "admission_error", command: nil,
                  blocked: true, admission_error: error) ]
     dispatcher, sup, _ctrl, logger, mw = make_dispatcher(rows: rows, with_merge_watcher: true)
-    mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "8-finalize",
-      command: "hive archive s1 --from 8-finalize --project p1 --json",
-      state_file_mtime: nil, hive_state_path: nil
-    } ]
-
     dispatcher.tick(now: T0)
 
     assert_empty sup.spawned
-    assert_includes mw.dropped, { project: "p1", slug: "s1" }
+    assert_equal rows, mw.observed.first.fetch(:rows)
+    assert_equal [ "p1" ], mw.tick_projects
     event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "admission_error" }
     refute_nil event
     assert_equal "dependency_repository_mismatch", event[1][:reason_code]
@@ -2349,71 +2348,154 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher.tick(now: T0)
 
     assert_equal 0, sup.spawned.size
-    assert_equal 1, mw.enqueued.size
-    assert_equal "git_status_failed", mw.enqueued.first[:error_reason]
-    event = logger.events.find { |name, attrs| name == :merge_watcher_enqueued && attrs[:slug] == "s1" }
-    assert event, "expected merge_watcher_enqueued event, got #{logger.events.inspect}"
-    assert_equal "git_status_failed", event[1][:error_reason]
+    assert_equal rows, mw.observed.first.fetch(:rows)
+    refute logger.events.any? { |name, _attrs| name == :dispatched }
   end
 
-  def test_merged_pr_archive_dispatches_through_supervisor
-    # PR-40 review P2 #4: when PrMergeWatcher.tick returns an archive
-    # dispatch entry (PR is MERGED), Dispatcher routes it through the
-    # supervisor + caps just like a regular advance dispatch.
-    dispatcher, sup, _ctrl, _logger, mw = make_dispatcher(rows: [], with_merge_watcher: true)
-    mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "8-finalize",
-      command: "hive archive s1 --from 8-finalize --project p1 --json",
-      state_file_mtime: nil, hive_state_path: nil
-    } ]
-    dispatcher.tick(now: T0)
-    assert_equal 1, sup.spawned.size
-    assert_equal "hive archive s1 --from 8-finalize --project p1 --json", sup.spawned.first[:command]
-  end
-
-  def test_merge_watcher_dropped_entries_are_logged
-    dispatcher, _sup, _ctrl, logger, mw = make_dispatcher(rows: [], with_merge_watcher: true)
-    mw.next_dropped = [ {
-      project: "p1", slug: "s1", pr_url: "https://example.com/pull/1",
-      failure_count: 3, last_error: "gh api failed"
-    } ]
-
-    dispatcher.tick(now: T0)
-
-    event = logger.events.find { |(name, _attrs)| name == :merge_watcher_dropped }
-    refute_nil event
-    assert_equal({
-      project: "p1", slug: "s1", pr_url: "https://example.com/pull/1",
-      failure_count: 3, last_error: "gh api failed"
-    }, event[1])
-  end
-
-  def test_merged_pr_archive_skips_when_project_disabled_after_enqueue
-    # PR-40 review P2 #4: a project disabled between merge-watch
-    # enqueue and the merge-completion tick must NOT be archived.
-    dispatcher, sup, _ctrl, logger, mw = make_dispatcher(
-      rows: [], with_merge_watcher: true, project_enabled: false
+  def test_merge_reconciliation_fences_provider_recovery
+    observed = row(
+      stage: "6-review",
+      marker: "review_error",
+      action: "recover_review",
+      command: "hive run s1 --stage 6-review --json"
     )
-    mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "8-finalize",
-      command: "hive archive s1 --from 8-finalize --project p1 --json",
-      state_file_mtime: nil, hive_state_path: nil
-    } ]
+    dispatcher, supervisor, _controller, logger, merge_watcher =
+      make_dispatcher(rows: [ observed ], with_merge_watcher: true)
+    merge_watcher.recovery_blocked = true
+    healed_rows = []
+    healer = Object.new
+    healer.define_singleton_method(:heal_attempt_losses) { |*_args, **_kwargs| [] }
+    healer.define_singleton_method(:heal) do |rows, **_kwargs|
+      healed_rows << rows
+      []
+    end
+    dispatcher.instance_variable_set(:@stale_agent_healer, healer)
+
     dispatcher.tick(now: T0)
-    assert_equal 0, sup.spawned.size
-    skipped = logger.events.find { |(n, a)| n == :skipped && a[:reason] == "project_disabled_after_enqueue" }
-    refute_nil skipped, "must log :skipped reason: project_disabled_after_enqueue"
+
+    assert_equal [ [] ], healed_rows
+    assert_empty supervisor.spawned
+    assert logger.events.any? { |name, attributes|
+      name == :skipped &&
+        attributes[:slug] == observed.slug &&
+        attributes[:reason] == "merge_reconciliation_pending"
+    }
   end
 
-  def test_merged_pr_archive_skips_when_project_layout_is_legacy
-    # ce-code-review P1 #10: when a project's status snapshot reports
-    # legacy_stage_dirs (half-migrated layout), archive dispatch must
-    # be deferred. The watcher's ARCHIVE_VERB_TEMPLATE is frozen at
-    # class-load and may interpolate a stale `--from <stage>` that
-    # doesn't match the post-migrate on-disk layout. Skip the dispatch
-    # and let handle_row re-enqueue on a future tick.
+  def test_merged_pr_archive_is_logged_from_the_durable_reconciler
+    rows = [ row(stage: "8-finalize", action: "ready_to_archive") ]
     dispatcher, sup, _ctrl, logger, mw = make_dispatcher(
-      rows: [], with_merge_watcher: true
+      rows: rows, with_merge_watcher: true
+    )
+    mw.next_results = [ { project: "p1", slug: "s1", status: :archived } ]
+    dispatcher.tick(now: T0)
+    assert_empty sup.spawned
+    completed = logger.events.find do |name, attrs|
+      name == :completed && attrs[:action] == "archive_merged_task"
+    end
+    refute_nil completed
+    assert_equal "archived", completed[1][:reason]
+  end
+
+  def test_merge_reconciliation_logs_observation_blocks_and_nonterminal_remote_states
+    rows = [ row(stage: "8-finalize", action: "ready_to_archive") ]
+    dispatcher, _supervisor, _controller, logger, watcher =
+      make_dispatcher(rows: rows, with_merge_watcher: true)
+    watcher.define_singleton_method(:observe) do |*, **|
+      [
+        {
+          status: :blocked,
+          project: "p1",
+          reason: "candidate identity is ambiguous"
+        }
+      ]
+    end
+    watcher.next_results = [
+      { project: "p1", slug: "open", status: :open },
+      { project: "p1", slug: "closed", status: :closed_unmerged },
+      { project: "p1", slug: "dry", status: :dry_run }
+    ]
+
+    dispatcher.tick(now: T0)
+
+    assert logger.events.any? do |name, attrs|
+      name == :blocked &&
+        attrs[:action] == "observe" &&
+        attrs[:reason] == "candidate identity is ambiguous"
+    end
+    assert logger.events.any? do |name, attrs|
+      name == :skipped && attrs[:slug] == "open" &&
+        attrs[:reason] == "pull_request_open"
+    end
+    assert logger.events.any? do |name, attrs|
+      name == :blocked && attrs[:slug] == "closed" &&
+        attrs[:reason] == "pull_request_closed_unmerged"
+    end
+    assert logger.events.any? do |name, attrs|
+      name == :skipped && attrs[:slug] == "dry" &&
+        attrs[:reason] == "dry_run"
+    end
+  end
+
+  def test_merge_reconciliation_recovery_guard_fails_closed
+    observed = row(
+      stage: "6-review",
+      marker: "review_error",
+      action: "recover_review",
+      command: "hive run s1 --stage 6-review --json"
+    )
+    dispatcher, supervisor, _controller, logger, watcher =
+      make_dispatcher(rows: [ observed ], with_merge_watcher: true)
+    watcher.define_singleton_method(:recovery_blocked?) do |**|
+      raise IOError, "ledger unreadable"
+    end
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    assert logger.events.any? do |name, attrs|
+      name == :blocked &&
+        attrs[:action] == "recovery_guard" &&
+        attrs[:reason].include?("ledger unreadable")
+    end
+  end
+
+  def test_merge_reconciliation_failures_remain_visible_without_drop
+    rows = [ row(stage: "6-review", action: "error") ]
+    dispatcher, _sup, _ctrl, logger, mw = make_dispatcher(
+      rows: rows, with_merge_watcher: true
+    )
+    mw.next_results = [ {
+      project: "p1", slug: "s1", status: :failed, reason: "gh api failed"
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    event = logger.events.find do |name, attrs|
+      name == :blocked && attrs[:action] == "archive_merged_task"
+    end
+    refute_nil event
+    assert_equal "gh api failed", event[1][:reason]
+  end
+
+  def test_merge_reconciliation_skips_disabled_project
+    rows = [ row(stage: "8-finalize", action: "ready_to_archive") ]
+    dispatcher, sup, _ctrl, logger, mw = make_dispatcher(
+      rows: rows, with_merge_watcher: true, project_enabled: false
+    )
+    dispatcher.tick(now: T0)
+    assert_empty sup.spawned
+    assert_empty mw.observed.first.fetch(:rows)
+    assert_empty mw.tick_projects
+    refute(logger.events.any? do |name, attrs|
+      name == :completed && attrs[:action] == "archive_merged_task"
+    end)
+  end
+
+  def test_merge_reconciliation_skips_legacy_layout
+    rows = [ row(stage: "8-finalize", action: "ready_to_archive") ]
+    dispatcher, sup, _ctrl, logger, mw = make_dispatcher(
+      rows: rows, with_merge_watcher: true
     )
     legacy_project = Hive::Daemon::StatusConsumer::ProjectInfo.new(
       name: "p1",
@@ -2421,29 +2503,22 @@ class HiveDaemonDispatcherTest < Minitest::Test
     )
     dispatcher.instance_variable_get(:@status_consumer).next_result =
       Hive::Daemon::StatusConsumer::Result.new(
-        ok: true, rows: [], projects: [ legacy_project ], error: nil
+        ok: true, rows: rows, projects: [ legacy_project ], error: nil
       )
-    mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "8-finalize",
-      command: "hive archive s1 --from 8-finalize --project p1 --json",
-      state_file_mtime: nil, hive_state_path: nil
-    } ]
     dispatcher.tick(now: T0)
-    assert_equal 0, sup.spawned.size,
-                 "archive must not fire while the project is half-migrated"
-    skipped = logger.events.find { |(n, a)| n == :skipped && a[:reason] == "legacy_layout_detected" }
-    refute_nil skipped, "must log :skipped reason: legacy_layout_detected"
-    assert_equal "archive", skipped[1][:action]
+    assert_empty sup.spawned
+    assert_empty mw.observed.first.fetch(:rows)
+    assert_empty mw.tick_projects
+    refute(logger.events.any? do |name, attrs|
+      name == :completed && attrs[:action] == "archive_merged_task"
+    end)
   end
 
-  def test_merged_pr_archive_respects_global_cap
-    # PR-40 review P2 #4: with N PRs ready to archive but only M
-    # capacity slots open, only M archives spawn this tick; the rest
-    # block (and re-enqueue for the next tick).
+  def test_merge_reconciliation_does_not_consume_provider_capacity
+    rows = [ row(stage: "8-finalize", action: "ready_to_archive") ]
     dispatcher, sup, ctrl, logger, mw = make_dispatcher(
-      rows: [], with_merge_watcher: true
+      rows: rows, with_merge_watcher: true
     )
-    # Force global cap to 1 with one slot already used.
     ctrl.instance_variable_set(:@max_concurrent_runs, 1)
     ctrl.record_dispatch(
       pid: 999, project: "px", slug: "running",
@@ -2451,16 +2526,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
       state_file_mtime: T0 - 60
     )
 
-    mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "8-finalize",
-      command: "hive archive s1 --from 8-finalize --project p1 --json",
-      state_file_mtime: nil, hive_state_path: nil
-    } ]
+    mw.next_results = [ { project: "p1", slug: "s1", status: :archived } ]
     dispatcher.tick(now: T0)
-    assert_equal 0, sup.spawned.size, "global cap reached → no archive spawn"
-    blocked = logger.events.find { |(n, a)| n == :blocked && a[:action] == "archive" }
-    refute_nil blocked, "must log :blocked for the archive dispatch"
-    assert_equal "global_cap", blocked[1][:reason]
+    assert_empty sup.spawned
+    assert(logger.events.any? do |name, attrs|
+      name == :completed && attrs[:action] == "archive_merged_task"
+    end)
   end
 
   def test_patrol_scheduler_dispatches_through_supervisor
@@ -3274,6 +3345,76 @@ def test_run_forever_reloads_ticks_and_shuts_down_cleanly
   assert_equal 0, supervisor.spawned.size
 end
 
+def test_run_forever_routes_shutdown_child_exit_through_architecture_completion
+  architecture = FakeRefactorPatrolScheduler.new
+  architecture.completion_status = :retry
+  dispatcher, supervisor, _ctrl, logger = make_dispatcher(
+    refactor_patrol_scheduler: architecture
+  )
+  token = {
+    kind: :architecture_patrol, phase: :discovery,
+    job_id: "job-7", owner: "daemon", generation: 1
+  }
+  supervisor.shutdown_exits = [
+    ChildExit.new(
+      pid: 100, exit_code: nil, project: "p1",
+      slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      command: "hive refactor-patrol p1", started_at: T0,
+      finished_at: T0 + 1, json_envelope: nil, dispatch_token: token
+    )
+  ]
+
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:tick) { |now:| request_shutdown! }
+  dispatcher.define_singleton_method(:interruptible_sleep) { |_seconds| nil }
+
+  dispatcher.run_forever
+
+  assert_equal 1, architecture.completed.size
+  assert_nil architecture.completed.first.fetch(:exit_code)
+  assert_equal token, architecture.completed.first.fetch(:dispatch_token)
+  assert logger.events.any? { |name, attrs|
+    name == :architecture_patrol_blocked && attrs[:job_id] == "job-7"
+  }
+end
+
+def test_run_forever_marks_signal_reaped_terminal_recovery_failed
+  Dir.mktmpdir("hive-shutdown-recovery") do |state_home|
+    recovery = dispatcher_recovery(phase: "dispatched").merge(
+      "attempt_id" => "attempt-shutdown"
+    )
+    Q.write_request!(
+      project: "p1", slug: "s1", argv: %w[hive run s1 --json],
+      requestor: "daemon", trigger: "recovery",
+      request_id: "recovery-shutdown", recovery: recovery,
+      state_home: state_home, now: T0
+    )
+    coordinator = FakeRecoveryCoordinator.new(status: "queued")
+    dispatcher, supervisor, = make_dispatcher(
+      dispatch_request_state_home: state_home,
+      recovery_coordinator: coordinator
+    )
+    supervisor.shutdown_exits = [
+      ChildExit.new(
+        pid: 101, exit_code: nil, project: "p1", slug: "s1",
+        stage: "4-execute", command: "hive run s1 --json",
+        started_at: T0, finished_at: T0 + 1, json_envelope: nil,
+        request_id: "recovery-shutdown"
+      )
+    ]
+    dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+    dispatcher.define_singleton_method(:tick) { |now:| request_shutdown! }
+    dispatcher.define_singleton_method(:interruptible_sleep) { |_seconds| nil }
+
+    dispatcher.run_forever
+
+    marked = coordinator.marked.fetch(0)
+    assert_equal "attempt-shutdown", marked.fetch(:attempt_id)
+    assert_equal true, marked.fetch(:terminal)
+    assert_equal "failed", marked.fetch(:outcome)
+  end
+end
+
 def test_run_forever_escalates_to_full_tick_when_cheap_probe_detects_change
   # Drive the fast-poll escalation branch in run_forever (dispatcher.rb
   # 323-324): on a fast poll where no full tick is due, a cheap probe
@@ -3703,22 +3844,18 @@ def test_dry_run_answer_digest_complete_raise_is_isolated_as_a_fatal_event
   refute_nil logger.events.find { |(name, attrs)| name == :child_exited && attrs[:dry_run] == true }
 end
 
-def test_archive_dispatch_reenqueue_errors_are_logged_as_fatal
-  dispatcher, _sup, ctrl, logger, mw = make_dispatcher(rows: [], with_merge_watcher: true)
-  ctrl.instance_variable_set(:@max_concurrent_runs, 1)
-  ctrl.record_dispatch(pid: 999, project: "p1", slug: "running", stage: "6-review",
-                       command: "hive review running", started_at: T0, state_file_mtime: T0 - 60)
-  mw.next_archives = [ {
-    project: "p1", slug: "s1", stage: "7-finalize",
-    command: "hive archive s1 --from 7-finalize --project p1 --json",
-    state_file_mtime: nil, hive_state_path: nil
-  } ]
+def test_merge_reconciliation_exceptions_are_logged_as_fatal
+  rows = [ row(stage: "8-finalize", action: "ready_to_archive") ]
+  dispatcher, _sup, _ctrl, logger, mw = make_dispatcher(
+    rows: rows, with_merge_watcher: true
+  )
+  mw.tick_error = RuntimeError.new("registry unavailable")
 
-  with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { raise "registry unavailable" }) do
-    dispatcher.tick(now: T0)
+  dispatcher.tick(now: T0)
+
+  fatal = logger.events.find do |name, attrs|
+    name == :fatal && attrs[:message].include?("task merge reconciliation failed")
   end
-
-  fatal = logger.events.find { |(name, attrs)| name == :fatal && attrs[:message].include?("archive dispatch error") }
   refute_nil fatal
   assert_includes fatal[1][:message], "registry unavailable"
 end

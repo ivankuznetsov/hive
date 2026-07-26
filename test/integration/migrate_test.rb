@@ -66,10 +66,260 @@ class MigrateTest < Minitest::Test
       [],
       config_only: false,
       backfilled_count: 2,
-      recovery_marker_count: 3
+      recovery_marker_count: 3,
+      workflow_configuration_count: 4
     )
 
-    assert_equal "hive: migrate project state (2 ids, 3 recovery markers)", message
+    assert_equal(
+      "hive: migrate project state (2 ids, 3 recovery markers, " \
+      "4 managed workflow pins)",
+      message
+    )
+  end
+
+  def test_managed_workflow_pin_only_commit_message
+    message = migrate_command("/tmp/project").send(
+      :migrate_commit_message,
+      [],
+      config_only: false,
+      workflow_configuration_count: 1
+    )
+
+    assert_equal "hive: migrate managed workflow pins (1 task)", message
+  end
+
+  def test_managed_workflow_pin_no_move_message
+    message = migrate_command("/tmp/project").send(
+      :migration_no_move_message,
+      config_changed: false,
+      backfilled_count: 0,
+      workflow_configuration_count: 2
+    )
+
+    assert_equal "hive: migrate updated 2 managed workflow pins", message
+  end
+
+  def test_complete_message_reports_every_migration_count
+    message = migrate_command("/tmp/project").send(
+      :migration_complete_message,
+      [ [ "5-review", "6-review", "task-a" ], [ "6-pr", "8-finalize", "task-b" ] ],
+      backfilled_count: 2,
+      recovery_marker_count: 3,
+      workflow_configuration_count: 4
+    )
+
+    assert_equal(
+      "hive: migrate complete (2 tasks moved, 2 ids backfilled, " \
+      "3 recovery markers upgraded, 4 managed workflow pins updated)",
+      message
+    )
+  end
+
+  def test_rebinds_same_generation_managed_tasks_to_the_selected_configuration
+    with_tmp_dir do |project|
+      hive_state = File.join(project, ".hive-state")
+      stages = File.join(hive_state, "stages")
+      folder = write_task_folder(
+        stages, "7-deliver", "managed-writing-260726-abcd"
+      )
+      old_digest = "a" * 64
+      selected_digest = "b" * 64
+      commit = "c" * 40
+      manifest = "d" * 64
+      Hive::TaskMeta.write(
+        folder,
+        id: 42,
+        slug: File.basename(folder),
+        display_name: "Managed writing",
+        depends_on: "source-task-260725-abcd",
+        workflow: "writing",
+        base_branch: "launch",
+        workflow_commit: commit,
+        workflow_manifest_digest: manifest,
+        workflow_configuration_digest: old_digest
+      )
+
+      calls = []
+      store = Object.new
+      store.define_singleton_method(:selected) do |name, cfg:|
+        calls << [ :selected, name, cfg ]
+        {
+          "source_commit" => commit,
+          "manifest_digest" => manifest,
+          "configuration_digest" => selected_digest
+        }
+      end
+      store.define_singleton_method(:workflow) do |name, source, digest, **kwargs|
+        calls << [ :workflow, name, source, digest, kwargs ]
+        Object.new
+      end
+      store.define_singleton_method(:cleanup_unreferenced) do |name|
+        calls << [ :cleanup, name ]
+        []
+      end
+      command = migrate_command(
+        project,
+        managed_store_factory: ->(_path) { store },
+        config_loader: ->(_path) { { "project_name" => "writing" } }
+      )
+
+      count = command.send(
+        :migrate_managed_workflow_configuration_pins, stages, hive_state
+      )
+
+      assert_equal 1, count
+      migrated = Hive::TaskMeta.read(folder)
+      assert_equal selected_digest, migrated.fetch(:workflow_configuration_digest)
+      assert_equal "source-task-260725-abcd", migrated.fetch(:depends_on)
+      assert_equal "launch", migrated.fetch(:base_branch)
+      assert_includes calls, [ :cleanup, "writing" ]
+      workflow_call = calls.find { |entry| entry.first == :workflow }
+      assert_equal selected_digest,
+                   workflow_call.last.fetch(:configuration_digest)
+    end
+  end
+
+  def test_preserves_managed_tasks_pinned_to_another_package_generation
+    with_tmp_dir do |project|
+      hive_state = File.join(project, ".hive-state")
+      stages = File.join(hive_state, "stages")
+      folder = write_task_folder(
+        stages, "7-deliver", "older-writing-260726-abcd"
+      )
+      pinned_digest = "a" * 64
+      Hive::TaskMeta.write(
+        folder,
+        id: 43,
+        slug: File.basename(folder),
+        display_name: "Older writing",
+        workflow: "writing",
+        workflow_commit: "c" * 40,
+        workflow_manifest_digest: "d" * 64,
+        workflow_configuration_digest: pinned_digest
+      )
+
+      cleanup_calls = []
+      store = Object.new
+      store.define_singleton_method(:selected) do |_name, cfg:|
+        {
+          "source_commit" => "e" * 40,
+          "manifest_digest" => "f" * 64,
+          "configuration_digest" => "b" * 64
+        }
+      end
+      store.define_singleton_method(:cleanup_unreferenced) do |_name|
+        cleanup_calls << true
+      end
+      command = migrate_command(
+        project,
+        managed_store_factory: ->(_path) { store },
+        config_loader: ->(_path) { {} }
+      )
+
+      count = command.send(
+        :migrate_managed_workflow_configuration_pins, stages, hive_state
+      )
+
+      assert_equal 0, count
+      assert_empty cleanup_calls
+      assert_equal pinned_digest,
+                   Hive::TaskMeta.read(folder).fetch(:workflow_configuration_digest)
+    end
+  end
+
+  def test_preflights_all_selected_configurations_before_rewriting_tasks
+    with_tmp_dir do |project|
+      hive_state = File.join(project, ".hive-state")
+      stages = File.join(hive_state, "stages")
+      old_digest = "a" * 64
+      selected_digest = "b" * 64
+      manifest = "d" * 64
+      %w[a-writing b-broken].each_with_index do |name, index|
+        folder = write_task_folder(
+          stages, "7-deliver", "#{name}-260726-abcd"
+        )
+        Hive::TaskMeta.write(
+          folder,
+          id: 50 + index,
+          slug: File.basename(folder),
+          display_name: name,
+          workflow: name,
+          workflow_commit: "c" * 40,
+          workflow_manifest_digest: manifest,
+          workflow_configuration_digest: old_digest
+        )
+      end
+
+      store = Object.new
+      store.define_singleton_method(:selected) do |name, cfg:|
+        {
+          "source_commit" => "c" * 40,
+          "manifest_digest" => manifest,
+          "configuration_digest" => selected_digest,
+          "name" => name,
+          "cfg" => cfg
+        }
+      end
+      store.define_singleton_method(:workflow) do |name, *_args, **_kwargs|
+        raise Hive::ConfigError, "selected profile is unavailable" if name == "b-broken"
+
+        Object.new
+      end
+      store.define_singleton_method(:cleanup_unreferenced) do |_name|
+        raise "cleanup must not run after failed preflight"
+      end
+      command = migrate_command(
+        project,
+        managed_store_factory: ->(_path) { store },
+        config_loader: ->(_path) { {} }
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        command.send(
+          :migrate_managed_workflow_configuration_pins, stages, hive_state
+        )
+      end
+
+      assert_includes error.message, "selected profile is unavailable"
+      %w[a-writing b-broken].each do |name|
+        folder = File.join(stages, "7-deliver", "#{name}-260726-abcd")
+        assert_equal old_digest,
+                     Hive::TaskMeta.read(folder).fetch(:workflow_configuration_digest)
+      end
+    end
+  end
+
+  def test_backfills_missing_registered_repository_identity_once
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        entry = Hive::Config.registered_projects.find { |project| project["path"] == dir }
+        assert_nil entry["repository_identity"]
+        run!("git", "-C", dir, "remote", "add", "origin", "https://github.com/acme/demo.git")
+
+        out, = capture_io { migrate_command(dir).call }
+
+        migrated = Hive::Config.registered_projects.find { |project| project["path"] == dir }
+        assert_equal "github.com/acme/demo", migrated["repository_identity"]
+        assert_includes out, "backfilled registered repository identity github.com/acme/demo"
+
+        run!("git", "-C", dir, "remote", "set-url", "origin", "https://github.com/acme/other.git")
+        second_out, = capture_io { migrate_command(dir).call }
+        preserved = Hive::Config.registered_projects.find { |project| project["path"] == dir }
+        assert_equal "github.com/acme/demo", preserved["repository_identity"]
+        refute_includes second_out, "backfilled registered repository identity"
+      end
+    end
+  end
+
+  def test_registered_project_path_comparison_fails_closed_for_missing_paths
+    with_tmp_dir do |dir|
+      refute migrate_command(dir).send(
+        :same_project_path?,
+        File.join(dir, "missing-candidate"),
+        File.join(dir, "missing-expected")
+      )
+    end
   end
 
   def test_migrates_previous_canonical_finalize_and_done_stage_directories
@@ -614,11 +864,10 @@ class MigrateTest < Minitest::Test
     end
   end
 
-  # The id-backfill path re-writes meta.yml; dropping the workflow arg there
-  # would silently revert a non-coding task to the project default workflow
-  # during migrate (the exact sibling of the depends_on strip above). Seed a
-  # populated workflow selector and assert it survives a full migrate run.
-  def test_migrate_fills_null_id_and_preserves_workflow
+  # The id-backfill path must preserve the complete managed workflow pin.
+  # Dropping any field can silently change the workflow or make its immutable
+  # generation/configuration impossible to resolve.
+  def test_migrate_fills_null_id_and_preserves_managed_workflow_provenance
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
@@ -629,16 +878,23 @@ class MigrateTest < Minitest::Test
           id: nil,
           slug: "generic-task-260603-aaaa",
           display_name: "Generic Task",
-          workflow: "research"
+          workflow: "research",
+          base_branch: "launch",
+          workflow_commit: "c" * 40,
+          workflow_manifest_digest: "d" * 64,
+          workflow_configuration_digest: "e" * 64
         )
 
         capture_io { migrate_command(dir).call }
 
         assert_equal(
           { id: 1, slug: "generic-task-260603-aaaa",
-            display_name: "Generic Task", depends_on: nil, workflow: "research" },
+            display_name: "Generic Task", depends_on: nil, workflow: "research",
+            base_branch: "launch", workflow_commit: "c" * 40,
+            workflow_manifest_digest: "d" * 64,
+            workflow_configuration_digest: "e" * 64 },
           Hive::TaskMeta.read(folder),
-          "migrate's id-backfill must preserve the workflow selector, not strip it"
+          "migrate's id-backfill must preserve complete workflow provenance"
         )
       end
     end
@@ -848,8 +1104,13 @@ class MigrateTest < Minitest::Test
     refute migrate.send(:systemctl_available?)
   end
 
-  def migrate_command(project_path, display_name_generator: NoopDisplayNameGenerator)
-    Hive::Commands::Migrate.new(project_path, display_name_generator: display_name_generator)
+  def migrate_command(project_path, display_name_generator: NoopDisplayNameGenerator,
+                      **options)
+    Hive::Commands::Migrate.new(
+      project_path,
+      display_name_generator: display_name_generator,
+      **options
+    )
   end
 
   def write_task_folder(stages, stage, slug, created_at: "2026-06-03T10:00:00Z", idea: true)

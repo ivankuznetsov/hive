@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/schemas/hive-pr-merge-reconciliation.v1.json",
+  "title": "Hive task-bound pull-request merge reconciliation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "registration",
+    "project_path",
+    "hive_state_path",
+    "host",
+    "repository",
+    "default_branch",
+    "cursor",
+    "backlog",
+    "updated_at",
+    "candidates"
+  ],
+  "properties": {
+    "schema": { "const": "hive-pr-merge-reconciliation" },
+    "schema_version": { "const": 1 },
+    "registration": { "type": "string", "minLength": 1 },
+    "project_path": { "type": "string", "minLength": 1 },
+    "hive_state_path": { "type": "string", "minLength": 1 },
+    "host": { "type": "string", "minLength": 1 },
+    "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+    "default_branch": { "type": "string", "minLength": 1 },
+    "cursor": {
+      "type": ["string", "null"],
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "backlog": { "$ref": "#/$defs/backlog" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "candidates": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-f0-9]{64}$" },
+      "additionalProperties": { "$ref": "#/$defs/candidate" }
+    }
+  },
+  "$defs": {
+    "nullableTimestamp": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "nullableOid": {
+      "type": ["string", "null"],
+      "pattern": "^[a-f0-9]{40,64}$"
+    },
+    "backlog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["watermark", "scanned_at", "complete", "outcomes"],
+      "properties": {
+        "watermark": { "type": "string", "format": "date-time" },
+        "scanned_at": { "$ref": "#/$defs/nullableTimestamp" },
+        "complete": { "type": "boolean" },
+        "outcomes": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-f0-9]{64}$" },
+          "additionalProperties": { "$ref": "#/$defs/outcome" }
+        }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key", "project", "slug", "stage", "task_generation", "status",
+        "reason", "candidate_key", "observed_at"
+      ],
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "project": { "type": "string", "minLength": 1 },
+        "slug": { "type": "string", "minLength": 1 },
+        "stage": {
+          "type": "string",
+          "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$"
+        },
+        "task_generation": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "status": { "enum": ["candidate", "rejected"] },
+        "reason": { "type": ["string", "null"], "maxLength": 500 },
+        "candidate_key": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "observed_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "task",
+        "observation",
+        "pull_request",
+        "remote",
+        "architecture",
+        "archive",
+        "retry",
+        "updated_at"
+      ],
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "task": { "$ref": "#/$defs/task" },
+        "observation": { "$ref": "#/$defs/observation" },
+        "pull_request": { "$ref": "#/$defs/pullRequest" },
+        "remote": { "$ref": "#/$defs/remote" },
+        "architecture": { "$ref": "#/$defs/architecture" },
+        "archive": { "$ref": "#/$defs/archive" },
+        "retry": { "$ref": "#/$defs/retry" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "slug", "id", "workflow", "folder"],
+      "properties": {
+        "project": { "type": "string", "minLength": 1 },
+        "slug": { "type": "string", "minLength": 1 },
+        "id": { "type": ["integer", "null"] },
+        "workflow": { "type": "string", "minLength": 1 },
+        "folder": { "type": "string", "minLength": 1 }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "marker",
+        "marker_generation",
+        "task_generation",
+        "state_file_mtime",
+        "held",
+        "hold_reason"
+      ],
+      "properties": {
+        "stage": { "type": "string", "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$" },
+        "marker": { "type": "string", "minLength": 1 },
+        "marker_generation": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "task_generation": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "state_file_mtime": { "$ref": "#/$defs/nullableTimestamp" },
+        "held": { "type": "boolean" },
+        "hold_reason": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
+    "pullRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "host", "repository", "number", "observed_head"],
+      "properties": {
+        "url": { "type": "string", "format": "uri" },
+        "host": { "type": "string", "minLength": 1 },
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "number": { "type": "integer", "minimum": 1 },
+        "observed_head": { "$ref": "#/$defs/nullableOid" }
+      }
+    },
+    "remote": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "merge_oid", "merged_at", "observed_at"],
+      "properties": {
+        "state": {
+            "enum": ["unknown", "open", "merged", "closed_unmerged", "delivered_elsewhere", "ambiguous"]
+        },
+        "merge_oid": { "$ref": "#/$defs/nullableOid" },
+        "merged_at": { "$ref": "#/$defs/nullableTimestamp" },
+        "observed_at": { "$ref": "#/$defs/nullableTimestamp" }
+      }
+    },
+    "architecture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "request_id", "receipt", "last_error"],
+      "properties": {
+        "status": { "enum": ["pending", "accepted", "deferred", "failed", "not_required"] },
+        "request_id": { "type": ["string", "null"] },
+        "receipt": { "type": ["string", "null"] },
+        "last_error": { "type": ["string", "null"] }
+      }
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "receipt_digest", "archived_at", "last_error"],
+      "properties": {
+        "status": { "enum": ["pending", "blocked", "archived", "failed", "superseded"] },
+        "receipt_digest": { "type": ["string", "null"] },
+        "archived_at": { "$ref": "#/$defs/nullableTimestamp" },
+        "last_error": { "type": ["string", "null"] }
+      }
+    },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["failures", "not_before"],
+      "properties": {
+        "failures": { "type": "integer", "minimum": 0 },
+        "not_before": { "$ref": "#/$defs/nullableTimestamp" }
+      }
+    }
+  }
+}

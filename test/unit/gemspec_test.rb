@@ -72,6 +72,14 @@ class GemspecTest < Minitest::Test
     refute_nil spec.runtime_dependencies.find { |candidate| candidate.name == "base64" }
   end
 
+  def test_runtime_dependencies_include_the_managed_web_locked_bundler
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+    dependency = spec.runtime_dependencies.find { |candidate| candidate.name == "bundler" }
+
+    refute_nil dependency
+    assert_equal Gem::Requirement.new("= 2.7.2"), dependency.requirement
+  end
+
   # The web tier is a Rails app under web/, supported only in the Docker
   # image or a source checkout — the gem must stay a lean CLI and not
   # package the app or its old Sinatra-era assets.

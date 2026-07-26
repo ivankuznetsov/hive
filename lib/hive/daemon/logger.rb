@@ -41,11 +41,6 @@ module Hive
         transient_retry
         quarantined
         dry_run
-        merge_watcher_enqueued
-        merge_watcher_polled
-        merge_watcher_dispatched
-        merge_watcher_dropped
-        gh_error
         marker_healed
         marker_heal_failed
         recovery_requested

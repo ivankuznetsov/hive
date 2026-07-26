@@ -45,6 +45,8 @@ module Hive
       ISSUE_SUPPRESSING_FIX_OUTCOMES = %w[no_diff pr_opened merged].freeze
       REMOTE_UNCERTAIN_OUTCOME = "remote_outcome_unknown".freeze
       FIX_RELEASE_EVIDENCE_LIMIT = 2_000
+      AUTHORITY_RECHECK_SEC = 3600
+      AUTHORITY_RECHECK_REASONS = %w[authority_revoked discovery_revoked].freeze
 
       attr_reader :fixer, :pr_opener, :issue_filer
 
@@ -55,7 +57,8 @@ module Hive
                      repository_ownership: nil,
                      canonical_action_catalog: nil,
                      registration: nil, token_budget: nil,
-                     lease_sec: 3600, backoff_sec: 60)
+                     lease_sec: 3600, backoff_sec: 60,
+                     authority_backoff_sec: AUTHORITY_RECHECK_SEC)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @token_budget = token_budget
@@ -102,6 +105,7 @@ module Hive
         end
         @lease_sec = lease_sec
         @backoff_sec = backoff_sec
+        @authority_backoff_sec = authority_backoff_sec
       end
 
       def run(job_id:, dry_run: false)
@@ -741,7 +745,7 @@ module Hive
             outcome: adapter_result.outcome,
             receipts: result_receipts,
             now: now,
-            backoff_sec: @backoff_sec
+            backoff_sec: backoff_sec_for(adapter_result.outcome)
           )
         end
       end
@@ -785,7 +789,7 @@ module Hive
           token,
           outcome: outcome,
           now: now,
-          backoff_sec: @backoff_sec
+          backoff_sec: backoff_sec_for(outcome)
         )
       end
 
@@ -1377,8 +1381,14 @@ module Hive
       def block_action_phase(aggregate, reason, evidence = {})
         @job_store.block_actions!(
           aggregate.fetch("job_id"), reason: reason,
-          evidence: evidence, now: now, backoff_sec: @backoff_sec
+          evidence: evidence, now: now, backoff_sec: backoff_sec_for(reason)
         )
+      end
+
+      def backoff_sec_for(reason)
+        return @authority_backoff_sec if AUTHORITY_RECHECK_REASONS.include?(reason.to_s)
+
+        @backoff_sec
       end
 
       def event(outcome, **details)

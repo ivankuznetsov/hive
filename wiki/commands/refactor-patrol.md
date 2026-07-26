@@ -375,7 +375,10 @@ identity; legacy provider-only snapshots retain provider-only comparison. The
 current config may revoke or narrow that
 snapshot; it cannot relax captured contract/dependency guards, lower
 confidence/leverage thresholds, add a validation command, switch identities, or
-otherwise broaden an old job.
+otherwise broaden an old job. A revoked action remains nonterminal so restored
+authority can resume it, but Hive probes that durable hold at most hourly
+instead of launching an action child every daemon minute. Other transient
+action failures retain the ordinary one-minute retry cadence.
 
 Fixes inherit the resolved refactor identity by default and may independently
 override `refactor_patrol.auto_fix.agent`, `.model`, and `.effort`. The selected

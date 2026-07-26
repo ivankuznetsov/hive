@@ -169,10 +169,7 @@ module Hive
           "HIVE_WEB_STORAGE_DIR" => asset_storage
         }
         command = if default_commands
-          bundle_argv(
-            dir, "exec", RbConfig.ruby,
-            File.join(dir, "bin", "rails"), "assets:precompile"
-          )
+          rails_argv(dir, "assets:precompile")
         else
           %w[bin/rails assets:precompile]
         end
@@ -201,6 +198,13 @@ module Hive
 
       def bundle_install_argv(dir)
         bundle_argv(dir, "install")
+      end
+
+      def rails_argv(dir, *arguments)
+        bundle_argv(
+          dir, "exec", RbConfig.ruby,
+          File.join(dir, "bin", "rails"), *arguments
+        )
       end
 
       def bundle_argv(dir, *arguments)

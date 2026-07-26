@@ -201,6 +201,11 @@ module Hive
           env["HIVE_CLI_ROOT"] = Hive::Web::AppBundle.hive_cli_root
           env["BUNDLE_PATH"] = Hive::Web::AppBundle.dependency_dir
         end
+        rails_argv = if managed_bundle
+          Hive::Web::AppBundle.rails_argv(app_dir)
+        else
+          [ "bin/rails" ]
+        end
         # The loopback no-auth bypass is opt-out: an operator can set
         # web.local_loopback: false to force GitHub login even on a loopback
         # bind. Only signal the bypass when both the bind is loopback AND the
@@ -224,7 +229,7 @@ module Hive
           if env.fetch("RAILS_ENV") == "production" && !precompiled_assets
             compiled = Dir.mktmpdir("hive-web-assets") do |asset_storage|
               asset_env = env.merge("HIVE_WEB_STORAGE_DIR" => asset_storage)
-              system(asset_env, "bin/rails", "assets:precompile")
+              system(asset_env, *rails_argv, "assets:precompile")
             end
             unless compiled && Hive::Web::AppBundle.assets_ready?(app_dir)
               raise Hive::Error,
@@ -236,7 +241,7 @@ module Hive
           # first boot, no-ops afterwards. Array form — no shell involved.
           # Typed error so a persistent failure surfaces as guidance, not a
           # raw backtrace looping on every restart under the service manager.
-          unless system(env, "bin/rails", "db:prepare")
+          unless system(env, *rails_argv, "db:prepare")
             raise Hive::Error,
                   "hive web: db:prepare failed — check that " \
                   "#{env.fetch("HIVE_WEB_STORAGE_DIR")} is writable " \
@@ -245,7 +250,7 @@ module Hive
           puts "hive web: listening on http://#{bind}:#{port}"
           # Replace this process with the Rails server (array form, env hash;
           # Kernel#exec never touches a shell when given an argv list).
-          Kernel.exec env, "bin/rails", "server", "-b", bind, "-p", port.to_s
+          Kernel.exec env, *rails_argv, "server", "-b", bind, "-p", port.to_s
         end
       end
 

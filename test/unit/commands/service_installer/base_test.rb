@@ -290,6 +290,29 @@ class ServiceInstallerBaseTest < Minitest::Test
     refute state["service_enabled"]
     refute state["service_running"]
     refute state["service_manager_available"]
+    refute installer.service_manager_available?
+    refute installer.send(:manager_query_available?)
+  end
+
+  def test_user_service_diagnostics_are_rendered_by_the_adapter
+    with_tmp_dir do |dir|
+      installer = build(dir)
+      path = installer.target_path
+
+      installer.send(
+        :record_user_service_messages,
+        Hive::UserService::Result.new(:stale, diagnostics: [ :stale_plan ]),
+        path: path
+      )
+      installer.send(
+        :record_user_service_messages,
+        Hive::UserService::Result.new(:unsafe_path, diagnostics: [ :unsafe_unit_path ]),
+        path: path
+      )
+
+      assert installer.messages.any? { |message| message.include?("changed after it was inspected") }
+      assert installer.messages.any? { |message| message.include?("refusing unsafe test unit path") }
+    end
   end
 
   def test_launchd_label_matches_service_name

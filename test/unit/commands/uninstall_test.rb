@@ -617,4 +617,29 @@ class UninstallCommandTest < Minitest::Test
       assert_match(/daemon-reload failed/, out.string)
     end
   end
+
+  def test_deregister_unit_renders_stale_and_generic_boundary_failures
+    out = StringIO.new
+    command = Hive::Commands::Uninstall.new(output: out)
+    installer = Object.new
+    installer.define_singleton_method(:target_path) { "/tmp/hive-test.service" }
+    results = [
+      Hive::UserService::Result.new(
+        :partial,
+        operation: :remove,
+        diagnostics: [ :stale_after_manager_change ]
+      ),
+      Hive::UserService::Result.new(
+        :failed,
+        operation: :remove,
+        diagnostics: [ :remove_failed ]
+      )
+    ]
+    installer.define_singleton_method(:remove!) { results.shift }
+
+    2.times { command.send(:deregister_unit, installer) }
+
+    assert_match(/changed while its service was being disabled/, out.string)
+    assert_match(/could not remove .* leaving it in place/, out.string)
+  end
 end

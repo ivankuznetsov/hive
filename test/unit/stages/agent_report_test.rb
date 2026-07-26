@@ -260,25 +260,27 @@ class StagesAgentReportTest < Minitest::Test
         Hive::Stages::AgentReport.parse(VALID_REPORT), context
       )
     end
-    assert_includes error.message, "git symbolic-ref"
+    assert_includes error.message, "repository path is not a directory"
   end
 
   def test_repository_validation_rejects_non_numeric_commit_count
-    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
     calls = 0
-    fake_git = lambda do |_path, *args, **_kwargs|
+    fake_git = lambda do |_path, operation, **_kwargs|
       calls += 1
-      out = case args.first
-      when "symbolic-ref" then "fix-task\n"
-      when "merge-base" then ""
-      when "rev-parse" then "b" * 40
-      when "rev-list" then "not-a-number\n"
+      out = case operation
+      when :current_branch then "fix-task\n"
+      when :ancestor then ""
+      when :head_oid then "b" * 40
+      when :commit_count then "not-a-number\n"
       else ""
       end
-      [ out, "", ok ]
+      Hive::AgentGitGate::ReadResult.new(
+        operation: operation, stdout: out, stderr: "", exitstatus: 0,
+        overflow: false
+      )
     end
     context = context_for("/tmp/repo", "a" * 40)
-    with_replaced_singleton_method(Hive::ManagedGit, :capture3, fake_git) do
+    with_replaced_singleton_method(Hive::AgentGitGate, :read, fake_git) do
       error = assert_raises(Hive::StageError) do
         Hive::Stages::AgentReport.validate_repository!(
           Hive::Stages::AgentReport.parse(VALID_REPORT), context

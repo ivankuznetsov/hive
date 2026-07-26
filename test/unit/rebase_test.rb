@@ -329,7 +329,13 @@ class HiveRebaseTest < Minitest::Test
     worktree = scenario.fetch(:worktree)
     task = make_task(worktree: worktree, folder: scenario.fetch(:folder))
 
-    result = Hive::Rebase.perform(task, base_cfg("default_branch" => "main"))
+    result = Hive::Rebase.perform(
+      task,
+      base_cfg(
+        "default_branch" => "main",
+        "agent_git_gate" => { "allow_local_transport" => true }
+      )
+    )
 
     assert result.succeeded
     rebased_head = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
@@ -382,7 +388,13 @@ class HiveRebaseTest < Minitest::Test
       original_push.call(path, branch, **kwargs)
     }) do
       task = make_task(worktree: worktree, folder: scenario.fetch(:folder))
-      result = Hive::Rebase.perform(task, base_cfg("default_branch" => "main"))
+      result = Hive::Rebase.perform(
+        task,
+        base_cfg(
+          "default_branch" => "main",
+          "agent_git_gate" => { "allow_local_transport" => true }
+        )
+      )
 
       assert result.succeeded
       assert(result.post_rebase_warnings.any? { |warning| warning.include?("exact lease push failed") })

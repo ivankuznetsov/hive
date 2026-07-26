@@ -906,18 +906,24 @@ end
 
 def test_push_exact_oid_names_immutable_source_and_never_forces
   captured = nil
-  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
   oid = "a" * 40
-  with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |path, *args, **_kwargs|
-    captured = [ path, *args ]
-    [ "", "", ok ]
+  receipt = Hive::AgentGitGate::PublicationReceipt.new(
+    remote_fingerprint: "f" * 64, branch: "feature",
+    expected_oid: nil, before_oid: nil,
+    published_oid: oid, after_oid: oid
+  )
+  with_replaced_singleton_method(Hive::AgentGitGate, :publish, lambda { |**kwargs|
+    captured = kwargs
+    receipt
   }) do
     result = Hive::Gh.push_exact_oid("/tmp/wt", oid, "feature")
     assert result.success?
   end
 
-  assert_equal [ "/tmp/wt", "push", "origin", "#{oid}:refs/heads/feature" ], captured
-  refute captured.any? { |arg| arg.include?("force") }
+  assert_equal "/tmp/wt", captured.fetch(:repository_path)
+  assert_equal oid, captured.fetch(:oid)
+  assert_equal "feature", captured.fetch(:branch)
+  assert captured.fetch(:expected_remote_absent)
 end
 
 def test_push_exact_oid_returns_bounded_failure_for_invalid_identity
@@ -932,28 +938,34 @@ end
 
 def test_managed_origin_push_url_uses_hardened_git_boundary
   captured = nil
-  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |path, *args, **_kwargs|
-    captured = [ path, *args ]
-    [ "git@github.com:acme/widgets.git\n", "", ok ]
+  with_replaced_singleton_method(Hive::AgentGitGate, :remote_urls, lambda { |**kwargs|
+    captured = kwargs
+    [ "git@github.com:acme/widgets.git" ]
   }) do
     assert_equal "git@github.com:acme/widgets.git", Hive::Gh.origin_push_url("/tmp/wt", managed: true)
   end
-  assert_equal [ "/tmp/wt", "remote", "get-url", "--push", "--all", "origin" ], captured
+  assert_equal "/tmp/wt", captured.fetch(:repository_path)
+  assert_equal "origin", captured.fetch(:remote)
+  assert captured.fetch(:push)
 end
 
 def test_managed_remote_branch_lookup_uses_hardened_git_boundary
   captured = nil
-  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |path, *args, **_kwargs|
-    captured = [ path, *args ]
-    [ "#{'a' * 40}\trefs/heads/feature\n", "", ok ]
+  observation = Hive::AgentGitGate::RemoteObservation.new(
+    remote_fingerprint: "f" * 64,
+    branch: "feature", ref: "refs/heads/feature", oid: "a" * 40
+  )
+  with_replaced_singleton_method(Hive::AgentGitGate, :observe_remote_branch, lambda { |**kwargs|
+    captured = kwargs
+    observation
   }) do
     oid = Hive::Gh.remote_branch_oid("/tmp/wt", "feature", managed: true)
     assert_equal "a" * 40, oid
   end
 
-  assert_equal [ "/tmp/wt", "ls-remote", "--heads", "origin", "refs/heads/feature" ], captured
+  assert_equal "/tmp/wt", captured.fetch(:repository_path)
+  assert_equal "feature", captured.fetch(:branch)
+  assert_equal "origin", captured.fetch(:remote)
 end
 
 def test_create_draft_pr_uses_explicit_args_and_always_removes_body_tempfile
@@ -982,34 +994,36 @@ end
 
 def test_push_branch_uses_exact_expected_oid_lease
   captured = nil
-  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
-    captured = cmd
-    [ "", "", ok ]
+  with_replaced_singleton_method(Hive::AgentGitGate, :publish_local_branch, lambda { |**kwargs|
+    captured = kwargs
+    true
   }) do
-    Hive::Gh.push_branch(
+    result = Hive::Gh.push_branch(
       "/tmp/wt", "feature", expected_remote_oid: "a" * 40
     )
+    assert result.success?
   end
 
-  assert_includes captured, "--force-with-lease=refs/heads/feature:#{'a' * 40}"
+  assert_equal "a" * 40, captured.fetch(:expected_remote_oid)
+  refute captured.fetch(:expected_remote_absent)
 end
 
 def test_push_branch_uses_absence_lease_and_exact_validated_remote_url
   captured = nil
-  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
   remote = "git@github.com:acme/demo.git"
-  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
-    captured = cmd
-    [ "", "", ok ]
+  with_replaced_singleton_method(Hive::AgentGitGate, :publish_local_branch, lambda { |**kwargs|
+    captured = kwargs
+    true
   }) do
-    Hive::Gh.push_branch(
+    result = Hive::Gh.push_branch(
       "/tmp/wt", "feature", expected_remote_absent: true, remote: remote
     )
+    assert result.success?
   end
 
-  assert_includes captured, "--force-with-lease=refs/heads/feature:"
-  assert_equal [ remote, "feature" ], captured.last(2)
+  assert captured.fetch(:expected_remote_absent)
+  assert_equal remote, captured.fetch(:remote)
+  assert_equal "feature", captured.fetch(:branch)
 end
 
 def test_remote_branch_oid_uses_exact_validated_remote_url

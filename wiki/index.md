@@ -22,6 +22,9 @@ Agent spawns that own controller artifacts use the boundary-ready
 `Hive::ArtifactFirewall` for same-user protected-anchor custody, required
 regular-output admission, bounded redacted reports, and verified safe restore;
 stage markers and success policy remain above that boundary.
+Post-agent Git and architecture-patrol publication use the boundary-ready
+`Hive::AgentGitGate`: a closed read vocabulary, exact detached materialization,
+and exact expected-OID publication with non-secret before/after receipts.
 
 The public native release surface is the `hive-cli` rubygem plus authenticated managed Hive web bundle installed through Homebrew, AUR, or `install.sh`, with `hive setup` installing the loopback service by default on Linux/macOS and `hv` as the Apache Hive collision fallback. Hivebox remains the Docker distribution through the GHCR image and `hivecli.sh/box` shell / PowerShell installers for isolation, multiple instances, untrusted-agent containment, and reproducible server/NAS deployments. Hive web, `hive init` workflow selection and normal-vs-patrol reviewer split, project-global Claude model/effort pins, `hive connect screenote`, ordinary and architecture patrol, `hive babysit`, `hive bench submit`, and the single ClawHub `hive-cli` listing are covered by dedicated command/module pages.
 
@@ -74,6 +77,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[log]] — `wiki/log.md`
 - [[modules/agent]] — `wiki/modules/agent.md`
 - [[modules/agent_cli_runtime]] — `wiki/modules/agent_cli_runtime.md`
+- [[modules/agent_git_gate]] — `wiki/modules/agent_git_gate.md`
 - [[modules/agent_profile]] — `wiki/modules/agent_profile.md`
 - [[modules/attempts]] — `wiki/modules/attempts.md`
 - [[modules/atomic_file]] — `wiki/modules/atomic_file.md`

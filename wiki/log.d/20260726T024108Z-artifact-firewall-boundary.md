@@ -28,3 +28,9 @@ compiled [[log]].
 **Mainline sync:** Replayed the boundary over the delivered-task recovery
 changes from #865. Open-PR and finalize retain current immutable PR identity
 checks and recovery behavior inside the firewall custody wrapper.
+
+**Hosted-CI follow-up:** Managed-worktree Git control paths are expanded and
+deduplicated before manifest construction. This keeps strict duplicate-anchor
+rejection in the public firewall while accepting CI environments where
+`XDG_CONFIG_HOME` or `GIT_CONFIG_GLOBAL` names the same file already derived
+from `HOME`.

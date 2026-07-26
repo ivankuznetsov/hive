@@ -95,10 +95,14 @@ branch, and base OID as trusted identity context. Across the spawn Hive hashes
 the task-owned control files plus the worktree `.git` pointer and repository,
 worktree, global, XDG, and configured Git config paths. Any change replaces
 untrusted report output with a private controller `ERROR
-reason=managed_agent_failed` marker. Every subsequent Git read, scan, cleanup,
-remote observation, and exact push uses `Hive::ManagedGit`, which ignores
-global/system config and disables hooks, fsmonitor, external diff/textconv,
-custom transports, and arbitrary credential/SSH helpers.
+reason=managed_agent_failed` marker. Git config environment aliases are
+expanded relative to the managed worktree and deduplicated by absolute path
+before the strict firewall manifest is built; this preserves one custody
+anchor when, for example, `XDG_CONFIG_HOME=$HOME/.config` or
+`GIT_CONFIG_GLOBAL=$HOME/.gitconfig`. Every subsequent Git read, scan,
+cleanup, remote observation, and exact push uses `Hive::ManagedGit`, which
+ignores global/system config and disables hooks, fsmonitor, external
+diff/textconv, custom transports, and arbitrary credential/SSH helpers.
 
 ### `freshest_base(default_branch)` — origin-first base resolution
 

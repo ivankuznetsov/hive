@@ -25,6 +25,12 @@ the runner floor unchanged. Exact-SHA pins prevent a mutable tag from changing
 the executable workflow dependency between review and execution, while the
 trailing version comments keep Dependabot updates legible.
 
+All seven `actions/upload-artifact` calls likewise pin v7.0.1 to
+`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`. They retain archive mode and
+their existing missing-file, hidden-file, and retention policies; Hive does
+not enable v7's single-file direct-upload mode. Upload jobs run only on
+GitHub-hosted runners, satisfying the Node 24 runner floor introduced in v6.
+
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
 tools. The v0.6.9 release-prep checkout is `0.6.9`: `lib/hive.rb`, root

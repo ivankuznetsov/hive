@@ -7,6 +7,7 @@ require "hive/task"
 require "hive/agent"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
+require "hive/model_routing"
 require "hive/stages/base"
 require "hive/scripts/workflow_policy_hook"
 require "hive/workflow_package/runtime_policy"
@@ -326,6 +327,83 @@ class SpawnAgentTest < Minitest::Test
       effort_index = argv.index("-c")
       assert_equal "gpt-5.6-terra", argv.fetch(model_index + 1)
       assert_equal "model_reasoning_effort=medium", argv.fetch(effort_index + 1)
+    end
+  end
+
+  def test_unsupported_routed_effort_fails_before_preflight_warnings_or_spawn
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      binary_log = File.join(dir, "binary.log")
+      preflight_log = File.join(dir, "preflight.log")
+      binary = File.join(dir, "unused-agent")
+      File.write(binary, <<~SH)
+        #!/bin/sh
+        printf 'invoked\n' >> #{binary_log.inspect}
+        printf 'unused-agent 1.0.0\n'
+      SH
+      File.chmod(0o755, binary)
+      profile = Hive::AgentProfile.new(
+        name: :pi,
+        bin_default: binary,
+        headless_flag: "-p",
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}",
+        model_argument_builder: ->(model) { [ "--model", model ] },
+        preflight: -> { File.write(preflight_log, "ran\n") }
+      )
+      resolution = Hive::ModelRouting.resolve(
+        models: { "plan" => { "effort" => "high" } },
+        stage: "plan",
+        provider: :pi,
+        current: { model: "provider/model-v1" }
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Base.spawn_agent(
+          task,
+          prompt: "x",
+          max_budget_usd: 9,
+          timeout_sec: 5,
+          add_dirs: [ dir ],
+          profile: profile,
+          routing_resolution: resolution
+        )
+      end
+
+      assert_match(/does not support reasoning effort/, error.message)
+      refute File.exist?(binary_log), "version/preflight must not invoke the binary"
+      refute File.exist?(preflight_log), "profile preflight must not run"
+      refute File.exist?(File.join(task.log_dir, "isolation-warnings.log"))
+      refute File.exist?(File.join(task.log_dir, "config-warnings.log"))
+      assert_equal "<!-- WAITING -->\n", File.read(task.state_file)
+    end
+  end
+
+  def test_spawn_rejects_resolution_and_rendered_routing_arguments_together
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      profile = Hive::AgentProfiles.lookup(:codex)
+      resolution = Hive::ModelRouting.resolve(
+        models: { "plan" => { "model" => "gpt-5.6-sol" } },
+        stage: "plan",
+        provider: :codex
+      )
+      arguments = profile.routing_arguments(resolution)
+
+      error = assert_raises(ArgumentError) do
+        Hive::Stages::Base.spawn_agent(
+          task,
+          prompt: "x",
+          max_budget_usd: 1,
+          timeout_sec: 5,
+          profile: profile,
+          routing_resolution: resolution,
+          routing_arguments: arguments
+        )
+      end
+
+      assert_match(/pass routing_resolution or routing_arguments, not both/, error.message)
     end
   end
 

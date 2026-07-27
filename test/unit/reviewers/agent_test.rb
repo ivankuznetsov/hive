@@ -377,6 +377,38 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  def test_reviewer_spawn_receives_review_family_route_and_spec_model
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      reviewer = Hive::Reviewers::Agent.new(
+        make_spec("model" => "opus"),
+        ctx,
+        cfg: {
+          "models" => {
+            "review" => { "effort" => "high" }
+          }
+        }
+      )
+      captured = nil
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+        captured = kwargs
+        { status: :ok }
+      end
+
+      result = reviewer.run!
+
+      assert result.ok?
+      assert_equal [
+        "--model", "opus", "--effort", "high"
+      ], captured.fetch(:routing_arguments).subcommand_arguments
+    ensure
+      Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent, &original) if original
+    end
+  end
+
   def test_run_does_not_retry_when_first_attempt_succeeds
     with_tmp_dir do |dir|
       reviewer, sleeps = with_stubbed_adapter(dir)

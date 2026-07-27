@@ -919,6 +919,42 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_review_rejects_routed_fix_identity_before_phase_or_worktree_effects
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        task = Hive::Task.new(folder)
+        cfg = Hive::Config.load(dir)
+        worktree = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
+                   "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(task.state_file, :review_waiting, pass: 1, escalations: 1)
+        File.write(File.join(worktree, "preexisting-residue.txt"), "must remain uncommitted\n")
+
+        marker_before = File.binread(task.state_file)
+        head_before = `git -C #{worktree} rev-parse HEAD`.strip
+        status_before = `git -C #{worktree} status --porcelain`
+
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :implementation_stage_identity,
+          ->(*_args) { raise Hive::ConfigError, "unsupported routed effort" }
+        ) do
+          error = assert_raises(Hive::ConfigError) do
+            Hive::Stages::Review.run!(task, cfg)
+          end
+
+          assert_equal "unsupported routed effort", error.message
+        end
+
+        assert_equal marker_before, File.binread(task.state_file)
+        assert_equal head_before, `git -C #{worktree} rev-parse HEAD`.strip
+        assert_equal status_before, `git -C #{worktree} status --porcelain`
+        refute File.exist?(File.join(folder, "events.jsonl"))
+      end
+    end
+  end
+
   def test_review_auto_commits_out_of_scope_pre_fix_residue_before_fix_agent
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

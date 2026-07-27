@@ -53,7 +53,10 @@ module Hive
           unless data
             return load_overlay!(project_root, fallback_workflow_dir(project_root))
           end
-          data = Hive::Config.normalize_legacy_project_config(data, source_path)
+          legacy_reviewers = data.key?("reviewers")
+          data = Hive::Config.normalize_legacy_project_config(
+            data, source_path, emit_warning: false
+          )
 
           configured_path = data["hive_state_path"]
           configured_path = Hive::Config::DEFAULTS.fetch("hive_state_path") unless configured_path.is_a?(String)
@@ -71,6 +74,7 @@ module Hive
             Hive::Config.build_project_config(
               project_root, source_path, data, stage_names: registered_stage_names
             )
+            Hive::Config.warn_legacy_root_reviewers_once!(source_path) if legacy_reviewers
           rescue Hive::UnsupportedProjectConfigError
             raise
           rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e

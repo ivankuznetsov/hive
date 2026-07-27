@@ -34,6 +34,10 @@ module Hive
           session_name: session_name_for(task),
           status_mode: :state_file_marker,
           profile: profile,
+          routing_arguments: Hive::Stages::Base.model_routing_arguments(
+            cfg, "brainstorm", profile,
+            current: Hive::Stages::Base.model_routing_current(cfg["brainstorm"])
+          ),
           **Hive::Stages::Base.tool_scope_kwargs(scope)
         )
         marker = Hive::Markers.current(task.state_file)

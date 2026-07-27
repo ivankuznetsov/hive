@@ -73,6 +73,39 @@ class ReviewersCodexReviewTest < Minitest::Test
     end
   end
 
+  def test_routed_codex_global_arguments_precede_review_subcommand
+    with_tmp_dir do |dir|
+      log = File.join(dir, "argv.log")
+      ENV["HIVE_FAKE_CODEX_ARGV_LOG"] = log
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      reviewer = Hive::Reviewers::CodexReview.new(
+        make_spec,
+        ctx,
+        cfg: {
+          "models" => {
+            "review_reviewers" => {
+              "model" => "gpt-5.6-sol",
+              "effort" => "xhigh"
+            }
+          }
+        }
+      )
+
+      result = reviewer.run!
+
+      assert result.ok?, result.error_message
+      args = File.read(log).lines.grep(/^arg=/).map { |line| line.sub(/^arg=/, "").chomp }
+      assert_equal [
+        "--model", "gpt-5.6-sol",
+        "-c", "model_reasoning_effort=xhigh",
+        "review"
+      ], args.first(5)
+      assert_operator args.index("review"), :<, args.index("--title")
+      refute_includes args, "--effort"
+    end
+  end
+
   def test_runs_codex_in_worktree_cwd
     with_tmp_dir do |dir|
       log = File.join(dir, "argv.log")

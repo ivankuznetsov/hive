@@ -85,6 +85,10 @@ module Hive
       with_diagnose_lock do
         cfg = Hive::Config.load(@task.project_root)
         profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+        @routing_arguments = Hive::Stages::Base.model_routing_arguments(
+          cfg, "diagnose", profile,
+          current: Hive::Stages::Base.model_routing_current(cfg["diagnose"])
+        )
         ensure_supported_diagnostic_generator!(profile)
         cwd = diagnose_cwd(cfg)
         unless @injected_spawn
@@ -591,6 +595,7 @@ module Hive
           prompt: prompt,
           add_dirs: add_dirs,
           max_budget_usd: max_budget_usd,
+          routing_arguments: @routing_arguments,
           include_output_format: false
         )
       )

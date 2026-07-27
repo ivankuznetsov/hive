@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_runtime.rb, lib/hive/agent/message_extractor.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-07-26
+updated: 2026-07-27
 tags: [agent, claude, subprocess]
 ---
 
@@ -13,6 +13,14 @@ wall-clock ceilings, and translates exit through the selected AgentProfile
 status mode. `:output_file_exists` now admits only non-empty regular in-root
 artifacts through `Hive::ArtifactFirewall`; symlinks and directories cannot
 satisfy completion.
+
+For recognized built-in routing, `RoutingArguments.global_arguments` are
+inserted before the profile headless subcommand and
+`subcommand_arguments` after the common launch controls. Durable routed
+implementation identities are rendered at the launcher seam for execute,
+open-PR, review-fix, and review-CI, including Claude's headless/tmux adapter;
+their deliberately empty legacy `native_arguments` array is never treated as
+the complete routed command.
 
 ## Class shape
 
@@ -89,7 +97,7 @@ There is **no inode-tracking concurrent-edit detection.** It was tried in early 
 selected `AgentProfile` remains the provider adapter:
 
 ```
-<profile.bin> <profile.headless_flag>
+<profile.bin> [<profile-routed global arguments>] <profile.headless_flag>
   <permission flags>
   [<profile.add_dir_flag> <dir> ...]
   [--allowedTools <csv>]
@@ -99,6 +107,15 @@ selected `AgentProfile` remains the provider adapter:
   <profile.output_format_flags...>
   <prompt>
 ```
+
+In actual argv the binary remains first: profile-routed global arguments are
+inserted immediately after it and before the headless subcommand. This is an
+opt-in path used only for an active recognized `ModelRouting` resolution.
+Codex therefore receives `codex --model ... -c
+model_reasoning_effort=... exec ...`; Claude, Grok, and Pi keep their
+profile-native routed arguments in the subcommand segment. Unscoped calls and
+inactive resolutions stay on the original assembly path, including the
+existing flat implementation-identity argument position.
 
 Prompt placement is profile data: Claude/Pi use a trailing positional prompt,
 Codex sends the prompt through stdin and places `-` in argv, and Grok places

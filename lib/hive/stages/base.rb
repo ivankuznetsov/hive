@@ -8,6 +8,7 @@ require "hive/agent_profiles"
 require "hive/config"
 require "hive/events"
 require "hive/markers"
+require "hive/model_routing"
 require "hive/permission_scope"
 require "hive/stages/clean_exit"
 require "hive/usage_db"
@@ -132,6 +133,82 @@ module Hive
 
         Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).resolve_stage!(stage)
       end
+
+      # Durable routed identities intentionally persist provider-neutral
+      # routing metadata instead of rendered argv. Materialize that metadata
+      # through the selected profile at the last trusted seam before launch;
+      # legacy identities continue to use their stored native argv unchanged.
+      def implementation_launch_arguments(identity, profile)
+        return { identity_arguments: nil, routing_arguments: nil } unless identity
+
+        {
+          identity_arguments: identity.native_arguments,
+          routing_arguments: identity.routing_arguments(profile)
+        }
+      end
+
+      # Resolve one non-durable built-in launch through the same closed,
+      # provider-neutral routing domain as implementation identities. The
+      # caller has already selected the profile; this helper can change only
+      # model and effort, never provider. A nil return preserves the exact
+      # legacy launch path when no route is active.
+      def model_routing_arguments(cfg, stage, profile, current: {})
+        cfg ||= {}
+        models = cfg.fetch("models", Hive::ModelRouting::EMPTY_MODELS)
+        return nil if models.empty?
+
+        resolution = Hive::ModelRouting.resolve(
+          models: models,
+          stage: stage,
+          current: current || Hive::ModelRouting::EMPTY_MODELS,
+          legacy: legacy_model_routing_values(cfg, profile),
+          provider: profile.name
+        )
+        return nil unless resolution.active?
+
+        profile.routing_arguments(
+          resolution,
+          source: model_routing_source(cfg)
+        )
+      end
+
+      def model_routing_current(block)
+        return Hive::ModelRouting::EMPTY_MODELS unless block.is_a?(Hash)
+
+        {
+          model: block["model"] || block[:model],
+          effort: block["effort"] || block[:effort]
+        }.compact
+      end
+
+      # Generic workflow/council stages keep descriptor-level controls unless
+      # their descriptor name is one of Hive's closed built-in identities.
+      # This preserves arbitrary custom stage names while letting the generic
+      # execution seam honor a built-in identity without inventing an open
+      # `models:` namespace.
+      def recognized_model_routing_arguments(cfg, stage, profile, current: {})
+        return nil unless Hive::ModelRouting.known?(stage)
+
+        model_routing_arguments(cfg, stage, profile, current: current)
+      end
+
+      def legacy_model_routing_values(cfg, profile)
+        return Hive::ModelRouting::EMPTY_MODELS unless profile.name == :claude
+
+        {
+          model: cfg.dig("claude", "model"),
+          effort: cfg.dig("claude", "effort")
+        }.compact
+      end
+      private_class_method :legacy_model_routing_values
+
+      def model_routing_source(cfg)
+        root = cfg["project_root"].to_s
+        return "project config" if root.empty?
+
+        File.join(root, ".hive-state", "config.yml")
+      end
+      private_class_method :model_routing_source
 
       def stage_permission_scope(cfg, stage_name, task, profile,
                                  base_add_dirs: [ task.folder ],
@@ -613,8 +690,14 @@ module Hive
                       profile: nil, expected_output: nil, status_mode: nil,
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
                       disallowed_tools: nil, cli_flags: nil,
-                      model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil)
+                      model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
+                      routing_resolution: nil, routing_arguments: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
+        if routing_resolution && routing_arguments
+          raise ArgumentError, "pass routing_resolution or routing_arguments, not both"
+        end
+        routing_arguments ||= profile.routing_arguments(routing_resolution) if routing_resolution
+        profile.validate_routing_arguments!(routing_arguments) if routing_arguments
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
         # so callers (Review.run!'s spawn_fix_agent etc.) write a
@@ -641,10 +724,11 @@ module Hive
         # path, already assembled the flags and must win over cfg; commit
         # 01841e12). Keying derivation on nil-vs-[] keeps those two intents
         # distinct rather than collapsing both to "empty".
-        derive_flags_from_cfg = cli_flags.nil? && identity_arguments.nil?
+        derive_flags_from_cfg =
+          cli_flags.nil? && identity_arguments.nil? && routing_arguments.nil?
         cli_flags ||= []
         launch_arguments = nil
-        if identity_arguments.nil? && (model || effort)
+        if routing_arguments.nil? && identity_arguments.nil? && (model || effort)
           if profile.model_argument_builder
             concrete_model = model || profile.concrete_default_model(
               cfg: cfg, project_root: cfg && cfg["project_root"]
@@ -686,7 +770,8 @@ module Hive
           cli_flags: cli_flags,
           identity_arguments: identity_arguments || [],
           launch_arguments: launch_arguments,
-          runtime_policy: runtime_policy
+          runtime_policy: runtime_policy,
+          routing_arguments: routing_arguments
         ).run!
         if result[:status] == :ok && runtime_policy&.host_outputs?
           begin
@@ -721,7 +806,8 @@ module Hive
                          profile: nil, expected_output: nil, status_mode: nil,
                          permission_mode: nil, allowed_tools: nil,
                          disallowed_tools: nil, mcp_config_path: nil,
-                         strict_mcp_config: false, identity_arguments: nil, runtime_policy: nil)
+                         strict_mcp_config: false, identity_arguments: nil,
+                         routing_arguments: nil, runtime_policy: nil)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -749,6 +835,7 @@ module Hive
           mcp_config_path: mcp_config_path,
           strict_mcp_config: strict_mcp_config,
           identity_arguments: identity_arguments,
+          routing_arguments: routing_arguments,
           runtime_policy: runtime_policy
         )
       end

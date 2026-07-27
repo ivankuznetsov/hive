@@ -334,6 +334,13 @@ error key set, text-mode durable failure exits, and recursive copy isolation.
 
 `test/integration/implementation_identity_routing_test.rb` drives a real temporary attempt store, task journal, projection, generation change, and status preview without external model calls. It covers Codex routing/status correspondence, restart/config-drift stability, a fenced new owner, and unpinned pi/grok provider defaults. `run_execute_test.rb`, `run_open_pr_test.rb`, and `run_review_test.rb` retain the stage-level fake-launcher coverage.
 
+`test/integration/mixed_agent_model_routing_test.rb` invokes checked-in fake
+Codex and Claude binaries for the mixed-provider acceptance configuration,
+asserting Codex global ordering and cross-provider non-leakage.
+`test/integration/model_routing_surface_test.rb` enumerates the authoritative
+registry through the profile/Agent argv seam and pins recognized-stage
+fallback plus byte-stable unscoped legacy argv.
+
 ## E2E suite (`test/e2e/`)
 
 The e2e layer is documented in [[e2e]]. It remains separate from the default

@@ -45,7 +45,198 @@ class ConfigTest < Minitest::Test
       assert_nil cfg.dig("open_pr", "agent")
       assert_nil cfg.dig("review", "ci", "agent")
       assert_nil cfg.dig("review", "fix", "agent")
+      refute cfg.key?("models"),
+             "an absent models map must not change the serialized config shape"
       assert_equal dir, cfg["project_root"]
+    end
+  end
+
+  def test_load_parses_project_owned_models_without_collapsing_absent_fields
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          plan:
+            model: " gpt-5.6-sol "
+          review:
+            effort: xhigh
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal({ "model" => "gpt-5.6-sol" }, cfg.dig("models", "plan"))
+      assert_equal({ "effort" => "xhigh" }, cfg.dig("models", "review"))
+      refute cfg.dig("models", "plan").key?("effort")
+      refute cfg.dig("models", "review").key?("model")
+    end
+  end
+
+  def test_load_rejects_project_models_before_emitting_legacy_config_warning
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        reviewers: []
+        models:
+          plan:
+            agent: codex
+      YAML
+
+      _out, err = capture_io do
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match(/models\.plan.*unknown field.*agent/i, error.message)
+      end
+
+      assert_empty err, "structural model validation must run before warnings"
+    end
+  end
+
+  def test_load_rejects_removed_digest_model_route
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          digest:
+            model: gpt-5.6-sol
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/models\.digest.*unknown/i, error.message)
+      assert_includes error.message, config_path
+    end
+  end
+
+  def test_load_rejects_reachable_unsupported_model_control_before_warnings
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        reviewers: []
+        plan:
+          agent: pi
+        models:
+          plan:
+            effort: high
+      YAML
+
+      _out, err = capture_io do
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match(/models\.plan\.effort/i, error.message)
+        assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
+      end
+
+      assert_empty err, "capability validation must run before legacy warnings"
+    end
+  end
+
+  def test_load_skips_capability_validation_for_disabled_patrol
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        patrol:
+          enabled: false
+          agent: pi
+        models:
+          patrol:
+            effort: high
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "high", cfg.dig("models", "patrol", "effort")
+    end
+  end
+
+  def test_load_validates_enabled_patrol_profile
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        patrol:
+          enabled: true
+          agent: pi
+        models:
+          patrol:
+            effort: high
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/models\.patrol\.effort.*effective for patrol_review/i, error.message)
+      assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
+    end
+  end
+
+  def test_load_accepts_incompatible_coarse_field_fully_shadowed_for_reachable_calls
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          review:
+            effort: minimal
+          review_triage:
+            effort: high
+          review_fix:
+            effort: high
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "minimal", cfg.dig("models", "review", "effort")
+    end
+  end
+
+  def test_load_rejects_incompatible_coarse_field_when_one_reachable_call_is_unshadowed
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          review:
+            effort: minimal
+          review_triage:
+            effort: high
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/models\.review\.effort.*effective for review_fix/i, error.message)
+      assert_match(/agent profile :claude/i, error.message)
+    end
+  end
+
+  def test_load_treats_string_and_argv_review_ci_commands_as_reachable
+    [ "bundle exec rake test", [ "bundle", "exec", "rake", "test" ] ].each do |command|
+      with_tmp_dir do |dir|
+        config_path = File.join(dir, ".hive-state", "config.yml")
+        FileUtils.mkdir_p(File.dirname(config_path))
+        File.write(
+          config_path,
+          {
+            "review" => {
+              "ci" => {
+                "agent" => "pi",
+                "command" => command
+              }
+            },
+            "models" => {
+              "review_ci" => {
+                "effort" => "high"
+              }
+            }
+          }.to_yaml
+        )
+
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+        assert_match(/models\.review_ci\.effort/i, error.message)
+        assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
+      end
     end
   end
 

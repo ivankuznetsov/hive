@@ -476,7 +476,7 @@ module Hive
         identity = projected_identity(record)
         identity if identity["generation"] == generation
       end.group_by { |identity| identity.fetch("stage") }
-       .transform_values(&:last)
+       .transform_values(&:first)
       warnings = authoritative.filter_map do |record|
         next unless record["event_type"] == "implementation_identity_fallback"
 

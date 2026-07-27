@@ -124,6 +124,30 @@ class StagesCouncilTest < Minitest::Test
     end
   end
 
+  def test_builtin_named_council_children_receive_stage_route
+    with_tmp_dir do |project|
+      workflow = council_workflow
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+      cfg = {
+        "models" => {
+          "review" => { "model" => "opus", "effort" => "high" }
+        }
+      }
+
+      with_stubbed_spawn([ "Verdict: ready\n", "Verdict: ready\n" ]) do |captured|
+        result = Hive::Stages::Council.run!(task, cfg)
+
+        assert_equal({ commit: "complete", status: :complete }, result)
+        assert_equal 2, captured.length
+        assert captured.all? do |kwargs|
+          kwargs.fetch(:routing_arguments).subcommand_arguments ==
+            [ "--model", "opus", "--effort", "high" ]
+        end
+      end
+    end
+  end
+
   def test_managed_council_children_launch_with_only_their_mapped_identity
     with_tmp_dir do |project|
       workflow = mixed_provider_council_workflow

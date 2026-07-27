@@ -33,6 +33,32 @@ claude:
 <% if claude_effort %>  effort: <%= claude_effort %>
 <% else %>  # effort: medium
 <% end %>
+# Optional built-in stage routing. `models:` changes only model and effort;
+# the existing stage/reviewer `agent:` still selects the provider. Exact keys
+# inherit an omitted field from their coarse family independently:
+#
+# models:
+#   plan:
+#     model: gpt-5.6-sol
+#     effort: xhigh
+#   execute:
+#     effort: high
+#   execute_implementation:
+#     model: gpt-5.6-sol       # inherits execute.effort
+#   review:
+#     effort: high
+#   review_fix:
+#     model: gpt-5.6-sol       # inherits review.effort
+#
+# Project-owned keys:
+# brainstorm, plan, execute, execute_implementation, rebase, diagnose,
+# babysitter, review, review_ci, review_reviewers, review_triage, review_fix,
+# review_browser, patrol, patrol_review, patrol_fix, open_pr, artifacts,
+# finalize. Hive's former in-process PR digest was removed; PRDigest is now a
+# standalone integration and is not a model-routing stage.
+# Arbitrary custom-workflow stage names are intentionally not valid here;
+# put `model:` / `effort:` on their workflow descriptor instead.
+
 # Optional per-stage agent tool scopes. Default is yolo, which preserves
 # today's stage behavior. Non-yolo scopes are Claude-only and are tool-level
 # controls, not an OS sandbox; see docs/permissions.md.

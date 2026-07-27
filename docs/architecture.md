@@ -267,6 +267,78 @@ rebase:
   conflict_resolution_timeout_sec: 2700
 ```
 
+## Per-stage model routing
+
+The optional top-level `models:` map overlays model and reasoning effort onto
+Hive's built-in calls without changing their selected `agent:` provider. Model
+and effort resolve independently: exact key, coarse family, the call's current
+identity/default, then the legacy global fallback. This is a copyable
+software-workflow configuration:
+
+```yaml
+brainstorm:
+  agent: claude
+plan:
+  agent: codex
+execute:
+  agent: codex
+review:
+  reviewers:
+    - name: architecture
+      kind: agent
+      agent: claude
+      output_basename: architecture
+      skill: ce-code-review
+      prompt_template: reviewer_claude_ce_code_review.md.erb
+    - name: implementation
+      kind: agent
+      agent: codex
+      output_basename: implementation
+      skill: ce-code-review
+      prompt_template: reviewer_codex_ce_code_review.md.erb
+
+models:
+  plan:
+    model: gpt-5.6-sol
+    effort: xhigh
+  execute:
+    effort: high
+  execute_implementation:
+    model: gpt-5.6-sol
+  review:
+    effort: high
+  review_fix:
+    model: gpt-5.6-sol
+```
+
+`execute_implementation` inherits `execute.effort`; `review_fix` inherits
+`review.effort`. The project keys are `brainstorm`, `plan`, `execute`,
+`execute_implementation`, `rebase`, `diagnose`, `babysitter`, `review`,
+`review_ci`, `review_reviewers`, `review_triage`, `review_fix`,
+`review_browser`, `patrol`, `patrol_review`, `patrol_fix`, `open_pr`,
+`artifacts`, and `finalize`. Hive's removed in-process PR digest is not a
+routing stage; standalone PRDigest selects its own provider configuration.
+
+Execute, open-PR, review-fix, and review-CI selections are frozen in the
+generation-scoped implementation identity. Retrying that generation does not
+re-read edited routing config; a new generation may capture new values. Hive
+also routes the direct and shared-session reviewer adapters, triage,
+browser-test, rebase, diagnosis, babysitter, ordinary patrol, Architecture
+Patrol, brainstorm, plan, artifacts, and finalize at their trusted launch
+seams. Shared Claude sessions are grouped by both effective permission scope
+and routed model/effort so one process cannot leak its identity into another
+reviewer.
+
+Config loading first resolves exact/coarse shadowing over only enabled,
+reachable calls, then validates each effective control against the
+already-selected profile. This happens before legacy warnings, markers,
+journal identities, subprocesses, or remote mutations. Disabled patrol,
+browser, CI, and reviewer paths therefore do not reject an otherwise dormant
+provider-incompatible route, while any reachable incompatible route fails the
+load. Codex receives routed global controls before `exec` or `review`; other
+providers receive only their native flags. Removing or omitting `models:`
+requires no migration and preserves the legacy argv path.
+
 Generation-scoped condition authority is intentionally staged. Existing
 projects stay on `markers`; operators may set only `stages.4-execute` to
 `shadow`, then to `conditions` after the parity bar is met. See the

@@ -101,7 +101,7 @@ jobs:
           git archive --format=tar.gz --output="$source_archive" "$CANDIDATE_SHA"
           ruby packaging/live_agent_skills/build.rb \
             "$CANDIDATE_SHA" "$gem_file" "$source_archive" dist/live-agent-candidate
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: live-agent-candidate-artifacts-${{ github.run_attempt }}
           path: dist/live-agent-candidate
@@ -187,7 +187,7 @@ jobs:
           bundle exec ruby -Itest test/smoke/live_hive_operating_skill_smoke_test.rb
       - name: Upload redacted structural evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: live-agent-evidence-${{ matrix.platform }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/live-agent-evidence/${{ matrix.platform }}.json
@@ -237,7 +237,7 @@ jobs:
             candidate-artifacts evidence proof)"
           attestation_sha256="$(jq -er '.attestation_sha256' <<<"$result")"
           echo "attestation_sha256=$attestation_sha256" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: live-agent-skills-proof-${{ github.run_attempt }}
           path: proof

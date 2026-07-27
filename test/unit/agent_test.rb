@@ -6,6 +6,7 @@ require "hive/config"
 require "hive/task"
 require "hive/agent"
 require "hive/agent_limit"
+require "hive/model_routing"
 require "hive/workflow_package/runtime_policy"
 
 class AgentTest < Minitest::Test
@@ -205,6 +206,22 @@ class AgentTest < Minitest::Test
         )
       end
       assert_includes error.message, "different native argv"
+
+      routing = profile.routing_arguments(
+        Hive::ModelRouting.resolve(
+          models: { "plan" => { "model" => "opus" } },
+          stage: "plan",
+          provider: :claude
+        )
+      )
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+          profile: profile, routing_arguments: routing,
+          identity_arguments: launch_arguments.native_arguments
+        )
+      end
+      assert_includes error.message, "cannot be combined"
     end
   end
 
@@ -573,6 +590,108 @@ class AgentTest < Minitest::Test
       assert_equal %w[--model gpt-5.6-terra], cmd.each_cons(2).find { |a, _| a == "--model" }
       assert_equal [ "-c", "model_reasoning_effort=medium" ],
                    cmd.each_cons(2).find { |a, _| a == "-c" }
+    end
+  end
+
+  def test_routed_codex_global_arguments_precede_exec
+    with_tmp_dir do |dir|
+      profile = Hive::AgentProfiles.lookup(:codex)
+      resolution = Hive::ModelRouting.resolve(
+        models: {
+          "plan" => {
+            "model" => "gpt-5.6-sol",
+            "effort" => "xhigh"
+          }
+        },
+        stage: "plan",
+        provider: :codex
+      )
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test",
+        max_budget_usd: nil, timeout_sec: 5,
+        profile: profile,
+        routing_arguments: profile.routing_arguments(resolution)
+      )
+
+      cmd = agent.send(:build_cmd)
+
+      assert_equal [
+        profile.bin,
+        "--model", "gpt-5.6-sol",
+        "-c", "model_reasoning_effort=xhigh",
+        "exec"
+      ], cmd.first(6)
+    end
+  end
+
+  def test_routed_codex_only_model_or_effort_still_precedes_exec
+    with_tmp_dir do |dir|
+      profile = Hive::AgentProfiles.lookup(:codex)
+      {
+        { "model" => "gpt-5.6-sol" } => [ "--model", "gpt-5.6-sol" ],
+        { "effort" => "xhigh" } => [ "-c", "model_reasoning_effort=xhigh" ]
+      }.each do |controls, expected|
+        resolution = Hive::ModelRouting.resolve(
+          models: { "plan" => controls },
+          stage: "plan",
+          provider: :codex
+        )
+        agent = Hive::Agent.new(
+          task: make_task(dir), prompt: "test",
+          max_budget_usd: nil, timeout_sec: 5,
+          profile: profile,
+          routing_arguments: profile.routing_arguments(resolution)
+        )
+        cmd = agent.send(:build_cmd)
+
+        assert_equal [ profile.bin, *expected, "exec" ], cmd.first(expected.length + 2)
+      end
+    end
+  end
+
+  def test_unscoped_implementation_identity_argv_remains_byte_identical
+    with_tmp_dir do |dir|
+      codex = Hive::AgentProfiles.lookup(:codex)
+      codex_identity = codex.identity_arguments(
+        model: "gpt-5.6-terra", effort: "medium"
+      )
+      codex_agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test",
+        max_budget_usd: nil, timeout_sec: 5,
+        profile: codex,
+        identity_arguments: codex_identity.native_arguments
+      )
+      assert_equal [
+        codex.bin,
+        "exec",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--model", "gpt-5.6-terra",
+        "-c", "model_reasoning_effort=medium",
+        "--json",
+        "-"
+      ], codex_agent.send(:build_cmd)
+
+      claude = Hive::AgentProfiles.lookup(:claude)
+      claude_identity = claude.identity_arguments(model: "opus", effort: "high")
+      claude_agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test",
+        max_budget_usd: 1, timeout_sec: 5,
+        profile: claude,
+        identity_arguments: claude_identity.native_arguments
+      )
+      assert_equal [
+        claude.bin,
+        "-p",
+        "--dangerously-skip-permissions",
+        "--max-budget-usd", "1",
+        "--model", "opus",
+        "--effort", "high",
+        "--output-format", "stream-json",
+        "--include-partial-messages",
+        "--verbose",
+        "--no-session-persistence",
+        "test"
+      ], claude_agent.send(:build_cmd)
     end
   end
 

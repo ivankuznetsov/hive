@@ -33,7 +33,9 @@ class HiveStagesOpenPrTest < Minitest::Test
     { "budget_usd" => {}, "timeout_sec" => {} }
   end
 
-  def with_basic_open_pr_run_stubs(existing_pr: nil, merged_pr: nil, scan: Scan.new(fetch_failed: false, fetch_error: nil, hits: []), &block)
+  def with_basic_open_pr_run_stubs(existing_pr: nil, merged_pr: nil,
+                                   scan: Scan.new(fetch_failed: false, fetch_error: nil, hits: []),
+                                   events: nil, &block)
     # With PR #138 fix #145, run! calls `lookup_prs_for_branch` ONCE and
     # filters in-process. The legacy `existing_pr` / `merged_pr` kwargs
     # are preserved for caller ergonomics: we compose the canonical
@@ -43,7 +45,9 @@ class HiveStagesOpenPrTest < Minitest::Test
     prs << merged_pr.merge("state" => merged_pr["state"] || "MERGED") if merged_pr
     with_replaced_singleton_method(Hive::Gh, :ensure_authenticated!, ->(_cfg) { }) do
       with_replaced_singleton_method(Hive::Gh, :lookup_prs_for_branch, ->(_worktree_path, _branch, cfg:) { prs }) do
-        with_replaced_singleton_method(Hive::Gh, :push_branch!, ->(_worktree_path, _branch, cfg:) { }) do
+        with_replaced_singleton_method(Hive::Gh, :push_branch!, lambda { |_worktree_path, _branch, cfg:|
+          events << :push if events
+        }) do
           with_replaced_singleton_method(Hive::Gh, :scan_pr_for_secrets, ->(state_file:, pr_url:, cfg:) { scan }) do
             with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(_cfg, _stage) { :profile }) do
               with_replaced_singleton_method(Hive::Stages::Base, :render, ->(_template, _bindings) { "prompt" }) do
@@ -53,6 +57,34 @@ class HiveStagesOpenPrTest < Minitest::Test
           end
         end
       end
+    end
+  end
+
+  def test_run_rejects_routed_identity_before_pushing_branch
+    with_tmp_dir do |root|
+      task = make_task(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      write_pointer(task, worktree)
+      events = []
+
+      with_basic_open_pr_run_stubs(events: events) do
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :implementation_stage_identity,
+          lambda { |_task, _cfg, _stage|
+            events << :validate
+            raise Hive::ConfigError, "unsupported routed effort"
+          }
+        ) do
+          error = assert_raises(Hive::ConfigError) do
+            capture_io { Hive::Stages::OpenPr.run!(task, cfg) }
+          end
+
+          assert_equal "unsupported routed effort", error.message
+        end
+      end
+
+      assert_equal [ :validate ], events
     end
   end
 
@@ -109,7 +141,9 @@ class HiveStagesOpenPrTest < Minitest::Test
       worktree = File.join(root, "worktree")
       FileUtils.mkdir_p(worktree)
       write_pointer(task, worktree)
-      identity = Struct.new(:provider).new("codex")
+      identity = Struct.new(:provider, :native_arguments) do
+        def routing_arguments(_profile) = nil
+      end.new("codex", [])
       looked_up = []
 
       with_basic_open_pr_run_stubs do

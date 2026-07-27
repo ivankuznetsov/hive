@@ -386,7 +386,7 @@ module Hive
             profile: profile,
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :exit_code_only,
-            identity_arguments: identity&.native_arguments
+            **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
           }
           if profile.name == :claude
             Hive::Stages::Base.spawn_claude!(

@@ -47,6 +47,7 @@ module Hive
       :add_dirs, :require_add_dirs,
       :allowed_tools, :disallowed_tools, :max_budget_usd,
       :model, :effort, :pin_model, :identity_arguments,
+      :routing_arguments,
       :capabilities, :raw_cli_arguments, :trusted_cli_arguments,
       :executable, :command_prefix, :include_output_format
     ) do
@@ -54,7 +55,8 @@ module Hive
                      require_add_dirs: false, allowed_tools: nil,
                      disallowed_tools: nil, max_budget_usd: nil,
                      model: nil, effort: nil, pin_model: true,
-                     identity_arguments: [], capabilities: [],
+                     identity_arguments: [], routing_arguments: nil,
+                     capabilities: [],
                      raw_cli_arguments: [], trusted_cli_arguments: [],
                      executable: nil, command_prefix: [],
                      include_output_format: true)
@@ -73,6 +75,7 @@ module Hive
           effort: effort.nil? ? nil : Immutable.string(effort),
           pin_model: pin_model != false,
           identity_arguments: Immutable.values(identity_arguments),
+          routing_arguments: routing_arguments,
           capabilities: Array(capabilities).map(&:to_sym).uniq.freeze,
           raw_cli_arguments: Immutable.values(raw_cli_arguments),
           trusted_cli_arguments: Immutable.values(trusted_cli_arguments),
@@ -152,8 +155,10 @@ module Hive
       profile = request.profile
       evidence = []
       require_headless!(profile, evidence)
+      routing = routing_arguments(profile, request, evidence)
 
       argv = [ request.executable || profile.bin ]
+      argv.concat(routing.fetch(:global))
       prompt_style = profile_prompt_style(profile)
       if profile.headless_flag
         argv << profile.headless_flag
@@ -170,6 +175,7 @@ module Hive
       argv.concat(tool_scope_arguments(profile, request))
       argv.concat(budget_arguments(profile, request.max_budget_usd))
       argv.concat(identity_arguments(profile, request, evidence))
+      argv.concat(routing.fetch(:subcommand))
 
       request.capabilities.each do |capability|
         capability_evidence = require_capability!(profile, capability)
@@ -377,6 +383,30 @@ module Hive
       arguments.concat(identity.native_arguments)
     end
     private_class_method :identity_arguments
+
+    def routing_arguments(profile, request, evidence)
+      return { global: [], subcommand: [] } unless request.routing_arguments
+      if !request.identity_arguments.empty? || request.model || request.effort
+        raise ArgumentError,
+              "routing_arguments cannot be combined with legacy identity model/effort arguments"
+      end
+      unless profile.respond_to?(:validate_routing_arguments!)
+        unsupported!(
+          profile, :model_routing,
+          "agent profile #{profile_name(profile).inspect} does not support model routing",
+          evidence
+        )
+      end
+
+      arguments = profile.validate_routing_arguments!(request.routing_arguments)
+      native_arguments = arguments.native_arguments
+      evidence << supported_evidence(profile, :model_routing, native_arguments)
+      {
+        global: arguments.global_arguments,
+        subcommand: arguments.subcommand_arguments
+      }
+    end
+    private_class_method :routing_arguments
 
     def profile_prompt_style(profile)
       profile.respond_to?(:prompt_style) && profile.prompt_style ? profile.prompt_style : :positional

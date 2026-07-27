@@ -8,6 +8,7 @@ require "hive/babysitter/interval"
 require "hive/permission_scope"
 require "hive/paths"
 require "hive/repository_identity"
+require "hive/model_routing"
 require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
 
@@ -701,7 +702,7 @@ module Hive
     # Project sections supported by consumers but intentionally absent from
     # DEFAULTS. Keep this list explicit so a newly rendered section cannot
     # silently become an unvalidated extension namespace.
-    PROJECT_KEYS_WITHOUT_DEFAULTS = Set.new(%w[gh]).freeze
+    PROJECT_KEYS_WITHOUT_DEFAULTS = Set.new(%w[gh models]).freeze
     @legacy_project_config_warning_lock = Mutex.new
     @legacy_project_config_warned_paths = Set.new
 
@@ -795,8 +796,10 @@ module Hive
 
     def build_project_config(project_root, source_path, data, stage_names: nil)
       project_root = File.expand_path(project_root)
-      data = normalize_legacy_project_config(data, source_path)
+      legacy_reviewers = data.key?("reviewers")
+      data = normalize_legacy_project_config(data, source_path, emit_warning: false)
       validate_project_top_level_keys!(data, source_path, project_root, stage_names: stage_names)
+      data = normalize_models_config(data, source_path)
       resolve_patrol_mode!(data)
       merged = merge_defaults(data).merge("project_root" => project_root)
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
@@ -805,7 +808,18 @@ module Hive
       merged[IMPLEMENTATION_IDENTITY_PROVENANCE_KEY] = implementation_identity_provenance(data)
       inject_bot_runtime_path_defaults!(merged)
       validate!(merged, source_path)
+      warn_legacy_root_reviewers_once!(source_path) if legacy_reviewers
       merged
+    end
+
+    def normalize_models_config(data, source_path)
+      return data unless data.key?("models")
+
+      normalized = deep_dup(data)
+      normalized["models"] = Hive::ModelRouting.parse(
+        data["models"], source: describe_source(source_path)
+      )
+      normalized
     end
 
     # `reviewers` was never a supported project-root key, but older Hive
@@ -1840,6 +1854,7 @@ module Hive
     # ever fails validation.
     def validate!(cfg, source_path)
       validate_hash_shaped_keys!(cfg, source_path)
+      validate_models!(cfg, source_path)
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_review_adhoc!(cfg, source_path)
@@ -1861,6 +1876,7 @@ module Hive
       validate_refactor_patrol!(cfg, source_path)
       validate_removed_digest!(cfg, source_path)
       validate_answer_digest!(cfg, source_path)
+      validate_model_routing_capabilities!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
     end
@@ -1875,6 +1891,7 @@ module Hive
     HASH_SHAPED_KEYS = %w[
       brainstorm
       claude
+      models
       plan
       execute
       conditions
@@ -1909,6 +1926,178 @@ module Hive
               "(defaults will apply) or supply `#{key}: { ... }` with the right shape."
       end
     end
+
+    def validate_models!(cfg, source_path)
+      return unless cfg.key?("models")
+
+      cfg["models"] = Hive::ModelRouting.parse(
+        cfg["models"],
+        source: describe_source(source_path)
+      )
+    end
+
+    # Validate only routed controls that can reach a concrete built-in launch
+    # under this merged project configuration. Structural validation happens
+    # in validate_models!; this second pass resolves exact/coarse shadowing and
+    # asks the selected AgentProfile about the effective field. It intentionally
+    # performs no binary/version probe and therefore stays a pure load barrier.
+    def validate_model_routing_capabilities!(cfg, source_path)
+      models = cfg.fetch("models", Hive::ModelRouting::EMPTY_MODELS)
+      return if models.empty?
+
+      calls = reachable_model_routing_calls(cfg)
+      Hive::ModelRouting.validate_effective!(models: models, calls: calls) do |control|
+        control.profile.validate_routed_control!(
+          control,
+          source: describe_source(source_path)
+        )
+      end
+    end
+
+    def reachable_model_routing_calls(cfg)
+      calls = []
+      execute_agent = cfg.dig("execute", "agent") || "claude"
+
+      add_model_routing_call(
+        calls, cfg, "brainstorm", cfg.dig("brainstorm", "agent"),
+        current: model_routing_current(cfg["brainstorm"])
+      )
+      add_model_routing_call(
+        calls, cfg, "plan", cfg.dig("plan", "agent"),
+        current: model_routing_current(cfg["plan"])
+      )
+      add_model_routing_call(
+        calls, cfg, "execute_implementation", execute_agent,
+        current: model_routing_current(cfg["execute"])
+      )
+      add_model_routing_call(
+        calls, cfg, "open_pr", cfg.dig("open_pr", "agent") || execute_agent,
+        current: model_routing_current(cfg["open_pr"])
+      )
+      add_model_routing_call(
+        calls, cfg, "artifacts", cfg.dig("artifacts", "agent"),
+        current: model_routing_current(cfg["artifacts"])
+      )
+      add_model_routing_call(
+        calls, cfg, "finalize", cfg.dig("finalize", "agent"),
+        current: model_routing_current(cfg["finalize"])
+      )
+
+      add_model_routing_call(
+        calls, cfg, "rebase", execute_agent,
+        enabled: cfg.dig("rebase", "enabled") == true,
+        current: model_routing_current(cfg["rebase"])
+      )
+      # Diagnosis is operator-triggerable for every red implementation task;
+      # it has no enable switch even when the daemon is disabled.
+      add_model_routing_call(calls, cfg, "diagnose", execute_agent)
+      add_model_routing_call(
+        calls, cfg, "babysitter", execute_agent,
+        enabled: cfg.dig("babysitter", "enabled") == true,
+        current: model_routing_current(cfg["babysitter"])
+      )
+
+      review = cfg.fetch("review")
+      add_model_routing_call(
+        calls, cfg, "review_ci", review.dig("ci", "agent") || execute_agent,
+        enabled: command_configured?(review.dig("ci", "command")),
+        current: model_routing_current(review["ci"])
+      )
+      add_model_routing_call(
+        calls, cfg, "review_triage", review.dig("triage", "agent") || "claude",
+        enabled: review.dig("triage", "enabled") == true,
+        current: model_routing_current(review["triage"])
+      )
+      add_model_routing_call(
+        calls, cfg, "review_fix", review.dig("fix", "agent") || execute_agent,
+        current: model_routing_current(review["fix"])
+      )
+      add_model_routing_call(
+        calls, cfg, "review_browser", review.dig("browser_test", "agent") || "claude",
+        enabled: review.dig("browser_test", "enabled") == true,
+        current: model_routing_current(review["browser_test"])
+      )
+      add_reviewer_model_routing_calls(calls, cfg, review["reviewers"])
+      add_reviewer_model_routing_calls(calls, cfg, review.dig("adhoc", "reviewers"))
+
+      patrol = cfg.fetch("patrol")
+      patrol_enabled = patrol["enabled"] == true
+      patrol_agent = patrol["agent"] || "claude"
+      add_model_routing_call(
+        calls, cfg, "patrol_review", patrol_agent,
+        enabled: patrol_enabled,
+        current: model_routing_current(patrol)
+      )
+      add_model_routing_call(
+        calls, cfg, "patrol_fix", patrol_agent,
+        enabled: patrol_enabled,
+        current: model_routing_current(patrol)
+      )
+      if patrol_enabled && patrol["review_prs"] == true
+        add_reviewer_model_routing_calls(calls, cfg, patrol.dig("review", "reviewers"))
+      end
+
+      refactor = cfg.fetch("refactor_patrol")
+      refactor_enabled = refactor["enabled"] == true
+      refactor_review_agent = refactor["agent"] || execute_agent
+      add_model_routing_call(
+        calls, cfg, "patrol_review", refactor_review_agent,
+        enabled: refactor_enabled,
+        current: model_routing_current(refactor)
+      )
+      auto_fix = refactor.fetch("auto_fix")
+      add_model_routing_call(
+        calls, cfg, "patrol_fix", auto_fix["agent"] || refactor_review_agent,
+        enabled: refactor_enabled && auto_fix["enabled"] == true,
+        current: model_routing_current(refactor).merge(model_routing_current(auto_fix))
+      )
+      calls.freeze
+    end
+    private_class_method :reachable_model_routing_calls
+
+    def add_reviewer_model_routing_calls(calls, cfg, reviewers)
+      Array(reviewers).each do |spec|
+        next unless spec.is_a?(Hash)
+        next if spec["kind"].to_s == "linter"
+
+        add_model_routing_call(
+          calls, cfg, "review_reviewers", spec["agent"] || "claude",
+          current: model_routing_current(spec)
+        )
+      end
+    end
+    private_class_method :add_reviewer_model_routing_calls
+
+    def add_model_routing_call(calls, cfg, stage, agent, enabled: true, current: {})
+      return unless enabled
+
+      profile = Hive::AgentProfiles.lookup(agent || "claude", cfg: cfg)
+      calls << {
+        stage: stage,
+        profile: profile,
+        provider: profile.name,
+        current: current
+      }
+    end
+    private_class_method :add_model_routing_call
+
+    def model_routing_current(block)
+      return Hive::ModelRouting::EMPTY_MODELS unless block.is_a?(Hash)
+
+      {
+        model: block["model"],
+        effort: block["effort"]
+      }.compact
+    end
+    private_class_method :model_routing_current
+
+    def command_configured?(command)
+      return false if command.nil?
+      return !command.strip.empty? if command.is_a?(String)
+
+      !Array(command).empty?
+    end
+    private_class_method :command_configured?
 
     def validate_conditions!(cfg, source_path)
       settings = cfg.fetch("conditions", {})

@@ -118,6 +118,7 @@ module Hive
       end
 
       def run!(task, cfg)
+        pre_effect_routing_validation = false
         # Track the current phase in a module-instance variable so the
         # top-level rescue at the end of this method can record it on
         # REVIEW_ERROR. The hive runner is single-task per process, so
@@ -541,6 +542,9 @@ module Hive
           end
 
           # --- Phase 4: fix ---
+          pre_effect_routing_validation = true
+          fix_identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
+          pre_effect_routing_validation = false
           @current_phase = :fix
           mark_working(task, phase: :fix, pass: pass)
           pre_fix_status = prepare_worktree_for_fix(task, cfg, worktree_path)
@@ -592,7 +596,6 @@ module Hive
             "reviews/suppressed.md",
             fix_success_relative_path(pass)
           ]
-          fix_identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
           custody_manifest = Hive::ArtifactFirewall::Manifest.new(
             root: task.folder,
             protected_anchors: protected_set,
@@ -744,6 +747,8 @@ module Hive
         # `reason=runner_exception exception_class=Hive::ConfigError`,
         # discarding the message. Surface it as a config-phase error
         # marker that preserves the message in the `reason` attr.
+        raise if pre_effect_routing_validation
+
         Hive::Markers.set(task.state_file, :review_error,
                           phase: @current_phase || :pre_flight,
                           reason: "config_error",
@@ -1522,12 +1527,14 @@ module Hive
 
           shared_reviewer_groups(cfg, claude_specs).each_with_index do |group, group_idx|
             scope = shared_reviewer_permission_scope(cfg, ctx, task, group.first)
+            routing_arguments = shared_reviewer_routing_arguments(cfg, group.first)
             Hive::ClaudeLauncher.with_shared_session(
               task: task,
               cfg: cfg,
               session_name: shared_reviewer_session_name(task, ctx.pass, group_idx),
               cwd: ctx.worktree_path,
               add_dirs: scope.fetch(:add_dirs),
+              cli_flags: routing_arguments&.native_arguments,
               **Hive::Stages::Base.tool_scope_kwargs(scope)
             ) do |handle|
               group.each do |spec|
@@ -1635,17 +1642,32 @@ module Hive
         :source_unknown
       end
 
-      # Group reviewers that share an effective permission scope so they can
-      # share one tmux session. The group key is the RESOLVED spec — an
+      # Group reviewers that share an effective permission scope and routed
+      # launch identity so they can share one tmux session. The permission
+      # part of the key is the RESOLVED spec — an
       # explicit `permissions:` value, or the project/stage default when the
       # key is omitted — so a reviewer spelling out `permissions: yolo` and
       # one inheriting the default yolo land in the SAME group (identical
       # effective scope → one session) instead of two sessions keyed on
-      # present-vs-absent. Each group's scope is built from group.first, which
-      # is sound because every member resolves to the same effective spec.
+      # present-vs-absent. RoutingArguments are immutable value objects, so
+      # equal effective model/effort controls coalesce while different ones
+      # cannot leak through a previously established Claude process. Each
+      # group's scope and route are built from group.first, which is sound
+      # because every member resolves to the same effective key.
       def shared_reviewer_groups(cfg, specs)
         default = Hive::Config.permission_spec(cfg || {}, "review.reviewers")
-        specs.group_by { |spec| spec.key?("permissions") ? spec["permissions"] : default }.values
+        specs.group_by do |spec|
+          permission = spec.key?("permissions") ? spec["permissions"] : default
+          [ permission, shared_reviewer_routing_arguments(cfg, spec) ]
+        end.values
+      end
+
+      def shared_reviewer_routing_arguments(cfg, spec)
+        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+        Hive::Stages::Base.model_routing_arguments(
+          cfg || {}, "review_reviewers", profile,
+          current: Hive::Stages::Base.model_routing_current(spec)
+        )
       end
 
       def shared_reviewer_session_name(task, pass, group_idx)
@@ -2109,7 +2131,7 @@ module Hive
           profile: profile,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only,
-          identity_arguments: identity&.native_arguments
+          **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
         }
         if profile.name == :claude
           Hive::Stages::Base.spawn_claude!(

@@ -94,6 +94,10 @@ module Hive
             profile: profile,
             model: identity[:model],
             effort: identity[:effort],
+            routing_arguments: Hive::Stages::Base.recognized_model_routing_arguments(
+              @cfg, @stage.name, profile,
+              current: { model: identity[:model], effort: identity[:effort] }.compact
+            ),
             expected_output: output_path,
             status_mode: :output_file_exists,
             cfg: @cfg,

@@ -141,7 +141,8 @@ module Hive
                    permission_mode: nil, allowed_tools: nil,
                    disallowed_tools: nil, cli_flags: [], max_tokens: nil,
                    max_turns: nil, identity_arguments: [], runtime_policy: nil,
-                   launch_arguments: nil, log_stream: true)
+                   launch_arguments: nil, routing_arguments: nil,
+                   log_stream: true)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -193,7 +194,13 @@ module Hive
         end
         supplied_identity_arguments = @launch_arguments.native_arguments
       end
+      if routing_arguments && (@launch_arguments || !supplied_identity_arguments.empty?)
+        raise ArgumentError,
+              "routing_arguments cannot be combined with legacy identity or launch arguments"
+      end
       @identity_arguments = supplied_identity_arguments.freeze
+      @routing_arguments =
+        routing_arguments && @profile.validate_routing_arguments!(routing_arguments)
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -556,6 +563,7 @@ module Hive
           disallowed_tools: @disallowed_tools,
           max_budget_usd: @max_budget_usd,
           identity_arguments: @identity_arguments,
+          routing_arguments: @routing_arguments,
           raw_cli_arguments: @cli_flags,
           trusted_cli_arguments: @runtime_cli_flags,
           executable: @runtime_policy&.executable,

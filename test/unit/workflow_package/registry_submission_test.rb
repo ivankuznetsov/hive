@@ -383,6 +383,45 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
     end
   end
 
+  def test_terminal_pr_adoption_allows_deleted_branch_but_rejects_branch_drift
+    with_package do |package|
+      %w[MERGED CLOSED].each do |remote_state|
+        with_tmp_dir do |state|
+          gateway = FakeGateway.new(package)
+          gateway.seed_pull_request(package, state: remote_state)
+          gateway.define_singleton_method(:branch_oid) { |_repository, _branch| nil }
+
+          result = submission_for(state, gateway).submit(package)
+          assert_equal remote_state, result.pull_request.state
+        end
+      end
+
+      with_tmp_dir do |state|
+        gateway = FakeGateway.new(package)
+        gateway.seed_pull_request(package, state: "MERGED")
+        gateway.define_singleton_method(:branch_oid) { |_repository, _branch| "e" * 40 }
+
+        assert_raises(Hive::WorkflowPackage::PublishConflict) do
+          submission_for(state, gateway).submit(package)
+        end
+      end
+    end
+  end
+
+  def test_open_pr_adoption_requires_live_exact_branch
+    with_package do |package|
+      with_tmp_dir do |state|
+        gateway = FakeGateway.new(package)
+        gateway.seed_pull_request(package, state: "OPEN")
+        gateway.define_singleton_method(:branch_oid) { |_repository, _branch| nil }
+
+        assert_raises(Hive::WorkflowPackage::PublishConflict) do
+          submission_for(state, gateway).submit(package)
+        end
+      end
+    end
+  end
+
   def test_adoption_translates_receipt_inconsistency_into_immutable_conflict
     with_package do |package|
       with_tmp_dir do |state|

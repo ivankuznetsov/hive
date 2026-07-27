@@ -38,11 +38,13 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
   class Gateway
     attr_reader :cleaned
 
-    def initialize(pr:, error: nil, parent_oid: "b" * 40, cleanup_error: nil)
+    def initialize(pr:, error: nil, parent_oid: "b" * 40, cleanup_error: nil,
+                   branch_oid: :pull_request_head)
       @pr = pr
       @error = error
       @parent_oid = parent_oid
       @cleanup_error = cleanup_error
+      @branch_oid = branch_oid
     end
 
     def pull_requests(_registry)
@@ -50,7 +52,9 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
       [ @pr ]
     end
 
-    def branch_oid(_repository, _branch) = @pr.head_oid
+    def branch_oid(_repository, _branch)
+      @branch_oid == :pull_request_head ? @pr.head_oid : @branch_oid
+    end
     def commit_parent_oid(_repository, _oid) = @parent_oid
     def verify_remote_package!(_repository, _ref, _package) = true
 
@@ -133,6 +137,39 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
     changed = pr("OPEN").with(head_oid: "e" * 40)
     assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
       resolver(receipt, catalogue: Catalogue.new, gateway: Gateway.new(pr: changed)).resolve(receipt)
+    end
+  end
+
+  def test_terminal_pr_allows_deleted_branch_but_open_pr_requires_it
+    %w[MERGED CLOSED].each do |state|
+      receipt = receipt_for(state)
+      result = resolver(
+        receipt, catalogue: Catalogue.new,
+        gateway: Gateway.new(pr: pr(state), branch_oid: nil)
+      ).resolve(receipt)
+
+      assert_equal(
+        state == "MERGED" ? "merged_pending_listing" : "closed_unmerged",
+        result.state
+      )
+    end
+
+    receipt = receipt_for("OPEN")
+    assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+      resolver(
+        receipt, catalogue: Catalogue.new,
+        gateway: Gateway.new(pr: pr("OPEN"), branch_oid: nil)
+      ).resolve(receipt)
+    end
+  end
+
+  def test_terminal_pr_rejects_a_surviving_branch_that_moved
+    receipt = receipt_for("MERGED")
+    assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+      resolver(
+        receipt, catalogue: Catalogue.new,
+        gateway: Gateway.new(pr: pr("MERGED"), branch_oid: "e" * 40)
+      ).resolve(receipt)
     end
   end
 

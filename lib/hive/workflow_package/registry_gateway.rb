@@ -6,6 +6,7 @@ require "uri"
 require "hive/gh"
 require "hive/paths"
 require "hive/workflow_package/manifest"
+require "hive/workflow_package/publish_lock"
 require "hive/workflow_package/publish_receipt"
 require "hive/workflow_package/registry_manifest"
 require "hive/workflow_package/safe_file"
@@ -167,9 +168,9 @@ module Hive
       def prepare_commit(package, repository:, base_branch:, base_oid:, head_repository:, branch:)
         key = ::Digest::SHA256.hexdigest([ repository, package.name, package.version, package.release_digest ].join("\0"))
         checkout = File.join(@objects_root, key)
-        FileUtils.mkdir_p(@objects_root, mode: 0o700)
-        File.chmod(0o700, @objects_root)
-        if File.directory?(File.join(checkout, ".git"))
+        PublishLock.ensure_private_directory!(@objects_root)
+        if File.exist?(checkout) || File.symlink?(checkout)
+          ensure_safe_checkout!(checkout)
           oid = git!(checkout, "rev-parse", "HEAD").strip
           retained_branch = git!(checkout, "rev-parse", "refs/heads/#{branch}").strip
           parent = git!(checkout, "rev-parse", "#{oid}^").strip
@@ -181,9 +182,9 @@ module Hive
           return [ checkout, oid ]
         end
 
-        raise PublishRecoveryError, "retained publication object path is not a repository" if File.exist?(checkout)
         run!([ "git", "clone", "--quiet", "--no-checkout", "--no-tags", "--branch", base_branch, "--single-branch",
                "--", "https://github.com/#{repository}.git", checkout ], "registry clone")
+        ensure_safe_checkout!(checkout)
         git!(checkout, "cat-file", "-e", "#{base_oid}^{commit}")
         git!(checkout, "checkout", "--quiet", "--detach", base_oid)
         actual_base = git!(checkout, "rev-parse", "HEAD").strip
@@ -400,6 +401,21 @@ module Hive
         end.sort_by { |entry| entry.fetch(:path) }
       rescue PackageError
         raise PublishRecoveryError, "validated package tree is unavailable"
+      end
+
+      def ensure_safe_checkout!(checkout)
+        checkout_stat = File.lstat(checkout)
+        git_dir = File.join(checkout, ".git")
+        git_stat = File.lstat(git_dir)
+        unless checkout_stat.directory? && !checkout_stat.symlink? &&
+               checkout_stat.uid == Process.uid &&
+               git_stat.directory? && !git_stat.symlink? &&
+               git_stat.uid == Process.uid
+          raise PublishRecoveryError, "retained publication object path is unsafe"
+        end
+        File.chmod(0o700, checkout)
+      rescue Errno::ENOENT
+        raise PublishRecoveryError, "retained publication object path is not a repository"
       end
 
       def git!(checkout, *args)

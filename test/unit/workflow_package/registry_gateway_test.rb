@@ -351,6 +351,7 @@ class WorkflowPackageRegistryGatewayTest < Minitest::Test
         )
         assert_equal commit_oid, oid
         assert File.file?(File.join(checkout, package.registry_path, "manifest.yml"))
+        assert_equal 0o700, File.stat(checkout).mode & 0o777
 
         retained_checkout, retained_oid = gateway.prepare_commit(
           package, repository: "owner/registry", base_branch: "main", base_oid: base_oid,
@@ -375,6 +376,60 @@ class WorkflowPackageRegistryGatewayTest < Minitest::Test
 
   def test_prepare_commit_rejects_inconsistent_or_unsafe_recovery_state
     with_package do |package|
+      with_tmp_dir do |target|
+        FileUtils.mkdir_p(File.join(target, "objects"))
+        objects_root = File.join(target, "objects-link")
+        File.symlink(File.join(target, "objects"), objects_root)
+        gateway = Hive::WorkflowPackage::RegistryGateway.new(
+          runner: ->(_args, chdir:) { raise "unexpected runner call in #{chdir}" },
+          objects_root: objects_root
+        )
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          prepare_commit(gateway, package)
+        end
+      end
+
+      with_tmp_dir do |objects_root|
+        File.chmod(0o755, objects_root)
+        gateway = Hive::WorkflowPackage::RegistryGateway.new(
+          runner: ->(_args, chdir:) { raise "unexpected runner call in #{chdir}" },
+          objects_root: objects_root
+        )
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          prepare_commit(gateway, package)
+        end
+      ensure
+        File.chmod(0o700, objects_root) if objects_root && File.directory?(objects_root)
+      end
+
+      with_tmp_dir do |objects_root|
+        real_checkout = File.join(objects_root, "elsewhere")
+        FileUtils.mkdir_p(File.join(real_checkout, ".git"))
+        File.symlink(real_checkout, File.join(objects_root, commit_key(package)))
+        gateway = Hive::WorkflowPackage::RegistryGateway.new(
+          runner: ->(_args, chdir:) { raise "unexpected runner call in #{chdir}" },
+          objects_root: objects_root
+        )
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          prepare_commit(gateway, package)
+        end
+      end
+
+      with_tmp_dir do |objects_root|
+        checkout = File.join(objects_root, commit_key(package))
+        external_git_dir = File.join(objects_root, "external-git")
+        FileUtils.mkdir_p(checkout)
+        FileUtils.mkdir_p(external_git_dir)
+        File.symlink(external_git_dir, File.join(checkout, ".git"))
+        gateway = Hive::WorkflowPackage::RegistryGateway.new(
+          runner: ->(_args, chdir:) { raise "unexpected runner call in #{chdir}" },
+          objects_root: objects_root
+        )
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          prepare_commit(gateway, package)
+        end
+      end
+
       with_tmp_dir do |objects_root|
         key = commit_key(package)
         File.write(File.join(objects_root, key), "not a repository")
@@ -413,7 +468,8 @@ class WorkflowPackageRegistryGatewayTest < Minitest::Test
         end
       end
 
-      with_tmp_dir do |objects_root|
+      with_tmp_dir do |parent|
+        objects_root = File.join(parent, "objects")
         runner, = commit_runner
         gateway = Hive::WorkflowPackage::RegistryGateway.new(
           runner: runner, objects_root: objects_root

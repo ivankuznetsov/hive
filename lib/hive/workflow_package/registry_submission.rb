@@ -181,8 +181,16 @@ module Hive
         verify_candidate_authority!(pr, base_oid, receipt, login)
         @gateway.verify_remote_package!(pr.head_repository, pr.head_oid, package)
         remote_oid = @gateway.branch_oid(pr.head_repository, pr.head_branch)
-        raise PublishConflict, "registry pull request head no longer matches its branch" unless remote_oid == pr.head_oid
+        unless pull_request_branch_valid?(pr, remote_oid)
+          raise PublishConflict, "registry pull request head no longer matches its branch"
+        end
         VerifiedCandidate.new(pull_request: pr, base_oid: base_oid).freeze
+      end
+
+      def pull_request_branch_valid?(pull_request, branch_oid)
+        return branch_oid == pull_request.head_oid if pull_request.state == "OPEN"
+
+        branch_oid.nil? || branch_oid == pull_request.head_oid
       end
 
       def verify_candidate_authority!(pr, base_oid, receipt, login)

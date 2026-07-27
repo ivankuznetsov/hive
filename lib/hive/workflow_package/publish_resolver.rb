@@ -81,9 +81,17 @@ module Hive
           )
         end
         branch_oid = @gateway.branch_oid(pr.head_repository, pr.head_branch)
-        raise PublishRecoveryError, "registry pull request branch identity drifted" unless branch_oid == pr.head_oid
+        unless pull_request_branch_valid?(pr, branch_oid)
+          raise PublishRecoveryError, "registry pull request branch identity drifted"
+        end
         @gateway.verify_remote_package!(pr.head_repository, pr.head_oid, package)
         pr
+      end
+
+      def pull_request_branch_valid?(pull_request, branch_oid)
+        return branch_oid == pull_request.head_oid if pull_request.state == "OPEN"
+
+        branch_oid.nil? || branch_oid == pull_request.head_oid
       end
 
       def persist(receipt, state, pr_url:, pr_number:)

@@ -39,7 +39,7 @@ module Hive
       # only when the runner result carries the corresponding data — currently
       # `cleanup_instructions:` from the terminal `done` stage. See
       # schemas/hive-run.v1.json $defs.SuccessPayload.properties.
-      OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
+      OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions allowed_outcomes].freeze
 
       # Exact pre-run task-folder snapshot used only for terminal runners. Lock
       # artifacts are process-owned and intentionally remain live across a
@@ -134,6 +134,12 @@ module Hive
           @observation_guard&.call(task)
           cfg = Hive::Config.load(task.project_root)
           marker = Hive::Markers.current(task.state_file)
+          if human_stage?(task)
+            @rebase_result = human_stage_rebase_result
+            status = marker.name == :complete ? :complete : :needs_input
+            report(task, { commit: nil, status: status })
+            return
+          end
           if marker.name == :manual_steering
             @rebase_result = manual_steering_rebase_result
             report(task, { commit: nil, status: :manual_steering })
@@ -247,6 +253,12 @@ module Hive
         require "hive/rebase"
 
         Hive::Rebase::Result.skipped(:manual_steering)
+      end
+
+      def human_stage_rebase_result
+        require "hive/rebase"
+
+        Hive::Rebase::Result.skipped(:human_stage)
       end
 
       def pick_runner(task)
@@ -373,6 +385,7 @@ module Hive
         if result.is_a?(Hash) && result[:cleanup_instructions]
           payload["cleanup_instructions"] = result[:cleanup_instructions]
         end
+        payload["allowed_outcomes"] = allowed_outcomes(task) if human_decision_required?(task, marker)
         # The JSON payload is written to stdout *before* the raise. bin/hive
         # rescues Hive::Error and calls `exit(e.exit_code)`; Ruby's normal
         # interpreter shutdown flushes stdout via IO finalizers, so the
@@ -410,6 +423,21 @@ module Hive
 
       def json_next_action(task, marker)
         kind = Hive::Schemas::NextActionKind
+        if human_stage?(task)
+          if marker.name == :complete
+            return { "kind" => kind::NO_OP, "reason" => "human_stage_complete" }
+          end
+
+          decision_id = marker.attrs["decision_id"].to_s
+          return {
+            "kind" => kind::NO_OP,
+            "reason" => "human_decision_required",
+            "allowed_outcomes" => allowed_outcomes(task),
+            "decide_with" => "hive decide #{task.slug} <outcome> --from #{task.stage_name} " \
+                             "--decision-id #{decision_id}"
+          }
+        end
+
         case marker.name
         when :waiting
           { "kind" => kind::EDIT, "target" => task.state_file, "rerun_with" => friendly_command(task, marker) }
@@ -596,6 +624,18 @@ module Hive
         end
         puts "hive: marker=#{marker.name}"
         puts "  state_file: #{task.state_file}"
+        if human_stage?(task)
+          if marker.name == :complete
+            puts "  complete: human workflow outcome recorded"
+            return
+          end
+
+          decision_id = marker.attrs["decision_id"].to_s
+          puts "  outcomes: #{allowed_outcomes(task).map { |outcome| outcome.fetch('name') }.join(', ')}"
+          puts "  next: hive decide #{task.slug} <outcome> --from #{task.stage_name} " \
+               "--decision-id #{decision_id}"
+          return
+        end
         case marker.name
         when :waiting
           puts "  next: edit the file, then `#{friendly_command(task, marker)}` again"
@@ -659,6 +699,18 @@ module Hive
       def project_name_for(task)
         project = Hive::Config.registered_projects.find { |p| p["path"] == task.project_root }
         project ? project["name"] : task.project_name
+      end
+
+      def human_stage?(task)
+        task.workflow.stage_named(task.stage_name)&.kind == :human
+      end
+
+      def human_decision_required?(task, marker)
+        human_stage?(task) && marker.name != :complete
+      end
+
+      def allowed_outcomes(task)
+        Hive::TaskAction.for(task, Hive::Markers.current(task.state_file)).allowed_outcomes
       end
 
       # Map a Hive::Error subclass to a RunErrorKind value. Ordering matters:

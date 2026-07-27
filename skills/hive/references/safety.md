@@ -10,9 +10,15 @@ Explain scope, affected state, and recovery before running:
 - Foreground or unbounded streams such as daemon or bot tails when a bounded native status/watch answer is sufficient.
 - Any external message, PR mutation beyond the user’s request, publication, deployment, tag, package release, or version change.
 - Workflow install/update/remove/publish, `setup-agents`, manual patrol starts,
-  and outbound `digest` or `bench submit` operations.
+  and outbound `bench submit` operations.
 
 Routine read-only inspection, `hive watch`, `hive doctor`, and a fresh `hive act` descriptor with `confirmation_required: false` do not require another prompt.
+
+Creating a new workflow authorizes only the newly scaffolded descriptor and
+instruction paths. It never authorizes edits to an existing workflow or task
+creation. Fresh minimal initialization requires its own disclosed preview and
+one explicit confirmation. External publication remains separately gated even
+when a human outcome marks an artifact publish-ready.
 
 No-write Honeycomb workflow previews (`workflow install|update|remove` with
 `--dry-run --json`) are read-only. Do not generalize that exemption: patrol

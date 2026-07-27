@@ -1663,7 +1663,19 @@ module Hive
       defaults
     end
 
-    def register_project(name:, path:, repository_identity: :detect)
+    class ProjectRegistrationCollision < ConfigError
+      attr_reader :name, :existing_path
+
+      def initialize(message, name:, existing_path:)
+        super(message)
+        @name = name
+        @existing_path = existing_path
+      end
+
+      def exit_code = Hive::ExitCodes::USAGE
+    end
+
+    def register_project(name:, path:, repository_identity: :detect, replace_existing: true)
       entry = nil
       update_global_config! do |data|
         data["registered_projects"] = Array(data["registered_projects"])
@@ -1676,6 +1688,13 @@ module Hive
         entry["real_path"] = real_path if real_path
         existing = data["registered_projects"].find { |p| p.is_a?(Hash) && p["name"] == name }
         if existing
+          existing_path = File.expand_path(existing.fetch("path"))
+          if !replace_existing && existing_path != abs_path
+            raise ProjectRegistrationCollision.new(
+              "project #{name.inspect} is already registered at #{existing.fetch('path')}",
+              name: name, existing_path: existing.fetch("path")
+            )
+          end
           existing.replace(entry)
         else
           data["registered_projects"] << entry

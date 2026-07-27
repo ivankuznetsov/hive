@@ -20,6 +20,8 @@ module Hive
       "hive-watch-event" => 1,
       "hive-act" => 2,
       "hive-init" => 2,
+      "hive-init-preview" => 1,
+      "hive-new" => 1,
       "hive-setup-agents" => 1,
       "hive-setup" => 1,
       "hive-web-status" => 1,
@@ -31,6 +33,7 @@ module Hive
       "hive-status-diagnose" => 2,
       "hive-run" => 2,
       "hive-approve" => 2,
+      "hive-decide" => 1,
       "hive-findings" => 1,
       "hive-stage-action" => 2,
       "hive-metrics-rollback-rate" => 1,
@@ -58,6 +61,9 @@ module Hive
       # every other agent-callable command's error envelope; the success arm
       # builds its hash directly.
       "hive-workflow-new" => 1,
+      # Read-only production-resolution validation for owner-authored,
+      # managed, and built-in workflows (`hive workflow validate ID --json`).
+      "hive-workflow-validate" => 1,
       "hive-workflow-install" => 2,
       # v2 gives selected managed rows their active immutable configuration
       # digest plus redacted per-slot mapping and optional-input discovery.

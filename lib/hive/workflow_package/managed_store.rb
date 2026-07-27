@@ -126,6 +126,15 @@ module Hive
         result
       end
 
+      # Validation and other strict no-write probes cannot use #selected:
+      # with_stable_read creates the mutation lock and reconciles an interrupted
+      # transaction before taking its shared read. This variant validates the
+      # selected pointer and configuration without creating, restoring, or
+      # clearing any managed-state path.
+      def selected_read_only(name, cfg: {}, &legacy_cfg_loader)
+        selected_unlocked(name, cfg: cfg, &legacy_cfg_loader)
+      end
+
       def selections(cfg: {})
         result = []
         with_stable_read do

@@ -55,6 +55,7 @@ class CliUsageErrorJsonTest < Minitest::Test
     cases = [
       [ %w[run --json], "hive-run", {} ],
       [ %w[approve --json], "hive-approve", {} ],
+      [ %w[decide task approve --json], "hive-decide", {} ],
       [ %w[markers clear --json], "hive-markers-clear", {} ],
       [ %w[drop --json], "hive-drop", {} ],
       [ %w[findings --json], "hive-findings", {} ],
@@ -211,8 +212,8 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "UsageError", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
-      assert_equal "missing SUBCOMMAND (expected: new, install, list, update, remove, publish)", payload["message"]
-      assert_equal %w[new install list update remove publish], payload["expected"]
+      assert_equal "missing SUBCOMMAND (expected: new, validate, commit, install, list, update, remove, publish)", payload["message"]
+      assert_equal %w[new validate commit install list update remove publish], payload["expected"]
     end
   end
 
@@ -223,7 +224,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       refute status.success?
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
       assert_empty out
-      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, install, list, update, remove, publish)\n", err
+      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, validate, commit, install, list, update, remove, publish)\n", err
     end
   end
 
@@ -255,6 +256,17 @@ class CliUsageErrorJsonTest < Minitest::Test
       # contract that wraps Thor's arity error.
       refute payload.key?("expected"), "Thor arity errors must not carry `expected`"
       refute payload.key?("value"), "Thor arity errors must not carry `value`"
+    end
+  end
+
+  def test_workflow_validate_arity_error_uses_validate_envelope
+    with_tmp_global_config do |home|
+      assert_pre_dispatch_error(
+        home,
+        %w[workflow validate editorial extra --json],
+        schema: "hive-workflow-validate",
+        error_kind: "usage"
+      )
     end
   end
 

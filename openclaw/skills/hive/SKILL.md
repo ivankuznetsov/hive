@@ -1,6 +1,6 @@
 ---
 name: hive
-description: "Operate Hive task pipelines and pre-release QA through its native CLI. Use when an agent needs to answer current Hive or Hive-bench status, identify the exact active task and blocker owner, follow work through bounded transitions, inspect candidate QA evidence, advance a fresh routine recommendation, diagnose recovery state, initialize or configure Hive, or explain what requires operator action across registered projects."
+description: "Operate Hive task pipelines and pre-release QA through its native CLI. Use when an agent needs to answer current Hive or Hive-bench status, identify the exact active task and blocker owner, follow work through bounded transitions, create a new project-local workflow from an ordinary-language request, inspect candidate QA evidence, advance a fresh routine recommendation, diagnose recovery state, initialize or configure Hive, or explain what requires operator action across registered projects."
 version: "0.1.3"
 user-invocable: true
 metadata:
@@ -17,7 +17,7 @@ metadata:
 platform: openclaw
 invocation: /hive
 skill-version: 0.1.3
-canonical-digest: c8aacce6c5e2af2a84c51c65d0b756613a14c686c839321f8a79b9a38a172a7a
+canonical-digest: f49fae3aaaa1f9c1d0c7f19ebc86f88e3d08ad6069a66133fb43b44ce82e8799
 hive-version: 0.6.9
 -->
 
@@ -56,6 +56,9 @@ Ask before destructive or administrative changes, marker clearing, force/bypass 
 
 ## Load the relevant reference
 
+- Read [workflow-creator.md](references/workflow-creator.md) when ordinary language asks to create a new project-local workflow. This focused route is the `hive-workflow-creator` capability inside the single canonical `/hive` skill; it is not a second skill or package.
+- Read [workflow-creator-example.md](references/workflow-creator-example.md) for the accepted research → draft → approval editorial example.
+- Read [workflow-schema.md](references/workflow-schema.md), [workflow-stage-design.md](references/workflow-stage-design.md), [workflow-checkpoints.md](references/workflow-checkpoints.md), [workflow-permissions.md](references/workflow-permissions.md), [workflow-testing.md](references/workflow-testing.md), and [workflow-common-mistakes.md](references/workflow-common-mistakes.md) only as needed while authoring or diagnosing a newly scaffolded descriptor.
 - Read [status-and-watch.md](references/status-and-watch.md) for status interpretation, reporting, compatibility, and native watch semantics.
 - Read [workflow-actions.md](references/workflow-actions.md) for task creation, direct workflow verbs, daemon ownership, closed actions, and completion checks.
 - Read [recovery.md](references/recovery.md) for diagnosis, coordinator ownership, provider holds, stale workers, migration, and guarded recovery.

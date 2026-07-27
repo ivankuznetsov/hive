@@ -23,6 +23,19 @@ require "hive/invoked_binary"
 module Hive
   module Commands
     class Init
+      include Hive::Schemas::EnvelopeEmitter
+
+      class PreconditionError < Hive::Error
+        attr_reader :error_kind
+
+        def initialize(message, error_kind:)
+          super(message)
+          @error_kind = error_kind
+        end
+      end
+
+      ProjectRegistrationCollision = Hive::Config::ProjectRegistrationCollision
+
       INIT_MAIN_CHECKOUT_PATHS = %w[
         .gitignore
         .llm-wiki/config.json
@@ -82,6 +95,7 @@ module Hive
 
       def initialize(project_path, force: false, json: false, prompts: nil,
                      workflow: nil, new_workflow: nil, refactor_patrol: nil,
+                     minimal: false, preview: false,
                      workflow_input: $stdin, workflow_output: $stderr,
                      provisioning_input: $stdin, provisioning_output: $stdout,
                      provisioning_error: $stderr, preflight_inspector: nil,
@@ -91,6 +105,11 @@ module Hive
         @json = json
         @workflow_name = workflow
         @new_workflow = new_workflow
+        @minimal = minimal
+        @preview = preview
+        unless [ true, false ].include?(@minimal) && [ true, false ].include?(@preview)
+          raise ArgumentError, "minimal and preview must be boolean"
+        end
         unless refactor_patrol.nil? || [ true, false ].include?(refactor_patrol)
           raise ArgumentError, "refactor_patrol must be true, false, or nil"
         end
@@ -123,6 +142,50 @@ module Hive
       end
 
       def call
+        return do_call unless minimal_json?
+
+        call_with_envelope { do_call }
+      end
+
+      def envelope_schema
+        @preview ? "hive-init-preview" : "hive-init"
+      end
+
+      def envelope_error_kind(error)
+        case error
+        when PreconditionError then error.error_kind
+        when ProjectRegistrationCollision then "project_name_collision"
+        when Hive::AlreadyInitialized then "already_initialized"
+        when Hive::Commands::Workflow::UsageError then "usage"
+        when Hive::ConcurrentRunError then "concurrent_run"
+        when Hive::ConfigError then "config"
+        when Hive::GitError then "git"
+        when Hive::InternalError then "internal"
+        else "error"
+        end
+      end
+
+      def envelope_extras_for(error)
+        extras = {
+          "minimal" => true,
+          "preview" => @preview,
+          "project" => File.basename(@project_path),
+          "path" => @project_path,
+          "workflow" => @new_workflow.to_s
+        }
+        extras["value"] = error.value if error.respond_to?(:value) && !error.value.nil?
+        if error.respond_to?(:suggested_id) && !error.suggested_id.nil?
+          extras["suggested_id"] = error.suggested_id
+        end
+        if error.is_a?(ProjectRegistrationCollision)
+          extras["existing_path"] = error.existing_path
+        end
+        extras
+      end
+
+      def envelope_serialization_failure_policy = :raise
+
+      def do_call
         validate_git_repo!
         # Argument-level mutual exclusivity is checked before validate_clean_tree!
         # so a dirty repo passing both flags gets the clearer usage error instead
@@ -130,9 +193,14 @@ module Hive
         if @workflow_name && @new_workflow
           raise Hive::Commands::Workflow::UsageError, "--workflow and --new-workflow are mutually exclusive"
         end
+        validate_minimal_arguments!
         validate_clean_tree! unless @force
 
         ops = Hive::GitOps.new(@project_path)
+        if @minimal
+          init_minimal(ops)
+          return
+        end
         reject_existing_refactor_patrol_selector!(ops)
         if @new_workflow
           init_with_new_workflow(ops)
@@ -194,6 +262,157 @@ module Hive
         raise Hive::InternalError, "init failed: #{e.class}: #{e.message}"
       end
 
+      def validate_minimal_arguments!
+        if @preview && !@minimal
+          raise Hive::Commands::Workflow::UsageError, "--preview requires --minimal"
+        end
+        return unless @minimal
+
+        raise Hive::Commands::Workflow::UsageError, "--minimal requires --new-workflow ID" unless @new_workflow
+        raise Hive::Commands::Workflow::UsageError, "--minimal never accepts --force" if @force
+        if @refactor_patrol
+          raise Hive::Commands::Workflow::UsageError,
+                "--minimal fixes refactor patrol off; do not pass --refactor-patrol"
+        end
+      end
+
+      def init_minimal(ops)
+        ensure_minimal_target_fresh!(ops)
+        ensure_minimal_registration_available!
+        id = Hive::Commands::Workflow.normalize_and_validate_id!(
+          @new_workflow, project_root: @project_path
+        )
+        if Hive::Commands::Workflow.scaffold_collision?(id, project_root: @project_path)
+          suggested = Hive::Commands::Workflow.available_id(id, project_root: @project_path)
+          raise Hive::Commands::Workflow::UsageError.new(
+            "workflow scaffold already exists for #{id.inspect}; try #{suggested.inspect}",
+            value: id, suggested_id: suggested
+          )
+        end
+
+        if @preview
+          emit_minimal_preview(ops, id)
+        else
+          scaffold_and_bind_fresh_minimal(ops, id)
+        end
+      end
+
+      def ensure_minimal_target_fresh!(ops)
+        if ops.hive_state_branch_exists? ||
+           File.exist?(ops.hive_state_path) ||
+           File.symlink?(ops.hive_state_path)
+          raise Hive::AlreadyInitialized,
+                "minimal initialization requires a fresh target with no hive/state branch or .hive-state path"
+        end
+      end
+
+      def ensure_minimal_registration_available!
+        name = File.basename(@project_path)
+        existing = Hive::Config.registered_projects.find { |project| project["name"] == name }
+        return unless existing
+        return if File.expand_path(existing.fetch("path")) == @project_path
+
+        raise ProjectRegistrationCollision.new(
+          "minimal initialization refuses to replace registered project #{name.inspect} " \
+          "at #{existing.fetch('path')}; rename the target directory or forget the existing project first",
+          name: name, existing_path: existing.fetch("path")
+        )
+      end
+
+      def scaffold_and_bind_fresh_minimal(ops, id)
+        answers = minimal_answers
+        project_config_content = render_project_config(ops, answers: answers, default_workflow: id)
+        scaffold = nil
+        entry = initialize_project_state(ops, content: project_config_content) do
+          scaffold = scaffold_descriptor_commit!(ops, id)
+        end
+        extra = scaffold_payload(scaffold.fetch(:paths)).merge("minimal" => true)
+        if @json
+          emit_json_summary(entry: entry, ops: ops, answers: answers, workflow: id, extra: extra)
+        else
+          print_summary(
+            entry: entry, ops: ops, answers: answers, workflow: id,
+            scaffold_paths: scaffold.fetch(:paths)
+          )
+        end
+        # Minimal initialization intentionally omits service installation,
+        # daemon-autostart persistence, optional agent provisioning, patrol,
+        # babysitting, and timers. Core project registration and wiki/context
+        # hooks were installed transactionally by initialize_project_state.
+      end
+
+      def emit_minimal_preview(ops, id)
+        payload = minimal_preview_payload(ops, id)
+        if @json
+          puts JSON.generate(payload)
+        else
+          puts "hive: minimal init preview for #{@project_path}"
+          puts "  workflow: #{id}"
+          puts "  creates: #{payload.fetch('project_files').length} project/context paths plus hive/state"
+          puts "  automation: disabled"
+        end
+        payload
+      rescue Errno::EPIPE
+        nil
+      end
+
+      def minimal_preview_payload(ops, id)
+        answers = minimal_answers
+        hive_state_path = ops.hive_state_path
+        workflows = File.join(hive_state_path, "workflows")
+        {
+          "schema" => "hive-init-preview",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-init-preview"),
+          "ok" => true,
+          "preview" => true,
+          "minimal" => true,
+          "project" => File.basename(@project_path),
+          "path" => @project_path,
+          "default_branch" => ops.default_branch,
+          "workflow" => id,
+          "profile" => "minimal",
+          "template" => "blank",
+          "project_files" => INIT_MAIN_CHECKOUT_PATHS.map { |path| File.join(@project_path, path) },
+          "state_worktree" => {
+            "branch" => Hive::GitOps::HIVE_BRANCH,
+            "path" => hive_state_path,
+            "config_path" => File.join(hive_state_path, "config.yml"),
+            "workflow_descriptor" => File.join(workflows, "#{id}.yml"),
+            "workflow_instruction" => File.join(workflows, id, "work.md")
+          },
+          "context_integration" => {
+            "llm_wiki" => true,
+            "agent_instructions" => true,
+            "post_commit_hook" => true,
+            "scheduler" => false
+          },
+          "global_registration" => {
+            "enabled" => true,
+            "config_path" => Hive::Config.global_config_path,
+            "name" => File.basename(@project_path),
+            "status" => "available"
+          },
+          "services" => {
+            "daemon_install" => false,
+            "daemon_autostart" => false,
+            "babysitter_timer" => false,
+            "llm_wiki_timer" => false
+          },
+          "background_automation" => {
+            "daemon_dispatch" => answers.fetch("daemon_enabled"),
+            "patrol" => answers.fetch("patrol_mode") != "off",
+            "refactor_patrol" => answers.fetch("refactor_patrol_enabled"),
+            "adhoc_auto_fix" => answers.fetch("adhoc_auto_fix"),
+            "babysitter" => answers.fetch("babysitter_enabled")
+          },
+          "task_creation" => false
+        }
+      end
+
+      def minimal_answers
+        Hive::Commands::Init::Prompts.minimal_defaults
+      end
+
       def init_with_new_workflow(ops)
         id = Hive::Commands::Workflow.normalize_and_validate_id!(@new_workflow)
         if ops.hive_state_branch_exists?
@@ -247,7 +466,7 @@ module Hive
             )
           end
           scaffold
-        rescue StandardError
+        rescue StandardError, Interrupt
           # Re-derive paths from `scaffold` rather than the local `paths` (bound
           # just above): if scaffold_files! raised before its assignment, the
           # local is unset — the `if scaffold` guard makes this the only safe read.
@@ -270,7 +489,7 @@ module Hive
             write_default_workflow!(cfg_path, id)
             begin
               Hive::Commands::Workflow.commit_workflow_scaffold(ops, slug: id, pathspecs: pathspecs)
-            rescue StandardError
+            rescue StandardError, Interrupt
               # hive_commit stages config.yml + descriptor + instruction dir via
               # a per-pathspec `git add -A -- <path>` before it runs; a failure
               # AFTER staging leaves those entries in the long-lived .hive-state
@@ -287,7 +506,7 @@ module Hive
               raise
             end
           end
-        rescue StandardError
+        rescue StandardError, Interrupt
           # Filesystem-only scaffold teardown stays outside the lock: it removes
           # working-tree files, not index entries, so it cannot be swept into a
           # concurrent commit.
@@ -395,7 +614,7 @@ module Hive
               action: "set to #{next_value}",
               pathspecs: [ "config.yml" ]
             )
-          rescue StandardError
+          rescue StandardError, Interrupt
             restore_config_snapshot(cfg_path, before)
             raise
           end
@@ -564,6 +783,7 @@ module Hive
 
       def initialize_project_state(ops, content:, workflow: nil, &after_bootstrap)
         rollback_on_failure = false
+        registration_written = false
         side_effect_snapshot = capture_init_side_effect_snapshot
         begin
           rollback_on_failure = true
@@ -574,12 +794,20 @@ module Hive
           ops.add_hive_state_to_master_gitignore!
           Hive::LlmWikiBootstrap.install!(@project_path, post_commit_hook: false, scheduler: false)
           ops.commit_llm_wiki_bootstrap!
-          Hive::LlmWikiBootstrap.install_runtime_hooks!(@project_path)
+          Hive::LlmWikiBootstrap.install_runtime_hooks!(@project_path, scheduler: !@minimal)
 
-          entry = Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
+          entry = Hive::Config.register_project(
+            name: File.basename(@project_path),
+            path: @project_path,
+            replace_existing: !@minimal
+          )
+          registration_written = true
           after_bootstrap&.call
           entry
-        rescue StandardError
+        rescue StandardError, Interrupt
+          unless registration_written
+            side_effect_snapshot.fetch(:paths).delete(Hive::Config.global_config_path)
+          end
           rollback_partial_init(ops, side_effect_snapshot: side_effect_snapshot) if rollback_on_failure
           raise
         end
@@ -1067,6 +1295,11 @@ module Hive
       def validate_git_repo!
         out, _err, status = Open3.capture3("git", "-C", @project_path, "rev-parse", "--git-common-dir")
         unless status.success?
+          if minimal_json?
+            raise PreconditionError.new(
+              "not a git repository: #{@project_path}", error_kind: "not_git_repository"
+            )
+          end
           warn "hive: not a git repository: #{@project_path}"
           exit 1
         end
@@ -1075,6 +1308,12 @@ module Hive
         expected = File.join(@project_path, ".git")
         return if File.expand_path(common) == File.expand_path(expected)
 
+        if minimal_json?
+          raise PreconditionError.new(
+            "target appears to be inside a worktree (common dir #{common}); init must run on the main checkout",
+            error_kind: "main_checkout_required"
+          )
+        end
         warn "hive: target appears to be inside a worktree (common dir #{common}); init must run on the main checkout"
         exit 1
       end
@@ -1088,8 +1327,18 @@ module Hive
         modified = out.lines.reject { |l| l.start_with?("??") }
         return if modified.empty?
 
+        if minimal_json?
+          raise PreconditionError.new(
+            "uncommitted modifications to tracked files; commit before minimal init",
+            error_kind: "dirty_worktree"
+          )
+        end
         warn "hive: uncommitted modifications to tracked files; commit or pass --force"
         exit 1
+      end
+
+      def minimal_json?
+        @minimal && @json
       end
 
       def write_per_project_config(ops, content:)

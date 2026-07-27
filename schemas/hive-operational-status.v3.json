@@ -226,10 +226,14 @@
         "position": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["stage", "marker"],
+          "required": ["stage", "marker", "allowed_outcomes"],
           "properties": {
             "stage": { "type": "string" },
-            "marker": { "type": "string" }
+            "marker": { "type": "string" },
+            "allowed_outcomes": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/HumanOutcome" }
+            }
           }
         },
         "liveness": {
@@ -326,6 +330,17 @@
             { "$ref": "#/$defs/Action" }
           ]
         }
+      }
+    },
+    "HumanOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "complete", "artifact", "to"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "complete": { "type": "boolean" },
+        "artifact": { "type": ["string", "null"] },
+        "to": { "type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9-]*$" }
       }
     },
     "Reason": {

@@ -36,7 +36,9 @@ module Hive
         permissions
         mapping_role
         mapping_contract
+        outcomes
       ].freeze
+      OUTCOME_KEYS = %w[complete artifact to].freeze
       REVIEWER_KEYS = %w[
         name
         agent
@@ -112,10 +114,10 @@ module Hive
         return if stages.empty?
 
         last = stages.last
-        return if [ :inert, :agent, :council ].include?(last.kind)
+        return if [ :inert, :agent, :council, :human ].include?(last.kind)
 
         raise descriptor_error(
-          "last stage #{last.name.inspect} must be terminal, agent, or council"
+          "last stage #{last.name.inspect} must be terminal, agent, council, or human"
         )
       end
 
@@ -271,6 +273,7 @@ module Hive
         condition_policy = parse_condition_policy(stage["conditions"], label: label)
         reviewers = parse_reviewers(stage["reviewers"], id: id, label: label) if kind == :council
         council = parse_council(stage["council"], id: id, label: label, reviewer_count: reviewers&.length) if kind == :council
+        outcomes = parse_outcomes(stage["outcomes"], stage_name: name, label: label) if kind == :human
         validate_agent_instruction!(skill: skill, instruction: instruction, label: label) if kind == :agent
 
         Hive::Workflow::Stage.new(
@@ -295,7 +298,8 @@ module Hive
           condition_policy: condition_policy,
           permissions: permissions,
           mapping_role: parse_mapping_role(stage["mapping_role"], label: label),
-          mapping_contract: optional_string(stage["mapping_contract"], label: "#{label} mapping_contract")
+          mapping_contract: optional_string(stage["mapping_contract"], label: "#{label} mapping_contract"),
+          outcomes: outcomes
         )
       end
 
@@ -320,11 +324,15 @@ module Hive
       # the rest of the runner assumes and removes the nested-dir fragility in the
       # agent runner's output path.
       def parse_state_file(value, label:)
-        file = required_string(value, label: "#{label} state_file")
+        parse_task_file(value, label: "#{label} state_file")
+      end
+
+      def parse_task_file(value, label:)
+        file = required_string(value, label: label)
         return file if file == File.basename(file) && ![ ".", ".." ].include?(file)
 
         raise descriptor_error(
-          "#{label} state_file #{file.inspect} must be a bare filename inside the task folder " \
+          "#{label} #{file.inspect} must be a bare filename inside the task folder " \
           "(no '/' path separator, not '.' or '..'); built-in stages use basenames like 'idea.md'"
         )
       end
@@ -334,10 +342,50 @@ module Hive
         case raw
         when "agent" then :agent
         when "council" then :council
+        when "human" then :human
         when "terminal" then :inert
         else
-          raise descriptor_error("#{label} kind #{raw.inspect} must be agent, council, or terminal")
+          raise descriptor_error("#{label} kind #{raw.inspect} must be agent, council, human, or terminal")
         end
+      end
+
+      def parse_outcomes(data, stage_name:, label:)
+        unless data.is_a?(Hash) && !data.empty?
+          raise descriptor_error("#{label} human stage must declare at least one outcome")
+        end
+
+        outcomes = stringify_hash(data, label: "#{label} #{stage_name.inspect} outcomes")
+        outcomes.each_with_object({}) do |(name, raw), parsed|
+          unless SAFE_SLUG.match?(name)
+            raise descriptor_error(
+              "#{label} #{stage_name.inspect} outcome name #{name.inspect} must match #{SAFE_SLUG.source}"
+            )
+          end
+
+          outcome_label = "#{label} #{stage_name.inspect} outcome #{name.inspect}"
+          value = stringify_hash(raw, label: outcome_label)
+          reject_unknown_keys!(value, OUTCOME_KEYS, label: outcome_label)
+          action_keys = %w[complete to].select { |key| value.key?(key) }
+          unless action_keys.one?
+            raise descriptor_error("#{outcome_label} must declare exactly one of complete or to")
+          end
+
+          if value.key?("complete")
+            unless value["complete"] == true
+              raise descriptor_error("#{outcome_label} complete must be true")
+            end
+            artifact = parse_task_file(value["artifact"], label: "#{outcome_label} artifact")
+            parsed[name] = Hive::Workflow::Outcome.new(
+              name: name, complete: true, artifact: artifact
+            )
+          else
+            if value.key?("artifact")
+              raise descriptor_error("#{outcome_label} artifact is only valid on a completing outcome")
+            end
+            target = parse_stage_name(value["to"], label: "#{outcome_label} target")
+            parsed[name] = Hive::Workflow::Outcome.new(name: name, to: target)
+          end
+        end.freeze
       end
 
       def parse_instruction(value, label:)
@@ -579,6 +627,16 @@ module Hive
       def reject_agent_only_fields!(stage, kind:, label:)
         return if [ :agent, :council ].include?(kind)
 
+        if kind == :human
+          present = %w[skill instruction agent model effort budget_usd timeout_sec reviewers council deliverable workspace handoff conditions permissions mapping_role mapping_contract]
+                    .select { |key| stage.key?(key) }
+          return if present.empty?
+
+          raise descriptor_error(
+            "#{label} #{present.inspect} #{present.one? ? 'is' : 'are'} not valid on a human stage"
+          )
+        end
+
         present = %w[skill instruction agent model effort budget_usd timeout_sec input reviewers council deliverable workspace handoff permissions mapping_role mapping_contract]
                   .select { |key| stage.key?(key) }
         return if present.empty?
@@ -605,6 +663,10 @@ module Hive
       AGENT_ONLY_FIELDS = %w[skill instruction workspace handoff].freeze
 
       def reject_wrong_kind_fields!(stage, kind:, label:)
+        if kind != :human && stage.key?("outcomes")
+          raise descriptor_error("#{label} outcomes is only valid on a human stage")
+        end
+
         case kind
         when :agent
           reject_fields_for_kind!(stage, COUNCIL_ONLY_FIELDS, kind: :agent, other: "council", label: label)

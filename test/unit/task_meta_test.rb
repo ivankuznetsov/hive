@@ -361,7 +361,7 @@ class TaskMetaTest < Minitest::Test
       result = nil
       _out, err = capture_io { result = Hive::TaskMeta.read(dir) }
       assert_equal Hive::TaskMeta.empty, result
-      assert_match(/depends_on, workflow, base_branch dropped; managed provenance dropped/, err,
+      assert_match(/depends_on, workflow, base_branch dropped; idempotency dropped; managed provenance dropped/, err,
                    "a YAML parse failure must warn that depends_on (and the " \
                    "workflow selector) were dropped")
     end
@@ -400,6 +400,33 @@ class TaskMetaTest < Minitest::Test
         },
         Hive::TaskMeta.read(dir)
       )
+    end
+  end
+
+  def test_idempotency_metadata_round_trips_and_survives_rewrites
+    with_tmp_dir do |dir|
+      fingerprint = "a" * 64
+      Hive::TaskMeta.write(
+        dir, id: 7, slug: "keep-slug", display_name: nil,
+        idempotency_key: "creator:v1", input_fingerprint: fingerprint
+      )
+
+      Hive::TaskMeta.update_display_name(dir, "Readable Name")
+      meta = Hive::TaskMeta.read(dir)
+
+      assert_equal "creator:v1", meta.fetch(:idempotency_key)
+      assert_equal fingerprint, meta.fetch(:input_fingerprint)
+      assert_includes File.read(File.join(dir, "meta.yml")), "idempotency_key: creator:v1"
+    end
+  end
+
+  def test_idempotency_metadata_requires_key_and_fingerprint_together
+    with_tmp_dir do |dir|
+      assert_raises(ArgumentError) do
+        Hive::TaskMeta.write(
+          dir, id: 1, slug: "task", display_name: nil, idempotency_key: "creator:v1"
+        )
+      end
     end
   end
 

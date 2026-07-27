@@ -682,8 +682,15 @@ CI has dedicated `rubocop`, `brakeman`, and `bundler-audit` jobs in
 `.github/workflows/ci.yml`. The Brakeman job runs:
 
 ```bash
-bundle exec brakeman --force --no-pager --quiet --format github --ignore-config config/brakeman.ignore
+bundle exec brakeman --rails8 --force --no-pager --quiet --format github --ignore-config config/brakeman.ignore
 ```
+
+The root scan deliberately reaches both Hive's Ruby libraries and the nested
+Rails web application, so it does not use `--path web`. Rails 8 mode is explicit
+because Brakeman's root-app heuristic stops inferring Rails when the repository
+contains a top-level `script/` directory without the legacy `script/rails`
+launcher. Without `--rails8`, Brakeman 8.0.5 falls back to the non-Erubi template
+parser and fails on frozen ERB output instead of completing the security scan.
 
 `config/brakeman.ignore` is the root ignore file for scanner false positives.
 Each entry carries a rationale for the trust boundary Brakeman cannot see,

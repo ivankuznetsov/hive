@@ -97,6 +97,19 @@ class CiTestPartitionTest < Minitest::Test
     end
   end
 
+  def test_brakeman_forces_rails_8_while_scanning_the_repository_root
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+    brakeman = workflow.fetch("jobs").fetch("brakeman")
+    command = brakeman.fetch("steps").filter_map { |step| step["run"] }.fetch(0)
+
+    assert_equal(
+      "bundle exec brakeman --rails8 --force --no-pager --quiet --format github " \
+        "--ignore-config config/brakeman.ignore",
+      command
+    )
+    refute_includes command, "--path web"
+  end
+
   def test_incident_duration_budget_is_advisory_and_separate_from_functional_e2e
     workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
     jobs = workflow.fetch("jobs")

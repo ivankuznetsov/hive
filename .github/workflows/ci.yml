@@ -210,7 +210,7 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
-      - run: bundle exec brakeman --force --no-pager --quiet --format github --ignore-config config/brakeman.ignore
+      - run: bundle exec brakeman --rails8 --force --no-pager --quiet --format github --ignore-config config/brakeman.ignore
 
   bundler-audit:
     name: bundler-audit

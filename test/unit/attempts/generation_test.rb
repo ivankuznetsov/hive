@@ -127,12 +127,12 @@ class AttemptsGenerationTest < Minitest::Test
         "#{JSON.generate(record)}\n"
       )
       store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
-      store.create_compatibility_running(
+      create_running_attempt(
+        store,
         attempt_id: "attempt-1", task_id: "42", project: "demo", task_slug: "task-one",
         intended_stage: "4-execute", task_generation: "owner-7",
         ownership_generation: "owner-7", task_input_epoch: 7,
-        progress_token: "progress-attempt-1", owner: current_owner,
-        provider: "codex", starting_revision: nil, now: Time.now.utc
+        progress_token: "progress-attempt-1", provider: "codex"
       )
       task = FakeTask.new(id: 42, slug: "task-one", state_file: state_file,
                           stage_index: 5, stage_name: "open-pr")
@@ -210,12 +210,12 @@ class AttemptsGenerationTest < Minitest::Test
       task = FolderTask.new(folder: dir, state_file: File.join(dir, "pr.md"))
       attempt_root = File.join(dir, "attempts")
       store = Hive::Attempts::Store.new(root: attempt_root)
-      store.create_compatibility_running(
+      create_running_attempt(
+        store,
         attempt_id: "attempt-3", task_id: "42", project: "demo", task_slug: "task",
         intended_stage: "4-execute", task_generation: "owner-3",
         ownership_generation: "owner-3", task_input_epoch: 3,
-        progress_token: "progress-attempt-3", owner: current_owner,
-        provider: "codex", starting_revision: nil, now: Time.now.utc
+        progress_token: "progress-attempt-3", provider: "codex"
       )
       record = Hive::TaskJournal::Envelope.authoritative(
         {
@@ -234,6 +234,28 @@ class AttemptsGenerationTest < Minitest::Test
   end
 
   private
+
+  def create_running_attempt(store, **attributes)
+    now = Time.now.utc
+    claim_capability = "c" * 64
+    launching = store.create_launching(
+      **attributes,
+      request_id: "request-#{attributes.fetch(:attempt_id)}",
+      predecessor_attempt_id: nil,
+      worker_argv: [ "hive", "run", attributes.fetch(:task_slug) ],
+      claim_capability_digest: Hive::Attempts::Capability.digest(claim_capability),
+      starting_revision: nil,
+      retry_charge: 0,
+      inherited_outputs: [],
+      launch_timeout_sec: 30,
+      now: now
+    )
+    claimed = store.claim(
+      launching, owner: current_owner, claim_capability: claim_capability,
+      first_heartbeat_timeout_sec: 30, now: now
+    )
+    store.first_heartbeat(claimed, stale_sec: 30, now: now)
+  end
 
   def current_owner
     {

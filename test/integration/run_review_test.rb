@@ -344,7 +344,7 @@ class RunReviewTest < Minitest::Test
         refute_nil next_action, "review_error envelopes must include next_action"
         assert_equal "fix", next_action["phase"]
         assert_equal "fix_failed", next_action["reason"]
-        assert_match(/REVIEW_ERROR/, next_action["instructions"].to_s)
+        assert_match(/workflow\.retry/, next_action["instructions"].to_s)
       end
     end
   end
@@ -915,6 +915,42 @@ class RunReviewTest < Minitest::Test
           event["event_type"] == "clean_exit_auto_committed" &&
             event["message"].to_s.include?("reason=pre_fix_dirty_worktree")
         }, "pre-fix residue auto-commit should be visible in events.jsonl"
+      end
+    end
+  end
+
+  def test_review_rejects_routed_fix_identity_before_phase_or_worktree_effects
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        task = Hive::Task.new(folder)
+        cfg = Hive::Config.load(dir)
+        worktree = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
+                   "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(task.state_file, :review_waiting, pass: 1, escalations: 1)
+        File.write(File.join(worktree, "preexisting-residue.txt"), "must remain uncommitted\n")
+
+        marker_before = File.binread(task.state_file)
+        head_before = `git -C #{worktree} rev-parse HEAD`.strip
+        status_before = `git -C #{worktree} status --porcelain`
+
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :implementation_stage_identity,
+          ->(*_args) { raise Hive::ConfigError, "unsupported routed effort" }
+        ) do
+          error = assert_raises(Hive::ConfigError) do
+            Hive::Stages::Review.run!(task, cfg)
+          end
+
+          assert_equal "unsupported routed effort", error.message
+        end
+
+        assert_equal marker_before, File.binread(task.state_file)
+        assert_equal head_before, `git -C #{worktree} rev-parse HEAD`.strip
+        assert_equal status_before, `git -C #{worktree} status --porcelain`
+        refute File.exist?(File.join(folder, "events.jsonl"))
       end
     end
   end

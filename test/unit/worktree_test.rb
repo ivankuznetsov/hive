@@ -244,6 +244,21 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_create_detached_exact_translates_gate_failures
+    with_initialized_project do |dir, root|
+      wt = Hive::Worktree.new(dir, "analysis-failed", worktree_root: root)
+      with_replaced_singleton_method(
+        Hive::AgentGitGate, :materialize,
+        ->(**) { raise Hive::AgentGitGate::MaterializationFailed, "materialization refused" }
+      ) do
+        error = assert_raises(Hive::WorktreeError) do
+          wt.create_detached_exact!(base_sha: "a" * 40)
+        end
+        assert_includes error.message, "materialization refused"
+      end
+    end
+  end
+
   def test_create_detached_exact_prunes_orphaned_registration_before_retry
     with_initialized_project do |dir, root|
       pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip

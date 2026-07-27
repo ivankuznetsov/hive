@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+output=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o)
+      output="${2:?}"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+[[ -n "$output" ]]
+cp "${HIVE_RC_CONTROL_ROOT:?}/channel_update_fixture.sh" "$output"
+chmod 0755 "$output"

@@ -1,14 +1,13 @@
 require "lipgloss"
-require "hive/archive_filter"
 require "hive/tui/styles"
 require "hive/tui/views/format"
 
 module Hive
   module Tui
     module Views
-      # Read-only archive projection. It intentionally uses the full
-      # in-memory snapshot, not the grid's old-archive filter, so operators
-      # can reach every 9-done task without a filesystem walk.
+      # Read-only archive projection. It consumes Snapshot's separate,
+      # explicitly unfiltered archive payload so custom terminal stages and
+      # retention-hidden tasks never leak into the ordinary grid.
       module ArchivePane
         TITLE = "Archive · all done tasks".freeze
         EMPTY = "(no archived tasks)".freeze
@@ -40,9 +39,7 @@ module Hive
         def archived_rows(model)
           return [] unless model.snapshot
 
-          model.snapshot.projects.flat_map do |project|
-            project.rows.select { |row| row.stage == Hive::ArchiveFilter::ARCHIVE_STAGE_DIR }
-          end
+          model.snapshot.archive_rows
         end
 
         def render_row(row, inner_width)

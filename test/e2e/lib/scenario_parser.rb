@@ -62,6 +62,7 @@ module Hive
         name = safe_scenario_name(required_string(data, "name"))
         description = data["description"].to_s
         tags = Array(data["tags"]).map(&:to_s)
+        coverage = parse_coverage(data["coverage"])
         incident_id, sibling_task_id, pending = parse_incident_metadata(data, description, tags)
         steps = parse_steps(data["steps"])
         if steps.count { |step| step.kind == "script_gh" } > 1
@@ -76,13 +77,36 @@ module Hive
           path: @path,
           incident_id: incident_id,
           sibling_task_id: sibling_task_id,
-          pending: pending
+          pending: pending,
+          coverage: coverage
         ).freeze
       rescue Psych::SyntaxError => e
         invalid!(e.message, e.line)
       end
 
       private
+
+      def parse_coverage(raw)
+        return Coverage.new(primary: nil, supporting: []).freeze if raw.nil?
+
+        invalid!("coverage must be a map", line_for("coverage")) unless raw.is_a?(Hash)
+        primary = raw["primary"]
+        unless primary.is_a?(String) && !primary.empty?
+          invalid!("coverage.primary must be a string", line_for("primary"))
+        end
+        supporting = raw.fetch("supporting", [])
+        unless supporting.is_a?(Array) && supporting.all? { |id| id.is_a?(String) && !id.empty? }
+          invalid!("coverage.supporting must be an array of strings", line_for("supporting"))
+        end
+        if supporting.uniq.size != supporting.size
+          invalid!("coverage.supporting IDs must be unique", line_for("supporting"))
+        end
+        if supporting.include?(primary)
+          invalid!("coverage.primary cannot also be supporting", line_for("supporting"))
+        end
+
+        Coverage.new(primary: primary, supporting: supporting.freeze).freeze
+      end
 
       def parse_incident_metadata(data, description, tags)
         metadata_present = %w[incident_id sibling_task_id pending].any? { |key| data.key?(key) }

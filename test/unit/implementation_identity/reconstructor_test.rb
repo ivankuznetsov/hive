@@ -14,8 +14,8 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
   }.freeze
 
   def test_structured_attempt_identity_wins_over_logged_argv
-    with_legacy_attempts do |task, store, current|
-      historical = compatibility_attempt(store, "historical-execute", "4-execute", "codex")
+    with_attempt_history do |task, store, current|
+      historical = running_attempt(store, "historical-execute", "4-execute", "codex")
       store.checkpoint(
         historical,
         checkpoint: {
@@ -43,7 +43,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
   end
 
   def test_config_fallback_warns_and_backfills_once
-    with_legacy_attempts do |task, store, current|
+    with_attempt_history do |task, store, current|
       reconstructor = described_class(task, store)
       first = with_context(current) { reconstructor.reconstruct! }
       second = with_context(current) { described_class(task, store).reconstruct! }
@@ -57,8 +57,8 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
   end
 
   def test_structured_history_is_bound_to_project_task_and_generation
-    with_legacy_attempts do |task, store, current|
-      matching = compatibility_attempt(store, "matching-execute", "4-execute", "codex")
+    with_attempt_history do |task, store, current|
+      matching = running_attempt(store, "matching-execute", "4-execute", "codex")
       store.checkpoint(
         matching,
         checkpoint: {
@@ -68,7 +68,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
         },
         now: Time.now.utc
       )
-      foreign = compatibility_attempt(
+      foreign = running_attempt(
         store, "foreign-execute", "4-execute", "claude", project: "other"
       )
       store.checkpoint(
@@ -89,7 +89,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
   end
 
   def test_missing_history_never_uses_merged_claude_default_implicitly
-    with_legacy_attempts(explicit_execute: false) do |task, store, current|
+    with_attempt_history(explicit_execute: false) do |task, store, current|
       error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
         with_context(current) { described_class(task, store).reconstruct! }
       end
@@ -100,8 +100,8 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
   end
 
   def test_logged_codex_argv_recovers_model_and_reasoning_effort
-    with_legacy_attempts do |task, store, current|
-      historical = compatibility_attempt(store, "historical-execute", "4-execute", "codex")
+    with_attempt_history do |task, store, current|
+      historical = running_attempt(store, "historical-execute", "4-execute", "codex")
       log_dir = File.join(task.folder, "logs")
       FileUtils.mkdir_p(log_dir)
       File.write(
@@ -144,7 +144,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
   end
 
   def test_log_recovery_skips_unreadable_logs_and_rejects_untrusted_argv_shapes
-    with_legacy_attempts do |task, store, current|
+    with_attempt_history do |task, store, current|
       log_dir = File.join(task.folder, "logs")
       FileUtils.mkdir_p(log_dir)
       path = File.join(log_dir, "execute.log")
@@ -169,7 +169,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
   end
 
   def test_log_path_discovery_degrades_when_metadata_is_unreadable
-    with_legacy_attempts do |task, store, _current|
+    with_attempt_history do |task, store, _current|
       log_dir = File.join(task.folder, "logs")
       FileUtils.mkdir_p(log_dir)
       path = File.join(log_dir, "execute.log")
@@ -181,6 +181,80 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
     end
   end
 
+  def test_projected_routed_identity_reconstructs_typed_arguments_without_live_models
+    with_tmp_dir do |root|
+      task = TaskStub.new(
+        folder: root, state_file: File.join(root, "task.md"), slug: "legacy-task",
+        id: 42, project_root: root
+      )
+      identity = {
+        "stage" => "execute", "provider" => "codex", "model" => "gpt-5.6-sol",
+        "profile_name" => "codex", "launcher_identity" => "codex-cli/v1",
+        "source" => "persisted_execute", "generation" => 2,
+        "originating_attempt" => "execute-2", "requested_effort" => "xhigh",
+        "effective_effort" => "xhigh", "effort_supported" => true,
+        "model_pinned" => true,
+        "routing" => {
+          "stage" => "execute_implementation",
+          "model" => "gpt-5.6-sol",
+          "effort" => "xhigh",
+          "provenance" => {
+            "model" => { "kind" => "exact", "key" => "execute_implementation" },
+            "effort" => { "kind" => "coarse", "key" => "execute" }
+          }
+        }
+      }
+      projection = Struct.new(:value) do
+        def read = value
+      end.new({ "implementation_identity" => { "execute" => identity } })
+      subject = Hive::ImplementationIdentity::Reconstructor.new(
+        task: task, cfg: config(root), attempt_store: Object.new,
+        projection_store: projection
+      )
+
+      selection = with_attempt_context(
+        attempt_id: "retry", task_generation: 2, ownership_generation: "owner-2"
+      ) { subject.reconstruct! }
+      arguments = selection.routing_arguments(Hive::AgentProfiles.lookup(:codex))
+
+      assert_empty selection.native_arguments
+      assert_equal [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh" ],
+                   arguments.global_arguments
+    end
+  end
+
+  def test_projected_legacy_identity_without_routing_keeps_flat_arguments
+    with_tmp_dir do |root|
+      task = TaskStub.new(
+        folder: root, state_file: File.join(root, "task.md"), slug: "legacy-task",
+        id: 42, project_root: root
+      )
+      identity = {
+        "stage" => "execute", "provider" => "codex", "model" => "gpt-5.6-sol",
+        "profile_name" => "codex", "launcher_identity" => "codex-cli/v1",
+        "source" => "persisted_execute", "generation" => 2,
+        "originating_attempt" => "execute-2", "requested_effort" => "xhigh",
+        "effective_effort" => "xhigh", "effort_supported" => true,
+        "model_pinned" => true
+      }
+      projection = Struct.new(:value) do
+        def read = value
+      end.new({ "implementation_identity" => { "execute" => identity } })
+      subject = Hive::ImplementationIdentity::Reconstructor.new(
+        task: task, cfg: config(root), attempt_store: Object.new,
+        projection_store: projection
+      )
+
+      selection = with_attempt_context(
+        attempt_id: "retry", task_generation: 2, ownership_generation: "owner-2"
+      ) { subject.reconstruct! }
+
+      assert_nil selection.routing
+      assert_equal [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh" ],
+                   selection.native_arguments
+    end
+  end
+
   private
 
   def described_class(task, store)
@@ -189,7 +263,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
     )
   end
 
-  def with_legacy_attempts(explicit_execute: true)
+  def with_attempt_history(explicit_execute: true)
     with_tmp_dir do |root|
       folder = File.join(root, "task")
       FileUtils.mkdir_p(folder)
@@ -200,20 +274,31 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       File.write(task.state_file, "body")
       @explicit_execute = explicit_execute
       store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
-      current = compatibility_attempt(store, "current-open-pr", "5-open-pr", "claude")
+      current = running_attempt(store, "current-open-pr", "5-open-pr", "claude")
       yield task, store, current
     ensure
       @explicit_execute = nil
     end
   end
 
-  def compatibility_attempt(store, id, stage, provider, project: "demo", input_epoch: 0)
-    store.create_compatibility_running(
+  def running_attempt(store, id, stage, provider, project: "demo", input_epoch: 0)
+    now = Time.now.utc
+    claim_capability = "c" * 64
+    launching = store.create_launching(
       attempt_id: id, task_id: "42", project: project, task_slug: "legacy-task",
       intended_stage: stage, task_generation: "owner-0", ownership_generation: "owner-0",
-      task_input_epoch: input_epoch, progress_token: "progress-#{id}", owner: OWNER,
-      provider: provider, starting_revision: nil, now: Time.now.utc
+      task_input_epoch: input_epoch, progress_token: "progress-#{id}",
+      provider: provider, starting_revision: nil,
+      request_id: "request-#{id}", predecessor_attempt_id: nil,
+      worker_argv: [ "hive", "run", "legacy-task" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest(claim_capability),
+      retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: now
     )
+    claimed = store.claim(
+      launching, owner: OWNER, claim_capability: claim_capability,
+      first_heartbeat_timeout_sec: 30, now: now
+    )
+    store.first_heartbeat(claimed, stale_sec: 30, now: now)
   end
 
   def with_context(attempt, &block)

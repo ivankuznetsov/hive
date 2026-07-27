@@ -182,6 +182,53 @@ class AgentSkillsBundledSkillTest < Minitest::Test
     end
   end
 
+  def test_provisioner_rejects_bundled_projection_drift_during_planning
+    with_tmp_dir do |home|
+      project = File.join(home, "project")
+      Dir.mkdir(project, 0o700)
+      bin = File.join(home, "bin", "claude")
+      make_executable(bin)
+      runner = Runner.new([ bin, "--version" ] => result(stdout: "2.1.179\n"))
+      env = {
+        "HOME" => home,
+        "PATH" => "",
+        "CLAUDE_CONFIG_DIR" => File.join(home, ".claude")
+      }
+      provisioner = Hive::AgentSkills::Provisioner.new(
+        config: config(bin), project_root: project, runner: runner, environment: env
+      )
+      projection = Hive::AgentSkills.render("claude")
+      actual = Hive::AgentSkills.plan(
+        root: File.join(home, ".claude"),
+        trusted_root: home,
+        projection: projection
+      )
+      changed_inspection = Hive::AgentSkills::ProjectionReport.new(
+        state: actual.inspection.state,
+        destination: actual.inspection.destination,
+        manifest: actual.inspection.manifest,
+        files: actual.inspection.files,
+        snapshot: actual.inspection.snapshot.merge("digest" => "changed"),
+        issues: actual.inspection.issues
+      )
+      changed_plan = Hive::AgentSkills::Plan.new(
+        action: actual.action,
+        projection: actual.projection,
+        root: actual.root,
+        trusted_root: actual.trusted_root,
+        inspection: changed_inspection
+      )
+
+      with_replaced_singleton_method(
+        Hive::AgentSkills, :plan, ->(**) { changed_plan }
+      ) do
+        assert_raises(Hive::ConfigError) do
+          provisioner.build_plan(agents: [ "claude" ], skills: [ "hive" ])
+        end
+      end
+    end
+  end
+
   def test_bundled_skill_root_outside_home_is_a_conflict
     with_tmp_dir do |home|
       project = File.join(home, "project")

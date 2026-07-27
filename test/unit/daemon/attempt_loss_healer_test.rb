@@ -109,7 +109,6 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         assert_equal 1, dispatcher.calls.size
         assert_equal 4, dispatcher.calls.first.fetch(:retry_charge)
         assert_equal "successor_dispatched", outcomes.fetch(lost.attempt_id).fetch("status")
-        refute logger.events.any? { |name, _attrs| name == :marker_heal_exhausted }
       end
     end
   end
@@ -179,7 +178,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         old_folder = task.folder.sub("2-brainstorm", "1-inbox")
         worker_argv = [
           "hive", "brainstorm", old_folder, "--from", "1-inbox", "--json",
-          "--recover-merged-error-reason", "ci_failed"
+          "--project", "demo"
         ]
         store = Hive::Attempts::Store.new(root: root)
         lost = lost_attempt(
@@ -195,7 +194,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
 
         assert_equal [
           "hive", "brainstorm", task.folder, "--json",
-          "--recover-merged-error-reason", "ci_failed"
+          "--project", "demo"
         ], dispatcher.calls.first.fetch(:argv)
       end
     end

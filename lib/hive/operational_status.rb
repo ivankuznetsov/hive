@@ -1,11 +1,12 @@
 require "time"
 require "hive/operational_action"
 require "hive/workflows"
+require "hive/task_closure"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
-  # is deliberately the public v6 payload so the compatibility serializer
-  # remains untouched and every operational consumer shares one collected
+  # is deliberately the current public payload so every operational consumer
+  # shares one collected
   # graph instead of re-scanning task folders independently.
   class OperationalStatus
     STATES = %w[
@@ -33,6 +34,7 @@ module Hive
       validate_source!
       projects = @status_payload.fetch("projects")
       archived = archive_rows(projects)
+      hidden_archived_task_count = hidden_archived_task_count(projects)
       active = active_rows(projects)
       issues = source_issues(projects, active)
       task_source_status = task_source_status(projects, active)
@@ -73,6 +75,7 @@ module Hive
           "overall_state" => overall_state(tasks, completeness),
           "active" => tasks.size,
           "archived" => archived.size,
+          "hidden_archived_task_count" => hidden_archived_task_count,
           "projects_total" => projects.size,
           "projects_healthy" => projects.count { |project| project["error"].nil? },
           "states" => counts
@@ -85,12 +88,44 @@ module Hive
       }
     end
 
+    # Lean projection for high-frequency adapters that only need canonical
+    # recovery receipts. It shares the same scheduler join and normalization
+    # as #to_h without allocating the full operational envelope for every
+    # task on every poll.
+    def recovery_rows
+      validate_source!
+      projects = @status_payload.fetch("projects")
+      @scheduler_join_issues = []
+      @scheduler_join_issue_keys = {}
+      scheduler = scheduler_payload(projects)
+
+      active_rows(projects).filter_map do |project, row|
+        next unless recovery_candidate?(project, row, scheduler)
+
+        disposition, freshness = scheduler_disposition_for(project, row, scheduler)
+        recovery = recovery_payload(row, disposition, freshness)
+        next unless recovery
+
+        {
+          "identity" => {
+            "project" => project.fetch("name"),
+            "slug" => row.fetch("slug")
+          },
+          "recovery" => recovery
+        }
+      end
+    end
+
     private
 
     def validate_source!
-      return if @status_payload["ok"] == true && @status_payload["schema"] == "hive-status"
+      current_version = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+      return if @status_payload["ok"] == true &&
+                @status_payload["schema"] == "hive-status" &&
+                @status_payload["schema_version"] == current_version
 
-      raise ArgumentError, "operational status requires a successful hive-status payload"
+      raise ArgumentError,
+            "operational status requires a successful hive-status v#{current_version} payload"
     end
 
     def archive_rows(projects)
@@ -98,6 +133,18 @@ module Hive
         Array(project["tasks"]).filter_map do |row|
           [ project, row ] if row["action"] == "archived"
         end
+      end
+    end
+
+    def hidden_archived_task_count(projects)
+      projects.sum do |project|
+        value = project.fetch("hidden_archived_task_count", 0)
+        unless value.is_a?(Integer) && value >= 0
+          raise ArgumentError,
+                "project #{project['name'].inspect} has invalid hidden_archived_task_count #{value.inspect}"
+        end
+
+        value
       end
     end
 
@@ -285,7 +332,10 @@ module Hive
         end
       end
       action = Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row)
-      action = nil if daemon_enabled?(project.fetch("name"))
+      if daemon_enabled?(project.fetch("name")) &&
+         action&.fetch("action_id") != Hive::OperationalAction::RETRY_ACTION_ID
+        action = nil
+      end
       {
         "identity" => {
           "project" => project.fetch("name"),
@@ -295,7 +345,11 @@ module Hive
           "folder" => row.fetch("folder")
         },
         "workflow" => row["workflow"],
-        "position" => { "stage" => row.fetch("stage"), "marker" => row.fetch("marker") },
+        "position" => {
+          "stage" => row.fetch("stage"),
+          "marker" => row.fetch("marker"),
+          "allowed_outcomes" => Array(row["outcomes"])
+        },
         "liveness" => {
           "status" => liveness_status(row),
           "pid" => row["task_lock_pid"] || row["claude_pid"],
@@ -308,6 +362,8 @@ module Hive
         "reasons" => reasons,
         "provider" => provider_payload(row),
         "retry" => retry_payload(scheduler_disposition),
+        "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
+        "closure" => closure_payload(project, row),
         "dependency" => {
           "blocked" => row["blocked"] == true,
           "blocked_by" => row["blocked_by"],
@@ -461,12 +517,16 @@ module Hive
         [ "waiting_on_provider_or_scheduler", "scheduler" ]
       when "retry_in_flight"
         [ "running", "agent" ]
+      when "attempt_terminal_replay"
+        [ "idle", "none" ]
       when "retry_safety_blocked"
         [ "needs_repair", disposition["owner"] || "operator" ]
+      when "recovery_unavailable"
+        [ "unknown", "hive" ]
       when "wait_for_answers"
         [ "waiting_on_you", "operator" ]
       when "quarantined", "project_dropped", "folder_missing", "folder_missing_nil",
-           "plan_approval_invalid", "legacy_layout", "markerless_stalled", "recovery_exhausted"
+           "plan_approval_invalid", "legacy_layout", "markerless_stalled"
         [ "needs_repair", disposition["owner"] || "operator" ]
       else
         [ nil, nil ]
@@ -501,6 +561,150 @@ module Hive
         "retry_at" => disposition["retry_at"],
         "safe" => disposition["retry_safe"] == true,
         "safety_reason" => disposition["safety_reason"]
+      }
+    end
+
+    def recovery_payload(row, disposition, scheduler_freshness)
+      canonical = disposition["recovery"] if disposition.is_a?(Hash)
+      if canonical.is_a?(Hash)
+        return normalized_recovery(canonical, row) unless
+          canonical["status"] == "queued" && canonical["request_id"].to_s.empty?
+      end
+
+      return nil unless Hive::Recovery::API.recoverable_marker?(row["marker"])
+      return nil if invalid_task?(row)
+      if row.dig("attrs", "marker_id").to_s.empty?
+        return normalized_recovery(
+          {
+            "status" => "blocked",
+            "request_id" => nil,
+            "attempt_id" => row["attempt_id"],
+            "phase" => nil,
+            "failure_origin" => row.dig("attrs", "reason"),
+            "next_eligible_at" => nil,
+            "owner" => "operator",
+            "reason" => "recovery_migration_required",
+            "remediation" => "run `hive migrate` in the task project and retry from fresh status",
+            "retry_count" => nil,
+            "provider_hint" => provider_hint(row),
+            "terminal_outcome" => nil,
+            "terminal_at" => nil
+          },
+          row
+        )
+      end
+
+      decision = disposition&.fetch("decision", nil)
+      # An eligibility assessment is not queue admission. Until the
+      # coordinator supplies a canonical receipt/request ID, keep the action
+      # available so a human surface can submit the same guarded admission.
+      return nil if decision == "retry_pending"
+
+      status = case decision
+      when "retry_cooldown" then "cooldown"
+      when "retry_in_flight", "dispatched" then "running"
+      when "retry_safety_blocked" then "blocked"
+      when "attempt_terminal_replay" then "terminal"
+      else "unavailable"
+      end
+      reason = if status == "unavailable"
+        scheduler_freshness == "current" ? "recovery_observation_missing" : "scheduler_observation_unavailable"
+      elsif status == "blocked"
+        decision
+      end
+      normalized_recovery(
+        {
+          "status" => status,
+          "request_id" => disposition&.fetch("request_id", nil),
+          "attempt_id" => disposition&.fetch("attempt_id", nil) || row["attempt_id"],
+          "phase" => disposition&.fetch("recovery_phase", nil),
+          "failure_origin" => row.dig("attrs", "reason"),
+          "next_eligible_at" => disposition&.fetch("retry_at", nil),
+          "owner" => disposition&.fetch("owner", nil) || (status == "unavailable" ? "hive" : "scheduler"),
+          "reason" => reason,
+          "remediation" => disposition&.fetch("safety_reason", nil),
+          "retry_count" => disposition&.fetch("retry_count", nil),
+          "provider_hint" => provider_hint(row),
+          "terminal_outcome" => nil,
+          "terminal_at" => nil
+        },
+        row
+      )
+    end
+
+    def recovery_candidate?(project, row, scheduler)
+      return true if Hive::Recovery::API.recoverable_marker?(row["marker"])
+      return false unless scheduler.fetch("status") == "current"
+
+      observed = (@scheduler_task_index || {})[
+        [ project.fetch("name"), row.fetch("slug") ]
+      ]
+      observed&.dig("disposition", "recovery").is_a?(Hash)
+    end
+
+    def normalized_recovery(recovery, row)
+      {
+        "status" => recovery.fetch("status"),
+        "request_id" => recovery["request_id"],
+        "attempt_id" => recovery["attempt_id"],
+        "phase" => recovery["phase"],
+        "failure_origin" => recovery["failure_origin"] || row.dig("attrs", "reason"),
+        "next_eligible_at" => recovery["next_eligible_at"],
+        "owner" => recovery["owner"],
+        "reason" => recovery["reason"],
+        "remediation" => recovery["remediation"],
+        "retry_count" => recovery["retry_count"],
+        "provider_hint" => recovery["provider_hint"] || provider_hint(row),
+        "terminal_outcome" => recovery["terminal_outcome"],
+        "terminal_at" => recovery["terminal_at"]
+      }
+    end
+
+    def provider_hint(row)
+      retry_after = row.dig("attrs", "retry_after") || row.dig("held", "retry_after")
+      return nil if retry_after.to_s.empty?
+
+      { "retry_after" => retry_after.to_s, "display_only" => true }
+    end
+
+    def closure_payload(project, row)
+      projected = row["closure"]
+      if projected.is_a?(Hash) && projected["schema"] == Hive::TaskClosure::SCHEMA
+        return {
+          "status" => "confirmed_pending_transition",
+          "reason" => projected["reason"],
+          "authority" => projected["authority"],
+          "receipt_digest" => projected["receipt_digest"],
+          "evidence" => Array(projected["evidence"]),
+          "diagnostic" => nil,
+          "quarantine_path" => nil,
+          "action" => nil
+        }
+      end
+      if projected.is_a?(Hash) && projected["status"] == "invalid"
+        return {
+          "status" => "blocked",
+          "reason" => nil,
+          "authority" => nil,
+          "receipt_digest" => nil,
+          "evidence" => [],
+          "diagnostic" => projected["reason"].to_s[0, Hive::TaskClosure::MAX_QUARANTINE_REASON_BYTES],
+          "quarantine_path" => projected["quarantine_path"],
+          "action" => nil
+        }
+      end
+
+      {
+        "status" => "operator_required",
+        "reason" => nil,
+        "authority" => nil,
+        "receipt_digest" => nil,
+        "evidence" => [],
+        "diagnostic" => nil,
+        "quarantine_path" => nil,
+        "action" => Hive::OperationalAction.closure_descriptor(
+          project: project.fetch("name"), row: row
+        )
       }
     end
 
@@ -626,11 +830,25 @@ module Hive
 
     def archive_payload(archived)
       grouped = archived.group_by { |project, _| project.fetch("name") }
+      closures = archived.filter_map do |project, row|
+        receipt = row["closure"]
+        next unless receipt.is_a?(Hash) && receipt["schema"] == Hive::TaskClosure::SCHEMA
+
+        {
+          "project" => project.fetch("name"),
+          "slug" => row.fetch("slug"),
+          "reason" => receipt.fetch("reason"),
+          "authority" => receipt.fetch("authority"),
+          "receipt_digest" => receipt.fetch("receipt_digest"),
+          "evidence" => Array(receipt["evidence"])
+        }
+      end
       {
         "count" => archived.size,
         "by_project" => grouped.keys.sort.map do |project|
           { "project" => project, "count" => grouped.fetch(project).size }
-        end
+        end,
+        "closures" => closures
       }
     end
 

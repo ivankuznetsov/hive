@@ -2,9 +2,9 @@ require "open3"
 require "fileutils"
 require "shellwords"
 require "digest"
+require "hive/artifact_firewall"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
-require "hive/protected_files"
 require "hive/reviewers/synthetic_task"
 require "hive/stages/base"
 
@@ -40,7 +40,7 @@ module Hive
 
         DEFAULT_TAIL_LINES = 200
         DEFAULT_MAX_LOG_BYTES = 256 * 1024 # 256 KB hard cap on captured output
-        PROTECTED_FILES = Hive::ProtectedFiles::ORCHESTRATOR_OWNED
+        PROTECTED_FILES = Hive::ArtifactFirewall::ORCHESTRATOR_OWNED
 
         module_function
 
@@ -117,31 +117,36 @@ module Hive
             fix_identity = Hive::Stages::Base.implementation_stage_identity(
               synthetic_task(ctx), cfg, "review.ci"
             )
-            protected_capture = Hive::ProtectedFiles.capture(
-              ctx.task_folder, PROTECTED_FILES
+            custody_manifest = Hive::ArtifactFirewall::Manifest.new(
+              root: ctx.task_folder,
+              protected_anchors: PROTECTED_FILES,
+              permitted_writable_roots: [ ctx.task_folder, ctx.worktree_path ]
             )
-            before = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
-            spawn_result = spawn_fix_agent(
-              cfg: cfg,
-              ctx: ctx,
-              command: command,
-              attempt: attempts,
-              max_attempts: max_attempts,
-              captured_output: output,
-              identity: fix_identity
-            )
-            after = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
-            tampered = Hive::ProtectedFiles.diff(before, after)
-            if tampered.any?
-              restored, restore_error = Hive::ProtectedFiles.restore_safely(
-                ctx.task_folder, protected_capture, tampered
+            custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
+            begin
+              spawn_result = spawn_fix_agent(
+                cfg: cfg,
+                ctx: ctx,
+                command: command,
+                attempt: attempts,
+                max_attempts: max_attempts,
+                captured_output: output,
+                identity: fix_identity
               )
+            ensure
+              custody_report = Hive::ArtifactFirewall.validate_and_restore(
+                custody_manifest, custody_snapshot
+              )
+            end
+            if custody_report.tampered?
               return Result.new(
                 status: :error,
                 attempts: attempts,
                 last_output: output,
-                error_message: "ci fix agent modified protected files: #{tampered.join(', ')}; " \
-                               "restored=#{restored}#{": #{restore_error}" if restore_error}",
+                error_message: "ci fix agent modified protected files: " \
+                               "#{custody_report.tampered_labels.join(', ')}; " \
+                               "restored=#{custody_report.restored?}" \
+                               "#{": #{custody_report.restore_diagnostic}" if custody_report.restore_diagnostic}",
                 limit_text: nil
               )
             end
@@ -381,7 +386,7 @@ module Hive
             profile: profile,
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :exit_code_only,
-            identity_arguments: identity&.native_arguments
+            **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
           }
           if profile.name == :claude
             Hive::Stages::Base.spawn_claude!(

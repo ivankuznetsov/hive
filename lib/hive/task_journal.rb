@@ -1,11 +1,9 @@
-require "digest"
-require "fileutils"
 require "json"
 require "time"
-require "hive/atomic_file"
 require "hive/stringify_keys"
 require "hive/task_journal/envelope"
 require "hive/conditions/value"
+require "hive/work_ledger"
 
 module Hive
   module TaskJournal
@@ -188,6 +186,11 @@ module Hive
         @validator = Validator.new(attempt_store: attempt_store, require_attempt_store: true)
         @id_generator = id_generator
         @clock = clock
+        @ledger = Hive::WorkLedger.journal(
+          path: @path,
+          lock_path: @lock_path,
+          record_id: ->(record) { record["event_id"] }
+        )
       end
 
       def append(attributes)
@@ -202,11 +205,11 @@ module Hive
         end
         records.each { |record| validate!(record) }
 
-        with_lock do
-          append_records(records)
-        end
+        append_records(records)
       rescue Error
         raise
+      rescue Hive::WorkLedger::Error => e
+        raise Error, "authoritative journal append failed: #{ledger_error_detail(e)}"
       rescue SystemCallError, IOError, JSON::GeneratorError => e
         raise Error, "authoritative journal append failed: #{e.class}: #{e.message}"
       end
@@ -218,22 +221,19 @@ module Hive
         record = Envelope.authoritative(input, id_generator: @id_generator, clock: @clock)
         validate!(record)
 
-        with_lock do
-          existing = read_records.find do |candidate|
-            candidate.dig("payload", "idempotency_key") == idempotency_key.to_s
-          end
-          if existing
-            unless idempotency_signature(existing) == idempotency_signature(record)
-              raise Conflict, "conflicting authoritative event for idempotency key #{idempotency_key.inspect}"
-            end
-
-            return current_result(existing)
-          end
-
-          append_records([ record ])
-        end
+        result = @ledger.append_idempotent(
+          record,
+          idempotency_key: idempotency_key,
+          key_for: ->(candidate) { candidate.dig("payload", "idempotency_key") },
+          signature_for: method(:idempotency_signature)
+        )
+        append_result(result)
+      rescue Hive::WorkLedger::Conflict => e
+        raise Conflict, e.message.sub("conflicting record", "conflicting authoritative event")
       rescue Error
         raise
+      rescue Hive::WorkLedger::Error => e
+        raise Error, "authoritative journal append failed: #{ledger_error_detail(e)}"
       rescue SystemCallError, IOError, JSON::ParserError, JSON::GeneratorError => e
         raise Error, "authoritative journal append failed: #{e.class}: #{e.message}"
       end
@@ -241,45 +241,16 @@ module Hive
       private
 
       def append_records(records)
-        lines = records.map { |record| "#{JSON.generate(record)}\n" }.join
-        created = !File.exist?(path) || File.zero?(path)
-        File.open(path, File::WRONLY | File::APPEND | File::CREAT, 0o644, encoding: "UTF-8") do |file|
-          original_size = file.stat.size
-          begin
-            offset = 0
-            while offset < lines.bytesize
-              written = file.syswrite(lines.byteslice(offset..))
-              raise IOError, "short journal append" unless written.is_a?(Integer) && written.positive?
-
-              offset += written
-            end
-            file.flush
-            file.fsync
-          rescue SystemCallError, IOError => e
-            rollback_append!(file, original_size, e)
-          end
-        end
-        Hive::AtomicFile.fsync_directory(task_folder) if created
-        current_result(records.last, records: records)
+        append_result(@ledger.append(records))
       end
 
-      def current_result(record, records: [ record ])
+      def append_result(receipt)
         AppendResult.new(
-          cursor: File.size(path),
-          event_id: record.fetch("event_id"),
-          journal_hash: ::Digest::SHA256.file(path).hexdigest,
-          records: records.freeze
+          cursor: receipt.cursor,
+          event_id: receipt.record_id,
+          journal_hash: receipt.ledger_hash,
+          records: receipt.records
         )
-      end
-
-      def read_records
-        return [] unless File.exist?(path)
-
-        File.readlines(path, chomp: true).filter_map do |line|
-          next if line.empty?
-
-          JSON.parse(line)
-        end
       end
 
       def idempotency_signature(record)
@@ -312,31 +283,15 @@ module Hive
         JSON.generate(canonical)
       end
 
-      def with_lock
-        FileUtils.mkdir_p(task_folder)
-        File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
-          lock.flock(File::LOCK_EX)
-          yield
-        ensure
-          lock&.flock(File::LOCK_UN)
-        end
-      end
-
       def validate!(record)
         @validator.validate!(record)
       end
 
-      def rollback_append!(file, original_size, original_error)
-        begin
-          file.truncate(original_size)
-          file.flush
-          file.fsync
-        rescue SystemCallError, IOError => rollback_error
-          raise IOError,
-                "#{original_error.class}: #{original_error.message}; " \
-                "journal rollback failed: #{rollback_error.class}: #{rollback_error.message}"
-        end
-        raise original_error
+      def ledger_error_detail(error)
+        cause = error.cause
+        return error.message unless cause && !cause.is_a?(Hive::WorkLedger::Error)
+
+        "#{cause.class}: #{cause.message}"
       end
     end
   end

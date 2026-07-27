@@ -8,170 +8,187 @@ on:
 # Default-narrow permissions: candidate/install gates only read trusted state. The
 # publish job needs `contents: write` to create the GitHub Release and
 # `id-token: write` for cosign keyless signing of SHA256SUMS.
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
-  web-bundle:
-    name: Build exact managed web archive
+  select-candidate:
+    name: Select and verify trusted pre-tag candidate
     runs-on: ubuntu-24.04
     permissions:
-      contents: read
-    outputs:
-      sha256: ${{ steps.archive.outputs.sha256 }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Build exact managed web archive
-        id: archive
-        env:
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          version="${REF_NAME#v}"
-          mkdir -p web-candidate
-          web_archive="web-candidate/hive-web-${version}.tar.gz"
-          # One git-archive invocation defines the bytes that every later gate
-          # proves and release-finalize publishes. Tracked files only; the Rails
-          # app root remains the archive root AppBundle.ensure! expects.
-          git archive --format=tar.gz --output "$web_archive" HEAD:web
-          web_sha="$(sha256sum "$web_archive" | awk '{print $1}')"
-          echo "sha256=$web_sha" >> "$GITHUB_OUTPUT"
-          echo "packaged $web_archive (sha256=$web_sha)"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: hive-web-candidate
-          path: web-candidate
-          if-no-files-found: error
-          retention-days: 1
-
-  candidate-gate:
-    name: Build and verify exact offline candidate
-    runs-on: ubuntu-24.04
-    needs: web-bundle
-    permissions:
+      actions: read
+      checks: read
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out the exact tag target without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: ruby/setup-ruby@v1
+          persist-credentials: false
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # pinned 2026-07-26
         with:
           ruby-version: "3.4"
-          bundler-cache: true
-      - name: Verify offline agent-skill and packaging contracts
-        run: |
-          set -euo pipefail
-          bundle exec ruby -Itest -Ilib -e \
-            'ARGV.each { |path| require File.expand_path(path) }' \
-            test/unit/agent_skills/canonical_skill_test.rb \
-            test/unit/agent_skills/manifest_test.rb \
-            test/unit/openclaw_skills_test.rb \
-            test/unit/packaging/live_agent_proof_test.rb \
-            test/unit/live_agent_candidate_gem_installer_test.rb \
-            test/unit/packaging/verify_release_test.rb
-      - name: Build, verify, and install the exact candidate
+      - name: Resolve tag target and select exact trusted evidence
         env:
           GH_TOKEN: ${{ github.token }}
           REF_NAME: ${{ github.ref_name }}
+        shell: bash
         run: |
           set -euo pipefail
-          candidate_sha="$(git rev-parse HEAD)"
-          [[ "$candidate_sha" == "$(git rev-parse "${GITHUB_REF}^{commit}")" ]] || {
-            echo "tag checkout does not resolve to the release candidate" >&2
-            exit 1
-          }
+          root="$RUNNER_TEMP/release-selection"
+          mkdir -p "$root"
+          candidate_sha="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          test "$candidate_sha" = "$GITHUB_SHA"
+          version="${REF_NAME#v}"
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           git merge-base --is-ancestor "$candidate_sha" refs/remotes/origin/main || {
-            echo "release candidate is not reachable from protected main" >&2
+            echo "tag target is not reachable from protected main" >&2
             exit 1
           }
-          [[ "$(gh api "repos/${GITHUB_REPOSITORY}/branches/main" --jq '.protected')" == "true" ]] || {
+          if test "$(gh api "repos/${GITHUB_REPOSITORY}/branches/main" --jq .protected)" != true; then
             echo "repository main branch is not protected" >&2
             exit 1
-          }
-          version="${REF_NAME#v}"
+          fi
           source_version="$(ruby -Ilib -e 'require "hive"; print Hive::VERSION')"
-          [[ "$source_version" == "$version" ]] || {
+          if test "$source_version" != "$version"; then
             echo "tag version $version does not match source version $source_version" >&2
             exit 1
+          fi
+
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${candidate_sha}/check-runs?per_page=100" \
+            > "$root/checks.json"
+          ruby packaging/release_candidate/select_release_candidate.rb check \
+            "$candidate_sha" "$GITHUB_REPOSITORY" "$version" "$root/checks.json" \
+            > "$root/check.json"
+          evidence_run_id="$(jq -er .evidence_run_id "$root/check.json")"
+          evidence_run_attempt="$(jq -er .evidence_run_attempt "$root/check.json")"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${evidence_run_id}" \
+            > "$root/evidence-run.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${evidence_run_id}/attempts/${evidence_run_attempt}/jobs?per_page=100" \
+            > "$root/evidence-jobs.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${evidence_run_id}/artifacts?per_page=100" \
+            > "$root/evidence-artifacts.json"
+          ruby packaging/release_candidate/select_release_candidate.rb select \
+            "$candidate_sha" "$GITHUB_REPOSITORY" "$version" \
+            "$root/checks.json" "$root/evidence-run.json" \
+            "$root/evidence-jobs.json" "$root/evidence-artifacts.json" \
+            > "$root/selection.json"
+
+          evidence_artifact_id="$(jq -er .evidence_artifact_id "$root/selection.json")"
+          evidence_artifact_digest="$(jq -er .evidence_artifact_digest "$root/selection.json")"
+          gh api -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${evidence_artifact_id}/zip" \
+            > "$root/evidence.zip"
+          ruby packaging/release_candidate/select_release_candidate.rb digest \
+            "$evidence_artifact_digest" "$root/evidence.zip"
+          ruby packaging/release_candidate/select_release_candidate.rb extract \
+            "$root/evidence.zip" "$root/evidence"
+          evidence="$root/evidence/evidence.json"
+          test -f "$evidence"
+          test "$(sha256sum "$evidence" | awk '{print $1}')" = \
+            "$(jq -er .evidence_sha256 "$root/selection.json")"
+
+          producer_run_id="$(jq -er .artifact.producer_run_id "$evidence")"
+          candidate_artifact_id="$(jq -er .artifact.id "$evidence")"
+          ordinary_run_id="$(jq -er .ordinary_ci.run_id "$evidence")"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${producer_run_id}" \
+            > "$root/producer-run.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${candidate_artifact_id}" \
+            > "$root/candidate-artifact.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ordinary_run_id}" \
+            > "$root/ordinary-run.json"
+
+          workflow_sha="$(jq -er .workflow_revision "$root/selection.json")"
+          git merge-base --is-ancestor "$workflow_sha" refs/remotes/origin/main || {
+            echo "candidate workflow revision is no longer reachable from protected main" >&2
+            exit 1
           }
+          for workflow in release-candidate release; do
+            gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/${workflow}.yml?ref=${workflow_sha}" \
+              --jq .content | base64 --decode > "$root/${workflow}.yml"
+          done
+          action_lock="$(
+            ruby packaging/release_candidate/select_release_candidate.rb action-lock \
+              .github/workflows/release-candidate.yml "$root/release-candidate.yml" \
+              .github/workflows/release.yml "$root/release.yml" |
+              jq -er .sha256
+          )"
+          ruby packaging/release_candidate/select_release_candidate.rb verify \
+            "$candidate_sha" "$GITHUB_REPOSITORY" "$version" \
+            "$root/checks.json" "$root/evidence-run.json" \
+            "$root/evidence-jobs.json" "$root/evidence-artifacts.json" \
+            "$root/selection.json" "$evidence" "$root/producer-run.json" \
+            "$root/candidate-artifact.json" "$root/ordinary-run.json" \
+            "$action_lock" > "$root/verified-selection.json"
 
-          candidate_dir="$RUNNER_TEMP/hive-release-candidate"
-          gem_file="$RUNNER_TEMP/hive-cli-${version}.gem"
-          source_archive="$RUNNER_TEMP/hive-source-${candidate_sha}.tar.gz"
-          gem build hive.gemspec --output "$gem_file"
-          git archive --format=tar.gz --output "$source_archive" HEAD
-          ruby packaging/live_agent_skills/build.rb \
-            "$candidate_sha" "$gem_file" "$source_archive" "$candidate_dir" >/dev/null
-          result="$(ruby packaging/live_agent_skills/verify_candidate.rb \
-            "$candidate_dir" "$candidate_sha" "$version")"
-          gem_path="$(jq -er '.gem' <<<"$result")"
-          skill_path="$(jq -er '.skills' <<<"$result")"
-          mkdir -p proven
-          cp "$gem_path" "$skill_path" proven/
+          candidate_artifact_digest="$(jq -er .candidate_artifact_digest "$root/verified-selection.json")"
+          gh api -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${candidate_artifact_id}/zip" \
+            > "$root/candidate.zip"
+          ruby packaging/release_candidate/select_release_candidate.rb digest \
+            "$candidate_artifact_digest" "$root/candidate.zip"
+          ruby packaging/release_candidate/select_release_candidate.rb extract \
+            "$root/candidate.zip" "$root/candidate"
+          ruby packaging/release_candidate/select_release_candidate.rb candidate \
+            "$GITHUB_WORKSPACE" "$root/candidate" "$candidate_sha" "$version" \
+            > "$root/candidate-manifest.json"
 
-          install_root="$RUNNER_TEMP/proven-gems"
+          gem_file="$(jq -er .public_files.gem "$root/candidate-manifest.json")"
+          web_file="$(jq -er .public_files.web "$root/candidate-manifest.json")"
+          gem_path="$root/candidate/$gem_file"
+          web_path="$root/candidate/$web_file"
+          install_root="$RUNNER_TEMP/selected-gems"
           packaging/live_agent_skills/install_candidate_gem.sh "$gem_path" "$install_root"
-          installed_version="$("$install_root/bin/hive" --version)"
-          [[ "$installed_version" == "$version" ]] || {
-            echo "installed candidate version $installed_version does not match $version" >&2
-            exit 1
-          }
-          ( cd proven && sha256sum * )
-      - uses: actions/download-artifact@v8
-        with:
-          name: hive-web-candidate
-          path: web-candidate
-      - name: Install and exercise the exact managed web candidate
-        env:
-          EXPECTED_WEB_SHA: ${{ needs.web-bundle.outputs.sha256 }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          version="${REF_NAME#v}"
-          web_archive="web-candidate/hive-web-${version}.tar.gz"
-          [[ -s "$web_archive" ]] || { echo "missing exact managed web candidate" >&2; exit 1; }
-          actual_web_sha="$(sha256sum "$web_archive" | awk '{print $1}')"
-          [[ "$actual_web_sha" == "$EXPECTED_WEB_SHA" ]] || {
-            echo "managed web candidate changed across the artifact boundary" >&2
-            exit 1
-          }
-          cp "$web_archive" proven/
-
-          sandbox="$RUNNER_TEMP/proven-managed-web"
-          hive_bin="$RUNNER_TEMP/proven-gems/bin/hive"
-          [[ -x "$hive_bin" ]] || { echo "missing privately installed candidate" >&2; exit 1; }
-          mkdir -p "$sandbox/verify"
+          test "$("$install_root/bin/hive" --version)" = "$version"
+          web_sha="$(jq -er --arg file "$web_file" '.files[$file].sha256' "$root/candidate-manifest.json")"
           packaging/verify-managed-web-setup.sh \
-            --hive-bin="$hive_bin" \
-            --archive="$web_archive" \
-            --sha256="$EXPECTED_WEB_SHA" \
-            --prefix="$sandbox/verify"
-      - uses: actions/upload-artifact@v7
+            --hive-bin="$install_root/bin/hive" \
+            --archive="$web_path" \
+            --sha256="$web_sha" \
+            --prefix="$RUNNER_TEMP/selected-managed-web"
+
+          mkdir -p "$root/selected/dist" "$root/selected/proof"
+          while IFS= read -r file; do
+            cp "$root/candidate/$file" "$root/selected/dist/$file"
+          done < <(jq -er '.public_files | [.gem, .skills, .web] | .[]' "$root/candidate-manifest.json")
+          cp "$root/candidate/manifest.json" "$root/selected/proof/manifest.json"
+          cp "$root/verified-selection.json" "$root/selected/proof/selection.json"
+          cp "$evidence" "$root/selected/proof/evidence.json"
+      - name: Retain only verified exact publication bytes
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: hive-proven-candidate
-          path: proven
+          name: hive-selected-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-selection/selected
           if-no-files-found: error
           retention-days: 1
 
   install-gate:
     name: gem-install gate / ${{ matrix.runs-on }}
     runs-on: ${{ matrix.runs-on }}
-    needs: candidate-gate
+    needs: select-candidate
     permissions:
+      actions: read
       contents: read
     strategy:
       fail-fast: false
       matrix:
         runs-on: [macos-15, ubuntu-24.04-arm]
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: hive-proven-candidate
-          path: dist
-      - uses: ruby/setup-ruby@v1
+          persist-credentials: false
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # pinned 2026-07-26
         with:
           ruby-version: "3.4"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hive-selected-candidate-${{ github.run_id }}
+          path: selected
+      - name: Reverify exact selected publication bytes
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          ruby packaging/release_candidate/select_release_candidate.rb publication \
+            selected "$GITHUB_SHA" "${REF_NAME#v}"
       - name: gem install the proven gem
         # Native-runner expansion of the pre-release candidate smoke:
         # confirm the gem installs + runs on macOS arm64 and Linux arm64
@@ -180,7 +197,8 @@ jobs:
         # emulated cell must never block a release (real Arch install is
         # covered post-release by install-verify.yml).
         run: |
-          gem_file="$(ls dist/hive-cli-*.gem | head -n 1)"
+          gem_file="$(find selected/dist -maxdepth 1 -type f -name 'hive-cli-*.gem' -print)"
+          test "$(printf '%s\n' "$gem_file" | sed '/^$/d' | wc -l)" = 1
           [[ -s "$gem_file" ]] || { echo "no hive-cli-*.gem artifact" >&2; exit 1; }
           sandbox="$(mktemp -d)/gem-sandbox"
           mkdir -p "$sandbox"
@@ -194,8 +212,9 @@ jobs:
   release-finalize:
     name: Publish GitHub release
     runs-on: ubuntu-24.04
-    needs: [candidate-gate, install-gate]
+    needs: [select-candidate, install-gate]
     permissions:
+      actions: read
       contents: write
       id-token: write
     env:
@@ -213,17 +232,28 @@ jobs:
     outputs:
       aur_enabled: ${{ steps.aur_gate.outputs.enabled }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: hive-proven-candidate
-          path: dist
+          persist-credentials: false
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # pinned 2026-07-26
+        with:
+          ruby-version: "3.4"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hive-selected-candidate-${{ github.run_id }}
+          path: selected
+      - name: Reverify exact selected publication bytes
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          ruby packaging/release_candidate/select_release_candidate.rb publication \
+            selected "$GITHUB_SHA" "${REF_NAME#v}"
       - name: Build checksums
         run: |
-          cd dist
+          cd selected/dist
           sha256sum hive-cli-*.gem hive-agent-skills-*.tar.gz hive-web-*.tar.gz > SHA256SUMS
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.10.1
       - name: Sign checksums
         # `--output-certificate` writes the fulcio cert blob that
         # `cosign verify-blob --certificate ... --signature ...` needs
@@ -231,9 +261,9 @@ jobs:
         # follow that path).
         run: |
           cosign sign-blob --yes \
-            --output-signature dist/SHA256SUMS.sig \
-            --output-certificate dist/SHA256SUMS.pem \
-            dist/SHA256SUMS
+            --output-signature selected/dist/SHA256SUMS.sig \
+            --output-certificate selected/dist/SHA256SUMS.pem \
+            selected/dist/SHA256SUMS
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -261,7 +291,7 @@ jobs:
           if [ ! -s "$notes_file" ]; then
             printf 'Hive %s\n' "$REF_NAME" > "$notes_file"
           fi
-          gh release create "$REF_NAME" dist/* \
+          gh release create "$REF_NAME" selected/dist/* \
             --title "$REF_NAME" \
             --notes-file "$notes_file" \
             --verify-tag
@@ -294,7 +324,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           version="${REF_NAME#v}"
-          gem_sha="$(awk '/hive-cli-/ {print $1}' dist/SHA256SUMS)"
+          gem_sha="$(awk '/hive-cli-/ {print $1}' selected/dist/SHA256SUMS)"
           # Send the WHOLE request body via jq + --input so client_payload
           # is a real JSON object. (`--raw-field client_payload=<json>`
           # sends it as a string, which the dispatch API rejects with
@@ -336,14 +366,16 @@ jobs:
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.0.0
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.0.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.0.0
         id: build
         with:
           context: .
@@ -368,14 +400,16 @@ jobs:
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.0.0
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.0.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.0.0
         id: build
         with:
           context: .
@@ -398,8 +432,8 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.0.0
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.0.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -442,7 +476,9 @@ jobs:
         # packaging/render.rb does `require "erb"` — without it the render
         # step dies with `cannot load such file -- erb (LoadError)`.
         run: pacman -Syu --noconfirm --needed git openssh cosign ruby ruby-erb jq github-cli
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Download and cosign-verify release artifacts
         env:
           GH_TOKEN: ${{ github.token }}

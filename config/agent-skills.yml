@@ -39,6 +39,13 @@ packages:
         scope: user
         config_home: PI_CODING_AGENT_DIR
         actions: [package_install, package_update]
+      grok:
+        provider: grok
+        package: compound-engineering
+        source: EveryInc/compound-engineering-plugin
+        scope: user
+        config_home: GROK_HOME
+        actions: [plugin_install, plugin_enable, plugin_update]
 
   - id: pr-review-toolkit
     version: ">= 0"
@@ -95,6 +102,7 @@ capabilities:
       claude: { invocation: /ce-brainstorm, probe: skills/ce-brainstorm/SKILL.md }
       codex: { invocation: /ce-brainstorm, probe: skills/ce-brainstorm/SKILL.md }
       pi: { invocation: "/skill:ce-brainstorm", probe: skills/ce-brainstorm/SKILL.md }
+      grok: { invocation: /ce-brainstorm, probe: skills/ce-brainstorm/SKILL.md }
 
   - id: ce-code-review
     package: compound-engineering
@@ -102,6 +110,7 @@ capabilities:
       claude: { invocation: /ce-code-review, probe: skills/ce-code-review/SKILL.md }
       codex: { invocation: /ce-code-review, probe: skills/ce-code-review/SKILL.md }
       pi: { invocation: "/skill:ce-code-review", probe: skills/ce-code-review/SKILL.md }
+      grok: { invocation: /ce-code-review, probe: skills/ce-code-review/SKILL.md }
 
   - id: ce-test-browser
     package: compound-engineering
@@ -109,6 +118,7 @@ capabilities:
       claude: { invocation: /ce-test-browser, probe: skills/ce-test-browser/SKILL.md }
       codex: { invocation: /ce-test-browser, probe: skills/ce-test-browser/SKILL.md }
       pi: { invocation: "/skill:ce-test-browser", probe: skills/ce-test-browser/SKILL.md }
+      grok: { invocation: /ce-test-browser, probe: skills/ce-test-browser/SKILL.md }
 
   - id: pr-review-toolkit:review-pr
     package: pr-review-toolkit

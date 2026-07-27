@@ -16,11 +16,21 @@
   <section class="demo" aria-labelledby="demo-heading">
     <h2 id="demo-heading">Demo</h2>
     <div class="demo-gallery">
-      <% media["items"].each do |item| %>
-        <figure class="demo-item">
-          <img src="<%= task_media_path(project.name, task["slug"], item["file"]) %>"
-               alt="<%= item["caption"].presence || item["file"] %>"
-               loading="lazy">
+        <% media["items"].each do |item| %>
+          <figure class="demo-item">
+          <% media_url = task_media_path(
+               project.name, task["slug"], item["file"], source: @task_source
+             ) %>
+          <% if item["type"] == "video" %>
+            <video src="<%= media_url %>"
+                   controls
+                   preload="metadata"
+                   aria-label="<%= item["caption"].presence || item["file"] %>"></video>
+          <% else %>
+            <img src="<%= media_url %>"
+                 alt="<%= item["caption"].presence || item["file"] %>"
+                 loading="lazy">
+          <% end %>
           <% if item["caption"].present? || item["screenote_url"].present? %>
             <figcaption>
               <% if item["caption"].present? %>

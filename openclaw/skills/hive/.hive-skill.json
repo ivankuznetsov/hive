@@ -5,14 +5,23 @@
   "platform": "openclaw",
   "invocation": "/hive",
   "skill_version": "0.1.3",
-  "canonical_digest": "66fcc191d437373208437faec121daf0607137d1a66c8dfe7ab46f134459fc87",
+  "canonical_digest": "cbe5e443058331b7f3a657e4f02b208e44e5edf6a0015c1c6187ac182f5da81a",
   "hive_version": "0.6.9",
   "files": {
-    "SKILL.md": "6fa145388473a565b7467d952a61e824e79a6f43c59146dc13e688b2b142c4b8",
-    "references/recovery.md": "e950ebc3b0368a60d41423692ee36e30a028deda3e7cee30220f6d85a015cd5f",
-    "references/safety.md": "4b420b964a5d729ccafe92bda01738517449f9779e1fe90d184463f461efacd3",
-    "references/setup-and-platforms.md": "f7e3079e8a0b3de79ebce6257c2ab576d22649a97c988043f3053471ee350d8b",
-    "references/status-and-watch.md": "5a9c878e347049bee9a7ed14fa98a52fa8428d7d83c21eb8db936696aea0b5aa",
-    "references/workflow-actions.md": "2a22865313edfe500a171acb2a8eb7ec72040729c23dc323812edd875af042ac"
+    "SKILL.md": "3d34adc1e8716a8365c7457cc2b6ed2b48043d2853b5fc27005658c96acdb6dc",
+    "references/recovery.md": "feb3a27a582673d87a46742f2935ee6e1067e3123ef865478263375c1bfd125c",
+    "references/release-candidate-qa.md": "595dbc9a9780d56ddb41ffad8554d3121c7bf24567b8b02c539b034b76297dbf",
+    "references/safety.md": "1b519b4f186e9b015604c96bf9d1e5d1269ca0d97476a153f595da483453002a",
+    "references/setup-and-platforms.md": "06713fc76c29e7b1507b9b8788e1369e3be7cef48c5ac4d6fefc2dd88bac69ec",
+    "references/status-and-watch.md": "9cff9c6eef5344646b682c7f005d56334410f20c6a9a5632b29c2bd7f62b9d49",
+    "references/workflow-actions.md": "2a22865313edfe500a171acb2a8eb7ec72040729c23dc323812edd875af042ac",
+    "references/workflow-checkpoints.md": "42d2339d9cb068bb2f72c671710cf08770dc1a9a2b65ad96172dfa1376b985a3",
+    "references/workflow-common-mistakes.md": "4e08b7afc90e83b3af340b9e4e59acff49ec6d0434e126e42ee7249f86a00839",
+    "references/workflow-creator-example.md": "6c12986e656d733f154d055d59928e248c423934ffe789bf2d315d5bdb7741e5",
+    "references/workflow-creator.md": "a501ef08124e1f251c80c84443ac569e2d248055d883b4f3e8680fa8cbd0ae74",
+    "references/workflow-permissions.md": "301d72cae02115fec26f450cdc478e27d7c322e5c3dcb0e047bed34804dc6714",
+    "references/workflow-schema.md": "5ecdb7dac296d055aa904d248318e57e941ad7ab7da58f9785c66b7c2a7fbcd2",
+    "references/workflow-stage-design.md": "578b9daf8b2ad2d6fcf984a3f7caad2898a80fa04a5cf97f2bb7f648c960e7fa",
+    "references/workflow-testing.md": "8b44cf16044022bb56b3df91a069ead4c95b12913348c53f06147f4aefd81833"
   }
 }

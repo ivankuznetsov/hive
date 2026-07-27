@@ -22,6 +22,17 @@ class LockTest < Minitest::Test
     end
   end
 
+  def test_acquire_task_lock_without_creation_rejects_a_missing_task
+    with_tmp_dir do |dir|
+      missing = File.join(dir, "missing-task")
+
+      assert_raises(Errno::ENOENT) do
+        Hive::Lock.acquire_task_lock(missing, create: false)
+      end
+      refute File.exist?(missing)
+    end
+  end
+
   def test_task_lock_projects_durable_attempt_identity
     with_tmp_dir do |dir|
       data = nil

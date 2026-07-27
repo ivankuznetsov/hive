@@ -248,6 +248,173 @@ module Hive
       end
     end
 
+    module Grok
+      module_function
+
+      def verify(invocation, project_root: nil)
+        resolution = resolve(invocation, project_root: project_root)
+        [ resolution.status, resolution.message ]
+      end
+
+      def resolve(invocation, project_root: nil, environment: ENV)
+        inv = Hive::SkillCheck.parse(invocation)
+        home = environment["HOME"] || Dir.home
+        config_dir = environment["GROK_HOME"].to_s
+        config_dir = File.join(home, ".grok") if config_dir.empty?
+        config_dir = File.expand_path(config_dir)
+        parse_errors = []
+        candidates = build_candidates(
+          inv,
+          config_dir: config_dir,
+          project_root: project_root,
+          parse_errors: parse_errors
+        )
+        path = Hive::SkillCheck.first_existing(candidates)
+        if path
+          return Resolution.new(
+            status: :present,
+            path: path,
+            message: path,
+            candidates: candidates.freeze,
+            parse_errors: parse_errors.freeze
+          )
+        end
+
+        Resolution.new(
+          status: :missing,
+          path: nil,
+          message: install_hint(inv),
+          candidates: candidates.freeze,
+          parse_errors: parse_errors.freeze
+        )
+      rescue ArgumentError => e
+        message = "grok: #{e.message}"
+        Resolution.new(
+          status: :missing,
+          path: nil,
+          message: message,
+          candidates: [].freeze,
+          parse_errors: [].freeze
+        )
+      end
+
+      def build_candidates(inv, config_dir:, project_root:, parse_errors: [])
+        paths = []
+        plugin = inv.plugin ? Hive::SkillCheck.glob_escape(inv.plugin) : "*"
+        name = Hive::SkillCheck.glob_escape(inv.name)
+        if project_root
+          paths << File.join(project_root, ".grok", "skills", inv.name, "SKILL.md")
+          paths.concat(
+            Dir[File.join(project_root, ".grok", "plugins", plugin, "skills", name, "SKILL.md")]
+          )
+        end
+        paths << File.join(config_dir, "skills", inv.name, "SKILL.md")
+        paths.concat(
+          Dir[File.join(config_dir, "plugins", plugin, "skills", name, "SKILL.md")]
+        )
+        installed_plugin_roots(config_dir, plugin: inv.plugin, parse_errors: parse_errors).each do |root|
+          candidate = File.join(root, "skills", inv.name, "SKILL.md")
+          path = jailed_skill_path(candidate, root, parse_errors: parse_errors)
+          paths << path if path
+        end
+        paths
+      end
+
+      def installed_plugin_roots(config_dir, plugin: nil, parse_errors: [])
+        registry_path = File.join(config_dir, "installed-plugins", "registry.json")
+        document = JSON.parse(File.binread(registry_path))
+        repos = document.fetch("repos", {})
+        raise TypeError, "#{registry_path} repos must be an object" unless repos.is_a?(Hash)
+
+        repos.filter_map do |repo_key, entry|
+          unless entry.is_a?(Hash)
+            parse_errors << "#{registry_path} repo #{repo_key.inspect} must be an object"
+            next
+          end
+          plugins = entry["plugins"]
+          unless plugins.is_a?(Hash)
+            parse_errors << "#{registry_path} repo #{repo_key.inspect} plugins must be an object"
+            next
+          end
+          names = plugins.keys.select { |name| plugin.nil? || name == plugin }
+          next if names.empty? || names.none? { |name| plugin_enabled?(config_dir, name) }
+
+          root = entry["path"] || File.join(config_dir, "installed-plugins", repo_key)
+          jailed_install_root(root, config_dir, parse_errors: parse_errors)
+        end
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        []
+      rescue JSON::ParserError, TypeError, KeyError, SystemCallError => e
+        parse_errors << e.message
+        []
+      end
+
+      def plugin_enabled?(config_dir, plugin_name)
+        content = File.binread(File.join(config_dir, "config.toml"))
+        section = content.match(/^\s*\[plugins\]\s*$\n?(.*?)(?=^\s*\[[^\]]+\]\s*$|\z)/m)&.[](1).to_s
+        disabled = toml_string_array(section, "disabled")
+        return false if plugin_name_match?(disabled, plugin_name)
+
+        plugin_name_match?(toml_string_array(section, "enabled"), plugin_name)
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        false
+      end
+
+      def toml_string_array(section, key)
+        raw = section.match(/^\s*#{Regexp.escape(key)}\s*=\s*(\[.*?\])/m)&.[](1)
+        return [] unless raw
+
+        raw.scan(/"((?:\\.|[^"])*)"|'([^']*)'/).map do |double_quoted, single_quoted|
+          if double_quoted
+            JSON.parse(%("#{double_quoted}"))
+          else
+            single_quoted
+          end
+        end
+      rescue JSON::ParserError
+        []
+      end
+
+      def plugin_name_match?(entries, plugin_name)
+        entries.any? { |entry| entry == plugin_name || entry.end_with?("/#{plugin_name}") }
+      end
+
+      def jailed_install_root(path, config_dir, parse_errors: [])
+        root = resolved_path(File.join(config_dir, "installed-plugins"))
+        candidate = resolved_path(path)
+        return candidate if path_within?(candidate, root)
+
+        parse_errors << "grok plugin path #{candidate.inspect} escapes #{root}"
+        nil
+      end
+
+      def jailed_skill_path(path, install_root, parse_errors: [])
+        root = resolved_path(install_root)
+        candidate = resolved_path(path)
+        return candidate if path_within?(candidate, root)
+
+        parse_errors << "grok skill path #{candidate.inspect} escapes #{root}"
+        nil
+      end
+
+      def path_within?(path, root)
+        path == root || path.start_with?(root + File::SEPARATOR)
+      end
+
+      def resolved_path(path)
+        File.realpath(path)
+      rescue SystemCallError
+        File.expand_path(path)
+      end
+
+      def install_hint(inv)
+        skill = inv.plugin ? "/#{inv.plugin}:#{inv.name}" : "/#{inv.name}"
+        "grok: #{skill} is not available from an enabled Grok skill or plugin. " \
+          "Install with `grok plugin install EveryInc/compound-engineering-plugin --trust` " \
+          "or enable it with `grok plugin enable compound-engineering`."
+      end
+    end
+
     module Pi
       module_function
 

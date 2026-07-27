@@ -1,0 +1,165 @@
+schema_version: 1
+profiles:
+  release:
+    description: Blocking semantic E2E proof for a Hive release candidate.
+coverage:
+  - id: attempt.terminal_replay
+    title: Durable attempt terminal replay
+    description: A CLI-originated multi-commit attempt survives caller loss and reaches one terminal receipt.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [linux], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/durable_attempt_1849_replay.yml]
+  - id: workflow.full_pipeline
+    title: Full workflow pipeline
+    description: The real CLI advances a task from inbox through the complete coding workflow.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/full_pipeline_happy_path.yml]
+  - id: attempt.caller_loss_adoption
+    title: Caller-loss attempt adoption
+    description: Durable attempt ownership adopts accepted work exactly once after its caller disappears.
+    maturity: planned
+    profiles: [release]
+    constraints: { platforms: [linux], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/incident_attempt_adoption_after_caller_loss.yml]
+  - id: release.finalize_pr_gate
+    title: Finalize pull-request lifecycle gate
+    description: Finalize cannot become archive-ready before the pull-request lifecycle is terminal.
+    maturity: planned
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/incident_finalize_pr_lifecycle_gate.yml]
+  - id: recovery.generation_scope
+    title: Generation-scoped recovery
+    description: An older no-worktree marker cannot override a newer committed attempt generation.
+    maturity: planned
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/incident_generation_scoped_no_worktree_marker.yml]
+  - id: dependency.plan_only_gate
+    title: Plan-only dependency gate
+    description: A plan-only prerequisite blocks dependent dispatch until its required terminal threshold.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/incident_plan_only_dependency_gate.yml]
+  - id: recovery.provider_limit
+    title: Provider retry ownership
+    description: Provider retry cooldown and ownership prevent repeated daemon ticks from creating a retry storm.
+    maturity: planned
+    profiles: [release]
+    constraints: { platforms: [], providers: [codex] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/incident_provider_limit_retry.yml]
+  - id: routing.repository
+    title: Repository identity routing
+    description: Repository identity rejects cross-project work without mutating or attributing the wrong project.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/incident_repository_routing.yml]
+  - id: review.findings_cycle
+    title: Review findings cycle
+    description: Review findings remain structured and can be accepted through the real CLI lifecycle.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/review_with_findings_then_develop.yml]
+  - id: runtime.error_envelope
+    title: Runtime error envelope
+    description: A concurrent run failure emits the stable parseable hive-run error contract.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/run_error_envelope.yml]
+  - id: recovery.stale_lock
+    title: Stale lock recovery
+    description: A concurrent lock failure can be cleared and rerun through the supported recovery path.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/stale_lock_recovery.yml]
+  - id: tui.idea_editing
+    title: TUI idea editing
+    description: The TUI new-idea prompt preserves paste, cursor navigation, insertion, and submission behavior.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [linux, macos], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/tui_new_idea_editing.yml]
+  - id: tui.dispatch_plan
+    title: TUI plan dispatch
+    description: The TUI plan verb launches the real workflow command and renders its resulting state.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [linux, macos], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/tui_status_navigate_dispatch_plan.yml]
+  - id: tui.navigation
+    title: TUI navigation
+    description: The two-pane TUI supports deterministic focus, row, project, and idea navigation.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [linux, macos], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/tui_two_pane_navigate.yml]
+  - id: routing.multi_project
+    title: Multi-project routing
+    description: TUI fuzzy filtering and project scoping preserve the selected repository boundary.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [linux, macos], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/two_projects_fuzzy_filter.yml]
+  - id: update.pipeline_available
+    title: Update pipeline available
+    description: The daemon detects a newer controlled release and publishes the expected update state.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/update_flow_pipeline.yml]
+  - id: update.tui_footer
+    title: Update TUI footer
+    description: The TUI footer renders the recorded update nudge and install command.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [linux, macos], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/update_flow_tui_footer.yml]
+  - id: update.tui_no_nudge
+    title: Update TUI nudge suppression
+    description: The TUI footer omits an update notice when no nudge is present.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [linux, macos], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/update_flow_tui_no_nudge.yml]
+  - id: update.up_to_date
+    title: Update current version
+    description: The daemon records no update nudge when the installed version is current.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/update_flow_up_to_date.yml]
+  - id: status.watch_transitions
+    title: Status watch transitions
+    description: Semantic watch emits one transition and a schema-valid settled final without ownership mutation.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [wiki/e2e.md]
+    code: [test/e2e/scenarios/watch_semantic_transitions.yml]

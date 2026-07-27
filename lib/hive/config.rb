@@ -8,6 +8,7 @@ require "hive/babysitter/interval"
 require "hive/permission_scope"
 require "hive/paths"
 require "hive/repository_identity"
+require "hive/model_routing"
 require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
 
@@ -357,21 +358,15 @@ module Hive
         # `child_kill_grace_sec: 0` does NOT mean immediate KILL (it means
         # "KILL on the next tick after TERM"). (#266)
         #
-        # The `digest` and `answer-digest` verbs ship a non-zero DEFAULT cap
-        # (every other verb stays at `child_timeout_sec`=0/disabled) because
-        # each holds the single global digest slot (can_dispatch_digest?): a
-        # child that wedges on an unbounded leg — a hung GitHub collection
-        # request, or a black-holed Telegram socket — would otherwise pin that
-        # slot forever, leave the scheduler's in-memory `@pending` marker set,
-        # and silently disable ALL future digests/answer-digests until a
-        # daemon restart. A reaped child exits non-zero, so the scheduler
-        # retries the date on backoff. 3600s is a generous ceiling above
-        # PRDigest's bounded network work while still bounding a wedged child.
-        # `answer-digest` shares the same cap because its status fetch or
-        # Telegram socket can also wedge.
+        # `answer-digest` ships a non-zero DEFAULT cap (every other verb stays
+        # at `child_timeout_sec`=0/disabled) because it holds the single global
+        # digest slot (can_dispatch_digest?). A black-holed Telegram socket
+        # would otherwise pin that slot and leave the scheduler pending until
+        # restart. A reaped child exits non-zero, so the scheduler retries the
+        # date on backoff.
         "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
-        "child_verb_timeouts" => { "digest" => 3600, "answer-digest" => 3600 },
+        "child_verb_timeouts" => { "answer-digest" => 3600 },
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5
       },
@@ -566,14 +561,6 @@ module Hive
           "max_owned_files" => 6
         }
       },
-      # Daily merged-PR changelist. The daemon schedules one global
-      # `hive digest` subprocess for each completed Europe/London day; the
-      # subprocess sends one chunk-safe Telegram changelist across registered
-      # GitHub projects.
-      "digest" => {
-        "enabled" => false,
-        "max_catchup_days" => 7
-      },
       # Daily pending-answer digest. The daemon schedules one global
       # `hive answer-digest` subprocess at/after the configured local hour;
       # the subprocess is silent when no task is waiting on human input.
@@ -719,7 +706,7 @@ module Hive
     # Project sections supported by consumers but intentionally absent from
     # DEFAULTS. Keep this list explicit so a newly rendered section cannot
     # silently become an unvalidated extension namespace.
-    PROJECT_KEYS_WITHOUT_DEFAULTS = Set.new(%w[gh]).freeze
+    PROJECT_KEYS_WITHOUT_DEFAULTS = Set.new(%w[gh models]).freeze
     @legacy_project_config_warning_lock = Mutex.new
     @legacy_project_config_warned_paths = Set.new
 
@@ -813,8 +800,10 @@ module Hive
 
     def build_project_config(project_root, source_path, data, stage_names: nil)
       project_root = File.expand_path(project_root)
-      data = normalize_legacy_project_config(data, source_path)
+      legacy_reviewers = data.key?("reviewers")
+      data = normalize_legacy_project_config(data, source_path, emit_warning: false)
       validate_project_top_level_keys!(data, source_path, project_root, stage_names: stage_names)
+      data = normalize_models_config(data, source_path)
       resolve_patrol_mode!(data)
       merged = merge_defaults(data).merge("project_root" => project_root)
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
@@ -823,7 +812,18 @@ module Hive
       merged[IMPLEMENTATION_IDENTITY_PROVENANCE_KEY] = implementation_identity_provenance(data)
       inject_bot_runtime_path_defaults!(merged)
       validate!(merged, source_path)
+      warn_legacy_root_reviewers_once!(source_path) if legacy_reviewers
       merged
+    end
+
+    def normalize_models_config(data, source_path)
+      return data unless data.key?("models")
+
+      normalized = deep_dup(data)
+      normalized["models"] = Hive::ModelRouting.parse(
+        data["models"], source: describe_source(source_path)
+      )
+      normalized
     end
 
     # `reviewers` was never a supported project-root key, but older Hive
@@ -1150,14 +1150,6 @@ module Hive
 
     def registered_projects
       registered_project_entries(preserve_invalid: false)
-    end
-
-    # Digest delegation must account for every persisted registry row. Other
-    # commands retain the tolerant loader contract above, while the PRDigest
-    # adapter receives malformed rows and fails closed instead of silently
-    # publishing an incomplete repository set.
-    def digest_registered_projects
-      registered_project_entries(preserve_invalid: true)
     end
 
     def registered_project_entries(preserve_invalid:)
@@ -1495,6 +1487,7 @@ module Hive
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
       raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+      validate_removed_digest!(data, path)
 
       override = data["daemon"] || {}
       unless override.is_a?(Hash)
@@ -1532,12 +1525,11 @@ module Hive
       merged
     end
 
-    # Shared loader for a single named global config block (`digest`,
-    # `answer_digest`): runs the ensure_migrated!/validate_hive_home!/path +
+    # Shared loader for a single named global config block such as
+    # `answer_digest`: runs the ensure_migrated!/validate_hive_home!/path +
     # shape-check preamble, deep-merges the override over DEFAULTS[key], runs the
     # block's own validator, and returns the merged hash. An optional block
-    # receives (merged, data, override) for per-block derivations (e.g. the
-    # digest's telegram-default `enabled`) and returns the merged hash to validate.
+    # receives (merged, data, override) and returns the merged hash to validate.
     def load_global_block(key, validator:)
       Hive::Paths.ensure_migrated!
       validate_hive_home!
@@ -1557,33 +1549,8 @@ module Hive
       merged
     end
 
-    # The `digest` block only (enabled / max_catchup_days), merged over
-    # defaults. Used by the daemon scheduler and the PRDigest CLI adapter.
-    def load_global_digest_block
-      load_global_block("digest", validator: :validate_digest!) do |merged, data, override|
-        # Opt-out beats opt-in: when the operator hasn't pinned digest.enabled
-        # either way, default it ON for anyone who already has the Telegram bot
-        # configured with a deliverable chat. An explicit digest.enabled (true
-        # OR false) is always honored — only the unset case is derived.
-        merged["enabled"] = telegram_digest_default?(data) unless override.key?("enabled")
-        merged
-      end
-    end
-
     def load_global_answer_digest_block
       load_global_block("answer_digest", validator: :validate_answer_digest!)
-    end
-
-    # True when the global Telegram bot is enabled and has at least one
-    # allowlisted chat to deliver to — the signal that "the user has Telegram
-    # set up", used to default the daily digest on. Reads the raw config so
-    # it never depends on bot-block defaults; the bot block's own shape is
-    # validated on its own load path.
-    def telegram_digest_default?(data)
-      bot = data["bot"]
-      return false unless bot.is_a?(Hash) && bot["enabled"] == true
-
-      Array(bot["chat_id_allowlist"]).any? { |id| id.is_a?(Integer) }
     end
 
     def load_global_web
@@ -1700,7 +1667,19 @@ module Hive
       defaults
     end
 
-    def register_project(name:, path:, repository_identity: :detect)
+    class ProjectRegistrationCollision < ConfigError
+      attr_reader :name, :existing_path
+
+      def initialize(message, name:, existing_path:)
+        super(message)
+        @name = name
+        @existing_path = existing_path
+      end
+
+      def exit_code = Hive::ExitCodes::USAGE
+    end
+
+    def register_project(name:, path:, repository_identity: :detect, replace_existing: true)
       entry = nil
       update_global_config! do |data|
         data["registered_projects"] = Array(data["registered_projects"])
@@ -1713,6 +1692,13 @@ module Hive
         entry["real_path"] = real_path if real_path
         existing = data["registered_projects"].find { |p| p.is_a?(Hash) && p["name"] == name }
         if existing
+          existing_path = File.expand_path(existing.fetch("path"))
+          if !replace_existing && existing_path != abs_path
+            raise ProjectRegistrationCollision.new(
+              "project #{name.inspect} is already registered at #{existing.fetch('path')}",
+              name: name, existing_path: existing.fetch("path")
+            )
+          end
           existing.replace(entry)
         else
           data["registered_projects"] << entry
@@ -1891,6 +1877,7 @@ module Hive
     # ever fails validation.
     def validate!(cfg, source_path)
       validate_hash_shaped_keys!(cfg, source_path)
+      validate_models!(cfg, source_path)
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_review_adhoc!(cfg, source_path)
@@ -1910,8 +1897,9 @@ module Hive
       validate_babysitter!(cfg, source_path)
       validate_patrol!(cfg, source_path)
       validate_refactor_patrol!(cfg, source_path)
-      validate_digest!(cfg, source_path)
+      validate_removed_digest!(cfg, source_path)
       validate_answer_digest!(cfg, source_path)
+      validate_model_routing_capabilities!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
     end
@@ -1926,6 +1914,7 @@ module Hive
     HASH_SHAPED_KEYS = %w[
       brainstorm
       claude
+      models
       plan
       execute
       conditions
@@ -1942,7 +1931,6 @@ module Hive
       babysitter
       patrol
       refactor_patrol
-      digest
       answer_digest
       bot
       rebase
@@ -1961,6 +1949,178 @@ module Hive
               "(defaults will apply) or supply `#{key}: { ... }` with the right shape."
       end
     end
+
+    def validate_models!(cfg, source_path)
+      return unless cfg.key?("models")
+
+      cfg["models"] = Hive::ModelRouting.parse(
+        cfg["models"],
+        source: describe_source(source_path)
+      )
+    end
+
+    # Validate only routed controls that can reach a concrete built-in launch
+    # under this merged project configuration. Structural validation happens
+    # in validate_models!; this second pass resolves exact/coarse shadowing and
+    # asks the selected AgentProfile about the effective field. It intentionally
+    # performs no binary/version probe and therefore stays a pure load barrier.
+    def validate_model_routing_capabilities!(cfg, source_path)
+      models = cfg.fetch("models", Hive::ModelRouting::EMPTY_MODELS)
+      return if models.empty?
+
+      calls = reachable_model_routing_calls(cfg)
+      Hive::ModelRouting.validate_effective!(models: models, calls: calls) do |control|
+        control.profile.validate_routed_control!(
+          control,
+          source: describe_source(source_path)
+        )
+      end
+    end
+
+    def reachable_model_routing_calls(cfg)
+      calls = []
+      execute_agent = cfg.dig("execute", "agent") || "claude"
+
+      add_model_routing_call(
+        calls, cfg, "brainstorm", cfg.dig("brainstorm", "agent"),
+        current: model_routing_current(cfg["brainstorm"])
+      )
+      add_model_routing_call(
+        calls, cfg, "plan", cfg.dig("plan", "agent"),
+        current: model_routing_current(cfg["plan"])
+      )
+      add_model_routing_call(
+        calls, cfg, "execute_implementation", execute_agent,
+        current: model_routing_current(cfg["execute"])
+      )
+      add_model_routing_call(
+        calls, cfg, "open_pr", cfg.dig("open_pr", "agent") || execute_agent,
+        current: model_routing_current(cfg["open_pr"])
+      )
+      add_model_routing_call(
+        calls, cfg, "artifacts", cfg.dig("artifacts", "agent"),
+        current: model_routing_current(cfg["artifacts"])
+      )
+      add_model_routing_call(
+        calls, cfg, "finalize", cfg.dig("finalize", "agent"),
+        current: model_routing_current(cfg["finalize"])
+      )
+
+      add_model_routing_call(
+        calls, cfg, "rebase", execute_agent,
+        enabled: cfg.dig("rebase", "enabled") == true,
+        current: model_routing_current(cfg["rebase"])
+      )
+      # Diagnosis is operator-triggerable for every red implementation task;
+      # it has no enable switch even when the daemon is disabled.
+      add_model_routing_call(calls, cfg, "diagnose", execute_agent)
+      add_model_routing_call(
+        calls, cfg, "babysitter", execute_agent,
+        enabled: cfg.dig("babysitter", "enabled") == true,
+        current: model_routing_current(cfg["babysitter"])
+      )
+
+      review = cfg.fetch("review")
+      add_model_routing_call(
+        calls, cfg, "review_ci", review.dig("ci", "agent") || execute_agent,
+        enabled: command_configured?(review.dig("ci", "command")),
+        current: model_routing_current(review["ci"])
+      )
+      add_model_routing_call(
+        calls, cfg, "review_triage", review.dig("triage", "agent") || "claude",
+        enabled: review.dig("triage", "enabled") == true,
+        current: model_routing_current(review["triage"])
+      )
+      add_model_routing_call(
+        calls, cfg, "review_fix", review.dig("fix", "agent") || execute_agent,
+        current: model_routing_current(review["fix"])
+      )
+      add_model_routing_call(
+        calls, cfg, "review_browser", review.dig("browser_test", "agent") || "claude",
+        enabled: review.dig("browser_test", "enabled") == true,
+        current: model_routing_current(review["browser_test"])
+      )
+      add_reviewer_model_routing_calls(calls, cfg, review["reviewers"])
+      add_reviewer_model_routing_calls(calls, cfg, review.dig("adhoc", "reviewers"))
+
+      patrol = cfg.fetch("patrol")
+      patrol_enabled = patrol["enabled"] == true
+      patrol_agent = patrol["agent"] || "claude"
+      add_model_routing_call(
+        calls, cfg, "patrol_review", patrol_agent,
+        enabled: patrol_enabled,
+        current: model_routing_current(patrol)
+      )
+      add_model_routing_call(
+        calls, cfg, "patrol_fix", patrol_agent,
+        enabled: patrol_enabled,
+        current: model_routing_current(patrol)
+      )
+      if patrol_enabled && patrol["review_prs"] == true
+        add_reviewer_model_routing_calls(calls, cfg, patrol.dig("review", "reviewers"))
+      end
+
+      refactor = cfg.fetch("refactor_patrol")
+      refactor_enabled = refactor["enabled"] == true
+      refactor_review_agent = refactor["agent"] || execute_agent
+      add_model_routing_call(
+        calls, cfg, "patrol_review", refactor_review_agent,
+        enabled: refactor_enabled,
+        current: model_routing_current(refactor)
+      )
+      auto_fix = refactor.fetch("auto_fix")
+      add_model_routing_call(
+        calls, cfg, "patrol_fix", auto_fix["agent"] || refactor_review_agent,
+        enabled: refactor_enabled && auto_fix["enabled"] == true,
+        current: model_routing_current(refactor).merge(model_routing_current(auto_fix))
+      )
+      calls.freeze
+    end
+    private_class_method :reachable_model_routing_calls
+
+    def add_reviewer_model_routing_calls(calls, cfg, reviewers)
+      Array(reviewers).each do |spec|
+        next unless spec.is_a?(Hash)
+        next if spec["kind"].to_s == "linter"
+
+        add_model_routing_call(
+          calls, cfg, "review_reviewers", spec["agent"] || "claude",
+          current: model_routing_current(spec)
+        )
+      end
+    end
+    private_class_method :add_reviewer_model_routing_calls
+
+    def add_model_routing_call(calls, cfg, stage, agent, enabled: true, current: {})
+      return unless enabled
+
+      profile = Hive::AgentProfiles.lookup(agent || "claude", cfg: cfg)
+      calls << {
+        stage: stage,
+        profile: profile,
+        provider: profile.name,
+        current: current
+      }
+    end
+    private_class_method :add_model_routing_call
+
+    def model_routing_current(block)
+      return Hive::ModelRouting::EMPTY_MODELS unless block.is_a?(Hash)
+
+      {
+        model: block["model"],
+        effort: block["effort"]
+      }.compact
+    end
+    private_class_method :model_routing_current
+
+    def command_configured?(command)
+      return false if command.nil?
+      return !command.strip.empty? if command.is_a?(String)
+
+      !Array(command).empty?
+    end
+    private_class_method :command_configured?
 
     def validate_conditions!(cfg, source_path)
       settings = cfg.fetch("conditions", {})
@@ -3200,32 +3360,12 @@ module Hive
             ">= #{min}; got #{value.inspect} (#{value.class})"
     end
 
-    def validate_digest!(cfg, source_path)
-      digest = cfg["digest"]
-      return if digest.nil?
-
-      if digest.key?("source")
-        raise ConfigError,
-              "digest.source is unsupported; PRDigest always reads registered repositories. " \
-              "Remove it from #{describe_source(source_path)}"
-      end
-
-      enabled = digest["enabled"]
-      unless enabled.nil? || enabled == true || enabled == false
-        raise ConfigError,
-              "digest.enabled in #{describe_source(source_path)} must be a boolean " \
-              "(true / false); got #{enabled.inspect} (#{enabled.class})"
-      end
-
-      max_catchup_days = digest["max_catchup_days"]
-      return if max_catchup_days.nil?
-      # 0 = unbounded catch-up (DigestScheduler#apply_catchup_cap treats it
-      # as "no cap"); negatives are clamped to 0 there, so reject them here.
-      return if max_catchup_days.is_a?(Integer) && max_catchup_days >= 0
+    def validate_removed_digest!(cfg, source_path)
+      return unless cfg.key?("digest")
 
       raise ConfigError,
-            "digest.max_catchup_days in #{describe_source(source_path)} must be an integer >= 0 " \
-            "(0 = unbounded); got #{max_catchup_days.inspect} (#{max_catchup_days.class})"
+            "digest configuration is no longer supported in #{describe_source(source_path)}; " \
+            "schedule `prdigest prose --deliver` directly or use `prdigest facts` from an agent"
     end
 
     def validate_answer_digest!(cfg, source_path)

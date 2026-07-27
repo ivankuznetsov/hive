@@ -3,8 +3,8 @@ title: Hive::Markers
 type: module
 source: lib/hive/markers.rb
 created: 2026-04-25
-updated: 2026-07-12
-tags: [marker, protocol, flock]
+updated: 2026-07-25
+tags: [marker, protocol, flock, recovery, migration]
 ---
 
 **TLDR**: Locked HTML-comment marker protocol. `Markers.current(path)` returns the *last* marker in a file as a `State` struct; `Markers.set(path, name, attrs)` writes via `flock(LOCK_EX)`, replacing the last marker (or appending if none).
@@ -33,16 +33,31 @@ tags: [marker, protocol, flock]
 
 Allowlist: see `KNOWN_NAMES` in `lib/hive/markers.rb`.
 
-`ERROR` markers written through `Markers.set` receive a generated `marker_id` attr unless the caller supplies one. This is the high-cardinality recovery discriminator for `hive markers clear --match-attr marker_id=...`; legacy rows without it fall back to observed attrs such as `reason=exit_code,exit_code=143`.
+Every recoverable marker written through `Markers.set` — `ERROR`,
+`REVIEW_ERROR`, `REVIEW_STALE`, or `REVIEW_CI_STALE` — receives a generated
+`marker_id` unless the caller supplies one. `REVIEW_WORKING` also receives an
+identity so a stale-working rewrite cannot race a newer review phase. The
+identity is the canonical failure-generation guard for recovery; reason,
+mtime, and other attrs are diagnostics, not fallback identities.
 
-`Markers.clear_current(..., purge_history: true)` supports guarded daemon-healer
-clears, while manual `hive markers clear` performs the same history purge after
-its current-name and optional attribute guards pass. Both paths remove every
-recognized marker comment from the state artifact while preserving surrounding
-prose. This prevents a successful retry clear from exposing an older shadowed
-`AGENT_WORKING`, `REVIEW_WORKING`, or `ERROR` marker.
+`hive migrate` performs the one-off identity backfill for an old recoverable
+marker. Runtime recovery rejects an id-less occurrence with
+`recovery_migration_required`; it never guesses from mtime or low-cardinality
+attrs. The migration uses `Markers.upgrade_recovery_marker_id`, a compare-and-
+swap under the marker sidecar lock: it re-reads the exact raw marker observed
+by the scan and upgrades only if that occurrence is still current and id-less.
+A concurrent agent or operator write therefore wins instead of being replaced
+by stale migration input.
 
-`KILL_CLASS_EXIT_CODES = %w[130 137 143]` — POSIX signal exit codes (SIGINT/SIGKILL/SIGTERM). Only an `ERROR` marker shaped as `reason=exit_code exit_code=130|137|143` means the task was interrupted rather than broken. Same numeric codes with another reason remain structured recoverable failures. The numeric list is shared by `Hive::Tui::BubbleModel#auto_heal_kill_class_errors` (auto-clears explicit signal-kill markers) and `Hive::Tui::KeyMap.error_message` (routes Enter to OpenLogTail instead of RecoverError so Enter doesn't race the auto-healer for the markers-lock).
+`Hive::Daemon::RecoveryCoordinator` is the sole production owner of destructive
+recoverable-marker transitions. It calls
+`Markers.clear_current(..., purge_history: true)` only after re-resolving the
+task, marker identity, safety checks, and durable recovery request under the
+task lock. The low-level `hive markers clear` command remains an explicit
+operator repair primitive and performs the same history purge after its
+current-name and optional attribute guards pass. Both paths remove every
+recognized marker comment while preserving surrounding prose, so a successful
+retry cannot expose an older shadowed marker.
 
 Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`, requires a marker-name boundary, and captures attrs until the terminating `-->` without crossing another `<!--`. Quoted error details may contain `>` (for example Git stderr `branch -> branch`) and newlines. Adding a marker name requires updating BOTH the list AND the regex alternation (they are two sources of truth).
 
@@ -60,10 +75,10 @@ Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`, requires a marker-nam
 |--------|------------|-----------|
 | `REVIEW_WORKING` | `phase=ci\|reviewers\|triage\|fix\|browser`, `pass=NN` | Transient — set at phase entry, replaced at phase exit per ADR-005's last-marker-wins. |
 | `REVIEW_WAITING` | Two shapes per `reason` attr: (1) **escalations-only** (no `reason`): `escalations=N`, `pass=NN` — user inspects `reviews/escalations-NN.md`. (2) **`reason=fix_guardrail`**: `matches=N`, `head=<sha>`, `pass=NN` — user inspects `reviews/fix-guardrail-NN.md` and ticks every `[x]` to approve; approval re-checks count + HEAD + worktree-clean. Legacy markers without `head=` (hive ≤ PR-A round-2) skip the HEAD check with a stderr notice. Reviewer infra failures now use `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure` because no user answer is required. | Terminal until next `hive run`. |
-| `REVIEW_CI_STALE` | `attempts=N` | Terminal — `cfg.review.ci.max_attempts` reached without green CI. Reviewers don't run on red CI. Recovery: edit `reviews/ci-blocked.md`, remove the marker, re-run. |
-| `REVIEW_STALE` | `pass=NN` | Terminal — `cfg.review.max_passes` reached. Recovery: if highest-NN reviewer files have no `escalations-NN.md`, remove the marker and re-run to retry that incomplete triage pass; otherwise edit reviewer files / escalations.md, delete or rename the highest-NN reviewer files, remove the marker, re-run. |
+| `REVIEW_CI_STALE` | `attempts=N` | Terminal — `cfg.review.ci.max_attempts` reached without green CI. Reviewers don't run on red CI. After inspecting or editing `reviews/ci-blocked.md`, submit retry through the TUI, web, bot, or `Hive::Recovery::API`; the coordinator owns the guarded transition. |
+| `REVIEW_STALE` | `pass=NN` | Terminal — `cfg.review.max_passes` reached. If highest-NN reviewer files have no `escalations-NN.md`, the incomplete triage pass is directly retryable. Otherwise edit reviewer files / escalations, then use the TUI's forced `r` recovery gesture; both paths submit to the coordinator. |
 | `REVIEW_COMPLETE` | `pass=NN`, `browser=passed\|warned\|skipped` | Terminal success — ready to run `hive artifacts` into 7-artifacts. `browser=warned` means browser test failed twice but loop continued (soft-warn); 8-finalize stage surfaces this in the PR body. |
-| `REVIEW_ERROR` | `phase=...`, `reason=...`; optional `message="..."` for phase-agent failures whose captured cause should be visible in status diagnostics; `retry_after=<iso8601>` for `reason=limits_reached`. Known `phase=resume` `reason=` values (added in PR-A round-3): `approval_head_mismatch` (worktree HEAD differs from marker `head=`), `approval_dirty_worktree` (uncommitted edits in worktree at approval time), `malformed_marker_matches` (fix_guardrail marker has missing/non-Integer `matches`), `resume_no_findings` (legacy: reviewer files were deleted between trip and resume). Triage/fix phase-agent non-limit failures are written through `Hive::ReviewErrorReason` as `merge_conflict`, `network_timeout`, `tool_permission_denied`, `agent_crashed`, or `unknown`; provider limits still write `limits_reached` first. In practice the plumbing forwards a condensed wrapper string (not raw agent output), so the specific buckets rarely fire and the reason normally lands on `unknown` with the raw cause in `message=` — see [[stages/review]]. Other phase/reason families (`phase=fix reason=fix_tampered`, `phase=reviewers reason=reviewer_partial_failure`, etc.) per the runner's protected-files + agent-error contracts. | Terminal - agent-level error or protected-file tampering. Mirrors ADR-013's `:error` shape for `EXECUTE_*`; `reason=limits_reached` is daemon-retryable after its cooldown. |
+| `REVIEW_ERROR` | `phase=...`, `reason=...`; optional `message="..."` for phase-agent failures whose captured cause should be visible in status diagnostics; `retry_after=<iso8601>` for `reason=limits_reached`. Known `phase=resume` `reason=` values (added in PR-A round-3): `approval_head_mismatch` (worktree HEAD differs from marker `head=`), `approval_dirty_worktree` (uncommitted edits in worktree at approval time), `malformed_marker_matches` (fix_guardrail marker has missing/non-Integer `matches`), `resume_no_findings` (legacy: reviewer files were deleted between trip and resume). Triage/fix phase-agent non-limit failures are written through `Hive::ReviewErrorReason` as `merge_conflict`, `network_timeout`, `tool_permission_denied`, `agent_crashed`, or `unknown`; provider limits still write `limits_reached` first. In practice the plumbing forwards a condensed wrapper string (not raw agent output), so the specific buckets rarely fire and the reason normally lands on `unknown` with the raw cause in `message=` — see [[stages/review]]. Other phase/reason families (`phase=fix reason=fix_tampered`, `phase=reviewers reason=reviewer_partial_failure`, etc.) per the runner's protected-files + agent-error contracts. | Terminal agent-level error or protected-file tampering. Every persisted occurrence enters the shared recovery lifecycle after the configured cooldown when its safety gates permit; provider-limit metadata affects explanation, not eligibility. |
 
 ## `State` struct
 
@@ -94,7 +109,7 @@ Parses the attribute string into a Hash. Format: `key=value` pairs, optional dou
 
 ## Tests
 
-- `test/unit/markers_test.rb` — round-trip set/get, attribute quoting/sanitization, last-marker semantics, missing-file handling, and Git stderr attrs containing `branch -> branch`.
+- `test/unit/markers_test.rb` — round-trip set/get, attribute quoting/sanitization, last-marker semantics, missing-file handling, Git stderr attrs containing `branch -> branch`, and migration compare-and-swap refusal after a newer generation lands.
 
 ## Used by
 

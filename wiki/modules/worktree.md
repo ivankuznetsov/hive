@@ -1,13 +1,13 @@
 ---
 title: Hive::Worktree
 type: module
-source: lib/hive/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/managed_git.rb, lib/hive/stages/agent_worktree.rb
+source: lib/hive/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/agent_git_gate.rb, lib/hive/stages/agent_worktree.rb
 created: 2026-04-25
 updated: 2026-07-24
 tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
 ---
 
-**TLDR**: Wrapper around `git worktree add/remove/list` with a YAML pointer file (`worktree.yml`) inside the task folder, path-prefix validation, and an origin-only exact-base path for controller-owned draft-PR workflows.
+**TLDR**: Wrapper around Git worktree lifecycle with a YAML pointer file (`worktree.yml`) inside the task folder, path-prefix validation, an origin-only exact-base path for controller-owned draft-PR workflows, and hardened exact detached analysis materialization through [[modules/agent_git_gate]].
 
 ## Class shape
 
@@ -95,10 +95,14 @@ branch, and base OID as trusted identity context. Across the spawn Hive hashes
 the task-owned control files plus the worktree `.git` pointer and repository,
 worktree, global, XDG, and configured Git config paths. Any change replaces
 untrusted report output with a private controller `ERROR
-reason=managed_agent_failed` marker. Every subsequent Git read, scan, cleanup,
-remote observation, and exact push uses `Hive::ManagedGit`, which ignores
-global/system config and disables hooks, fsmonitor, external diff/textconv,
-custom transports, and arbitrary credential/SSH helpers.
+reason=managed_agent_failed` marker. Git config environment aliases are
+expanded relative to the managed worktree and deduplicated by absolute path
+before the strict firewall manifest is built; this preserves one custody
+anchor when, for example, `XDG_CONFIG_HOME=$HOME/.config` or
+`GIT_CONFIG_GLOBAL=$HOME/.gitconfig`. Every subsequent Git read, scan,
+cleanup, remote observation, and exact push uses `Hive::ManagedGit`, which
+ignores global/system config and disables hooks, fsmonitor, external
+diff/textconv, custom transports, and arbitrary credential/SSH helpers.
 
 ### `freshest_base(default_branch)` — origin-first base resolution
 
@@ -137,6 +141,17 @@ git -C <path> rev-parse HEAD
 ```
 
 The caller chooses `path` and `branch`; ad-hoc review uses the normal `worktree_root/<slug>` path and branch `hive/review/pr-N`, while babysitter keeps its own babysitter worktree path. The returned `head_sha` lets callers compare the materialized checkout to GitHub's `headRefOid`. Failures raise `Hive::WorktreeError`.
+
+## Exact detached analysis materialization
+
+`create_detached_exact!(base_sha:)` delegates to
+`Hive::AgentGitGate.materialize`. The destination is constrained below the
+worktree's configured root; the OID must resolve to that exact commit; and the
+result must be detached, clean, and at the expected HEAD. An interrupted stale
+registration may be pruned only for the same missing destination. An existing
+tree is reusable only when it passes all three checks. The gate's typed
+`created`/`existing` disposition is translated back to the historical symbol
+return contract, while failures remain `Hive::WorktreeError`.
 
 ## `exists?`
 
@@ -208,10 +223,11 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
   failure, exact pointer/receipt creation, initial and advanced-phase resume,
   incomplete-state preservation, exact-cwd one-agent execution,
   protected-state enforcement, and runtime/report outcome separation.
-- `test/unit/managed_git_test.rb` — proves agent-selected fsmonitor and
+- `test/unit/agent_git_gate_test.rb` and `test/unit/managed_git_test.rb` — prove
+  exact/root-confined detached materialization and that agent-selected fsmonitor and
   `.gitattributes` external-diff helpers execute under ordinary Git but never
-  at the managed controller boundary; also pins environment and command
-  allowlists.
+  at the managed controller boundary; they also pin environment and closed
+  operation allowlists.
 - `test/unit/stages/agent_report_test.rb` — strict evidence grammar plus actual
   branch, ancestry, cleanliness, and commit-count validation.
 

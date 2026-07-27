@@ -3,8 +3,8 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-07-20
-tags: [command, bootstrap, git, prompts, llm-wiki, provisioning]
+updated: 2026-07-26
+tags: [command, bootstrap, git, prompts, preview, minimal, llm-wiki, provisioning]
 ---
 
 **TLDR**: `hive init [PATH]` bootstraps a project for Hive and `--json` emits the resolved bootstrap contract. Alongside workflow, agents, review, patrol cadence, and daemon settings, fresh terminal and web setup recommend post-merge architecture patrol with an explicit default-yes answer. Headless callers can choose the same value before any write with `--refactor-patrol` or `--no-refactor-patrol`; enabling it also enables confined auto-fix/PR attempts and deduplicated GitHub issues as the fallback review surface. After the project transaction succeeds, interactive init diagnoses enabled manifest-managed agent skills and can delegate an accepted offer to the same setup engine as `hive setup-agents`; decline, non-TTY, and JSON flows only report remediation.
@@ -14,6 +14,8 @@ tags: [command, bootstrap, git, prompts, llm-wiki, provisioning]
 ```
 hive init [PROJECT_PATH] [--force] [--json] [--workflow NAME] [--refactor-patrol|--no-refactor-patrol]
 hive init --new-workflow ID [PROJECT_PATH]
+hive init --new-workflow ID --minimal --preview --json [PROJECT_PATH]
+hive init --new-workflow ID --minimal --json [PROJECT_PATH]
 ```
 
 `PROJECT_PATH` defaults to `Dir.pwd`. `--force` skips the clean-tree check. `--json` emits the current `hive-init.v2` success document on stdout with project metadata and the resolved prompt answers; v1 remains a compatibility schema. `--workflow NAME` selects the project default workflow and is validated against `Hive::Workflows::Registry`; unknown names fail before disk writes and list valid names.
@@ -97,7 +99,7 @@ or migrated manually.
 11. **Install runtime wiki hooks** via `Hive::LlmWikiBootstrap.install_runtime_hooks!`: first ensures the local and shared runtime files exist, then adds/replaces only the managed block in `<absolute-git-common-dir>/hooks/post-commit`. At commit time the hook resolves the active worktree root, prefers the shared runner, falls back to that worktree's local runner, and passes `--project <active-root>`. The shared runtime records its canonical systemd service: normal commit-triggered runners enqueue and pin the source, then ask that memory-bounded service to drain. Headless hooks and scheduler reconciliation reconstruct missing user-systemd bus variables from the standard runtime socket. If signaling is still unavailable, the runner retains the installer-owned dispatch marker and continues through machine-wide serialized fallback instead of disabling bounded dispatch for future commits or stranding the queue. A commit whose only changed path is compiled `wiki/log.md` exits before queueing or provider launch; source fragments and other relevant changes remain eligible. An active scheduled worker performs up to three bounded drain batches by default with a short settle between them; sources arriving after its snapshot therefore do not open the manual circuit, and a final race remains queued for the next hook or timer. It also writes one Linux user systemd service/timer pair per repository, anchored to the primary checkout even when installation is requested from a linked worktree, and enables the timer through `timers.target.wants`. The timer schedules its first run ten minutes after the timer itself becomes active, then one day after each service activation, with up to six hours of randomized delay so project timers do not synchronize; it is not persistent, so a user-manager restart cannot launch a catch-up stampede. Every generated service takes the canonical `%t/llm-wiki-refresh.lock` non-blocking `flock` shared with standalone llm-wiki and the marketplace plugin, caps memory at 4 GiB with swap disabled, and requires the packaged runner deployed under the shared Git directory. Only one scheduled wiki refresh can therefore run per user at a time, even across mixed llm-wiki installations or when many timers activate together. The first invocation of an upgraded `hive` binary (including `hive --version`) refreshes that shared runtime without dirtying the checkout, stops in-flight obsolete or rewritten services, collapses live linked-worktree units onto their primary checkout, and removes only explicitly marked, config-confirmed, or known disposable-test Hive units, including the exact `/tmp/e2e-runs?<date>-<pid>-<suffix>` family used by Hive E2E tests. Reconciliation preserves intentionally disabled timers, leaves ambiguous legacy units untouched, retries service stops after interrupted reconciliation, and tracks incomplete systemd reloads with a durable marker. Activation failures warn and leave retry state instead of breaking `hive init`.
 12. **Register globally** via `Hive::Config.register_project(name: basename(path), path: path)`, writing into the XDG global config path (`~/.config/hive/config.yml`, or `HIVE_HOME/config.yml`).
 13. Print a human summary, or with `--json` emit the current `hive-init.v2` payload. The full `answers` object and top-level projection include `refactor_patrol_enabled` alongside the existing workflow, agent, reviewer, patrol, limits, daemon, babysitter, and autostart choices. JSON mode suppresses the non-TTY defaults line so stdout remains one document; retained `hive-init.v1` is a compatibility artifact, not the current producer.
-14. Ensure the global daemon service unit exists via `Hive::Commands::Daemon::ServiceInstaller`, recording `daemon.autostart` from the prompt answer in the global config and enabling/starting the platform service only when requested. This is global infrastructure; it does not override the per-project `daemon.enabled` answer.
+14. Ensure the global daemon service unit exists via the thin `Hive::Commands::Daemon::ServiceInstaller` adapter and its `Hive::UserService` boundary, recording `daemon.autostart` from the prompt answer in the global config and enabling/starting the platform service only when requested. This is global infrastructure; it does not override the per-project `daemon.enabled` answer.
 15. Run the shared managed-skill inspector as a non-transactional post-init aid. If actionable available rows remain and stdin is a TTY, prompt `Provision unresolved agent skills now? [y/N]:`. Acceptance delegates in-process to [[commands/setup-agents]] with recorded consent, so setup still renders/revalidates its exact aggregate plan but does not prompt a second time. Decline prints scoped remediation. Non-TTY and `--json` never offer or mutate; unavailable-only rows do not prompt. Setup failure leaves the initialized project intact, reports the non-zero setup result, and points to an idempotent standalone rerun. Hive Web supplies both non-TTY input and a request-local `provisioning_error` stream, then presents any findings beside its success notice rather than losing them to server stderr.
 
 If any step from orphan-state creation through global registration raises, init attempts partial rollback before surfacing the failure: delete `.hive-state/config.yml` if present, `git worktree remove --force <project>/.hive-state`, `git branch -D hive/state`, reset init-created main-checkout commits to the pre-init head, and restore/remove init-owned files such as `.gitignore`, `.llm-wiki/`, wiki scaffolding, runtime hooks, scheduler units, and the global registry file. Non-Hive exceptions are wrapped as `Hive::InternalError` (exit 70) so `bin/hive` does not leak a Ruby stack trace. If rollback itself cannot converge, stderr includes the rollback error plus a one-line recovery command so re-running init is not trapped behind an orphan `hive/state` branch.
@@ -130,7 +132,7 @@ Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g
 
 The prompt's choice list is rendered in a documented stable order:
 - **Agent profiles**: `claude`, `codex`, `pi`, `grok` — the order in which `lib/hive/agent_profiles.rb` requires them at boot. `Hive::AgentProfiles.registered_names` returns them in this order. The llm-wiki `context_agents` scaffold remains `claude`/`codex`/`pi` until Grok has a native wiki skill verifier.
-- **Default reviewers**: `claude-ce-code-review`, `codex-ce-code-review`, `pr-review-toolkit` — the order shipped in `templates/project_config.yml.erb` and surfaced via `Hive::Commands::Init::Prompts::DEFAULT_REVIEWER_NAMES`.
+- **Available ordinary reviewers**: `claude-ce-code-review`, `codex-ce-code-review`, `pr-review-toolkit`, `grok-ce-code-review`. The first three remain the blank-answer and non-TTY defaults; Grok is opt-in so a fresh project does not silently acquire Grok authentication/plugin prerequisites.
 - **Patrol reviewers**: `codex-native-review`, `codex-ce-code-review`, `claude-ce-code-review` — native Codex review is index 1 and the blank/default; the CE reviewers are optional broader patrol reviewers.
 
 Reordering either is a **breaking change for scripted automation** that uses index answers — index `1` would silently shift to a different value. Prefer names in scripts.
@@ -174,6 +176,32 @@ This branch is what the orphan worktree is initially based on, and what feature 
 - `test/integration/llm_wiki_post_commit_refresh_test.rb` covers the transactional refresh runner plus scheduled `--drain` delegation, shared-runner preference, project-runner fallback, provider non-execution by the wrapper, and byte-for-byte preservation of a dirty primary checkout.
 - `test/unit/commands/init_test.rb` covers small init collaborators, including the `ProjectConfigBinding` complete-answer path, top-level and nested missing-key fail-fast contracts, rollback helper behavior, daemon-registration warning paths, and JSON summary EPIPE handling.
 - `test/unit/commands/init/prompts_test.rb` covers prompt defaults and parsing, including the explicit default-yes architecture-patrol answer and the non-TTY summary. `test/integration/init_test.rb` and the hivebox setup tests pin terminal/web parity, explicit pre-write architecture-patrol selection, rejection of fresh-only selectors on every existing-project re-init path, config rendering, default-on fresh auto-fix/issue gates, explicit disablement, and inert legacy missing-block behavior. `test/unit/schema_files_test.rb` pins the current `schemas/hive-init.v2.json` projection, including `refactor_patrol_enabled`; v1 remains a compatibility schema.
+
+## Minimal workflow-creator profile
+
+`--minimal` is a non-interactive, fresh-target-only profile for an explicitly
+named `--new-workflow ID`. `--preview --json` emits
+`hive-init-preview.v1` after the same preflight and ID/collision resolution as
+execution, but writes nothing. The payload names planned project files, the
+Hive state worktree, context/wiki integration, global registration, services,
+background automation, and task creation.
+
+The minimal profile creates the core project/state registration and required
+context hooks while disabling patrol/refactor patrol, ad-hoc auto-fix, daemon
+dispatch/autostart, and babysitter/timer installation, including the llm-wiki
+scheduler timer. Bootstrap refuses pre-existing symlinks anywhere in its
+managed project paths and uses no-follow final writes, preserving outside
+targets and existing project choices. It never selects a
+starter template and rejects `--force`, missing `--new-workflow`, an existing
+Hive project/state branch, a non-fresh target, or a basename already registered
+to a different project path. The preview discloses the available registration
+name, and execution rechecks that name inside the locked registry write so a
+post-preview contender cannot be replaced. Minimal `--json` precondition,
+collision, already-initialized, and usage failures use the typed
+`hive-init-preview.v1` or `hive-init.v2` error envelope instead of prose. The
+natural-language creator presents this preview and waits for one explicit
+confirmation before invoking the same command without `--preview`; unanswered
+or declined confirmation therefore leaves the directory unchanged.
 
 ## Backlinks
 

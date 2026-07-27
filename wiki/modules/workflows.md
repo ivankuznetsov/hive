@@ -3,15 +3,18 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/workflow_package/
 created: 2026-04-26
-updated: 2026-07-21
-tags: [module, workflow, verbs, selection, honeycomb, registry]
+updated: 2026-07-26
+tags: [module, workflow, verbs, selection, human-stage, outcomes, honeycomb, registry, archive, retention]
 ---
 
-**TLDR**: The coding, content, bench, and project-authored workflows are described as ordered `Hive::Workflow` value objects whose stages carry directory names, state files, incoming advance verbs, runner metadata, optional instruction files, optional permission specs, per-stage agent/model/effort overrides, council reviewer configs, and terminal deliverables. `Hive::Workflows::Registry.default` still returns the coding descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for built-in, runtime/test, and active-project registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` / `kind: :council` as fallbacks for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`. Coding's descriptor now uses runtime primitive kinds (`:execute`, `:review_council`, `:finalize`) for the worktree-coupled stages; the old `:marker` descriptor kind is retired.
+**TLDR**: The coding, content, bench, and project-authored workflows are described as ordered `Hive::Workflow` value objects whose stages carry directory names, state files, incoming advance verbs, runner metadata, optional instruction files, optional permission specs, per-stage agent/model/effort overrides, council reviewer configs, terminal deliverables, and an archive visibility retention policy. `Hive::Workflows::Registry.default` still returns the coding descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for built-in, runtime/test, and active-project registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` / `kind: :council` as fallbacks for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`. Coding's descriptor now uses runtime primitive kinds (`:execute`, `:review_council`, `:finalize`) for the worktree-coupled stages; the old `:marker` descriptor kind is retired.
 
 ## Descriptor and registry
 
-- `Hive::Workflow` — frozen `Data` value object with `id` and ordered `stages`. Read-only lookup helpers:
+- `Hive::Workflow` — frozen `Data` value object with `id`, ordered `stages`,
+  and normalized `archive_visibility_retention_days` (`Integer` or `:never`).
+  `DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS` is the single legacy default
+  (`3`). Read-only lookup helpers:
   - `#stage_named(name)` — soft lookup, returns the `Stage` or nil.
   - `#state_file_for(name)` — hard lookup, raises `KeyError` on an unknown name.
   - `#stage_names` / `#stage_dirs` — frozen lists of the descriptor's stage names / `index-name` dirs.
@@ -20,10 +23,18 @@ tags: [module, workflow, verbs, selection, honeycomb, registry]
   - `#stage_for_dir(dir)` — soft lookup by `index-name` dir, returns the `Stage` or nil.
   - `#resolve_stage_ref(ref)` — accepts a full dir (`3-plan`) or short name (`plan`) and returns the canonical `Stage#dir` (or nil); used by `Approve` to canonicalize `--to`/`--from`.
   - `#has_stage?(ref)` — predicate wrapper around `#resolve_stage_ref`. An additive affordance (U6.3) for coding-scoped consumers to skip absent-stage behavior; it has no production call sites yet and is currently exercised only by its own unit test.
+- Workflow construction maps only `id`, stage name/index/dir/kind, and incoming
+  advance-verb presence into `Hive::WorkLedger.validate_descriptor`.
+  WorkLedger rejects empty identities/stage lists, gapped ordering, duplicate
+  names/dirs, unknown caller-supplied kinds, and a leading advance verb without
+  loading condition or coding policy. `Hive::Workflow` preserves its
+  `ArgumentError` compatibility surface. YAML slug/filename rules, agent and
+  permission lookup, conditions, terminal/deliverable/workspace/handoff rules,
+  and built-in kind policy remain in Hive's descriptor adapters.
 - `Hive::Workflow::Stage` — frozen stage value object. `#dir` returns `"#{index}-#{name}"`; metadata such as `kind`, `skill`, `instruction`, `permissions`, `status_mode`, `budget_usd`, `timeout_sec`, `capability`, `agent`, `model`, `effort`, `input`, `reviewers`, `council`, and `deliverable` is carried for runner selection, prompt rendering, and status classification. The generic runner path consumes `kind: :agent` (for runner selection), `state_file` (`agent.rb:20`), `skill`, `instruction`, descriptor-level `permissions`, `budget_usd`, `timeout_sec`, and per-stage `agent`/`model`/`effort` overrides. `kind: :council` routes to [[stages/council]] and carries typed `Workflow::Reviewer`, `Workflow::Council`, and optional `Workflow::Revise` values. Coding's action classifier consumes `kind: :execute`, `kind: :review_council`, and `kind: :finalize`; project-authored descriptors still expose only parser-supported user-facing kinds. As of U6 the runner also honors the descriptor's `status_mode`, falling back to `:state_file_marker` only when the stage leaves it unset (`agent.rb:53`); terminal agent/council stages can declare `deliverable` (defaulting to `state_file`) and classify as archived only when that artifact is non-empty.
 - `Hive::Workflow::AdvanceVerb` — frozen value object for the verb that advances into a stage, with `force_source` and `interactive` flags defaulting false.
 - `Hive::Workflows::Coding::DESCRIPTOR` — the default built-in descriptor (`id: :coding`), matching the current nine-stage pipeline exactly. Its action semantics for coding `:agent`/`:inert` stages live in `Hive::Workflows::Coding::ACTION_DISPATCH`; execute/review/finalize route by their runtime primitive kinds.
-- `Hive::Workflows::Content::DESCRIPTOR` — built-in non-coding descriptor (`id: :content`) for `inbox -> research -> outline -> draft -> critique -> done`. `inbox` is inert and captures `idea.md`; every later stage is a generic `kind: :agent` stage with `status_mode: :state_file_marker`, slash-skill metadata, explicit budgets/timeouts, and `done` writing the terminal `article.md`.
+- `Hive::Workflows::Content::DESCRIPTOR` — built-in non-coding descriptor (`id: :content`) for `inbox -> research -> outline -> draft -> critique -> done`. `inbox` is inert and captures `idea.md`; every later stage is a generic `kind: :agent` stage with `status_mode: :state_file_marker`, slash-skill metadata, explicit budgets/timeouts, and `done` writing the terminal `article.md`. `Content::BUDGET_USD` is the single frozen source for the shipped per-run caps: research `3.0`, outline `1.5`, draft `3.0`, critique `2.0`, and done `2.0`.
 - `Hive::Workflows::Bench::DESCRIPTOR` — built-in hive-bench descriptor (`id: :bench`) for `inbox -> extract -> generate -> judge -> publish -> done`. The four generic agent stages use packaged instructions under `templates/builtins/bench/` and pin their lightweight shell-control work to Codex rather than consuming the Claude account being benchmarked. Extract/publish allow one hour; generate/judge allow seven days so a serialized campaign is not killed by the generic one-hour fallback. Generate distinguishes provider-only pending cells from real failures: the former write `ERROR reason=limits_reached retry_after=...` for daemon cooldown retry, while missing, malformed, contradictory, or non-limit failed cells remain manual `WAITING`. Judge completion requires a numeric 0–10 round-two `final` from every configured deliberation judge; a fail-soft `final: null` remains visible in the transcript, keeps the stage `WAITING`, and is excluded from the retry skip-set so a later run can recover it. `Hive::Workflows::Bench.install_runtime!` snapshots the packaged campaign example, runner image, and harness into `.hive-state/bench-runtime` and commits it on `hive/state`, so `hive init . --workflow bench` needs neither a project-local descriptor nor a separate hive-bench checkout. The packaged candidate registry includes serialized Sol-plan/Terra-execute, Fable-plan/Grok-execute, and Sol-plan/Grok-execute comparisons with a sole Sol `ce-code-review` reviewer. Per-stage Codex model/effort pins are applied by the runtime shim; generate selects the Codex-0.144+ `sol` image for any GPT-5.6 stage, and that image also carries Grok for mixed cells.
 - `Hive::Workflows::Registry.fetch(:coding)` / `.default` — descriptor lookup. Unknown ids raise `Hive::Workflows::UnknownWorkflow`.
 - `Hive::Workflows::Registry.all` / `.ids` — live enumeration of registered descriptors/ids (`:coding`, `:content`, `:bench`, plus any scoped test/runtime registrations and the active project's discovered descriptors). Test helpers override this at call time so runtime-registered workflows participate in status scans and slug resolution.
@@ -34,6 +45,11 @@ tags: [module, workflow, verbs, selection, honeycomb, registry]
 Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulting to `.hive-state/workflows/*.yml`. `Hive::Workflows::DescriptorParser` validates YAML into `Hive::Workflow` objects:
 
 - `id` is required, must match the filename stem, and must match `/\A[a-z0-9][a-z0-9-]*\z/`.
+- `archive_visibility_retention_days` accepts a positive integer or exact
+  lowercase `never`. Key omission normalizes to `3`; key presence is checked
+  separately so explicit `null` fails. Floats, booleans, strings (including
+  numeric strings), zero, negatives, and alternate sentinel casing fail with
+  workflow id, field name, received value, and accepted forms in the error.
 - user-facing `kind: agent` maps to `:agent`; `kind: terminal` maps to `:inert`; `kind: council` maps to the generic document council runner.
 - stage indexes are derived from array order; non-entry stages default their incoming `advance_verb` to the stage name.
 - every user-authored agent stage declares exactly one of `skill:` or `instruction:`.
@@ -41,14 +57,23 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
 - council stages require a `reviewers:` list; each reviewer declares exactly one of `skill`, `instruction`, `prompt`, or `command`, plus optional agent/model/effort/permissions/output basename. The `council:` block carries `quorum`, `max_rounds`, `exit_rule`, `on_max_rounds` (`wait` by default or `complete` for a bounded downstream delivery), `triage_output`, and optional `revise`.
 - `instruction:` paths are resolved relative to the descriptor directory and stored on the stage as absolute paths.
 - `permissions:` values are validated through `Hive::PermissionScope` at load time and later passed to the generic agent runner as the explicit permission spec.
-- the last stage may be inert, agent, or council. Active terminal stages require both `COMPLETE` and a non-empty deliverable before `TaskAction` classifies them as archived.
+- the last stage may be inert, agent, council, or human. Active terminal stages
+  require `COMPLETE` and their declared non-empty deliverable/artifact before
+  `TaskAction` classifies them as archived.
 - `workspace: worktree` plus `handoff: draft_pr` is one closed terminal-agent
   contract. Both fields must appear together and both `state_file` and
   `deliverable` must equal task-root `fix-report.md`. Parser and managed-package
   validation reject every partial or alternate shape, including workflows
   constructed directly in Ruby rather than parsed from YAML.
 
-`Hive::Workflows::Loader` discovers project descriptors, and `Hive::Workflows::Project.load!(project_root, config: nil)` is the idempotent boundary call. Callers that already resolved the project config may pass it so descriptor discovery does not parse the same file again; legacy callers keep the self-loading behavior. It swaps the active project overlay in `Hive::Workflows::Registry`, rejects collisions with built-in/runtime ids, and resets the memoized cross-workflow stage unions (`all_stage_dirs`, `all_stage_names`, `all_terminal_stage_dirs`). The self-loading path resolves `hive_state_path` from the shared raw project-config reader, installs one fingerprinted overlay, then validates strict root keys against that overlay; it does not call `Config.load` recursively. For command paths that load `Project` without the aggregate `hive/workflows` entrypoint, strict validation derives its stage-name union directly from `Registry.all`, so behavior does not depend on require order. `Config.load` reuses the active overlay when it needs project stage names. `Task`, `WorkflowSelection`, `init`, `new`, `status`, `drop`, and stage-filtered resolver paths call it before resolving workflow ids or stage refs.
+`Hive::Workflows::Loader` discovers project descriptors, and `Hive::Workflows::Project.load!(project_root, config: nil)` is the idempotent boundary call. Callers that already resolved the project config may pass it so descriptor discovery does not parse the same file again; legacy callers keep the self-loading behavior. It swaps the active project overlay in `Hive::Workflows::Registry`, rejects collisions with built-in/runtime ids, and resets the memoized cross-workflow stage unions (`all_stage_dirs`, `all_stage_names`, `all_terminal_stage_dirs`). Descriptor signatures include content, not only mtime/size, so creation, deletion, rename, same-size replacement, and preserved/coarse-mtime replacement are visible on the next load. There is no last-known-good fallback for a currently selected malformed/missing workflow policy. The self-loading path resolves `hive_state_path` from the shared raw project-config reader, installs one fingerprinted overlay, then validates strict root keys against that overlay; it does not call `Config.load` recursively. For command paths that load `Project` without the aggregate `hive/workflows` entrypoint, strict validation derives its stage-name union directly from `Registry.all`, so behavior does not depend on require order. `Config.load` reuses the active overlay when it needs project stage names. `Task`, `WorkflowSelection`, `init`, `new`, `status`, `drop`, and stage-filtered resolver paths call it before resolving workflow ids or stage refs.
+
+Archive visibility resolves the same descriptor order on every refresh:
+explicit task `workflow:` pin, project `default_workflow`, then `coding`.
+Applying a managed workflow configuration preserves the source descriptor's
+retention value. Hive's built-in `coding`, `content`, and `bench` descriptors
+and both local scaffolds explicitly declare `3`; legacy and externally managed
+descriptors may omit it and receive the same value.
 
 The one compatibility exception is an exact semantic match for the project-local
 `bench.yml` shipped before `bench` became built in. Hive temporarily keeps that
@@ -88,7 +113,7 @@ The upgrade path was live-smoked on the existing hive-bench state checkout on
 `coding` tasks all remained resolvable, with all nine pre-migration status rows
 still visible and the unrelated dirty-state fingerprint unchanged.
 
-`hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those files to `hive/state`. The only richer shipped scaffold is `--template research`; Architecture and Writing are installed as full reviewed Honeycomb packages so their agent-slot configuration remains operator-owned.
+`hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those initial files to `hive/state`. After editing, the natural-language creator validates and invokes `hive workflow commit ID`, which commits the populated descriptor/instruction directory under the shared state commit lock before it reports success or creates a task. The only richer shipped scaffold is `--template research`; Architecture and Writing are installed as full reviewed Honeycomb packages so their agent-slot configuration remains operator-owned.
 
 ## Managed Honeycomb overlay
 
@@ -160,7 +185,13 @@ weakening owner-authored descriptor compatibility:
   descriptors while rejecting id collisions and reloading when its managed
   fingerprint changes. Task-pinned generations bypass the single-id overlay and
   validate/load directly from `ManagedStore` by id, source commit, manifest
-  digest, and configuration digest. Profile fingerprint drift fails closed.
+  digest, and configuration digest. Profile fingerprint drift fails closed at
+  runtime. `hive migrate` is the explicit one-way mapping cutover: when a task
+  and the selected workflow still share the same package source commit and
+  manifest digest, it preflights the selected configuration, rebinds the task
+  to that configuration digest, and cleans snapshots no task references.
+  Tasks on another package generation remain pinned for a workflow-specific
+  migration rather than silently changing instructions.
   For a legacy lock-schema-v1 selection, task creation derives the compatibility
   snapshot with the effective project agent profiles and writes that
   digest-addressed snapshot before `meta.yml` can pin it. The snapshot therefore
@@ -193,7 +224,34 @@ policy. Managed execution uses each stage/reviewer/reviser descriptor's exact
 `permissions:` block. Explicit `yolo`, scoped shell, and unqualified scoped
 file-write actors are portable only after separate high-risk consent; a v2
 manifest hiding that actor surface behind a narrower disclosure is rejected.
-Bounded actors admit only on profiles that enforce the bound. Strict `x-hive`
+Bounded actors admit only on profiles that enforce the bound. Claude uses its
+native tool rules. Codex and Grok may also execute read-only actors through the
+portable managed-output adapter: Codex gets a generated named filesystem
+profile plus ephemeral user-config/rules isolation, Grok gets a bubblewrap
+mount namespace, both receive a strict JSON output schema, and Hive alone
+writes the path-qualified `Edit(...)` targets. Hive validates the complete
+response before writing, rolls back already-published companion files on a
+later publication failure, and publishes the requested stage/state artifact
+last as the completion commit point. Grok returns the schema result on its
+terminal `end.structuredOutput` field after streaming human-readable prose;
+its profile explicitly declares the `:grok_end` output protocol, so Hive
+normalizes that terminal object as the final structured message without
+teaching the shape to custom or non-Grok profiles. Parsed and conservatively
+recognized unparseable terminal payloads stay out of durable logs, plain
+fallback, and quota diagnostics. For managed output, a malformed terminal
+value invalidates the preceding stream before host validation, so a
+schema-looking prose rendering cannot be published after Grok's terminal
+validation failed. Codex executable discovery accepts valid
+runtime provenance even when unrelated aggregate doctor checks fail, while a
+dedicated bounded probe and executable-path validation remain fail-closed. The
+probe uses an ephemeral empty Codex state root, so executable discovery does
+not scan the operator's rollout archive or inherit its user configuration.
+When a launch is built from typed model/effort selection, its private spawn log
+and `agent_start` event record only the normalized model, requested/effective
+effort, pin state, and effort-support state. They never serialize the provider
+argv or prompt, so short-lived managed reviewers retain an auditable execution
+identity without expanding the secret-bearing log surface.
+Bare/unbounded file edits and unsupported tools still fail admission. Strict `x-hive`
 metadata declares manifest-hashed executable tools, manifest-hashed prompt
 assets exposed as absolute paths in the managed prompt preamble, and optional
 environment names with authorized stable slots. Package-declared process
@@ -263,9 +321,42 @@ Hive::Workflows.all_stage_names            # union across Registry.all
 
 `content` is the first built-in non-coding workflow. It uses the descriptor-generic path from [[stages/agent]] and never touches coding's bespoke runner table. `hive new --workflow content` writes the topic to `1-inbox/<slug>/idea.md` and stamps the inert entry complete, making that file prior context for `research`. The terminal `6-done` stage is also `kind: :agent`; it writes `article.md`, stamps `<!-- COMPLETE -->`, and then `TaskAction` classifies the terminal complete marker as archived.
 
+The descriptor reads every Content cap from the frozen
+`Hive::Workflows::Content::BUDGET_USD` map. These are fixed shipped defaults,
+not dynamically scaled values: research `3.0`, outline `1.5`, draft `3.0`,
+critique `2.0`, and done `2.0`. A project-authored explicit non-null stage
+override still takes precedence through the generic workflow resource
+resolution described above.
+
 Hermetic coverage lives in `test/unit/workflows/content_test.rb`,
 `test/integration/content_workflow_stage_test.rb`, and
 `test/integration/content_workflow_e2e_test.rb`.
+
+## Durable human stages
+
+`Hive::Workflow::Stage` accepts `kind: :human` plus immutable named
+`outcomes`. The owner-authored parser exposes only closed directional actions:
+an outcome must either complete the workflow or target another stage, and a
+completing outcome may name an artifact. Unsafe outcome names, unknown keys,
+missing/duplicate actions, unknown targets, and agent-only settings fail while
+the descriptor is loaded.
+
+A human stage has no runner. Entering it leaves the state file `WAITING`, and
+status exposes `NEEDS_INPUT` with the descriptor's allowed outcomes.
+`Hive::Commands::Decide` writes a durable decision record with outcome, note,
+artifact/target, and timestamp. A completing decision verifies its declared
+artifact, stamps `meta.yml completed_at` from the same clock, and exposes the
+task through the shared archive/retention path. Decision-state reads refuse
+symlinks and verify the opened inode. State, metadata, and moves roll back
+together when a commit fails or is interrupted. A returning decision moves the
+same task under the task/state locks and resets the target state file to
+`WAITING`, preventing a stale completion marker from immediately advancing it
+again.
+
+The accepted editorial graph is exactly
+`research -> draft -> approval`: `approve` completes with non-empty
+`draft.md` recorded as publish-ready, while `reject` returns to `draft`.
+There is no publish stage or executable outcome action.
 
 ## Backlinks
 

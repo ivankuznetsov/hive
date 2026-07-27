@@ -18,6 +18,7 @@ Rails.application.routes.draw do
   root "status#index"
   get "board" => "status#index", defaults: { view: "board" }, as: :board
   get "grid" => "status#index", defaults: { view: "grid" }, as: :grid
+  get "archive" => "status#archive", as: :archive
   resource :status_view_preference, only: :create
   resource :daemon_repair, only: :create, path: "daemon/repair"
 
@@ -45,12 +46,14 @@ Rails.application.routes.draw do
     get  "log" => "tasks/logs#show", as: :task_log
     get  "media/:filename" => "tasks/media#show", as: :task_media,
          format: false,
-         constraints: { filename: /[\w.-]+\.(?:png|jpe?g|gif)/i }
+         constraints: { filename: /[\w.-]+\.(?:png|jpe?g|gif|webp|webm|mp4)/i }
     post "approve" => "tasks/approvals#create", as: :task_approve
     post "reject" => "tasks/rejections#create", as: :task_reject
     post "drop" => "tasks/drops#create", as: :task_drop
     post "run" => "tasks/runs#create", as: :task_run
     post "recover" => "tasks/recoveries#create", as: :task_recover
+    get  "closure" => "tasks/closures#new", as: :new_task_closure
+    post "closure" => "tasks/closures#create", as: :task_closure
     post "intervene" => "tasks/interventions#create", as: :task_intervene
     post "answers" => "tasks/answers#create", as: :task_answers
   end

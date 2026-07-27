@@ -1,113 +1,218 @@
-require "time"
-require "monitor"
 require "digest"
 require "json"
+require "monitor"
+require "time"
 require "hive/commands/status"
 require "hive/config"
+require "hive/secret_patterns"
+require "hive/tui/state_source"
 
 module Hive
   module Web
-    # Publishes the live `hive status` snapshot to subscribers — in the
-    # Rails web tier that is StatusBroadcaster, which bridges each changed
-    # snapshot to a Turbo Streams broadcast.
+    # Adapts the bounded status projection source to StatusFeed's existing
+    # command seam. Puma requests and the shared Cable poller can enter this
+    # object concurrently, while StateSource intentionally has one projection
+    # writer; serialize those synchronous refreshes here.
+    class CachedStatusCommand
+      ARCHIVE_REFRESH_FALLBACK_SECONDS = 300.0
+
+      def initialize(
+        source: Hive::Tui::StateSource.new(
+          poll_interval_seconds: 60,
+          archive_cache_mode: :visible,
+          archive_refresh_fallback_seconds: ARCHIVE_REFRESH_FALLBACK_SECONDS
+        ),
+        recovery_status_command: Hive::Commands::Status.new(json: true)
+      )
+        @source = source
+        @recovery_status_command = recovery_status_command
+        @mutex = Mutex.new
+      end
+
+      def json_payload(_projects)
+        @mutex.synchronize { @source.refresh_payload_now }
+      end
+
+      # Keep the daemon-owned recovery receipt overlay available without
+      # paying for another fleet scan. Commands::Status joins the supplied
+      # cached payload to the scheduler snapshot in memory.
+      def operational_recoveries(projects, status_payload:)
+        @recovery_status_command.operational_recoveries(
+          projects,
+          status_payload: status_payload
+        )
+      end
+    end
+
+    # The process-wide owner of the expensive fleet status computation. In
+    # Rails, StatusBroadcaster bridges each changed snapshot to Turbo Streams.
     #
-    # While at least one live page is connected, a single shared background
-    # poller computes the snapshot ONCE per tick (one filesystem scan + YAML
-    # parse for the whole box) and publishes it to a mutex-protected
-    # latest-value. Every subscriber reads that shared value, so N subscribers
-    # cost one scan per tick — not N; an idle server performs no scans.
+    # HTTP status renders and the Cable poller both enter refresh_state, whose
+    # single-flight gate guarantees that concurrent callers share one scan.
+    # The default command makes that scan a bounded active-task refresh:
+    # terminal membership/policy changes and a five-minute archive backstop
+    # refresh the ordinary archive projection, while complete archive reads
+    # remain on-demand. An idle server performs no scans.
     #
-    # Contract: a new subscriber gets the current snapshot immediately (emit
-    # on connect); unchanged snapshots are suppressed (dedup, volatile fields
-    # stripped) and instead fire `on_idle` (a keep-alive seam — no production
-    # subscriber passes it today, tests use it to observe deduped ticks); and
-    # `snapshot` returns a freshly-computed payload for the per-request read
-    # path (the grid render, task_row lookups).
+    # Failures never manufacture a healthy empty fleet: they publish either a
+    # degraded latest-good snapshot or an explicit unavailable envelope. A new
+    # subscriber gets the current state immediately; unchanged semantic states
+    # are suppressed and instead fire the optional on_idle keep-alive seam.
     class StatusFeed
       DEFAULT_INTERVAL = 5.0
+      VOLATILE_KEYS = %w[generated_at age_seconds].freeze
+      UNAVAILABLE_PAYLOAD = {
+        "schema" => "hive-status",
+        "ok" => false,
+        "unavailable" => true,
+        "projects" => []
+      }.freeze
 
-      def initialize(interval: DEFAULT_INTERVAL, status_command: Hive::Commands::Status.new(json: true))
+      State = Data.define(
+        :payload, :availability, :token, :last_success_at, :error,
+        :scan_count, :generation
+      ) do
+        def fresh? = availability == "fresh"
+        def degraded? = availability == "degraded"
+        def unavailable? = availability == "unavailable"
+
+        def to_h
+          {
+            "payload" => payload,
+            "availability" => availability,
+            "token" => token,
+            "last_success_at" => last_success_at,
+            "error" => error,
+            "scan_count" => scan_count,
+            "generation" => generation
+          }
+        end
+      end
+
+      def initialize(
+        interval: DEFAULT_INTERVAL,
+        status_command: CachedStatusCommand.new,
+        archive_status_command: Hive::Commands::Status.new(json: true, archive: true),
+        clock: -> { Time.now.utc }
+      )
         @interval = interval
         @status_command = status_command
+        @archive_status_command = archive_status_command
+        @clock = clock
         @monitor = Monitor.new
         @tick = @monitor.new_cond
+        @refresh_done = @monitor.new_cond
         @generation = 0
-        @latest_payload = nil
+        @scan_count = 0
+        @state = nil
+        @latest_good = nil
         @latest_key = nil
         @latest_token = nil
         @prime_claim = nil
+        @refreshing = false
         @poller = nil
       end
 
-      # Compute a fresh snapshot. Used by the per-request read path (the grid
-      # `/` route, `task_row`, `find_project!`). The SSE path goes through the
-      # shared poller instead so it never pays this cost per connection.
+      # Compatibility read for callers that only consume the status payload.
+      # New web callers should use snapshot_state so availability cannot be
+      # mistaken for a real empty fleet.
       def snapshot
-        @status_command.json_payload(Hive::Config.registered_projects)
+        snapshot_state.payload
       end
 
-      # Seed the shared poller from the snapshot Rails already computed to
-      # render the subscribing page. Without this handoff, the first Cable
-      # connection immediately repeats the same full-fleet filesystem scan.
-      # The first request owns the idle baseline until this poller lifecycle
-      # starts. Every page receives a stable token for the exact semantic
-      # payload it rendered; StatusChannel compares that token after Cable
-      # confirms, so an interleaving poll or another Puma worker cannot label
-      # stale content as current.
+      # Dedicated archive reads are lossless and deliberately stay outside
+      # the ordinary feed's priming, availability, and dedup lifecycle.
+      def archive_snapshot
+        @archive_status_command.json_payload(Hive::Config.registered_projects)
+      end
+
+      # One fresh scan, coalesced across all callers already waiting for it.
+      def snapshot_state
+        refresh_state
+      end
+
+      # A non-scanning read for task-local routes and reconnecting subscribers.
+      def current_state
+        @monitor.synchronize { @state }
+      end
+
+      def scan_count
+        @monitor.synchronize { @scan_count }
+      end
+
+      # Seed the poller from a status page that already rendered a successful
+      # payload. A competing page receives the token for its own content but
+      # cannot replace the active lifecycle's baseline.
       def prime(payload)
-        key = comparable_key(payload)
+        key = state_key("fresh", payload)
         token = cached_token_for(key)
         @monitor.synchronize do
           unless @poller&.alive? || @prime_claim
-            @latest_payload = payload
+            now = iso_time(@clock.call)
+            @generation += 1
+            @latest_good = payload
             @latest_key = key
             @latest_token = token
+            @state = State.new(
+              payload: payload,
+              availability: "fresh",
+              token: token,
+              last_success_at: now,
+              error: nil,
+              scan_count: @scan_count,
+              generation: @generation
+            )
             @prime_claim = Object.new
-            @generation += 1
           end
 
           token
         end
       end
 
-      # The poll sequence wakes subscribers on every tick so `on_idle` keeps
-      # its contract. The public token changes only with semantic content,
-      # preventing an unchanged background tick from making a restored page
-      # look stale and trigger an unnecessary HTTP refresh.
       def current_version?(candidate)
-        candidate.is_a?(String) && @monitor.synchronize { candidate == @latest_token }
+        candidate.is_a?(String) &&
+          @monitor.synchronize { candidate == @state&.token }
       end
 
-      # json_payload regenerates `generated_at` (and per-task `age_seconds`)
-      # on every poll, so comparing raw serialized payloads re-emitted every
-      # tick — the documented dedup was dead in production and the on_idle
-      # keep-alive branch never ran. Strip the volatile fields for the
-      # comparison; subscribers still receive the full payload.
-      # mtime/folder_mtime are deliberately NOT volatile: task-page artifact
-      # liveness rides on them — a state-file write is often the ONLY field
-      # that changes while an agent works, and stripping it would dedup away
-      # the broadcast that refreshes artifact bodies mid-write.
-      VOLATILE_KEYS = %w[generated_at age_seconds].freeze
-
-      def each_snapshot(on_idle: nil)
+      # State-aware subscribers receive degradation and recovery transitions
+      # even when the underlying last-good rows are unchanged.
+      def each_state(on_idle: nil)
         ensure_poller!
-
-        payload, last_key, seen_generation = current_snapshot
-        yield payload
+        state, last_key, seen_generation = current_publication
+        yield state
 
         loop do
-          payload, key, seen_generation = await_tick(seen_generation)
+          state, key, seen_generation = await_tick(seen_generation)
           if key != last_key
             last_key = key
-            yield payload
+            yield state
           else
             on_idle&.call
           end
         end
       end
 
-      # Stop the shared poller thread. StatusChannel calls this after the last
-      # live page disconnects; tests also use it to reclaim the thread.
+      # Legacy payload-only subscription. Freshness-only transitions are idle
+      # ticks here; StatusBroadcaster uses each_state.
+      def each_snapshot(on_idle: nil)
+        ensure_poller!
+        state, = current_publication
+        last_payload_key = comparable_key(state.payload)
+        seen_generation = state.generation
+        yield state.payload
+
+        loop do
+          state, _key, seen_generation = await_tick(seen_generation)
+          payload_key = comparable_key(state.payload)
+          if payload_key != last_payload_key
+            last_payload_key = payload_key
+            yield state.payload
+          else
+            on_idle&.call
+          end
+        end
+      end
+
       def stop
         thread = nil
         detached_prime_claim = nil
@@ -122,9 +227,6 @@ module Hive
         thread.kill
         thread.join
         @monitor.synchronize do
-          # A request can claim a new idle baseline while the detached thread
-          # is joining. Release only the claim that belonged to the lifecycle
-          # being stopped, never a newer claim accepted in that join window.
           if !@poller&.alive? && @prime_claim.equal?(detached_prime_claim)
             @prime_claim = nil
           end
@@ -133,23 +235,83 @@ module Hive
 
       private
 
-      # Lazily start the single shared poller on the first subscriber so a box
-      # with no open dashboards does no background scanning at all.
+      def compute_snapshot
+        projects = Hive::Config.registered_projects
+        payload = @status_command.json_payload(projects)
+        overlay_operational_recoveries(payload, projects)
+      end
+
+      def refresh_state
+        owner = false
+        @monitor.synchronize do
+          if @refreshing
+            @refresh_done.wait while @refreshing
+            return @state
+          end
+          @refreshing = true
+          @scan_count += 1
+          owner = true
+        end
+
+        begin
+          publish_success(compute_snapshot)
+        rescue StandardError => e
+          publish_failure(e)
+        ensure
+          if owner
+            @monitor.synchronize do
+              @refreshing = false
+              @refresh_done.broadcast
+            end
+          end
+        end
+        @monitor.synchronize { @state }
+      end
+
+      # The web page already paid for one ordinary status scan. Reuse that
+      # exact payload when asking the status producer to join the daemon's
+      # owner-private snapshot, then copy only canonical recovery receipts
+      # onto the matching task rows. This is a file read + in-memory join, not
+      # a second fleet scan. The lean projection also avoids building the
+      # complete operational envelope on every five-second web poll.
+      def overlay_operational_recoveries(payload, projects)
+        return payload unless @status_command.respond_to?(:operational_recoveries)
+
+        recovery_rows = @status_command.operational_recoveries(
+          projects,
+          status_payload: payload
+        )
+        recoveries = Array(recovery_rows).to_h do |task|
+          identity = task["identity"] || {}
+          [ [ identity["project"].to_s, identity["slug"].to_s ], task["recovery"] ]
+        end
+        changed = false
+        projects_with_recoveries = Array(payload["projects"]).map do |project|
+          project_changed = false
+          tasks_with_recoveries = Array(project["tasks"]).map do |task|
+            recovery = recoveries[[ project["name"].to_s, task["slug"].to_s ]]
+            next task unless recovery.is_a?(Hash)
+            next task if task["recovery"] == recovery
+
+            changed = true
+            project_changed = true
+            task.merge("recovery" => recovery)
+          end
+          project_changed ? project.merge("tasks" => tasks_with_recoveries) : project
+        end
+        changed ? payload.merge("projects" => projects_with_recoveries) : payload
+      rescue StandardError => e
+        warn "hive web: operational recovery overlay failed (#{e.class}: #{e.message}); using base status"
+        payload
+      end
+
       def ensure_poller!
+        needs_initial = @monitor.synchronize { @state.nil? }
+        refresh_state if needs_initial
+
         @monitor.synchronize do
           return if @poller&.alive?
 
-          # The connect-emit compute rides the same safety net as the loop:
-          # a config error at exactly boot time must not kill the subscriber
-          # thread before the poller ever starts.
-          unless @latest_payload
-            begin
-              publish(snapshot)
-            rescue StandardError => e
-              warn "hive web: initial status snapshot failed (#{e.class}: #{e.message}); retrying on the next tick"
-              publish({ "projects" => [] })
-            end
-          end
           @poller = Thread.new { poll_loop }
         end
       end
@@ -157,43 +319,70 @@ module Hive
       def poll_loop
         loop do
           sleep @interval
-          # A transient snapshot failure (operator mid-edit on config.yml, a
-          # task folder mv racing the scan) must not kill the poller thread:
-          # a dead poller silently freezes every subscriber forever — ticks
-          # stop, so even the on_idle keep-alive path never runs again. Log
-          # and try again next tick.
-          begin
-            publish(snapshot)
-          rescue StandardError => e
-            warn "hive web: status poll failed (#{e.class}: #{e.message}); retrying"
-          end
+          refresh_state
         end
       end
 
-      # Store the newest snapshot and wake every waiting subscriber. The
-      # generation counter lets a subscriber detect it slept through a tick.
-      def publish(payload)
-        key = comparable_key(payload)
+      def publish_success(payload)
+        key = state_key("fresh", payload)
         token = cached_token_for(key)
+        now = iso_time(@clock.call)
         @monitor.synchronize do
-          @latest_payload = payload
+          @generation += 1
+          @latest_good = payload
           @latest_key = key
           @latest_token = token
-          @generation += 1
+          @state = State.new(
+            payload: payload,
+            availability: "fresh",
+            token: token,
+            last_success_at: now,
+            error: nil,
+            scan_count: @scan_count,
+            generation: @generation
+          )
           @tick.broadcast
         end
       end
 
-      def current_snapshot
-        @monitor.synchronize { [ @latest_payload, @latest_key, @generation ] }
+      # Kept as a test seam and for callers that publish an already computed
+      # payload. It is a successful publication and does not increment scans.
+      def publish(payload)
+        publish_success(payload)
       end
 
-      # Block until the poller publishes a generation newer than the one this
-      # subscriber last saw, then return the published value.
+      def publish_failure(error)
+        diagnostic = bounded_error(error)
+        warn "hive web: status snapshot failed (#{error.class}: #{diagnostic}); retrying"
+        @monitor.synchronize do
+          availability = @latest_good ? "degraded" : "unavailable"
+          payload = @latest_good || UNAVAILABLE_PAYLOAD.dup
+          key = state_key(availability, payload)
+          token = key == @latest_key ? @latest_token : token_for(key)
+          @generation += 1
+          @latest_key = key
+          @latest_token = token
+          @state = State.new(
+            payload: payload,
+            availability: availability,
+            token: token,
+            last_success_at: @state&.last_success_at,
+            error: "#{error.class}: #{diagnostic}",
+            scan_count: @scan_count,
+            generation: @generation
+          )
+          @tick.broadcast
+        end
+      end
+
+      def current_publication
+        @monitor.synchronize { [ @state, @latest_key, @generation ] }
+      end
+
       def await_tick(seen_generation)
         @monitor.synchronize do
           @tick.wait while @generation == seen_generation
-          [ @latest_payload, @latest_key, @generation ]
+          [ @state, @latest_key, @generation ]
         end
       end
 
@@ -202,21 +391,20 @@ module Hive
         cached || token_for(key)
       end
 
+      def state_key(availability, payload)
+        { "availability" => availability, "payload" => comparable_key(payload) }
+      end
+
       def comparable_key(node)
         case node
-        when Hash then node.except(*VOLATILE_KEYS).transform_values { |v| comparable_key(v) }
-        when Array then node.map { |v| comparable_key(v) }
+        when Hash then node.except(*VOLATILE_KEYS).transform_values { |value| comparable_key(value) }
+        when Array then node.map { |value| comparable_key(value) }
         else node
         end
       end
 
-      # A content identity, not a process-local event counter: HTTP and Cable
-      # may land on different Puma workers, and an open page may reconnect
-      # after a process restart. Canonical key ordering makes equal semantic
-      # payloads produce the same token in every process.
       def token_for(key)
-        canonical = canonicalize(key)
-        "sha256:#{::Digest::SHA256.hexdigest(JSON.generate(canonical))}"
+        "sha256:#{::Digest::SHA256.hexdigest(JSON.generate(canonicalize(key)))}"
       end
 
       def canonicalize(node)
@@ -228,6 +416,16 @@ module Hive
         else
           node
         end
+      end
+
+      def bounded_error(error)
+        text = error.message.to_s.b.byteslice(0, 4 * 1024).to_s
+                    .force_encoding(Encoding::UTF_8).scrub
+        Hive::SecretPatterns.redact(text)
+      end
+
+      def iso_time(value)
+        value.respond_to?(:utc) ? value.utc.iso8601(6) : Time.parse(value.to_s).utc.iso8601(6)
       end
     end
   end

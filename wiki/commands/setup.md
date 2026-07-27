@@ -3,7 +3,7 @@ title: hive setup
 type: command
 source: lib/hive/commands/setup.rb, lib/hive/commands/setup_agents.rb, lib/hive/setup/diagnostics.rb, lib/hive/web/app_bundle.rb, lib/hive/commands/{daemon,web}/service_installer.rb
 created: 2026-06-30
-updated: 2026-07-21
+updated: 2026-07-26
 tags: [command, setup, install, agents, skills, consent, web, daemon]
 ---
 
@@ -48,11 +48,13 @@ Without `--no-bootstrap`, setup provisions in this order:
    `Hive::Web::AppBundle.ensure!`.
 4. Run `hive daemon install` semantics through
    `Hive::Commands::Daemon::ServiceInstaller` with autostart, forced template
-   refresh, and the same `Hive::InvokedBinary.path` used to invoke setup.
+   refresh, and the same `Hive::InvokedBinary.path` used to invoke setup. The
+   adapter delegates platform-neutral service planning/application to
+   `Hive::UserService`.
 5. Initialize or enroll the current project unless `--no-init` is passed. If
    the project is already initialized, setup enables it for daemon dispatch.
 6. Unless `--no-service` is passed, install the separate `hive-web` service
-   through the same invoked binary and observe installed, enabled/loaded,
+   through the same boundary and invoked binary, then observe installed, enabled/loaded,
    running/active, and bounded readiness state. A failed web-bundle phase
    blocks mutation but still reports the read-only lifecycle state. If a
    refreshed bundle replaces an app already held by a running service, setup
@@ -143,6 +145,11 @@ Bundle download defaults to the versioned GitHub Release asset `hive-web-<versio
 Setup installs both managed services with the invoked user-facing binary, so daemon and web units point at the same `hive`/`hv` wrapper. The shared `ServiceInstaller::Base#render_launchd_from` renders macOS plists for both daemon and web services: it substitutes the resolved binary into ProgramArguments, PATH/HIVE_BIN, log paths, and the web plist's bare WorkingDirectory (`/Users/YOU` -> real home). `Daemon::ServiceInstaller#installed_launchd_exec_binary` parses the shell-wrapped ProgramArguments positionally and returns the `$0` slot, so renamed binaries or `hv` wrappers do not become false `unparseable` drift.
 
 The web service is separate from the daemon. `hive web install` writes `~/.config/systemd/user/hive-web.service` on Linux or `~/Library/LaunchAgents/local.hive-web.plist` on macOS and pins all six resolved `HIVE_WEB_*` values into the unit; unsupported platforms report a platform exception instead of constructing invalid service-manager argv. When setup receives the installer's successful `unsupported` outcome (including Linux without systemd-user), its service fields remain observationally exact (`enabled`, `running`, and `ready` stay false with `readiness: manager_unavailable`), but the platform-exception phases and process exit remain successful and report foreground `hive web`, WSL-systemd, and Hivebox recovery paths. A genuine install failure, drifted unit, or active-but-not-ready service remains nonzero. Ordinary setup preserves a drifted user-customized unit and points to explicit `hive web install --force` repair. Repeated macOS setup skips `launchctl load` when an unchanged plist is already loaded. Shared installers expose read-only enabled/running probes; mutating setup/install resamples asynchronous launchd lifecycle state before Hive web probes the manager-owned local bind for bounded `/health` readiness, while read-only status stays immediate and reports the separately advertised effective origin. Windows has no separate native service manager in this contract: use WSL with systemd or Hivebox.
+
+The mutating web-install readiness window uses 40 samples at 250 ms intervals,
+so a cold packaged Rails boot can take roughly ten seconds without producing a
+false `active_not_ready` install failure. This longer window does not make
+`hive web status` block; status retains its single immediate health sample.
 
 ## Backlinks
 

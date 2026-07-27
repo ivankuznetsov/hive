@@ -43,6 +43,24 @@ class GemspecTest < Minitest::Test
     expected.each { |path| assert_includes spec.files, path }
   end
 
+  def test_gem_package_includes_workflow_creator_references
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+    references = %w[
+      workflow-creator.md
+      workflow-creator-example.md
+      workflow-schema.md
+      workflow-stage-design.md
+      workflow-checkpoints.md
+      workflow-permissions.md
+      workflow-testing.md
+      workflow-common-mistakes.md
+    ]
+
+    references.each do |name|
+      assert_includes spec.files, "skills/hive/references/#{name}"
+    end
+  end
+
   def test_gem_package_includes_metadata_for_managed_web_path_dependency
     spec = Gem::Specification.load(GEMSPEC_PATH)
 
@@ -70,6 +88,21 @@ class GemspecTest < Minitest::Test
     spec = Gem::Specification.load(GEMSPEC_PATH)
 
     refute_nil spec.runtime_dependencies.find { |candidate| candidate.name == "base64" }
+  end
+
+  def test_runtime_dependencies_include_the_managed_web_locked_bundler
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+    dependency = spec.runtime_dependencies.find { |candidate| candidate.name == "bundler" }
+
+    refute_nil dependency
+    assert_equal Gem::Requirement.new("= 2.7.2"), dependency.requirement
+  end
+
+  def test_runtime_dependencies_exclude_prdigest
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+    dependency = spec.runtime_dependencies.find { |candidate| candidate.name == "prdigest" }
+
+    assert_nil dependency
   end
 
   # The web tier is a Rails app under web/, supported only in the Docker

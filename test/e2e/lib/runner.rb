@@ -8,6 +8,7 @@ require_relative "sandbox"
 require_relative "scenario_parser"
 require_relative "schemas"
 require_relative "step_executor"
+require_relative "../../../lib/hive/atomic_file"
 
 module Hive
   module E2E
@@ -21,10 +22,11 @@ module Hive
         @scenario_metadata = []
       end
 
-      def run_all(pattern: nil, tag: nil, scenarios: nil, keep_artifacts: false)
+      def run_all(pattern: nil, tag: nil, scenarios: nil, keep_artifacts: false, selection: nil)
         @run_id = generate_run_id
         @run_dir = File.join(@runs_dir, @run_id)
         FileUtils.mkdir_p(File.join(@run_dir, "scenarios"))
+        write_selection(selection) if selection
         @started_at = Time.now.utc
         @harness_errors = []
         selected_scenarios = scenarios || select_scenarios(pattern: pattern, tag: tag)
@@ -166,12 +168,18 @@ module Hive
       end
 
       def write_report(status:, total:)
-        path = File.join(@run_dir, "report.json")
-        tmp = "#{path}.tmp.#{Process.pid}"
-        File.write(tmp, JSON.pretty_generate(report_hash(status: status, total: total)))
-        File.rename(tmp, path)
-      ensure
-        FileUtils.rm_f(tmp) if tmp && File.exist?(tmp)
+        write_json(
+          File.join(@run_dir, "report.json"),
+          report_hash(status: status, total: total)
+        )
+      end
+
+      def write_selection(selection)
+        write_json(File.join(@run_dir, "selection.json"), selection)
+      end
+
+      def write_json(path, payload)
+        Hive::AtomicFile.write(path, JSON.pretty_generate(payload), fsync: false)
       end
 
       def report_hash(status:, total:)

@@ -20,7 +20,7 @@ answering is now deterministic Q-by-Q.)
 | Module | File | Purpose |
 |--------|------|---------|
 | `Supervisor` | `lib/hive/bot/supervisor.rb` | Long-running loop. Polls Telegram, runs status ticks, reaps child commands, handles TERM/INT/HUP, writes last-seen update IDs. |
-| `Telegram` | `lib/hive/bot/telegram.rb` | Thin `telegram-bot-ruby` wrapper for `getUpdates`, `sendMessage`, plain length/newline splitting, typed `Update` records, media/voice metadata extraction, `getFile`, and file download. Digest-only chunk inspection, MarkdownV2 validation/conversion, and checkpoint-oriented single-chunk sending were removed with the internal digest engine; PRDigest owns that delivery policy. Benign `getUpdates` transport errors (`Faraday::TimeoutError`, `Faraday::ConnectionFailed`, `Net::ReadTimeout`) still emit `poll_failure`, but at `level=debug category=noise`; other poll errors remain warnings. |
+| `Telegram` | `lib/hive/bot/telegram.rb` | Thin `telegram-bot-ruby` wrapper for `getUpdates`, `sendMessage`, plain length/newline splitting, typed `Update` records, media/voice metadata extraction, `getFile`, and file download. Benign `getUpdates` transport errors (`Faraday::TimeoutError`, `Faraday::ConnectionFailed`, `Net::ReadTimeout`) emit `poll_failure` at `level=debug category=noise`; other poll errors remain warnings. |
 | `PollHealth` | `lib/hive/bot/poll_health.rb` | Small injectable health tracker for the Telegram long-poll loop. It escalates a sustained outage once per unhealthy episode via `poll_unhealthy` after the consecutive-failure or no-success silence threshold, then re-arms after the next successful poll. |
 | `Format` | `lib/hive/bot/format.rb` | Telegram-safe HTML helpers for status/queue and notification messages: text/attribute escaping, control-character stripping, http(s) URL validation, and `pr_url` → clickable `#<number>` links via [[modules/pr]]. |
 | `Router` | `lib/hive/bot/router.rb` | Closed-enum intent classifier and pure dispatch into slash/callback/free-text handlers. Performs allowlist auth before any handler sees an update. The first-contact `/start` command has its own `:slash_start` intent so a newly connected Telegram chat receives a welcome instead of the unknown-command hint. Idea capture includes media updates, voice-note transcription/edit intents, awaiting-text drafts, project-pick callbacks, transcript confirm/discard callbacks, and Done/Skip callbacks. Voice notes sent during an active or reattached `/answer` conversation route to the transcription action with answer context instead of being treated as blank free text. Legacy `path_a_yes:` / `path_a_type:` callbacks classify only to retirement replies; retired `codex_*` callback data has no live intent. |
@@ -39,7 +39,7 @@ answering is now deterministic Q-by-Q.)
 | `BrainstormAnswerWriter` | `lib/hive/bot/brainstorm_answer_writer.rb` | Locked, first-write-wins insertion into the next answer block, with atomic rewrite. Slot location is **Q-context-aware**: walks forward from the parser-identified target Q's line, returning the first empty A-section before the next block boundary. When Q{n} is present and unanswered but has **no `### A` slot at all**, the writer **creates** the slot at the end of the Q-block (before the next Q/Round/marker boundary, via the parser's canonical `answer_header`) and writes the answer there — so a brainstorm agent that emitted a question without an answer block no longer dead-ends the operator (issue #269; previously `:answer_slot_missing`, which with the daemon's answers-pending gate held the task indefinitely). `:answer_slot_missing` remains only as a defensive fallback when the Q line can't be located. `Errno::ENOENT` on the underlying file is mapped to `:question_not_found` (not lock contention). |
 | `ConversationStore` | `lib/hive/bot/conversation_store.rb` | In-memory per-chat active answer state with TTL. No sidecar file; `brainstorm.md` stays canonical. State now carries only `chat_id`, `project`, `slug`, `question_n`, `mode`, and `updated_at`; the retired Codex draft-assist fields (`history`, `draft`, `awaiting_confirm`) and `pending_confirm_count` API are gone. All `@states` reads/writes are mutex-guarded because the Telegram poll thread mutates conversations while the status-poll thread calls `active_for_slug?` and prunes. `active_for_slug?(slug, project: nil)` is prune-aware and returns true when any chat has a non-expired answer conversation for that slug. Project scoping is lenient: two fully resolved different projects do not cross-suppress, but an unscoped/project-less side still suppresses to avoid reintroducing duplicate waiting alerts. `NotificationDispatcher` uses this to avoid duplicate proactive waiting pushes while the operator is already answering. |
 | `ChildSupervisor` | `lib/hive/bot/child_supervisor.rb` | Spawns child `hive ...` commands with `pgroup: true`, writes per-dispatch logs, reaps with `Process.wait2(-1, WNOHANG)`. After plan 2026-05-28-002 the bot only reaches this path for **non-queue-routable** verbs (`hive status --diagnose --write --force` for Refresh diagnostic, `hive new` for the idea picker, `hive approve` for the /approve slash command, `hive accept-finding` / `hive reject-finding` for findings replies). State-mutating workflow verbs are written to the daemon's dispatch-request queue instead — see `DispatchRequestWriter` below. |
-| `DispatchRequestWriter` | `lib/hive/bot/dispatch_request_writer.rb` | Client of the daemon's durable dispatch-request queue. Atomic tmp+rename JSON write into `<state_home>/dispatch_requests/`. Argv is validated against `Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS` at the call site too, so a typo in a slash handler raises locally rather than silently writing a request the daemon would discard. `dispatch!` writes that delivery record first, resolves the task within the requested project/stage, and attempts immediate non-interactive durable admission; accepted attempts are claimed with their attempt/generation IDs, capacity or unavailable-local cases remain queued, and unexpected admission failures remove only the still-unclaimed delivery before re-raising. Returns a request/attempt reference for correlation. |
+| `DispatchRequestWriter` | `lib/hive/bot/dispatch_request_writer.rb` | Client of the daemon's durable dispatch-request queue. Atomic tmp+rename JSON write into `<state_home>/dispatch_requests/`. Argv is validated against `Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS` at the call site too, so a typo in a slash handler raises locally rather than silently writing a request the daemon would discard. `dispatch!` writes that delivery record first, resolves the task within the requested project/stage, and attempts immediate non-interactive durable admission; accepted attempts are claimed with their attempt/generation IDs, capacity or unavailable-local cases remain queued, and unexpected admission failures remove only the still-unclaimed delivery before re-raising. Recoverable-marker requests delegate to the neutral `Hive::Recovery::API`; the coordinator, not the bot namespace, owns cooldown, safety, mutation, and lifecycle truth. |
 | `Logger` | `lib/hive/bot/logger.rb` | JSON-line structured logger with size rotation, closed event enum, and centralized severity defaults. `SCHEMA_VERSION` is now `3`: `hive-bot-log.v3` requires `level` (`debug`/`info`/`warn`/`error`), accepts optional `category`, and adds `poll_unhealthy`; `v1` and `v2` stay checked in for historical lines. Event names remain stable, while `notification_skipped_dedupe` and `notification_skipped_backoff` default to debug/noise and meaningful operator events such as `notification_sent`, `notification_skipped_active_conversation`, `notification_skipped_live_agent`, and `notification_skipped_daemon_plan_pause` remain info by default. The `noise` category (`Logger::CATEGORY_NOISE`, the one load-bearing category value) is a **downstream-only convention**: producers tag high-frequency, low-signal lines (benign poll-transport failures, dedupe/backoff skips) with it, but nothing in this gem filters on it — an external log viewer or forwarder is expected to drop `category=noise` lines. Rotation checks, fallback-state transitions, and file writes are serialized because the supervisor's worker threads share one logger. If rotation and the recovery reopen both fail, the in-flight JSON line and all future lines fall back to stderr instead of raising on a missing file handle. |
 | `Commands::Bot` | `lib/hive/commands/bot.rb` | Thor command surface and PID-file lifecycle. |
 | `Commands::Pairing` | `lib/hive/commands/pairing.rb` | Owner CLI for listing and approving Telegram pairing requests; appends approved chat ids to the global bot allowlist, requests bot reload, and queues approval DMs. |
@@ -102,12 +102,13 @@ paths. The operator-facing message is `Stage stuck` plus one
 plain-language cause sentence. Every `ERROR` and `REVIEW_ERROR` shows
 `Autofix`, regardless of whether diagnostic retry metadata exists; Hive also
 continues its guarded automatic retries. `EXECUTE_STALE` remains manual-only
-and shows `Show details`. Autofix callbacks prefer the generated `marker_id`
-for both error kinds, so stale Telegram buttons cannot clear a newer marker;
-legacy markers fall back to observed pass/phase/reason or reason/exit-code
-attrs. The dispatcher
-clears the persisted alert entry for that task before
-spawning the retry sequence. `/status [project]` and `/queue` are explicit
+and shows `Show details`. Autofix callbacks carry the generated `marker_id`
+for both error kinds and revalidate every encoded stage, marker, and attr
+against the fresh status row, so a stale Telegram button cannot authorize a
+newer marker. Legacy markers bind observed attrs plus state-file mtime. The
+handler submits that observation through `Hive::Recovery::API`, renders the
+coordinator's durable receipt, and resets the persisted alert entry only after
+the request is accepted. `/status [project]` and `/queue` are explicit
 pull surfaces and render actionable rows as `#id Title… — #561 — Stage`
 or `#id Title… — — — Stage`. They use Telegram HTML parse mode so valid
 `pr_url` values become clickable `#<number>` links; all dynamic title,
@@ -153,10 +154,11 @@ schema-version skew*. Bot-specific behaviour (fix-forward on #416):
 
 ## Trust boundary
 
-The bot does not move task folders or invent approval policy. State
+The bot does not move task folders or invent approval policy. Ordinary state
 mutations go through existing `hive` commands (`new`, workflow verbs,
-`markers clear`, `accept-finding`, `reject-finding`, `run`) except for
-two narrow in-process paths. Brainstorm answer insertion is deliberately narrow:
+`accept-finding`, `reject-finding`, `run`); recoverable markers enter the
+shared `Hive::Recovery::API` and are mutated only by `RecoveryCoordinator`.
+Two other in-process paths remain. Brainstorm answer insertion is deliberately narrow:
 `BrainstormAnswerWriter.append!` holds `Hive::Lock.with_task_lock`,
 re-parses the file under the lock, refuses non-empty answer slots, and
 inserts the literal answer text. Two devices racing the same question
@@ -202,13 +204,11 @@ archive markers`), the dispatch is rewritten to
 request_id=…` event is logged. The daemon picks up the request
 on its next tick.
 
-For multi-command sequences (`dispatch_command_sequence`, used by
-Autofix's `markers clear` + retry-verb pair), the bot writes only the
-first queue-routable command and persists later commands as a hidden
-sequence sidecar keyed by that request id. The daemon promotes the next
-command only when the current request exits 0; a non-zero or killed
-clear command discards the sidecar so the retry cannot run against a
-still-set recovery marker.
+Legacy non-recovery multi-command sequences may still use a hidden sequence
+sidecar. Autofix no longer does: it submits one v4 recovery request through
+`Hive::Recovery::API`, and the coordinator persists
+`admitted → cleared → dispatched → terminal` as a single restartable
+lifecycle.
 
 Audit (CI-enforced post-merge):
 
@@ -235,10 +235,8 @@ confirmation (for example `Run completed for <project>/<slug>.` or
 `Archived <project>/<slug>.`); non-zero exits and nil signal/timeout
 exits still render as
 `<slug>: hive <verb> failed (exit N)` or `killed (signal/timeout)`.
-For queue-routed recovery sequences, the daemon suppresses the
-intermediate success notice for the marker-clear step when it promotes
-the retry command, so the operator sees the final result rather than two
-success pings.
+For durable recovery requests, the bot renders the coordinator receipt; there
+is no intermediate marker-clear command or success ping.
 Before relaying, `drain_dispatch_results` re-checks each notice's
 `chat_id` against `chat_id_allowlist` (defense-in-depth, #263): the
 chat_id round-trips from the on-disk request file through the daemon with

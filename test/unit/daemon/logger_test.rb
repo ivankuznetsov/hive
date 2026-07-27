@@ -82,18 +82,6 @@ class HiveDaemonLoggerTest < Minitest::Test
     end
   end
 
-  def test_auto_retry_events_are_accepted
-    with_log do |logger, path|
-      %i[auto_retry auto_retry_skipped auto_retry_exhausted auto_retry_failed].each do |event|
-        logger.event(event, project: "demo", slug: "task", stage: "4-execute")
-      end
-      logger.close
-
-      events = File.readlines(path, chomp: true).map { |line| JSON.parse(line).fetch("event") }
-      assert_equal %w[auto_retry auto_retry_skipped auto_retry_exhausted auto_retry_failed], events
-    end
-  end
-
   # ── rotation ──────────────────────────────────────────────────────────
 
   def test_logger_rotates_past_size_threshold

@@ -2,6 +2,7 @@ require "hive/agent_profiles"
 require "hive/config"
 require "hive/implementation_identity"
 require "hive/implementation_identity/utility_models"
+require "hive/model_routing"
 
 module Hive
   module ImplementationIdentity
@@ -11,7 +12,13 @@ module Hive
         "review.fix" => "high",
         "review.ci" => "high"
       }.freeze
-      IMPLEMENTATION_STAGES = [ "execute", *DOWNSTREAM_EFFORT.keys ].freeze
+      ROUTING_STAGES = {
+        "execute" => "execute_implementation",
+        "open_pr" => "open_pr",
+        "review.fix" => "review_fix",
+        "review.ci" => "review_ci"
+      }.freeze
+      IMPLEMENTATION_STAGES = ROUTING_STAGES.keys.freeze
 
       def initialize(cfg:)
         @cfg = cfg || {}
@@ -25,13 +32,17 @@ module Hive
         end
 
         profile = Hive::AgentProfiles.lookup(provider, cfg: @cfg)
-        model = if fields.key?("model")
-          Hive::ImplementationIdentity.normalize_model(fields["model"], concrete: true)
-        else
-          configured_model(profile) || profile.concrete_default_model(
-            cfg: @cfg, project_root: @cfg["project_root"]
-          )
-        end
+        routing_stage = ROUTING_STAGES.fetch("execute")
+        model =
+          if routed_field?(routing_stage, :model)
+            nil
+          elsif fields.key?("model")
+            Hive::ImplementationIdentity.normalize_model(fields["model"], concrete: true)
+          else
+            configured_model(profile) || profile.concrete_default_model(
+              cfg: @cfg, project_root: @cfg["project_root"]
+            )
+          end
         effort = if fields.key?("effort")
           Hive::ImplementationIdentity.normalize_effort(fields["effort"])
         else
@@ -41,7 +52,8 @@ module Hive
         build_selection(
           stage: "execute", profile: profile, model: model, effort: effort,
           pin_model: true, source: source, generation: generation,
-          originating_attempt: attempt_id
+          originating_attempt: attempt_id,
+          routing_stage: routing_stage
         )
       end
 
@@ -60,10 +72,16 @@ module Hive
         profile = Hive::AgentProfiles.lookup(provider, cfg: @cfg)
         provider_changed = provider.to_s != execute_provider.to_s
 
-        model, pin_model = downstream_model(
-          stage, fields: fields, profile: profile, provider_changed: provider_changed,
-          execute_identity: execute_identity
-        )
+        routing_stage = ROUTING_STAGES.fetch(stage)
+        model, pin_model =
+          if routed_field?(routing_stage, :model)
+            [ nil, true ]
+          else
+            downstream_model(
+              stage, fields: fields, profile: profile, provider_changed: provider_changed,
+              execute_identity: execute_identity
+            )
+          end
         effort = if fields.key?("effort")
           Hive::ImplementationIdentity.normalize_effort(fields["effort"])
         else
@@ -80,7 +98,8 @@ module Hive
           stage: stage, profile: profile, model: model, effort: effort,
           pin_model: pin_model, source: source,
           generation: identity_value(execute_identity, :generation),
-          originating_attempt: attempt_id || identity_value(execute_identity, :originating_attempt)
+          originating_attempt: attempt_id || identity_value(execute_identity, :originating_attempt),
+          routing_stage: routing_stage
         )
       end
 
@@ -91,7 +110,7 @@ module Hive
           model: Hive::ImplementationIdentity.normalize_model(model, concrete: true),
           effort: Hive::ImplementationIdentity.normalize_effort(effort),
           pin_model: true, source: "legacy_backfill", generation: generation,
-          originating_attempt: attempt_id
+          originating_attempt: attempt_id, routing_stage: nil
         )
       end
 
@@ -120,7 +139,47 @@ module Hive
       end
 
       def build_selection(stage:, profile:, model:, effort:, pin_model:, source:,
-                          generation:, originating_attempt:)
+                          generation:, originating_attempt:, routing_stage:)
+        resolution = routing_resolution(
+          routing_stage, profile: profile, model: model, effort: effort
+        )
+        if resolution&.active?
+          Hive::ModelRouting.validate_effective!(
+            models: @cfg.fetch("models", Hive::ModelRouting::EMPTY_MODELS),
+            calls: [
+              {
+                stage: routing_stage,
+                profile: profile,
+                provider: profile.name,
+                current: { model: model, effort: effort }
+              }
+            ]
+          ) do |control|
+            profile.validate_routed_control!(control, source: routing_source)
+          end
+          resolution = materialize_concrete_routed_model(resolution, profile)
+          profile.routing_arguments(resolution, source: routing_source)
+          arguments = profile.identity_arguments(
+            model: resolution.model, effort: resolution.effort, pin_model: true
+          )
+          return Selection.new(
+            stage: stage,
+            provider: profile.name,
+            model: arguments.model,
+            profile_name: profile.name,
+            launcher_identity: profile.launcher_identity,
+            source: source,
+            generation: generation,
+            originating_attempt: originating_attempt,
+            requested_effort: arguments.requested_effort,
+            effective_effort: arguments.effective_effort,
+            effort_supported: arguments.effort_supported,
+            model_pinned: true,
+            native_arguments: [],
+            routing: Hive::ImplementationIdentity.routing_metadata(resolution)
+          )
+        end
+
         arguments = profile.identity_arguments(
           model: model, effort: effort, pin_model: pin_model
         )
@@ -137,8 +196,56 @@ module Hive
           effective_effort: arguments.effective_effort,
           effort_supported: arguments.effort_supported,
           model_pinned: arguments.model_pinned,
-          native_arguments: arguments.native_arguments
+          native_arguments: arguments.native_arguments,
+          routing: nil
         )
+      end
+
+      def routing_resolution(stage, profile:, model:, effort:)
+        return nil unless stage
+
+        Hive::ModelRouting.resolve(
+          models: @cfg.fetch("models", Hive::ModelRouting::EMPTY_MODELS),
+          stage: stage,
+          current: { model: model, effort: effort },
+          provider: profile.name
+        )
+      end
+
+      def routed_field?(stage, field)
+        resolution = Hive::ModelRouting.resolve(
+          models: @cfg.fetch("models", Hive::ModelRouting::EMPTY_MODELS),
+          stage: stage
+        )
+        resolution.provenance.fetch(field).routed?
+      end
+
+      def materialize_concrete_routed_model(resolution, profile)
+        model = resolution.model
+        if Hive::ImplementationIdentity::CONCRETE_MODEL_SENTINELS.include?(
+          model.to_s.downcase
+        )
+          model = profile.concrete_default_model(
+            cfg: @cfg, project_root: @cfg["project_root"]
+          )
+        else
+          model = Hive::ImplementationIdentity.normalize_model(model, concrete: true)
+        end
+
+        Hive::ModelRouting::Resolution.new(
+          stage: resolution.stage,
+          provider: resolution.provider,
+          model: model,
+          effort: resolution.effort,
+          provenance: resolution.provenance
+        )
+      end
+
+      def routing_source
+        root = @cfg["project_root"].to_s
+        return "project config" if root.empty?
+
+        File.join(root, ".hive-state", "config.yml")
       end
 
       def configured_model(profile)

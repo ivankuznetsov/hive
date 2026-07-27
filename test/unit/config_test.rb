@@ -45,7 +45,198 @@ class ConfigTest < Minitest::Test
       assert_nil cfg.dig("open_pr", "agent")
       assert_nil cfg.dig("review", "ci", "agent")
       assert_nil cfg.dig("review", "fix", "agent")
+      refute cfg.key?("models"),
+             "an absent models map must not change the serialized config shape"
       assert_equal dir, cfg["project_root"]
+    end
+  end
+
+  def test_load_parses_project_owned_models_without_collapsing_absent_fields
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          plan:
+            model: " gpt-5.6-sol "
+          review:
+            effort: xhigh
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal({ "model" => "gpt-5.6-sol" }, cfg.dig("models", "plan"))
+      assert_equal({ "effort" => "xhigh" }, cfg.dig("models", "review"))
+      refute cfg.dig("models", "plan").key?("effort")
+      refute cfg.dig("models", "review").key?("model")
+    end
+  end
+
+  def test_load_rejects_project_models_before_emitting_legacy_config_warning
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        reviewers: []
+        models:
+          plan:
+            agent: codex
+      YAML
+
+      _out, err = capture_io do
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match(/models\.plan.*unknown field.*agent/i, error.message)
+      end
+
+      assert_empty err, "structural model validation must run before warnings"
+    end
+  end
+
+  def test_load_rejects_removed_digest_model_route
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          digest:
+            model: gpt-5.6-sol
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/models\.digest.*unknown/i, error.message)
+      assert_includes error.message, config_path
+    end
+  end
+
+  def test_load_rejects_reachable_unsupported_model_control_before_warnings
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        reviewers: []
+        plan:
+          agent: pi
+        models:
+          plan:
+            effort: high
+      YAML
+
+      _out, err = capture_io do
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match(/models\.plan\.effort/i, error.message)
+        assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
+      end
+
+      assert_empty err, "capability validation must run before legacy warnings"
+    end
+  end
+
+  def test_load_skips_capability_validation_for_disabled_patrol
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        patrol:
+          enabled: false
+          agent: pi
+        models:
+          patrol:
+            effort: high
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "high", cfg.dig("models", "patrol", "effort")
+    end
+  end
+
+  def test_load_validates_enabled_patrol_profile
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        patrol:
+          enabled: true
+          agent: pi
+        models:
+          patrol:
+            effort: high
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/models\.patrol\.effort.*effective for patrol_review/i, error.message)
+      assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
+    end
+  end
+
+  def test_load_accepts_incompatible_coarse_field_fully_shadowed_for_reachable_calls
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          review:
+            effort: minimal
+          review_triage:
+            effort: high
+          review_fix:
+            effort: high
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "minimal", cfg.dig("models", "review", "effort")
+    end
+  end
+
+  def test_load_rejects_incompatible_coarse_field_when_one_reachable_call_is_unshadowed
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          review:
+            effort: minimal
+          review_triage:
+            effort: high
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/models\.review\.effort.*effective for review_fix/i, error.message)
+      assert_match(/agent profile :claude/i, error.message)
+    end
+  end
+
+  def test_load_treats_string_and_argv_review_ci_commands_as_reachable
+    [ "bundle exec rake test", [ "bundle", "exec", "rake", "test" ] ].each do |command|
+      with_tmp_dir do |dir|
+        config_path = File.join(dir, ".hive-state", "config.yml")
+        FileUtils.mkdir_p(File.dirname(config_path))
+        File.write(
+          config_path,
+          {
+            "review" => {
+              "ci" => {
+                "agent" => "pi",
+                "command" => command
+              }
+            },
+            "models" => {
+              "review_ci" => {
+                "effort" => "high"
+              }
+            }
+          }.to_yaml
+        )
+
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+        assert_match(/models\.review_ci\.effort/i, error.message)
+        assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
+      end
     end
   end
 
@@ -3042,22 +3233,6 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_digest_registered_projects_preserves_malformed_rows_for_adapter_validation
-    with_tmp_global_config do
-      malformed = { "name" => "Broken", "path" => 123 }
-      valid = { "name" => "Working", "path" => "/tmp/working" }
-      Hive::Config.send(
-        :write_global_config!,
-        { "registered_projects" => [ malformed, valid ] }
-      )
-
-      assert_equal [ "Working" ], Hive::Config.registered_projects.map { |entry| entry.fetch("name") }
-      rows = Hive::Config.digest_registered_projects
-      assert_equal malformed, rows.first
-      assert_equal "Working", rows.last.fetch("name")
-    end
-  end
-
   def test_register_project_still_works_on_first_call_with_fresh_hive_home
     # `register_project` must continue to lazy-create config.yml on first
     # use even though `registered_projects` now validates HIVE_HOME. The
@@ -3629,10 +3804,9 @@ class ConfigTest < Minitest::Test
       # R-02 per-child timeout knobs.
       assert_equal 0,     cfg.dig("daemon", "child_timeout_sec")
       assert_equal 30,    cfg.dig("daemon", "child_kill_grace_sec")
-      # The digest and answer-digest verbs ship a non-zero default cap so a
-      # wedged child can't pin the single global digest slot forever; every
-      # other verb stays at the (disabled) child_timeout_sec default.
-      assert_equal({ "digest" => 3600, "answer-digest" => 3600 },
+      # Answer-digest ships a non-zero default cap so a wedged child cannot
+      # pin the single global digest slot forever.
+      assert_equal({ "answer-digest" => 3600 },
                    cfg.dig("daemon", "child_verb_timeouts"))
     end
   end
@@ -3661,10 +3835,8 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
       assert_equal 10800, cfg.dig("daemon", "child_verb_timeouts", "review")
       assert_equal 5400,  cfg.dig("daemon", "child_verb_timeouts", "develop")
-      # A user override deep-merges with the seeded default, so the digest
-      # wedge backstop survives an operator setting other verb timeouts.
-      assert_equal 3600,  cfg.dig("daemon", "child_verb_timeouts", "digest"),
-                   "an operator override must not wipe the default digest verb timeout"
+      # A user override deep-merges with the seeded default.
+      assert_equal 3600, cfg.dig("daemon", "child_verb_timeouts", "answer-digest")
     end
   end
 
@@ -4096,15 +4268,13 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  # ── Daily digest global settings ─────────────────────────────────────
+  # ── Answer digest global settings ────────────────────────────────────
 
-  def test_load_returns_documented_digest_defaults_when_key_absent
+  def test_load_returns_documented_answer_digest_defaults_when_key_absent
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
 
-      assert_equal false, cfg.dig("digest", "enabled")
-      refute cfg.fetch("digest").key?("agent")
-      assert_equal 7, cfg.dig("digest", "max_catchup_days")
+      refute cfg.key?("digest")
       assert_equal false, cfg.dig("answer_digest", "enabled")
       assert_equal 9, cfg.dig("answer_digest", "hour")
     end
@@ -4165,162 +4335,18 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_global_digest_block_honors_overrides
+  def test_load_rejects_removed_digest_configuration
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)
         registered_projects: []
         digest:
           enabled: true
-          agent: codex
-          max_catchup_days: 3
       YAML
 
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal true, cfg["enabled"]
-      assert_equal "codex", cfg["agent"]
-      assert_equal 3, cfg["max_catchup_days"]
-    end
-  end
-
-  def test_load_global_digest_block_defaults_enabled_on_when_bot_configured
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        bot:
-          enabled: true
-          chat_id_allowlist:
-            - 60499527
-      YAML
-
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal true, cfg["enabled"],
-                   "digest should auto-enable when the Telegram bot is configured with a chat"
-    end
-  end
-
-  def test_load_global_digest_block_honors_explicit_disable_even_with_bot
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          enabled: false
-        bot:
-          enabled: true
-          chat_id_allowlist:
-            - 60499527
-      YAML
-
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal false, cfg["enabled"],
-                   "an explicit digest.enabled: false must always be honored as an opt-out"
-    end
-  end
-
-  def test_load_global_digest_block_stays_off_without_a_deliverable_bot
-    with_tmp_global_config do |home|
-      # Bot enabled but no chat to deliver to: auto-enabling would only
-      # dispatch a paid changelog generator that then fails at send time.
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        bot:
-          enabled: true
-          chat_id_allowlist: []
-      YAML
-
-      assert_equal false, Hive::Config.load_global_digest_block["enabled"],
-                   "no allowlisted chat means no deliverable digest, so stay off"
-    end
-
-    with_tmp_global_config do |home|
-      # Chat present but bot disabled: the user has not turned Telegram on.
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        bot:
-          enabled: false
-          chat_id_allowlist:
-            - 60499527
-      YAML
-
-      assert_equal false, Hive::Config.load_global_digest_block["enabled"],
-                   "a disabled bot means Telegram is not set up, so stay off"
-    end
-  end
-
-  def test_load_global_digest_block_allows_zero_max_catchup_days_as_unbounded
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          max_catchup_days: 0
-      YAML
-
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal 0, cfg["max_catchup_days"]
-    end
-  end
-
-  def test_load_global_digest_block_rejects_bad_shapes_and_values
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest: enabled
-      YAML
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
-      assert_match(/digest.*must be a Hash/, err.message)
-
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          enabled: sometimes
-      YAML
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
-      assert_match(/digest\.enabled.*must be a boolean/, err.message)
-
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          max_catchup_days: -1
-      YAML
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
-      assert_match(/digest\.max_catchup_days.*>= 0/, err.message)
-    end
-  end
-
-  def test_digest_loaders_reject_removed_source_selector_even_when_null
-    [ "shipped", nil ].each do |source|
-      with_tmp_global_config do |home|
-        File.write(File.join(home, "config.yml"), YAML.dump(
-          "registered_projects" => [],
-          "digest" => { "enabled" => true, "source" => source }
-        ))
-
-        error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
-        assert_match(/digest\.source is unsupported/, error.message)
-      end
-    end
-  end
-
-  def test_digest_block_contains_only_scheduler_settings
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          enabled: true
-          max_catchup_days: 12
-      YAML
-
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal true, cfg.fetch("enabled")
-      assert_equal 12, cfg.fetch("max_catchup_days")
-      refute cfg.key?("agent")
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daemon }
+      assert_match(/digest configuration is no longer supported/, error.message)
+      assert_match(/prdigest prose --deliver/, error.message)
+      assert_match(/prdigest facts/, error.message)
     end
   end
 

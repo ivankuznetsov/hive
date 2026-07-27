@@ -2,7 +2,6 @@ require "yaml"
 require "fileutils"
 require "hive/git_ops"
 require "hive/gh"
-require "hive/protected_files"
 require "hive/stages/base"
 
 module Hive
@@ -387,6 +386,10 @@ module Hive
         log_label: "rebase_conflict",
         profile: profile,
         status_mode: :exit_code_only,
+        routing_arguments: Hive::Stages::Base.model_routing_arguments(
+          cfg, "rebase", profile,
+          current: Hive::Stages::Base.model_routing_current(cfg["rebase"])
+        ),
         cfg: cfg
       )
     end

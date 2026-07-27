@@ -2,7 +2,6 @@ require "test_helper"
 require "json"
 require "json_schemer"
 require "stringio"
-require "hive/commands/digest"
 require "hive/commands/watch"
 
 class CommandsWatchTest < Minitest::Test
@@ -761,13 +760,17 @@ class CommandsWatchTest < Minitest::Test
     end + archived
     Hive::Commands::Watch::SourceSnapshot.new(
       operational: {
-        "schema" => "hive-operational-status", "schema_version" => 1, "ok" => true,
+        "schema" => "hive-operational-status",
+        "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-operational-status"),
+        "ok" => true,
         "generated_at" => "2026-07-20T12:00:00Z", "completeness" => "complete",
         "source" => { "task_graph" => { "status" => "complete" } },
         "tasks" => active
       },
       full_graph: {
-        "schema" => "hive-status", "schema_version" => 6, "ok" => true,
+        "schema" => "hive-status",
+        "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+        "ok" => true,
         "projects" => [ { "name" => "demo", "tasks" => legacy_rows } ]
       }
     )

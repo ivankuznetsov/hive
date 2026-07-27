@@ -4,6 +4,7 @@ require "fileutils"
 require "json"
 require "stringio"
 require "hive/commands/doctor"
+require "hive/agent_skills/inspector"
 
 class HiveCommandsDoctorManagedSkillsTest < Minitest::Test
   include HiveTestHelper

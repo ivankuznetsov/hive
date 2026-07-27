@@ -15,6 +15,8 @@ module Hive
   # itself. Plans, pointers, markers, and durable identity state therefore
   # share this single protected-file source of truth.
   module ProtectedFiles
+    class RestoreError < StandardError; end
+
     # Files the orchestrator owns; sub-spawns must not modify them.
     ORCHESTRATOR_OWNED = %w[
       plan.md worktree.yml handoff.yml task.md task-journal.jsonl task-projection.json
@@ -38,6 +40,13 @@ module Hive
     # trust anchors and must not change across the spawn.
     def snapshot_paths(paths)
       paths.to_h { |label, path| [ label, fingerprint(path) ] }
+    end
+
+    # Structured no-follow identities used by the Artifact Firewall. The
+    # legacy #snapshot shape remains content-digest compatible, while this
+    # richer observation also detects mode and file-type substitutions.
+    def observe_paths(paths)
+      paths.to_h { |label, path| [ label, identity(path) ] }
     end
 
     # Capture the bytes needed to restore controller-owned files immediately
@@ -72,9 +81,9 @@ module Hive
         restore_path(paths.fetch(label), captured.fetch(label))
       end
       mismatches = Array(labels).reject do |label|
-        fingerprint(paths.fetch(label)) == captured.fetch(label).fetch(:fingerprint)
+        restored_entry?(paths.fetch(label), captured.fetch(label))
       end
-      raise Hive::Error, "protected paths could not be restored: #{mismatches.join(', ')}" unless mismatches.empty?
+      raise RestoreError, "protected paths could not be restored: #{mismatches.join(', ')}" unless mismatches.empty?
 
       true
     end
@@ -116,25 +125,46 @@ module Hive
       unless stat.file?
         return {
           kind: :unrestorable,
-          fingerprint: fingerprint(path)
+          fingerprint: fingerprint(path),
+          identity: identity(path)
         }
       end
 
-      content = File.open(path, File::RDONLY | File::NOFOLLOW, &:read)
-      {
-        kind: :file,
-        content: content,
-        mode: stat.mode & 0o777,
-        fingerprint: ::Digest::SHA256.hexdigest(content)
-      }
+      File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
+        opened_stat = file.stat
+        unless opened_stat.file?
+          return {
+            kind: :unrestorable,
+            fingerprint: "#{opened_stat.ftype}:#{opened_stat.mode}",
+            identity: {
+              kind: opened_stat.ftype.to_sym,
+              mode: opened_stat.mode & 0o777
+            }.freeze
+          }
+        end
+
+        content = file.read
+        digest = ::Digest::SHA256.hexdigest(content)
+        {
+          kind: :file,
+          content: content,
+          mode: opened_stat.mode & 0o777,
+          fingerprint: digest,
+          identity: {
+            kind: :file,
+            sha256: digest,
+            mode: opened_stat.mode & 0o777
+          }.freeze
+        }
+      end
     rescue Errno::ENOENT
-      { kind: :missing, fingerprint: nil }
+      { kind: :missing, fingerprint: nil, identity: { kind: :missing }.freeze }
     end
     private_class_method :capture_path
 
     def restore_path(path, entry)
       if File.directory?(path) && !File.symlink?(path)
-        raise Hive::Error, "refusing to replace protected path directory: #{path}"
+        raise RestoreError, "refusing to replace protected path directory: #{path}"
       end
 
       case entry.fetch(:kind)
@@ -146,20 +176,63 @@ module Hive
         )
         File.chmod(entry.fetch(:mode), path)
       when :unrestorable
-        raise Hive::Error, "protected non-file path cannot be reconstructed safely: #{path}"
+        raise RestoreError, "protected non-file path cannot be reconstructed safely: #{path}"
       else
-        raise Hive::Error, "unknown protected capture type for #{path}"
+        raise RestoreError, "unknown protected capture type for #{path}"
       end
     end
     private_class_method :restore_path
 
     def verify_restored!(root, captured, names)
       mismatches = Array(names).reject do |name|
-        fingerprint(File.join(root, name)) == captured.fetch(name).fetch(:fingerprint)
+        restored_entry?(File.join(root, name), captured.fetch(name))
       end
-      raise Hive::Error, "protected files could not be restored: #{mismatches.join(', ')}" unless mismatches.empty?
+      raise RestoreError, "protected files could not be restored: #{mismatches.join(', ')}" unless mismatches.empty?
     end
     private_class_method :verify_restored!
+
+    def identity(path)
+      stat = File.lstat(path)
+      case stat.ftype
+      when "file"
+        File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
+          opened_stat = file.stat
+          if opened_stat.file?
+            {
+              kind: :file,
+              sha256: ::Digest::SHA256.hexdigest(file.read),
+              mode: opened_stat.mode & 0o777
+            }.freeze
+          else
+            {
+              kind: opened_stat.ftype.to_sym,
+              mode: opened_stat.mode & 0o777
+            }.freeze
+          end
+        end
+      when "link"
+        { kind: :symlink, target: File.readlink(path) }.freeze
+      when "directory"
+        { kind: :directory, mode: stat.mode & 0o777 }.freeze
+      else
+        { kind: stat.ftype.to_sym, mode: stat.mode & 0o777 }.freeze
+      end
+    rescue Errno::ENOENT
+      { kind: :missing }.freeze
+    rescue SystemCallError, IOError => e
+      { kind: :unreadable, error_class: e.class.name }.freeze
+    end
+    private_class_method :identity
+
+    def restored_entry?(path, entry)
+      expected_identity = entry[:identity]
+      if expected_identity
+        identity(path) == expected_identity
+      else
+        fingerprint(path) == entry.fetch(:fingerprint)
+      end
+    end
+    private_class_method :restored_entry?
 
     def validate_relative_name!(name)
       value = name.to_s

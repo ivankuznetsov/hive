@@ -1,5 +1,4 @@
 require "hive/brainstorm_parser"
-require "hive/git_ops"
 require "hive/secret_patterns"
 require "hive/task"
 require "hive/worktree"
@@ -7,8 +6,11 @@ require "hive/worktree"
 module Hive
   module Daemon
     # Work-area guard before clearing a durable error for a same-stage rerun.
-    # It temporarily defers retries when current files prove that a blind rerun
-    # would overwrite operator input or collide with uncommitted execute work.
+    # It temporarily defers retries when current files prove that a rerun would
+    # overwrite operator input or use a worktree owned by another task.
+    # Execute retries deliberately resume an owned dirty worktree in place:
+    # those edits are the failed agent's durable progress, and the execute
+    # runner already requires a clean, committed result before completion.
     # Unknown stages are allowed: their runner remains responsible for
     # re-validating current state, and parking them forever would contradict
     # Hive's file-based recovery contract.
@@ -51,16 +53,7 @@ module Hive
       end
 
       def execute_safe?(row)
-        pointer_path = File.join(row.folder.to_s, "worktree.yml")
-        return [ true, "missing worktree pointer; runner will create it" ] unless File.exist?(pointer_path)
-
-        safe, reason, path = owned_worktree_safe?(row)
-        return [ safe, reason ] unless safe
-
-        status = Hive::GitOps.new(path).status_short
-        return [ true, "worktree clean" ] if status.to_s.strip.empty?
-
-        [ false, "worktree dirty" ]
+        owned_worktree_safe?(row).first(2)
       end
 
       def owned_worktree_safe?(row)

@@ -132,7 +132,7 @@ Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and the command/schem
 | Backward via `--to`      | none                            | n/a      |
 | Same stage (no-op)       | none                            | n/a      |
 
-`:error`, `:waiting`, `:execute_waiting`, `:execute_stale`, `:review_waiting`, `:review_ci_stale`, `:review_stale`, `:review_error` are all non-terminal: they leave the task in place. The error message includes `marker is :<name>` so an agent can branch deterministically. Backward `--to` is the recovery lever (e.g. `hive approve <slug> --to 3-plan` after an execute crash). For the recovery markers (`:review_stale` / `:review_ci_stale` / `:review_error` / `:execute_stale` / `:error`) the agent-callable surface is `hive markers clear FOLDER --name <NAME>` — see [[commands/markers]].
+`:error`, `:waiting`, `:execute_waiting`, `:execute_stale`, `:review_waiting`, `:review_ci_stale`, `:review_stale`, `:review_error` are all non-terminal: they leave the task in place. The error message includes `marker is :<name>` so an agent can branch deterministically. Backward `--to` is the recovery lever for an intentional stage rewind. Recoverable error markers use the fresh `workflow.retry` action from `hive status --operational --json`; `EXECUTE_STALE` remains manual because findings must be inspected first. `hive markers clear` remains a low-level maintenance command, not the standard agent recovery recipe.
 
 ## Idempotency: `--from`
 

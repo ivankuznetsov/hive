@@ -6,6 +6,22 @@
 
 This doc is the authoritative source for the `AgentProfile` instances under `lib/hive/agent_profiles/` (created in U12). If a CLI's behavior changes upstream, update this doc and the corresponding profile in lockstep.
 
+## Routed model and effort capabilities
+
+The selected `AgentProfile` validates and renders an effective built-in-stage
+route. `models:` never selects the profile.
+
+| Profile | Routed model | Routed effort | Native placement |
+| --- | --- | --- | --- |
+| Claude | yes; `inherit` omits the flag | `default`, `inherit`, `low`, `medium`, `high`, `xhigh`, `max` | `--model` / `--effort` in Claude argv; shared by headless and tmux |
+| Codex | yes; `default`/`inherit` omit the flag | `default`, `inherit`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh` | global `--model` / `-c model_reasoning_effort=…` before `exec` or `review` |
+| Grok | yes; `default`/`inherit` omit the flag | `default`, `inherit`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | profile-native `--model` / `--reasoning-effort` flags |
+| Pi | yes; `default`/`inherit` omit the flag | unsupported | profile-native model flag only |
+
+An unsupported effective effort fails before launch; Hive does not translate
+or leak another provider's flags. When routing is inactive or no recognized
+stage context is supplied, the pre-routing argv path and order are unchanged.
+
 > **Scope decision (2026-04-25, post-spike):** **opencode is dropped from v1 scope.** Reasons captured in the per-CLI summary below: (a) no native CE plugin → hive must inline SKILL.md content, losing plugin-update propagation; (b) per-spawn filesystem isolation requires temp-config writing rather than a simple flag, which is non-trivial to implement and harder to reason about than the per-spawn `--add-dir` model; (c) hive's v1 default reviewer set already covers two profile-supported CLIs (claude + codex), so opencode adds maintenance surface without unique signal. The opencode column below is preserved as evidence of evaluation; U12 ships profiles for **claude, codex, and pi only**. Opencode can be revisited in v1.1 if a user needs it (e.g., for OpenCode Zen cost reasons).
 
 ---
@@ -212,9 +228,22 @@ Hive rejects relative path overrides so preflight and a child spawned in another
 working directory cannot resolve different credential files or state directories. Grok has no
 `--add-dir` equivalent or native dollar-budget flag, so Hive retains its
 process-group wall-clock limit and emits the normal reduced-isolation warning.
-No Grok skill verifier exists yet; the bundled Grok CE reviewer therefore uses
-a compact, self-contained, report-only prompt instead of claiming native skill
-resolution.
+Grok Build now supports native plugins. Hive manages Compound Engineering with:
+
+```sh
+grok plugin install EveryInc/compound-engineering-plugin --trust
+grok plugin enable compound-engineering
+grok plugin update compound-engineering
+```
+
+`Hive::SkillCheck::Grok` resolves enabled plugin skills from Grok's native
+`installed-plugins/registry.json` and `[plugins]` configuration. The opt-in Grok
+CE reviewer now invokes `/ce-code-review`; the previous self-contained copied
+review prompt was only a compatibility stopgap and has been removed. Doctor
+inspection runs `grok inspect --json` from the target project and requires the
+runtime skill's reported source to match the canonical, realpath-jailed skill
+inside the expected installed plugin. A stale, disabled plugin converges in one
+setup plan by updating before enabling it.
 
 ## Normalized implementation identity arguments (2026-07-17)
 
@@ -225,9 +254,15 @@ Implementation-owning stages pass normalized model and effort values through the
 | Claude | `--model <model>` | `--effort <value>` | `sonnet`, `medium` |
 | Codex | `--model <model>` | `-c model_reasoning_effort=<value>` | literal `gpt-5.6-terra`, `medium` |
 | Pi | `--model <model>` when pinned | unsupported | normal provider default, no model pin |
-| Grok | `--model <model>` when pinned | unsupported | normal provider default, no model pin |
+| Grok | `--model <model>` when pinned | `--reasoning-effort <value>` | normal provider default, no model pin |
 
-Review-fix and CI-fix retain the exact concrete execute model and request `high`. Pi and Grok honestly report the request as unsupported and omit an effort argument. Their open-PR utility route deliberately omits a model pin so provider-native configuration remains authoritative, while the resolved concrete default is retained for audit/status. Every value is a discrete argv element; model and effort never ride shell interpolation or credential-bearing environment snapshots.
+Review-fix and CI-fix retain the exact concrete execute model and request
+`high`. Pi honestly reports that request as unsupported and omits an effort
+argument; Grok renders it natively. Pi and Grok's open-PR utility route
+deliberately omits a model pin so provider-native configuration remains
+authoritative, while the resolved concrete default is retained for
+audit/status. Every value is a discrete argv element; model and effort never
+ride shell interpolation or credential-bearing environment snapshots.
 
 ## Brainstorm Interactive Tmux Addendum
 

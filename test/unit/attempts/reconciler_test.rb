@@ -188,24 +188,6 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
-  def test_compatibility_owners_are_adopted_suspect_or_lost
-    { matching: :legacy_adopted, unverifiable: :legacy_suspect, missing: :lost }.each do |owner, classification|
-      with_store do |store|
-        store.create_compatibility_running(
-          attempt_id: "compat-#{owner}", task_id: "42", project: "demo",
-          task_slug: "durable-task", intended_stage: "4-execute",
-          task_generation: "generation-#{owner}", progress_token: "progress",
-          owner: OWNER, provider: "legacy", starting_revision: nil, now: NOW
-        )
-        status = reconciler(store, owner).reconcile(now: NOW + 1).attempts.first
-        assert_equal classification, status.classification
-        if owner == :missing
-          assert_equal "legacy_owner_gone", status.attempt["loss"]["reason"]
-        end
-      end
-    end
-  end
-
   def test_competing_reconciler_cas_loss_is_ignored_until_next_scan
     with_store do |store|
       running_attempt(store, stale_sec: 30)

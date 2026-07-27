@@ -3,11 +3,17 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-23
+updated: 2026-07-27
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+
+The live project template includes a commented, copyable `models:` example.
+Exact and coarse entries inherit model and effort independently, never select an
+agent, and are absent by default so generated projects keep legacy behavior.
+Arbitrary descriptor stage names remain descriptor-owned and are rejected from
+the closed `models:` vocabulary.
 
 ## Strict project root keys
 
@@ -64,6 +70,22 @@ command-specific fallback behavior. An invalid workflow path cannot pre-empt
 an unsupported-root diagnostic; the legacy reviewers alias is normalized before
 workflow-path resolution.
 
+## Model-routing ownership and structure
+
+`models:` is a strict, no-default section backed by
+[[modules/model_routing]]. Leaving it out therefore leaves the loaded project
+config shape unchanged. Project config may contain every registered public
+key. The removed in-process PR digest is not a route; standalone PRDigest owns
+that integration.
+
+Structural validation rejects non-mapping roots, unknown or wrong-owner stage
+keys, empty/non-mapping entries, fields other than `model` and `effort`,
+blank/non-scalar models, and efforts outside the shared accepted vocabulary.
+Each entry retains only authored fields, so model-only and effort-only
+overrides stay distinguishable. This structural pass runs before the legacy
+top-level-reviewers warning. Reachable-profile capability validation remains a
+separate, pure routing-domain step after exact/coarse shadowing is known.
+
 ## Condition authority
 
 ```yaml
@@ -108,14 +130,14 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
     "execute_implementation" => 500, "open_pr" => 50, "artifacts" => 100,
     "finalize" => 50,
     "review_ci" => 100, "review_triage" => 75,
-    "review_fix" => 500, "review_browser" => 100, "patrol" => 100, "digest" => 50
+    "review_fix" => 500, "review_browser" => 100, "patrol" => 100
   },
   "timeout_sec" => {
     "brainstorm" => 1800, "plan" => 3600,
     "execute_implementation" => 14400, "open_pr" => 1800,
     "artifacts" => 3600, "finalize" => 1800,
     "review_ci" => 3600, "review_triage" => 1800,
-    "review_fix" => 14400, "review_browser" => 3600, "patrol" => 3600, "digest" => 1800
+    "review_fix" => 14400, "review_browser" => 3600, "patrol" => 3600
   },
   # Stage-level agent defaults remain for independently owned stages.
   # Implementation-owned downstream stages intentionally omit active
@@ -202,7 +224,6 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
     "auto_retry" => { "enabled" => true },
     ...
   },
-  "digest" => { "enabled" => false, "agent" => nil, "max_catchup_days" => 7 },
   "screenote" => { "base_url" => "https://screenote.ai" },
   "bot" => {
     "enabled" => false,
@@ -228,7 +249,7 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
 
 `default_workflow` is the middle tier in task workflow selection: `<task>/meta.yml workflow:` wins first, then `Config.load(project_root)["default_workflow"]`, then built-in `coding`. It is deliberately not registry-validated during config load; unknown names fail when `Hive::Task` resolves the workflow so the error is tied to the affected task path. `dependency_gate_stage` belongs to the depending project, defaults to `8-finalize`, and may be set only to `9-done`; dependency admission also verifies that the prerequisite's own workflow can actually reach the selected gate.
 
-`worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `permissions: "yolo"` preserves existing launch behavior unless a project or stage opts into a narrower Claude tool scope; `Config.permission_spec(cfg, stage)` returns the exact stage spec (`plan.permissions`, `review.ci.permissions`, reviewer-entry `permissions`, etc.) when present, otherwise the project default, with no field merge. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `review.adhoc.reviewers: nil` inherits `review.reviewers`, while an explicit `[]` means zero ad-hoc reviewers, and `review.adhoc.fix: false` keeps ad-hoc PR reviews review-only unless an operator opts into local fix commits with `true`. `daemon.auto_retry.enabled` defaults to `true` and can be set to `false` to disable automatic `ERROR` / `REVIEW_ERROR` clears while leaving ordinary daemon dispatch and stale in-flight ownership reconciliation enabled. `patrol.review.reviewers` defaults to the single native Codex reviewer (`name: codex-native-review`, `kind: codex_review`), which runs Codex's built-in `review` subcommand and needs no CE skill; fresh init can optionally add Codex or Claude CE `ce-code-review` entries for patrol PRs. `daemon.max_concurrent_patrol_scans` (default `1`, validated `>= 1`) is a **per-project** cap bounding daemon-scheduled `hive patrol PROJECT` scans on a **separate** in-flight budget from task dispatch: a long codex-backed scan never consumes a `daemon.max_concurrent_runs` task slot — scans are tagged `kind: :patrol_scan` in the dispatcher and excluded from the per-project/global task caps, counted only against this independent cap. `ConcurrencyController#can_dispatch_patrol_scan?` counts only the **given project's** running scans (`entry[:kind] == :patrol_scan && entry[:project] == project`), so the default `1` means one scan per project at a time and **different projects patrol in parallel** rather than being serialized/starved by a global count (see `→ :patrol_scan_cap`).
+`worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `permissions: "yolo"` preserves existing launch behavior unless a project or stage opts into a narrower Claude tool scope; `Config.permission_spec(cfg, stage)` returns the exact stage spec (`plan.permissions`, `review.ci.permissions`, reviewer-entry `permissions`, etc.) when present, otherwise the project default, with no field merge. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `review.adhoc.reviewers: nil` inherits `review.reviewers`, while an explicit `[]` means zero ad-hoc reviewers, and `review.adhoc.fix: false` keeps ad-hoc PR reviews review-only unless an operator opts into local fix commits with `true`. `daemon.auto_retry.enabled` defaults to `true` and can be set to `false` to disable the daemon's automatic `ERROR` / `REVIEW_ERROR` submissions while leaving explicit operator recovery, ordinary daemon dispatch, and stale in-flight ownership reconciliation enabled. `patrol.review.reviewers` defaults to the single native Codex reviewer (`name: codex-native-review`, `kind: codex_review`), which runs Codex's built-in `review` subcommand and needs no CE skill; fresh init can optionally add Codex or Claude CE `ce-code-review` entries for patrol PRs. `daemon.max_concurrent_patrol_scans` (default `1`, validated `>= 1`) is a **per-project** cap bounding daemon-scheduled `hive patrol PROJECT` scans on a **separate** in-flight budget from task dispatch: a long codex-backed scan never consumes a `daemon.max_concurrent_runs` task slot — scans are tagged `kind: :patrol_scan` in the dispatcher and excluded from the per-project/global task caps, counted only against this independent cap. `ConcurrencyController#can_dispatch_patrol_scan?` counts only the **given project's** running scans (`entry[:kind] == :patrol_scan && entry[:project] == project`), so the default `1` means one scan per project at a time and **different projects patrol in parallel** rather than being serialized/starved by a global count (see `→ :patrol_scan_cap`).
 
 **Patrol is opt-in.** `resolve_patrol_mode!` runs on the raw YAML before `merge_defaults` and only derives/injects mode knobs when `mode:` is **explicitly present** in the raw config (`return unless nested_key?(data, "patrol", "mode")`). A config with **no patrol section** — or a patrol section that omits `mode:` — injects nothing and falls through to `DEFAULTS["patrol"]["enabled"] = false`, so patrol stays **disabled**. `medium` is the default offered by the `hive init` *prompt*, never a config-resolution default. The explicit modes are `ultrapatrol` (`timer`/30m, 800k tokens and 10 launches per cycle, 2.4m/36 per UTC day, 100k tokens and 100 budget-equivalent units per agent), `high` (`timer`/2h, 400k/6 per cycle, 1.2m/18 per day, 75k/50 per agent), `medium` (`timer`/4h, 200k/3 per cycle, 600k/8 per day, 50k/25 per agent), `low` (`new_commits`, 100k/1 per cycle, 200k/2 per day, 40k/10 per agent), and `off` (`enabled: false`). `fix_budget_multiplier` defaults to `2` and widens only an ordinary fix agent's streamed per-agent limit; cycle/day token and launch totals stay shared. `architecture_budget_multiplier` defaults to `2`, widening architecture stages' per-cycle token/launch limits and per-agent token limit while leaving the native budget-equivalent guard and shared project/day token ceiling unchanged; architecture fixes do not compound both multipliers. Input and output consume token ceilings, while cached tokens remain visible telemetry without being charged again. Metered architecture launches are accounted separately and never consume the mode's ordinary daily launch quota. Architecture reviews use the independent `max_architecture_review_spawns_per_day` ceiling (default `8`) without consuming fix capacity. `max_architecture_unmetered_spawns_per_day` defaults to `96` and is the independent durable backstop when an architecture provider repeatedly omits token counts. The `max_budget_usd_per_agent` name follows agent CLI terminology; with subscription-backed agents it is not a separate payment. The mode never changes finding/PR caps, per-feature diversity, confidence, or alpha gates. Explicit granular knobs always win over a set mode and survive the deep-merge.
 
@@ -281,32 +302,9 @@ instead of silently dropping that project. See [[commands/refactor-patrol]].
 
 ## Digest config
 
-Hive no longer owns digest generation configuration. `Hive::Prdigest` loads the
-small scheduler block plus the global bot block and writes a private temporary
-PRDigest config. The relevant Hive keys are:
-
-- `digest.enabled` for daemon scheduling;
-- `digest.max_catchup_days` for Hive's scheduler cursor;
-- `bot.chat_id_allowlist[0]` for the delegated Telegram destination.
-
-`digest.agent`, `budget_usd.digest`, and `timeout_sec.digest` were removed with
-the internal LLM/MarkdownV2 engine. Fetch/render/delivery options belong to
-PRDigest.
-
-`load_global_digest_block` returns only the validated `digest` block for
-`Hive::Commands::Daemon`, which wires `DigestScheduler`. Delivery resolves to
-`bot.chat_id_allowlist[0]`. The digest is **opt-out**: when the operator has not
-set `digest.enabled`, `load_global_digest_block` derives it from the bot config —
-`true` when `bot.enabled == true` and `bot.chat_id_allowlist` has at least one
-integer chat id, else `false` (the predicate is the private
-`Config.telegram_digest_default?(data)` helper). An explicit `digest.enabled`
-(true or false) is always honored; only the unset case is derived. Both
-scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher
-SIGHUP reconfigure) load through `load_global_digest_block`, so the derived
-value applies in both. The block has no `source` field: the sole digest mode is
-the registered-repository PR changelist, and CLI `--repo` is a runtime filter.
-Legacy `digest.source` is rejected even when set to `null`, so recursive config
-merging cannot silently preserve the removed shipped/merged selector.
+Hive has no PR-digest configuration. A top-level `digest:` block in global
+config is rejected when the daemon starts, with guidance to schedule
+`prdigest prose --deliver` directly or use `prdigest facts` from an agent.
 
 ## Screenote config
 
@@ -333,14 +331,13 @@ expiry, client id, issuer, MCP resource URL, base URL, and default
 | `global_config_path` | `<hive_home>/config.yml` |
 | `hive_state_dir(project_root, name = ".hive-state")` | `<project_root>/<name>` |
 | `load(project_root)` | Reads `<project_root>/.hive-state/config.yml`, treating only an initial `ENOENT` as absent and rewrapping traversal, symlink-loop, read, and YAML parse failures as path-bearing `ConfigError`s; validates raw project root keys against static keys plus registered workflow stage names; then recursively deep-merges onto DEFAULTS, validates values, and returns a Hash with `"project_root"` injected. |
-| `registered_projects` | Reads global config; returns `[{name, path, hive_state_path, repository_identity}, …]` (paths `expand_path`-ed). The identity is a normalized canonical `origin` captured at enrollment when available. |
+| `registered_projects` | Reads global config; returns `[{name, path, hive_state_path, repository_identity}, …]` (paths `expand_path`-ed). The identity is a normalized canonical `origin` captured at enrollment when available; `hive migrate <project>` backfills missing identities for older rows without overwriting an existing value. |
 | `find_project(name)` | First entry from `registered_projects` matching `name` (or `nil`). |
 | `register_project(name:, path:, repository_identity: :detect)` | Adds or replaces an entry under `config.yml.lock`; stores private `real_path` for relink detection and the transport-independent canonical `origin` identity when detectable. Enrollment still succeeds without an origin, but an explicit cross-project dependency targeting that project later fails closed until identity is configured and re-enrolled. |
 | `unregister_project(name)` | Index-based delete (not `Array#-`, which would clear duplicate-content rows); `to_s`-symmetric name match so an Integer `name:` in YAML still resolves; rewrites under `config.yml.lock`. |
 | `prune_missing_projects!(dry_run:)` | Drops rows whose `path` is not a directory, whose stored valid `real_path` no longer matches the current target, OR whose shape is invalid (non-Hash, missing `path`); reads and, unless `dry_run`, rewrites under `config.yml.lock`. |
 | `load_global_config(path)` | Reads + `YAML.safe_load`; rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` as `ConfigError` (exit 78) so `chmod 000` on the file surfaces as bad-config, not internal-error. |
-| `load_global_digest_block` | Reads global config, deep-merges the `digest` section over defaults, validates `enabled` and `max_catchup_days`, and returns the scheduler/PRDigest-adapter block. |
-| `telegram_chat_id!` | Returns the first allowlisted Telegram chat or raises a configuration error; shared by PRDigest delegation and the separate answer digest. |
+| `telegram_chat_id!` | Returns the first allowlisted Telegram chat or raises a configuration error; used by Hive's answer digest. |
 | `load_global_web` | Reads global config, deep-merges the `web` section onto web defaults, fills `session_secret_file` with `<state_home>/.web.session_secret` when omitted, validates bind/port/origin/GitHub fields, and returns the merged web config for [[commands/web]]. |
 | `global_web_defaults` | Returns a deep copy of `DEFAULTS["web"]` with the state-home session-secret path injected. |
 | `update_global_config!` | Locks sibling `config.yml.lock`, yields the mutable global config Hash, then writes via tempfile + `fsync` + atomic rename. Use for read-modify-write registry/global-config changes. |
@@ -380,7 +377,7 @@ trigger a failure — only user input does. Both boundaries raise
 `Hive::ConfigError` (the single class for all "config is bad" cases). Key checks
 include:
 
-1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `web`, `babysitter`, `patrol`, `digest`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
+1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `models`, `plan`, `execute`, `conditions`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `web`, `screenote`, `babysitter`, `patrol`, `refactor_patrol`, `answer_digest`, `bot`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
 2. **`validate_reviewers!` / `validate_review_adhoc!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`. `review.adhoc.reviewers` is either nil or the same reviewer-entry Array shape, and `review.adhoc.fix` is boolean.
 3. **`validate_review_fix_auto_commit!`** — `review.fix` and `review.fix.auto_commit` must stay Hash-shaped. `review.fix.auto_commit.sign_policy` is optional and must be one of `inherit`, `bypass`, or `fail`; `scope_check.enabled` must be boolean; `scope_check.allowed_paths` / `denied_paths` must be relative path-glob arrays without traversal, absolute paths, or null bytes.
 4. **`validate_role_agent_names!`** — every stage/review role agent path is checked via `validate_agent_name!`.
@@ -392,6 +389,11 @@ include:
 10. **`validate_refactor_patrol!`** — validates discovery/auto-fix/issue booleans and nested shapes, agent names, confidence/run counts, the whole-run review deadline, include/exclude paths, all six commands including `docs` and `public_contract`, semantic scope and contract/dependency policy booleans, leverage weights, the proposal-wide leverage floor, and the issue threshold. File count and diff size are publication evidence, not config or mutation gates; runtime mutation remains protected by root/path confinement, `.hive-state` and protected-path checks, secret scanning, dependency and public-contract guards, and applicable validation commands. Invalid side-effect policy fails at config load, not in a background action.
 11. **`validate_daemon!`** — daemon numeric bounds, booleans, and nested hashes are checked before the daemon starts. The nested `daemon.auto_retry` block must be a hash, and `daemon.auto_retry.enabled` must be boolean when present.
 12. **`validate_dependency_gate_stage!`** — `dependency_gate_stage` must be exactly `8-finalize` or `9-done`. Runtime admission then checks reachability against the prerequisite task's selected workflow rather than assuming the coding descriptor.
+13. **`validate_model_routing_capabilities!`** — after structural role and
+patrol validation, resolves exact/coarse routes for enabled, reachable built-in
+calls and asks each already-selected profile to validate only its effective
+model/effort controls. Fully shadowed coarse fields and disabled optional calls
+do not fail. This pure barrier runs before legacy warnings or runtime effects.
 
 Bot attachment capture settings are validated with the other bot numeric
 keys: `bot.idea_attachment_max_bytes` defaults to 20 MiB and may not
@@ -478,10 +480,7 @@ cfg.dig("babysitter", "enabled")
 cfg.dig("babysitter", "max_concurrent_prs")
 cfg.dig("patrol", "review_prs")
 cfg.dig("patrol", "review", "reviewers")
-cfg.dig("digest", "agent")
 cfg.dig("daemon", "auto_retry", "enabled")
-cfg.dig("budget_usd", "digest")
-cfg.dig("timeout_sec", "digest")
 cfg.dig("bot", "chat_id_allowlist")
 cfg["worktree_root"]
 ```
@@ -492,10 +491,10 @@ Tests use `with_tmp_global_config` (`test/test_helper.rb:30`) to point `HIVE_HOM
 
 ## Tests
 
-- `test/unit/config_test.rb` — defaults, recursive deep-merge, register/find round-trip, malformed YAML, reviewer/agent validation, ordinary patrol, architecture-patrol consent/policy validation, babysitter/digest defaults, global digest config merge, and bot digest-chat validation.
+- `test/unit/config_test.rb` — defaults, recursive deep-merge, register/find round-trip, malformed YAML, reviewer/agent validation, ordinary patrol, architecture-patrol consent/policy validation, removed PR-digest config rejection, and answer-digest/bot validation.
 - `test/unit/web/config_test.rb` — global web defaults and invalid web port rejection.
 
 ## Backlinks
 
-- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/babysit]] · [[commands/patrol]] · [[commands/refactor-patrol]] · [[commands/web]] · [[commands/digest]]
-- [[modules/agent]] · [[modules/digest]] · [[state-model]]
+- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/babysit]] · [[commands/patrol]] · [[commands/refactor-patrol]] · [[commands/web]]
+- [[modules/agent]] · [[state-model]]

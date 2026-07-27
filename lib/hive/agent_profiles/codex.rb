@@ -49,6 +49,14 @@ module Hive
       },
       model_argument_builder: ->(model) { [ "--model", model ] },
       effort_argument_builder: ->(effort) { [ "-c", "model_reasoning_effort=#{effort}" ] },
+      routed_model_argument_builder: ->(model) {
+        %w[default inherit].include?(model) ? [] : [ "--model", model ]
+      },
+      routed_effort_argument_builder: ->(effort) {
+        %w[default inherit].include?(effort) ? [] : [ "-c", "model_reasoning_effort=#{effort}" ]
+      },
+      routed_effort_values: %w[default inherit none minimal low medium high xhigh],
+      routing_argument_placement: :global,
       launcher_identity: "codex-cli/v1"
     )
 

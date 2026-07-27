@@ -3,10 +3,12 @@ require "fileutils"
 require "securerandom"
 require "time"
 require "hive/agent"
+require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/config"
 require "hive/events"
 require "hive/markers"
+require "hive/model_routing"
 require "hive/permission_scope"
 require "hive/stages/clean_exit"
 require "hive/usage_db"
@@ -132,12 +134,89 @@ module Hive
         Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).resolve_stage!(stage)
       end
 
+      # Durable routed identities intentionally persist provider-neutral
+      # routing metadata instead of rendered argv. Materialize that metadata
+      # through the selected profile at the last trusted seam before launch;
+      # legacy identities continue to use their stored native argv unchanged.
+      def implementation_launch_arguments(identity, profile)
+        return { identity_arguments: nil, routing_arguments: nil } unless identity
+
+        {
+          identity_arguments: identity.native_arguments,
+          routing_arguments: identity.routing_arguments(profile)
+        }
+      end
+
+      # Resolve one non-durable built-in launch through the same closed,
+      # provider-neutral routing domain as implementation identities. The
+      # caller has already selected the profile; this helper can change only
+      # model and effort, never provider. A nil return preserves the exact
+      # legacy launch path when no route is active.
+      def model_routing_arguments(cfg, stage, profile, current: {})
+        cfg ||= {}
+        models = cfg.fetch("models", Hive::ModelRouting::EMPTY_MODELS)
+        return nil if models.empty?
+
+        resolution = Hive::ModelRouting.resolve(
+          models: models,
+          stage: stage,
+          current: current || Hive::ModelRouting::EMPTY_MODELS,
+          legacy: legacy_model_routing_values(cfg, profile),
+          provider: profile.name
+        )
+        return nil unless resolution.active?
+
+        profile.routing_arguments(
+          resolution,
+          source: model_routing_source(cfg)
+        )
+      end
+
+      def model_routing_current(block)
+        return Hive::ModelRouting::EMPTY_MODELS unless block.is_a?(Hash)
+
+        {
+          model: block["model"] || block[:model],
+          effort: block["effort"] || block[:effort]
+        }.compact
+      end
+
+      # Generic workflow/council stages keep descriptor-level controls unless
+      # their descriptor name is one of Hive's closed built-in identities.
+      # This preserves arbitrary custom stage names while letting the generic
+      # execution seam honor a built-in identity without inventing an open
+      # `models:` namespace.
+      def recognized_model_routing_arguments(cfg, stage, profile, current: {})
+        return nil unless Hive::ModelRouting.known?(stage)
+
+        model_routing_arguments(cfg, stage, profile, current: current)
+      end
+
+      def legacy_model_routing_values(cfg, profile)
+        return Hive::ModelRouting::EMPTY_MODELS unless profile.name == :claude
+
+        {
+          model: cfg.dig("claude", "model"),
+          effort: cfg.dig("claude", "effort")
+        }.compact
+      end
+      private_class_method :legacy_model_routing_values
+
+      def model_routing_source(cfg)
+        root = cfg["project_root"].to_s
+        return "project config" if root.empty?
+
+        File.join(root, ".hive-state", "config.yml")
+      end
+      private_class_method :model_routing_source
+
       def stage_permission_scope(cfg, stage_name, task, profile,
                                  base_add_dirs: [ task.folder ],
                                  default_allowed_tools: nil,
                                  explicit_permission_spec: MISSING_EXPLICIT_PERMISSION_SPEC,
                                  managed_slot: nil,
-                                 managed_context: nil)
+                                 managed_context: nil,
+                                 managed_outputs: [])
         if task.respond_to?(:managed_workflow?) && task.managed_workflow?
           require "hive/workflow_package/runtime_policy"
           if explicit_permission_spec.equal?(MISSING_EXPLICIT_PERMISSION_SPEC)
@@ -148,7 +227,9 @@ module Hive
           runtime_policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
             explicit_permission_spec,
             task_folder: task.folder, profile: profile,
-            package_root: context.fetch(:package_root), environment: context.fetch(:environment)
+            package_root: context.fetch(:package_root), environment: context.fetch(:environment),
+            base_add_dirs: base_add_dirs,
+            managed_outputs: managed_outputs
           )
           return {
             add_dirs: runtime_policy.directories,
@@ -201,6 +282,8 @@ module Hive
             cfg, stage_name, task, profile,
             managed_slot: managed_slot, managed_context: context, **scope_kwargs
           )
+          prompt = scope[:runtime_policy].decorate_prompt(prompt) if
+            scope[:runtime_policy]&.host_outputs?
           [ prompt, scope ]
         end
       end
@@ -607,8 +690,14 @@ module Hive
                       profile: nil, expected_output: nil, status_mode: nil,
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
                       disallowed_tools: nil, cli_flags: nil,
-                      model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil)
+                      model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
+                      routing_resolution: nil, routing_arguments: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
+        if routing_resolution && routing_arguments
+          raise ArgumentError, "pass routing_resolution or routing_arguments, not both"
+        end
+        routing_arguments ||= profile.routing_arguments(routing_resolution) if routing_resolution
+        profile.validate_routing_arguments!(routing_arguments) if routing_arguments
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
         # so callers (Review.run!'s spawn_fix_agent etc.) write a
@@ -616,8 +705,7 @@ module Hive
         # instead of letting the exception escape and land
         # `reason="runner_exception"`.
         begin
-          profile.check_version!
-          profile.preflight!
+          Hive::AgentRuntime.prepare!(profile)
         rescue Hive::AgentError => e
           return { status: :error,
                    error_message: "preflight failed: #{e.message}" }
@@ -636,16 +724,19 @@ module Hive
         # path, already assembled the flags and must win over cfg; commit
         # 01841e12). Keying derivation on nil-vs-[] keeps those two intents
         # distinct rather than collapsing both to "empty".
-        derive_flags_from_cfg = cli_flags.nil? && identity_arguments.nil?
+        derive_flags_from_cfg =
+          cli_flags.nil? && identity_arguments.nil? && routing_arguments.nil?
         cli_flags ||= []
-        if identity_arguments.nil? && (model || effort)
+        launch_arguments = nil
+        if routing_arguments.nil? && identity_arguments.nil? && (model || effort)
           if profile.model_argument_builder
             concrete_model = model || profile.concrete_default_model(
               cfg: cfg, project_root: cfg && cfg["project_root"]
             )
-            identity_arguments = profile.identity_arguments(
+            launch_arguments = profile.identity_arguments(
               model: concrete_model, effort: effort
-            ).native_arguments
+            )
+            identity_arguments = launch_arguments.native_arguments
           else
             # Old-shape custom profiles predate normalized identity
             # capabilities. Preserve their historical launch behavior for
@@ -661,6 +752,7 @@ module Hive
         end
 
         started_at = Time.now.utc.iso8601
+        effective_status_mode = runtime_policy&.host_outputs? ? :exit_code_only : status_mode
         result = Hive::Agent.new(
           task: task,
           prompt: prompt,
@@ -671,16 +763,29 @@ module Hive
           log_label: log_label,
           profile: profile,
           expected_output: expected_output,
-          status_mode: status_mode,
+          status_mode: effective_status_mode,
           permission_mode: permission_mode,
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
           cli_flags: cli_flags,
           identity_arguments: identity_arguments || [],
-          runtime_policy: runtime_policy
+          launch_arguments: launch_arguments,
+          runtime_policy: runtime_policy,
+          routing_arguments: routing_arguments
         ).run!
+        if result[:status] == :ok && runtime_policy&.host_outputs?
+          begin
+            runtime_policy.materialize_outputs!(result)
+          rescue Hive::ConfigError => e
+            result[:status] = :error
+            result[:error_reason] = "managed_output_invalid"
+            result[:error_message] = e.message
+          end
+        end
         record_usage(task, profile, result, started_at)
         result
+      ensure
+        runtime_policy&.cleanup!
       end
 
       def stage_resource_limits(cfg, stage)
@@ -701,7 +806,8 @@ module Hive
                          profile: nil, expected_output: nil, status_mode: nil,
                          permission_mode: nil, allowed_tools: nil,
                          disallowed_tools: nil, mcp_config_path: nil,
-                         strict_mcp_config: false, identity_arguments: nil, runtime_policy: nil)
+                         strict_mcp_config: false, identity_arguments: nil,
+                         routing_arguments: nil, runtime_policy: nil)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -729,6 +835,7 @@ module Hive
           mcp_config_path: mcp_config_path,
           strict_mcp_config: strict_mcp_config,
           identity_arguments: identity_arguments,
+          routing_arguments: routing_arguments,
           runtime_policy: runtime_policy
         )
       end

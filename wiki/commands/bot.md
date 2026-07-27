@@ -3,8 +3,8 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-30
-tags: [command, bot, telegram, mobile, json]
+updated: 2026-07-26
+tags: [command, bot, telegram, mobile, json, closure]
 ---
 
 **TLDR**: `hive bot SUBCOMMAND` runs the Telegram mobile surface for
@@ -33,7 +33,7 @@ hive bot install [--force] [--json]
 | `status` | Reports running/not-running and exits `0` when running, `1` when not. With `--json`, emits `hive-bot-status.v1` with `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`, plus the autostart-service state `service_installed`, `service_enabled`, and `unit_path` (read-only probe — `systemctl --user is-enabled` / `launchctl list`) so an agent can tell whether `hive bot install` has run without a mutating call. |
 | `reload` | Sends `SIGHUP`; the supervisor reloads config at the next loop boundary while preserving in-flight children and conversations. With `--json`, emits `hive-bot-reload.v1`. |
 | `tail` | Streams `~/.local/state/hive/logs/bot.log`; exits 1 if the log does not exist. |
-| `install` | (Re)writes the platform-native unit (`~/.config/systemd/user/hive-bot.service` on Linux, `~/Library/LaunchAgents/local.hive-bot.plist` on macOS) and enables autostart. Mirrors `hive daemon install` via the shared `ServiceInstaller::Base` platform mechanics and `ServiceInstaller::ResultPresenter` command outcome handling: always installs with `autostart: true`. Without `--force`, refuses to overwrite a pre-existing unit that differs from the template (exit `64` USAGE, message pointing at `--force`). With `--force`, saves the previous content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` via atomic write, then — only when an existing unit was actually overwritten (the `upgraded` outcome) — restarts/reloads the service so new `Environment=` lines take effect (a first-time `--force` install with no prior unit just enables/loads, no restart). A service-manager failure exits `70` (SOFTWARE); a host with no systemd-user manager still gets the unit written but exits `0` with the `unsupported` outcome. Units point at the user-facing wrapper path when installers provide it, so `hv` invocations survive Apache Hive shadowing `hive`. `hive uninstall` tears this unit back down. With `--json`, every outcome (success and error) emits a `hive-bot-install.v1` envelope. |
+| `install` | (Re)writes the platform-native unit (`~/.config/systemd/user/hive-bot.service` on Linux, `~/Library/LaunchAgents/local.hive-bot.plist` on macOS) and enables autostart. Mirrors `hive daemon install` through `Hive::UserService` inspect/plan/apply mechanics, with `Bot::ServiceInstaller` retaining templates and command policy and `ServiceInstaller::ResultPresenter` retaining output handling; it always installs with `autostart: true`. Without `--force`, refuses to overwrite a pre-existing unit that differs from the template (exit `64` USAGE, message pointing at `--force`). With `--force`, saves the previous content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` via atomic write, then — only when an existing unit was actually overwritten (the `upgraded` outcome) — restarts/reloads the service so new `Environment=` lines take effect (a first-time `--force` install with no prior unit just enables/loads, no restart). A service-manager failure exits `70` (SOFTWARE); a host with no systemd-user manager still gets the unit written but exits `0` with the `unsupported` outcome. Units point at the user-facing wrapper path when installers provide it, so `hv` invocations survive Apache Hive shadowing `hive`. `hive uninstall` tears this unit back down. With `--json`, every outcome (success and error) emits a `hive-bot-install.v1` envelope. |
 
 ## Commands in Telegram
 
@@ -45,8 +45,9 @@ hive bot install [--force] [--json]
 | `/idea [text]` | Starts a new inbox idea draft. With text, the bot shows a project picker; without text, it asks for the next message's text. After project selection the draft enters file collection and shows `Done` / `Skip`. Pressing either finalizes through `Hive::Commands::New#call!`; successful capture replies `"Captured your idea in <project>. It's in the inbox - move it to 2-brainstorm to start."` Expired picker/draft callbacks ask the operator to send `/idea` again. Bare Telegram voice notes also enter idea capture: the bot transcribes the note and shows a transcript confirmation keyboard; the project picker appears only after the operator taps `Confirm`. |
 | `/answer <id\|slug>` | Starts deterministic brainstorm answering; numeric ids (`9281` or `#9281`) resolve through the current status snapshot to the task slug before the conversation starts. Each free-text reply or voice note writes the current unanswered `### A<N>.` block under the task lock. The historical Path A/B distinction is compatibility-only now, and both modes use the same answer writer. Voice answers are transcribed first, then reuse the same answer writer and auto-advance replies as typed answers. |
 | `/approve <id\|slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface after resolving numeric ids through the current status snapshot. Inline approval buttons usually use the workflow verb instead. |
-| `/autofix <id\|slug>` | Dispatches the same `hive markers clear` + retry-verb sequence the inline 🔧 Autofix button dispatches. Resolves an id or slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers and `"No retry verb for stage X."` when the stage has none. |
+| `/autofix <id\|slug>` | Submits the latest observed recoverable row through `Hive::Recovery::API` and renders the durable coordinator receipt, matching the inline 🔧 Autofix button. Resolves an id or slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers. |
 | `/details <id\|slug>` | Resolves an id or slug against the latest `StatusWatcher` snapshot and replies with the same in-process details text as the inline "Show details" button: row summary, next-step hint, and cached diagnostic summary/detail when the row carries one. |
+| `/close <id\|slug> --reason <already_delivered\|superseded> --evidence <PR-or-commit> ...` | Starts the evidence-bound operator closure flow for an active status row. Repeat `--evidence` as needed; `superseded` also uses `--successor project:slug --attestation "statement"`. The command creates only a compacted **Verify evidence** callback. The first tap re-resolves and verifies immutable evidence; a separate allowlisted **Confirm and archive** tap is still required. |
 | `/done` | Ends the active brainstorm conversation and dispatches `hive run <slug> --json` so the brainstorm runner re-checks the round. There is no remaining draft-confirm substate; without an active conversation it replies with the friendly no-conversation hint. |
 | `/help` | Lists the typeable workflow command set. |
 
@@ -112,7 +113,7 @@ push-notification buttons):
 - anything else (e.g. in-flight `agent_running`) → no button
 
 The reply stays text-only when no row is actionable. The `/answer`,
-`/approve`, `/autofix`, `/details` slash commands remain typeable
+`/approve`, `/autofix`, `/details`, `/close` slash commands remain typeable
 (and appear in the quick-actions menu as `<id|slug>`) for operators who
 prefer typing or scripting.
 
@@ -136,7 +137,7 @@ binary path.
 On bot start the supervisor calls Telegram's `setMyCommands` so the
 blue quick-actions menu (shown when the operator taps the `/` icon in
 the chat input) surfaces `/idea`, `/status`, `/queue`, `/answer`,
-`/approve`, `/autofix`, `/details`, `/done`, and `/help` with
+`/approve`, `/autofix`, `/details`, `/close`, `/done`, and `/help` with
 human-readable descriptions. This is a one-shot idempotent RPC at
 start — it is not re-issued on SIGHUP/config reload because the
 command list does not change with config. A network failure during
@@ -154,10 +155,21 @@ Push notifications use callback data that routes to:
 - Stage approvals: `Approve` dispatches `hive brainstorm|plan|develop|review|pr|archive <slug> --from <stage> --project <project> --json`.
 - Brainstorm waits: `Answer in chat` starts the same `/answer` conversation.
 - Review triage: `Accept all` / `Reject all` dispatch `hive accept-finding` or `hive reject-finding` with `--all`.
-- Recovery markers: every `ERROR` and `REVIEW_ERROR` exposes `Autofix`, even when no diagnostic suggested action was recorded. It dispatches `hive markers clear ... --name <MARKER> --match-attr <key=value> --json` when a marker attribute is available, then dispatches the stage's workflow verb when one exists and resets the persisted alert entry for that task. Both error kinds prefer `marker_id=<current>` and use observed pass/phase/reason or reason/exit-code attrs only for legacy markers. `EXECUTE_STALE` remains manual-only and shows `Show details`, which renders the cached row summary plus manual-repair hint and any cached diagnostic; legacy `Clear and retry` buttons from older messages delegate directly to the current Autofix handler and therefore use the same guarded recovery sequence.
+- Recovery markers: every `ERROR` and `REVIEW_ERROR` exposes `Autofix`, even when no diagnostic suggested action was recorded. It submits the cached row plus current observation token to the durable recovery coordinator, which re-resolves task identity and safety before any mutation and returns queued, cooldown, running, blocked, or terminal state. Every recoverable occurrence must bind `marker_id`; an old id-less row returns `recovery_migration_required` until `hive migrate` upgrades it once. `EXECUTE_STALE` remains manual-only and shows `Show details`, which renders the cached row summary plus manual-repair hint and any cached diagnostic; legacy `Clear and retry` buttons from older messages delegate directly to the current Autofix handler and therefore enter the same coordinator lifecycle. Callback data is generation-checked: every encoded stage, marker, and attr must still match the fresh row before the request is accepted.
 - Legacy stage-directory warnings are text-only project-level alerts. They tell the operator to run `hive migrate <project_path>`, have no inline action, dedupe while the project remains legacy-dirty, and re-alert after the project reports clean then regresses.
 - Idea project pickers use `idea_project:<project>:<token>`. Current drafts enter attachment collection instead of immediately spawning `hive new`; the follow-up keyboard emits `idea_done:<token>` and `idea_skip:<token>`, both of which finalize the current draft. `idea_project_new:<token>` clears the draft/picker token and replies that registering a new project from Telegram is out of MVP scope.
 - Legacy Path-A buttons (`path_a_yes:` / `path_a_type:`) from messages sent before Codex draft-assist retirement do not start a draft flow; they reply with instructions to tap **Answer in chat** or send `/answer <id|slug>`. Retired `codex_write:` / `codex_edit:` / `codex_cancel:` data is unknown callback data.
+- Evidence closure: `/close` resolves an active cached task row and creates the
+  first compacted `closure_preview:` callback; the slash command itself does
+  not verify evidence or mutate task state. `closure_preview:` decodes one
+  bounded task/input payload,
+  resolves the exact registered task, and calls `Hive::TaskClosure.preview`.
+  A valid preview edits the message with normalized immutable facts plus one
+  compacted `closure_confirm:` button. Confirmation rechecks the current chat
+  allowlist, records `telegram:<from_id>` as operator, calls the shared
+  confirm service, and edits the same message with the archived receipt.
+  Non-allowlisted chats never reach dispatch; malformed/expired callbacks and
+  stale evidence fail closed without invoking a workflow command.
 - `Open laptop` is an explicit no-op reply for disagreements that do not fit the MVP button set.
 
 ## Config
@@ -212,10 +224,7 @@ with `hive pairing approve telegram <CODE>` (see [[commands/pairing]]). Unknown
 non-`/start` chat IDs are still logged once per bot lifetime and ignored
 silently.
 
-The delegated PRDigest subprocess receives the same Telegram token and delivers
-the daily digest to `bot.chat_id_allowlist[0]`; there is no separate digest chat
-setting. It does not reuse Hive's bot client. See [[commands/digest]] and
-[[modules/digest]]. The allowlist remains the bot's chat-auth boundary.
+The allowlist remains the bot's chat-auth boundary.
 
 Voice transcription uses `bot.transcription.api_key_env` for the OpenAI
 audio API key (default `HIVE_WHISPER_API_KEY`); the key is not persisted.

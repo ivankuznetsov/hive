@@ -145,7 +145,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
 
     def lookup_prs_for_branch(*, **) = []
 
-    def origin_push_url(_path, cfg:) = @remote_path
+    def origin_push_url(_path, cfg:, managed: false) = @remote_path
 
     def repository_identity_from_remote(_url)
       { "repository" => "acme/polyglot", "host" => "github.com" }
@@ -414,7 +414,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       current = config(auto_fix: false)
       runner = build_runner(
         dir, store: store, cfg: current,
-        fixer: FakeFixer.new, backoff_sec: 60
+        fixer: FakeFixer.new, backoff_sec: 60, authority_backoff_sec: 3600
       )
 
       first = runner.run(job_id: "job-1")
@@ -424,6 +424,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       assert_equal "authority_revoked", first.actions.first.fetch("outcome")
       assert_equal "action_block", first.aggregate.fetch("attempts").last.fetch("kind")
       assert_equal "authority_revoked", first.aggregate.fetch("attempts").last.fetch("reason")
+      assert_equal (T0 + 3600).iso8601,
+                   first.aggregate.fetch("attempts").last.fetch("next_eligible_at")
       assert_equal "action_backoff", second.completeness.fetch("reason")
       assert_equal 1, second.aggregate.fetch("attempts").count { |attempt| attempt["kind"] == "action_block" }
       assert_empty runner.fixer.calls
@@ -2809,6 +2811,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
   def build_runner(dir, store:, cfg: config, family_store: FakeFamilyStore.new,
                    fixer: FakeFixer.new, pr_opener: FakePrOpener.new,
                    issue_filer: FakeIssueFiler.new, backoff_sec: 0,
+                   authority_backoff_sec: backoff_sec,
                    config_loader: nil,
                    gate_reader: nil,
                    repository_ownership: nil,
@@ -2833,7 +2836,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       config_loader: config_loader,
       gate_reader: gate_reader,
       lease_sec: 60,
-      backoff_sec: backoff_sec
+      backoff_sec: backoff_sec,
+      authority_backoff_sec: authority_backoff_sec
     )
   end
 

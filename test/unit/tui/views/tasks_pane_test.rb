@@ -115,20 +115,13 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, "Tasks · myapp"
   end
 
-  def test_render_omits_old_clean_archived_rows_but_keeps_visible_rows
-    old = (Time.now - (5 * 86_400)).utc.iso8601
+  def test_render_uses_producer_rows_and_shows_hidden_archive_summary
     recent = (Time.now - 86_400).utc.iso8601
     snap = make_snapshot([
-                           { "name" => "hive", "tasks" => [
-                             make_task(
-                               slug: "old-archived",
-                               stage: "9-done",
-                               action: "archived",
-                               action_label: "Archived",
-                               marker: "complete",
-                               mtime: old,
-                               folder_mtime: old
-                             ),
+                           {
+                             "name" => "hive",
+                             "hidden_archived_task_count" => 1,
+                             "tasks" => [
                              make_task(
                                slug: "recent-archived",
                                stage: "9-done",
@@ -139,7 +132,8 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                                folder_mtime: recent
                              ),
                              make_task(slug: "active-task", stage: "4-execute", marker: "execute_complete")
-                           ] }
+                             ]
+                           }
                          ])
 
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
@@ -147,6 +141,28 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     refute_includes out, "old-archived"
     assert_includes out, "recent-archived"
     assert_includes out, "active-task"
+    assert_includes out, "… and 1 older archived task (hive archive to view)"
+  end
+
+  def test_hidden_archive_summary_pluralizes_and_respects_scope
+    snap = make_snapshot([
+      { "name" => "hive", "hidden_archived_task_count" => 0, "tasks" => [] },
+      { "name" => "app", "hidden_archived_task_count" => 2, "tasks" => [] }
+    ])
+
+    all = Hive::Tui::Views::TasksPane.render(
+      make_model(snapshot: snap, scope: 0), width: 100
+    )
+    app = Hive::Tui::Views::TasksPane.render(
+      make_model(snapshot: snap, scope: 2), width: 100
+    )
+    hive = Hive::Tui::Views::TasksPane.render(
+      make_model(snapshot: snap, scope: 1), width: 100
+    )
+
+    assert_includes all, "… and 2 older archived tasks (hive archive to view)"
+    assert_includes app, "… and 2 older archived tasks (hive archive to view)"
+    refute_includes hive, "older archived"
   end
 
   # ---- Column rendering ----

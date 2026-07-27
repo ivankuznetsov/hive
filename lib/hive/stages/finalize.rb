@@ -1,10 +1,10 @@
 require "fileutils"
 require "open3"
 require "time"
+require "hive/artifact_firewall"
 require "hive/gh"
 require "hive/git_ops"
 require "hive/markers"
-require "hive/protected_files"
 require "hive/secret_patterns"
 require "hive/claude_launcher"
 require "hive/stages"
@@ -76,21 +76,32 @@ module Hive
         Hive::Gh.ensure_authenticated!(cfg)
         state_result = verify_state!(task, worktree_path, branch, cfg)
         return state_result if state_result
+        identity_result = refresh_pr_identity!(
+          task, worktree_path, pr_url, cfg
+        )
+        return identity_result if identity_result
 
         prompt = render_prompt(task, worktree_path, branch, pr_url)
         profile = Hive::Stages::Base.stage_profile(cfg, "finalize")
-        protected_capture = Hive::ProtectedFiles.capture(task.folder)
-        before_sha = Hive::ProtectedFiles.snapshot(task.folder)
-        spawn_finalize_agent(task, cfg, prompt, profile, worktree_path)
-        after_sha = Hive::ProtectedFiles.snapshot(task.folder)
-        if (tampered = Hive::ProtectedFiles.diff(before_sha, after_sha)).any?
-          restored, restore_error = Hive::ProtectedFiles.restore_safely(
-            task.folder, protected_capture, tampered
+        custody_manifest = Hive::ArtifactFirewall::Manifest.new(
+          root: task.folder,
+          protected_anchors: Hive::ArtifactFirewall::ORCHESTRATOR_OWNED,
+          permitted_writable_roots: [ task.folder, worktree_path ]
+        )
+        custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
+        begin
+          spawn_finalize_agent(task, cfg, prompt, profile, worktree_path)
+        ensure
+          custody_report = Hive::ArtifactFirewall.validate_and_restore(
+            custody_manifest, custody_snapshot
           )
+        end
+        if custody_report.tampered?
           Hive::Markers.set(task.state_file, :error,
-                            reason: "finalize_tampered", files: tampered.join(","),
-                            restored: restored,
-                            restore_error: restore_error.to_s[0, 200])
+                            reason: "finalize_tampered",
+                            files: custody_report.tampered_labels.join(","),
+                            restored: custody_report.restored?,
+                            restore_error: custody_report.restore_diagnostic.to_s[0, 200])
           return { commit: "finalize_tampered", status: :error }
         end
 
@@ -143,6 +154,10 @@ module Hive
           timeout_sec: finalize_timeout(cfg),
           log_label: "finalize",
           profile: profile,
+          routing_arguments: Hive::Stages::Base.model_routing_arguments(
+            cfg, "finalize", profile,
+            current: Hive::Stages::Base.model_routing_current(cfg["finalize"])
+          ),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
@@ -266,6 +281,49 @@ module Hive
                           reason: "unpushed_commits",
                           detail: ((forced&.stderr).to_s.strip.empty? ? push_result.stderr : forced.stderr).to_s.strip[0, 200])
         { commit: "finalize_unpushed_commits", status: :error }
+      end
+
+      def refresh_pr_identity!(task, worktree_path, pr_url, cfg)
+        parsed = Hive::Gh.parse_pull_request_url(pr_url)
+        unless parsed
+          Hive::Markers.set(task.state_file, :error, reason: "finalize_pr_url_invalid")
+          return { commit: "finalize_pr_url_invalid", status: :error }
+        end
+
+        local_head, head_status = capture_git(worktree_path, "rev-parse", "HEAD")
+        metadata = Hive::Gh.pr_metadata(
+          parsed.fetch("number"), cfg: cfg, chdir: worktree_path
+        )
+        local_head = local_head.to_s.strip.downcase
+        remote_head = metadata.head_ref_oid.to_s.downcase
+        unless head_status.success? &&
+               metadata.number == parsed.fetch("number") &&
+               Hive::Gh.parse_pull_request_url(metadata.url) == parsed &&
+               local_head.match?(/\A[a-f0-9]{40,64}\z/) &&
+               remote_head == local_head
+          Hive::Markers.set(
+            task.state_file, :error,
+            reason: "finalize_pr_head_mismatch",
+            local_head: local_head.empty? ? "(unavailable)" : local_head,
+            remote_head: remote_head.empty? ? "(unavailable)" : remote_head
+          )
+          return { commit: "finalize_pr_head_mismatch", status: :error }
+        end
+
+        Hive::Gh.persist_pr_identity!(
+          File.join(task.folder, "pr.md"),
+          pr_url: parsed.fetch("url"),
+          pr_number: parsed.fetch("number"),
+          head_oid: remote_head
+        )
+        nil
+      rescue Hive::GhError => e
+        Hive::Markers.set(
+          task.state_file, :error,
+          reason: "finalize_pr_identity_refresh_failed",
+          detail: e.message.to_s[0, 200]
+        )
+        { commit: "finalize_pr_identity_refresh_failed", status: :error }
       end
 
       # True only when HEAD already contains, by patch-id, every commit on the

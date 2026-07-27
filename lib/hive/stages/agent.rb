@@ -39,13 +39,14 @@ module Hive
         end
         prompt = render_prompt(task, cfg, stage, profile: profile, instruction_body: instruction_body)
         permission_kwargs = stage.permissions.nil? ? {} : { explicit_permission_spec: stage.permissions }
+        resource_limits = Hive::Stages::Base.stage_resource_limits(cfg, stage)
+        marker_before_spawn = Hive::Markers.current(output_path)
         prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
           cfg, task.stage_name, task, profile,
-          prompt: prompt, managed_slot: "stages.#{stage.name}", **permission_kwargs
+          prompt: prompt, managed_slot: "stages.#{stage.name}",
+          managed_outputs: [ output_path ], **permission_kwargs
         )
-        resource_limits = Hive::Stages::Base.stage_resource_limits(cfg, stage)
 
-        marker_before_spawn = Hive::Markers.current(output_path)
         result = Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -56,6 +57,10 @@ module Hive
           profile: profile,
           model: stage.model,
           effort: stage.effort,
+          routing_arguments: Hive::Stages::Base.recognized_model_routing_arguments(
+            cfg, stage.name, profile,
+            current: { model: stage.model, effort: stage.effort }.compact
+          ),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           # Honor the descriptor's declared status_mode; fall back to the
           # marker-file convention only when the stage leaves it unset.
@@ -91,7 +96,7 @@ module Hive
             # marker from a prior run so the new failure stays observable.
             Hive::Markers.set(
               output_path, :error,
-              reason: "agent_preflight_failed",
+              reason: result[:error_reason] || "agent_preflight_failed",
               message: result[:error_message].to_s[0, 200]
             )
           end

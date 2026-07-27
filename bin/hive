@@ -5,13 +5,35 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 require "hive"
 require "hive/llm_wiki_bootstrap"
 
+# The workflow creator owns two strict observation routes. They must stay
+# byte-for-byte no-write even when an upgraded binary would otherwise repair
+# scheduler units during process startup.
+init_index = ARGV.index("init")
+workflow_index = ARGV.index("workflow")
+strict_no_write_route =
+  if init_index && (!workflow_index || init_index < workflow_index)
+    ARGV.drop(init_index + 1).any? do |arg|
+      arg == "--preview" || arg.match?(/\A--preview=true\z/i)
+    end
+  elsif workflow_index
+    workflow_subcommands = %w[new validate commit install list update remove publish].freeze
+    workflow_subcommand = ARGV.drop(workflow_index + 1).find do |arg|
+      workflow_subcommands.include?(arg)
+    end
+    workflow_subcommand == "validate"
+  else
+    false
+  end
+
 # Repair legacy path-keyed LLM-wiki timers as soon as an upgraded Hive binary
 # is invoked, including `hive --version`. The reconciliation is idempotent and
 # touches only Hive-managed units.
-begin
-  Hive::LlmWikiBootstrap::Scheduler.reconcile_existing!
-rescue StandardError => e
-  warn "hive: warning: could not reconcile LLM-wiki scheduler units: #{e.message}"
+unless strict_no_write_route
+  begin
+    Hive::LlmWikiBootstrap::Scheduler.reconcile_existing!
+  rescue StandardError => e
+    warn "hive: warning: could not reconcile LLM-wiki scheduler units: #{e.message}"
+  end
 end
 
 if ENV["HIVE_ATTEMPT_INTERNAL"] == "1"
@@ -49,7 +71,7 @@ end
 
 JSON_BOOLEAN_OPTIONS = Hive::CliJsonOptions::BOOLEAN_OPTIONS
 STAGE_ACTION_USAGE_COMMANDS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
-NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow].freeze
+NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow --idempotency-key].freeze
 JSON_USAGE_ERROR_CONTRACTS = {
   "run" => { schema: "hive-run", error_kind: "invalid_task_path" },
   "rebase-status" => { schema: "hive-rebase-status", schema_version: 1, error_kind: "invalid_task_path" },
@@ -350,8 +372,8 @@ def json_usage_error_contract(argv)
     subcommand = json_usage_subcommand(argv, command_index)
     schema = subcommand == "approve" ? "hive-pairing-approve" : "hive-pairing-list"
     return { schema: schema, error_kind: "invalid_arguments" }
-  when "digest"
-    return { reporter: :prdigest }
+  when "decide"
+    return { schema: "hive-decide", error_kind: "invalid_task_path" }
   when "refactor-patrol"
     if (jobs = refactor_patrol_jobs_argv(option_argv))
       return {
@@ -367,9 +389,18 @@ def json_usage_error_contract(argv)
     when "remove" then "hive-workflow-remove"
     when "update" then "hive-workflow-update"
     when "publish" then "hive-workflow-publish"
+    when "validate" then "hive-workflow-validate"
     else "hive-workflow-new"
     end
-    return { schema: schema, error_kind: "usage" } if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+    if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+      extras = if subcommand == "validate"
+        id = json_usage_positionals(argv, command_index).fetch(1, "")
+        { "valid" => false, "id" => id }
+      else
+        {}
+      end
+      return { schema: schema, error_kind: "usage", extras: extras }
+    end
   end
 
   JSON_USAGE_ERROR_CONTRACTS[command]
@@ -456,11 +487,6 @@ def native_web_error_context(schema, argv)
 end
 
 def json_usage_error_payload(contract, error, argv: [])
-  if contract[:reporter] == :prdigest
-    require "hive/prdigest"
-    return Hive::Prdigest.failure_payload(kind: "cli", message: error.message)
-  end
-
   if contract[:reporter] == :refactor_patrol
     version = if refactor_patrol_pr_scoped_argv?(argv)
       Hive::RefactorPatrol::Reporter::V3_SCHEMA_VERSION
@@ -487,6 +513,9 @@ def json_usage_error_payload(contract, error, argv: [])
       error_kind: error_kind,
       extras: extras
     )
+    if schema == "hive-workflow-validate"
+      payload["diagnostics"] = [ { "message" => error.message } ]
+    end
     payload.delete("error_class") if contract[:omit_error_class]
     return payload
   end

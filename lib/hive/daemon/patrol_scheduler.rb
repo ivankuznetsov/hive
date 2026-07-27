@@ -4,7 +4,6 @@ require "shellwords"
 require "time"
 require "hive/config"
 require "hive/git_ops"
-require "hive/daemon/pr_merge_watcher"
 
 module Hive
   module Daemon
@@ -15,6 +14,7 @@ module Hive
     class PatrolScheduler
       PATROL_STAGE = "patrol".freeze
       PATROL_SLUG = "patrol".freeze
+      FAILURE_BACKOFF_SCHEDULE = [ 60, 300, 900 ].freeze
 
       class GitHelper
         def default_branch(project_root, cfg:)
@@ -103,12 +103,12 @@ module Hive
 
       def complete(project:, exit_code:, now: Time.now)
         @pending.delete(project)
-        if exit_code.to_i.zero?
+        if exit_code == Hive::ExitCodes::SUCCESS
           @failures.delete(project)
         else
           count = @failures.dig(project, :count).to_i + 1
-          interval = PrMergeWatcher::GH_BACKOFF_SCHEDULE[
-            [ count - 1, PrMergeWatcher::GH_BACKOFF_SCHEDULE.size - 1 ].min
+          interval = FAILURE_BACKOFF_SCHEDULE[
+            [ count - 1, FAILURE_BACKOFF_SCHEDULE.size - 1 ].min
           ]
           @failures[project] = { count: count, next_eligible_at: now + interval }
         end

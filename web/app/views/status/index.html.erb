@@ -17,6 +17,10 @@
       real reconnects receive one targeted catch-up refresh. %>
   <%= status_stream_source id: "status-stream-source",
         hidden: true, data: { turbo_permanent: true } %>
+  <%= render "status/freshness_warning",
+        availability: @status_page_snapshot.availability,
+        last_success_at: @status_page_snapshot.last_success_at,
+        error: @status_page_snapshot.error %>
   <%= render "status/project_nav", projects: @projects,
         selected_project: @selected_project&.name %>
   <div class="status-main">
@@ -74,8 +78,12 @@
   <%= render "status/view_switch", status_view: @status_view %>
 </div>
 
-<% if @status_view == "board" %>
-  <%= render "status/board", board: @board %>
+<% if @status_page_snapshot.unavailable? %>
+  <div class="empty-state status-content-unavailable">
+    <p>Fleet state will appear after the next successful refresh.</p>
+  </div>
+<% elsif @status_view == "board" %>
+  <%= render "status/board", board: @board, status_fresh: @status_fresh %>
 <% else %>
   <%= render "status/projects", projects: @visible_projects %>
 <% end %>

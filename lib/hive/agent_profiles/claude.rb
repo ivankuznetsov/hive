@@ -36,7 +36,19 @@ module Hive
       },
       model_argument_builder: ->(model) { [ "--model", model ] },
       effort_argument_builder: ->(effort) { [ "--effort", effort ] },
+      routed_model_argument_builder: ->(model) {
+        model == "inherit" ? [] : [ "--model", model ]
+      },
+      routed_effort_argument_builder: ->(effort) {
+        %w[default inherit].include?(effort) ? [] : [ "--effort", effort ]
+      },
+      routed_effort_values: %w[default inherit low medium high xhigh max],
       launcher_identity: "claude-code/v1",
+      tool_scope_flags: {
+        allowed: "--allowedTools",
+        disallowed: "--disallowedTools"
+      },
+      raw_cli_arguments_supported: true,
       cli_capabilities: {
         safe_mode: [ "--safe-mode" ],
         patrol_review_context: [

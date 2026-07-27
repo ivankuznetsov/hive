@@ -3,9 +3,11 @@ require "json"
 require "open3"
 require "tempfile"
 require "time"
+require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/agent_limit"
 require "hive/agent/message_extractor"
+require "hive/artifact_firewall"
 require "hive/events"
 require "hive/lock"
 require "hive/permission_scope"
@@ -131,7 +133,7 @@ module Hive
 
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :max_tokens, :max_turns, :timeout_sec,
                 :profile, :expected_output, :status_mode, :permission_mode,
-                :runtime_policy, :child_environment
+                :runtime_policy, :child_environment, :observable_result
 
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
@@ -139,6 +141,7 @@ module Hive
                    permission_mode: nil, allowed_tools: nil,
                    disallowed_tools: nil, cli_flags: [], max_tokens: nil,
                    max_turns: nil, identity_arguments: [], runtime_policy: nil,
+                   launch_arguments: nil, routing_arguments: nil,
                    log_stream: true)
       @task = task
       @prompt = prompt
@@ -168,17 +171,36 @@ module Hive
         @permission_mode = @runtime_policy.permission_mode
         @allowed_tools = @runtime_policy.allowed_tools
         @disallowed_tools = @runtime_policy.disallowed_tools
-        @add_dirs = @runtime_policy.directories
-        @cli_flags = Array(cli_flags) + @runtime_policy.cli_flags
+        @add_dirs = @runtime_policy.agent_add_dirs
+        @cli_flags = Array(cli_flags)
+        @runtime_cli_flags = @runtime_policy.cli_flags
         @child_environment = @runtime_policy.environment.merge(SCRUBBED_CHILD_ENV)
       else
         @permission_mode = permission_mode
         @allowed_tools = allowed_tools
         @disallowed_tools = disallowed_tools
         @cli_flags = Array(cli_flags)
+        @runtime_cli_flags = []
         @child_environment = SCRUBBED_CHILD_ENV
       end
-      @identity_arguments = Hive::ImplementationIdentity.validate_native_arguments(identity_arguments).freeze
+      @launch_arguments = normalize_launch_arguments(launch_arguments)
+      supplied_identity_arguments =
+        Hive::ImplementationIdentity.validate_native_arguments(identity_arguments)
+      if @launch_arguments
+        unless supplied_identity_arguments.empty? ||
+               supplied_identity_arguments == @launch_arguments.native_arguments
+          raise ArgumentError,
+                "launch_arguments and identity_arguments describe different native argv"
+        end
+        supplied_identity_arguments = @launch_arguments.native_arguments
+      end
+      if routing_arguments && (@launch_arguments || !supplied_identity_arguments.empty?)
+        raise ArgumentError,
+              "routing_arguments cannot be combined with legacy identity or launch arguments"
+      end
+      @identity_arguments = supplied_identity_arguments.freeze
+      @routing_arguments =
+        routing_arguments && @profile.validate_routing_arguments!(routing_arguments)
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -241,6 +263,7 @@ module Hive
       end
       result = spawn_and_wait
       handle_exit(result)
+      @observable_result = Hive::AgentRuntime.observe(@profile, result)
       result
     ensure
       emit_agent_event(:agent_end, message: agent_end_message(result, $!))
@@ -249,8 +272,14 @@ module Hive
     def spawn_and_wait
       cmd = build_cmd
       log_file = log_path
-      messages = Hive::Agent::MessageExtractor::Accumulator.new(max_bytes: FINAL_MESSAGE_TAIL_BYTES)
+      structured_output_protocol = @profile.structured_output_protocol
+      messages = Hive::Agent::MessageExtractor::Accumulator.new(
+        max_bytes: FINAL_MESSAGE_TAIL_BYTES,
+        structured_output_protocol: structured_output_protocol,
+        require_terminal_structured_output: @runtime_policy&.host_outputs? == true
+      )
       limit_text = nil
+      structured_failure = nil
       last_usage = nil
       token_meter = StreamTokenMeter.new(@profile.name)
       resource_exhaustion = nil
@@ -268,7 +297,8 @@ module Hive
         # which runner launched.
         log.puts "[hive] #{Time.now.utc.iso8601} spawn " \
                  "cwd=#{Hive::SecretPatterns.redact(@cwd)} " \
-                 "profile=#{@profile.name} executable=#{File.basename(cmd.first.to_s)} argc=#{cmd.length}"
+                 "profile=#{@profile.name} executable=#{File.basename(cmd.first.to_s)} argc=#{cmd.length}" \
+                 "#{launch_identity_log_fields}"
       end
       r, w = IO.pipe
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
@@ -301,10 +331,19 @@ module Hive
             # logical message can span multiple newline-delimited JSON events,
             # so per-line regex redaction cannot safely retain their payloads.
             json = parse_json_line(line)
+            sensitive_payload = Hive::Agent::MessageExtractor.sensitive_payload?(
+              json,
+              raw_line: line,
+              structured_output_protocol: structured_output_protocol
+            )
             message = messages.observe(json, raw_line: line)
+            if structured_failure.nil? && @profile.name == :claude
+              structured_failure = Hive::Agent::MessageExtractor.extract_failure(json)
+            end
             if @log_stream
-              safe_line = if message
-                "[structured message omitted type=#{json.fetch('type', 'unknown')}]\n"
+              safe_line = if message || sensitive_payload
+                event_type = json.is_a?(Hash) ? json.fetch("type", "unknown") : "end"
+                "[structured message omitted type=#{event_type}]\n"
               else
                 Hive::SecretPatterns.redact(line)
               end
@@ -318,7 +357,7 @@ module Hive
             # MessageExtractor does not surface as a final message — so without
             # scanning the raw line the limit text never reaches handle_exit and
             # the run is misreported as a generic failure (exit_code=1).
-            if limit_text.nil? && Hive::AgentLimit.limit_reached?(line)
+            if limit_text.nil? && !sensitive_payload && Hive::AgentLimit.limit_reached?(line)
               detail = json && (json["message"] || (json["error"].is_a?(Hash) ? json["error"]["message"] : nil))
               limit_text = (detail || line).to_s.strip
             end
@@ -333,7 +372,7 @@ module Hive
             end
             write_tool_in_current_turn = true if claude_write_tool_event?(json)
 
-            usage = json && @profile.extract_usage_event(json)
+            usage = json && Hive::AgentRuntime.extract_usage(@profile, json)
             if usage
               last_usage = usage
               observed_tokens = token_meter.observe(json, usage)
@@ -441,9 +480,17 @@ module Hive
       end
 
       message = messages.value
+      failure_details = structured_failure && {
+        provider: @profile.name.to_s,
+        subtype: structured_failure[:subtype],
+        configured_cap_usd: @max_budget_usd,
+        observed_cost_usd: structured_failure[:observed_cost_usd],
+        diagnostic: structured_failure[:diagnostic],
+        remedy: structured_failure[:remedy]
+      }.compact
 
       reported_usage = resource_exhaustion || output_completed ? token_meter.usage : last_usage
-      {
+      result = {
         pid: pid,
         pgid: pgid,
         exit_code: exit_code,
@@ -459,6 +506,11 @@ module Hive
         output_completed: output_completed,
         status: nil
       }
+      if structured_failure
+        result[:failure_origin] = structured_failure.fetch(:origin)
+        result[:failure_details] = failure_details
+      end
+      result
     ensure
       if stdin_file
         stdin_file.close
@@ -466,15 +518,16 @@ module Hive
       end
     end
 
-    # Build the argv for the configured profile.
+    # Compile the provider-neutral request through AgentRuntime.
     #
     # Order is fixed:
     #   bin, headless_flag, permission flags (if any),
     #   --add-dir <dir> repeated for each add_dir (if profile supports),
-    #   Claude-only tool scope flags (if supplied),
+    #   profile-declared tool scope flags (if supplied),
     #   budget_flag <amount> (if profile supports),
+    #   typed implementation identity arguments,
+    #   legacy raw arguments (only when the profile explicitly supports them),
     #   output_format_flags...,
-    #   extra_flags...,
     #   prompt
     #
     # The claude profile reproduces today's hardcoded argv exactly (verified
@@ -482,60 +535,41 @@ module Hive
     # and #test_argv_includes_verbose_when_stream_json which still pass after
     # the refactor — the claude profile's flag set IS today's flag set).
     def build_cmd
-      cmd = [ @profile.bin ]
-      if @profile.headless_flag
-        cmd << @profile.headless_flag
-        # Some CLIs' headless flag TAKES the prompt as its value (grok's
-        # -p/--single) rather than reading a trailing positional — the prompt
-        # must sit adjacent to the flag, before any other flags.
-        cmd << @prompt if @profile.prompt_style == :headless_flag_value
-      end
-      cmd.concat(permission_flags)
-      if @profile.add_dir_flag
-        @add_dirs.each do |d|
-          cmd << @profile.add_dir_flag << d
-        end
-      end
-      if @profile.name == :claude
-        if (allowed = Hive::PermissionScope.tool_csv(@allowed_tools))
-          cmd << "--allowedTools" << allowed
-        end
-        if (disallowed = Hive::PermissionScope.tool_csv(@disallowed_tools))
-          cmd << "--disallowedTools" << disallowed
-        end
-      end
-      if @profile.budget_flag && @max_budget_usd
-        cmd << @profile.budget_flag << @max_budget_usd.to_s
-      end
-      # Typed profile-native identity argv is provider-safe and always
-      # arrives as discrete Process.spawn arguments. The raw cli_flags path
-      # remains Claude-only for backward compatibility with callers that
-      # need unrelated Claude flags (MCP, legacy capability adapters).
-      cmd.concat(@identity_arguments)
-      if @cli_flags.any? && @profile.name != :claude
-        raise ArgumentError, "cli_flags are claude-specific; got #{@cli_flags.inspect} for #{@profile.name}"
-      end
-      cmd.concat(@cli_flags)
-      cmd.concat(@profile.output_format_flags)
-      cmd << (@profile.prompt_style == :stdin ? "-" : @prompt) unless @profile.prompt_style == :headless_flag_value
-      cmd
-    end
-
-    def permission_flags
-      @profile.permission_flags(@permission_mode)
+      compiled_invocation.argv.dup
     end
 
     def prompt_via_stdin?
-      @profile.prompt_style == :stdin
+      !compiled_invocation.stdin_data.nil?
     end
 
     def prompt_stdin_file
       return nil unless prompt_via_stdin?
 
       file = Tempfile.new([ "hive-agent-prompt-", ".txt" ])
-      file.write(@prompt)
+      file.write(compiled_invocation.stdin_data)
       file.rewind
       file
+    end
+
+    def compiled_invocation
+      @compiled_invocation ||= Hive::AgentRuntime.compile(
+        Hive::AgentRuntime::Request.new(
+          profile: @profile,
+          prompt: @prompt,
+          permission_mode: @permission_mode,
+          permission_arguments: @runtime_policy&.permission_flags,
+          add_dirs: @add_dirs,
+          allowed_tools: @allowed_tools,
+          disallowed_tools: @disallowed_tools,
+          max_budget_usd: @max_budget_usd,
+          identity_arguments: @identity_arguments,
+          routing_arguments: @routing_arguments,
+          raw_cli_arguments: @cli_flags,
+          trusted_cli_arguments: @runtime_cli_flags,
+          executable: @runtime_policy&.executable,
+          command_prefix: @runtime_policy&.command_prefix
+        )
+      )
     end
 
     def kill_group(pgid)
@@ -579,6 +613,21 @@ module Hive
     def handle_exit(result)
       if result[:output_completed] && completed_output_file?
         result[:status] = :ok
+        return
+      end
+
+      # Claude can finish the required state artifact and only then emit a
+      # trailing max-budget diagnostic while unwinding. The current terminal
+      # marker plus non-empty artifact is stronger completion evidence than
+      # that trailing event; Brainstorm applies its stricter format/current-run
+      # validation above this generic boundary.
+      if result[:failure_origin] == "budget_exhausted" && completed_state_file_artifact?
+        result[:status] = Hive::Markers.current(@task.state_file).name
+        return
+      end
+
+      if result[:failure_origin] == "budget_exhausted"
+        handle_budget_exhaustion(result)
         return
       end
 
@@ -702,6 +751,35 @@ module Hive
       result[:error_message] = message
     end
 
+    def handle_budget_exhaustion(result)
+      detail = result[:failure_details].is_a?(Hash) ? result[:failure_details] : {}
+      observed = detail[:observed_cost_usd]
+      configured = detail[:configured_cap_usd]
+      diagnostic = detail[:diagnostic].to_s
+      amounts = []
+      amounts << "observed $#{observed}" unless observed.nil?
+      amounts << "configured $#{configured}" unless configured.nil?
+      message = "agent exhausted its per-run budget"
+      message = "#{message} (#{amounts.join(', ')})" unless amounts.empty?
+      message = "#{message}: #{diagnostic}" unless diagnostic.empty?
+      message = "#{message}; raise this stage's max_budget_usd"
+
+      if effective_status_mode == :state_file_marker
+        attrs = {
+          reason: "budget_exhausted",
+          provider: detail[:provider] || @profile.name,
+          subtype: detail[:subtype] || "error_max_budget_usd",
+          max_budget_usd: configured,
+          observed_cost_usd: observed,
+          remedy: detail[:remedy] || "raise_stage_budget",
+          message: message.byteslice(0, 200).to_s.scrub
+        }.compact
+        Hive::Markers.set(@task.state_file, :error, **attrs)
+      end
+      result[:status] = :error
+      result[:error_message] = message
+    end
+
     def resource_exhaustion_marker_attrs(detail)
       if detail.fetch(:reason) == "token_limit"
         {
@@ -720,9 +798,17 @@ module Hive
 
     def completed_output_file?
       effective_status_mode == :output_file_exists &&
-        !@expected_output.to_s.empty? &&
-        File.exist?(@expected_output) &&
-        File.size(@expected_output).positive?
+        expected_output_report&.valid?
+    end
+
+    def completed_state_file_artifact?
+      return false unless effective_status_mode == :state_file_marker
+      return false unless File.file?(@task.state_file) && File.size(@task.state_file).positive?
+
+      marker = Hive::Markers.current(@task.state_file)
+      marker.name == :waiting || Hive::Markers::TERMINAL_MARKER_NAMES.include?(marker.name)
+    rescue SystemCallError
+      false
     end
 
     def detected_limit_text(result)
@@ -790,7 +876,7 @@ module Hive
         return
       end
 
-      unless File.exist?(path) && File.size(path) > 0
+      unless expected_output_report&.valid?
         result[:status] = :error
         result[:error_message] = "expected output file missing or empty: #{path}"
         return
@@ -799,8 +885,35 @@ module Hive
       result[:status] = :ok
     end
 
+    def expected_output_report
+      manifest = expected_output_manifest
+      return nil unless manifest
+
+      Hive::ArtifactFirewall.validate_required_outputs(manifest)
+    rescue Hive::ArtifactFirewall::Error
+      nil
+    end
+
+    def expected_output_manifest
+      return nil if @expected_output.nil? || @expected_output.to_s.empty?
+
+      @expected_output_manifest ||= begin
+        path = File.expand_path(@expected_output.to_s)
+        root = File.dirname(path)
+        Hive::ArtifactFirewall::Manifest.new(
+          root: root,
+          protected_anchors: {},
+          permitted_writable_roots: [ root ],
+          required_outputs: { File.basename(path) => path }
+        )
+      end
+    end
+
     def extract_final_message(data)
-      Hive::Agent::MessageExtractor.extract(data)
+      Hive::Agent::MessageExtractor.extract(
+        data,
+        structured_output_protocol: @profile.structured_output_protocol
+      )
     end
 
     def parse_json_line(line)
@@ -866,7 +979,7 @@ module Hive
       # worktree-vs-task-folder distinction (e.g. worktree-feat-x vs
       # feat-x-260424-aaaa) and loses that signal in the event log.
       "cwd=#{@cwd} timeout_sec=#{@timeout_sec} max_budget_usd=#{@max_budget_usd} " \
-        "max_tokens=#{@max_tokens} max_turns=#{@max_turns}"
+        "max_tokens=#{@max_tokens} max_turns=#{@max_turns}#{launch_identity_log_fields}"
     end
 
     def agent_end_message(result, exception)
@@ -876,6 +989,24 @@ module Hive
       end
 
       "status=#{result&.dig(:status)} exit_code=#{result&.dig(:exit_code)} pid=#{result&.dig(:pid)}"
+    end
+
+    def normalize_launch_arguments(value)
+      return nil if value.nil?
+      return value if value.is_a?(Hive::ImplementationIdentity::LaunchArguments)
+
+      raise ArgumentError, "launch_arguments must be a Hive::ImplementationIdentity::LaunchArguments"
+    end
+
+    def launch_identity_log_fields
+      return "" unless @launch_arguments
+
+      model = Hive::SecretPatterns.redact(@launch_arguments.model)
+      requested_effort = @launch_arguments.requested_effort || "none"
+      effective_effort = @launch_arguments.effective_effort || "provider-default"
+      " model=#{model} requested_effort=#{requested_effort} " \
+        "effective_effort=#{effective_effort} model_pinned=#{@launch_arguments.model_pinned} " \
+        "effort_supported=#{@launch_arguments.effort_supported}"
     end
   end
 end

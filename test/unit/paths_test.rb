@@ -32,7 +32,7 @@ class PathsTest < Minitest::Test
                      Hive::Paths.operational_snapshot_path
         assert_equal File.join(dir, "cache", "hive"), Hive::Paths.cache_home
         assert_equal File.join(dir, "bin"), Hive::Paths.bin_home
-        attempts = File.join(dir, "state", "hive", "attempts", "v1")
+        attempts = File.join(dir, "state", "hive", "attempts", "v2")
         assert_equal attempts, Hive::Paths.attempts_root
         assert_equal File.join(attempts, "records"), Hive::Paths.attempt_records_root
         assert_equal File.join(attempts, "logs"), Hive::Paths.attempt_logs_root

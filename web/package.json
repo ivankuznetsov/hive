@@ -1,0 +1,11 @@
+{
+  "name": "hive-web-capture-tools",
+  "private": true,
+  "version": "1.0.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "playwright": "1.60.0"
+  }
+}

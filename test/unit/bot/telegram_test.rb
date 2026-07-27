@@ -35,6 +35,11 @@ class HiveBotTelegramTest < Minitest::Test
       true
     end
 
+    def edit_message_text(params)
+      @calls << [ :edit_message_text, params ]
+      true
+    end
+
     def answer_callback_query(params)
       @calls << [ :answer_callback_query, params ]
       true
@@ -179,6 +184,23 @@ class HiveBotTelegramTest < Minitest::Test
 
     _, params = api.calls.last
     assert_equal :edit_message_reply_markup, api.calls.last.first
+    assert_equal 50, params[:message_id]
+    assert_instance_of Telegram::Bot::Types::InlineKeyboardMarkup, params[:reply_markup]
+  end
+
+  def test_edit_message_text_uses_gem_inline_keyboard_shape
+    api = FakeApi.new
+
+    telegram(api).edit_message_text(
+      chat_id: 12345,
+      message_id: 50,
+      text: "Verified closure",
+      reply_markup: [ [ { text: "Confirm", callback_data: "#closure" } ] ]
+    )
+
+    kind, params = api.calls.last
+    assert_equal :edit_message_text, kind
+    assert_equal "Verified closure", params[:text]
     assert_equal 50, params[:message_id]
     assert_instance_of Telegram::Bot::Types::InlineKeyboardMarkup, params[:reply_markup]
   end

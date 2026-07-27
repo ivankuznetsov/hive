@@ -1,6 +1,9 @@
 name: incident_generation_scoped_no_worktree_marker
 description: Proves an older no-worktree-changes marker cannot override a newer committed attempt generation.
 tags: [incident-regression]
+coverage:
+  primary: recovery.generation_scope
+  supporting: []
 incident_id: generation-scoped-no-worktree-marker
 sibling_task_id: "#9768"
 pending: true

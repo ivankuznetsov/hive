@@ -2,9 +2,10 @@ require "json"
 require "timeout"
 require "uri"
 require "yaml"
+require "hive/agent_git_gate"
+require "hive/atomic_file"
 require "hive/git_ref"
 require "hive/gh/repository_identity"
-require "hive/managed_git"
 require "hive/secret_patterns"
 
 module Hive
@@ -67,27 +68,29 @@ module Hive
                     remote: "origin", set_upstream: true)
       branch = validated_branch_name(branch)
       remote = validated_remote_target(remote)
+      if expected_remote_oid || expected_remote_absent
+        Hive::AgentGitGate.publish_local_branch(
+          repository_path: worktree_path,
+          branch: branch,
+          remote: remote,
+          expected_remote_oid: expected_remote_oid,
+          expected_remote_absent: expected_remote_absent,
+          allow_local_transport: agent_git_gate_allow_local_transport?(cfg)
+        )
+        return PushResult.new(success: true, stdout: "", stderr: "")
+      end
+
       args = [ "git", "-C", worktree_path, "push" ]
       args << "-u" if set_upstream
       # --force-with-lease (not --force): a concurrent third-party update to
       # the branch aborts the push instead of being clobbered.
-      if expected_remote_oid && expected_remote_absent
-        raise Hive::GhError, "remote branch cannot require both an OID and absence"
-      elsif expected_remote_oid
-        oid = expected_remote_oid.to_s
-        unless oid.match?(/\A[0-9a-f]{40,64}\z/i)
-          raise Hive::GhError, "expected remote branch OID is invalid"
-        end
-        args << "--force-with-lease=refs/heads/#{branch}:#{oid.downcase}"
-      elsif expected_remote_absent
-        args << "--force-with-lease=refs/heads/#{branch}:"
-      elsif force
+      if force
         args << "--force-with-lease"
       end
       args.push(remote, branch)
       out, err, status = capture3(*args, cfg: cfg)
       PushResult.new(success: status.success?, stdout: out, stderr: err)
-    rescue Hive::GhError => e
+    rescue Hive::AgentGitGate::Error, Hive::GhError => e
       PushResult.new(success: false, stdout: "", stderr: e.message)
     end
 
@@ -111,7 +114,11 @@ module Hive
 
       ref = "refs/heads/#{name}"
       out, err, status = if managed
-        Hive::ManagedGit.capture3(worktree_path, "ls-remote", "--heads", remote, ref)
+        observation = Hive::AgentGitGate.observe_remote_branch(
+          repository_path: worktree_path, branch: name, remote: remote,
+          allow_local_transport: agent_git_gate_allow_local_transport?(cfg)
+        )
+        return observation.oid
       else
         capture3("git", "-C", worktree_path, "ls-remote", "--heads", remote, ref, cfg: cfg)
       end
@@ -131,6 +138,8 @@ module Hive
       end
 
       oid.downcase
+    rescue Hive::AgentGitGate::Error => e
+      raise Hive::GhError, e.message
     end
 
     # Publish one immutable, already-scanned commit without naming a mutable
@@ -144,12 +153,16 @@ module Hive
       end
       name = validated_branch_name(branch)
       target = validated_remote_target(remote)
-      refspec = "#{oid}:refs/heads/#{name}"
-      out, err, status = Hive::ManagedGit.capture3(
-        worktree_path, "push", target, refspec
+      Hive::AgentGitGate.publish(
+        repository_path: worktree_path,
+        oid: oid,
+        branch: name,
+        remote: target,
+        expected_remote_absent: true,
+        allow_local_transport: agent_git_gate_allow_local_transport?(cfg)
       )
-      PushResult.new(success: status.success?, stdout: out, stderr: err)
-    rescue Hive::GhError => e
+      PushResult.new(success: true, stdout: "", stderr: "")
+    rescue Hive::AgentGitGate::Error, Hive::GhError => e
       PushResult.new(success: false, stdout: "", stderr: e.message)
     end
 
@@ -249,6 +262,71 @@ module Hive
       raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
     end
 
+    # Parse the one pull-request URL shape Hive accepts at every trust
+    # boundary. Keeping this in Gh prevents task closure and daemon
+    # reconciliation from assigning different identities to the same URL.
+    def parse_pull_request_url(value)
+      uri = URI.parse(value.to_s)
+      match = uri.path.match(
+        %r{\A/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)\z}
+      )
+      return nil unless uri.scheme == "https" && uri.host &&
+        uri.port == 443 && uri.userinfo.nil? &&
+        uri.query.nil? && uri.fragment.nil? && match
+
+      host = RepositoryIdentity.validated_github_host(uri.host).downcase
+      repository = RepositoryIdentity.validated_repository_slug(
+        "#{match[1]}/#{match[2]}"
+      ).downcase
+      number = Integer(match[3])
+      {
+        "url" => "https://#{host}/#{repository}/pull/#{number}",
+        "host" => host,
+        "repository" => repository,
+        "number" => number
+      }
+    rescue URI::InvalidURIError, ArgumentError, TypeError, Hive::GhError
+      nil
+    end
+
+    # Controller-owned PR identity refresh. Agent-authored prose is retained,
+    # while the URL/number/head binding is replaced atomically after GitHub and
+    # the local owned worktree agree.
+    def persist_pr_identity!(path, pr_url:, pr_number:, head_oid:)
+      parsed = parse_pull_request_url(pr_url)
+      head = head_oid.to_s.downcase
+      unless parsed && parsed.fetch("number") == Integer(pr_number) &&
+             head.match?(/\A[a-f0-9]{40,64}\z/)
+        raise Hive::GhError, "pull request identity is not canonical"
+      end
+
+      source = File.file?(path) ? File.binread(path) : ""
+      lines = source.lines
+      body = source
+      retained = []
+      if lines.first&.strip == "---"
+        closing = lines.each_index.drop(1).find { |index| lines[index].strip == "---" }
+        if closing
+          retained = lines[1...closing].reject do |line|
+            line.match?(/\A(?:pr_url|pr_number|head_sha|head_oid|headRefOid):/)
+          end
+          body = lines[(closing + 1)..]&.join.to_s.sub(/\A\s*\n/, "")
+        end
+      end
+      identity = [
+        "---\n",
+        "pr_url: #{parsed.fetch('url')}\n",
+        "pr_number: #{parsed.fetch('number')}\n",
+        "head_oid: #{head}\n",
+        *retained,
+        "---\n\n"
+      ].join
+      Hive::AtomicFile.write(path, "#{identity}#{body}", mode: 0o600)
+      true
+    rescue ArgumentError, TypeError
+      raise Hive::GhError, "pull request identity is not canonical"
+    end
+
     def validated_branch_name(branch)
       Hive::GitRef.validate_branch_name(branch)
     rescue ArgumentError
@@ -266,6 +344,12 @@ module Hive
     end
     private_class_method :validated_remote_target
 
+    def agent_git_gate_allow_local_transport?(cfg)
+      cfg.is_a?(Hash) &&
+        cfg.dig("agent_git_gate", "allow_local_transport") == true
+    end
+    private_class_method :agent_git_gate_allow_local_transport?
+
     def pr_state(pr_url, cfg: nil)
       out, err, status = capture3("gh", "pr", "view", pr_url.to_s, "--json", "state", cfg: cfg)
       unless status.success?
@@ -278,6 +362,130 @@ module Hive
       doc["state"].to_s
     rescue JSON::ParserError => e
       raise Hive::GhError, "`gh pr view #{pr_url}` returned unparseable JSON: #{e.message}"
+    end
+
+    # Bounded, repository-scoped transport for TaskClosure. The closure
+    # service canonicalizes every identity before it reaches this boundary;
+    # these helpers still validate the host/repository/OID so no caller can
+    # turn an evidence reference into an arbitrary URL fetch or gh argv.
+    def closure_pr_facts(host:, repository:, number:, default_branch: nil, cfg: nil,
+                         timeout_sec: nil)
+      host = RepositoryIdentity.validated_github_host(host)
+      repository = RepositoryIdentity.validated_repository_slug(repository)
+      number = Integer(number)
+      raise Hive::GhError, "pull request number must be positive" unless number.positive?
+
+      target = RepositoryIdentity.github_repository_target(repository, host)
+      fields = "number,url,state,mergedAt,mergeCommit,baseRefName,headRefOid"
+      out, err, status = capture3(
+        "gh", "pr", "view", number.to_s, "--repo", target, "--json", fields,
+        cfg: cfg, timeout_sec: timeout_sec, max_stdout_bytes: 128 * 1024
+      )
+      unless status.success?
+        raise Hive::GhError,
+              "`gh pr view #{repository}##{number}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+      doc = JSON.parse(out)
+      raise Hive::GhError, "pull request lookup returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+      unless doc["number"].to_i == number
+        raise Hive::GhError, "pull request lookup returned a different number"
+      end
+      merge_oid = if doc["mergeCommit"].is_a?(Hash)
+        doc["mergeCommit"]["oid"]
+      else
+        doc["mergeCommit"]
+      end
+      default_branch ||= closure_default_branch(
+        host: host, repository: repository, cfg: cfg,
+        timeout_sec: timeout_sec
+      )
+      reachable = !merge_oid.to_s.empty? && closure_commit_facts(
+        host: host, repository: repository, oid: merge_oid,
+        default_branch: default_branch, cfg: cfg,
+        timeout_sec: timeout_sec
+      ).fetch("reachable_from_default")
+      {
+        "repository" => repository,
+        "number" => number,
+        "url" => doc["url"].to_s,
+        "state" => doc["state"].to_s,
+        "merged_at" => doc["mergedAt"].to_s,
+        "merge_oid" => merge_oid.to_s.downcase,
+        "head_oid" => doc["headRefOid"].to_s.downcase,
+        "base_ref_name" => doc["baseRefName"].to_s,
+        "reachable_from_default" => reachable
+      }
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "pull request lookup returned unparseable JSON: #{e.message}"
+    rescue ArgumentError, TypeError
+      raise Hive::GhError, "pull request number must be positive"
+    end
+
+    def closure_default_branch(host:, repository:, cfg: nil, timeout_sec: nil)
+      host = RepositoryIdentity.validated_github_host(host)
+      repository = RepositoryIdentity.validated_repository_slug(repository)
+      endpoint = "repos/#{repository}"
+      out, err, status = capture3(
+        "gh", "api", "--hostname", host, endpoint, "--jq", ".default_branch",
+        cfg: cfg, timeout_sec: timeout_sec, max_stdout_bytes: 4 * 1024
+      )
+      unless status.success?
+        raise Hive::GhError,
+              "`gh api #{endpoint}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+      branch = out.to_s.strip
+      if branch.empty? || branch.start_with?("-") || branch.match?(/[\0\r\n\s]/)
+        raise Hive::GhError, "repository default branch is invalid"
+      end
+      branch
+    end
+
+    def closure_commit_facts(host:, repository:, oid:, default_branch:, cfg: nil,
+                             timeout_sec: nil)
+      host = RepositoryIdentity.validated_github_host(host)
+      repository = RepositoryIdentity.validated_repository_slug(repository)
+      oid = oid.to_s.downcase
+      unless oid.match?(/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/)
+        raise Hive::GhError, "closure evidence requires a full immutable commit OID"
+      end
+      branch = default_branch.to_s
+      if branch.empty? || branch.start_with?("-") || branch.match?(/[\0\r\n\s]/)
+        raise Hive::GhError, "repository default branch is invalid"
+      end
+
+      commit_endpoint = "repos/#{repository}/commits/#{oid}"
+      out, err, status = capture3(
+        "gh", "api", "--hostname", host, commit_endpoint, "--jq", ".sha",
+        cfg: cfg, timeout_sec: timeout_sec, max_stdout_bytes: 4 * 1024
+      )
+      unless status.success?
+        raise Hive::GhError,
+              "`gh api #{commit_endpoint}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+      observed_oid = out.to_s.strip.downcase
+      unless observed_oid == oid
+        raise Hive::GhError, "commit lookup returned a different immutable OID"
+      end
+
+      compare_endpoint = "repos/#{repository}/compare/#{oid}...#{branch}"
+      comparison, compare_err, compare_status = capture3(
+        "gh", "api", "--hostname", host, compare_endpoint, "--jq", ".status",
+        cfg: cfg, timeout_sec: timeout_sec, max_stdout_bytes: 4 * 1024
+      )
+      unless compare_status.success?
+        raise Hive::GhError,
+              "`gh api #{compare_endpoint}` failed: " \
+              "#{compare_err.to_s.strip.empty? ? comparison : compare_err.strip}"
+      end
+      compare_state = comparison.to_s.strip.downcase
+      {
+        "oid" => observed_oid,
+        "default_branch" => branch,
+        "comparison" => compare_state,
+        # Comparing base=OID to head=default means `ahead` or `identical`
+        # proves the immutable commit is reachable from current default.
+        "reachable_from_default" => %w[ahead identical].include?(compare_state)
+      }
     end
 
     def list_open_prs(worktree_path, cfg: nil)
@@ -326,9 +534,14 @@ module Hive
 
     def origin_push_url(worktree_path, cfg: nil, timeout_sec: nil, managed: false)
       out, err, status = if managed
-        Hive::ManagedGit.capture3(
-          worktree_path, "remote", "get-url", "--push", "--all", "origin"
+        urls = Hive::AgentGitGate.remote_urls(
+          repository_path: worktree_path, remote: "origin", push: true
         )
+        unless urls.one?
+          raise Hive::GhError,
+                "origin push URL lookup returned #{urls.size} records"
+        end
+        return urls.first
       else
         capture3(
           "git", "-C", worktree_path, "remote", "get-url", "--push", "--all", "origin",
@@ -346,6 +559,8 @@ module Hive
       end
 
       urls.first
+    rescue Hive::AgentGitGate::Error => e
+      raise Hive::GhError, e.message
     end
 
     def repository_identity_from_remote(remote_url)

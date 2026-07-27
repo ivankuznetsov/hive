@@ -4,7 +4,7 @@ require "hive/agent_limit"
 require "hive/claude_launcher"
 require "hive/dependencies"
 require "hive/dependency_snapshot"
-require "hive/protected_files"
+require "hive/artifact_firewall"
 require "hive/stages/base"
 require "hive/worktree"
 require "hive/implementation_identity/store"
@@ -40,6 +40,7 @@ module Hive
       PROTECTED_FILES = %w[
         plan.md worktree.yml task-journal.jsonl task-projection.json
       ].freeze
+      UNRESOLVED_IDENTITY = Object.new.freeze
 
       def run!(task, cfg)
         plan_path = File.join(task.folder, "plan.md")
@@ -47,8 +48,6 @@ module Hive
           warn "hive: plan.md missing; this task did not pass through 3-plan"
           exit 1
         end
-
-        FileUtils.mkdir_p(task.reviews_dir)
 
         case task_state(task)
         when :complete
@@ -59,10 +58,13 @@ module Hive
           exit 1
         end
 
+        identity = capture_implementation_identity(task, cfg)
+        FileUtils.mkdir_p(task.reviews_dir)
+
         if File.exist?(task.worktree_yml_path)
-          run_continuation_pass(task, cfg)
+          run_continuation_pass(task, cfg, identity)
         else
-          run_init_pass(task, cfg)
+          run_init_pass(task, cfg, identity)
         end
       end
 
@@ -88,7 +90,8 @@ module Hive
 
       # First entry into 4-execute: create the feature worktree, run
       # implementation, finalize.
-      def run_init_pass(task, cfg)
+      def run_init_pass(task, cfg, identity = UNRESOLVED_IDENTITY)
+        identity = capture_implementation_identity(task, cfg) if identity.equal?(UNRESOLVED_IDENTITY)
         ops = Hive::GitOps.new(task.project_root)
         worktree_root = canonical_worktree_root(task, cfg)
         wt = Hive::Worktree.new(task.project_root, task.slug, worktree_root: worktree_root)
@@ -106,7 +109,7 @@ module Hive
         wt.write_pointer!(task.folder, task.slug, execute_base_head: Hive::GitOps.new(wt.path).head_sha)
 
         write_initial_task_md(task)
-        run_pass(task, cfg, wt.path)
+        run_pass(task, cfg, wt.path, identity)
       end
 
       # User re-ran `hive run` on a 4-execute task whose worktree
@@ -114,7 +117,8 @@ module Hive
       # spawn. Idempotent at the agent level (the agent re-reads
       # plan.md and continues / refines whatever was committed last
       # time).
-      def run_continuation_pass(task, cfg)
+      def run_continuation_pass(task, cfg, identity = UNRESOLVED_IDENTITY)
+        identity = capture_implementation_identity(task, cfg) if identity.equal?(UNRESOLVED_IDENTITY)
         worktree_root = canonical_worktree_root(task, cfg)
         pointer = Hive::Worktree.read_owned_pointer(
           task.folder,
@@ -124,31 +128,40 @@ module Hive
         )
         worktree_path = pointer.fetch("path")
 
-        run_pass(task, cfg, worktree_path)
+        run_pass(task, cfg, worktree_path, identity)
       end
 
       # Spawn the implementation agent, SHA-protect plan.md /
       # worktree.yml around it, finalize EXECUTE_COMPLETE on clean
       # spawn or :error on tamper / agent failure.
-      def run_pass(task, cfg, worktree_path)
+      def run_pass(task, cfg, worktree_path, identity = UNRESOLVED_IDENTITY)
+        identity = capture_implementation_identity(task, cfg) if identity.equal?(UNRESOLVED_IDENTITY)
         worktree_git = Hive::GitOps.new(worktree_path)
         baseline_head = execute_baseline_head(task, worktree_git)
         return worktree_git_failed(task, cfg, worktree_path) unless baseline_head
 
-        identity = capture_implementation_identity(task, cfg)
-        protected_capture = Hive::ProtectedFiles.capture(task.folder, PROTECTED_FILES)
-        before_impl = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
-        impl_result = spawn_implementation(task, cfg, worktree_path, identity: identity)
-        after_impl = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
+        custody_manifest = Hive::ArtifactFirewall::Manifest.new(
+          root: task.folder,
+          protected_anchors: PROTECTED_FILES,
+          permitted_writable_roots: [ task.folder, worktree_path ]
+        )
+        custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
+        begin
+          impl_result = spawn_implementation(
+            task, cfg, worktree_path, identity: identity
+          )
+        ensure
+          custody_report = Hive::ArtifactFirewall.validate_and_restore(
+            custody_manifest, custody_snapshot
+          )
+        end
         append_implementation_output(task, impl_result)
 
-        if (tampered = Hive::ProtectedFiles.diff(before_impl, after_impl)).any?
-          restored, restore_error = Hive::ProtectedFiles.restore_safely(
-            task.folder, protected_capture, tampered
-          )
+        if custody_report.tampered?
           return record_tamper(
-            task, tampered, who: "implementer",
-            restored: restored, restore_error: restore_error
+            task, custody_report.tampered_labels, who: "implementer",
+            restored: custody_report.restored?,
+            restore_error: custody_report.restore_diagnostic
           )
         end
 
@@ -366,7 +379,7 @@ module Hive
           profile: profile,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only,
-          identity_arguments: identity&.native_arguments
+          **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
         }
         result = if profile.name == :claude
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(

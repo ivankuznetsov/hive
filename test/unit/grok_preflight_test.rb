@@ -72,12 +72,10 @@ class GrokPreflightTest < Minitest::Test
     assert_match(/GROK_AUTH_PATH must be absolute/, err.message)
   end
 
-  def test_rejects_relative_grok_auth_path_even_with_api_key
-    err = with_env("GROK_AUTH_PATH" => "relative/auth.json", "XAI_API_KEY" => "test-key") do
-      assert_raises(Hive::AgentError) { Hive::AgentProfiles::GROK_PREFLIGHT.call }
+  def test_ignores_unused_relative_grok_auth_path_with_api_key
+    with_env("GROK_AUTH_PATH" => "relative/auth.json", "XAI_API_KEY" => "test-key") do
+      assert_nil Hive::AgentProfiles::GROK_PREFLIGHT.call
     end
-
-    assert_match(/GROK_AUTH_PATH must be absolute/, err.message)
   end
 
   def test_rejects_relative_grok_home
@@ -88,20 +86,13 @@ class GrokPreflightTest < Minitest::Test
     assert_match(/GROK_HOME must be absolute/, err.message)
   end
 
-  def test_rejects_relative_grok_home_when_auth_path_and_api_key_are_set
-    Dir.mktmpdir do |dir|
-      auth_path = File.join(dir, "auth.json")
-      File.write(auth_path, '{"access_token":"x"}')
-
-      err = with_env(
-        "GROK_AUTH_PATH" => auth_path,
-        "GROK_HOME" => "relative/grok-home",
-        "XAI_API_KEY" => "test-key"
-      ) do
-        assert_raises(Hive::AgentError) { Hive::AgentProfiles::GROK_PREFLIGHT.call }
-      end
-
-      assert_match(/GROK_HOME must be absolute/, err.message)
+  def test_ignores_unused_relative_grok_home_with_api_key
+    with_env(
+      "GROK_AUTH_PATH" => "relative/auth.json",
+      "GROK_HOME" => "relative/grok-home",
+      "XAI_API_KEY" => "test-key"
+    ) do
+      assert_nil Hive::AgentProfiles::GROK_PREFLIGHT.call
     end
   end
 

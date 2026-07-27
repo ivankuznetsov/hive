@@ -35,11 +35,16 @@ module Hive
         end
         components, recovery = structured_components(current_attempt) ||
           logged_argv_components(current_attempt) || config_components(context)
-        selection = @resolver.resolve_legacy(
-          provider: components.fetch("provider"), model: components.fetch("model"),
-          effort: components["effort"], generation: context.task_generation,
-          attempt_id: components["originating_attempt"] || context.attempt_id
-        )
+        selection =
+          if components.is_a?(Selection)
+            components
+          else
+            @resolver.resolve_legacy(
+              provider: components.fetch("provider"), model: components.fetch("model"),
+              effort: components["effort"], generation: context.task_generation,
+              attempt_id: components["originating_attempt"] || context.attempt_id
+            )
+          end
         append_fallback_warning(context) if recovery == :config
         @writer.append_idempotent(
           identity_event(context, selection, recovery),
@@ -106,14 +111,7 @@ module Hive
           generation: context.task_generation, attempt_id: context.attempt_id,
           source: "legacy_backfill"
         )
-        [
-          {
-            "provider" => selection.provider, "model" => selection.model,
-            "effort" => selection.requested_effort,
-            "originating_attempt" => selection.originating_attempt
-          },
-          :config
-        ]
+        [ selection, :config ]
       end
 
       def append_fallback_warning(context)
@@ -141,12 +139,22 @@ module Hive
 
       def selection_from(identity)
         profile = Hive::AgentProfiles.lookup(identity.fetch("provider"), cfg: @cfg)
-        arguments = profile.identity_arguments(
-          model: identity.fetch("model"), effort: identity["requested_effort"],
-          pin_model: identity.fetch("model_pinned", true)
+        routing = identity["routing"]
+        native_arguments =
+          if routing
+            []
+          else
+            profile.identity_arguments(
+              model: identity.fetch("model"), effort: identity["requested_effort"],
+              pin_model: identity.fetch("model_pinned", true)
+            ).native_arguments
+          end
+        selection = Selection.new(
+          **identity.slice(*Selection.members.map(&:to_s)).transform_keys(&:to_sym)
+                    .merge(native_arguments: native_arguments, routing: routing)
         )
-        Selection.new(**identity.slice(*Selection.members.map(&:to_s)).transform_keys(&:to_sym)
-                                .merge(native_arguments: arguments.native_arguments))
+        selection.routing_arguments(profile) if routing
+        selection
       end
 
       def execute_attempts(current_attempt)

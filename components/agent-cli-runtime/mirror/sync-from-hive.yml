@@ -1,0 +1,95 @@
+name: Sync from Hive monorepo
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-cli-runtime-mirror-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'ivankuznetsov/agent-cli-runtime'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the distribution mirror
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: mirror
+          fetch-depth: 1
+          ssh-key: ${{ secrets.MIRROR_DEPLOY_KEY }}
+
+      - name: Check out canonical Hive main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ivankuznetsov/hive
+          ref: main
+          path: hive
+          fetch-depth: 0
+          persist-credentials: false
+          sparse-checkout: components/agent-cli-runtime
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # pinned 2026-07-26
+        with:
+          ruby-version: "3.4"
+
+      - name: Resolve the exact component source commit
+        id: source
+        shell: bash
+        run: |
+          source_commit="$(
+            git -C hive log -1 --format=%H -- components/agent-cli-runtime
+          )"
+          if [[ ! "$source_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "could not resolve component source commit" >&2
+            exit 1
+          fi
+          echo "commit=$source_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Synchronize the package tree
+        shell: bash
+        run: |
+          ruby hive/components/agent-cli-runtime/mirror/sync.rb \
+            hive/components/agent-cli-runtime \
+            mirror \
+            "${{ steps.source.outputs.commit }}"
+
+      - name: Verify the synchronized package
+        shell: bash
+        run: |
+          recorded="$(
+            ruby -rjson -e \
+              'print JSON.parse(File.read(ARGV.fetch(0))).fetch("source_commit")' \
+              mirror/.mirror-source.json
+          )"
+          test "$recorded" = "${{ steps.source.outputs.commit }}"
+          ruby -Imirror/lib -ragent_cli_runtime -e \
+            'abort unless AgentCliRuntime::VERSION.match?(/\A\d+\.\d+\.\d+\z/)'
+          (
+            cd mirror
+            gem build agent-cli-runtime.gemspec \
+              --output "$RUNNER_TEMP/agent-cli-runtime.gem"
+          )
+
+      - name: Commit an updated mirror
+        shell: bash
+        working-directory: mirror
+        run: |
+          git add --all
+          if git diff --cached --quiet; then
+            echo "Mirror already matches the canonical component."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m \
+            "Sync from Hive ${{ steps.source.outputs.commit }}"
+          git push origin HEAD:main

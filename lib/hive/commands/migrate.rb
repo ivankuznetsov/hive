@@ -6,12 +6,17 @@ require "hive/config"
 require "hive/display_name/generator"
 require "hive/git_ops"
 require "hive/lock"
+require "hive/markers"
 require "hive/paths"
 require "hive/process_kill"
+require "hive/recovery"
+require "hive/recovery/migration"
+require "hive/repository_identity"
 require "hive/stages"
 require "hive/task"
 require "hive/task_counter"
 require "hive/task_meta"
+require "hive/workflow_package/managed_store"
 
 module Hive
   module Commands
@@ -50,9 +55,13 @@ module Hive
       # `Hive::Commands::Status#detect_legacy_stage_dirs`.
       SLUG_RE = Hive::Stages::SLUG_RE
 
-      def initialize(project_path = Dir.pwd, display_name_generator: Hive::DisplayName::Generator)
+      def initialize(project_path = Dir.pwd, display_name_generator: Hive::DisplayName::Generator,
+                     managed_store_factory: Hive::WorkflowPackage::ManagedStore.method(:new),
+                     config_loader: Hive::Config.method(:load))
         @project_path = File.expand_path(project_path)
         @display_name_generator = display_name_generator
+        @managed_store_factory = managed_store_factory
+        @config_loader = config_loader
       end
 
       def call
@@ -60,8 +69,11 @@ module Hive
         stages = File.join(hive_state, "stages")
         raise Hive::InvalidTaskPath, "not a hive project: #{hive_state}" unless Dir.exist?(stages)
 
+        Hive::Recovery::Migration.ensure!
         moved = []
         backfilled_count = 0
+        recovery_marker_count = 0
+        workflow_configuration_count = 0
         no_move_message = nil
         Hive::Lock.with_commit_lock(hive_state) do
           plan = build_migration_plan(stages)
@@ -69,9 +81,24 @@ module Hive
           if plan.empty?
             ensure_current_stage_dirs(stages)
             backfilled_count = backfill_task_ids(stages)
-            if config_changed || backfilled_count.positive?
-              commit_migration(hive_state, moved, config_only: config_changed, backfilled_count: backfilled_count)
-              no_move_message = migration_no_move_message(config_changed: config_changed, backfilled_count: backfilled_count)
+            recovery_marker_count = backfill_recovery_marker_ids(stages)
+            workflow_configuration_count =
+              migrate_managed_workflow_configuration_pins(stages, hive_state)
+            if config_changed || backfilled_count.positive? ||
+               recovery_marker_count.positive? ||
+               workflow_configuration_count.positive?
+              commit_migration(
+                hive_state, moved, config_only: config_changed,
+                backfilled_count: backfilled_count,
+                recovery_marker_count: recovery_marker_count,
+                workflow_configuration_count: workflow_configuration_count
+              )
+              no_move_message = migration_no_move_message(
+                config_changed: config_changed,
+                backfilled_count: backfilled_count,
+                recovery_marker_count: recovery_marker_count,
+                workflow_configuration_count: workflow_configuration_count
+              )
             elsif already_migrated?(stages)
               no_move_message = "hive: migrate found nothing to move (target stage directories look already-migrated)"
             else
@@ -87,7 +114,15 @@ module Hive
             moved.concat(plan.map { |op| [ op[:old_stage], op[:new_stage], op[:entry] ] })
             ensure_current_stage_dirs(stages)
             backfilled_count = backfill_task_ids(stages)
-            commit_migration(hive_state, moved, config_only: false, backfilled_count: backfilled_count)
+            recovery_marker_count = backfill_recovery_marker_ids(stages)
+            workflow_configuration_count =
+              migrate_managed_workflow_configuration_pins(stages, hive_state)
+            commit_migration(
+              hive_state, moved, config_only: false,
+              backfilled_count: backfilled_count,
+              recovery_marker_count: recovery_marker_count,
+              workflow_configuration_count: workflow_configuration_count
+            )
           end
         end
 
@@ -97,21 +132,55 @@ module Hive
             commit_display_name_backfill(hive_state, display_name_count)
           end
         end
+        repository_identity = backfill_registered_repository_identity
 
         if moved.empty?
           puts no_move_message
         else
-          puts "hive: migrate complete (#{moved.size} task#{moved.size == 1 ? '' : 's'} moved" \
-               "#{backfilled_count.positive? ? ", #{backfilled_count} id#{backfilled_count == 1 ? '' : 's'} backfilled" : ''})"
+          puts migration_complete_message(
+            moved,
+            backfilled_count: backfilled_count,
+            recovery_marker_count: recovery_marker_count,
+            workflow_configuration_count: workflow_configuration_count
+          )
         end
         if display_name_count.positive?
           puts "hive: migrate backfilled #{display_name_count} display name#{display_name_count == 1 ? '' : 's'}"
         end
-        restart_daemon_if_running! if moved.any?
+        if repository_identity
+          puts "hive: migrate backfilled registered repository identity #{repository_identity}"
+        end
+        restart_daemon_if_running! if moved.any? || workflow_configuration_count.positive?
         moved
       end
 
       private
+
+      def backfill_registered_repository_identity
+        project = Hive::Config.registered_projects.find do |entry|
+          same_project_path?(entry["path"], @project_path)
+        end
+        return nil unless project
+        return nil unless project["repository_identity"].to_s.empty?
+
+        identity = Hive::RepositoryIdentity.current(@project_path)
+        return nil unless identity
+
+        Hive::Config.register_project(
+          name: project.fetch("name"),
+          path: project.fetch("path"),
+          repository_identity: identity
+        )
+        identity
+      end
+
+      def same_project_path?(candidate, expected)
+        return true if File.expand_path(candidate.to_s) == expected
+
+        File.realpath(candidate.to_s) == File.realpath(expected)
+      rescue SystemCallError
+        false
+      end
 
       def build_migration_plan(stages)
         ops = []
@@ -189,17 +258,99 @@ module Hive
         targets.sort_by! { |folder| [ idea_created_at(folder) || Time.at(2**31 - 1), File.basename(folder) ] }
 
         targets.each do |folder|
-          meta = Hive::TaskMeta.read(folder)
-          Hive::TaskMeta.write(
-            folder,
-            id: Hive::TaskCounter.next!,
-            slug: File.basename(folder),
-            display_name: meta[:display_name],
-            depends_on: meta[:depends_on],
-            workflow: meta[:workflow]
-          )
+          Hive::TaskMeta.update_id(folder, Hive::TaskCounter.next!)
         end
         targets.size
+      end
+
+      # Recovery v2 requires every recoverable marker generation to carry a
+      # durable random identity. Older projects may have ERROR/REVIEW_ERROR
+      # markers written before marker_id existed. Migrate them once, under the
+      # project commit lock, so runtime recovery can reject id-less markers
+      # instead of carrying a permanent compatibility identity algorithm.
+      def backfill_recovery_marker_ids(stages)
+        task_folders(stages).count do |folder|
+          state_file = recovery_state_file(folder)
+          next false unless state_file
+
+          marker = Hive::Markers.current(state_file)
+          next false unless Hive::Recovery.recoverable_marker?(marker.name)
+          next false unless marker.attrs["marker_id"].to_s.empty?
+
+          Hive::Markers.upgrade_recovery_marker_id(state_file, observed: marker)
+        end
+      end
+
+      # A mapping-only managed-workflow update keeps the immutable package
+      # generation unchanged while selecting a new current agent profile.
+      # Older task pins on that same generation would otherwise retain stale
+      # profile fingerprints forever and can become impossible to load after
+      # an agent configuration change. `hive migrate` is the explicit one-way
+      # boundary: rebind those tasks to the selected configuration, then let
+      # the managed store remove configurations no task still references.
+      #
+      # Tasks pinned to another package generation remain untouched because
+      # changing their descriptor/instructions requires a workflow-specific
+      # migration, not a configuration rewrite.
+      def migrate_managed_workflow_configuration_pins(stages, hive_state)
+        tasks = task_folders(stages).filter_map do |folder|
+          read = Hive::TaskMeta.read_for_admission(folder)
+          next unless read.status == :ok
+          next unless read.data[:workflow] && read.data[:workflow_commit] &&
+                      read.data[:workflow_manifest_digest]
+
+          [ folder, read.data ]
+        end
+        return 0 if tasks.empty?
+
+        store = @managed_store_factory.call(hive_state)
+        cfg = @config_loader.call(@project_path)
+        selections = {}
+        validated = {}
+        migrations = tasks.filter_map do |folder, meta|
+          selected = selections.fetch(meta[:workflow]) do
+            selections[meta[:workflow]] = store.selected(meta[:workflow], cfg: cfg)
+          end
+          next unless selected
+          next unless selected.fetch("source_commit") == meta[:workflow_commit] &&
+                      selected.fetch("manifest_digest") == meta[:workflow_manifest_digest]
+
+          selected_digest = selected.fetch("configuration_digest")
+          next if selected_digest == meta[:workflow_configuration_digest]
+
+          validation_key = [
+            meta[:workflow], meta[:workflow_commit],
+            meta[:workflow_manifest_digest], selected_digest
+          ]
+          unless validated[validation_key]
+            store.workflow(
+              meta[:workflow], meta[:workflow_commit],
+              meta[:workflow_manifest_digest],
+              configuration_digest: selected_digest, cfg: cfg
+            )
+            validated[validation_key] = true
+          end
+          [ folder, meta[:workflow], selected_digest ]
+        end
+
+        migrations.each do |folder, _workflow, selected_digest|
+          Hive::TaskMeta.rewrite(
+            folder, workflow_configuration_digest: selected_digest
+          )
+        end
+        migrations.map { |_folder, workflow, _digest| workflow }.uniq.each do |name|
+          store.cleanup_unreferenced(name)
+        end
+        migrations.length
+      end
+
+      def recovery_state_file(folder)
+        Hive::Task.new(folder).state_file
+      rescue Hive::InvalidTaskPath, Hive::ConfigError
+        # An unknown or incomplete workflow cannot identify its authoritative
+        # state file safely. Preserve it unchanged; recovery remains blocked
+        # until the workflow is restored and migrate can be rerun.
+        nil
       end
 
       def backfill_display_names(stages)
@@ -253,13 +404,19 @@ module Hive
         {}
       end
 
-      def commit_migration(hive_state, moved, config_only: false, backfilled_count: 0)
+      def commit_migration(hive_state, moved, config_only: false, backfilled_count: 0,
+                           recovery_marker_count: 0,
+                           workflow_configuration_count: 0)
         ops = Hive::GitOps.new(@project_path)
         ops.run_git!("-C", hive_state, "add", "-A")
         _out, _err, status = Open3.capture3("git", "-C", hive_state, "diff", "--cached", "--quiet")
         return if status.success?
 
-        message = migrate_commit_message(moved, config_only: config_only, backfilled_count: backfilled_count)
+        message = migrate_commit_message(
+          moved, config_only: config_only, backfilled_count: backfilled_count,
+          recovery_marker_count: recovery_marker_count,
+          workflow_configuration_count: workflow_configuration_count
+        )
         ops.run_git!("-C", hive_state, "commit", "-m", message)
       rescue Hive::GitError => e
         # The mv operations already succeeded — the on-disk layout is
@@ -273,7 +430,11 @@ module Hive
         # `Migrate#call` (daemon restart, completion message) still
         # runs against the consistent on-disk layout. ce-code-review
         # P2 #21.
-        message = migrate_commit_message(moved, config_only: config_only, backfilled_count: backfilled_count)
+        message = migrate_commit_message(
+          moved, config_only: config_only, backfilled_count: backfilled_count,
+          recovery_marker_count: recovery_marker_count,
+          workflow_configuration_count: workflow_configuration_count
+        )
         warn "hive: migrate completed the on-disk mv operations but " \
              "could not commit them to the hive-state git history: " \
              "#{e.class}: #{e.message}"
@@ -297,24 +458,71 @@ module Hive
              "(#{display_name_count} task#{display_name_count == 1 ? '' : 's'})'"
       end
 
-      def migrate_commit_message(moved, config_only:, backfilled_count: 0)
-        if moved.empty? && backfilled_count.positive? && !config_only
+      def migrate_commit_message(moved, config_only:, backfilled_count: 0,
+                                 recovery_marker_count: 0,
+                                 workflow_configuration_count: 0)
+        if moved.empty? && recovery_marker_count.positive? &&
+           backfilled_count.zero? && workflow_configuration_count.zero? &&
+           !config_only
+          "hive: migrate recovery markers (#{recovery_marker_count} task#{recovery_marker_count == 1 ? '' : 's'})"
+        elsif moved.empty? && workflow_configuration_count.positive? &&
+              backfilled_count.zero? && recovery_marker_count.zero? &&
+              !config_only
+          "hive: migrate managed workflow pins " \
+            "(#{workflow_configuration_count} task#{workflow_configuration_count == 1 ? '' : 's'})"
+        elsif moved.empty? && backfilled_count.positive? && !config_only &&
+              recovery_marker_count.zero? && workflow_configuration_count.zero?
           "hive: migrate task ids (#{backfilled_count} task#{backfilled_count == 1 ? '' : 's'})"
-        elsif config_only && moved.empty?
+        elsif config_only && moved.empty? && recovery_marker_count.zero? &&
+              workflow_configuration_count.zero?
           "hive: migrate config keys (no tasks moved)"
+        elsif moved.empty?
+          parts = []
+          parts << "#{backfilled_count} ids" if backfilled_count.positive?
+          parts << "#{recovery_marker_count} recovery markers" if recovery_marker_count.positive?
+          if workflow_configuration_count.positive?
+            parts << "#{workflow_configuration_count} managed workflow pins"
+          end
+          "hive: migrate project state (#{parts.join(', ')})"
         else
           "hive: migrate stage directories (#{moved.size} task#{moved.size == 1 ? '' : 's'})"
         end
       end
 
-      def migration_no_move_message(config_changed:, backfilled_count:)
-        if config_changed && backfilled_count.positive?
-          "hive: migrate rewrote legacy config keys and backfilled #{backfilled_count} task id#{backfilled_count == 1 ? '' : 's'}"
-        elsif config_changed
-          "hive: migrate rewrote legacy config keys (no task folders to move)"
-        else
-          "hive: migrate backfilled #{backfilled_count} task id#{backfilled_count == 1 ? '' : 's'}"
+      def migration_complete_message(moved, backfilled_count:,
+                                     recovery_marker_count:,
+                                     workflow_configuration_count:)
+        parts = [ "#{moved.size} task#{moved.size == 1 ? '' : 's'} moved" ]
+        if backfilled_count.positive?
+          parts << "#{backfilled_count} id#{backfilled_count == 1 ? '' : 's'} backfilled"
         end
+        if recovery_marker_count.positive?
+          parts << "#{recovery_marker_count} recovery marker" \
+                   "#{recovery_marker_count == 1 ? '' : 's'} upgraded"
+        end
+        if workflow_configuration_count.positive?
+          pin_label = workflow_configuration_count == 1 ? "pin" : "pins"
+          parts << "#{workflow_configuration_count} managed workflow #{pin_label} updated"
+        end
+        "hive: migrate complete (#{parts.join(', ')})"
+      end
+
+      def migration_no_move_message(config_changed:, backfilled_count:,
+                                    recovery_marker_count: 0,
+                                    workflow_configuration_count: 0)
+        actions = []
+        actions << "rewrote legacy config keys" if config_changed
+        if backfilled_count.positive?
+          actions << "backfilled #{backfilled_count} task id#{backfilled_count == 1 ? '' : 's'}"
+        end
+        if recovery_marker_count.positive?
+          actions << "upgraded #{recovery_marker_count} recovery marker#{recovery_marker_count == 1 ? '' : 's'}"
+        end
+        if workflow_configuration_count.positive?
+          pin_label = workflow_configuration_count == 1 ? "pin" : "pins"
+          actions << "updated #{workflow_configuration_count} managed workflow #{pin_label}"
+        end
+        "hive: migrate #{actions.join(' and ')}"
       end
 
       # Rewrite legacy `pr` budget/timeout keys onto the canonical
@@ -421,14 +629,11 @@ module Hive
       end
 
       # When `hive migrate` reshuffles the stage layout, an already-
-      # running daemon still has Ruby constants (most importantly
-      # `Hive::Daemon::PrMergeWatcher::ARCHIVE_VERB_TEMPLATE` and
-      # `ARCHIVE_FROM_STAGE`) frozen at class-load time from the OLD
-      # `Workflows::VERBS`. Its next archive dispatch would emit
-      # `hive archive ... --from <old-stage>` against the post-migrate
-      # disk layout and silently fail with `WrongStage`. Restarting the
-      # daemon process is the only way to refresh those constants
-      # (SIGHUP only re-reads YAML config, not Ruby constants).
+      # running daemon still has stage-derived constants (including the
+      # merge reconciler's supported PR-bearing stages) frozen at class-load
+      # time from the OLD `Workflows::VERBS`. Restarting the daemon process
+      # is the only way to refresh those constants (SIGHUP only re-reads YAML
+      # config, not Ruby constants).
       #
       # Best-effort: skip when no daemon pid file, no live process, or
       # `HIVE_MIGRATE_SKIP_DAEMON_RESTART` is set. On Linux with

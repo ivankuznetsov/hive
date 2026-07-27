@@ -35,7 +35,7 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       @prs
     end
 
-    def origin_push_url(_path, cfg:)
+    def origin_push_url(_path, cfg:, managed: false)
       "git@github.com:acme/demo.git"
     end
 
@@ -43,7 +43,7 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       @repository
     end
 
-    def remote_branch_oid(_path, _branch, cfg:, remote:)
+    def remote_branch_oid(_path, _branch, cfg:, remote:, managed: false)
       @before_remote_read&.call
       @remote_oid
     end

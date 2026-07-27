@@ -160,6 +160,11 @@ module Hive
         label: "Needs your input",
         command: "run"
       },
+      human_needs_input: {
+        key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+        label: "Awaiting human decision",
+        command: nil
+      },
       recover_draft_pr: {
         key: Hive::Schemas::TaskActionKind::RECOVER_DRAFT_PR,
         label: "Retry draft PR handoff manually",
@@ -280,8 +285,23 @@ module Hive
         "key" => key,
         "label" => label,
         "command" => command,
-        "next_action" => next_action
+        "next_action" => next_action,
+        "outcomes" => allowed_outcomes
       }
+    end
+
+    def allowed_outcomes
+      stage = workflow_stage
+      return [] unless stage&.kind == :human
+
+      stage.outcomes.values.map do |outcome|
+        {
+          "name" => outcome.name,
+          "complete" => outcome.complete,
+          "artifact" => outcome.artifact,
+          "to" => outcome.to
+        }
+      end
     end
 
     def migration_selection
@@ -363,6 +383,8 @@ module Hive
         review_action
       when :finalize
         finalize_action
+      when :human
+        human_action
       when :agent, :council, :inert
         # `|| generic_action(stage)` is the LIVE path for NON-coding
         # `:agent`/`:inert` workflows: `coding_table_action` returns nil for any
@@ -375,6 +397,10 @@ module Hive
       else
         generic_action(stage)
       end
+    end
+
+    def human_action
+      marker.name == :complete ? ACTIONS.fetch(:done) : ACTIONS.fetch(:human_needs_input)
     end
 
     def coding_table_action(stage)
@@ -654,6 +680,7 @@ module Hive
         legacy_execute_findings: legacy_execute_findings?,
         stale_agent_reason: stale_agent_reason,
         condition_gate: migration_selection.effective == "conditions" ? condition_gate : nil,
+        projection: @projection,
         state_file_mtime: @state_file_mtime,
         project_name: project_name,
         project_count: @project_count
@@ -692,12 +719,9 @@ module Hive
     # drift would silently desync producer + consumers. See PR #84
     # review finding #17.
     def self.max_passes_review_stale_with_escalations?(folder:, marker_name:, attrs:)
-      return false unless marker_name.to_s == "review_stale"
-
-      pass = (attrs || {})["pass"].to_s
-      return false unless pass.match?(/\A[1-9]\d*\z/)
-
-      File.exist?(File.join(folder.to_s, "reviews", "escalations-#{format('%02d', pass.to_i)}.md"))
+      Hive::Recovery.intervention_required?(
+        marker: marker_name, attrs: attrs || {}, folder: folder
+      )
     end
 
     # Shared prefix for every `hive <verb> <slug>` builder: the verb, the
@@ -821,7 +845,8 @@ module Hive
     end
 
     def task_workflow
-      workflow = task.respond_to?(:workflow) ? task.workflow : nil
+      workflow = task.respond_to?(:action_workflow) ? task.action_workflow : nil
+      workflow ||= task.respond_to?(:workflow) ? task.workflow : nil
       workflow || Hive::Workflows::Registry.default
     end
   end

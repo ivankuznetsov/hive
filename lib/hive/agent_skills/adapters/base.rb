@@ -2,8 +2,6 @@ require "digest"
 require "fileutils"
 
 require "hive/agent_skills/inspector"
-require "hive/agent_skills/canonical_skill"
-require "hive/agent_skills/directory_publisher"
 require "hive/atomic_file"
 
 module Hive
@@ -157,6 +155,7 @@ module Hive
           when "claude" then File.join(home, ".claude")
           when "codex" then File.join(home, ".codex")
           when "pi" then File.join(home, ".pi", "agent")
+          when "grok" then File.join(home, ".grok")
           end
         end
 
@@ -165,11 +164,19 @@ module Hive
         end
 
         def bundled_operations_for_package(package, bundled_spec, rows)
-          projection = CanonicalSkill.new.render(agent)
+          projection = Hive::AgentSkills.render(agent)
           root = config_root(bundled_spec)
           destination = File.join(root, projection.destination_relative)
           snapshot = rows.first.native.dig("projection", "snapshot")
           raise Hive::ConfigError, "bundled Hive skill inspection has no directory snapshot" unless snapshot
+          skill_plan = Hive::AgentSkills.plan(
+            root: root,
+            trusted_root: @environment["HOME"] || Dir.home,
+            projection: projection
+          )
+          unless skill_plan.inspection.snapshot == snapshot
+            raise Hive::ConfigError, "bundled Hive skill destination changed during planning"
+          end
 
           [ operation(
             package: package,
@@ -182,13 +189,14 @@ module Hive
               "root" => root,
               "trusted_root" => @environment["HOME"] || Dir.home,
               "platform" => agent,
-              "snapshot" => snapshot
+              "snapshot" => snapshot,
+              "skill_plan" => skill_plan
             }
           ) ]
         end
 
         def runner_environment
-          %w[HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR].each_with_object({}) do |key, out|
+          %w[HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME].each_with_object({}) do |key, out|
             out[key] = @environment[key] if @environment.key?(key)
           end
         end
@@ -280,12 +288,7 @@ module Hive
           platform = operation.metadata.fetch("platform")
           raise Hive::ConfigError, "bundled skill platform #{platform.inspect} does not match #{agent}" unless platform == agent
 
-          publisher = DirectoryPublisher.new(
-            root: operation.metadata.fetch("root"),
-            trusted_root: operation.metadata.fetch("trusted_root"),
-            projection: CanonicalSkill.new.render(platform)
-          )
-          publisher.publish(expected_snapshot: operation.metadata.fetch("snapshot"))
+          Hive::AgentSkills.apply(operation.metadata.fetch("skill_plan"))
           Outcome.new(
             operation_id: operation.id,
             agent: agent,

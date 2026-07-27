@@ -3,11 +3,11 @@ title: 4-execute stage
 type: stage
 source: lib/hive/stages/execute.rb, templates/execute_prompt.md.erb
 created: 2026-04-25
-updated: 2026-07-17
+updated: 2026-07-25
 tags: [stage, execute, worktree]
 ---
 
-**TLDR**: Implementation-only since U9 (ADR-014). First entry creates a feature worktree at `<worktree_root>/<slug>`, records its baseline HEAD in `worktree.yml`, spawns the implementation agent, captures its final message into `task.md`, and finalises with `EXECUTE_COMPLETE` only when the worktree stays on the task branch, descends from the baseline, has a new commit, and is clean. Clean no-change exits pause as `EXECUTE_WAITING reason=no_worktree_changes` unless `plan.md` opts into `execution_mode: research` and the agent produced a structured final answer. Provider quota walls now write `ERROR reason=limits_reached provider=<execute-agent> retry_after=<iso8601>` so the daemon's existing cooldown healer can hold and later retry the task instead of repeatedly re-spawning into the same wall. The user `mv`s completed tasks to `6-review/` to enter the autonomous review loop. No review/iteration logic lives in 4-execute — that all moved to [[stages/review]].
+**TLDR**: Implementation-only since U9 (ADR-014). First entry creates a feature worktree at `<worktree_root>/<slug>`, records its baseline HEAD in `worktree.yml`, spawns the implementation agent, captures its final message into `task.md`, and finalises with `EXECUTE_COMPLETE` only when the worktree stays on the task branch, descends from the baseline, has a new commit, and is clean. Clean no-change exits pause as `EXECUTE_WAITING reason=no_worktree_changes` unless `plan.md` opts into `execution_mode: research` and the agent produced a structured final answer. Provider quota walls write `ERROR reason=limits_reached provider=<execute-agent> retry_after=<iso8601>`; like every persisted execute error, the daemon submits that exact marker generation to `RecoveryCoordinator` after the shared cooldown instead of hot-looping. The user `mv`s completed tasks to `6-review/` to enter the autonomous review loop. No review/iteration logic lives in 4-execute — that all moved to [[stages/review]].
 
 ## Condition boundary
 
@@ -27,7 +27,7 @@ report paths share the transition guard. See [[modules/conditions]].
 
 ## Generation-scoped implementation owner
 
-Before the first implementation process in a task generation, `Hive::ImplementationIdentity::Store#capture_execute!` runs under the durable attempt context. It resolves provider, concrete model, launcher/profile identity, source, generation, originating attempt, requested/effective execute effort, and effort support; appends `implementation_identity_captured`; rebuilds the projection; and only then permits the spawn. Journal failure aborts the launch. The journal and projection are included in the protected-file snapshot after capture, so an implementation process with task-folder access cannot rewrite its durable owner unnoticed. Equivalent retries are idempotent, while a conflicting second identity for the same generation fails closed.
+Before execute creates its reviews directory, feature worktree, pointer, or initial task marker, `Hive::ImplementationIdentity::Store#capture_execute!` runs under the durable attempt context. It resolves provider, concrete model, launcher/profile identity, source, generation, originating attempt, requested/effective execute effort, and effort support; appends `implementation_identity_captured`; rebuilds the projection; and only then permits stage initialization and the spawn. Invalid effective routing or journal failure therefore leaves execute state untouched. The journal and projection are included in the protected-file snapshot after capture, so an implementation process with task-folder access cannot rewrite its durable owner unnoticed. Equivalent retries are idempotent, while a conflicting second identity for the same generation fails closed.
 
 Crash/provider retries, daemon adoption, restart, and project config edits stay within the generation and reuse the captured identity, including failure-marker provider attribution. An accepted input change through the generation tracker advances the epoch, after which execute may capture a new owner while history remains queryable. Legacy reconstruction is allowed only at a mutating implementation boundary: structured durable attempt metadata from the exact project/task/generation wins over sanitized launcher argv, which wins over explicit current execute config. Config fallback appends a visible warning and one `legacy_backfill`; status reads never invoke reconstruction. Downstream attempt admission treats only an absent journal as legacy generation zero; malformed, unreadable, empty, or attempt-unbound journals fail closed.
 
@@ -52,17 +52,23 @@ Crash/provider retries, daemon adoption, restart, and project config edits stay 
 
 ## Init pass (`run_init_pass`)
 
-1. `Worktree.new.create!(slug, default_branch: ...)` runs `git worktree add <root> -b <slug> <default>` (or attaches to an existing branch if it already exists).
-2. `Worktree.validate_pointer_path` rejects worktrees outside the configured `worktree_root` prefix.
-3. `Worktree#write_pointer!` writes `worktree.yml`, including `execute_base_head` for later baseline checks.
-4. `write_initial_task_md`.
-5. `spawn_implementation`.
-6. Capture the agent's final stdout / stream-json result into `task.md` under `## Execute Output`.
-7. SHA-256 protect pass on `plan.md` / `worktree.yml`.
-8. Verify the worktree is on the expected task branch, descends from `execute_base_head`, is clean, and either has a new baseline-descendant commit or is an explicit `execution_mode: research` plan with a structured final agent message.
-9. `EXECUTE_COMPLETE` or `EXECUTE_WAITING reason=...`.
+1. Resolve and profile-validate the generation's effective implementation identity.
+2. `Worktree.new.create!(slug, default_branch: ...)` runs `git worktree add <root> -b <slug> <default>` (or attaches to an existing branch if it already exists).
+3. `Worktree.validate_pointer_path` rejects worktrees outside the configured `worktree_root` prefix.
+4. `Worktree#write_pointer!` writes `worktree.yml`, including `execute_base_head` for later baseline checks.
+5. `write_initial_task_md`.
+6. `spawn_implementation`.
+7. Capture the agent's final stdout / stream-json result into `task.md` under `## Execute Output`.
+8. SHA-256 protect pass on `plan.md` / `worktree.yml`.
+9. Verify the worktree is on the expected task branch, descends from `execute_base_head`, is clean, and either has a new baseline-descendant commit or is an explicit `execution_mode: research` plan with a structured final agent message.
+10. `EXECUTE_COMPLETE` or `EXECUTE_WAITING reason=...`.
 
 Re-running with `worktree.yml` already present and a `:execute_complete` marker is a no-op announcing 6-review.
+An automatic retry after `ERROR` resumes the exact owned worktree even when it
+contains uncommitted edits from the failed agent. Those edits are durable
+implementation progress; ownership, branch, ancestry, and tamper checks still
+run, and a successful agent exit with remaining dirt pauses as
+`EXECUTE_WAITING reason=dirty_worktree` instead of completing.
 
 ## Implementation sub-agent (`spawn_implementation`)
 

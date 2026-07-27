@@ -112,6 +112,30 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_rejects_routed_identity_before_initializing_stage_state
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      worktree_root = File.join(dir, "worktrees")
+
+      with_replaced_singleton_method(
+        Hive::Stages::Execute, :capture_implementation_identity,
+        ->(_task, _cfg) { raise Hive::ConfigError, "unsupported routed effort" }
+      ) do
+        error = assert_raises(Hive::ConfigError) do
+          Hive::Stages::Execute.run!(task, "worktree_root" => worktree_root)
+        end
+
+        assert_equal "unsupported routed effort", error.message
+      end
+
+      refute Dir.exist?(task.reviews_dir)
+      refute File.exist?(task.worktree_yml_path)
+      refute File.exist?(task.state_file)
+      refute Dir.exist?(File.join(worktree_root, task.slug))
+    end
+  end
+
   def test_run_pass_waits_when_new_head_is_not_descendant
     with_tmp_dir do |dir|
       task = build_task(dir)
@@ -273,6 +297,41 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_restores_custody_before_propagating_spawn_exception
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      original_plan = File.binread(File.join(task.folder, "plan.md"))
+      write_pointer(
+        task,
+        "path" => File.join(dir, "worktree"),
+        "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "base", branch: task.slug, dirty: false, ancestor_result: true
+      )
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          lambda { |_task, _cfg, _path, **_kwargs|
+            File.write(File.join(task.folder, "plan.md"), "forged\n")
+            raise IOError, "provider stream failed"
+          }
+        ) do
+          error = assert_raises(IOError) do
+            Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
+          end
+
+          assert_equal "provider stream failed", error.message
+        end
+      end
+
+      assert_equal original_plan, File.binread(File.join(task.folder, "plan.md"))
+    end
+  end
+
   # `agent_failed?` is true for :timeout as well as :error, and the
   # non-limit branch records `status: impl_result[:status]` verbatim — so a
   # timeout (e.g. the exit_code_only "stop hook did not signal completion"
@@ -359,7 +418,7 @@ class HiveStagesExecuteTest < Minitest::Test
 
       with_replaced_singleton_method(Hive::GitOps, :new, ->(path) { path == dir ? project_git : worktree_git }) do
         with_replaced_singleton_method(Hive::Worktree, :new, ->(_project_root, _slug, worktree_root:) { fake_wt }) do
-          with_replaced_singleton_method(Hive::Stages::Execute, :run_pass, ->(_task, _cfg, _path) { { commit: nil, status: :ok } }) do
+          with_replaced_singleton_method(Hive::Stages::Execute, :run_pass, ->(_task, _cfg, _path, _identity) { { commit: nil, status: :ok } }) do
             Hive::Stages::Execute.run_init_pass(task, { "worktree_root" => File.join(dir, "worktrees") })
           end
         end

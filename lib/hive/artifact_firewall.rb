@@ -538,7 +538,18 @@ module Hive
           "required output #{label.inspect} is not a regular file"
         )
       end
-      if stat.size.zero?
+
+      output = File.open(
+        path, File::RDONLY | File::NOFOLLOW | File::NONBLOCK
+      )
+      opened_stat = output.stat
+      unless opened_stat.file?
+        return violation(
+          manifest, :required_output_non_regular, label, path,
+          "required output #{label.inspect} is not a regular file"
+        )
+      end
+      if output.read(1).to_s.empty?
         return violation(
           manifest, :required_output_empty, label, path,
           "required output #{label.inspect} is empty"
@@ -546,6 +557,11 @@ module Hive
       end
 
       nil
+    rescue Errno::ELOOP
+      violation(
+        manifest, :required_output_symlink, label, path,
+        "required output #{label.inspect} is a symlink"
+      )
     rescue Errno::ENOENT
       violation(
         manifest, :required_output_missing, label, path,
@@ -556,6 +572,8 @@ module Hive
         manifest, :required_output_unreadable, label, path,
         "required output #{label.inspect} is unreadable: #{e.class}"
       )
+    ensure
+      output&.close
     end
     private_class_method :required_output_violation
 

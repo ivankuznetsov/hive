@@ -657,6 +657,27 @@ class ArtifactFirewallTest < Minitest::Test
     end
   end
 
+  def test_required_output_must_be_openable_and_readable
+    with_tmp_dir do |dir|
+      output = File.join(dir, "output.md")
+      File.write(output, "nonempty but unreadable\n")
+      File.chmod(0o000, output)
+      manifest = build_manifest(
+        dir,
+        outputs: { "output" => output },
+        roots: [ dir ]
+      )
+
+      report = Hive::ArtifactFirewall.validate_required_outputs(manifest)
+
+      assert_equal :rejected, report.status
+      assert_equal :required_output_unreadable,
+                   report.required_output_violations.fetch(0).kind
+    ensure
+      File.chmod(0o600, output) if output && File.exist?(output)
+    end
+  end
+
   def test_violation_rejects_unknown_kind
     error = assert_raises(ArgumentError) do
       Hive::ArtifactFirewall::Violation.new(

@@ -62,8 +62,11 @@ and then restoring through a different policy observation.
 `validate_required_outputs(manifest)` is the read-only polling seam used by
 headless `Hive::Agent` and `Hive::ClaudeLauncher`. It replaces the former
 `File.exist? && File.size.positive?` check, so symlinks and directories cannot
-masquerade as successful reviewer artifacts. Final stage acceptance still uses
-the spawn-bound snapshot when protected anchors are also in scope.
+masquerade as successful reviewer artifacts. Admission opens the path with
+`NOFOLLOW`, verifies the opened descriptor is still regular, and reads at least
+one byte, so a nonempty but unreadable file also fails closed. Final stage
+acceptance still uses the spawn-bound snapshot when protected anchors are also
+in scope.
 
 ## Typed violations
 

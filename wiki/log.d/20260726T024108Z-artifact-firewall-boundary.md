@@ -40,3 +40,8 @@ duplicate manifest rejection, normalization and internal-error translation,
 capture-time parent instability, descriptor type changes, unreadable paths,
 legacy capture verification, no-op stale restoration, and Agent, Claude, and
 review-triage fail-closed adapters. Production firewall behavior is unchanged.
+
+**Review hardening:** Required-output admission now opens each candidate with
+`NOFOLLOW`, verifies the opened descriptor is regular, and reads a byte.
+Nonempty paths that cannot actually be read therefore produce
+`required_output_unreadable` instead of passing from `lstat` metadata alone.

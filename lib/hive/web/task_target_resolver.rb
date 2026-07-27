@@ -6,17 +6,18 @@ module Hive
   module Web
     # Resolves one registered project/task without entering the fleet status
     # producer. A cached row is presentation data only: TaskResolver still
-    # proves that the task currently exists in the selected project.
+    # proves that the task currently exists in the selected project. Archive
+    # mode disables retention only for that resolved project/stage.
     class TaskTargetResolver
       Result = Data.define(:native_task, :attributes, :source)
 
-      def initialize(project:, slug:, cached_payload: nil,
-                     status_command: Hive::Commands::Status.new(json: true),
-                     task_resolver: nil)
+      def initialize(project:, slug:, cached_payload: nil, archive: false,
+                     status_command: nil, task_resolver: nil)
         @project = project.to_h
         @slug = slug.to_s
         @cached_payload = cached_payload
-        @status_command = status_command
+        @status_command =
+          status_command || Hive::Commands::Status.new(json: true, archive: archive)
         @task_resolver = task_resolver || lambda do
           Hive::TaskResolver.new(@slug, project_filter: @project.fetch("name")).resolve
         end

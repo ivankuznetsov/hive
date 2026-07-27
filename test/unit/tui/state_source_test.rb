@@ -221,6 +221,24 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_refresh_payload_now_raises_a_refresh_failure_after_a_prior_success
+    source = Hive::Tui::StateSource.new
+    stale_payload = { "schema" => "hive-status", "projects" => [] }
+    failure = Hive::ConfigError.new("synthetic refresh failure")
+    source.instance_variable_set(:@current_payload, stale_payload)
+    source.define_singleton_method(:refresh_once) do
+      @last_error = failure
+    end
+
+    raised = assert_raises(Hive::ConfigError) { source.refresh_payload_now }
+
+    assert_same failure, raised
+    assert_same stale_payload, source.instance_variable_get(:@current_payload),
+                "the TUI latest-good payload remains available for its own degraded rendering"
+  ensure
+    source&.stop
+  end
+
   def test_visible_archive_cache_mode_avoids_the_unfiltered_cold_scan
     with_direct_project do |_project, hive_state|
       archived_folder = write_state_task(
@@ -529,6 +547,30 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_refresh_once_reparses_when_active_task_folder_mtime_changes
+    with_seeded_project do |_project, _dir|
+      calls = 0
+      patch = Module.new do
+        define_method(:json_payload) do |projects, **kwargs|
+          calls += 1
+          super(projects, **kwargs)
+        end
+      end
+      Hive::Commands::Status.prepend(patch)
+
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      folder = source.current.rows.first.folder
+      File.write(File.join(folder, "brainstorm.md"), "# New artifact\n")
+      changed_at = Time.now + 5
+      File.utime(changed_at, changed_at, folder)
+      source.send(:refresh_once)
+
+      assert_equal 3, calls,
+                   "active task artifact changes must invalidate the ordinary snapshot"
+    end
+  end
+
   def test_refresh_once_reparses_when_task_lock_appears
     with_seeded_project do |_project, _dir|
       calls = 0
@@ -626,7 +668,9 @@ class TuiStateSourceTest < Minitest::Test
       source.send(:refresh_once)
 
       fingerprint_paths = source.instance_variable_get(:@mtime_fingerprint).keys
+      assert_includes fingerprint_paths, active_folder
       assert_includes fingerprint_paths, File.join(active_folder, "task.md")
+      refute_includes fingerprint_paths, archived_folder
       refute_includes fingerprint_paths, File.join(archived_folder, "task.md")
       refute_includes fingerprint_paths, File.join(archived_folder, ".lock")
       assert_includes source.instance_variable_get(:@archive_dir_mtimes).keys,

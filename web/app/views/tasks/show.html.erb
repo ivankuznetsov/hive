@@ -78,7 +78,9 @@
   <%= turbo_frame_tag "task-log",
         src: task_log_path(@project.name, @task["slug"], source: @task_source),
         refresh: "morph",
-        data: { controller: "poll", poll_interval_value: 3000, turbo_permanent: true } do %>
+        data: (@task_source ?
+          { turbo_permanent: true } :
+          { controller: "poll", poll_interval_value: 3000, turbo_permanent: true }) do %>
     <div class="log-pane"><pre>Loading log…</pre></div>
   <% end %>
 <% end %>

@@ -284,6 +284,7 @@ class StatusFeedTest < Minitest::Test
           }
         ]
       end
+      base.dig("projects", 0, "tasks", 0).freeze
       feed = Hive::Web::StatusFeed.new(status_command: status)
 
       payload = feed.snapshot
@@ -291,6 +292,8 @@ class StatusFeedTest < Minitest::Test
       assert_equal 1, status.calls
       assert_equal receipt,
                    payload.dig("projects", 0, "tasks", 0, "recovery")
+      refute base.dig("projects", 0, "tasks", 0).key?("recovery"),
+             "the daemon overlay must not mutate StateSource's shared cached rows"
     ensure
       feed&.stop
     end

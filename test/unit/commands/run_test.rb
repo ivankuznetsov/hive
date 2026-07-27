@@ -298,7 +298,7 @@ class CommandsRunTest < Minitest::Test
       run.define_singleton_method(:pick_runner) { |_task| runner }
       run.define_singleton_method(:legacy_completed_at_before_run) { |*| nil }
 
-      error = with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(*) {}) do
+      error = with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(*) { }) do
         with_replaced_singleton_method(Hive::Config, :load, ->(*) { {} }) do
           with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
             assert_raises(Hive::Error) { run.send(:do_call) }

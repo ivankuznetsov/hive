@@ -292,12 +292,18 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
   Terminal-directory changes, policy edits, and retention boundaries rebuild
   the ordinary projection immediately; a five-minute backstop repairs missed
   signals. `/archive` remains lossless by invoking the unfiltered Status
-  producer on demand and never replacing the ordinary feed's cache.
+  producer on demand and never replacing the ordinary feed's cache. Archive
+  task links resolve only the requested registered project and stage through
+  the unfiltered producer, so their shell, log, media, diff, and action routes
+  do not multiply lossless fleet scans.
   `StatusFeed` suppresses unchanged snapshots by comparing with only
   `generated_at` and `age_seconds` removed while keeping `mtime` /
-  `folder_mtime` as liveness signals. The poller publishes its comparable key
-  with the payload and reuses the existing semantic token when that key is
-  unchanged, so volatile-only ticks do not repeat canonical JSON hashing.
+  `folder_mtime` as liveness signals. Active task-folder mtimes are part of the
+  bounded source fingerprint, so an added or removed artifact invalidates the
+  page token without waiting for the fallback parse. The poller publishes its
+  comparable key with the payload and reuses the existing semantic token when
+  that key is unchanged, so volatile-only ticks do not repeat canonical JSON
+  hashing.
   `hidden_archived_task_count` remains in that comparison, making a
   boundary- or policy-driven count change material even if every active row is
   unchanged.
@@ -393,8 +399,11 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
   for the task shell and every child controller, while the shell propagates it
   to log, media, diff, answer, intervention, run, approval, rejection,
   recovery, and drop routes. An expired task opened from the archive therefore
-  remains usable instead of its child requests becoming false 404s. Native Hive
-  web and Hivebox use this same Rails route and producer path.
+  remains usable instead of its child requests becoming false 404s. Each route
+  resolves that exact project/stage rather than rescanning the fleet, and
+  terminal archive logs load once without the live task page's three-second
+  polling loop. Native Hive web and Hivebox use this same Rails route and
+  producer path.
 - **Task page** — state-driven actions (Retry stage for red
   `recover_review` / `recover_execute` / `error` rows; Approve only when the
   marker makes a forward move possible; Run <verb> only when the project daemon
@@ -774,9 +783,12 @@ terracotta honeycomb hive glyph rather than the old placeholder.
 
 ## Task-local reads and degraded status
 
-Task show, log, diff, media, and mutation routes resolve one registered project
-and task through `Hive::Web::TaskTargetResolver`; they do not call the
-fleet-wide status producer. One process-wide `StatusFeed` owns polling,
+Ordinary task show, log, diff, media, and mutation routes resolve one registered
+project and task through `Hive::Web::TaskTargetResolver`; they do not call the
+fleet-wide status producer. Explicit `source=archive` routes use that same
+targeted resolver with retention filtering disabled, so hidden terminal tasks
+remain addressable and mutations revalidate current task state without a stale
+fleet cache. One process-wide `StatusFeed` owns polling,
 single-flight refresh, actual scan count, and latest-good state. First-scan
 failure renders an explicit unavailable page. A later failure retains the last
 good rows with an accessible warning and disables freshness-dependent mutation

@@ -285,13 +285,21 @@ module Hive
           identity = task["identity"] || {}
           [ [ identity["project"].to_s, identity["slug"].to_s ], task["recovery"] ]
         end
-        Array(payload["projects"]).each do |project|
-          Array(project["tasks"]).each do |task|
+        changed = false
+        projects_with_recoveries = Array(payload["projects"]).map do |project|
+          project_changed = false
+          tasks_with_recoveries = Array(project["tasks"]).map do |task|
             recovery = recoveries[[ project["name"].to_s, task["slug"].to_s ]]
-            task["recovery"] = recovery if recovery.is_a?(Hash)
+            next task unless recovery.is_a?(Hash)
+            next task if task["recovery"] == recovery
+
+            changed = true
+            project_changed = true
+            task.merge("recovery" => recovery)
           end
+          project_changed ? project.merge("tasks" => tasks_with_recoveries) : project
         end
-        payload
+        changed ? payload.merge("projects" => projects_with_recoveries) : payload
       rescue StandardError => e
         warn "hive web: operational recovery overlay failed (#{e.class}: #{e.message}); using base status"
         payload

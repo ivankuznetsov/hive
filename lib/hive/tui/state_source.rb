@@ -163,7 +163,11 @@ module Hive
       # source's poll state has one writer by design.
       def refresh_payload_now
         refresh_once
-        raise @last_error if @current_payload.nil? && @last_error
+        # TUI callers intentionally hold the last snapshot and surface
+        # last_error beside it. Synchronous consumers such as Web::StatusFeed
+        # instead need the exception so their own latest-good state becomes
+        # explicitly degraded rather than republishing stale rows as fresh.
+        raise @last_error if @last_error
 
         @current_payload
       end
@@ -396,6 +400,11 @@ module Hive
           project.rows.each do |row|
             next if archived_folders.include?(row.folder)
 
+            # Creating/removing an artifact changes the task directory but
+            # not its stage state file. Watch the active folder so web task
+            # pages receive a new semantic token as soon as an artifact
+            # appears, including during Cable reconnect catch-up.
+            paths << row.folder
             paths << row.state_file
             # A runner can acquire the task lock before it writes
             # AGENT_WORKING, so the lock file is a status-affecting path.

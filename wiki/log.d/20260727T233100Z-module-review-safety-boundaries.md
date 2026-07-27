@@ -11,5 +11,7 @@
   stdout and stderr, and secret prefixes at the truncation boundary are
   redacted. Filesystem grants now reject symlinks that resolve outside the
   project.
+- The four module acceptance scenarios are registered as required semantic E2E
+  coverage so current release-profile preflight can select and run them.
 
-**Pages:** [[modules/workflows]], [[modules/patrol]]
+**Pages:** [[modules/workflows]], [[modules/patrol]], [[e2e]]

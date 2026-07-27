@@ -1,6 +1,9 @@
 name: module_fresh_install
 description: Reviewed first-party modules activate project-locally and CLI/Web consume identical redacted status.
 tags: [modules, acceptance, lifecycle]
+coverage:
+  primary: module.lifecycle_install
+  supporting: []
 steps:
   - kind: seed_state
     stage: 1-inbox

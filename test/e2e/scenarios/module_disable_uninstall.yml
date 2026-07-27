@@ -1,6 +1,9 @@
 name: module_disable_uninstall
 description: Disable, re-enable, and uninstall enforce no-replay watermarks while retaining tombstone history.
 tags: [modules, acceptance, lifecycle]
+coverage:
+  primary: module.lifecycle_disable_uninstall
+  supporting: []
 steps:
   - kind: seed_state
     stage: 1-inbox

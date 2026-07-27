@@ -1,6 +1,9 @@
 name: module_update_rollback
 description: A failed candidate is removed and both automatic and explicit previous-generation rollback preserve state.
 tags: [modules, acceptance, lifecycle]
+coverage:
+  primary: module.lifecycle_update_rollback
+  supporting: []
 steps:
   - kind: seed_state
     stage: 1-inbox

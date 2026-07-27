@@ -1,6 +1,9 @@
 name: module_trigger_replay
 description: Replaying one named event yields one module-hook attempt and an explainable duplicate decision.
 tags: [modules, acceptance, events]
+coverage:
+  primary: module.event_replay
+  supporting: []
 steps:
   - kind: seed_state
     stage: 1-inbox

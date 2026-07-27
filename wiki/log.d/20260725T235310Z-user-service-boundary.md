@@ -21,3 +21,9 @@ forbids external construction of its Manager collaborator, permits only the
 downward AtomicFile dependency, and verifies a clean process load without Hive
 commands, stages, or web code. No gem, version, release, publication,
 deployment, or repository split was introduced.
+
+**Review hardening:** Apply and remove reject caller-constructed plans whose
+action or manager-observation flags do not match the bound status. Linux
+autostart treats a present `systemctl` binary with no user manager as
+unavailable without issuing manager mutations, and a failed replacement still
+reports a backup that was successfully written.

@@ -167,6 +167,86 @@ class UserServiceTest < Minitest::Test
     end
   end
 
+  def test_apply_rejects_a_forged_force_decision
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "operator-owned\n")
+      calls = []
+      service = build_service(dir, runner: ->(argv) { calls << argv; true })
+      valid = service.plan(autostart: false, force: false)
+      forged = Hive::UserService::Plan.new(
+        operation: :apply,
+        action: :replace,
+        definition_fingerprint: valid.definition_fingerprint,
+        expected_observation: valid.expected_observation,
+        status: valid.status,
+        manager_observed: valid.manager_observed,
+        autostart: valid.autostart,
+        force: valid.force
+      )
+
+      error = assert_raises(ArgumentError) { service.apply(forged) }
+
+      assert_match(/decision does not match/, error.message)
+      assert_equal "operator-owned\n", File.read(path)
+      assert_empty Dir["#{path}.bak-*"]
+      assert_empty calls & MUTATING_COMMANDS
+    end
+  end
+
+  def test_apply_does_not_mutate_an_unavailable_systemd_manager
+    with_tmp_dir do |dir|
+      calls = []
+      service = Hive::UserService.new(
+        definition: service_definition(dir),
+        runner: ->(argv) { calls << argv; true },
+        query_available: true,
+        manager_available: false
+      )
+
+      result = service.apply(service.plan(autostart: true))
+
+      assert_equal :autostart_unavailable, result.kind
+      assert result.success?
+      assert_equal "desired\n", File.read(definition_path(dir))
+      assert_includes result.diagnostics, :autostart_unavailable
+      assert_empty calls & MUTATING_COMMANDS
+    end
+  end
+
+  def test_failed_replacement_reports_the_completed_backup
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "operator-owned\n")
+      writes = 0
+      writer = Object.new
+      writer.define_singleton_method(:write) do |target, content, mode:|
+        writes += 1
+        raise IOError, "target replacement failed" if writes == 2
+
+        Hive::AtomicFile.write(target, content, mode: mode)
+      end
+      service = Hive::UserService.new(
+        definition: service_definition(dir),
+        runner: ->(_argv) { true },
+        writer: writer,
+        clock: -> { Time.utc(2026, 7, 26, 1, 2, 3) }
+      )
+
+      result = service.apply(service.plan(autostart: false, force: true))
+
+      assert_equal :failed, result.kind
+      assert_equal "#{path}.bak-20260726T010203Z", result.backup_path
+      assert_equal "operator-owned\n", File.read(result.backup_path)
+      assert_equal "operator-owned\n", File.read(path)
+      assert_includes result.diagnostics, :backup_written
+      assert_includes result.diagnostics, :write_failed
+      assert_equal "IOError", result.error_class
+    end
+  end
+
   def test_partial_manager_failure_returns_typed_final_observed_state
     with_tmp_dir do |dir|
       path = definition_path(dir)
@@ -625,6 +705,21 @@ class UserServiceTest < Minitest::Test
           status: status
         )
       end
+
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      valid_remove = service.plan_remove
+      forged_remove = Hive::UserService::Plan.new(
+        operation: :remove,
+        action: valid_remove.action,
+        definition_fingerprint: valid_remove.definition_fingerprint,
+        expected_observation: valid_remove.expected_observation,
+        status: valid_remove.status,
+        manager_observed: false
+      )
+      assert_raises(ArgumentError) { service.remove(forged_remove) }
+      assert File.exist?(path)
     end
   end
 

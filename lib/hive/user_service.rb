@@ -218,7 +218,17 @@ module Hive
           return stale_result(:apply, inspect_status(manager: plan.manager_observed)) unless backup_content
 
           write(backup_path, backup_content)
-          write(@definition.target_path, @definition.content)
+          begin
+            write(@definition.target_path, @definition.content)
+          rescue StandardError => error
+            return Result.new(
+              :failed,
+              backup_path: backup_path,
+              final_status: safe_inspect(manager: plan.manager_observed),
+              diagnostics: %i[backup_written write_failed],
+              error: error
+            )
+          end
           :upgraded
         when :noop
           :unchanged
@@ -274,9 +284,31 @@ module Hive
     def validate_plan!(plan, operation)
       raise ArgumentError, "expected Hive::UserService::Plan" unless plan.is_a?(Plan)
       raise ArgumentError, "expected #{operation} plan, got #{plan.operation}" unless plan.operation == operation
-      return if plan.definition_fingerprint == @definition.fingerprint
+      unless plan.definition_fingerprint == @definition.fingerprint
+        raise ArgumentError, "plan belongs to a different service definition"
+      end
+      return if canonical_plan?(plan)
 
-      raise ArgumentError, "plan belongs to a different service definition"
+      raise ArgumentError, "plan decision does not match its observed service state"
+    end
+
+    def canonical_plan?(plan)
+      case plan.operation
+      when :apply
+        expected_action = apply_action(plan.status, force: plan.force)
+        plan.action == expected_action &&
+          plan.manager_observed == (plan.autostart && manager_action?(expected_action))
+      when :remove
+        expected_action = plan.status.content_state == :absent ? :none : :remove
+        expected_manager_observed =
+          !%i[absent unsafe unreadable].include?(plan.status.content_state)
+        plan.action == expected_action &&
+          plan.manager_observed == expected_manager_observed &&
+          !plan.autostart &&
+          !plan.force
+      else
+        false
+      end
     end
 
     def stale_result(operation, current)

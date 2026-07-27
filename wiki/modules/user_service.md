@@ -31,7 +31,9 @@ Require `hive/user_service` and construct a service with a
 
 `inspect` and `plan` are non-mutating. Apply and remove re-inspect the same
 observation surface before mutating; a changed file or manager state returns a
-stale result without proceeding.
+stale result without proceeding. They also recompute the plan decision from
+its bound status, so callers cannot fabricate force, removal, or
+manager-observation flags around those checks.
 
 ## Ownership boundary
 
@@ -55,7 +57,11 @@ Hive adapters continue to own:
 
 The boundary supports Linux systemd user services and macOS launchd only. It
 does not claim a filesystem/service-manager transaction: partial outcomes name
-the completed mutations and report the final state callers can retry from.
+the completed mutations and report the final state callers can retry from. If
+a backup succeeds but replacement fails, the failed result still reports that
+backup path. A present `systemctl` binary without an available user manager
+writes the unit but performs no manager mutation and reports
+`autostart_unavailable`.
 
 ## Internal collaborator
 

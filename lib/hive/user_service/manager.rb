@@ -36,7 +36,7 @@ module Hive
 
       def install(kind:, status:)
         case @definition.platform
-        when :linux then install_systemd(kind)
+        when :linux then install_systemd(kind, status)
         when :macos then install_launchd(kind, status)
         else Action.new(ok: true, restarted: false, diagnostics: [])
         end
@@ -99,8 +99,8 @@ module Hive
         )
       end
 
-      def install_systemd(kind)
-        unless query_available?
+      def install_systemd(kind, status)
+        unless query_available? && status.manager_available?
           return Action.new(
             ok: true,
             restarted: false,

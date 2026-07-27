@@ -130,39 +130,37 @@ poll can starve Ruby background threads during startup; relying on the first
 background poll alone produced multi-second loading screens even when
 `hive status` itself was fast. At cold boot, the source obtains one ordinary
 status payload and one explicit, unfiltered archive payload using the same
-refresh time and admission context. Steady refreshes obtain the ordinary
-`Hive::Commands::Status#json_payload(Hive::Config.registered_projects)`
-projection in-process; the full archive cache is refreshed separately for the
-Archive pane and dependency context. The ordinary producer already includes
-still-visible archived rows and removes only rows whose resolved workflow
-retention has expired, so the TUI never re-evaluates age from public task
-timestamps.
+refresh time and admission context. Steady idle ticks do not rebuild either
+payload. When process liveness must be rechecked, Status scans only the captured
+workflow generations' nonterminal stage directories and StateSource merges the
+immutable still-visible archive subset from its last authoritative projection.
+Policy changes, terminal-directory signals, and retention boundaries run one
+full ordinary projection immediately; the complete archive cache then catches
+up off-thread. Its 30-second backstop repairs a missed directory signal. The
+ordinary producer remains the sole owner of archive membership and retention,
+so neither StateSource nor the TUI infers archive state from stage names or
+public timestamps.
 
 The cached fingerprint watches the global project registry
 (`Hive::Config.global_config_path`), project configuration, workflow descriptor
-contents, task metadata (including workflow pins), all relevant terminal
-directories, every ordinary or archived row's metadata, each visible row's
-state file and `.lock`, and the project's
+contents, active-task metadata (including workflow pins), all relevant terminal
+directories, each active row's state file and `.lock`, and the project's
 `.hive-state/stages` directory and children. Content signatures detect
 descriptor creation, deletion, rename, and same-size replacement even when
 mtime is preserved. Policy/default/pin changes therefore publish a complete new
 ordinary projection and hidden count on the next refresh; no last-good policy
-is reused for a malformed currently selected workflow. Hidden archived metadata
-stays in the policy fingerprint so a hidden task repinned to `never` or a longer
-policy reappears on the next poll; archived state files and locks remain
-excluded. The fingerprint evicts signatures for paths that moved or
-disappeared. `Status` also supplies the earliest upcoming retention boundary,
-which bypasses the idle gate on the first poll after expiry even when no file
-changed. A separate time-bounded fallback
-(`LIVENESS_REPARSE_FALLBACK_SECONDS`, 3s) forces a full re-parse even
-when the fingerprint is unchanged, so liveness-derived fields
-(`live_task_lock`, `claude_pid_alive`) that flip without touching any
-file cannot stay stale indefinitely. This makes the "near-zero idle
-CPU" AC a partial win: even with unchanged mtimes the fallback re-incurs
-a full `json_payload` + `Dir.glob` fingerprint rebuild ~20×/min (every
-3s). It is an accepted correctness tradeoff — those liveness fields flip
-without any file write and must self-heal — and it never causes a redraw
-because `App.start_snapshot_poller` dedups identical snapshots (below).
+is reused for a malformed currently selected workflow. Hive-owned archived
+metadata writes touch the containing terminal stage directory, so a hidden task
+repinned to `never` or a longer policy still reappears on the next poll without
+hashing every archived `meta.yml`; the archive backstop covers out-of-band
+edits. Archived state files and locks remain excluded. The fingerprint evicts
+signatures for paths that moved or disappeared. `Status` also supplies the
+earliest upcoming retention boundary, which bypasses the idle gate on the first
+poll after expiry even when no file changed. A separate three-second liveness
+fallback reparses only active stages, so `live_task_lock` and
+`claude_pid_alive` self-heal without making refresh cost proportional to archive
+size. Cache publication is generation-fenced: an older background archive scan
+cannot overwrite a newer synchronous policy or terminal projection.
 Because status is the sole task-row producer, stage-move races are
 normalised upstream: `Status#collect_rows` skips task folders that vanish
 mid-read, re-raises `ENOENT` when the folder still exists, and prunes

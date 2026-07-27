@@ -283,6 +283,16 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
   pages share one five-second polling cadence regardless of their count. The
   subscribing page already rendered the primed snapshot, so the broadcaster
   does not send a duplicate first refresh.
+  The ordinary feed uses `Hive::Tui::StateSource` as a shared bounded
+  projection cache, serialized behind `CachedStatusCommand` for concurrent
+  Puma callers. Cold construction performs one authoritative ordinary scan but
+  no second unfiltered archive scan. Steady liveness refreshes scan only active
+  workflow stages and merge cached visible terminal rows, so the five-second
+  cadence is proportional to active work rather than total archive size.
+  Terminal-directory changes, policy edits, and retention boundaries rebuild
+  the ordinary projection immediately; a five-minute backstop repairs missed
+  signals. `/archive` remains lossless by invoking the unfiltered Status
+  producer on demand and never replacing the ordinary feed's cache.
   `StatusFeed` suppresses unchanged snapshots by comparing with only
   `generated_at` and `age_seconds` removed while keeping `mtime` /
   `folder_mtime` as liveness signals. The poller publishes its comparable key

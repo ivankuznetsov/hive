@@ -54,6 +54,15 @@ parity tests prevent the temporary publication-window copy from drifting.
 Landing the package does not change Hive's gem dependency graph. See
 [[modules/agent_cli_runtime]] for the public surface and release boundary.
 
+Its public standalone repository is deliberately a one-way distribution
+projection. Scheduled main snapshots and manually requested release snapshots
+record the exact Hive component commit. The canonical checkout owns projection
+logic and the release workflow independently reconstructs the expected tag tree
+before publication; immutable mirror tag rules protect that verified result.
+Development, issues, pull requests, version selection, and RubyGems publication
+remain owned by this monorepo. The mirror improves focused discovery without
+creating a second source of truth.
+
 ## Catalog contract
 
 `config/component-boundaries.yml` is the canonical agent-readable inventory.

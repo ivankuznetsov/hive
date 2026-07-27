@@ -1,0 +1,250 @@
+name: Mirror a component release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing component version, including the leading v
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-cli-runtime-mirror-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'ivankuznetsov/agent-cli-runtime'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the distribution mirror
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          path: mirror
+          fetch-depth: 0
+
+      - name: Validate the release request
+        id: request
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "invalid version: $VERSION" >&2
+            exit 1
+          fi
+          echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=components/agent-cli-runtime/$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag_ref=refs/tags/components/agent-cli-runtime/$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the canonical component tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          repository: ivankuznetsov/hive
+          ref: ${{ steps.request.outputs.tag_ref }}
+          path: hive
+          fetch-depth: 0
+          persist-credentials: false
+          sparse-checkout: components/agent-cli-runtime
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # pinned 2026-07-26
+        with:
+          ruby-version: "3.4"
+
+      - name: Require the exact component tag on canonical main
+        id: release
+        env:
+          EXPECTED_VERSION: ${{ steps.request.outputs.version }}
+          TAG_NAME: ${{ steps.request.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit="$(git -C hive rev-parse HEAD)"
+          git -C hive fetch --no-tags --force origin \
+            +refs/heads/main:refs/remotes/origin/main
+          hive/components/agent-cli-runtime/bin/release-preflight \
+            "$TAG_NAME" \
+            "$source_commit" \
+            refs/remotes/origin/main
+          echo "version=$EXPECTED_VERSION" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Require the exact version on RubyGems
+        env:
+          EXPECTED_VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            --connect-timeout 5 \
+            --max-time 20 \
+            --retry 3 \
+            --retry-delay 2 \
+            --retry-max-time 60 \
+            --retry-all-errors \
+            https://rubygems.org/api/v1/versions/agent-cli-runtime.json |
+            ruby -rjson -e '
+              expected = ARGV.fetch(0)
+              versions = JSON.parse(STDIN.read)
+              abort "RubyGems does not contain exact version #{expected}" unless
+                versions.any? { |version| version.fetch("number") == expected }
+            ' "$EXPECTED_VERSION"
+
+      - name: Require immutable mirror release tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruleset_ids="$(
+            gh api "repos/$GITHUB_REPOSITORY/rulesets" \
+              --jq '.[] | select(.target == "tag" and .enforcement == "active") | .id'
+          )"
+          immutable=false
+          while IFS= read -r ruleset_id; do
+            test -n "$ruleset_id" || continue
+            if gh api "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id" |
+              ruby -rjson -e '
+                ruleset = JSON.parse(STDIN.read)
+                includes = ruleset.dig("conditions", "ref_name", "include") || []
+                types = ruleset.fetch("rules", []).map { |rule| rule.fetch("type") }
+                required = %w[update deletion non_fast_forward]
+                immutable = includes.include?("refs/tags/v*") &&
+                  (required - types).empty?
+                exit(immutable ? 0 : 1)
+              '
+            then
+              immutable=true
+              break
+            fi
+          done <<< "$ruleset_ids"
+          if test "$immutable" != true; then
+            echo "active immutable refs/tags/v* ruleset is required" >&2
+            exit 1
+          fi
+
+      - name: Create and compare the exact release snapshot tag locally
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ steps.release.outputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sync="$RUNNER_TEMP/agent-cli-runtime-mirror-sync.rb"
+          expected="$RUNNER_TEMP/expected-release-snapshot"
+          git -C hive show \
+            refs/remotes/origin/main:components/agent-cli-runtime/mirror/sync.rb \
+            > "$sync"
+          mkdir -p "$expected"
+          git -C hive archive \
+            "$SOURCE_COMMIT:components/agent-cli-runtime" |
+            tar -x -C "$expected" --exclude=mirror --exclude='mirror/*'
+          ruby -rjson -e '
+            source_commit, destination = ARGV
+            payload = {
+              repository: "ivankuznetsov/hive",
+              component_path: "components/agent-cli-runtime",
+              source_commit: source_commit
+            }
+            File.write(destination, "#{JSON.pretty_generate(payload)}\n")
+          ' "$SOURCE_COMMIT" "$expected/.mirror-source.json"
+          git init -q "$expected"
+          git -C "$expected" add --all
+          expected_tree="$(git -C "$expected" write-tree)"
+
+          if git -C mirror rev-parse --verify --quiet \
+            "refs/tags/$VERSION^{commit}" >/dev/null; then
+            actual_tree="$(
+              git -C mirror rev-parse "refs/tags/$VERSION^{tree}"
+            )"
+            test "$actual_tree" = "$expected_tree"
+            echo "Existing mirror tag $VERSION exactly matches the canonical snapshot."
+            exit 0
+          fi
+
+          git -C mirror config user.name "github-actions[bot]"
+          git -C mirror config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C mirror switch --orphan \
+            "mirror-release-${{ steps.release.outputs.version }}"
+          git -C mirror rm -rf --ignore-unmatch .
+          ruby "$sync" \
+            hive/components/agent-cli-runtime \
+            mirror \
+            "$SOURCE_COMMIT" \
+            --release
+          git -C mirror add --all
+          actual_tree="$(git -C mirror write-tree)"
+          test "$actual_tree" = "$expected_tree"
+          git -C mirror commit -m \
+            "Mirror agent-cli-runtime $VERSION"
+          git -C mirror tag "$VERSION"
+          tag_tree="$(
+            git -C mirror rev-parse "refs/tags/$VERSION^{tree}"
+          )"
+          test "$tag_tree" = "$expected_tree"
+
+      - name: Verify the release snapshot
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          snapshot="$RUNNER_TEMP/release-snapshot"
+          mkdir -p "$snapshot"
+          git -C mirror archive "$VERSION" | tar -x -C "$snapshot"
+          (
+            cd "$snapshot"
+            gem build agent-cli-runtime.gemspec \
+              --output "$RUNNER_TEMP/agent-cli-runtime.gem"
+          )
+          gem install "$RUNNER_TEMP/agent-cli-runtime.gem" \
+            --install-dir "$RUNNER_TEMP/gem-home" \
+            --no-document
+          GEM_HOME="$RUNNER_TEMP/gem-home" \
+            GEM_PATH="$RUNNER_TEMP/gem-home" \
+            "$RUNNER_TEMP/gem-home/bin/agent-runtime" --version |
+            grep -Fx "${{ steps.release.outputs.version }}"
+
+      - name: Push the verified release snapshot tag
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C mirror push origin "refs/tags/$VERSION"
+
+      - name: Create the mirror GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          if gh release view "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Mirror release $VERSION already exists."
+            exit 0
+          fi
+          notes="$RUNNER_TEMP/release-notes.md"
+          printf '%s\n' \
+            "Read-only source snapshot of the component release from the Hive monorepo." \
+            "" \
+            "Install from RubyGems:" \
+            "" \
+            '```sh' \
+            "gem install agent-cli-runtime --version ${{ steps.release.outputs.version }}" \
+            '```' \
+            "" \
+            "Canonical development and release authority remain in https://github.com/ivankuznetsov/hive." \
+            > "$notes"
+          gh release create "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "agent-cli-runtime $VERSION" \
+            --notes-file "$notes"

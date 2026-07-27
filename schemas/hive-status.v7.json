@@ -73,7 +73,8 @@
             }
           }
         },
-        "legacy_migrate_command": { "type": ["string", "null"] }
+        "legacy_migrate_command": { "type": ["string", "null"] },
+        "hidden_archived_task_count": { "type": "integer", "minimum": 0 }
       }
     },
     "AdmissionError": {

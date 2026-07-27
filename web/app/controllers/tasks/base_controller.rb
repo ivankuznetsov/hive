@@ -19,10 +19,12 @@ class Tasks::BaseController < ApplicationController
     @status_last_success_at = page_snapshot&.last_success_at
     @status_error = page_snapshot&.error
     @status_fresh = @status_availability == "fresh"
+    @task_source = "archive" if params[:source] == "archive"
     result = Hive::Web::TaskTargetResolver.new(
       project: @project.attributes,
       slug: params[:slug],
-      cached_payload: page_snapshot&.payload
+      cached_payload: @task_source ? nil : page_snapshot&.payload,
+      archive: @task_source.present?
     ).call
     @task = Task.new(project: @project, attributes: result.attributes)
   end

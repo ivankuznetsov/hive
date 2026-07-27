@@ -5,7 +5,10 @@ require "fileutils"
 class HiveCommandsApproveTest < Minitest::Test
   include HiveTestHelper
 
-  FakeTask = Struct.new(:slug, :stage_index, :stage_name, :folder, :hive_state_path, :project_root, :workflow)
+  FakeTask = Struct.new(
+    :slug, :stage_index, :stage_name, :folder, :hive_state_path, :project_root, :workflow,
+    :state_file
+  )
 
   def command(**kwargs)
     Hive::Commands::Approve.new("slug", **kwargs)
@@ -36,9 +39,169 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_inert_terminal_entry_writes_completed_at_with_the_move
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "1-work", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      File.write(File.join(source, "work.md"), "ready\n")
+      workflow = terminal_workflow
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 1, stage_name: "work", workflow: workflow
+      )
+      now = Time.utc(2026, 7, 22, 10, 0, 0)
+      File.utime(now, now, File.join(source, "work.md"))
+      cmd = command(clock: -> { now })
+      cmd.define_singleton_method(:record_hive_commit) { |*| nil }
+
+      folder, = cmd.send(:perform_move_and_commit, current, "2-done")
+
+      assert_equal "2026-07-22T10:00:00Z", Hive::TaskMeta.read(folder)[:completed_at]
+      refute File.directory?(source)
+    end
+  end
+
+  def test_inert_terminal_entry_preserves_legacy_first_completion_time
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "1-work", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 1, stage_name: "work", workflow: terminal_workflow
+      )
+      first_completion = Time.utc(2026, 7, 20, 9, 0, 0)
+      cmd = command(clock: -> { Time.utc(2026, 7, 24, 10, 0, 0) })
+      cmd.define_singleton_method(:record_hive_commit) { |*| nil }
+      observed_task = nil
+
+      with_replaced_singleton_method(Hive::CompletionTime, :discover, ->(task) {
+        observed_task = task
+        first_completion
+      }) do
+        folder, = cmd.send(:perform_move_and_commit, current, "2-done")
+
+        assert_same current, observed_task
+        assert_equal "2026-07-20T09:00:00Z", Hive::TaskMeta.read(folder)[:completed_at]
+      end
+    end
+  end
+
+  def test_terminal_commit_failure_rolls_back_move_and_completed_at
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "1-work", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 1, stage_name: "work", workflow: terminal_workflow
+      )
+      cmd = command(clock: -> { Time.utc(2026, 7, 22, 10, 0, 0) })
+      cmd.define_singleton_method(:record_hive_commit) { |*| raise Hive::GitError, "no commit" }
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+        assert_raises(Hive::GitError) do
+          cmd.send(:perform_move_and_commit, current, "2-done")
+        end
+      end
+
+      assert File.directory?(source)
+      refute Hive::TaskMeta.read(source).key?(:completed_at)
+      refute File.exist?(File.join(state, "stages", "2-done", current.slug))
+    end
+  end
+
+  def test_terminal_rollback_reconciles_source_and_destination_index_entries
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "1-work", "slug-260522-abcd")
+      destination = File.join(state, "stages", "2-done", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      File.write(
+        File.join(state, ".gitignore"),
+        "stages/*/*/.lock\nstages/*/*/.lock.tmp.*\n"
+      )
+      run!("git", "-C", state, "init", "-b", "hive/state", "--quiet")
+      run!("git", "-C", state, "config", "user.email", "test@example.com")
+      run!("git", "-C", state, "config", "user.name", "Test")
+      run!("git", "-C", state, "config", "commit.gpgsign", "false")
+      run!("git", "-C", state, "add", ".")
+      run!("git", "-C", state, "commit", "-m", "seed", "--quiet")
+      completion_snapshot = Hive::TaskMeta.snapshot(source)
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 1, stage_name: "work", workflow: terminal_workflow
+      )
+      FileUtils.mkdir_p(File.dirname(destination))
+      FileUtils.mv(source, destination)
+      Hive::TaskMeta.write_completed_at_once(destination, Time.utc(2026, 7, 22, 10, 0, 0))
+      run!("git", "-C", state, "add", "-A", "--", "stages/1-work", "stages/2-done")
+
+      assert_raises(Hive::GitError) do
+        command.send(
+          :attempt_rollback!, current, destination, Hive::GitError.new("commit failed"),
+          completion_snapshot: completion_snapshot
+        )
+      end
+
+      assert File.directory?(source)
+      refute File.exist?(destination)
+      refute Hive::TaskMeta.read(source).key?(:completed_at)
+      cached, = Open3.capture3("git", "-C", state, "diff", "--cached")
+      assert_empty cached, cached
+    end
+  end
+
+  def test_legacy_completion_time_uses_state_file_then_folder_mtime_fallbacks
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "1-work", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      state_file = File.join(source, "work.md")
+      File.write(state_file, "legacy\n")
+      state_time = Time.utc(2026, 7, 20, 9, 0, 0)
+      folder_time = Time.utc(2026, 7, 19, 9, 0, 0)
+      File.utime(state_time, state_time, state_file)
+      File.utime(folder_time, folder_time, source)
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 1, stage_name: "work", workflow: terminal_workflow
+      )
+      current.define_singleton_method(:completed_at) { nil }
+      current.define_singleton_method(:state_file) { state_file }
+
+      with_replaced_singleton_method(Hive::CompletionTime, :from_history, ->(*) { nil }) do
+        assert_equal state_time, command.send(:legacy_completion_time, current)
+        File.delete(state_file)
+        File.utime(folder_time, folder_time, source)
+        assert_equal folder_time, command.send(:legacy_completion_time, current)
+      end
+    end
+  end
+
   def task(folder: "/tmp/task", hive_state_path: "/tmp/state", project_root: "/tmp/project",
            stage_index: 2, stage_name: "brainstorm", workflow: Hive::Workflows::Registry.default)
-    FakeTask.new("slug-260522-abcd", stage_index, stage_name, folder, hive_state_path, project_root, workflow)
+    FakeTask.new(
+      "slug-260522-abcd", stage_index, stage_name, folder, hive_state_path, project_root,
+      workflow, File.join(folder, "#{stage_name}.md")
+    )
+  end
+
+  def terminal_workflow
+    Hive::Workflow.new(
+      id: :terminal,
+      stages: [
+        Hive::Workflow::Stage.new(name: "work", index: 1, state_file: "work.md", kind: :agent),
+        Hive::Workflow::Stage.new(name: "done", index: 2, state_file: "done.md", kind: :inert)
+      ]
+    )
   end
 
   def failing_status

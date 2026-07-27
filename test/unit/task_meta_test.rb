@@ -2,6 +2,112 @@ require "test_helper"
 require "hive/task_meta"
 
 class TaskMetaTest < Minitest::Test
+  def test_writes_and_restores_signal_the_containing_stage_directory
+    with_tmp_dir do |root|
+      stage = File.join(root, ".hive-state", "stages", "9-done")
+      task = File.join(stage, "finished")
+      FileUtils.mkdir_p(task)
+      Hive::TaskMeta.write(task, id: 7, slug: "finished", display_name: nil)
+      snapshot = Hive::TaskMeta.snapshot(task)
+      old_mtime = Time.now - 3_600
+
+      File.utime(old_mtime, old_mtime, stage)
+      Hive::TaskMeta.update_display_name(task, "Finished")
+      assert_operator File.mtime(stage), :>, old_mtime
+
+      File.utime(old_mtime, old_mtime, stage)
+      Hive::TaskMeta.restore(task, snapshot)
+      assert_operator File.mtime(stage), :>, old_mtime
+    end
+  end
+
+  def test_completed_at_round_trips_in_utc_and_survives_rewrites
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(
+        dir, id: 7, slug: "finished", display_name: nil,
+        completed_at: "2026-07-22T12:30:00+02:00"
+      )
+
+      assert_equal "2026-07-22T10:30:00Z", Hive::TaskMeta.read(dir)[:completed_at]
+      Hive::TaskMeta.update_display_name(dir, "Finished")
+      Hive::TaskMeta.update_id(dir, 8)
+      assert_equal "2026-07-22T10:30:00Z", Hive::TaskMeta.read(dir)[:completed_at]
+    end
+  end
+
+  def test_completed_at_first_writer_wins
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(dir, id: 7, slug: "finished", display_name: nil)
+
+      first = Hive::TaskMeta.write_completed_at_once(dir, Time.utc(2026, 7, 20, 8, 0, 0))
+      second = Hive::TaskMeta.write_completed_at_once(dir, Time.utc(2026, 7, 22, 8, 0, 0))
+
+      assert_equal "2026-07-20T08:00:00Z", first
+      assert_equal first, second
+      assert_equal first, Hive::TaskMeta.read(dir)[:completed_at]
+    end
+  end
+
+  def test_completed_at_rejects_malformed_mutations
+    with_tmp_dir do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::TaskMeta.write(
+          dir, id: 7, slug: "finished", display_name: nil, completed_at: "yesterday"
+        )
+      end
+
+      assert_includes error.message, "completed_at"
+      refute File.exist?(File.join(dir, "meta.yml"))
+    end
+  end
+
+  def test_malformed_stored_completed_at_warns_and_is_not_rewritten
+    with_tmp_dir do |dir|
+      path = File.join(dir, "meta.yml")
+      original = "id: 7\nslug: finished\ncompleted_at: yesterday\n"
+      File.write(path, original)
+
+      metadata = nil
+      _out, err = capture_io { metadata = Hive::TaskMeta.read(dir) }
+
+      assert_nil metadata[:completed_at]
+      assert_includes err, "keeping task visible"
+      assert_raises(Hive::TaskMeta::InvalidMetadata) do
+        Hive::TaskMeta.update_display_name(dir, "Do not rewrite")
+      end
+      assert_equal original, File.read(path)
+    end
+  end
+
+  def test_timestamp_shaped_invalid_completed_at_warns_and_stays_visible
+    with_tmp_dir do |dir|
+      File.write(
+        File.join(dir, "meta.yml"),
+        "id: 7\nslug: finished\ncompleted_at: '2026-99-99T00:00:00Z'\n"
+      )
+
+      metadata = nil
+      _out, err = capture_io { metadata = Hive::TaskMeta.read(dir) }
+
+      assert_nil metadata[:completed_at]
+      assert_includes err, "invalid completed_at"
+      assert_includes err, "keeping task visible"
+    end
+  end
+
+  def test_concurrent_completed_at_writers_converge_on_one_value
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(dir, id: 7, slug: "finished", display_name: nil)
+      values = 8.times.map { |index| Time.utc(2026, 7, 20, 8, 0, index) }
+      results = values.map do |value|
+        Thread.new { Hive::TaskMeta.write_completed_at_once(dir, value) }
+      end.map(&:value)
+
+      assert_equal 1, results.uniq.size
+      assert_equal results.first, Hive::TaskMeta.read(dir)[:completed_at]
+    end
+  end
+
   def test_read_for_admission_distinguishes_absent_metadata
     Dir.mktmpdir do |dir|
       result = Hive::TaskMeta.read_for_admission(dir)
@@ -135,6 +241,17 @@ class TaskMetaTest < Minitest::Test
                    Hive::TaskMeta.read(dir))
       assert File.exist?(File.join(dir, "meta.yml"))
       refute Dir.children(dir).any? { |name| name.include?(".meta.yml.tmp") }
+    end
+  end
+
+  def test_rewrite_guard_uses_the_existing_ignored_task_lock_namespace
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo")
+      Hive::TaskMeta.update_display_name(dir, "Updated")
+
+      assert File.exist?(File.join(dir, ".lock.tmp.meta-guard"))
+      refute File.exist?(File.join(dir, ".meta.yml.tmp.guard"))
+      assert_includes Hive::GitOps::HIVE_STATE_GITIGNORE, "stages/*/*/.lock.tmp.*"
     end
   end
 

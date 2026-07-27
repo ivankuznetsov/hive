@@ -1,19 +1,15 @@
 require "hive/work_ledger"
 
 module Hive
-  Workflow = Data.define(:id, :stages) do
-    def initialize(id:, stages:)
-      # Shallow freeze: the element Stages stay shared with the caller, which is
-      # safe only because Stage is itself frozen. This dup does NOT deep-copy.
-      super(id: id, stages: stages.dup.freeze)
-      validate_structure!
-    end
-  end
+  Workflow = Data.define(:id, :stages, :archive_visibility_retention_days)
 
   # Reopened (not redefined) so the nested Stage/AdvanceVerb constants resolve as
   # Workflow::Stage — Data.define's block can't host constant declarations.
   class Workflow
     include Enumerable
+
+    DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS = 3
+    NEVER_ARCHIVE_VISIBILITY_RETENTION = :never
 
     # :agent selects the agent runner, :council selects the generic document
     # council runner, :inert auto-advances with no runner,
@@ -28,6 +24,17 @@ module Hive
     # can't drift across those copies.
     DEFAULT_TRIAGE_OUTPUT = "reviews/triage.md"
     MAPPING_ROLES = %w[planning development reviewer].freeze
+
+    def initialize(id:, stages:,
+                   archive_visibility_retention_days: DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS)
+      retention = normalize_archive_visibility_retention(
+        archive_visibility_retention_days, workflow_id: id
+      )
+      # Shallow freeze: the element Stages stay shared with the caller, which is
+      # safe only because Stage is itself frozen. This dup does NOT deep-copy.
+      super(id: id, stages: stages.dup.freeze, archive_visibility_retention_days: retention)
+      validate_structure!
+    end
 
     ExecutableSlot = Data.define(:id, :kind, :actor, :default_role)
 
@@ -151,6 +158,15 @@ module Hive
     end
 
     private
+
+    def normalize_archive_visibility_retention(value, workflow_id:)
+      return value if value.is_a?(Integer) && value.positive?
+      return NEVER_ARCHIVE_VISIBILITY_RETENTION if value == "never" || value == NEVER_ARCHIVE_VISIBILITY_RETENTION
+
+      raise ArgumentError,
+            "workflow #{workflow_id.inspect} field archive_visibility_retention_days received #{value.inspect}; " \
+            "expected a positive integer or `never`"
+    end
 
     # Turn five runtime-stranding modes — empty list, gapped/unordered indices,
     # duplicate names or dirs, an unknown kind, and a leading advance_verb — into

@@ -269,7 +269,7 @@ Useful prompt shapes once Hive is installed:
 - *Watch a long-running task:* `Run hive watch <project>:<slug> --json-lines and stop on its final event.`
 - *Take a safe next step:* `Read a fresh operational action descriptor, then run hive act <action_id> <target> --observation <token> --json.`
 
-For commands that emit JSON, the schema is versioned under [schemas/](schemas/), so agent prompts can rely on field shapes without scraping. `hive status --json` deliberately remains the complete compatibility graph for daemon/bot/TUI consumers; agents should prefer the additive operational view. `hive watch` is a stream and therefore uses `--json-lines`, not the global `--json` document mode. `hive tui` remains human-only. For installation via an agent, point it at [install.md](install.md).
+For commands that emit JSON, the schema is versioned under [schemas/](schemas/), so agent prompts can rely on field shapes without scraping. `hive status --json` is the ordinary visibility projection used by daemon, bot, TUI, and web consumers; each project also reports `hidden_archived_task_count`. Use `hive archive --json` for the complete, retention-unfiltered terminal record. Agents should prefer the additive operational view for day-to-day control. `hive watch` is a stream and therefore uses `--json-lines`, not the global `--json` document mode. `hive tui` remains human-only. For installation via an agent, point it at [install.md](install.md).
 
 ## Custom Workflows
 
@@ -306,6 +306,7 @@ A descriptor is short enough to read top to bottom — an entry gate, agent stag
 
 ```yaml
 id: "writing"
+archive_visibility_retention_days: 3
 stages:
   - { name: inbox,    kind: terminal, state_file: idea.md }
   - { name: research, kind: agent,    state_file: research.md, instruction: ./writing/research.md }
@@ -313,6 +314,12 @@ stages:
   - { name: edit,     kind: agent,    state_file: edit.md,     instruction: ./writing/edit.md }
   - { name: done,     kind: terminal, state_file: done.md }
 ```
+
+`archive_visibility_retention_days` controls how long completed tasks remain in
+ordinary status, TUI, and web views. It accepts a positive integer number of
+full 24-hour periods or the exact lowercase value `never`; omission remains
+compatible and means `3`. This changes visibility only—`hive archive` remains
+the complete record, and no task folders are deleted or moved by retention.
 
 Three commands cover authoring: `hive workflow new ID` (scaffold a blank starter in an existing project), `hive workflow new ID --template research` (seed from the multi-stage research sample), and `hive init --new-workflow ID` (bootstrap a project and bind the workflow as its default in one go). Custom workflows are discovered from `.hive-state/workflows/*.yml` and run through the same surfaces as the built-ins — `hive new --workflow`, `status`, `run`, `approve`, and the daemon.
 

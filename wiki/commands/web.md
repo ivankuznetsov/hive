@@ -4,7 +4,7 @@ type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
 updated: 2026-07-26
-tags: [command, web, rails, turbo, hivebox-container]
+tags: [command, web, rails, turbo, hivebox-container, archive, retention]
 ---
 
 **TLDR**: `hive web` boots the default native Hive browser UI — a vanilla
@@ -210,7 +210,11 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
   drawer, cursor, transition, or audit subsystem: workflow mutation continues
   through the existing task controllers. Each band scrolls horizontally
   inside the page at narrow widths. `Grid` retains the compact per-project task
-  rows. A TUI-left-pane-parity project rail filters either view through
+  rows. Both ordinary views consume status's workflow-aware archive projection:
+  expired archived rows are absent, and a positive project count renders
+  `… and 1 older archived task (hive archive to view)` or
+  `… and N older archived tasks (hive archive to view)` as a direct link to the
+  project-scoped archive. A TUI-left-pane-parity project rail filters either view through
   ordinary GET links ("All projects" + one link per registered project;
   projects are ordered by descending in-flight task count, preserving registry
   order for ties, and the grid plus permanent composer selector stay in that
@@ -279,11 +283,30 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
   pages share one five-second polling cadence regardless of their count. The
   subscribing page already rendered the primed snapshot, so the broadcaster
   does not send a duplicate first refresh.
+  The ordinary feed uses `Hive::Tui::StateSource` as a shared bounded
+  projection cache, serialized behind `CachedStatusCommand` for concurrent
+  Puma callers. Cold construction performs one authoritative ordinary scan but
+  no second unfiltered archive scan. Steady liveness refreshes scan only active
+  workflow stages and merge cached visible terminal rows, so the five-second
+  cadence is proportional to active work rather than total archive size.
+  Terminal-directory changes, policy edits, and retention boundaries rebuild
+  the ordinary projection immediately; a five-minute backstop repairs missed
+  signals. `/archive` remains lossless by invoking the unfiltered Status
+  producer on demand and never replacing the ordinary feed's cache. Archive
+  task links resolve only the requested registered project and stage through
+  the unfiltered producer, so their shell, log, media, diff, and action routes
+  do not multiply lossless fleet scans.
   `StatusFeed` suppresses unchanged snapshots by comparing with only
   `generated_at` and `age_seconds` removed while keeping `mtime` /
-  `folder_mtime` as liveness signals. The poller publishes its comparable key
-  with the payload and reuses the existing semantic token when that key is
-  unchanged, so volatile-only ticks do not repeat canonical JSON hashing.
+  `folder_mtime` as liveness signals. Active task-folder mtimes are part of the
+  bounded source fingerprint, so an added or removed artifact invalidates the
+  page token without waiting for the fallback parse. The poller publishes its
+  comparable key with the payload and reuses the existing semantic token when
+  that key is unchanged, so volatile-only ticks do not repeat canonical JSON
+  hashing.
+  `hidden_archived_task_count` remains in that comparison, making a
+  boundary- or policy-driven count change material even if every active row is
+  unchanged.
   The broadcaster first renders one Turbo Stream
   message containing the refresh plus the server-sorted composer selector,
   then sends that complete message once over solid_cable. The refresh GET
@@ -367,6 +390,20 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
   down, not merely when `service_installed` is false. A
   stopped, otherwise healthy daemon points to `hive daemon start --detach`;
   a missing or drifted service points to `hive daemon install --force`.
+- **Archive (`/archive`)** — requests `StatusFeed#archive_snapshot`, whose
+  separate `Status.new(archive: true)` producer bypasses ordinary retention and
+  is deliberately excluded from the live feed's priming and dedup baseline.
+  It renders every workflow-aware archived task with the existing task
+  attributes, preserves `?project=` in its rail and links, and links task pages
+  with `source=archive`. `Tasks::BaseController` honors that explicit source
+  for the task shell and every child controller, while the shell propagates it
+  to log, media, diff, answer, intervention, run, approval, rejection,
+  recovery, and drop routes. An expired task opened from the archive therefore
+  remains usable instead of its child requests becoming false 404s. Each route
+  resolves that exact project/stage rather than rescanning the fleet, and
+  terminal archive logs load once without the live task page's three-second
+  polling loop. Native Hive web and Hivebox use this same Rails route and
+  producer path.
 - **Task page** — state-driven actions (Retry stage for red
   `recover_review` / `recover_execute` / `error` rows; Approve only when the
   marker makes a forward move possible; Run <verb> only when the project daemon
@@ -663,6 +700,8 @@ paths (typed refusal page + confirmed force), Q&A round replacement without a
 lingering old form, typed Q&A preservation across a pushed morph, log-tail
 follow/pause/resume with node-preserving frame morph reloads, artifact
 open-state preservation across pushed morphs with live content refresh, and
+ordinary-board hidden summaries navigating through the lossless Archive route
+to an expired task detail page, plus
 repo setup workflow selection (fresh `content` writes config, re-run lists a
 project-authored workflow and preselects the current default), plus
 real browser workflow scaffolding and exact-permission managed install review,
@@ -744,9 +783,12 @@ terracotta honeycomb hive glyph rather than the old placeholder.
 
 ## Task-local reads and degraded status
 
-Task show, log, diff, media, and mutation routes resolve one registered project
-and task through `Hive::Web::TaskTargetResolver`; they do not call the
-fleet-wide status producer. One process-wide `StatusFeed` owns polling,
+Ordinary task show, log, diff, media, and mutation routes resolve one registered
+project and task through `Hive::Web::TaskTargetResolver`; they do not call the
+fleet-wide status producer. Explicit `source=archive` routes use that same
+targeted resolver with retention filtering disabled, so hidden terminal tasks
+remain addressable and mutations revalidate current task state without a stale
+fleet cache. One process-wide `StatusFeed` owns polling,
 single-flight refresh, actual scan count, and latest-good state. First-scan
 failure renders an explicit unavailable page. A later failure retains the last
 good rows with an accessible warning and disables freshness-dependent mutation

@@ -22,6 +22,16 @@ class StatusController < ApplicationController
     @daemon_status = daemon_status
   end
 
+  def archive
+    @payload = StatusBroadcaster.archive_snapshot
+    @projects = StatusBroadcaster.projects(@payload)
+    requested_project = params[:project].to_s.presence
+    @selected_project = @projects.find { |project| project.name == requested_project }
+    return redirect_to status_project_filter_path(nil) if requested_project && !@selected_project
+
+    @visible_projects = @selected_project ? [ @selected_project ] : @projects
+  end
+
   private
 
   def status_project_filter_path(project)

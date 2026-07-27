@@ -105,13 +105,15 @@ so daemon dispatch baselines still observe stage moves. Real-command tests
 cover workflow stage actions plus generic `run` and `approve` branches from
 status-issued tokens.
 
-Full text/JSON status and daemon snapshots read the complete on-disk graph.
-The TUI's steady-state active-only refresh combines freshly parsed active
-tasks with lossless immutable terminal task snapshots from its last
-full/archive status pass. Those snapshots preserve exact workflow stages,
-dependency edges, validation errors, and enrolled repository identity. They
-are indexed once and reused as a fallback context, keeping refresh cost
-independent of archive size without changing transitive dependency verdicts.
+Status captures every registered project's workflow/config generation before
+scanning any project's rows, captures one UTC `now`, and then publishes either
+the ordinary or dedicated archive projection. Dependency admission uses those
+same captured generations and is built from the complete
+graph before presentation filtering, so an expired completed dependency still
+satisfies its dependants. Daemon, bot, TUI, and web consume the ordinary
+projection. The TUI separately caches a fresh archive-mode payload for its
+dedicated archive pane and dependency context; it never reconstructs ordinary
+visibility from row timestamps.
 
 The JSON envelope isolates project-local failures. Missing roots report
 `error: missing_project_path`, missing state roots report
@@ -128,7 +130,7 @@ snapshot that hides unsupported root keys.
 ## Detailed compatibility output shape
 
 The following detailed grouping and row rules apply to `--full`, archive mode,
-and the unchanged compatibility JSON where relevant.
+and compatibility JSON where relevant.
 
 ```
 <project_name>
@@ -193,15 +195,63 @@ Repeated CLI/TUI/web status reads never reconstruct legacy ownership or append j
 
 ## Archived tasks
 
-`Hive::ArchiveFilter` is the shared policy for day-to-day archive hiding. A row is hideable when `stage == Hive::Stages::DIRS.last` (`9-done`), the row timestamp is present, and `(now - mtime) > 3 days`. Marker state is not part of the policy: complete, unresolved, and markerless done rows all use the same age rule. The policy uses the task row's `mtime` (state-file mtime, the same timestamp rendered as row age) rather than `folder_mtime`, because sidecar updates such as `meta.yml` display-name backfills can touch the directory without making the archived task newly relevant. Older consumers that only have `folder_mtime` still get it as a fallback. If neither timestamp is available, the filter fails open and keeps the row visible rather than guessing. `hive archive` remains the full view.
+`Hive::ArchiveFilter` is the sole ordinary/archive projection boundary.
+Archive membership comes from the resolved workflow's canonical
+`TaskAction#key == archived`, not from a global terminal-directory name. An
+inert final stage is archived on entry; an agent/council final stage becomes
+archived only after its existing marker/deliverable contract succeeds. A
+directory may therefore be terminal for one pinned workflow and active for
+another without being misclassified.
 
-The age filter applies to the TUI grid and the detailed `hive status --full`
-human table. `hive status --json` stays unfiltered so daemon, bot, TUI, and
-pinned consumers continue to see every task row. The operational projection
-does not emit archived task rows; it reports archive totals by project in
-its `archive` summary. Use `hive archive` for archived row details.
+Each resolved workflow supplies `archive_visibility_retention_days`: a
+positive integer or normalized `:never`. Descriptor omission means `3`.
+Resolution follows explicit task pin, project default, then `coding`.
+`never` remains visible in ordinary views. For integers, the immutable
+`completed_at` clock is compared in UTC seconds and hides only when
+`now - completed_at > days * 86_400`; equality remains visible. Descriptor,
+project-default, and task-pin changes reproject on the next refresh from the
+same first-completion clock without moving the task or changing archive
+membership. A policy-only task repin may resolve retention from a descriptor
+with a different stage layout while action/archive classification continues to
+use the terminal descriptor that owns the existing folder. Malformed, deleted,
+or unknown descriptors remain visible Error rows. A task in their unique
+terminal directory remains in the dedicated archive but is never
+retention-hidden or counted as hidden.
 
-`hive archive` with no target reuses Status in archive mode (`Hive::Commands::Status.new(archive: true)`): it lists only `9-done` tasks, with no age cutoff and no hidden-count summary. Empty archive projects print `no archived tasks`. Text rows are sorted newest-first by `mtime` and use the same id/PR/display-name identity column as daily status. `hive archive --json` emits a focused `hive-status` payload whose project task arrays contain only `9-done` rows. `hive archive <slug>` still runs the workflow verb that advances a completed finalize task into done.
+`completed_at` is written to `meta.yml` the first time a successful terminal
+transition makes the task archived and is never replaced. Reopening, metadata
+rewrites, repinning, id migration, and later return to a terminal stage preserve
+it. A bounded producer-side backfill handles legacy archived tasks: earliest
+credible Git event that first made the resolved terminal stage archived, then
+the terminal state-file mtime, then task-folder mtime. The value is eligible
+for hiding only after its atomic metadata write and `hive/state` commit
+succeed. Missing/corrupt evidence, an invalid stored value, or persistence
+failure warns and fails open. Backfill also runs under `never`, so a later
+policy change already has a stable clock. Each refresh has one shared
+one-second backfill deadline that also bounds history and commit subprocesses.
+Task locking rechecks that the folder still exists without recreating it, the
+durable per-project cursor under Hive's state home rotates past persistent
+failures across one-shot CLI processes, and the path-only backfill commit
+preserves unrelated staged operator changes.
+
+Ordinary text, `hive status --full`, `hive status --json`, operational status,
+daemon snapshots, TUI, web, and Hivebox omit expired archived rows. Every
+successful ordinary project JSON object carries the non-negative
+`hidden_archived_task_count` (including `0`); task objects do not expose
+`completed_at`, retention, hidden details, or hidden reasons. Operational
+status and daemon snapshots aggregate the same key without copying hidden
+rows. Human CLI and TUI surfaces render
+`… and 1 older archived task (hive archive to view)` or
+`… and N older archived tasks (hive archive to view)`.
+
+`hive archive` with no target reuses Status in archive mode
+(`Hive::Commands::Status.new(archive: true)`). It lists every workflow-aware
+terminal archived task with no retention cutoff or hidden-count field; invalid
+affected terminal rows remain visible as errors. Empty archive projects print
+`no archived tasks`. Text rows are sorted newest-first by `mtime` and use the
+same id/PR/display-name identity column as daily status. `hive archive --json`
+retains the existing task-object shape. `hive archive <slug>` still runs the
+workflow verb that advances a completed terminal predecessor.
 
 Every compatibility JSON task row has a nullable `closure` field. A validated
 receipt exposes the exact reason, authority, digest, successor, and canonical
@@ -252,15 +302,29 @@ The `legacy_stage_dirs` field was an additive extension of status v2. Task `id` 
 - Project path missing → `"<name>: missing project path <path>"`.
 - `.hive-state` missing → `"<name>: not initialised (no .hive-state)"`.
 - Action bucket with no tasks → header omitted entirely.
-- Old `9-done` rows → hidden from `--full` text output by age alone,
-  regardless of marker state, with the per-project summary line above.
+- Expired workflow-archived rows → hidden from ordinary text/JSON by the
+  resolved policy and immutable completion clock, with the per-project summary
+  line above.
 - Daily and archive-mode task identity is left-padded to 49 chars; it includes id, fixed-width PR token, and display name/slug. State label is left-padded to 24 chars, followed by the suggested command and humanised age. Marker attr values in the state label collapse internal whitespace so multi-line stderr details do not break the table.
 
 `humanise_age` thresholds: `<60s → Ns ago`, `<3600s → Nm ago`, `<86400s → Nh ago`, else `Nd ago`.
 
 ## How tasks are discovered
 
-For each stage in `Hive::Workflows.all_stage_dirs` (the union of every live registered descriptor; coding remains the default source of truth via `Hive::Stages::DIRS`), `collect_rows` globs `<hive_state>/stages/<stage>/*` directories through the `stage_task_entries(stage_dir)` seam. Each entry is parsed via `Hive::Task.new(entry)`; non-conforming directories (no slug match, or a folder whose `workflow` selector does not contain that stage) are silently skipped via `rescue InvalidTaskPath`. Marker is read with `Hive::Markers.current(task.state_file)`. `folder_mtime` is always `File.mtime(entry)`; `mtime` is the state-file mtime when the state file exists and otherwise the directory mtime; `observation_mtime` is the state-file mtime when present, then `meta.yml`, then the directory fallback.
+For each stage in `Hive::Workflows.all_stage_dirs` (the union of every live
+registered descriptor; coding remains the default source of truth via
+`Hive::Stages::DIRS`), plus on-disk stages referenced by an explicit task pin
+or an unavailable project default, `collect_rows` walks
+`<hive_state>/stages/<stage>/*` through the `stage_task_entries(stage_dir)`
+seam. All project config/default-workflow/descriptor generations are captured
+before the first project scan and passed to every `Hive::Task` and dependency
+snapshot, so a descriptor/config edit cannot mix old and new policy within one
+multi-project payload. Invalid referenced tasks become visible
+Error rows rather than disappearing. Marker is read with
+`Hive::Markers.current(task.state_file)`. `folder_mtime` is always
+`File.mtime(entry)`; `mtime` is the state-file mtime when the state file exists
+and otherwise the directory mtime; `observation_mtime` is the state-file mtime
+when present, then `meta.yml`, then the directory fallback.
 
 Stage moves are treated as a normal filesystem race. If an entry disappears between the stage glob and any in-folder row read, `collect_rows` rescues `Errno::ENOENT`, re-checks the folder path, and skips it only when the folder is gone. The rescue is deliberately folder-level: an `ENOENT` while the task folder still exists is re-raised as a real status command failure, because in-place state-file writers may truncate content but should not make the state file transiently absent inside a surviving folder. A forward stage move can resurface under the later stage in the same scan; a backward move to an already-scanned stage can disappear for one poll and then reappear on the next refresh. After all stages are scanned, `drop_transient_stage_moves` looks only at duplicate-slug groups and removes every duplicate row whose folder no longer exists. If two live folders still share a slug, both rows remain and `annotate_actions` still passes `stage_collision: true` into `Hive::TaskAction`. This keeps `hive status --json` and TUI snapshots from briefly showing an old-stage and new-stage copy during a normal `mv`, without hiding persistent duplicate state.
 
@@ -304,13 +368,23 @@ JSON output uses schema `hive-status-diagnose`, version `2`, and returns `slug`,
 
 ## Read-only
 
-Normal `status` and `status --diagnose` without `--write` do not mutate filesystem state, do not commit, do not spawn agents, and do not touch locks. `status --diagnose --write` is the explicit mutation path: it spawns the configured development agent and writes only `diagnostics/red-status.md`.
+Normal status does not mutate task stage, markers, dependencies, or ordinary
+task artifacts and never spawns an agent. Its one bounded mutation is the
+idempotent `completed_at` backfill for legacy archived tasks, performed under
+task/commit locks and committed before the clock can hide a row.
+`status --diagnose` without `--write` remains diagnostic-read-only;
+`status --diagnose --write` is the explicit agent mutation path and writes only
+`diagnostics/red-status.md`.
 
 ## Tests
 
 - `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration, and v5 admission fields.
 - `test/integration/dependency_admission_test.rb` — plan-only ordering drift and cross-project repository identity mismatch.
-- `test/unit/commands/status_test.rb` — status row collection, per-project `project_load_failed` degradation, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, `pr_url` extraction from `pr.md` frontmatter, text/archive PR-column rendering, old-archive hiding, and archive-mode listing.
+- `test/unit/commands/status_test.rb` — status row collection, per-project `project_load_failed` degradation, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, `pr_url` extraction from `pr.md` frontmatter, text/archive PR-column rendering, workflow-aware retention/count projection, strict boundaries, and lossless archive-mode listing.
+- `test/integration/archive_visibility_retention_test.rb` — one fixed-clock
+  mixed legacy/`7`/`never` project drives ordinary status, operational
+  aggregation, daemon parsing, TUI ordinary/archive snapshots, and the web feed;
+  a preserved-mtime same-size policy edit reprojects on the next refresh.
 - `test/unit/operational_status_test.rb` — closed state projection, source
   completeness, scheduler joins/freshness, archive summaries, and schema.
 - `test/unit/operational_action_test.rb` and

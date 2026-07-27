@@ -1,10 +1,10 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
 updated: 2026-07-26
-tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, dependencies, admission, web]
+tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, dependencies, admission, web]
 ---
 
 **TLDR**: Hive's workflow state has no application database. Task/project state lives in `.hive-state` and feature worktrees; durable task execution ownership lives in versioned attempt records under the global state home. Evidence-bound delivered/superseded closure is a separate task-local authority retained with an archived task, never fabricated attempt success.
@@ -66,9 +66,25 @@ slug: add-foo-260603-abcd
 display_name:
 workflow:
 depends_on: api:base-task-260716-abcd
+completed_at: 2026-07-24T12:00:00Z
 ```
 
-`Hive::Task#id`, `#display_name`, `#display_label`, `#depends_on`, and the optional workflow selector are derived from this sidecar. The tolerant reader remains total for display/task construction, but dependency admission uses `TaskMeta.read_for_admission`, which distinguishes an absent legacy file from unreadable YAML, a non-mapping document, and an invalid scalar reference. Admission therefore never converts corrupt metadata into “no dependency.” `TaskMeta.update_id` and `update_display_name` refuse corrupt input and preserve every dependency/workflow field on healthy rewrites. Writes remain atomic tempfile-plus-rename.
+`Hive::Task#id`, `#display_name`, `#display_label`, `#depends_on`,
+`#completed_at`, and the optional workflow selector are derived from this
+sidecar. `completed_at` is optional for active and legacy tasks. Once present it
+is an exact UTC ISO 8601 timestamp and `TaskMeta.write_completed_at_once`
+preserves the first valid value. Reopen, repin, id/display-name migration, and
+other metadata rewrites retain it.
+
+The tolerant reader remains total for display/task construction, but dependency
+admission uses `TaskMeta.read_for_admission`, which distinguishes an absent
+legacy file from unreadable YAML, a non-mapping document, and an invalid scalar
+reference. Admission therefore never converts corrupt metadata into “no
+dependency.” Mutation reads reject an explicitly malformed `completed_at`;
+ordinary projection reads warn and fail open. `TaskMeta.update_id` and
+`update_display_name` refuse corrupt input and preserve every
+dependency/workflow/completion field on healthy rewrites. Writes remain atomic
+tempfile-plus-rename.
 
 `depends_on` is one scalar: same-project slug/numeric id, or explicit `project:slug`. The global registry stores canonical remote identity for cross-project verification. An optional `plan.md` frontmatter `depends_on` is only an exact drift assertion; `meta.yml` remains authoritative and prose is ignored. See [[modules/task_dependencies]].
 
@@ -149,6 +165,40 @@ unsupported, or identity-drifted authoritative bytes are not rewritten:
 conflict evidence is copied to
 `.hive-state/daemon/quarantine/pr-merge-reconciliation/`, that project blocks,
 and other registrations continue.
+## Completion clock and archive visibility
+
+Archive membership and ordinary visibility are separate. Membership comes from
+the task's resolved workflow and canonical `TaskAction`: entering an inert
+terminal stage archives immediately, while an agent/council terminal stage
+archives only when its marker and deliverable satisfy the workflow. The
+workflow's `archive_visibility_retention_days` then controls display only; it
+never moves a folder, changes the task action, or changes dependency
+completion.
+
+The first successful transition to archived state writes `completed_at` in the
+same move/finalization transaction. Rollback restores the exact prior metadata.
+Reopening deliberately keeps the clock, and a later return to the terminal
+stage reuses it.
+
+At the shared ordinary-status producer boundary, `CompletedAtBackfiller`
+converges archived legacy tasks that lack the field. Under the project commit
+lock and task lock it prefers the earliest credible Git event that first made
+the resolved terminal stage archived, then the terminal state-file mtime, then
+the task-folder mtime. A value is eligible for hiding only after its metadata
+write and `hive/state` commit both succeed. Missing/corrupt sources or failed
+persistence warn and keep the task visible; a successful first write is
+idempotent, including while policy is `never`. Each refresh reuses the status
+producer's captured workflow/config generation, bounds Git history and commit
+subprocesses by the shared deadline, commits only the metadata path without
+consuming unrelated index entries, and advances a durable per-project cursor so
+daemonless status calls remain fair across process restarts.
+
+`ArchiveFilter` captures one UTC `now` for a refresh and applies the currently
+resolved task pin, project default, or `coding` workflow policy. Positive
+integer values mean full 24-hour periods and hide only when
+`now - completed_at > days * 86_400`; equality and future timestamps remain
+visible. `never` always remains visible in ordinary views. The dedicated
+archive source bypasses this projection and retains every archived task.
 
 Task ids are allocated from the global counter file `<state_home>/task-counter.yml` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`). The counter is protected by `<state_home>/.task-counter.lock` (`flock LOCK_EX`, default 30s timeout, 0.2s polling) and stores the next id as YAML:
 
@@ -370,7 +420,11 @@ Turbo Streams. `StatusFeed#snapshot` computes a fresh
 `Hive::Commands::Status#json_payload(Hive::Config.registered_projects)` for
 request-time reads, then overlays canonical recovery receipts from that same
 producer's operational payload by project/slug in memory. This performs no
-second registry scan. That page-render snapshot primes the live feed, avoiding a
+second registry scan. This ordinary archive projection includes each
+project's aggregate `hidden_archived_task_count`; task objects remain
+unchanged. `StatusFeed#archive_snapshot` separately requests lossless archive
+mode for the dedicated Archive route and never primes or replaces the ordinary
+live-feed baseline. That page-render ordinary snapshot primes the live feed, avoiding a
 second full-registry scan when the page's Cable connection arrives. The first
 idle request owns that baseline until the poller starts; competing page renders
 cannot replace it. Each rendered status/task page carries a canonical SHA-256
@@ -406,9 +460,11 @@ before stream registration is queued, so rejection cannot race a late pub/sub
 handler into the adapter. While pages are connected,
 `StatusFeed#each_snapshot` polls at a five-second interval and compares
 snapshots with only volatile `generated_at` /
-`age_seconds` fields removed. `mtime` and `folder_mtime` deliberately remain
+`age_seconds` fields removed. `hidden_archived_task_count`, `mtime`, and
+`folder_mtime` deliberately remain
 part of the comparison key because task pages use those changes as the liveness
-signal for artifact/log refreshes while agents write. The key is published
+signal for artifact/log refreshes while agents write and count-only retention
+changes must refresh ordinary surfaces. The key is published
 beside the payload and an unchanged key reuses the existing SHA-256 token,
 avoiding a second normalization plus canonical serialization/hash each tick.
 `StatusBroadcaster`

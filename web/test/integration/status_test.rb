@@ -257,6 +257,37 @@ class StatusTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "ordinary grid and board link exact hidden archive summaries" do
+    sign_in!
+    project_name = create_hive_project!("archive-summary-status-app")
+    project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
+    project = {
+      "name" => project_name,
+      "path" => project_path,
+      "hive_state_path" => File.join(project_path, ".hive-state"),
+      "hidden_archived_task_count" => 1,
+      "tasks" => []
+    }
+
+    with_daemon_status("running" => true, "service_installed" => true, "binary_drift" => "none") do
+      with_status_snapshot("projects" => [ project ]) do
+        get grid_path
+
+        assert_response :success
+        assert_select ".archive-summary a[href='#{archive_path(project: project_name)}']",
+                      text: "… and 1 older archived task (hive archive to view)"
+
+        project["hidden_archived_task_count"] = 2
+        get board_path
+
+        assert_response :success
+        assert_select ".archive-summary a[href='#{archive_path(project: project_name)}']",
+                      text: "… and 2 older archived tasks (hive archive to view)",
+                      count: 1
+      end
+    end
+  end
+
   test "degraded status keeps latest-good rows visible and disables task mutations" do
     sign_in!
     project_name = create_hive_project!("degraded-cache-app")
@@ -293,6 +324,45 @@ class StatusTest < ActionDispatch::IntegrationTest
         assert_select ".kanban-card form button[disabled][aria-disabled=true]",
                       text: "Approve"
       end
+    end
+  end
+
+  test "archive view uses the unfiltered payload and preserves project context" do
+    sign_in!
+    project_name = create_hive_project!("archive-view-status-app")
+    project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
+    slug = "expired-task-260710-abcd"
+    payload = {
+      "projects" => [
+        {
+          "name" => project_name,
+          "path" => project_path,
+          "hive_state_path" => File.join(project_path, ".hive-state"),
+          "tasks" => [
+            {
+              "slug" => slug,
+              "stage" => "9-done",
+              "workflow" => "coding",
+              "action" => "archived",
+              "action_label" => "Archived",
+              "age_seconds" => 10 * 86_400
+            }
+          ]
+        }
+      ]
+    }
+
+    with_archive_snapshot(payload) do
+      get archive_path(project: project_name)
+
+      assert_response :success
+      assert_select "#status-archive .project-section[data-project-name='#{project_name}']"
+      assert_select "[data-task-slug='#{slug}']"
+      assert_select "a[href='#{task_path(project_name, slug, source: "archive")}']"
+      assert_select ".project-nav a.active[aria-current='page']", text: project_name
+
+      get archive_path(project: "ghost")
+      assert_redirected_to archive_path
     end
   end
 
@@ -353,5 +423,13 @@ class StatusTest < ActionDispatch::IntegrationTest
     yield
   ensure
     StatusBroadcaster.define_singleton_method(:snapshot_with_version, original_snapshot) if original_snapshot
+  end
+
+  def with_archive_snapshot(payload)
+    original_snapshot = StatusBroadcaster.method(:archive_snapshot)
+    StatusBroadcaster.define_singleton_method(:archive_snapshot) { payload }
+    yield
+  ensure
+    StatusBroadcaster.define_singleton_method(:archive_snapshot, original_snapshot) if original_snapshot
   end
 end

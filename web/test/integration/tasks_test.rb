@@ -145,6 +145,60 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select ".task-closure code", text: "d" * 64
   end
 
+  test "an archive link resolves a task omitted from the ordinary snapshot" do
+    folder = stage_dir(@project, "9-done").join(@slug)
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug), folder)
+    Hive::TaskMeta.rewrite(
+      folder.to_s,
+      completed_at: Time.now.utc - (10 * 86_400)
+    )
+    media_fixture!(folder)
+    ordinary = {
+      "projects" => [
+        { "name" => @project, "tasks" => [], "hidden_archived_task_count" => 1 }
+      ]
+    }
+    ordinary_snapshot = lambda do
+      StatusBroadcaster::PageSnapshot.new(payload: ordinary, version: "ordinary-version")
+    end
+    fleet_archive_snapshot = -> { raise "archive task route attempted a fleet scan" }
+
+    with_replaced_singleton_method(StatusBroadcaster, :current_page_snapshot, ordinary_snapshot) do
+      with_replaced_singleton_method(
+        StatusBroadcaster, :archive_snapshot, fleet_archive_snapshot
+      ) do
+        get task_path(@project, @slug)
+        assert_response :not_found
+
+        get task_path(@project, @slug, source: "archive")
+        assert_response :success
+        assert_select "#status-stream-owner[data-status-version='ordinary-version']"
+        assert_select ".task-header", text: /#{Regexp.escape(@slug.sub(/-\d{6}-\h{4}\z/, "").tr("-", " "))}/i
+        assert_select "img[src*='source=archive']", minimum: 1
+        assert_select "form[action*='source=archive']", minimum: 1
+        assert_select(
+          "#task-log[data-controller='poll']",
+          { count: 0 },
+          "an archived task log is immutable and must not trigger status work every 3 seconds"
+        )
+
+        get task_log_path(@project, @slug)
+        assert_response :not_found
+        get task_log_path(@project, @slug, source: "archive")
+        assert_response :success
+
+        get task_media_path(@project, @slug, "01-home.png")
+        assert_response :not_found
+        get task_media_path(@project, @slug, "01-home.png", source: "archive")
+        assert_response :success
+
+        get task_diff_path(@project, @slug, source: "archive")
+        assert_response :conflict
+        assert_match(/worktree unavailable/i, response.body)
+      end
+    end
+  end
+
   test "task state renders implementation ownership as pending without mutating legacy state" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
 

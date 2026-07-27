@@ -34,6 +34,7 @@ module Hive
       validate_source!
       projects = @status_payload.fetch("projects")
       archived = archive_rows(projects)
+      hidden_archived_task_count = hidden_archived_task_count(projects)
       active = active_rows(projects)
       issues = source_issues(projects, active)
       task_source_status = task_source_status(projects, active)
@@ -74,6 +75,7 @@ module Hive
           "overall_state" => overall_state(tasks, completeness),
           "active" => tasks.size,
           "archived" => archived.size,
+          "hidden_archived_task_count" => hidden_archived_task_count,
           "projects_total" => projects.size,
           "projects_healthy" => projects.count { |project| project["error"].nil? },
           "states" => counts
@@ -131,6 +133,18 @@ module Hive
         Array(project["tasks"]).filter_map do |row|
           [ project, row ] if row["action"] == "archived"
         end
+      end
+    end
+
+    def hidden_archived_task_count(projects)
+      projects.sum do |project|
+        value = project.fetch("hidden_archived_task_count", 0)
+        unless value.is_a?(Integer) && value >= 0
+          raise ArgumentError,
+                "project #{project['name'].inspect} has invalid hidden_archived_task_count #{value.inspect}"
+        end
+
+        value
       end
     end
 

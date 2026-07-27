@@ -122,7 +122,11 @@ module Hive
             reviewers: reviewers.empty? ? stage.reviewers : reviewers.freeze, council: council
           )
         end
-        Hive::Workflow.new(id: workflow.id, stages: stages)
+        Hive::Workflow.new(
+          id: workflow.id,
+          stages: stages,
+          archive_visibility_retention_days: workflow.archive_visibility_retention_days
+        )
       end
 
       def input_environment_for(slot_id, runtime_metadata:, environment: ENV)

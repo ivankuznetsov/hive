@@ -27,6 +27,7 @@ jobs:
         with:
           path: mirror
           fetch-depth: 0
+          ssh-key: ${{ secrets.MIRROR_DEPLOY_KEY }}
 
       - name: Validate the release request
         id: request

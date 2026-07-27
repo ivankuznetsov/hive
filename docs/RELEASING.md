@@ -90,13 +90,22 @@ The mirror's `main` branch is synchronized one way from
 `components/agent-cli-runtime/` by **Sync from Hive monorepo**, on a six-hour
 schedule or manual dispatch. Each snapshot records its exact canonical
 component commit in `.mirror-source.json`. The sync excludes the component's
-`mirror/` administration directory from the public package tree and preserves
-the mirror-only workflow, contribution, and security files. The workflow
+`mirror/` administration directory from the public package tree and installs
+the canonical workflow, contribution, and security files. The workflow
 executes the projector from the canonical Hive checkout, so projector and
 administration changes take effect atomically.
 New mirror-only administration must first be added to the canonical
 `mirror/` allowlist in Hive; unsourced target-only files are removed. Any
 missing canonical admin file fails before mutating the mirror.
+
+Both mirror workflows use the repository-scoped private deploy key in the
+`MIRROR_DEPLOY_KEY` Actions secret for Git pushes. Its public half must be a
+write-enabled deploy key on `ivankuznetsov/agent-cli-runtime`, and the private
+half must not be reused by any other repository. This credential is required
+because GitHub's generated `GITHUB_TOKEN` cannot update files under
+`.github/workflows`, even with `contents: write`. The sync otherwise keeps its
+generated token read-only; the release workflow uses that short-lived token
+only for ruleset inspection and GitHub release creation.
 
 After an approved component version has been published from Hive, manually run
 **Mirror a component release** in the mirror with `vX.Y.Z`. The workflow checks
@@ -111,12 +120,13 @@ exercises `agent-runtime --version`. Only then does it push the mirror tag and
 create the GitHub release. Existing mirror tags are accepted only when their
 complete tree matches the independently reconstructed canonical snapshot.
 
-The mirror repository must have an active tag ruleset targeting
-`refs/tags/v*` that restricts updates and deletion and blocks non-fast-forward
-movement. Leave initial creation available to the verified workflow; never add
-a bypass that can replace an existing release tag. The workflow checks the live
-ruleset through the GitHub API and refuses to create a local release tag when
-the immutable-tag policy is absent.
+The mirror repository must have the `MIRROR_DEPLOY_KEY` credential described
+above and an active tag ruleset targeting `refs/tags/v*` that restricts updates
+and deletion and blocks non-fast-forward movement. Leave initial creation
+available to the verified workflow; never add a bypass that can replace an
+existing release tag. The workflow checks the live ruleset through the GitHub
+API and refuses to create a local release tag when the immutable-tag policy is
+absent.
 
 The mirror workflow never pushes to Hive or RubyGems and cannot choose or
 publish a version. Do not accept issues, pull requests, independent commits, or

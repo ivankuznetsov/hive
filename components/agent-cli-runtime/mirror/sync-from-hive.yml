@@ -6,7 +6,7 @@ on:
     - cron: "17 */6 * * *"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: agent-cli-runtime-mirror-sync
@@ -24,6 +24,7 @@ jobs:
         with:
           path: mirror
           fetch-depth: 1
+          ssh-key: ${{ secrets.MIRROR_DEPLOY_KEY }}
 
       - name: Check out canonical Hive main
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0

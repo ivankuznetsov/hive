@@ -181,7 +181,8 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
     workflow = File.read(WORKFLOW)
 
     assert_includes workflow, "github.repository == 'ivankuznetsov/agent-cli-runtime'"
-    assert_includes workflow, "contents: write"
+    assert_includes workflow, "contents: read"
+    assert_includes workflow, "ssh-key: ${{ secrets.MIRROR_DEPLOY_KEY }}"
     assert_includes workflow, "repository: ivankuznetsov/hive"
     assert_actions_are_pinned(workflow)
     assert_equal 2, workflow.scan("uses: #{CHECKOUT_ACTION}").length
@@ -198,6 +199,10 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
 
     release_workflow = File.read(RELEASE_WORKFLOW)
     assert_includes release_workflow, "contents: write"
+    assert_includes(
+      release_workflow,
+      "ssh-key: ${{ secrets.MIRROR_DEPLOY_KEY }}"
+    )
     assert_actions_are_pinned(release_workflow)
     assert_equal 2, release_workflow.scan("uses: #{CHECKOUT_ACTION}").length
     assert_equal 1, release_workflow.scan("uses: #{RUBY_ACTION}").length

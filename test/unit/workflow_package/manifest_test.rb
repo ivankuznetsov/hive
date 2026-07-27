@@ -75,6 +75,17 @@ class WorkflowPackageManifestTest < Minitest::Test
     end
   end
 
+  def test_inventory_rejects_invalid_utf8_when_text_is_required
+    with_tmp_dir do |root|
+      File.binwrite(File.join(root, "bad.txt"), "\xFF".b)
+
+      assert_rule("package.invalid_encoding") do
+        Hive::WorkflowPackage::Manifest.inventory(root)
+      end
+      assert_equal 1, Hive::WorkflowPackage::Manifest.inventory(root, require_utf8: false).length
+    end
+  end
+
   private
 
   def assert_rule(rule)

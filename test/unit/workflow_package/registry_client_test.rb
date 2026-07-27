@@ -28,6 +28,66 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
     end
   end
 
+  def test_observes_exact_catalogue_identity_without_materializing_package
+    with_registry do |repository, _source_revision, catalog_commit|
+      client = Hive::WorkflowPackage::RegistryClient.new(repository: repository)
+      manifest = YAML.safe_load(File.read(File.join(repository, "packages", "demo", "1.0.0", "manifest.yml")))
+      exact = client.observe(
+        name: "demo", version: "1.0.0", release_digest: manifest.fetch("release_sha256")
+      )
+      absent = client.observe(name: "demo", version: "9.0.0", release_digest: "a" * 64)
+
+      assert exact.listed
+      assert_equal catalog_commit, exact.catalog_commit
+      refute absent.listed
+      assert_nil absent.entry
+    end
+  end
+
+  def test_catalogue_observation_rejects_digest_mismatch
+    with_registry do |repository, _source_revision, _catalog_commit|
+      error = assert_raises(Hive::WorkflowPackage::PublishConflict) do
+        Hive::WorkflowPackage::RegistryClient.new(repository: repository).observe(
+          name: "demo", version: "1.0.0", release_digest: "a" * 64
+        )
+      end
+      assert_match(/digest conflicts/, error.message)
+    end
+  end
+
+  def test_configured_catalogue_branch_is_bound_at_clone_time
+    calls = []
+    client = Hive::WorkflowPackage::RegistryClient.new(
+      repository: "https://github.com/owner/registry.git", branch: "release/v1"
+    )
+    client.define_singleton_method(:git!) do |*args, **_kwargs|
+      calls << args
+      ""
+    end
+    client.send(:clone!, "/checkout")
+
+    assert_equal(
+      [ "clone", "--quiet", "--no-checkout", "--branch", "release/v1",
+        "--single-branch", "--", "https://github.com/owner/registry.git", "/checkout" ],
+      calls.first
+    )
+  end
+
+  def test_catalogue_observation_separates_invalid_identity_from_transport_unavailability
+    client = Hive::WorkflowPackage::RegistryClient.new
+    assert_raises(Hive::WorkflowPackage::RegistryError) do
+      client.observe(name: "Bad Name", version: "latest", release_digest: "short")
+    end
+
+    client.define_singleton_method(:git!) do |*_args, **_kwargs|
+      raise Hive::WorkflowPackage::RegistryError, "offline"
+    end
+    error = assert_raises(Hive::WorkflowPackage::CatalogueUnavailable) do
+      client.observe(name: "demo", version: "1.0.0", release_digest: "a" * 64)
+    end
+    assert_equal "offline", error.message
+  end
+
   def test_rejects_external_namespace_mutable_and_unlisted_refs
     with_registry do |repository, _source_revision, _catalog_commit|
       client = Hive::WorkflowPackage::RegistryClient.new(repository: repository)

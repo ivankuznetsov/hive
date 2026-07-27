@@ -509,7 +509,7 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
   def permissions
     {
       "risk" => "low", "capabilities" => [ "filesystem-read" ], "network_hosts" => [],
-      "filesystem_read" => [ "task" ], "filesystem_write" => [], "secrets" => []
+      "filesystem_read" => %w[repository task], "filesystem_write" => [], "secrets" => []
     }
   end
 

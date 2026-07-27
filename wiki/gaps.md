@@ -86,11 +86,12 @@ tags: [gap, todo, release-proof, agent-skills]
   admission before any install/update write. Close this by adding exact v2
   runtime-policy data or an equally precise Hive enforcement path, then run a
   live install/run smoke. Do not advertise either seed install as working yet.
-- `hive workflow publish` still creates the legacy
-  `workflows/NAME/manifest.json` submission layout. It does not author the
-  current immutable version directory/canonical YAML contract and needs a
-  separate v2 publication migration before its pending-review output can feed
-  the deployed registry.
+- The v2-only `hive workflow publish` path is covered by hermetic package,
+  receipt, retry, lifecycle, schema, and local CLI tests, but this implementation
+  deliberately performs no live external publication. A separately authorized
+  smoke must still prove the configured GitHub permission mode and deployed
+  registry CI against a disposable package; that evidence must not merge,
+  approve, or list the package automatically.
 - The built-in `bench` descriptor, packaged stage instructions, self-contained
   runtime snapshot, and `hive init . --workflow bench` path are covered locally,
   but they have not yet shipped in a Hive release or completed a live

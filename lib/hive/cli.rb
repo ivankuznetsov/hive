@@ -491,7 +491,7 @@ module Hive
     option :yes, type: :boolean, default: false,
                  desc: "confirm install/update/remove in JSON or non-interactive mode"
     option :dry_run, type: :boolean, default: false,
-                     desc: "for `install`, `update`, or `remove`: validate and report without changing project state"
+                     desc: "for workflow mutations: validate and report without changing project or remote state"
     option :allow_escalation, type: :boolean, default: false,
                               desc: "for `install`/`update`: separately allow unbounded or increased capabilities"
     option :mapping, type: :array, default: [],
@@ -500,6 +500,8 @@ module Hive
                            desc: "for `install`/`update`: optional input NAME=ENV_NAME bindings"
     option :version, type: :string,
                      desc: "for `publish`: semantic package version"
+    option :expected_release_digest, type: :string,
+                                         desc: "for `publish`: require the exact confirmed dry-run release digest"
     def workflow(subcommand = nil, id = nil)
       require "hive/commands/workflow"
       Hive::Commands::Workflow.new(
@@ -513,7 +515,8 @@ module Hive
         allow_escalation: options[:allow_escalation],
         mapping_overrides: options[:mapping],
         input_bindings: options[:input_binding],
-        version: options[:version]
+        version: options[:version],
+        expected_release_digest: options[:expected_release_digest]
       ).call
     end
 

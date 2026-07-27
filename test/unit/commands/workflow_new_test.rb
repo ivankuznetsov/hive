@@ -41,7 +41,13 @@ class WorkflowNewTest < Minitest::Test
       assert_equal "Edit this file to define what the `work` stage should do.\n", File.read(instruction_path)
       assert File.file?(File.join(File.dirname(instruction_path), "README.md"))
       assert File.file?(File.join(File.dirname(instruction_path), "honeycomb.yml"))
-      assert_includes File.read(File.join(File.dirname(instruction_path), "README.md")), "# my-flow"
+      readme = File.read(File.join(File.dirname(instruction_path), "README.md"))
+      assert_includes readme, "# my-flow"
+      %w[Behavior Prerequisites Inputs Outputs Permissions\ and\ Risks Recovery].each do |section|
+        assert_includes readme, "## #{section.gsub('\\ ', ' ')}"
+      end
+      metadata = YAML.safe_load(File.read(File.join(File.dirname(instruction_path), "honeycomb.yml")))
+      assert_equal %w[assets author description hive_min_version license source], metadata.keys.sort
 
       workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
       assert_equal :"my-flow", workflow.id
@@ -50,6 +56,8 @@ class WorkflowNewTest < Minitest::Test
       assert_equal :agent, workflow.stages[1].kind
       assert_equal instruction_path, workflow.stages[1].instruction
       assert_nil workflow.stages[1].skill
+      assert_equal "development", workflow.stages[1].mapping_role
+      assert_equal "my-flow-work-v1", workflow.stages[1].mapping_contract
       assert_equal :inert, workflow.stages[2].kind
 
       assert_equal :"my-flow", Hive::WorkflowSelection.fetch!("my-flow", project_root: project_root).id
@@ -167,6 +175,10 @@ class WorkflowNewTest < Minitest::Test
       assert_includes File.read(File.join(workflows, "brief.yml")), "archive_visibility_retention_days: 3"
       assert_equal %w[inbox gather synthesize report done], workflow.stage_names
       assert_equal %i[inert agent agent agent inert], workflow.stages.map(&:kind)
+      workflow.executable_slots.each do |slot|
+        assert slot.actor.mapping_role
+        assert slot.actor.mapping_contract
+      end
 
       # Every stage instruction is copied verbatim from the sample — real
       # content, not the blank placeholder — and named per stage.

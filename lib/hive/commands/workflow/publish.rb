@@ -1,4 +1,6 @@
+require "time"
 require "tmpdir"
+require "fileutils"
 require "hive/commands/workflow/base"
 require "hive/workflow_package/publisher"
 
@@ -7,44 +9,199 @@ module Hive
     class Workflow
       class Publish < Base
         SCHEMA = "hive-workflow-publish".freeze
+        SHA256 = /\A[0-9a-f]{64}\z/
 
-        def initialize(name, project_root:, version:, json: false, stdout: $stdout, publisher: nil)
+        class ValidationError < Hive::Error
+          def exit_code = Hive::ExitCodes::USAGE
+        end
+
+        class InternalError < Hive::Error
+          def exit_code = Hive::ExitCodes::SOFTWARE
+        end
+
+        def initialize(name, project_root:, version:, json: false, dry_run: false,
+                       expected_release_digest: nil, stdout: $stdout, publisher: nil, clock: nil)
           super(project_root: project_root, json: json, stdout: stdout)
           @name = name.to_s
           @version = version.to_s
+          @dry_run = dry_run
+          @expected_release_digest = expected_release_digest
+          @clock = clock || -> { Time.now.utc }
           @publisher = publisher || Hive::WorkflowPackage::Publisher.new(
             @name, project_root: project_root, version: @version
           )
         end
 
         def call!
-          Dir.mktmpdir("hive-workflow-package-") do |root|
-            package = @publisher.package(destination: root)
-            pr_url = @publisher.publish(package)
-            result = payload(package, pr_url)
-            emit(result, human_lines: [
-              "hive: submitted honeycomb/#{package.name}@#{package.version} for review",
-              "pull request: #{pr_url}",
-              "status: pending_review (not yet listed)"
-            ])
+          validate_expected_digest!
+          root = Dir.mktmpdir("hive-workflow-package-")
+          lifecycle = nil
+          begin
+            @last_package = build_package(root)
+            assert_expected_digest!(@last_package)
+            @receipt_context_available = !@dry_run
+            lifecycle = @publisher.publish(@last_package) unless @dry_run
+          ensure
+            warning = cleanup_tempdir(root)
+            if warning
+              @cleanup_warnings = [ warning ].freeze
+              if @last_package
+                @last_package = @last_package.with(
+                  warnings: (@last_package.warnings + @cleanup_warnings).uniq.freeze
+                )
+              end
+            end
           end
+          return emit_validated(@last_package) if @dry_run
+
+          emit_lifecycle(@last_package, lifecycle)
+        end
+
+        def call
+          super
+        rescue StandardError => e
+          error = InternalError.new("workflow publication failed unexpectedly (#{e.class.name.split('::').last})")
+          if @json
+            @stdout.puts JSON.generate(error_payload(error))
+          else
+            warn "hive workflow: #{error.message}"
+          end
+          exit(error.exit_code)
         end
 
         private
 
-        def payload(package, pr_url)
+        def build_package(root)
+          if @dry_run || !@publisher.respond_to?(:prepare)
+            @publisher.package(destination: root)
+          else
+            @publisher.prepare(destination: root)
+          end
+        rescue Hive::WorkflowPackage::PublishConfigurationError
+          raise
+        rescue Hive::WorkflowPackage::PackageError, Hive::ConfigError => e
+          raise ValidationError, e.message
+        end
+
+        def validate_expected_digest!
+          return if @expected_release_digest.nil?
+          unless SHA256.match?(@expected_release_digest.to_s)
+            raise ValidationError, "--expected-release-digest must be a lowercase SHA-256 digest"
+          end
+          return unless @dry_run
+
+          raise ValidationError, "--expected-release-digest is for the confirmed real publication, not dry-run"
+        end
+
+        def assert_expected_digest!(package)
+          return unless @expected_release_digest
+          return if secure_equal?(@expected_release_digest, package.release_digest)
+
+          raise ValidationError, "validated release digest changed; run dry-run and obtain confirmation again"
+        end
+
+        def emit_validated(package)
+          validated_at = @clock.call.utc.iso8601
+          payload = common_payload(package).merge(
+            "state" => "validated", "freshness" => "not_checked", "validated_at" => validated_at
+          )
+          emit(payload, human_lines: [
+            "hive: validated honeycomb/#{package.name}@#{package.version}",
+            "release digest: #{package.release_digest}",
+            "remote lifecycle: not checked"
+          ])
+        end
+
+        def emit_lifecycle(package, result)
+          payload = common_payload(package).merge(
+            "state" => result.state, "freshness" => result.freshness,
+            "observed_at" => result.observed_at, "pr_url" => result.pr_url,
+            "warnings" => (package.warnings + result.warnings).uniq
+          )
+          label = result.state == "listed" ? "listed in the Honeycomb catalogue" : result.state.tr("_", " ")
+          lines = [
+            "hive: honeycomb/#{package.name}@#{package.version} is #{label}",
+            "release digest: #{package.release_digest}",
+            "freshness: #{result.freshness} at #{result.observed_at}"
+          ]
+          lines << "pull request: #{result.pr_url}" if result.pr_url
+          emit(payload, human_lines: lines)
+        end
+
+        def common_payload(package)
           {
             "schema" => SCHEMA,
             "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(SCHEMA),
-            "ok" => true,
-            "status" => "pending_review",
-            "name" => package.name,
-            "version" => package.version,
-            "manifest_digest" => package.manifest_digest,
-            "warnings" => package.warnings,
-            "pr_url" => pr_url,
-            "listed" => false
+            "ok" => true, "name" => package.name, "version" => package.version,
+            "package_digest" => package.package_digest,
+            "release_digest" => package.release_digest,
+            "warnings" => package.warnings
           }
+        end
+
+        def error_payload(error)
+          extras = { "retryable" => retryable?(error) }
+          extras["warnings"] = @cleanup_warnings if @cleanup_warnings&.any?
+          if @last_package
+            extras["package_digest"] = @last_package.package_digest
+            extras["release_digest"] = @last_package.release_digest
+            if @receipt_context_available
+              extras["last_completed_step"] = "validated"
+              begin
+                receipt = @publisher.receipt_for(@last_package) if @publisher.respond_to?(:receipt_for)
+                if receipt
+                  extras["last_completed_step"] = receipt.last_completed_step
+                  extras["last_observed_state"] = receipt.observation["state"] if receipt.observation
+                  extras["pr_url"] = receipt.data["pr_url"] if receipt.data["pr_url"]
+                end
+              rescue StandardError
+                nil
+              end
+            end
+          end
+          Hive::Schemas::ErrorEnvelope.build(
+            schema: SCHEMA, error: error, error_kind: error_kind(error), extras: extras
+          )
+        end
+
+        def error_kind(error)
+          case error
+          when ValidationError, Hive::WorkflowPackage::PackageError,
+               Hive::WorkflowPackage::PublishPolicyBlocked then "validation"
+          when Hive::WorkflowPackage::PublishAuthenticationError then "authentication"
+          when Hive::WorkflowPackage::PublishConfigurationError then "configuration"
+          when Hive::WorkflowPackage::PublishOfflineError, Hive::WorkflowPackage::CatalogueUnavailable then "offline"
+          when Hive::WorkflowPackage::PublishConflict then "immutable_conflict"
+          when Hive::WorkflowPackage::PublishAmbiguousError, Hive::ConcurrentRunError then "remote_ambiguous"
+          when Hive::WorkflowPackage::PublishRecoveryError then "internal"
+          when Hive::WorkflowPackage::RegistryError then "offline"
+          when Hive::ConfigError then "configuration"
+          else "internal"
+          end
+        end
+
+        def retryable?(error)
+          error.is_a?(Hive::WorkflowPackage::PublishOfflineError) ||
+            error.is_a?(Hive::WorkflowPackage::CatalogueUnavailable) ||
+            error.is_a?(Hive::WorkflowPackage::PublishAmbiguousError) ||
+            error.is_a?(Hive::WorkflowPackage::RegistryError) ||
+            error.is_a?(Hive::ConcurrentRunError)
+        end
+
+        def cleanup_tempdir(root)
+          FileUtils.remove_entry(root)
+          nil
+        rescue StandardError => error
+          {
+            "rule_id" => "publish.cleanup_failed", "path" => "temporary-package",
+            "message" => "temporary package cleanup failed; publication outcome is unchanged",
+            "detail" => error.class.name.split("::").last
+          }.freeze
+        end
+
+        def secure_equal?(left, right)
+          left.bytesize == right.bytesize &&
+            left.bytes.zip(right.bytes).reduce(0) { |memo, (a, b)| memo | (a ^ b) }.zero?
         end
 
         def envelope_schema = SCHEMA

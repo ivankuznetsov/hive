@@ -356,7 +356,7 @@ module Hive
 
       def initialize(subcommand, id = nil, project_root: Dir.pwd, json: false, stdout: $stdout, template: DEFAULT_TEMPLATE,
                      yes: false, dry_run: false, allow_escalation: false, version: nil,
-                     mapping_overrides: [], input_bindings: [])
+                     expected_release_digest: nil, mapping_overrides: [], input_bindings: [])
         @subcommand = subcommand
         @id = id
         @project_root = File.expand_path(project_root)
@@ -367,6 +367,7 @@ module Hive
         @dry_run = dry_run
         @allow_escalation = allow_escalation
         @version = version
+        @expected_release_digest = expected_release_digest
         @mapping_overrides = mapping_overrides
         @input_bindings = input_bindings
       end
@@ -520,7 +521,8 @@ module Hive
         when "publish"
           require "hive/commands/workflow/publish"
           Hive::Commands::Workflow::Publish.new(
-            @id, project_root: @project_root, json: @json, version: @version, stdout: @stdout
+            @id, project_root: @project_root, json: @json, version: @version,
+            dry_run: @dry_run, expected_release_digest: @expected_release_digest, stdout: @stdout
           )
         end
       end

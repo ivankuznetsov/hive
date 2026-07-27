@@ -155,9 +155,12 @@ descriptor:
 hive workflow validate my-flow --json
 ```
 
-`README.md` and `honeycomb.yml` are publish-preflight inputs. The scaffolded
-summary and author are placeholders; edit them before running `workflow
-publish`. They do not change how an owner-authored workflow runs locally.
+`README.md` and `honeycomb.yml` are publish-preflight inputs. Complete the
+authored description, author, SPDX license, minimum Hive version, immutable
+source URL/revision, and optional closed asset list. Every README scaffold has
+required `Behavior`, `Prerequisites`, `Inputs`, `Outputs`, `Permissions and
+Risks`, and `Recovery` sections; placeholders are rejected. These files do not
+change how an owner-authored workflow runs locally.
 
 Then create a task with:
 
@@ -183,7 +186,9 @@ hive workflow list
 hive workflow update architecture --dry-run
 hive workflow update architecture --yes
 hive workflow remove architecture --yes
-hive workflow publish my-flow --version 1.0.0
+hive workflow publish my-flow --version 1.0.0 --dry-run --json
+hive workflow publish my-flow --version 1.0.0 \
+  --expected-release-digest <confirmed-release-digest> --json
 ```
 
 Architecture and Writing previously existed as lightweight `workflow new`
@@ -242,14 +247,14 @@ and never deletes task-pinned generations or owner-authored/built-in workflows.
 List and remove work offline; catalog visibility is reported as
 `unknown_offline` until a trusted refresh is available.
 
-Hive web exposes the same project-scoped lifecycle under **Workflows**. It lists
+Hive web exposes the install/update/remove project lifecycle under **Workflows**. It lists
 built-in, authored, selected, and retained generations; scaffolds project
 workflows; and makes install/update/remove a two-step review. The first step is
 the command's real dry-run disclosure. The second uses a 15-minute signed
 receipt bound to the reviewed package, configuration, and selected baseline;
 security-expanding updates require their own checkbox in addition to ordinary
-update consent. The current legacy `workflow publish` output is shown as a known
-limitation rather than an action that would open an unusable v2 registry PR.
+update consent. Publication intentionally remains a CLI-only author workflow;
+Hive web does not add a competing publish or status route.
 
 Honeycomb v2 manifests carry coarse disclosure for review and consent, while
 each executable stage, reviewer, and reviser declares its exact runtime
@@ -262,9 +267,30 @@ only the binding name, injects a current value only into its authorized child,
 and rejects package-declared process-control names such as `PATH`, `HOME`,
 `RUBYOPT`, and `LD_PRELOAD`.
 
-`workflow publish` still emits the legacy `workflows/<name>/manifest.json`
-submission shape. It remains `pending_review`, not listed, and does not yet
-produce the current `packages/<name>/<version>/manifest.yml` registry contract.
+`workflow publish` builds only the immutable Honeycomb v1 directory
+`packages/<name>/<version>/`. It snapshots referenced local instructions and
+declared regular assets, records named skills as external dependencies, derives
+the conservative permission union, generates complete file hashes plus
+`release_sha256`, and runs the same consumer validator and pinned local security
+lint before any remote access. `--dry-run` performs that entire local path with
+no receipt, Git, GitHub, or catalogue side effects.
+
+A real submission must bind `--expected-release-digest` to the exact confirmed
+dry-run bytes. Hive retains an owner-private digest bundle and receipt under
+the XDG state home, journals intent before fork/push/PR effects, and reconciles
+the exact fork parent, head repository/branch, commit parent and OID, manifest,
+PR base, and catalogue entry on retry. A matching externally created PR may use
+a different branch name; names are locators, while verified bytes and remote
+identity are authority. Receipt progress and lifecycle observations are
+monotonic, so a stale concurrent retry cannot replace newer evidence.
+The schema-v2 lifecycle is `pending_review`, `merged_pending_listing`, `listed`,
+or `closed_unmerged`; freshness is independently `current` or `cached`, and
+cached results retain the original observation time. Publication never merges,
+approves, closes, force-pushes, deletes remote state, or authors catalogue and
+review evidence. A retained release is rechecked against both its recorded lint
+identity and the current policy: a new blocking rule remains visible during
+read-only reconciliation but prevents any new fork, push, or PR mutation.
+Registry maintainers own review, merge, and listing.
 
 ## Descriptor Schema
 

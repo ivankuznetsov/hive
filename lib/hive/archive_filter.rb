@@ -17,9 +17,19 @@ module Hive
 
     module_function
 
-    def project(rows, now: Time.now.utc, backfiller: Hive::CompletedAtBackfiller.new)
+    def project(rows, now: Time.now.utc, backfiller: Hive::CompletedAtBackfiller.new,
+                apply_retention: true)
       rows = Array(rows)
       archive_rows = rows.select { |row| archive_row?(row) }
+      unless apply_retention
+        return Projection.new(
+          ordinary_rows: rows,
+          archive_rows: archive_rows,
+          hidden_rows: [],
+          next_retention_boundary: nil
+        )
+      end
+
       archived_rows = archive_rows.select { |row| archive_member?(row) }
       clocks = completion_clocks(archived_rows, backfiller: backfiller)
       hidden_rows = archived_rows.select do |row|

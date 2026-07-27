@@ -24,6 +24,9 @@ module Hive
       end
 
       def stage_dirs = workflows.values.flat_map(&:stage_dirs).uniq.freeze
+      def active_stage_dirs
+        workflows.values.flat_map { |workflow| workflow.stages[0...-1].map(&:dir) }.uniq.freeze
+      end
       def terminal_stage_dirs = workflows.values.map { |workflow| workflow.stages.last.dir }.uniq.freeze
     end
 

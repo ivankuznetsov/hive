@@ -103,7 +103,8 @@ module Hive
                    deadline_seconds: REFRESH_DEADLINE_SECONDS,
                    monotonic_clock: -> { Hive::Lock.monotonic_now },
                    cursor_store: CursorStore.new,
-                   command_runner: Hive::CompletionTime::CommandRunner.new)
+                   command_runner: Hive::CompletionTime::CommandRunner.new,
+                   shared_refresh_deadline: false)
       @command_runner = command_runner
       @history = history || Hive::CompletionTime::History.new(
         command_runner: command_runner, monotonic_clock: monotonic_clock
@@ -112,10 +113,14 @@ module Hive
       @deadline_seconds = deadline_seconds
       @monotonic_clock = monotonic_clock
       @cursor_store = cursor_store
+      @refresh_deadline =
+        @monotonic_clock.call + @deadline_seconds if shared_refresh_deadline
     end
 
     def call(tasks)
-      deadline = @monotonic_clock.call + @deadline_seconds
+      deadline = @refresh_deadline || (@monotonic_clock.call + @deadline_seconds)
+      return {} if @monotonic_clock.call >= deadline
+
       self.class.rotating_batch(
         tasks, @batch_size, cursor_store: @cursor_store
       ).each_with_object({}) do |task, clocks|
@@ -129,7 +134,7 @@ module Hive
       stored = Hive::CompletionTime.parse(task.completed_at, warn_context: task.folder)
       return stored if stored
       return nil unless File.directory?(task.folder)
-      deadline ||= @monotonic_clock.call + @deadline_seconds
+      deadline ||= @refresh_deadline || (@monotonic_clock.call + @deadline_seconds)
 
       remaining = [ deadline - @monotonic_clock.call, 0 ].max
       Hive::Lock.with_commit_lock(task.hive_state_path, timeout: remaining) do

@@ -170,11 +170,13 @@ module Hive
         admission_context = build_admission_context(
           projects, workflow_generations: workflow_generations
         )
+        archive_backfiller = shared_archive_backfiller
         projects.each do |project|
           render_project(
             project, project_count: projects.size,
             admission_context: admission_context, now: refresh_now,
-            workflow_generation: workflow_generation_for(project, workflow_generations)
+            workflow_generation: workflow_generation_for(project, workflow_generations),
+            archive_backfiller: archive_backfiller
           )
         rescue Hive::UnsupportedProjectConfigError
           raise
@@ -342,7 +344,8 @@ module Hive
       # version. `tasks[].marker` is the lowercased symbol name as a string;
       # `tasks[].attrs` is the marker's attribute map.
       def json_payload(projects, stages: nil, exclude_archived: false, admission_context: nil,
-                       now: Time.now.utc, workflow_generations: nil)
+                       now: Time.now.utc, workflow_generations: nil,
+                       include_archive_index: false)
         now = now.utc
         @next_retention_boundary = nil
         workflow_generations ||= capture_workflow_generations(projects)
@@ -352,6 +355,7 @@ module Hive
         admission_context ||= build_admission_context(
           projects, workflow_generations: workflow_generations
         )
+        archive_backfiller = shared_archive_backfiller
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
@@ -365,7 +369,9 @@ module Hive
               exclude_archived: exclude_archived,
               admission_context: admission_context,
               now: now,
-              workflow_generation: workflow_generation_for(p, workflow_generations)
+              workflow_generation: workflow_generation_for(p, workflow_generations),
+              archive_backfiller: archive_backfiller,
+              include_archive_index: include_archive_index
             )
           end
         }
@@ -381,7 +387,8 @@ module Hive
       # entry still validates against the published hive-status schema.
       def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false,
                                       admission_context: nil, now: Time.now.utc,
-                                      workflow_generation: nil)
+                                      workflow_generation: nil, archive_backfiller: nil,
+                                      include_archive_index: false)
         project_payload(
           project,
           project_count: project_count,
@@ -389,7 +396,9 @@ module Hive
           exclude_archived: exclude_archived,
           admission_context: admission_context,
           now: now,
-          workflow_generation: workflow_generation
+          workflow_generation: workflow_generation,
+          archive_backfiller: archive_backfiller,
+          include_archive_index: include_archive_index
         )
       rescue Hive::UnsupportedProjectConfigError
         raise
@@ -406,12 +415,14 @@ module Hive
           "legacy_migrate_command" => nil
         }
         degraded["hidden_archived_task_count"] = 0 unless @archive
+        degraded["__archive_folders"] = [] if include_archive_index
         degraded
       end
 
       def project_payload(project, project_count:, stages: nil, exclude_archived: false,
                           admission_context: nil, now: Time.now.utc,
-                          workflow_generation: nil)
+                          workflow_generation: nil, archive_backfiller: nil,
+                          include_archive_index: false)
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {
@@ -456,7 +467,11 @@ module Hive
             rows = annotate_dependencies(
               rows, project, admission_context: admission_context
             )
-            projection = Hive::ArchiveFilter.project(rows, now: now)
+            projection = Hive::ArchiveFilter.project(
+              rows, now: now,
+              backfiller: archive_backfiller || Hive::CompletedAtBackfiller.new,
+              apply_retention: !@archive
+            )
             note_retention_boundary(projection.next_retention_boundary) unless @archive
             rows =
               if @archive
@@ -468,6 +483,13 @@ module Hive
               end
             out = base.merge("tasks" => rows.map { |r| task_payload(r, now: now) })
             out["hidden_archived_task_count"] = projection.hidden_count unless @archive
+            if include_archive_index
+              # Internal cache handoff only. StateSource removes this key
+              # before publishing the ordinary payload, so the public status
+              # schema and task objects remain unchanged.
+              out["__archive_folders"] =
+                projection.archive_rows.filter_map { |row| row[:folder] }.freeze
+            end
             # Always emit `legacy_stage_dirs` (default empty array) so
             # consumers can branch on `.empty?` without a `key?` probe and
             # the schema's optional-but-never-undefined contract holds.
@@ -791,7 +813,7 @@ module Hive
       end
 
       def render_project(project, project_count:, admission_context: nil, now: Time.now.utc,
-                         workflow_generation: nil)
+                         workflow_generation: nil, archive_backfiller: nil)
         path = project["path"]
         unless File.directory?(path)
           puts "#{project['name']}: missing project path #{path}"
@@ -825,7 +847,11 @@ module Hive
             config: config, with_diagnostic: false
           )
           rows = annotate_dependencies(rows, project, admission_context: admission_context)
-          projection = Hive::ArchiveFilter.project(rows, now: now)
+          projection = Hive::ArchiveFilter.project(
+            rows, now: now,
+            backfiller: archive_backfiller || Hive::CompletedAtBackfiller.new,
+            apply_retention: !@archive
+          )
         end
         if @archive
           render_archive_project(project, projection.archive_rows)
@@ -1013,22 +1039,31 @@ module Hive
       # overlay. Archive membership is applied after TaskAction annotation,
       # because one workflow's terminal directory may be another workflow's
       # active directory.
-      def default_stage_dirs(hive_state, _exclude_archived, workflow_generation: nil)
+      def default_stage_dirs(hive_state, exclude_archived, workflow_generation: nil)
         # Archive membership is workflow/action-aware and cannot be inferred
-        # from a global terminal-directory union. Scan the full generation and
-        # apply exclude_archived only after TaskAction annotation.
+        # from a global terminal-directory union. The normal producer scans the
+        # full generation. The TUI's explicitly active-only hot path scans the
+        # union of nonterminal stages for the captured project generation and
+        # merges the last authoritative retention projection afterward.
         stages_root = File.join(hive_state, "stages")
+        selected_stage_dirs =
+          if exclude_archived
+            workflow_active_stage_dirs(workflow_generation)
+          else
+            workflow_stage_dirs(workflow_generation)
+          end
         on_disk = Dir.children(stages_root).select do |entry|
           entry.match?(/\A\d+-[a-z][a-z0-9-]*\z/) &&
             File.directory?(File.join(stages_root, entry)) &&
-            (workflow_stage_dirs(workflow_generation).include?(entry) ||
+            (selected_stage_dirs.include?(entry) ||
+             (!exclude_archived &&
              orphan_stage_has_workflow_reference?(
                File.join(stages_root, entry), workflow_generation: workflow_generation
-             ))
+             )))
         end
-        (workflow_stage_dirs(workflow_generation) + on_disk).uniq
+        (selected_stage_dirs + on_disk).uniq
       rescue SystemCallError
-        workflow_stage_dirs(workflow_generation)
+        selected_stage_dirs || workflow_stage_dirs(workflow_generation)
       end
 
       def orphan_stage_has_workflow_reference?(stage_dir, workflow_generation: nil)
@@ -1290,12 +1325,24 @@ module Hive
         generation ? generation.stage_dirs : Hive::Workflows.all_stage_dirs
       end
 
+      def workflow_active_stage_dirs(generation)
+        return generation.active_stage_dirs if generation
+
+        Hive::Workflows::Registry.all
+          .flat_map { |workflow| workflow.stages[0...-1].map(&:dir) }
+          .uniq
+      end
+
       def workflow_terminal_stage_dirs(generation)
         generation ? generation.terminal_stage_dirs : Hive::Workflows.all_terminal_stage_dirs
       end
 
       def workflow_ids(generation)
         generation ? generation.workflows.keys : Hive::Workflows::Registry.ids
+      end
+
+      def shared_archive_backfiller
+        Hive::CompletedAtBackfiller.new(shared_refresh_deadline: true)
       end
 
       def note_retention_boundary(boundary)

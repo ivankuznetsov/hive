@@ -152,6 +152,7 @@ module Hive
                 task, terminal_snapshot, Hive::GitOps.new(task.project_root), e
               )
             end
+            raise
           end
           commit_after(
             task, result, config: cfg, terminal_snapshot: terminal_snapshot,

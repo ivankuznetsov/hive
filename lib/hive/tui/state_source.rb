@@ -26,15 +26,13 @@ module Hive
     # most recent error). The polling loop never crashes its own thread.
     #
     # Cross-thread state beyond `@current`. A short-lived archive
-    # refresher thread (spawned by `#start_archive_refresh_if_needed`)
-    # writes `@archived_cache`, `@archive_last_refresh_at`, and
-    # `@archive_last_error`. Once `@current` is established the refresher is
-    # the SOLE writer of those three: the poll/boot thread's cold-start
-    # branch in `#refresh_once` also seeds `@archived_cache` and
-    # `@archive_last_refresh_at`, but that branch runs only while `@current`
-    # is nil — before any refresher can spawn — so there is no concurrent
-    # write. Thereafter the poll/render threads only read them, so the same
-    # atomic-reference-read discipline as `@current` applies.
+    # refresher thread (spawned by `#start_archive_refresh_if_needed`) and an
+    # authoritative policy/terminal refresh can both produce a replacement
+    # `@archived_cache`. Publication is serialized by
+    # `@archive_cache_mutex`; a generation compare-and-swap prevents an older
+    # background scan from overwriting a newer synchronous projection.
+    # Readers remain lock-free because each published cache is immutable and
+    # the reference assignment is atomic under MRI's GVL.
     # `@archive_refresh_dirty` is the field written by more than one thread
     # in steady state: ANY thread may SET it (`#request_archive_refresh` is
     # called from the Bubbletea update thread as well as the poll thread,
@@ -67,6 +65,7 @@ module Hive
       # SET it, only the poll thread CLEARS it) or an mtime-granularity
       # miss still self-heals.
       ARCHIVE_REFRESH_FALLBACK_SECONDS = 30.0
+      ARCHIVE_CACHE_MODES = %i[complete visible].freeze
 
       # Fresh-per-call marker distinguishing "stat errored" from nil
       # ("absent"). Two instances are never `==`, so a repeatedly-erroring
@@ -80,9 +79,21 @@ module Hive
       # erroring path read as "unchanged" and silently mask a real mutation.
       class StatError; end
 
-      def initialize(poll_interval_seconds: 1.0)
+      def initialize(poll_interval_seconds: 1.0, archive_cache_mode: :complete,
+                     archive_refresh_fallback_seconds: ARCHIVE_REFRESH_FALLBACK_SECONDS)
+        unless ARCHIVE_CACHE_MODES.include?(archive_cache_mode)
+          raise ArgumentError,
+                "archive_cache_mode must be one of: #{ARCHIVE_CACHE_MODES.join(', ')}"
+        end
+
         @poll_interval_seconds = poll_interval_seconds
+        @archive_cache_mode = archive_cache_mode
+        @archive_refresh_fallback_seconds = Float(archive_refresh_fallback_seconds)
+        if @archive_refresh_fallback_seconds <= 0
+          raise ArgumentError, "archive_refresh_fallback_seconds must be positive"
+        end
         @current = nil
+        @current_payload = nil
         @current_seen_at = nil
         @last_error = nil
         # Separate error channel for the archive refresher thread so the
@@ -96,7 +107,7 @@ module Hive
         @last_full_parse_at = nil
         @next_retention_boundary = nil
         # Consecutive archive-refresh failures, so a permanent
-        # `json_payload` raise backs off to the 30s backstop instead of
+        # `json_payload` raise backs off to the configured backstop instead of
         # hot-looping a full archive rescan every poll tick (see
         # #refresh_archived_cache).
         @archive_refresh_failures = 0
@@ -104,6 +115,8 @@ module Hive
         # genuinely stuck EACCES/ESTALE biases the change detectors toward
         # a re-check forever; the streak surfaces a breadcrumb after N.
         @stat_error_streaks = {}
+        @archive_cache_mutex = Mutex.new
+        @archive_cache_generation = 0
         @archived_cache = empty_archived_cache
         @snapshot_archived_cache = @archived_cache
         @archive_dir_mtimes = {}
@@ -142,6 +155,17 @@ module Hive
       def refresh_now
         refresh_once
         current
+      end
+
+      # Raw status payload for non-TUI consumers that need the same bounded
+      # projection cache without rebuilding JSON from Snapshot rows. Calls are
+      # synchronous; multi-threaded consumers must serialize them because the
+      # source's poll state has one writer by design.
+      def refresh_payload_now
+        refresh_once
+        raise @last_error if @current_payload.nil? && @last_error
+
+        @current_payload
       end
 
       # Marks the archived-row cache dirty so the next poll tick spawns a
@@ -204,8 +228,9 @@ module Hive
         refresh_now = Time.now.utc
         note_archive_refresher_liveness
         policy_unchanged = false
+        archive_signal_changed = false
         if @current
-          refresh_archive_signals(@current.projects)
+          archive_signal_changed = refresh_archive_signals(@current.projects)
           current_policy_fingerprint = policy_fingerprint_for(@current)
           policy_unchanged = current_policy_fingerprint == @policy_fingerprint
           request_archive_refresh unless policy_unchanged
@@ -224,36 +249,105 @@ module Hive
         end
 
         projects = Hive::Config.registered_projects
-        admission_context = Hive::DependencySnapshot.admission_context(projects)
         if @current.nil?
-          # Cold start publishes the ordinary producer projection and seeds a
-          # separate, explicitly unfiltered archive cache with the same clock.
+          # Cold start publishes the ordinary producer projection and seeds
+          # the configured archive cache with the same clock. TUI mode retains
+          # the complete archive; web mode retains only currently visible
+          # archived rows because its complete archive route is on demand.
+          admission_context = Hive::DependencySnapshot.admission_context(projects)
           ordinary_status = Hive::Commands::Status.new
           ordinary_payload = ordinary_status.json_payload(
-            projects, admission_context: admission_context, now: refresh_now
+            projects,
+            admission_context: admission_context,
+            now: refresh_now,
+            include_archive_index: !complete_archive_cache?
           )
-          archive_payload = Hive::Commands::Status.new(archive: true).json_payload(
-            projects, admission_context: admission_context, now: refresh_now
-          )
-          @archived_cache = archived_cache_from_payload(
-            archive_payload, admission_context: admission_context, previous: @archived_cache
-          )
+          next_archived_cache =
+            if complete_archive_cache?
+              archive_payload = Hive::Commands::Status.new(archive: true).json_payload(
+                projects, admission_context: admission_context, now: refresh_now
+              )
+              archived_cache_from_payload(
+                archive_payload,
+                ordinary_payload: ordinary_payload,
+                next_retention_boundary: ordinary_status.next_retention_boundary,
+                admission_context: admission_context,
+                previous: @archived_cache
+              )
+            else
+              visible_archived_cache_from_payload(
+                ordinary_payload,
+                next_retention_boundary: ordinary_status.next_retention_boundary,
+                admission_context: admission_context
+              )
+            end
+          replace_archived_cache(next_archived_cache)
           @archive_last_refresh_at = refresh_now
           publish_snapshot(
             ordinary_payload, archived_cache: @archived_cache,
             next_retention_boundary: ordinary_status.next_retention_boundary
           )
           @archive_dir_mtimes = archive_dir_mtimes_for(@current.projects)
-        else
-          # Steady state also consumes Status's ordinary projection directly.
-          # The cache is attached only as Snapshot's dedicated archive source.
+        elsif !policy_unchanged || archive_signal_changed ||
+              retention_reparse_due?(now: refresh_now)
+          # Policy edits, terminal membership changes, and wall-clock expiry
+          # require one authoritative full ordinary projection immediately.
+          # The unfiltered archive cache catches up off-thread, while its
+          # visible subset is refreshed synchronously so a later active-only
+          # tick cannot resurrect a row this projection just hid.
+          admission_context = Hive::DependencySnapshot.admission_context(projects)
           ordinary_status = Hive::Commands::Status.new
           ordinary_payload = ordinary_status.json_payload(
-            projects, admission_context: admission_context, now: refresh_now
+            projects,
+            admission_context: admission_context,
+            now: refresh_now,
+            include_archive_index: !complete_archive_cache?
+          )
+          if complete_archive_cache?
+            update_archived_cache do |latest_cache|
+              cache_with_ordinary_visibility(
+                latest_cache, ordinary_payload,
+                next_retention_boundary: ordinary_status.next_retention_boundary
+              )
+            end
+          else
+            replace_archived_cache(
+              visible_archived_cache_from_payload(
+                ordinary_payload,
+                next_retention_boundary: ordinary_status.next_retention_boundary,
+                admission_context: admission_context
+              )
+            )
+          end
+          unless complete_archive_cache?
+            @archive_refresh_dirty = false
+            @archive_last_refresh_at = refresh_now
+          end
+          publish_snapshot(
+            ordinary_payload, archived_cache: @archived_cache,
+            next_retention_boundary: ordinary_status.next_retention_boundary
+          )
+        else
+          # Steady state re-parses only each captured workflow generation's
+          # nonterminal stages, then merges the immutable, authoritative
+          # still-visible archive subset. This keeps the 1 Hz hot path
+          # proportional to active work while retaining Status as the sole
+          # component that decides archive membership and retention.
+          admission_context = Hive::DependencySnapshot.admission_context(
+            projects,
+            exclude_archived: true,
+            fallback_context: cache.fetch(:admission_context)
+          )
+          active_payload = Hive::Commands::Status.new.json_payload(
+            projects,
+            exclude_archived: true,
+            admission_context: admission_context,
+            now: refresh_now
           )
           publish_snapshot(
-            ordinary_payload, archived_cache: cache,
-            next_retention_boundary: ordinary_status.next_retention_boundary
+            merge_visible_archived_payload(active_payload, cache),
+            archived_cache: cache,
+            next_retention_boundary: cache[:next_retention_boundary]
           )
         end
         # Do not overlap the ordinary producer with the heavier unfiltered
@@ -339,16 +433,20 @@ module Hive
       end
 
       # Policy inputs are small descriptor/config files plus task metadata
-      # that can change a workflow pin. They use content-aware signatures so
-      # same-size replacements with preserved/coarse mtimes still invalidate
-      # the ordinary projection on the next poll.
+      # that can change a workflow pin. Archived task metadata is excluded:
+      # Hive-owned writes touch the containing terminal stage directory, and
+      # the configured archive refresh remains the backstop for out-of-band edits.
+      # Active metadata keeps content-aware signatures so same-size
+      # replacements with preserved/coarse mtimes still invalidate the
+      # ordinary projection on the next poll.
       def policy_fingerprint_for(snapshot)
         content_paths = [ registry_config_path ]
         snapshot.projects.each do |project|
           content_paths.concat(project_policy_paths(project))
         end
-        task_meta_paths = (snapshot.rows + snapshot.archive_rows).map do |row|
-          task_meta_path(row.folder)
+        archived_folders = @archived_cache.fetch(:archive_folder_index)
+        task_meta_paths = snapshot.rows.filter_map do |row|
+          task_meta_path(row.folder) unless archived_folders.key?(row.folder)
         end
         fingerprint = content_paths.compact.uniq.sort.to_h do |path|
           [ path, safe_content_signature(path, always_digest: true) ]
@@ -417,7 +515,7 @@ module Hive
       # then reads as "changed/uncertain" and biases toward a re-check — a
       # transient EACCES/ESTALE on an archive dir (or a vanish between
       # `exist?` and `mtime`) can't masquerade as "unchanged" and drop a
-      # real mutation until the 30s backstop. A stably-absent path stays
+      # real mutation until the configured backstop. A stably-absent path stays
       # `nil == nil` and is correctly seen as unchanged.
       def safe_mtime(path)
         return nil unless path && File.exist?(path)
@@ -456,6 +554,7 @@ module Hive
           payload,
           archive_payload: archive_payload_from_cache(payload, archived_cache)
         )
+        @current_payload = payload
         @current = snapshot
         @current_seen_at = Time.now
         @last_full_parse_at = @current_seen_at
@@ -479,10 +578,111 @@ module Hive
         copy
       end
 
+      def merge_visible_archived_payload(active_payload, archived_cache)
+        visible_rows_by_path = archived_cache.fetch(:visible_rows_by_path)
+        hidden_counts_by_path = archived_cache.fetch(:hidden_counts_by_path)
+        copy = active_payload.dup
+        copy["projects"] = Array(active_payload["projects"]).map do |project|
+          project_copy = project.dup
+          active_rows = Array(project["tasks"])
+          active_folders = active_rows.to_h { |row| [ row["folder"], true ] }
+          cached_rows =
+            if project["error"]
+              []
+            else
+              visible_rows_by_path.fetch(project["path"], [])
+            end
+          project_copy["tasks"] =
+            active_rows + cached_rows.reject { |row| active_folders.key?(row["folder"]) }
+          project_copy["hidden_archived_task_count"] =
+            project["error"] ? 0 : hidden_counts_by_path.fetch(project["path"], 0)
+          project_copy
+        end
+        copy
+      end
+
       def empty_archived_cache
         {
           rows_by_path: {}.freeze,
+          archive_folder_index: {}.freeze,
+          visible_rows_by_path: {}.freeze,
+          hidden_counts_by_path: {}.freeze,
+          next_retention_boundary: nil,
           admission_context: Hive::DependencyAdmission::Context.new(projects: [])
+        }.freeze
+      end
+
+      def archive_cache_state
+        @archive_cache_mutex.synchronize do
+          [ @archived_cache, @archive_cache_generation ]
+        end
+      end
+
+      def replace_archived_cache(cache, expected_generation: nil)
+        @archive_cache_mutex.synchronize do
+          if expected_generation && expected_generation != @archive_cache_generation
+            return false
+          end
+
+          @archived_cache = cache
+          @archive_cache_generation += 1
+          true
+        end
+      end
+
+      def update_archived_cache
+        @archive_cache_mutex.synchronize do
+          @archived_cache = yield(@archived_cache)
+          @archive_cache_generation += 1
+          @archived_cache
+        end
+      end
+
+      # Web archive routes call Status in unfiltered archive mode on demand,
+      # so their shared ordinary feed caches only the archived rows that are
+      # currently visible. Status supplies its workflow-aware archive folder
+      # index from the ordinary scan that already produced the public rows;
+      # consuming that private handoff avoids a second fleet scan and keeps
+      # visible terminal Error rows without guessing from action labels or
+      # global terminal stage names.
+      def visible_archived_cache_from_payload(ordinary_payload,
+                                              next_retention_boundary:, admission_context:)
+        archive_folders_by_path = {}
+        rows_by_path = {}
+        hidden_counts_by_path = {}
+        Array(ordinary_payload["projects"]).each do |project|
+          path = project["path"]
+          next unless path
+
+          archive_folders = Array(project.delete("__archive_folders")).to_h do |folder|
+            [ folder, true ]
+          end.freeze
+          archive_folders_by_path[File.expand_path(path)] = archive_folders
+          rows_by_path[path] = Array(project["tasks"]).filter_map do |row|
+            row.dup.freeze if archive_folders.key?(row["folder"])
+          end.freeze
+          hidden_counts_by_path[path] =
+            project["error"] ? 0 : Integer(project.fetch("hidden_archived_task_count", 0))
+        rescue ArgumentError, TypeError
+          hidden_counts_by_path[path] = 0
+        end
+        archived_projects = admission_context.projects.map do |project|
+          archive_folders = archive_folders_by_path.fetch(File.expand_path(project.path), {})
+          project.with(
+            tasks: project.tasks.select { |task| archive_folders.key?(task.folder) }
+          )
+        end
+        frozen_rows = rows_by_path.freeze
+        archive_folder_index = archive_folders_by_path.each_value.each_with_object({}) do |folders, index|
+          index.merge!(folders)
+        end.freeze
+        {
+          rows_by_path: frozen_rows,
+          archive_folder_index: archive_folder_index,
+          visible_rows_by_path: frozen_rows,
+          hidden_counts_by_path: hidden_counts_by_path.freeze,
+          next_retention_boundary: next_retention_boundary,
+          admission_context: Hive::DependencyAdmission::Context.new(projects: archived_projects)
         }.freeze
       end
 
@@ -502,7 +702,8 @@ module Hive
       # refresh, leaving a permanent ghost in the archive pane (plan Risk #6).
       # Genuine removals that shrink a project to a smaller non-empty set are
       # still published verbatim.
-      def archived_cache_from_payload(payload, admission_context:, previous: nil)
+      def archived_cache_from_payload(payload, admission_context:, ordinary_payload: nil,
+                                      next_retention_boundary: nil, previous: nil)
         previous_rows = previous && previous.fetch(:rows_by_path, nil)
         rows_by_path = {}
         retained_paths = {}
@@ -539,9 +740,77 @@ module Hive
             project.with(tasks: project.tasks.select { |task| archived_slugs.key?(task.slug) })
           end
         end
-        {
+        cache = {
           rows_by_path: rows_by_path.freeze,
+          archive_folder_index: archive_folder_index(rows_by_path),
+          visible_rows_by_path: retained_visible_rows(rows_by_path, previous),
+          hidden_counts_by_path: retained_hidden_counts(rows_by_path, previous),
+          next_retention_boundary: previous&.fetch(:next_retention_boundary, nil),
           admission_context: Hive::DependencyAdmission::Context.new(projects: archived_projects)
+        }
+        cache_with_ordinary_visibility(
+          cache, ordinary_payload,
+          next_retention_boundary: next_retention_boundary
+        )
+      end
+
+      def archive_folder_index(rows_by_path)
+        rows_by_path.each_value.each_with_object({}) do |rows, index|
+          rows.each do |row|
+            folder = row["folder"]
+            index[folder] = true if folder
+          end
+        end.freeze
+      end
+
+      def retained_visible_rows(rows_by_path, previous)
+        previous_rows = previous ? previous.fetch(:visible_rows_by_path, {}) : {}
+        rows_by_path.to_h do |path, rows|
+          current_folders = rows.to_h { |row| [ row["folder"], true ] }
+          retained = Array(previous_rows[path]).select do |row|
+            current_folders.key?(row["folder"])
+          end
+          [ path, retained.freeze ]
+        end.freeze
+      end
+
+      def retained_hidden_counts(rows_by_path, previous)
+        previous_counts = previous ? previous.fetch(:hidden_counts_by_path, {}) : {}
+        rows_by_path.to_h do |path, _rows|
+          [ path, previous_counts.fetch(path, 0) ]
+        end.freeze
+      end
+
+      def cache_with_ordinary_visibility(cache, ordinary_payload,
+                                         next_retention_boundary:)
+        return cache.freeze unless ordinary_payload
+
+        rows_by_path = cache.fetch(:rows_by_path)
+        visible_rows_by_path = cache.fetch(:visible_rows_by_path).dup
+        hidden_counts_by_path = cache.fetch(:hidden_counts_by_path).dup
+        Array(ordinary_payload["projects"]).each do |project|
+          path = project["path"]
+          next unless path && rows_by_path.key?(path)
+          next if project["error"]
+
+          archive_folders = rows_by_path.fetch(path).to_h do |row|
+            [ row["folder"], true ]
+          end
+          visible_rows_by_path[path] = Array(project["tasks"]).filter_map do |row|
+            row.dup.freeze if archive_folders.key?(row["folder"])
+          end.freeze
+          hidden_counts_by_path[path] =
+            Integer(project.fetch("hidden_archived_task_count", 0))
+        rescue ArgumentError, TypeError
+          hidden_counts_by_path[path] = 0
+        end
+        {
+          rows_by_path: rows_by_path,
+          archive_folder_index: cache.fetch(:archive_folder_index),
+          visible_rows_by_path: visible_rows_by_path.freeze,
+          hidden_counts_by_path: hidden_counts_by_path.freeze,
+          next_retention_boundary: next_retention_boundary,
+          admission_context: cache.fetch(:admission_context)
         }.freeze
       end
 
@@ -573,16 +842,19 @@ module Hive
         # as "changed" on EVERY tick for a persistently-stuck terminal dir
         # (e.g. stale NFS where `File.exist?` is true but `File.mtime`
         # raises). That hot-loops the heavyweight archive-mode status rescan
-        # with no backoff: the 30s `#archive_refresh_due?`
+        # with no backoff: the configured `#archive_refresh_due?`
         # throttle gates only the time-based re-arm, and the failure backoff
         # only engages when `json_payload` itself raises (here it succeeds).
         # Collapsing `StatError` to one value makes a stuck dir trigger
         # exactly once on the transition into the error (the correct
         # "uncertain → re-check once" bias) and once on recovery, while the
-        # 30s backstop still forces periodic refreshes if the dir keeps
+        # configured backstop still forces periodic refreshes if the dir keeps
         # mutating behind an unreadable mtime.
-        request_archive_refresh if archive_mtime_signature(@archive_dir_mtimes) != archive_mtime_signature(mtimes)
+        changed =
+          archive_mtime_signature(@archive_dir_mtimes) != archive_mtime_signature(mtimes)
+        request_archive_refresh if changed
         @archive_dir_mtimes = mtimes
+        changed
       end
 
       def archive_mtime_signature(mtimes)
@@ -623,7 +895,11 @@ module Hive
         return false if @archive_refresh_thread&.alive?
         return true if @archive_last_refresh_at.nil?
 
-        (now - @archive_last_refresh_at) >= ARCHIVE_REFRESH_FALLBACK_SECONDS
+        (now - @archive_last_refresh_at) >= @archive_refresh_fallback_seconds
+      end
+
+      def complete_archive_cache?
+        @archive_cache_mode == :complete
       end
 
       def start_archive_refresh_if_needed
@@ -670,16 +946,52 @@ module Hive
         # (`capture_status_io`, mirroring `BubbleModel#capture_command_io`).
         admission_context = Hive::DependencySnapshot.admission_context(projects)
         refresh_now = Time.now.utc
-        payload = capture_status_io do
-          Hive::Commands::Status.new(archive: true).json_payload(
+        previous_cache, starting_generation = archive_cache_state
+        ordinary_status = Hive::Commands::Status.new
+        ordinary_payload, secondary_payload = capture_status_io do
+          ordinary = ordinary_status.json_payload(
             projects,
             admission_context: admission_context,
-            now: refresh_now
+            now: refresh_now,
+            include_archive_index: !complete_archive_cache?
           )
+          secondary =
+            if complete_archive_cache?
+              Hive::Commands::Status.new(archive: true).json_payload(
+                projects,
+                admission_context: admission_context,
+                now: refresh_now
+              )
+            end
+          [ ordinary, secondary ]
         end
-        @archived_cache = archived_cache_from_payload(
-          payload, admission_context: admission_context, previous: @archived_cache
+        next_archived_cache =
+          if complete_archive_cache?
+            archived_cache_from_payload(
+              secondary_payload,
+              ordinary_payload: ordinary_payload,
+              next_retention_boundary: ordinary_status.next_retention_boundary,
+              admission_context: admission_context,
+              previous: previous_cache
+            )
+          else
+            visible_archived_cache_from_payload(
+              ordinary_payload,
+              next_retention_boundary: ordinary_status.next_retention_boundary,
+              admission_context: admission_context
+            )
+          end
+        unless replace_archived_cache(
+          next_archived_cache, expected_generation: starting_generation
         )
+          # A newer authoritative refresh won the race while this scan was in
+          # flight. Preserve it and schedule one fresh background pass instead
+          # of publishing older archive visibility over it.
+          @archive_refresh_dirty = true
+          @archive_refresh_failures = 0
+          @archive_last_error = nil
+          return
+        end
         @archive_last_refresh_at = refresh_now
         @archive_refresh_failures = 0
         @archive_last_error = nil
@@ -703,7 +1015,7 @@ module Hive
           @archive_refresh_dirty = true
         else
           # Repeated failure: back off. Stamp the refresh time so the next
-          # attempt waits for the 30s backstop instead of respawning a full
+          # attempt waits for the configured backstop instead of respawning a full
           # archive-mode rescan every ~1s tick. A genuine permanent top-level
           # json_payload raise (unlikely — per-project failures degrade)
           # would otherwise hot-loop the heavyweight scan this PR exists to

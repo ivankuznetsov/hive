@@ -265,11 +265,16 @@ module Hive
 
     def admission_tasks(root, config, project_name: File.basename(root), exclude_archived: false,
                         workflow_generation: nil)
-      folders = Dir.glob(File.join(root, ".hive-state", "stages", "*-*", "*"))
-        .select { |folder| File.directory?(folder) }
-        .sort
-
       scan = lambda do
+        stage_dirs =
+          if exclude_archived
+            active_stage_dirs_for(workflow_generation)
+          else
+            [ "*-*" ]
+          end
+        folders = stage_dirs.flat_map do |stage_dir|
+          Dir.glob(File.join(root, ".hive-state", "stages", stage_dir, "*"))
+        end.select { |folder| File.directory?(folder) }.uniq.sort
         if exclude_archived
           folders.reject! do |folder|
             archived_folder?(
@@ -291,6 +296,14 @@ module Hive
         Hive::Workflows::Project.load!(root)
         scan.call
       end
+    end
+
+    def active_stage_dirs_for(workflow_generation)
+      return workflow_generation.active_stage_dirs if workflow_generation
+
+      Hive::Workflows::Registry.all
+        .flat_map { |workflow| workflow.stages[0...-1].map(&:dir) }
+        .uniq
     end
 
     # Presentation-only active snapshots may omit archived rows for cost, but

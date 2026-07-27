@@ -81,6 +81,27 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  class RecordingSource
+    attr_reader :calls
+
+    def initialize = @calls = 0
+
+    def refresh_payload_now
+      @calls += 1
+      { "projects" => [], "call" => @calls }
+    end
+  end
+
+  class RecordingRecoveryStatus
+    attr_reader :projects, :payload
+
+    def operational_recoveries(projects, status_payload:)
+      @projects = projects
+      @payload = status_payload
+      [ { "identity" => { "project" => "demo", "slug" => "task" } } ]
+    end
+  end
+
   def test_snapshot_uses_registered_projects
     with_tmp_global_config do
       feed = Hive::Web::StatusFeed.new
@@ -89,6 +110,44 @@ class StatusFeedTest < Minitest::Test
       assert_equal "hive-status", payload["schema"]
       assert_equal [], payload["projects"]
     end
+  end
+
+  def test_default_feed_uses_the_bounded_status_command
+    feed = Hive::Web::StatusFeed.new
+
+    assert_instance_of Hive::Web::CachedStatusCommand,
+                       feed.instance_variable_get(:@status_command)
+  ensure
+    feed&.stop
+  end
+
+  def test_cached_status_command_reuses_the_same_projection_source
+    source = RecordingSource.new
+    command = Hive::Web::CachedStatusCommand.new(source: source)
+
+    first = command.json_payload([])
+    second = command.json_payload([])
+
+    assert_equal 1, first.fetch("call")
+    assert_equal 2, second.fetch("call")
+    assert_equal 2, source.calls
+  end
+
+  def test_cached_status_command_delegates_recovery_join_with_the_cached_payload
+    source = RecordingSource.new
+    recovery_status = RecordingRecoveryStatus.new
+    command = Hive::Web::CachedStatusCommand.new(
+      source: source,
+      recovery_status_command: recovery_status
+    )
+    payload = command.json_payload([])
+
+    rows = command.operational_recoveries([ { "name" => "demo" } ], status_payload: payload)
+
+    assert_equal "task", rows.dig(0, "identity", "slug")
+    assert_equal [ { "name" => "demo" } ], recovery_status.projects
+    assert_same payload, recovery_status.payload
+    assert_equal 1, source.calls
   end
 
   def test_archive_snapshot_uses_the_lossless_status_command_without_priming_the_ordinary_feed

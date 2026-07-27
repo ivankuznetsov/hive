@@ -70,7 +70,13 @@ module HiveTuiScaleFixture
   def write_task(hive_state, stage, slug, id:, marker:, active_index: nil)
     folder = File.join(hive_state, "stages", stage, slug)
     FileUtils.mkdir_p(folder)
-    Hive::TaskMeta.write(folder, id: id, slug: slug, display_name: display_name_for(slug))
+    Hive::TaskMeta.write(
+      folder,
+      id: id,
+      slug: slug,
+      display_name: display_name_for(slug),
+      completed_at: (Time.now.utc if stage == CODING_ARCHIVE_STAGE_DIR)
+    )
     File.write(File.join(folder, state_file_for(stage)), state_body(stage, marker))
     write_lock(folder) if active_index && (active_index % 5).zero?
     write_pr(folder) if stage_index(stage) >= stage_index(Hive::Commands::Status::OPEN_PR_STAGE_DIR)

@@ -5,15 +5,59 @@ require "time"
 require "hive/commands/status"
 require "hive/config"
 require "hive/secret_patterns"
+require "hive/tui/state_source"
 
 module Hive
   module Web
-    # The process-wide owner of the expensive fleet status computation.
+    # Adapts the bounded status projection source to StatusFeed's existing
+    # command seam. Puma requests and the shared Cable poller can enter this
+    # object concurrently, while StateSource intentionally has one projection
+    # writer; serialize those synchronous refreshes here.
+    class CachedStatusCommand
+      ARCHIVE_REFRESH_FALLBACK_SECONDS = 300.0
+
+      def initialize(
+        source: Hive::Tui::StateSource.new(
+          poll_interval_seconds: 60,
+          archive_cache_mode: :visible,
+          archive_refresh_fallback_seconds: ARCHIVE_REFRESH_FALLBACK_SECONDS
+        ),
+        recovery_status_command: Hive::Commands::Status.new(json: true)
+      )
+        @source = source
+        @recovery_status_command = recovery_status_command
+        @mutex = Mutex.new
+      end
+
+      def json_payload(_projects)
+        @mutex.synchronize { @source.refresh_payload_now }
+      end
+
+      # Keep the daemon-owned recovery receipt overlay available without
+      # paying for another fleet scan. Commands::Status joins the supplied
+      # cached payload to the scheduler snapshot in memory.
+      def operational_recoveries(projects, status_payload:)
+        @recovery_status_command.operational_recoveries(
+          projects,
+          status_payload: status_payload
+        )
+      end
+    end
+
+    # The process-wide owner of the expensive fleet status computation. In
+    # Rails, StatusBroadcaster bridges each changed snapshot to Turbo Streams.
     #
     # HTTP status renders and the Cable poller both enter refresh_state, whose
     # single-flight gate guarantees that concurrent callers share one scan.
+    # The default command makes that scan a bounded active-task refresh:
+    # terminal membership/policy changes and a five-minute archive backstop
+    # refresh the ordinary archive projection, while complete archive reads
+    # remain on-demand. An idle server performs no scans.
+    #
     # Failures never manufacture a healthy empty fleet: they publish either a
-    # degraded latest-good snapshot or an explicit unavailable envelope.
+    # degraded latest-good snapshot or an explicit unavailable envelope. A new
+    # subscriber gets the current state immediately; unchanged semantic states
+    # are suppressed and instead fire the optional on_idle keep-alive seam.
     class StatusFeed
       DEFAULT_INTERVAL = 5.0
       VOLATILE_KEYS = %w[generated_at age_seconds].freeze
@@ -47,7 +91,7 @@ module Hive
 
       def initialize(
         interval: DEFAULT_INTERVAL,
-        status_command: Hive::Commands::Status.new(json: true),
+        status_command: CachedStatusCommand.new,
         archive_status_command: Hive::Commands::Status.new(json: true, archive: true),
         clock: -> { Time.now.utc }
       )

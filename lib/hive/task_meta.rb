@@ -164,6 +164,7 @@ module Hive
       tmp = File.join(task_folder, ".#{FILENAME}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
       File.write(tmp, data.to_yaml)
       File.rename(tmp, path(task_folder))
+      notify_stage_directory(task_folder)
       result = data.transform_keys(&:to_sym).merge(
         depends_on: normalized_depends_on, workflow: normalized_workflow
       )
@@ -227,8 +228,13 @@ module Hive
       if snapshot.exists
         FileUtils.mkdir_p(task_folder)
         write_raw_atomic(task_folder, snapshot.bytes)
+        notify_stage_directory(task_folder)
       else
-        File.delete(path(task_folder)) if File.exist?(path(task_folder))
+        metadata_path = path(task_folder)
+        if File.exist?(metadata_path)
+          File.delete(metadata_path)
+          notify_stage_directory(task_folder)
+        end
       end
     end
 
@@ -341,6 +347,19 @@ module Hive
       File.rename(tmp, path(task_folder))
     ensure
       File.delete(tmp) if tmp && File.exist?(tmp)
+    end
+
+    # StateSource deliberately excludes archived task metadata from its 1 Hz
+    # content fingerprint. Signal Hive-owned metadata mutations through the
+    # containing stage directory instead, which is already the bounded
+    # terminal-stage invalidation surface. Restrict the touch to the canonical
+    # `<state>/stages/<stage>/<task>` layout so standalone TaskMeta consumers
+    # do not mutate an arbitrary parent directory.
+    def notify_stage_directory(task_folder)
+      stage_directory = File.dirname(File.expand_path(task_folder.to_s))
+      return unless File.basename(File.dirname(stage_directory)) == "stages"
+
+      FileUtils.touch(stage_directory)
     end
   end
 end

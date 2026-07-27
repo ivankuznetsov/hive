@@ -2,6 +2,25 @@ require "test_helper"
 require "hive/task_meta"
 
 class TaskMetaTest < Minitest::Test
+  def test_writes_and_restores_signal_the_containing_stage_directory
+    with_tmp_dir do |root|
+      stage = File.join(root, ".hive-state", "stages", "9-done")
+      task = File.join(stage, "finished")
+      FileUtils.mkdir_p(task)
+      Hive::TaskMeta.write(task, id: 7, slug: "finished", display_name: nil)
+      snapshot = Hive::TaskMeta.snapshot(task)
+      old_mtime = Time.now - 3_600
+
+      File.utime(old_mtime, old_mtime, stage)
+      Hive::TaskMeta.update_display_name(task, "Finished")
+      assert_operator File.mtime(stage), :>, old_mtime
+
+      File.utime(old_mtime, old_mtime, stage)
+      Hive::TaskMeta.restore(task, snapshot)
+      assert_operator File.mtime(stage), :>, old_mtime
+    end
+  end
+
   def test_completed_at_round_trips_in_utc_and_survives_rewrites
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(

@@ -204,6 +204,109 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_refresh_payload_now_exposes_the_bounded_raw_status_projection
+    with_seeded_project do |project, _dir|
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+
+      payload = source.refresh_payload_now
+
+      assert_equal "hive-status", payload.fetch("schema")
+      assert_equal project, payload.fetch("projects").first.fetch("name")
+      assert_equal source.current.rows.first.slug,
+                   payload.fetch("projects").first.fetch("tasks").first.fetch("slug")
+      assert_nil source.instance_variable_get(:@thread),
+                 "synchronous web refreshes must not start the TUI poll thread"
+    ensure
+      source&.stop
+    end
+  end
+
+  def test_visible_archive_cache_mode_avoids_the_unfiltered_cold_scan
+    with_direct_project do |_project, hive_state|
+      archived_folder = write_state_task(
+        hive_state, "9-done", "visible-archive-260626-abcd",
+        marker: "COMPLETE", id: 1
+      )
+      Hive::TaskMeta.write(
+        archived_folder, id: 1, slug: File.basename(archived_folder),
+        display_name: nil, completed_at: Time.now.utc
+      )
+      archive_calls = 0
+      patch = Module.new do
+        define_method(:json_payload) do |projects, **kwargs|
+          archive_calls += 1 if @archive
+          super(projects, **kwargs)
+        end
+      end
+      Hive::Commands::Status.prepend(patch)
+      source = Hive::Tui::StateSource.new(
+        archive_cache_mode: :visible,
+        archive_refresh_fallback_seconds: 300
+      )
+
+      payload = source.refresh_payload_now
+
+      assert_equal 0, archive_calls,
+                   "the ordinary web cache must not scan the complete archive at boot"
+      refute payload.fetch("projects").first.key?("__archive_folders"),
+             "the private cache handoff must not leak through the public payload"
+      assert_includes source.current.rows.map(&:slug), File.basename(archived_folder)
+      assert_includes source.current.archive_rows.map(&:slug), File.basename(archived_folder)
+      refute source.instance_variable_get(:@archive_refresh_thread)&.alive?
+    ensure
+      source&.stop
+    end
+  end
+
+  def test_archive_cache_generation_rejects_a_stale_background_publication
+    source = Hive::Tui::StateSource.new
+    _initial_cache, generation = source.send(:archive_cache_state)
+    authoritative = { source: "authoritative" }.freeze
+    stale = { source: "stale-background" }.freeze
+
+    assert source.send(:replace_archived_cache, authoritative)
+    refute source.send(
+      :replace_archived_cache, stale, expected_generation: generation
+    )
+    assert_same authoritative, source.instance_variable_get(:@archived_cache)
+  ensure
+    source&.stop
+  end
+
+  def test_visible_archive_cache_keeps_a_new_terminal_row_across_active_reparses
+    with_direct_project do |_project, hive_state|
+      active_folder = write_state_task(
+        hive_state, "4-execute", "moving-visible-260626-abcd",
+        marker: "EXECUTE_COMPLETE", id: 1
+      )
+      source = Hive::Tui::StateSource.new(
+        archive_cache_mode: :visible,
+        archive_refresh_fallback_seconds: 300
+      )
+      source.send(:refresh_once)
+
+      done_folder = File.join(hive_state, "stages", "9-done", File.basename(active_folder))
+      FileUtils.mv(active_folder, done_folder)
+      File.write(File.join(done_folder, "task.md"), "<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write_completed_at_once(done_folder)
+      source.send(:refresh_once)
+      assert_equal 1, source.current.rows.count { |row| row.folder == done_folder }
+
+      source.instance_variable_set(
+        :@last_full_parse_at,
+        Time.now - (Hive::Tui::StateSource::LIVENESS_REPARSE_FALLBACK_SECONDS + 1)
+      )
+      source.send(:refresh_once)
+
+      assert_equal 1, source.current.rows.count { |row| row.folder == done_folder },
+                   "the bounded active reparse must merge the refreshed terminal cache exactly once"
+      refute source.instance_variable_get(:@archive_refresh_thread)&.alive?,
+             "a Hive-signalled terminal move must rebuild the visible cache synchronously"
+    ensure
+      source&.stop
+    end
+  end
+
   def test_refresh_now_reprojects_same_size_policy_edits_and_keeps_archive_lossless
     with_direct_project do |_project, hive_state|
       descriptor = write_retention_workflow(hive_state, 3)
@@ -531,7 +634,7 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
-  def test_idle_policy_fingerprint_includes_hidden_archive_metadata
+  def test_idle_policy_fingerprint_excludes_archived_metadata
     with_direct_project do |_project, hive_state|
       active_folder = write_state_task(
         hive_state, "4-execute", "active-policy-260626-abcd",
@@ -550,7 +653,7 @@ class TuiStateSourceTest < Minitest::Test
       fingerprint = source.send(:policy_fingerprint_for, source.current)
 
       assert_includes fingerprint, File.join(active_folder, "meta.yml")
-      assert_includes fingerprint, File.join(archived_folder, "meta.yml")
+      refute_includes fingerprint, File.join(archived_folder, "meta.yml")
     ensure
       source&.stop
     end

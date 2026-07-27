@@ -76,6 +76,31 @@ class CompletedAtBackfillerTest < Minitest::Test
     assert attempted.all? { |_folder, deadline| deadline == 1.0 }
   end
 
+  def test_shared_refresh_deadline_bounds_multiple_project_batches
+    now = 0.0
+    cursor = MemoryCursor.new({})
+    backfiller = Hive::CompletedAtBackfiller.new(
+      batch_size: 2, deadline_seconds: 1.0, monotonic_clock: -> { now },
+      cursor_store: cursor, shared_refresh_deadline: true
+    )
+    attempted = []
+    backfiller.define_singleton_method(:completed_at_for) do |task, deadline:|
+      attempted << [ task.folder, deadline ]
+      now += 0.6
+      nil
+    end
+    first_project = 2.times.map { |index| BackfillTask.new("/first-#{index}", "/first-state") }
+    second_project = 2.times.map { |index| BackfillTask.new("/second-#{index}", "/second-state") }
+
+    backfiller.call(first_project)
+    backfiller.call(second_project)
+
+    assert_equal %w[/first-0 /first-1], attempted.map(&:first)
+    assert attempted.all? { |_folder, deadline| deadline == 1.0 }
+    refute cursor.values.key?("/second-state"),
+           "an exhausted fleet refresh budget must not advance an unattempted project's cursor"
+  end
+
   def test_rotating_batches_advance_past_persistent_failures
     tasks = 3.times.map { |index| BackfillTask.new("/task-#{index}", "/state") }
     cursor = MemoryCursor.new({})

@@ -2,6 +2,7 @@ require "fileutils"
 require "json"
 require "open3"
 require "pathname"
+require "securerandom"
 require "hive/config"
 require "hive/task"
 require "hive/task_resolver"
@@ -14,6 +15,7 @@ require "hive/workflows"
 require "hive/commit_or_rollback"
 require "hive/dependency_snapshot"
 require "hive/attempts/context"
+require "hive/atomic_file"
 require "hive/conditions/transition_guard"
 require "hive/workflow_package/mutation_lock"
 require "hive/task_meta"
@@ -62,7 +64,7 @@ module Hive
       end
 
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
-                     observation_guard: nil, clock: DEFAULT_CLOCK)
+                     observation_guard: nil, commit_lock: true, clock: DEFAULT_CLOCK)
         @target = target
         @to = to
         @from = from
@@ -74,6 +76,7 @@ module Hive
         # State changes and typed exceptions still propagate normally.
         @quiet = quiet
         @observation_guard = observation_guard
+        @commit_lock = commit_lock
         @clock = clock
       end
 
@@ -266,33 +269,106 @@ module Hive
       def perform_move_and_commit(task, dest_stage, enforce_admission: false)
         new_folder = nil
         commit_action = nil
+        human_state_snapshot = nil
         completion_snapshot = nil
         completion_time = nil
-        Hive::Lock.with_commit_lock(task.hive_state_path) do
-          Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "approve") do
-            # Preserve the command's typed collision contract before building
-            # a multi-project snapshot: a pre-existing destination necessarily
-            # duplicates the slug, but it is first and foremost an unsafe move
-            # destination and requires no dependency inference to reject.
-            raise_destination_collision(destination_folder(task, dest_stage)) if
-              destination_exists?(destination_folder(task, dest_stage))
-            Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
-            Hive::Attempts::Context.current&.validate_generation!(task)
-            @observation_guard&.call(task)
-            if completion_on_terminal_entry?(task, dest_stage)
-              completion_snapshot = Hive::TaskMeta.snapshot(task.folder)
-              completion_time = legacy_completion_time(task)
+        begin
+          with_optional_commit_lock(task.hive_state_path) do
+            Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "approve") do
+              # Preserve the command's typed collision contract before building
+              # a multi-project snapshot: a pre-existing destination necessarily
+              # duplicates the slug, but it is first and foremost an unsafe move
+              # destination and requires no dependency inference to reject.
+              raise_destination_collision(destination_folder(task, dest_stage)) if
+                destination_exists?(destination_folder(task, dest_stage))
+              Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
+              Hive::Attempts::Context.current&.validate_generation!(task)
+              @observation_guard&.call(task)
+              human_state_snapshot = initialize_human_destination!(task, dest_stage)
+              if completion_on_terminal_entry?(task, dest_stage)
+                completion_snapshot = Hive::TaskMeta.snapshot(task.folder)
+                completion_time = legacy_completion_time(task)
+              end
+              new_folder = move_task!(task, dest_stage)
             end
-            new_folder = move_task!(task, dest_stage)
+            cleanup_orphan_task_lock(new_folder)
+            commit_action = "approve #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
+            record_commit_or_rollback!(
+              task, dest_stage, new_folder, commit_action,
+              completion_snapshot: completion_snapshot, completion_time: completion_time
+            )
           end
-          cleanup_orphan_task_lock(new_folder)
-          commit_action = "approve #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
-          record_commit_or_rollback!(
-            task, dest_stage, new_folder, commit_action,
-            completion_snapshot: completion_snapshot, completion_time: completion_time
-          )
+        rescue StandardError, Interrupt
+          restore_human_destination!(task, new_folder, human_state_snapshot)
+          raise
         end
         [ new_folder, commit_action ]
+      end
+
+      def with_optional_commit_lock(hive_state_path, &block)
+        return block.call unless @commit_lock
+
+        Hive::Lock.with_commit_lock(hive_state_path, &block)
+      end
+
+      def initialize_human_destination!(task, dest_stage)
+        stage = stage_for_dest!(task, dest_stage)
+        return nil unless stage.kind == :human
+
+        path = File.join(task.folder, stage.state_file)
+        snapshot = nil
+        Hive::Markers.with_markers_lock(path) do
+          snapshot = read_human_state_snapshot!(path, stage.state_file)
+          marker = Hive::Markers.build_marker(
+            "WAITING", "decision_id" => SecureRandom.hex(8)
+          )
+          body, count = Hive::Markers.replace_last_marker(snapshot.fetch(:body).to_s, marker)
+          if count.zero?
+            separator = body.empty? || body.end_with?("\n") ? "" : "\n"
+            body = "#{body}#{separator}#{marker}\n"
+          end
+          Hive::AtomicFile.write(path, body)
+        end
+        snapshot
+      end
+
+      def read_human_state_snapshot!(path, state_file)
+        stat = File.lstat(path)
+        unless stat.file? && !stat.symlink?
+          raise Hive::InvalidTaskPath,
+                "human stage state file #{state_file.inspect} must be a regular file, not a symlink"
+        end
+
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        body = File.open(path, flags) do |file|
+          opened = file.stat
+          unless opened.file? && opened.dev == stat.dev && opened.ino == stat.ino
+            raise Hive::InvalidTaskPath,
+                  "human stage state file #{state_file.inspect} changed while entering the stage"
+          end
+          file.read
+        end
+        { state_file: state_file, existed: true, body: body }
+      rescue Errno::ENOENT
+        { state_file: state_file, existed: false, body: nil }
+      rescue Errno::ELOOP, Errno::EMLINK
+        raise Hive::InvalidTaskPath,
+              "human stage state file #{state_file.inspect} must be a regular file, not a symlink"
+      end
+
+      def restore_human_destination!(task, new_folder, snapshot)
+        return unless snapshot
+
+        folder = File.directory?(task.folder) ? task.folder : new_folder
+        return unless folder && File.directory?(folder)
+
+        path = File.join(folder, snapshot.fetch(:state_file))
+        if snapshot.fetch(:existed)
+          Hive::AtomicFile.write(path, snapshot.fetch(:body))
+        else
+          File.delete(path) if File.exist?(path) || File.symlink?(path)
+        end
       end
 
       def move_task!(task, dest_stage)

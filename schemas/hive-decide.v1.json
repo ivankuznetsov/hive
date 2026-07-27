@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:decide:v1",
+  "title": "hive-decide v1",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "applied", "noop", "slug", "workflow",
+        "from_stage", "outcome", "decision_id", "note", "decided_at", "completed",
+        "artifact", "artifact_path", "to", "current_stage", "task_folder", "next_action"
+      ],
+      "properties": {
+        "schema": { "const": "hive-decide" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "applied": { "type": "boolean" },
+        "noop": { "type": "boolean" },
+        "slug": { "type": "string" },
+        "workflow": { "type": "string" },
+        "from_stage": { "type": "string", "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$" },
+        "outcome": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "decision_id": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "note": { "type": ["string", "null"] },
+        "decided_at": { "type": "string", "format": "date-time" },
+        "completed": { "type": "boolean" },
+        "artifact": { "type": ["string", "null"] },
+        "artifact_path": { "type": ["string", "null"] },
+        "to": { "type": ["string", "null"] },
+        "current_stage": { "type": "string", "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$" },
+        "task_folder": { "type": "string" },
+        "next_action": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "enum": ["run", "needs_input", "no_op"] },
+            "command": { "type": ["string", "null"] },
+            "reason": { "type": "string" }
+          }
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-decide" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "enum": [
+            "wrong_stage", "ambiguous_slug", "invalid_task_path", "concurrent_run",
+            "config", "git", "internal", "error"
+          ]
+        },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "candidates": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "current_stage": { "type": "string" },
+        "target_stage": { "type": "string" },
+        "holder": { "type": "object", "additionalProperties": true },
+        "lock_path": { "type": "string" }
+      }
+    }
+  }
+}

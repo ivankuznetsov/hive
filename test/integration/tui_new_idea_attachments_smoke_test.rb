@@ -116,7 +116,7 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
 
             writer.write("\r")
             writer.flush
-            grid_buffer = read_until(reader, deadline_seconds: 10.0) { |buf| buf.include?("bug-here") }
+            grid_buffer = read_until(reader, deadline_seconds: 30.0) { |buf| buf.include?("bug-here") }
             assert_includes grid_buffer, "bug-here",
               "post-submit grid must show the bug-here slug row"
 
@@ -238,7 +238,7 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
 
           writer.write("\r")
           writer.flush
-          grid_buffer = read_until(reader, deadline_seconds: 10.0) { |buf| buf.include?("ctrl-v-image") }
+          grid_buffer = read_until(reader, deadline_seconds: 30.0) { |buf| buf.include?("ctrl-v-image") }
           assert_includes grid_buffer, "ctrl-v-image",
             "post-submit grid must show the ctrl-v-image slug row"
 

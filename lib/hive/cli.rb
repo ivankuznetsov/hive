@@ -128,6 +128,19 @@ module Hive
       already-initialized project scaffolds the workflow and rebinds the
       default in one hive-state commit.
 
+      Workflow creators can inspect the neutral fresh-project plan without
+      writes, then execute that exact automation-disabled profile after an
+      explicit confirmation:
+
+        hive init --new-workflow editorial --minimal --preview --json
+        hive init --new-workflow editorial --minimal --json
+
+      Minimal init is fresh-target only, rejects --force, and disables patrol,
+      architecture patrol, ad-hoc auto-fix, daemon dispatch/autostart,
+      babysitting, optional reviewers, and service/timer installation. It
+      retains the core hive/state worktree, global project registration, and
+      required llm-wiki/context hooks.
+
       Headless callers can explicitly select architecture discovery before
       any state is written with --refactor-patrol or --no-refactor-patrol;
       omitting both keeps the fresh-project default enabled. Set other
@@ -151,6 +164,10 @@ module Hive
     option :workflow, type: :string, desc: workflow_option_desc
     option :new_workflow, type: :string,
                           desc: "scaffold custom workflow ID, bind it as this project's default, and print paths to edit"
+    option :minimal, type: :boolean, default: false,
+                     desc: "with --new-workflow on a fresh project: use the neutral automation-disabled profile"
+    option :preview, type: :boolean, default: false,
+                     desc: "with --minimal: report the resolved initialization plan without writing"
     option :refactor_patrol, type: :boolean, default: nil,
                              desc: "enable or disable post-merge architecture discovery before init writes state"
     def init(project_path = Dir.pwd)
@@ -161,7 +178,9 @@ module Hive
         json: options[:json],
         workflow: options[:workflow],
         new_workflow: options[:new_workflow],
-        refactor_patrol: options[:refactor_patrol]
+        refactor_patrol: options[:refactor_patrol],
+        minimal: options[:minimal],
+        preview: options[:preview]
       ).call
     end
 
@@ -454,6 +473,8 @@ module Hive
         new ID    Scaffold a per-project workflow descriptor under
                   <hive_state_path>/workflows/ID.yml plus its stage
                   instruction(s) under <hive_state_path>/workflows/ID/.
+        validate ID  Read and validate the normalized workflow graph without writes.
+        commit ID    Commit a validated owner-authored graph under Hive's state lock.
         install honeycomb/NAME[@VERSION]  Verify and install a reviewed package.
         list                              Inspect built-in, authored, and managed workflows.
         update NAME                       Diff and advance a managed package.
@@ -524,6 +545,11 @@ module Hive
       uses the project's default workflow; pass --workflow to pin a registered
       workflow for this task. (Options may also follow the text.)
 
+      --idempotency-key makes retries state-wide and machine-safe. Hive stores
+      the opaque key with a fingerprint of the input and resolved workflow,
+      returns the original task after it moves stages, and rejects reuse for
+      different input. Pair it with --json for the hive-new.v1 result.
+
       --depends-on stacks this task on a prerequisite: the daemon holds
       auto-advance until the prerequisite reaches the project's dependency
       gate stage (8-finalize by default, configurable via
@@ -544,6 +570,8 @@ module Hive
         hive new myproj --depends-on add-export-endpoint-260618-ab12 "wire up export API"
 
         hive new myproj --depends-on api:add-export-endpoint-260618-ab12 "wire up export UI"
+
+        hive new myproj --workflow content --idempotency-key creator:launch:v1 --json "write the launch post"
     DESC
     option :depends_on, type: :string,
                         desc: "depend on a same-project id/slug or explicit project:slug; hold daemon " \
@@ -552,6 +580,8 @@ module Hive
     option :base, type: :string,
                   desc: "base branch for a worktree/draft-PR workflow"
     option :workflow, type: :string, desc: workflow_option_desc
+    option :idempotency_key, type: :string,
+                             desc: "return the original task on a retry with identical input; reject conflicting reuse"
     def new_task(project, *text_parts)
       require "hive/commands/new"
       text = text_parts.join(" ")
@@ -562,7 +592,9 @@ module Hive
         text,
         base: options[:base],
         depends_on: options[:depends_on],
-        workflow: options[:workflow]
+        workflow: options[:workflow],
+        idempotency_key: options[:idempotency_key],
+        json: options[:json]
       ).call
     end
     map "new" => :new_task
@@ -1102,6 +1134,34 @@ module Hive
         from: options[:from],
         project: options[:project],
         force: options[:force],
+        json: options[:json]
+      ).call
+    end
+
+    desc "decide TARGET OUTCOME", "Apply a named outcome to a durable human workflow stage"
+    long_desc <<~DESC
+      TARGET is a task slug or folder currently waiting at a descriptor-declared
+      human stage. OUTCOME must be one of that stage's closed named outcomes.
+
+      --from and --decision-id are required and identify the expected human-stage
+      visit. Repeating the same decision is a no-op; a conflicting or stale
+      decision fails with WRONG_STAGE instead of changing the moved task.
+    DESC
+    option :from, type: :string, required: true,
+                  desc: "expected human stage, full or short form"
+    option :decision_id, type: :string,
+                         desc: "required decision identity reported by run/status for this visit"
+    option :note, type: :string, desc: "optional audit note recorded with the decision"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def decide(target, outcome)
+      require "hive/commands/decide"
+      Hive::Commands::Decide.new(
+        target,
+        outcome,
+        from: options[:from],
+        decision_id: options[:decision_id],
+        note: options[:note],
+        project: options[:project],
         json: options[:json]
       ).call
     end

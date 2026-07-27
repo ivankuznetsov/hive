@@ -4,7 +4,7 @@ type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
 updated: 2026-07-24
-tags: [command, workflow, authoring, honeycomb, registry, archive, retention]
+tags: [command, workflow, authoring, validation, human-stage, honeycomb, registry, archive, retention]
 ---
 
 **TLDR**: `hive workflow` manages two ownership domains: `new` scaffolds trusted project-authored descriptors, while `install`, `list`, `update`, and `remove` manage immutable reviewed Honeycomb generations; `publish` validates an authored descriptor and opens a registry PR whose status is only `pending_review`.
@@ -15,6 +15,8 @@ tags: [command, workflow, authoring, honeycomb, registry, archive, retention]
 hive workflow new my-flow
 hive workflow new my-flow --template research
 hive workflow new my-flow --json
+hive workflow validate my-flow --json
+hive workflow commit my-flow
 hive workflow install honeycomb/repo-brief --yes
 hive workflow install honeycomb/repo-brief --yes --allow-escalation \
   --mapping stages.research=codex,model=gpt-5.6-sol,effort=high \
@@ -257,6 +259,67 @@ A multi-stage template prints `edit: <id>/ (N stage instructions to fill in)`
 pointing at the directory of instructions to define (the single-stage blank
 still names its one `work.md`). An unknown `--template` is a USAGE error
 listing the available names; with `--json` they ride the `expected` array.
+
+## Read-only validation and human outcomes
+
+`hive workflow validate ID --json` resolves authored descriptors, built-ins,
+and the currently selected managed generation through direct read-only
+lookups. It does not acquire the managed mutation lock, reconcile a selected
+pointer, or replay/clear a transaction journal. It validates descriptor YAML,
+referenced instructions, stage inputs/state files, automatic edges, and
+descriptor-declared human outcomes without creating a task or writing project
+or Hive state. The `hive-workflow-validate.v1` result reports the descriptor
+origin/path, ordered stages, instruction paths, automatic edges, human
+outcomes, and `valid`. Invalid input uses the same command-specific envelope
+with diagnostics, including malformed `--json` invocations.
+
+Project-authored descriptors may declare a durable `kind: human` stage:
+
+```yaml
+- name: approval
+  kind: human
+  state_file: approval.md
+  input: draft.md
+  outcomes:
+    approve:
+      complete: true
+      artifact: draft.md
+    reject:
+      to: draft
+```
+
+Every outcome has exactly one action: `complete: true` with a required
+non-empty artifact basename, or `to: STAGE`. Human stages reject
+agent/model/permissions/instruction/runner settings and are never dispatched
+by the daemon. Apply a decision with
+`hive decide TASK OUTCOME --from STAGE --decision-id DECISION_ID [--note TEXT] [--json]`.
+The waiting `hive run --json` response supplies that visit-specific ID. The
+expected stage and decision identity make matching retries no-ops and reject
+stale or conflicting decisions. Matching concurrent retries are rechecked
+under the decision lock and return one apply plus idempotent no-ops. Completing
+outcomes accept only a no-follow regular file inside the task folder. A
+self-targeting outcome records the decision, leaves the task in place, and
+mints a fresh waiting identity instead of reporting a false move. Human state
+files are also read no-follow with inode verification. A completing outcome
+writes its decision record and `completed_at` from one clock, classifies as
+archived, and participates in the descriptor's archive visibility retention;
+commit failure or interruption rolls both files back.
+
+Create-only natural-language requests are handled by the canonical `/hive`
+skill's `hive-workflow-creator` route. It gates on the installed version,
+inventories IDs, scaffolds only through this command (or the minimal init path),
+edits only returned new paths, validates here, commits the populated descriptor
+and instruction directory with `hive workflow commit ID`, reports all defaults, and creates no
+task unless the original request explicitly asks for one. The populated-graph
+commit is required because `workflow new` commits only the initial scaffold.
+Both `workflow validate` and minimal-init preview bypass startup scheduler
+reconciliation, preserving their strict no-write contract. Scaffold collision
+checks treat dangling descriptor or instruction symlinks as occupied paths.
+Creation claims the instruction directory and descriptor with exclusive
+filesystem operations; rollback removes only paths claimed by that invocation,
+so a concurrent or raced scaffold is never overwritten or deleted.
+If a scaffold commit fails after staging, Hive resets those exact index
+pathspecs under the commit lock before removing the generated files.
 
 ## Backlinks
 

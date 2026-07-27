@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-init-preview.v1.json",
+  "title": "hive init minimal preview (v1)",
+  "description": "Resolved, no-write plan emitted by hive init --new-workflow ID --minimal --preview --json.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "ok", "preview", "minimal", "project", "path",
+    "default_branch", "workflow", "profile", "template", "project_files",
+    "state_worktree", "context_integration", "global_registration", "services",
+    "background_automation", "task_creation"
+  ],
+  "properties": {
+    "schema": { "const": "hive-init-preview" },
+    "schema_version": { "const": 1 },
+    "ok": { "const": true },
+    "preview": { "const": true },
+    "minimal": { "const": true },
+    "project": { "type": "string" },
+    "path": { "type": "string" },
+    "default_branch": { "type": "string" },
+    "workflow": { "type": "string" },
+    "profile": { "const": "minimal" },
+    "template": { "const": "blank" },
+    "project_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "state_worktree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch", "path", "config_path", "workflow_descriptor", "workflow_instruction"],
+      "properties": {
+        "branch": { "const": "hive/state" },
+        "path": { "type": "string" },
+        "config_path": { "type": "string" },
+        "workflow_descriptor": { "type": "string" },
+        "workflow_instruction": { "type": "string" }
+      }
+    },
+    "context_integration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["llm_wiki", "agent_instructions", "post_commit_hook", "scheduler"],
+      "properties": {
+        "llm_wiki": { "const": true },
+        "agent_instructions": { "const": true },
+        "post_commit_hook": { "const": true },
+        "scheduler": { "const": false }
+      }
+    },
+    "global_registration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "config_path", "name", "status"],
+      "properties": {
+        "enabled": { "const": true },
+        "config_path": { "type": "string" },
+        "name": { "type": "string" },
+        "status": { "const": "available" }
+      }
+    },
+    "services": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["daemon_install", "daemon_autostart", "babysitter_timer", "llm_wiki_timer"],
+      "properties": {
+        "daemon_install": { "const": false },
+        "daemon_autostart": { "const": false },
+        "babysitter_timer": { "const": false },
+        "llm_wiki_timer": { "const": false }
+      }
+    },
+    "background_automation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["daemon_dispatch", "patrol", "refactor_patrol", "adhoc_auto_fix", "babysitter"],
+      "properties": {
+        "daemon_dispatch": { "const": false },
+        "patrol": { "const": false },
+        "refactor_patrol": { "const": false },
+        "adhoc_auto_fix": { "const": false },
+        "babysitter": { "const": false }
+      }
+    },
+    "task_creation": { "const": false }
+  }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind", "exit_code",
+        "message", "minimal", "preview", "project", "path", "workflow"
+      ],
+      "properties": {
+        "schema": { "const": "hive-init-preview" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "enum": [
+            "usage", "already_initialized", "project_name_collision",
+            "not_git_repository", "main_checkout_required", "dirty_worktree",
+            "concurrent_run", "config", "git", "internal", "error"
+          ]
+        },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "minimal": { "const": true },
+        "preview": { "const": true },
+        "project": { "type": "string" },
+        "path": { "type": "string" },
+        "workflow": { "type": "string" },
+        "value": { "type": "string" },
+        "suggested_id": { "type": "string" },
+        "existing_path": { "type": "string" },
+        "holder": { "type": "object", "additionalProperties": true },
+        "lock_path": { "type": "string" }
+      }
+    }
+  }
+}

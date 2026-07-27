@@ -57,6 +57,30 @@ class OpenClawSkillsTest < Minitest::Test
     refute_match(/pgrep\s+-af|kill\s+-0|while\s+:/, text)
   end
 
+  def test_projection_routes_natural_language_workflow_creation_inside_hive
+    root = ROOT.join("hive")
+    creator_references = %w[
+      workflow-creator.md
+      workflow-creator-example.md
+      workflow-schema.md
+      workflow-stage-design.md
+      workflow-checkpoints.md
+      workflow-permissions.md
+      workflow-testing.md
+      workflow-common-mistakes.md
+    ]
+
+    creator_references.each do |name|
+      assert root.join("references", name).file?, name
+    end
+
+    text = projection_text
+    assert_includes text, "hive-workflow-creator"
+    assert_includes text, "hive workflow validate ID --json"
+    assert_includes text, "No task by default"
+    assert_includes text, "Never publish externally"
+  end
+
   def test_projection_keeps_recovery_and_release_authority_guarded
     text = projection_text
     normalized_text = text.gsub(/\s+/, " ")

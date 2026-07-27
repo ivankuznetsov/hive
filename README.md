@@ -135,7 +135,12 @@ readiness state alongside the daemon outcome. Project enrollment is a separate
 babysitter defaults can be reviewed before confirmation. After setup, pass Hive
 CLI commands through `/hive ...`, for example
 `/hive status --operational --json`, `/hive watch <project>:<task>`,
-`/hive new . "build this feature"`, and `/hive review <task-slug>`.
+`/hive new . "build this feature"`, and `/hive review <task-slug>`. The same
+canonical skill can create a new project-local workflow from natural language:
+`/hive create a three-stage editorial workflow that researches, drafts, and
+requires approval before publishing`. It scaffolds through Hive, validates the
+result, reports every inferred default, and creates no task unless the request
+explicitly asks for one.
 
 For local checkout testing, run `openclaw skills install ./openclaw/skills/hive
 --as hive`. See [openclaw/README.md](openclaw/README.md) for the publish
@@ -321,19 +326,28 @@ full 24-hour periods or the exact lowercase value `never`; omission remains
 compatible and means `3`. This changes visibility only—`hive archive` remains
 the complete record, and no task folders are deleted or moved by retention.
 
-Three commands cover authoring: `hive workflow new ID` (scaffold a blank starter in an existing project), `hive workflow new ID --template research` (seed from the multi-stage research sample), and `hive init --new-workflow ID` (bootstrap a project and bind the workflow as its default in one go). Custom workflows are discovered from `.hive-state/workflows/*.yml` and run through the same surfaces as the built-ins — `hive new --workflow`, `status`, `run`, `approve`, and the daemon.
+Ask the canonical `/hive` skill to create a workflow in natural language when
+you do not want to author YAML. It uses the same three CLI primitives:
+`hive workflow new ID` (scaffold a blank starter in an existing project),
+`hive workflow new ID --template research` (seed from the multi-stage research
+sample), and `hive init --new-workflow ID` (bootstrap a project and bind the
+workflow as its default in one go). Validate edits with
+`hive workflow validate ID --json`. Custom workflows are discovered from
+`.hive-state/workflows/*.yml` and run through the same surfaces as the
+built-ins — `hive new --workflow`, `status`, `run`, `approve`, `decide`, and
+the daemon.
 
 **Full walkthrough** — mental model, descriptor anatomy, writing stage instructions, advanced options (terminal approval gates, `skill:` stages, per-stage permissions), and gotchas: **[hivecli.sh/docs/custom-workflows](https://hivecli.sh/docs/custom-workflows/)** (also in-repo at [docs/workflows.md](docs/workflows.md)).
 
 ## Power-User / Scripting CLI
 
-The TUI is the recommended human interface and an agent-driven CLI is the recommended automation surface, but the workflow commands are also available directly on `bin/hive` (or the `hv` shim when Apache Hive shadows the name) for scripting, debugging, and recovery. Stage-driving verbs support `--json` and return typed envelopes; `hive new` remains plain text and prints the captured task path plus the next-step hint.
+The TUI is the recommended human interface and an agent-driven CLI is the recommended automation surface, but the workflow commands are also available directly on `bin/hive` (or the `hv` shim when Apache Hive shadows the name) for scripting, debugging, and recovery. Stage-driving verbs support `--json` and return typed envelopes. `hive new` keeps its existing text output by default and adds an opt-in JSON contract for idempotent automation.
 
 | Group | Verbs | What it's for |
 |---|---|---|
 | Native setup & web | `hive setup`, `hive web`, `hive web status/install/start/stop` | Provision the default loopback Hive web service, run the foreground server, or observe/repair the managed unit. `--no-service` opts out of web-service mutation. See [docs/cli.md#day-to-day-workflow](docs/cli.md#day-to-day-workflow). |
-| Workflow | `hive new`, `hive brainstorm`, `hive plan`, `hive develop`, `hive open-pr`, `hive review`, `hive artifacts`, `hive finalize`, `hive archive`, `hive run`, `hive approve` | Drive a single stage of a single task by hand. `--from <stage>` lets you re-run a stage in place. See [docs/cli.md#day-to-day-workflow](docs/cli.md#day-to-day-workflow). |
-| Workflow authoring | `hive workflow new` | Scaffold a project-local workflow descriptor under `.hive-state/workflows/` (`--template research` seeds from a sample). See [Custom Workflows](#custom-workflows) and [docs/workflows.md](docs/workflows.md). |
+| Workflow | `hive new`, `hive brainstorm`, `hive plan`, `hive develop`, `hive open-pr`, `hive review`, `hive artifacts`, `hive finalize`, `hive archive`, `hive run`, `hive approve`, `hive decide` | Drive a single stage of a single task by hand. `--from <stage>` makes advances retry-safe; human decisions also require the visit-specific `--decision-id`. See [docs/cli.md#day-to-day-workflow](docs/cli.md#day-to-day-workflow). |
+| Workflow authoring | `hive workflow new`, `hive workflow validate` | Scaffold and read-only validate a project-local workflow descriptor under `.hive-state/workflows/` (`--template research` seeds from a sample). See [Custom Workflows](#custom-workflows) and [docs/workflows.md](docs/workflows.md). |
 | Review findings | `hive findings`, `hive accept-finding`, `hive reject-finding` | Inspect GFM-checkbox findings from the latest review pass and tick which ones should feed the next fix pass. See [docs/cli.md#findings-triage](docs/cli.md#findings-triage). |
 | Patrol | `hive patrol` | Run one opt-in repository patrol cycle: map feature slices, review them, validate fixes, and open PRs for passed fixes only. See [docs/cli.md#patrol](docs/cli.md#patrol). |
 | Daemon | `hive daemon install/enable/start/status/tail/stop/disable` | Manage the global daemon service plus per-project enrollment. The service polls `hive status --json` and dispatches workflow verbs for enrolled projects. Read [wiki/operating.md](wiki/operating.md) before going live. See [docs/cli.md#daemon](docs/cli.md#daemon). |

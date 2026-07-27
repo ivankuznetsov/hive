@@ -4,7 +4,7 @@ type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/workflow_package/
 created: 2026-04-26
 updated: 2026-07-26
-tags: [module, workflow, verbs, selection, honeycomb, registry, archive, retention]
+tags: [module, workflow, verbs, selection, human-stage, outcomes, honeycomb, registry, archive, retention]
 ---
 
 **TLDR**: The coding, content, bench, and project-authored workflows are described as ordered `Hive::Workflow` value objects whose stages carry directory names, state files, incoming advance verbs, runner metadata, optional instruction files, optional permission specs, per-stage agent/model/effort overrides, council reviewer configs, terminal deliverables, and an archive visibility retention policy. `Hive::Workflows::Registry.default` still returns the coding descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for built-in, runtime/test, and active-project registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` / `kind: :council` as fallbacks for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`. Coding's descriptor now uses runtime primitive kinds (`:execute`, `:review_council`, `:finalize`) for the worktree-coupled stages; the old `:marker` descriptor kind is retired.
@@ -57,7 +57,9 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
 - council stages require a `reviewers:` list; each reviewer declares exactly one of `skill`, `instruction`, `prompt`, or `command`, plus optional agent/model/effort/permissions/output basename. The `council:` block carries `quorum`, `max_rounds`, `exit_rule`, `on_max_rounds` (`wait` by default or `complete` for a bounded downstream delivery), `triage_output`, and optional `revise`.
 - `instruction:` paths are resolved relative to the descriptor directory and stored on the stage as absolute paths.
 - `permissions:` values are validated through `Hive::PermissionScope` at load time and later passed to the generic agent runner as the explicit permission spec.
-- the last stage may be inert, agent, or council. Active terminal stages require both `COMPLETE` and a non-empty deliverable before `TaskAction` classifies them as archived.
+- the last stage may be inert, agent, council, or human. Active terminal stages
+  require `COMPLETE` and their declared non-empty deliverable/artifact before
+  `TaskAction` classifies them as archived.
 - `workspace: worktree` plus `handoff: draft_pr` is one closed terminal-agent
   contract. Both fields must appear together and both `state_file` and
   `deliverable` must equal task-root `fix-report.md`. Parser and managed-package
@@ -111,7 +113,7 @@ The upgrade path was live-smoked on the existing hive-bench state checkout on
 `coding` tasks all remained resolvable, with all nine pre-migration status rows
 still visible and the unrelated dirty-state fingerprint unchanged.
 
-`hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those files to `hive/state`. The only richer shipped scaffold is `--template research`; Architecture and Writing are installed as full reviewed Honeycomb packages so their agent-slot configuration remains operator-owned.
+`hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those initial files to `hive/state`. After editing, the natural-language creator validates and invokes `hive workflow commit ID`, which commits the populated descriptor/instruction directory under the shared state commit lock before it reports success or creates a task. The only richer shipped scaffold is `--template research`; Architecture and Writing are installed as full reviewed Honeycomb packages so their agent-slot configuration remains operator-owned.
 
 ## Managed Honeycomb overlay
 
@@ -322,6 +324,32 @@ resolution described above.
 Hermetic coverage lives in `test/unit/workflows/content_test.rb`,
 `test/integration/content_workflow_stage_test.rb`, and
 `test/integration/content_workflow_e2e_test.rb`.
+
+## Durable human stages
+
+`Hive::Workflow::Stage` accepts `kind: :human` plus immutable named
+`outcomes`. The owner-authored parser exposes only closed directional actions:
+an outcome must either complete the workflow or target another stage, and a
+completing outcome may name an artifact. Unsafe outcome names, unknown keys,
+missing/duplicate actions, unknown targets, and agent-only settings fail while
+the descriptor is loaded.
+
+A human stage has no runner. Entering it leaves the state file `WAITING`, and
+status exposes `NEEDS_INPUT` with the descriptor's allowed outcomes.
+`Hive::Commands::Decide` writes a durable decision record with outcome, note,
+artifact/target, and timestamp. A completing decision verifies its declared
+artifact, stamps `meta.yml completed_at` from the same clock, and exposes the
+task through the shared archive/retention path. Decision-state reads refuse
+symlinks and verify the opened inode. State, metadata, and moves roll back
+together when a commit fails or is interrupted. A returning decision moves the
+same task under the task/state locks and resets the target state file to
+`WAITING`, preventing a stale completion marker from immediately advancing it
+again.
+
+The accepted editorial graph is exactly
+`research -> draft -> approval`: `approve` completes with non-empty
+`draft.md` recorded as publish-ready, while `reject` returns to `draft`.
+There is no publish stage or executable outcome action.
 
 ## Backlinks
 

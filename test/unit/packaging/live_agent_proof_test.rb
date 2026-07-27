@@ -90,8 +90,9 @@ class LiveAgentProofTest < Minitest::Test
     with_tmp_dir do |dir|
       artifacts = prepare_artifacts(dir)
       evidence = prepare_evidence(dir, artifacts)
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
       proof = File.join(dir, "proof")
-      result = attest(artifacts, evidence, proof)
+      result = attest(artifacts, evidence, creator_evidence, proof)
 
       verified = HiveLiveAgentProof::Verifier.new(
         proof_dir: proof, candidate_sha: SHA, workflow_revision: WORKFLOW_SHA,
@@ -107,9 +108,10 @@ class LiveAgentProofTest < Minitest::Test
     with_tmp_dir do |dir|
       artifacts = prepare_artifacts(dir)
       evidence = prepare_evidence(dir, artifacts)
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
       FileUtils.rm_f(File.join(evidence, "pi.json"))
       error = assert_raises(HiveLiveAgentProof::Error) do
-        attest(artifacts, evidence, File.join(dir, "proof-missing"))
+        attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-missing"))
       end
       assert_includes error.message, "exactly"
 
@@ -119,7 +121,7 @@ class LiveAgentProofTest < Minitest::Test
       row["result"] = "skipped"
       HiveLiveAgentProof.write_json(row_path, row)
       error = assert_raises(HiveLiveAgentProof::Error) do
-        attest(artifacts, evidence, File.join(dir, "proof-skipped"))
+        attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-skipped"))
       end
       assert_includes error.message, "invalid"
 
@@ -127,7 +129,7 @@ class LiveAgentProofTest < Minitest::Test
       row["hive_commands"] << [ "act", "resume", "proof:live-agent-skill" ]
       HiveLiveAgentProof.write_json(row_path, row)
       error = assert_raises(HiveLiveAgentProof::Error) do
-        attest(artifacts, evidence, File.join(dir, "proof-unsafe"))
+        attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-unsafe"))
       end
       assert_includes error.message, "exactly one operational status"
 
@@ -139,9 +141,36 @@ class LiveAgentProofTest < Minitest::Test
       }
       HiveLiveAgentProof.write_json(row_path, row)
       error = assert_raises(HiveLiveAgentProof::Error) do
-        attest(artifacts, evidence, File.join(dir, "proof-generic-activation"))
+        attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-generic-activation"))
       end
       assert_includes error.message, "native activation"
+    end
+  end
+
+  def test_attestor_rejects_workflow_creator_mutation_or_graph_drift
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
+      row_path = File.join(creator_evidence, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(row_path))
+      row["task_count"] = 2
+      HiveLiveAgentProof.write_json(row_path, row)
+
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-task"))
+      end
+      assert_includes error.message, "unauthorized side effect"
+
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
+      row_path = File.join(creator_evidence, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(row_path))
+      row["validation"]["stages"] << "publish"
+      HiveLiveAgentProof.write_json(row_path, row)
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-publish"))
+      end
+      assert_includes error.message, "normalized graph"
     end
   end
 
@@ -149,8 +178,9 @@ class LiveAgentProofTest < Minitest::Test
     with_tmp_dir do |dir|
       artifacts = prepare_artifacts(dir)
       evidence = prepare_evidence(dir, artifacts)
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
       proof = File.join(dir, "proof")
-      result = attest(artifacts, evidence, proof)
+      result = attest(artifacts, evidence, creator_evidence, proof)
 
       assert_raises(HiveLiveAgentProof::Error) do
         verifier(proof, "0" * 64).call
@@ -243,11 +273,66 @@ class LiveAgentProofTest < Minitest::Test
     evidence
   end
 
-  def attest(artifacts, evidence, proof)
+  def prepare_creator_evidence(dir, artifacts)
+    evidence = File.join(dir, "creator-evidence")
+    FileUtils.rm_rf(evidence)
+    FileUtils.mkdir_p(evidence)
+    manifest = JSON.parse(File.read(File.join(artifacts, "artifact-manifest.json")))
+    row = {
+      "schema" => "hive-live-workflow-creator-evidence",
+      "schema_version" => 1,
+      "platform" => "openclaw",
+      "candidate_sha" => SHA,
+      "result" => "passed",
+      "prompt_sha256" => Digest::SHA256.hexdigest(HiveLiveAgentProof::WORKFLOW_CREATOR_PROMPT),
+      "task_prompt_sha256" =>
+        Digest::SHA256.hexdigest(HiveLiveAgentProof::WORKFLOW_CREATOR_TASK_PROMPT),
+      "skill" => {
+        "skill_version" => manifest.fetch("skill_version"),
+        "canonical_digest" => manifest.fetch("canonical_digest")
+      },
+      "native_activation" => {
+        "kind" => HiveLiveAgentProof::NATIVE_ACTIVATION_KINDS.fetch("openclaw"),
+        "invocation" => HiveLiveAgentProof::INVOCATIONS.fetch("openclaw")
+      },
+      "hive_commands" => HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS,
+      "created_files" => HiveLiveAgentProof::WORKFLOW_CREATOR_FILES.map do |path|
+        { "path" => path, "sha256" => "c" * 64, "size" => 10 }
+      end,
+      "validation" => {
+        "valid" => true,
+        "stages" => %w[research draft approval],
+        "automatic_edges" => [ %w[research draft], %w[draft approval] ],
+        "human_outcomes" => [
+          { "stage" => "approval", "name" => "approve", "complete" => true,
+            "artifact" => "draft.md", "to" => nil },
+          { "stage" => "approval", "name" => "reject", "complete" => false,
+            "artifact" => nil, "to" => "draft" }
+        ]
+      },
+      "creation_only_task_count" => 0,
+      "task_count" => 1,
+      "task" => {
+        "slug" => HiveLiveAgentProof::WORKFLOW_CREATOR_TASK_SLUG,
+        "workflow" => "editorial",
+        "first_created" => true,
+        "retry_created" => false,
+        "run_count" => 1,
+        "current_stage" => "1-research"
+      },
+      "external_actions" => [],
+      "secret_scan" => { "status" => "passed" },
+      "cleanup" => { "status" => "passed" }
+    }
+    HiveLiveAgentProof.write_json(File.join(evidence, "openclaw-workflow-creator.json"), row)
+    evidence
+  end
+
+  def attest(artifacts, evidence, creator_evidence, proof)
     HiveLiveAgentProof::Attestor.new(
       candidate_sha: SHA, workflow_revision: WORKFLOW_SHA, repository: REPOSITORY,
       run_id: "42", run_attempt: "1", artifact_dir: artifacts,
-      evidence_dir: evidence, output_dir: proof
+      evidence_dir: evidence, creator_evidence_dir: creator_evidence, output_dir: proof
     ).call
   end
 

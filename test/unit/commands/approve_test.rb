@@ -39,6 +39,122 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_restore_human_destination_handles_existing_new_and_missing_folders
+    with_tmp_dir do |root|
+      source = File.join(root, "source")
+      destination = File.join(root, "destination")
+      FileUtils.mkdir_p(source)
+      FileUtils.mkdir_p(destination)
+      current = task(folder: source)
+      state = File.join(source, "approval.md")
+      File.write(state, "changed")
+
+      command.send(
+        :restore_human_destination!, current, destination,
+        { state_file: "approval.md", existed: true, body: "original" }
+      )
+      assert_equal "original", File.read(state)
+
+      FileUtils.rm_rf(source)
+      destination_state = File.join(destination, "approval.md")
+      File.write(destination_state, "created")
+      command.send(
+        :restore_human_destination!, current, destination,
+        { state_file: "approval.md", existed: false, body: nil }
+      )
+      refute File.exist?(destination_state)
+
+      FileUtils.rm_rf(destination)
+      assert_nil command.send(
+        :restore_human_destination!, current, destination,
+        { state_file: "approval.md", existed: false, body: nil }
+      )
+      assert_nil command.send(:restore_human_destination!, current, destination, nil)
+    end
+  end
+
+  def test_initialize_human_destination_refuses_symlinked_state_file
+    with_tmp_dir do |root|
+      source = File.join(root, "source")
+      outside = File.join(root, "outside.md")
+      FileUtils.mkdir_p(source)
+      File.write(outside, "external bytes\n")
+      File.symlink(outside, File.join(source, "approval.md"))
+      current = task(folder: source, workflow: human_workflow)
+
+      error = assert_raises(Hive::InvalidTaskPath) do
+        command.send(:initialize_human_destination!, current, "2-approval")
+      end
+
+      assert_includes error.message, "must be a regular file, not a symlink"
+      assert_equal "external bytes\n", File.read(outside)
+      assert File.symlink?(File.join(source, "approval.md"))
+    end
+  end
+
+  def test_human_state_snapshot_rejects_file_swaps_and_nofollow_errors
+    with_tmp_dir do |root|
+      path = File.join(root, "approval.md")
+      File.write(path, "owner approval\n")
+      observed = File.lstat(path)
+      swapped_stat = Struct.new(:dev, :ino) do
+        def file? = true
+      end.new(observed.dev, observed.ino + 1)
+      swapped_file = Object.new
+      swapped_file.define_singleton_method(:stat) { swapped_stat }
+      swapped_file.define_singleton_method(:read) { "replacement\n" }
+
+      with_replaced_singleton_method(
+        File, :open, ->(_path, *_args, &block) { block.call(swapped_file) }
+      ) do
+        error = assert_raises(Hive::InvalidTaskPath) do
+          command.send(:read_human_state_snapshot!, path, "approval.md")
+        end
+        assert_includes error.message, "changed while entering the stage"
+      end
+
+      with_replaced_singleton_method(
+        File, :open, ->(*_args) { raise Errno::ELOOP, path }
+      ) do
+        error = assert_raises(Hive::InvalidTaskPath) do
+          command.send(:read_human_state_snapshot!, path, "approval.md")
+        end
+        assert_includes error.message, "must be a regular file, not a symlink"
+      end
+    end
+  end
+
+  def test_interrupted_human_stage_commit_restores_move_and_destination_state
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "1-draft", "slug-260522-abcd")
+      destination = File.join(state, "stages", "2-approval", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "draft.md"), "# Draft\n")
+      original = "# Approval instructions\n"
+      File.write(File.join(source, "approval.md"), original)
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 1, stage_name: "draft", workflow: human_workflow
+      )
+      cmd = command
+      cmd.define_singleton_method(:record_hive_commit) { |*| raise Interrupt, "stop" }
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+        assert_raises(Interrupt) do
+          cmd.send(:perform_move_and_commit, current, "2-approval")
+        end
+      end
+
+      assert File.directory?(source)
+      refute File.exist?(destination)
+      assert_equal original, File.binread(File.join(source, "approval.md"))
+      assert_equal :none, Hive::Markers.current(File.join(source, "approval.md")).name
+    end
+  end
+
   def test_inert_terminal_entry_writes_completed_at_with_the_move
     with_tmp_dir do |root|
       state = File.join(root, ".hive-state")
@@ -200,6 +316,25 @@ class HiveCommandsApproveTest < Minitest::Test
       stages: [
         Hive::Workflow::Stage.new(name: "work", index: 1, state_file: "work.md", kind: :agent),
         Hive::Workflow::Stage.new(name: "done", index: 2, state_file: "done.md", kind: :inert)
+      ]
+    )
+  end
+
+  def human_workflow
+    Hive::Workflow.new(
+      id: :editorial,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "draft", index: 1, state_file: "draft.md", kind: :agent
+        ),
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: {
+            "approve" => Hive::Workflow::Outcome.new(
+              name: "approve", complete: true, artifact: "draft.md"
+            )
+          }.freeze
+        )
       ]
     )
   end

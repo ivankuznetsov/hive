@@ -4,7 +4,7 @@ type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
 updated: 2026-07-26
-tags: [command, bootstrap, git, prompts, llm-wiki, provisioning]
+tags: [command, bootstrap, git, prompts, preview, minimal, llm-wiki, provisioning]
 ---
 
 **TLDR**: `hive init [PATH]` bootstraps a project for Hive and `--json` emits the resolved bootstrap contract. Alongside workflow, agents, review, patrol cadence, and daemon settings, fresh terminal and web setup recommend post-merge architecture patrol with an explicit default-yes answer. Headless callers can choose the same value before any write with `--refactor-patrol` or `--no-refactor-patrol`; enabling it also enables confined auto-fix/PR attempts and deduplicated GitHub issues as the fallback review surface. After the project transaction succeeds, interactive init diagnoses enabled manifest-managed agent skills and can delegate an accepted offer to the same setup engine as `hive setup-agents`; decline, non-TTY, and JSON flows only report remediation.
@@ -14,6 +14,8 @@ tags: [command, bootstrap, git, prompts, llm-wiki, provisioning]
 ```
 hive init [PROJECT_PATH] [--force] [--json] [--workflow NAME] [--refactor-patrol|--no-refactor-patrol]
 hive init --new-workflow ID [PROJECT_PATH]
+hive init --new-workflow ID --minimal --preview --json [PROJECT_PATH]
+hive init --new-workflow ID --minimal --json [PROJECT_PATH]
 ```
 
 `PROJECT_PATH` defaults to `Dir.pwd`. `--force` skips the clean-tree check. `--json` emits the current `hive-init.v2` success document on stdout with project metadata and the resolved prompt answers; v1 remains a compatibility schema. `--workflow NAME` selects the project default workflow and is validated against `Hive::Workflows::Registry`; unknown names fail before disk writes and list valid names.
@@ -174,6 +176,32 @@ This branch is what the orphan worktree is initially based on, and what feature 
 - `test/integration/llm_wiki_post_commit_refresh_test.rb` covers the transactional refresh runner plus scheduled `--drain` delegation, shared-runner preference, project-runner fallback, provider non-execution by the wrapper, and byte-for-byte preservation of a dirty primary checkout.
 - `test/unit/commands/init_test.rb` covers small init collaborators, including the `ProjectConfigBinding` complete-answer path, top-level and nested missing-key fail-fast contracts, rollback helper behavior, daemon-registration warning paths, and JSON summary EPIPE handling.
 - `test/unit/commands/init/prompts_test.rb` covers prompt defaults and parsing, including the explicit default-yes architecture-patrol answer and the non-TTY summary. `test/integration/init_test.rb` and the hivebox setup tests pin terminal/web parity, explicit pre-write architecture-patrol selection, rejection of fresh-only selectors on every existing-project re-init path, config rendering, default-on fresh auto-fix/issue gates, explicit disablement, and inert legacy missing-block behavior. `test/unit/schema_files_test.rb` pins the current `schemas/hive-init.v2.json` projection, including `refactor_patrol_enabled`; v1 remains a compatibility schema.
+
+## Minimal workflow-creator profile
+
+`--minimal` is a non-interactive, fresh-target-only profile for an explicitly
+named `--new-workflow ID`. `--preview --json` emits
+`hive-init-preview.v1` after the same preflight and ID/collision resolution as
+execution, but writes nothing. The payload names planned project files, the
+Hive state worktree, context/wiki integration, global registration, services,
+background automation, and task creation.
+
+The minimal profile creates the core project/state registration and required
+context hooks while disabling patrol/refactor patrol, ad-hoc auto-fix, daemon
+dispatch/autostart, and babysitter/timer installation, including the llm-wiki
+scheduler timer. Bootstrap refuses pre-existing symlinks anywhere in its
+managed project paths and uses no-follow final writes, preserving outside
+targets and existing project choices. It never selects a
+starter template and rejects `--force`, missing `--new-workflow`, an existing
+Hive project/state branch, a non-fresh target, or a basename already registered
+to a different project path. The preview discloses the available registration
+name, and execution rechecks that name inside the locked registry write so a
+post-preview contender cannot be replaced. Minimal `--json` precondition,
+collision, already-initialized, and usage failures use the typed
+`hive-init-preview.v1` or `hive-init.v2` error envelope instead of prose. The
+natural-language creator presents this preview and waits for one explicit
+confirmation before invoking the same command without `--preview`; unanswered
+or declined confirmation therefore leaves the directory unchanged.
 
 ## Backlinks
 

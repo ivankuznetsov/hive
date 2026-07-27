@@ -1,9 +1,9 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_closure.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, dependencies, admission, web]
 ---
 
@@ -259,6 +259,23 @@ generation checks as the writer; unknown record shapes fail closed.
 Validation follows predecessor lineage and rejects missing, incompatible, or
 cyclic links. Projection selection uses that causal chain before timestamps,
 so clock regression cannot reverse retry order.
+
+The underlying storage/replay mechanics now enter through
+`require "hive/work_ledger"`. `Hive::WorkLedger` owns only policy-light ordered
+descriptor validation, JSONL locking/complete-write/fsync/rollback,
+idempotency-key conflict detection, byte-bound replay, and duplicate record
+identity rejection. `Hive::TaskJournal` still creates and validates the
+Hive-owned authoritative event schema, and `Hive::TaskProjection` supplies
+attempt enrichment plus condition/projection compatibility policy through the
+replay callback. Consequently `task-journal.jsonl` and
+`task-projection.json` remain internal Hive compatibility formats, not public
+WorkLedger formats. Task paths, store selection, migrations, transitions,
+overlays, Git actions, and status policy remain above the mechanism.
+
+Append and replay receipts contain detached, deeply frozen JSON record
+snapshots. Replay hashes a private copy of its source bytes, and idempotent
+append validates every historical record sharing the requested key before it
+returns an existing receipt.
 
 `<task>/task-projection.json` is an atomic, disposable materialized view bound
 to the journal cursor, last event ID, and SHA-256. It contains projected

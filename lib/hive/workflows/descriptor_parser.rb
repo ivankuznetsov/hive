@@ -1,5 +1,6 @@
 require "yaml"
 require "hive/agent_profiles"
+require "hive/conditions/policy"
 require "hive/permission_scope"
 require "hive/workflow"
 

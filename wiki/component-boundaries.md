@@ -23,7 +23,7 @@ the first and primary consumer.
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
 | Skillpack | `boundary-ready` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
 | Safe Agent Git Gate | `boundary-ready` | `require "hive/agent_git_gate"` → `Hive::AgentGitGate` | [[modules/agent_git_gate]] |
-| WorkLedger | `candidate` | `require "hive/task_journal"` → `Hive::TaskJournal` | [[state-model]] |
+| WorkLedger | `boundary-ready` | `require "hive/work_ledger"` → `Hive::WorkLedger` | [[state-model]] |
 
 `candidate` means the current code is mapped, but callers, dependencies, or
 policy still need refactoring before the seam is supported. `boundary-ready`
@@ -33,12 +33,13 @@ has earned a gem, version, repository, or release.
 
 `Hive::Attempts::API` is the guarded reference admission slice. Its public
 result contracts, focused clean-load proof, and exact internal construction
-sites are enforced while it remains a `candidate`. Promotion is blocked because
-Attempts reads WorkLedger projections while WorkLedger-owned
-`lib/hive/task_projection/store.rb` still requires and constructs
-`Hive::Attempts::Store`; U8 owns removal of that reciprocal source edge. The
-reference slice does not publish raw storage, reconciliation, supervision,
-capacity, loss-policy, cancellation, export, or generic lifecycle operations.
+sites are enforced while it remains a `candidate`. U8 removed its former
+catalog dependency and reciprocal-source exception by recognizing
+`TaskProjection` as a Hive adapter rather than WorkLedger-owned source.
+Attempts intentionally remains the guarded reference instead of claiming that
+its full lifecycle is a supported component boundary: the slice does not
+publish raw storage, reconciliation, supervision, capacity, loss-policy,
+cancellation, export, or generic lifecycle operations.
 
 The `Agent ABI` is boundary-ready below orchestration. `AgentRuntime` exposes
 immutable request, compiled invocation, capability/probe evidence, and
@@ -120,6 +121,32 @@ append-only publication ledger decides which superseded OID is replaceable;
 the gate only enforces that exact authority. Receipts retain a non-secret
 transport fingerprint rather than URLs or command output. This is Git process
 hardening, not an agent, Git, or operating-system sandbox.
+
+`WorkLedger` is boundary-ready around three policy-light mechanisms: structural
+validation of ordered stage descriptors, locked/fsynced JSONL append with
+idempotency conflict detection and partial-write rollback, and deterministic
+JSONL replay with caller-supplied validation and duplicate-identity rejection.
+The facade returns a narrow `JournalHandle`; its receipts bind descriptor
+identity or exact ledger cursor, last record identity, and SHA-256. The entry
+point loads without Attempts, conditions, task journals, projections,
+workflows, commands, stages, or web runtime.
+
+Receipt strings and record trees are detached, deeply frozen JSON snapshots,
+so mutating a caller-owned input after append or validation cannot rewrite the
+reported durable identity. Replay snapshots its source bytes before invoking
+caller validation. Idempotent lookup checks every matching historical key and
+fails closed if any stored signature conflicts with the requested operation.
+
+WorkLedger deliberately defines no public disk schema. `Hive::Workflow` maps
+its stage structure into the validator, while `Hive::TaskJournal` owns the
+authoritative event envelope and attempt/condition validation and
+`Hive::TaskProjection` owns compatibility replay and projection rules.
+`TaskProjection::Store` remains a Hive composition adapter that may open
+`Hive::Attempts::Store`; it is not WorkLedger source and creates no component
+cycle. Task directories, condition vocabulary, transition and migration
+policy, overlays, snapshots, Git behavior, and operational status all remain
+Hive-owned. Boundary readiness is an internal API verdict, not a public format,
+gem, version, or release commitment.
 
 ## Catalog contract
 

@@ -25,8 +25,7 @@ components:
       - "hive-attempt v2 is the only runtime reader/writer; Hive::Recovery::Migration owns the one-off cutover"
     lock_contracts:
       - "admission lock before generation lock; record transitions use guarded CAS"
-    component_dependencies:
-      - work-ledger
+    component_dependencies: []
     allowed_hive_dependencies:
       - hive/agent_limit
       - hive/atomic_file
@@ -105,9 +104,7 @@ components:
     wiki_page: wiki/modules/attempts.md
     focused_tests:
       - test/unit/attempts/api_test.rb
-    migration_exceptions:
-      - reason: "WorkLedger-owned lib/hive/task_projection/store.rb still requires and constructs Hive::Attempts::Store, creating a reciprocal Attempts/WorkLedger source edge that blocks an acyclic boundary-ready graph."
-        removal_unit: U8
+    migration_exceptions: []
 
   - id: user-service
     name: UserService
@@ -424,43 +421,57 @@ components:
 
   - id: work-ledger
     name: WorkLedger
-    state: candidate
+    state: boundary-ready
     entrypoint:
-      file: lib/hive/task_journal.rb
-      require: hive/task_journal
-      constant: Hive::TaskJournal
+      file: lib/hive/work_ledger.rb
+      require: hive/work_ledger
+      constant: Hive::WorkLedger
     public_contract:
       values:
-        - Hive::TaskJournal::AppendResult
+        - Hive::WorkLedger::AppendReceipt
+        - Hive::WorkLedger::DescriptorReceipt
+        - Hive::WorkLedger::JournalHandle
+        - Hive::WorkLedger::ReplayReceipt
       errors:
-        - Hive::TaskJournal::Error
+        - Hive::WorkLedger::AppendFailed
+        - Hive::WorkLedger::Conflict
+        - Hive::WorkLedger::InvalidDescriptor
+        - Hive::WorkLedger::InvalidRecord
+        - Hive::WorkLedger::InvalidRequest
+        - Hive::WorkLedger::ReplayFailed
     owned_paths:
-      - lib/hive/task_journal.rb
-      - lib/hive/task_journal
-      - lib/hive/task_projection.rb
-      - lib/hive/task_projection
-      - lib/hive/workflow.rb
-      - lib/hive/workflows
+      - lib/hive/work_ledger.rb
+      - lib/hive/work_ledger
     state_contracts:
-      - "Task journal, projection, descriptor overlays, and historical fixtures"
+      - "Caller-owned append-only JSONL records and ordered structural descriptors"
     schema_contracts:
-      - "Hive-owned journal/projection formats remain internal compatibility contracts"
+      - "No WorkLedger disk schema; callers inject record identity and validation while Hive owns journal/projection compatibility"
     lock_contracts:
-      - "Append and projection writes use Hive task/state locks and fsync discipline"
+      - "JSONL appends take one caller-named exclusive lock, write complete batches, fsync, and roll back to the prior durable byte boundary on failure"
     component_dependencies: []
-    allowed_hive_dependencies: []
+    allowed_hive_dependencies:
+      - hive/atomic_file
+      - hive/errors
     internal_collaborators:
-      - Hive::TaskJournal::Validator
-      - Hive::TaskProjection::Store
-      - Hive::Workflows::DescriptorParser
-    forbidden_constructions: []
+      - Hive::WorkLedger::DescriptorValidator
+      - Hive::WorkLedger::Journal
+      - Hive::WorkLedger::Replay
+    forbidden_constructions:
+      - Hive::WorkLedger::DescriptorValidator
+      - Hive::WorkLedger::Journal
+      - Hive::WorkLedger::Replay
     authorized_internal_constructions: []
     hive_consumers:
-      - lib/hive/task_action.rb
-      - lib/hive/conditions
-    mutation_authority: "Hive event, condition, task-path, transition, Git, and migration policy remains above the seam."
-    recovery_surface: "Replay preserves historical records without rewriting; incompatible events fail closed."
+      - lib/hive/task_journal.rb
+      - lib/hive/task_projection.rb
+      - lib/hive/workflow.rb
+    mutation_authority: "Callers supply the exact ledger and lock paths plus validated records; Hive event, condition, task-path, transition, Git, and migration policy remains above the seam."
+    recovery_surface: "Typed receipts bind exact cursor/hash/identity; replay preserves source bytes, duplicate identities fail closed, and partial appends roll back."
     wiki_page: wiki/state-model.md
     focused_tests:
+      - test/unit/work_ledger_test.rb
       - test/unit/task_journal_test.rb
+      - test/unit/task_projection/store_test.rb
+      - test/unit/task_projection_test.rb
+      - test/unit/workflow_test.rb
     migration_exceptions: []

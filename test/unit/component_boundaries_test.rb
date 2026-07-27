@@ -27,16 +27,8 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "candidate", attempts.fetch("state")
     assert_equal "hive/attempts/api", attempts.dig("entrypoint", "require")
     assert_equal "Hive::Attempts::API", attempts.dig("entrypoint", "constant")
-    assert_equal [ "work-ledger" ], attempts.fetch("component_dependencies")
-    assert_equal(
-      [
-        {
-          "reason" => "WorkLedger-owned lib/hive/task_projection/store.rb still requires and constructs Hive::Attempts::Store, creating a reciprocal Attempts/WorkLedger source edge that blocks an acyclic boundary-ready graph.",
-          "removal_unit" => "U8"
-        }
-      ],
-      attempts.fetch("migration_exceptions")
-    )
+    assert_empty attempts.fetch("component_dependencies")
+    assert_empty attempts.fetch("migration_exceptions")
     assert_equal %w[
       Hive::Attempts::ClientResult
       Hive::Attempts::DispatchResult
@@ -166,10 +158,40 @@ class ComponentBoundariesTest < Minitest::Test
                  git_gate.fetch("internal_collaborators")
     assert_empty git_gate.fetch("migration_exceptions")
 
-    ready_components.push(agent_abi, artifact_firewall, skillpack, git_gate)
+    work_ledger = contract.component("work-ledger")
+    assert_equal "boundary-ready", work_ledger.fetch("state")
+    assert_equal "hive/work_ledger",
+                 work_ledger.dig("entrypoint", "require")
+    assert_equal "Hive::WorkLedger",
+                 work_ledger.dig("entrypoint", "constant")
+    assert_equal(
+      %w[
+        Hive::WorkLedger::AppendReceipt
+        Hive::WorkLedger::DescriptorReceipt
+        Hive::WorkLedger::JournalHandle
+        Hive::WorkLedger::ReplayReceipt
+      ],
+      work_ledger.dig("public_contract", "values").sort
+    )
+    assert_includes work_ledger.dig("public_contract", "errors"),
+                    "Hive::WorkLedger::Conflict"
+    assert_equal(
+      %w[
+        Hive::WorkLedger::DescriptorValidator
+        Hive::WorkLedger::Journal
+        Hive::WorkLedger::Replay
+      ],
+      work_ledger.fetch("forbidden_constructions").sort
+    )
+    assert_empty work_ledger.fetch("migration_exceptions")
+
+    ready_components.push(
+      agent_abi, artifact_firewall, skillpack, git_gate, work_ledger
+    )
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
+    assert_equal [ attempts ], remaining_candidates
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
     ready_loads = contract.validate_clean_loads!
@@ -179,6 +201,7 @@ class ComponentBoundariesTest < Minitest::Test
       safe-agent-git-gate
       skillpack
       user-service
+      work-ledger
     ], ready_loads.keys.sort
     agent_abi_load = ready_loads.fetch("agent-abi")
     assert_equal "Hive::AgentRuntime", agent_abi_load.fetch("constant")
@@ -200,6 +223,10 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::AgentGitGate", git_gate_load.fetch("constant")
     assert_empty git_gate_load.fetch("forbidden_loaded_features")
     assert_empty git_gate_load.fetch("forbidden_constants")
+    work_ledger_load = ready_loads.fetch("work-ledger")
+    assert_equal "Hive::WorkLedger", work_ledger_load.fetch("constant")
+    assert_empty work_ledger_load.fetch("forbidden_loaded_features")
+    assert_empty work_ledger_load.fetch("forbidden_constants")
   end
 
   def test_production_consumers_do_not_bypass_artifact_firewall
@@ -251,6 +278,24 @@ class ComponentBoundariesTest < Minitest::Test
 
     assert_empty offenders,
                  "Hive production consumers must use Hive::AgentGitGate: #{offenders.join(', ')}"
+  end
+
+  def test_production_consumers_do_not_require_work_ledger_internals
+    owned = contract_component_owned_files("work-ledger")
+    internal_require = %r{
+      require\ ["']hive/work_ledger/(?:descriptor_validator|journal|replay)["']
+    }x
+    internal_constant = /Hive::WorkLedger::(?:DescriptorValidator|Journal|Replay)/
+    offenders = Dir.glob(File.join(ROOT, "lib", "hive", "**", "*.rb")).filter_map do |path|
+      relative = path.delete_prefix("#{ROOT}/")
+      next if owned.include?(relative)
+
+      source = File.read(path)
+      relative if source.match?(internal_require) || source.match?(internal_constant)
+    end
+
+    assert_empty offenders,
+                 "Hive production consumers must use Hive::WorkLedger: #{offenders.join(', ')}"
   end
 
   def test_invalid_catalog_rows_name_the_component_and_field
@@ -321,11 +366,13 @@ class ComponentBoundariesTest < Minitest::Test
     end
   end
 
-  def test_attempts_cannot_be_promoted_while_work_ledger_remains_candidate
+  def test_boundary_ready_component_cannot_depend_on_a_candidate
     document = Marshal.load(Marshal.dump(@document))
     attempts = component(document, "attempts")
     attempts["state"] = "boundary-ready"
     attempts["migration_exceptions"] = []
+    attempts["component_dependencies"] = [ "work-ledger" ]
+    component(document, "work-ledger")["state"] = "candidate"
 
     error = assert_raises(ComponentBoundaryContract::ValidationError) do
       ComponentBoundaryContract.new(document, root: ROOT).validate_catalog!

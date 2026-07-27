@@ -7,6 +7,7 @@ require "yaml"
 require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/agent_limit"
+require "hive/artifact_firewall"
 require "hive/config"
 require "hive/lock"
 require "hive/markers"
@@ -802,8 +803,11 @@ module Hive
       deadline = Time.now + timeout
       tmux_error_streak = 0
       last_tmux_error_msg = nil
+      output_manifest = expected_output_manifest(expected_output)
       loop do
-        output_available = expected_output_available?(expected_output)
+        output_available = expected_output_available?(
+          expected_output, manifest: output_manifest
+        )
         pane_tail = capture_limit_tail(runner)
         if (limit_context = Hive::AgentLimit.live_limit_context(pane_tail))
           limit_line = limit_context.each_line.first.to_s.strip
@@ -857,8 +861,26 @@ module Hive
       end
     end
 
-    def expected_output_available?(expected_output)
-      File.exist?(expected_output.to_s) && File.size(expected_output.to_s).positive?
+    def expected_output_available?(expected_output, manifest: nil)
+      manifest ||= expected_output_manifest(expected_output)
+      return false unless manifest
+
+      Hive::ArtifactFirewall.validate_required_outputs(manifest).valid?
+    rescue Hive::ArtifactFirewall::Error
+      false
+    end
+
+    def expected_output_manifest(expected_output)
+      return nil if expected_output.nil? || expected_output.to_s.empty?
+
+      path = File.expand_path(expected_output.to_s)
+      root = File.dirname(path)
+      Hive::ArtifactFirewall::Manifest.new(
+        root: root,
+        protected_anchors: {},
+        permitted_writable_roots: [ root ],
+        required_outputs: { File.basename(path) => path }
+      )
     end
 
     def expected_output_session_alive?(runner)

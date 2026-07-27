@@ -113,14 +113,28 @@ class ComponentBoundariesTest < Minitest::Test
                     "Hive::AgentRuntime::UnsupportedCapability"
     assert_empty agent_abi.fetch("migration_exceptions")
 
-    ready_components << agent_abi
+    artifact_firewall = contract.component("agent-artifact-firewall")
+    assert_equal "boundary-ready", artifact_firewall.fetch("state")
+    assert_equal "hive/artifact_firewall",
+                 artifact_firewall.dig("entrypoint", "require")
+    assert_equal "Hive::ArtifactFirewall",
+                 artifact_firewall.dig("entrypoint", "constant")
+    assert_includes artifact_firewall.dig("public_contract", "values"),
+                    "Hive::ArtifactFirewall::Report"
+    assert_includes artifact_firewall.dig("public_contract", "errors"),
+                    "Hive::ArtifactFirewall::InvalidManifest"
+    assert_equal [ "Hive::ProtectedFiles" ],
+                 artifact_firewall.fetch("internal_collaborators")
+    assert_empty artifact_firewall.fetch("migration_exceptions")
+
+    ready_components.push(agent_abi, artifact_firewall)
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
     ready_loads = contract.validate_clean_loads!
-    assert_equal %w[agent-abi user-service], ready_loads.keys.sort
+    assert_equal %w[agent-abi agent-artifact-firewall user-service], ready_loads.keys.sort
     agent_abi_load = ready_loads.fetch("agent-abi")
     assert_equal "Hive::AgentRuntime", agent_abi_load.fetch("constant")
     assert_empty agent_abi_load.fetch("forbidden_loaded_features")
@@ -129,6 +143,28 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::UserService", user_service_load.fetch("constant")
     assert_empty user_service_load.fetch("forbidden_loaded_features")
     assert_empty user_service_load.fetch("forbidden_constants")
+    artifact_firewall_load = ready_loads.fetch("agent-artifact-firewall")
+    assert_equal "Hive::ArtifactFirewall", artifact_firewall_load.fetch("constant")
+    assert_empty artifact_firewall_load.fetch("forbidden_loaded_features")
+    assert_empty artifact_firewall_load.fetch("forbidden_constants")
+  end
+
+  def test_production_consumers_do_not_bypass_artifact_firewall
+    allowed = %w[
+      lib/hive/artifact_firewall.rb
+      lib/hive/protected_files.rb
+    ]
+    offenders = Dir.glob(File.join(ROOT, "lib", "hive", "**", "*.rb")).filter_map do |path|
+      relative = path.delete_prefix("#{ROOT}/")
+      next if allowed.include?(relative)
+
+      source = File.read(path)
+      relative if source.include?("Hive::ProtectedFiles") ||
+                  source.match?(/require ["']hive\/protected_files["']/)
+    end
+
+    assert_empty offenders,
+                 "Hive production consumers must use Hive::ArtifactFirewall: #{offenders.join(', ')}"
   end
 
   def test_invalid_catalog_rows_name_the_component_and_field

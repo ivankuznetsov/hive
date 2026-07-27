@@ -3,11 +3,16 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_runtime.rb, lib/hive/agent/message_extractor.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [agent, claude, subprocess]
 ---
 
-**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for marker-owned spawns, optionally persists stdout/stderr to the per-stage log, always parses the stream for a bounded final-message summary and limits, enforces native budget-equivalent, streamed token, optional completed-turn, and wall-clock ceilings, kills the process group on exhaustion or completed output, classifies Claude's structured per-run budget outcome separately from provider account/rate/quota limits, and translates the exit into a status/marker according to the selected `AgentProfile` status mode. The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
+**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for
+marker-owned spawns, parses bounded results/limits, enforces resource and
+wall-clock ceilings, and translates exit through the selected AgentProfile
+status mode. `:output_file_exists` now admits only non-empty regular in-root
+artifacts through `Hive::ArtifactFirewall`; symlinks and directories cannot
+satisfy completion.
 
 ## Class shape
 
@@ -23,7 +28,7 @@ Hive::Agent.new(
   cwd: nil,             # defaults to task.folder
   log_label: nil,       # defaults to task.stage_name
   profile: nil,         # AgentProfile; defaults to claude profile
-  expected_output: nil, # used by :output_file_exists profiles
+  expected_output: nil, # required regular artifact for :output_file_exists
   status_mode: nil,     # per-spawn override
   permission_mode: nil, # profile-owned override; nil uses profile default/config caller
   allowed_tools: nil,   # Claude-only --allowedTools CSV source
@@ -187,7 +192,7 @@ launches send the prompt through stdin with `-` in argv.
 9. On timeout: `kill_group(pgid)` (TERM), then `sleep_grace_then_kill` (3s grace, then KILL).
 10. Reap with `Process.wait(pid)` (rescuing `Errno::ECHILD`).
 11. Join the reader thread (kill if still alive after 2s).
-12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, output_completed, status: nil}` plus `failure_origin` / `failure_details` only when a recognized structured failure was observed. Resource exhaustion carries `reason: "token_limit"` or `"turn_limit"`, the configured limit, and the observed count. A completed output is accepted only in `:output_file_exists` mode and remains subject to the caller's structured parser.
+12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, output_completed, status: nil}` plus `failure_origin` / `failure_details` only when a recognized structured failure was observed. Resource exhaustion carries `reason: "token_limit"` or `"turn_limit"`, the configured limit, and the observed count. A completed output is accepted only in `:output_file_exists` mode, must pass the Artifact Firewall's non-empty regular-file/root admission, and remains subject to the caller's structured parser.
 
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
 
@@ -196,7 +201,15 @@ Claude/tmux launches record the managed pane PID in the same per-task lock.
 `claude_pid` and its `claude_pid_start_time`; this gives tmux-backed cleanup the
 same PID-reuse identity guard as headless `Hive::Agent` spawns.
 
-Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers, triage/browser helpers) poll the expected artifact and the managed tmux session together. If the session disappears before the expected file exists and is non-empty, `Hive::ClaudeLauncher` returns `status: :error` with `tmux_session_terminated...` instead of waiting for the full reviewer timeout. If the expected artifact is non-empty and Claude's Stop hook already wrote `.done`, the result is accepted as `:ok`; a non-empty artifact without `.done` is treated as partial and retried rather than being promoted as a successful review. Claude/tmux pane tails are also scanned for provider-limit UI such as Claude's "Stop and wait for limit to reset" / "Add funds to continue with usage credits" menu. When that appears, marker-owned waits stamp `ERROR reason=limits_reached` and expected-output waits return an error message beginning `limits reached for claude:` instead of surfacing generic readiness, timeout, or tmux-session-death errors.
+Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers,
+triage/browser helpers) poll the expected artifact and managed tmux session
+together. Availability means a non-empty regular file accepted by
+`ArtifactFirewall.validate_required_outputs`; a symlink or directory remains
+unavailable even when its target has bytes. If the session disappears before
+acceptance, the launcher returns `tmux_session_terminated...`. An accepted
+artifact still needs Claude's Stop hook `.done` or a proven ready prompt;
+otherwise it remains partial. Provider-limit pane evidence continues to win
+over readiness, timeout, session-death, and missing-output fallbacks.
 
 `Hive::ClaudeLauncher.claude_ready_prompt?` treats Claude's TUI prompt as version-churny terminal chrome, not as a fixed last-line string. The detector keys on the idle `❯` caret only when it is the first or last glyph of its line, accepts Unicode separator spaces around it, and accepts the Claude Code 2.1.179 separator/caret/separator/footer shape as long as every line below the caret is prompt chrome or the real `bypass permissions` footer. It still rejects numbered menu options, current trust/permission prompts, stale carets with non-footer output below them, and `❯` glyphs embedded in Claude's own prose or shell snippets.
 
@@ -235,6 +248,6 @@ The default Claude permission path still uses `--dangerously-skip-permissions` (
 ## Backlinks
 
 - [[modules/task]] · [[modules/markers]] · [[modules/lock]]
-- [[modules/agent_profile]] · [[modules/config]]
+- [[modules/agent_profile]] · [[modules/protected_files]] · [[modules/config]]
 - [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/artifacts]] · [[stages/finalize]]
 - [[architecture]]

@@ -20,7 +20,7 @@ the first and primary consumer.
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
-| Agent Artifact Firewall | `candidate` | `require "hive/protected_files"` → `Hive::ProtectedFiles` | [[modules/protected_files]] |
+| Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
 | Skillpack | `candidate` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
 | Safe Agent Git Gate | `candidate` | `require "hive/managed_git"` → `Hive::ManagedGit` | [[modules/git_ops]] |
 | WorkLedger | `candidate` | `require "hive/task_journal"` → `Hive::TaskJournal` | [[state-model]] |
@@ -46,9 +46,24 @@ observable-result values while preserving `AgentProfile.new(...)` and
 `AgentProfiles.register` as extension points. Claude, Codex, Pi, Grok, and
 custom profiles remain adapters inside the boundary. Hive owns process
 lifetime, timeouts, retries, workflow selection, artifact acceptance, and
-stage success. `Hive::SecretPatterns` remains shared Hive infrastructure rather
-than component-owned state: both the ABI's bounded diagnostics and the future
-artifact firewall consume it.
+stage success.
+
+The `Agent Artifact Firewall` is boundary-ready below stage policy. Its
+immutable manifest declares protected anchors, permitted writable roots,
+required regular outputs, and an injectable redactor. Snapshot, typed
+validation, bounded reporting, descriptor-bound baseline identities,
+protected-parent substitution checks, and verified safe restore sit below the
+facade; execute, open-PR, finalize, review, and managed-worktree adapters
+continue to choose paths and markers. Headless Agent and interactive Claude
+expected-output polling also use the regular-file admission seam.
+`Hive::ProtectedFiles` is now an internal compatibility engine and production
+consumers cannot bypass the facade. The guarantee is same-user application
+custody only: it is not an OS sandbox, a write monitor, a multi-file
+transaction, or the Safe Agent Git Gate.
+
+`Hive::SecretPatterns` remains shared lower-level Hive infrastructure rather
+than component-owned state. Both the Agent ABI and Artifact Firewall use it for
+bounded diagnostics, while the firewall also accepts an injected redactor.
 
 The package-only extraction lives at `components/agent-cli-runtime/` and
 publishes the neutral `AgentCliRuntime` namespace plus the bounded

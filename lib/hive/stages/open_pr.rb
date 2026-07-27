@@ -1,10 +1,10 @@
 require "open3"
 require "hive/dependencies"
 require "hive/dependency_snapshot"
+require "hive/artifact_firewall"
 require "hive/gh"
 require "hive/git_ops"
 require "hive/markers"
-require "hive/protected_files"
 require "hive/secret_patterns"
 require "hive/claude_launcher"
 require "hive/stages/base"
@@ -127,18 +127,27 @@ module Hive
         else
           Hive::Stages::Base.stage_profile(cfg, "open_pr")
         end
-        protected_capture = Hive::ProtectedFiles.capture(task.folder)
-        before_sha = Hive::ProtectedFiles.snapshot(task.folder)
-        spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path, identity: identity)
-        after_sha = Hive::ProtectedFiles.snapshot(task.folder)
-        if (tampered = Hive::ProtectedFiles.diff(before_sha, after_sha)).any?
-          restored, restore_error = Hive::ProtectedFiles.restore_safely(
-            task.folder, protected_capture, tampered
+        custody_manifest = Hive::ArtifactFirewall::Manifest.new(
+          root: task.folder,
+          protected_anchors: Hive::ArtifactFirewall::ORCHESTRATOR_OWNED,
+          permitted_writable_roots: [ task.folder, worktree_path ]
+        )
+        custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
+        begin
+          spawn_open_pr_agent(
+            task, cfg, prompt, profile, worktree_path, identity: identity
           )
+        ensure
+          custody_report = Hive::ArtifactFirewall.validate_and_restore(
+            custody_manifest, custody_snapshot
+          )
+        end
+        if custody_report.tampered?
           Hive::Markers.set(task.state_file, :error,
-                            reason: "open_pr_tampered", files: tampered.join(","),
-                            restored: restored,
-                            restore_error: restore_error.to_s[0, 200])
+                            reason: "open_pr_tampered",
+                            files: custody_report.tampered_labels.join(","),
+                            restored: custody_report.restored?,
+                            restore_error: custody_report.restore_diagnostic.to_s[0, 200])
           return { commit: "open_pr_tampered", status: :error }
         end
 

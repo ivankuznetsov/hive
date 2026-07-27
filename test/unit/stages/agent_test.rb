@@ -334,6 +334,35 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_worktree_stage_deduplicates_aliasing_git_configuration_paths
+    with_draft_pr_task do |task, _worktree_root|
+      with_tmp_dir do |agent_home|
+        report_source = valid_fix_report.sub("Decision: ready", "Decision: no-fix")
+        spawn = lambda do |_task, **_kwargs|
+          File.write(File.join(task.folder, "fix-report.md"), report_source)
+          { status: :ok, exit_code: 0 }
+        end
+        aliases = {
+          "HOME" => agent_home,
+          "XDG_CONFIG_HOME" => File.join(agent_home, ".config"),
+          "GIT_CONFIG_GLOBAL" => File.join(agent_home, ".gitconfig")
+        }
+
+        with_env(aliases) do
+          with_fake_github_controller do
+            with_deferred_draft_handoff do
+              with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+                result = Hive::Stages::AgentWorktree.run!(task, {})
+
+                assert_equal :"no-fix", result.fetch(:status)
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
   def test_worktree_stage_rejects_protected_state_mutation_and_agent_marker_authorship
     %w[meta.yml task.md].each do |protected_name|
       with_draft_pr_task do |task, _worktree_root|
@@ -412,8 +441,8 @@ class StagesAgentTest < Minitest::Test
         with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
           with_replaced_singleton_method(
             Hive::ProtectedFiles,
-            :restore_safely,
-            ->(_root, _captured, _names) { [ false, "synthetic restore failure" ] }
+            :restore_paths_safely,
+            ->(_paths, _captured, _labels) { [ false, "synthetic restore failure" ] }
           ) do
             result = Hive::Stages::AgentWorktree.run!(task, {})
 
@@ -483,10 +512,10 @@ class StagesAgentTest < Minitest::Test
   end
 
   def test_worktree_stage_protects_controller_handoff_files_without_changing_global_stage_ownership
-    expected = (Hive::ProtectedFiles::ORCHESTRATOR_OWNED + %w[meta.yml handoff.yml pr.md]).uniq
+    expected = (Hive::ArtifactFirewall::ORCHESTRATOR_OWNED + %w[meta.yml handoff.yml pr.md]).uniq
 
     assert_equal expected, Hive::Stages::AgentWorktree::PROTECTED_FILES
-    refute_includes Hive::ProtectedFiles::ORCHESTRATOR_OWNED, "pr.md"
+    refute_includes Hive::ArtifactFirewall::ORCHESTRATOR_OWNED, "pr.md"
   end
 
   def test_worktree_stage_rejects_symlinked_report

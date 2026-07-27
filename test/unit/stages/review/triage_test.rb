@@ -2,7 +2,7 @@ require "test_helper"
 require "hive/stages/review/triage"
 require "hive/reviewers"
 require "hive/agent_profiles"
-require "hive/protected_files"
+require "hive/artifact_firewall"
 
 # Direct coverage for the triage step of the 6-review autonomous loop.
 class TriageTest < Minitest::Test
@@ -231,10 +231,10 @@ class TriageTest < Minitest::Test
 
   # --- SHA-256 protected files ------------------------------------------
 
-  # Parameterized over every file in Hive::ProtectedFiles::ORCHESTRATOR_OWNED
+  # Parameterized over every file in Hive::ArtifactFirewall::ORCHESTRATOR_OWNED
   # (post-LFG-2 refactor). Each protected file's mutation must yield
   # :tampered with that filename surfaced in tampered_files.
-  Hive::ProtectedFiles::ORCHESTRATOR_OWNED.each do |protected_file|
+  Hive::ArtifactFirewall::ORCHESTRATOR_OWNED.each do |protected_file|
     define_method("test_protected_file_tampering_#{protected_file.tr('.', '_')}_yields_tampered_status") do
       with_triage_dir do |dir, task_folder|
         ctx = make_ctx(dir, task_folder)
@@ -326,8 +326,8 @@ class TriageTest < Minitest::Test
       result = nil
       with_replaced_singleton_method(
         Hive::ProtectedFiles,
-        :restore_safely,
-        ->(_root, _captured, _names) { [ false, "synthetic restore failure" ] }
+        :restore_paths_safely,
+        ->(_paths, _captured, _labels) { [ false, "synthetic restore failure" ] }
       ) do
         result = Hive::Stages::Review::Triage.run!(
           cfg: default_cfg,
@@ -364,6 +364,7 @@ class TriageTest < Minitest::Test
       captured = {}
       replacement = lambda do |_task, _cfg, **kwargs|
         captured = kwargs
+        File.write(kwargs.fetch(:expected_output), "# Escalations\n")
         { status: :ok, log_label: "review-triage-pass01" }
       end
 
@@ -389,6 +390,28 @@ class TriageTest < Minitest::Test
 
       assert_equal :error, result.status
       assert_match(/missing or empty/, result.error_message)
+    end
+  end
+
+  def test_successful_spawn_without_escalations_is_rejected_by_firewall
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder)
+      File.write(
+        File.join(task_folder, "reviews", "claude-ce-code-review-01.md"),
+        "## Nit\n- [ ] x: y\n"
+      )
+      successful_spawn = lambda do |_task, _cfg, **_kwargs|
+        { status: :ok, log_label: "review-triage-pass01" }
+      end
+
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :spawn_claude!, successful_spawn
+      ) do
+        result = Hive::Stages::Review::Triage.run!(cfg: default_cfg, ctx: ctx)
+
+        assert_equal :error, result.status
+        assert_includes result.error_message, "required output"
+      end
     end
   end
 

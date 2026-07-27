@@ -14,22 +14,22 @@ module HiveReleaseCandidate
 
       rows = Array(source["effective_gate_set"])
       names = case selector["mode"]
-              when "named"
+      when "named"
                 Array(selector["gates"]).map(&:to_s)
-              when "failed"
+      when "failed"
                 rows.filter_map do |row|
                   next unless row.is_a?(Hash)
                   next if row["status"] == "completed" && row["conclusion"] == "success"
 
                   row["name"].to_s
                 end
-              when "missing"
+      when "missing"
                 @required_names - rows.filter_map do |row|
                   row["name"].to_s if row.is_a?(Hash)
                 end
-              else
+      else
                 raise Error, "retry selector mode is invalid"
-              end
+      end
 
       unless !names.empty? && names.uniq.size == names.size &&
              (names - @required_names).empty?

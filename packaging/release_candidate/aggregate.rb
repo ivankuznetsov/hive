@@ -180,9 +180,9 @@ module HiveReleaseCandidate
       run_valid = if source_attempt && !current_names.include?(job["name"])
                     positive_integer?(job["run_id"]) &&
                       positive_integer?(job["run_attempt"])
-                  else
+      else
                     job["run_id"] == run_id && job["run_attempt"] == run_attempt
-                  end
+      end
       run_valid &&
         job.fetch("status", "completed") == "completed" &&
         job.fetch("conclusion", status_to_conclusion(job["status"])) == "success" &&

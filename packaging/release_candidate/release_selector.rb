@@ -286,11 +286,11 @@ module HiveReleaseCandidate
         valid = if current
                   row["run_id"] == evidence["run_id"] &&
                     row["run_attempt"] == evidence["run_attempt"]
-                else
+        else
                   provenance.key?("source_run_id") &&
                     positive_integer?(row["run_id"]) &&
                     positive_integer?(row["run_attempt"])
-                end
+        end
         raise Error, "effective gate attempt provenance is invalid: #{row['name']}" unless valid
       end
       return unless provenance.key?("source_run_id")

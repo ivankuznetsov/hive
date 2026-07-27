@@ -93,11 +93,11 @@ class ReleaseCandidateInvariantSnapshotTest < Minitest::Test
     REQUIRED.to_h do |name|
       value = if name == "tasks"
                 tasks
-              elsif name == "install_identity"
+      elsif name == "install_identity"
                 { "gem_sha256" => "a" * 64 }
-              else
+      else
                 { "value" => name }
-              end
+      end
       [ name, value ]
     end
   end

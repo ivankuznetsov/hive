@@ -21,7 +21,7 @@ module HiveReleaseCandidate
 
       @process_alive = process_alive || method(:process_alive?)
       @service_active = service_active || ->(_name) { false }
-      @service_stopper = service_stopper || ->(_name) {}
+      @service_stopper = service_stopper || ->(_name) { }
       @signaler = signaler || ->(signal, target) { Process.kill(signal, target) }
       @sleeper = sleeper || ->(seconds) { sleep(seconds) }
     end

@@ -757,18 +757,18 @@ module HiveReleaseCandidate
       attestation = baseline_cache_attestation(catalog, cache_root, inventory, closures)
       status = if invalid.any? || closure_invalid.any? || attestation["status"] == "invalid"
                  "invalid"
-               elsif missing.any? || closure_missing.any? || attestation["status"] == "missing"
+      elsif missing.any? || closure_missing.any? || attestation["status"] == "missing"
                  "missing"
-               else
+      else
                  "available"
-               end
+      end
       reason = if invalid.any? || closure_invalid.any? || attestation["status"] == "invalid"
                  "baseline_assets_invalid"
-               elsif missing.any? || closure_missing.any?
+      elsif missing.any? || closure_missing.any?
                  "baseline_assets_missing"
-               elsif attestation["status"] == "missing"
+      elsif attestation["status"] == "missing"
                  "baseline_cache_authentication_missing"
-               end
+      end
       {
         "status" => status,
         "reason" => reason,
@@ -784,12 +784,12 @@ module HiveReleaseCandidate
             attestation.fetch("release_assets_sha256") : nil,
         "fetch_argv" => [
           *(missing.empty? ? [] : catalog.fetch_argv(cache_root: cache_root, missing: missing)),
-          *((closure_missing.empty? && attestation["status"] != "missing") ? [] : [[
+          *((closure_missing.empty? && attestation["status"] != "missing") ? [] : [ [
             RbConfig.ruby,
             "packaging/release_candidate/materialize_baseline_cache.rb",
             sha,
             cache_root
-          ]])
+          ] ])
         ],
         "next_action_argv" => status == "available" ? nil : [
           "bin/hive-release-candidate", "dispatch", "--sha", sha

@@ -654,7 +654,12 @@ bundle exec brakeman --force --no-pager --quiet --format github --ignore-config 
 `config/brakeman.ignore` is the root ignore file for scanner false positives.
 Each entry carries a rationale for the trust boundary Brakeman cannot see,
 such as argv-form subprocess calls, integer coercion before shell use, or
-registry-laundered filesystem paths. The old task-log-path ignore from commit
+registry-laundered filesystem paths. Release-candidate artifact construction
+and baseline materialization use discrete-argv `Open3.capture3` calls; their
+candidate OIDs are validated and their remaining refs and paths are internal
+or loaded from the reviewed, digest-pinned catalog, so the associated command
+injection findings are recorded as scoped false positives. The old
+task-log-path ignore from commit
 `83f0a800` is no longer needed: `Tasks::LogsController#show` loads a `Task`
 only after registered-project resolution, and moving the bounded path read to
 `Task#latest_log` lets Brakeman see no controller file sink. `Task#diff` now

@@ -81,13 +81,13 @@ class ReleaseCandidateHostedGateTest < Minitest::Test
       File.binwrite(File.join(dir, name), body)
       kind = if name.end_with?(".gem")
                "gem"
-             elsif name.include?("source")
+      elsif name.include?("source")
                "source"
-             elsif name.include?("skills")
+      elsif name.include?("skills")
                "skills"
-             else
+      else
                "web"
-             end
+      end
       [
         name,
         {

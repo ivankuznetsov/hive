@@ -251,9 +251,9 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
                fi
                exit 0
              BASH
-           else
+    else
              "#!/bin/sh\nexit 0\n"
-           end
+    end
     File.write(File.join(root, "bin/hive"), body)
     File.chmod(0o755, File.join(root, "bin/hive"))
     File.write(File.join(root, "target.json"), JSON.generate(

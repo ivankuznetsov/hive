@@ -27,8 +27,8 @@ class ReleaseCandidateProcessTeardownTest < Minitest::Test
     teardown = HiveReleaseCandidate::ProcessTeardown.new(
       process_alive: ->(pid) { pid == 22 },
       service_active: ->(name) { name == "hive-web" },
-      signaler: ->(_signal, _target) {},
-      sleeper: ->(_seconds) {}
+      signaler: ->(_signal, _target) { },
+      sleeper: ->(_seconds) { }
     )
 
     error = assert_raises(HiveReleaseCandidate::Error) do

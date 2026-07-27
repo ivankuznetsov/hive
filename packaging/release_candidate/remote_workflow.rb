@@ -122,13 +122,13 @@ module HiveReleaseCandidate
                id = positive_integer(run_id, "workflow run ID")
                row = client.run(id)
                row ? [ row ] : []
-             else
+      else
                Array(client.workflow_runs(RemoteIdentity::WORKFLOW_PATH)).select do |run|
                  run["name"].to_s.start_with?(
                    "#{RemoteIdentity::RUN_NAME_PREFIX}#{request_id}:"
                  )
                end
-             end
+      end
       rows.select { |row| row.is_a?(Hash) }
     end
 
@@ -157,11 +157,11 @@ module HiveReleaseCandidate
                      run_id: run_identity.fetch("run_id"),
                      run_attempt: run_identity.fetch("run_attempt")
                    )
-                 elsif matching.empty?
+      elsif matching.empty?
                    artifact_from_terminal_evidence(run_identity, artifacts)
-                 else
+      else
                    raise Error, "candidate artifact is ambiguous"
-                 end
+      end
       collection(
         "terminal", request_id: run_identity.fetch("request_id"),
         run: run_identity, artifact: artifact,

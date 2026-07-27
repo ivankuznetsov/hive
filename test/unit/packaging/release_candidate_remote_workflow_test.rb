@@ -175,7 +175,7 @@ class ReleaseCandidateRemoteWorkflowTest < Minitest::Test
     client.runs = [ workflow_run("req-abc123", status: "queued") ]
     ticks = [ 0, 2 ]
     result = workflow(
-      client, sleeper: ->(_seconds) {},
+      client, sleeper: ->(_seconds) { },
       monotonic_clock: -> { ticks.shift || 2 }
     ).collect(
       request_id: "req-abc123", wait: true, timeout: 1
@@ -185,7 +185,7 @@ class ReleaseCandidateRemoteWorkflowTest < Minitest::Test
 
   private
 
-  def workflow(client, sleeper: ->(_seconds) {}, monotonic_clock: -> { 0 })
+  def workflow(client, sleeper: ->(_seconds) { }, monotonic_clock: -> { 0 })
     identity = HiveReleaseCandidate::RemoteIdentity.new(
       repository: "ivankuznetsov/hive", candidate_sha: SHA,
       workflow_sha: WORKFLOW_SHA, action_lock_sha256: ACTION_LOCK

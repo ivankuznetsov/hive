@@ -78,16 +78,16 @@ module HiveReleaseCandidate
     def rerun(source:, mode:, names: [])
       effective = source.fetch("effective_gate_set", [])
       selected_names = case mode
-                       when "failed"
+      when "failed"
                          effective.select { |gate| gate["status"] == "failed" }.map { |gate| gate["name"] }
-                       when "missing"
+      when "missing"
                          proven = effective.map { |entry| entry["name"] }
                          local_defaults.map(&:name) - proven
-                       when "named"
+      when "named"
                          names
-                       else
+      else
                          raise UsageError, "rerun requires exactly one selector mode"
-                       end
+      end
       raise UsageError, "rerun selector matched no eligible local gates" if selected_names.empty?
 
       select_named(selected_names)

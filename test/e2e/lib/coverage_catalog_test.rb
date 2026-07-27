@@ -15,9 +15,9 @@ class E2ECoverageCatalogTest < Minitest::Test
                      sibling_task_id: "#1234"
                      pending: true
                    YAML
-                 else
+      else
                    "tags: [synthetic]\n"
-                 end
+      end
       File.write(scenario_path, <<~YAML)
         name: synthetic_scenario
         description: Synthetic catalog fixture.

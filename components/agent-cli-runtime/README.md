@@ -1,19 +1,10 @@
 # Agent CLI Runtime
 
-`agent-cli-runtime` is a small Ruby library for tools that need to describe
-and inspect locally installed headless agent CLIs without owning an agent
-orchestration system.
-
-> [!NOTE]
-> Canonical development, issues, pull requests, and release authority remain in
-> the [Hive monorepo](https://github.com/ivankuznetsov/hive/tree/main/components/agent-cli-runtime).
-> [`ivankuznetsov/agent-cli-runtime`](https://github.com/ivankuznetsov/agent-cli-runtime)
-> is a read-only distribution mirror for focused discovery and release browsing.
-
-It ships immutable profiles for Claude Code, Codex CLI, Pi, and Grok CLI;
-compiles provider-neutral requests into argv/stdin; reports typed capability
-evidence; extracts usage from provider JSON events; and exposes an honest local
-diagnostic command.
+`agent-cli-runtime` is a small Ruby library for tools that integrate with
+locally installed headless agent CLIs. It ships immutable profiles for Claude
+Code, Codex CLI, Pi, and Grok CLI and compiles provider-neutral requests into
+argv/stdin. It also reports typed capability evidence, extracts usage from
+provider JSON events, and exposes an honest local diagnostic command.
 
 ## Install
 
@@ -48,11 +39,11 @@ Compilation does not execute the returned command. Unsupported requested
 controls raise `AgentCliRuntime::UnsupportedCapability` with typed evidence
 instead of silently widening the request.
 
-`permission_mode: nil` deliberately preserves Hive's existing trusted,
-headless behavior: providers with a bypass flag receive that flag. Consumers
-that do not want this compatibility path should pass `"read-only"` or
-`"workspace-write"` explicitly. A profile raises instead of pretending to
-enforce a mode its CLI cannot represent.
+`permission_mode: nil` selects the profile's default non-interactive permission
+flags, which may include a provider's bypass flag. Pass `"read-only"` or
+`"workspace-write"` explicitly when the integration requires that constraint.
+A profile raises instead of pretending to enforce a mode its CLI cannot
+represent.
 
 ## Public API
 
@@ -109,6 +100,16 @@ fail closed when a declared option is not advertised.
 
 ## Inspect local prerequisites
 
+```ruby
+probe = AgentCliRuntime.probe(:codex)
+probe.ready
+probe.version
+probe.auth_configuration.status
+
+# Returns the ready probe or raises AgentCliRuntime::ProbeError.
+AgentCliRuntime.prepare!(:codex)
+```
+
 ```sh
 agent-runtime probe codex
 agent-runtime probe --all --json
@@ -126,41 +127,45 @@ configuration presence, and declared capabilities. `configured` means a
 recognized local file or environment variable is present. It does not mean the
 credential is valid, the provider is online, or the account has quota.
 
-## Scope and compatibility
+## Normalize provider output
 
-The library does not spawn or supervise agents, retry work, run workflows,
-accept artifacts, or interpret Hive state. Provider flags and event formats are
-SemVer-governed public behavior. Additive fields are compatible within 0.1.x;
-removing or changing an existing field or meaning requires a new minor version
-while the gem remains pre-1.0.
+```ruby
+usage = AgentCliRuntime.extract_usage(
+  :codex,
+  "type" => "turn.completed",
+  "usage" => {
+    "input_tokens" => 120,
+    "output_tokens" => 42
+  }
+)
+# => { input: 120, output: 42, cached: 0, model: nil }
 
-Development remains in the Hive monorepo under
-`components/agent-cli-runtime`. Hive is the primary consumer and HiveBench is
-the first named external adopter. The Hive maintainer team owns compatibility,
-security response, and releases for the package.
-
-The distribution mirror synchronizes from the canonical component tree and
-cannot become an independent development or release source. Contributions and
-security reports follow the Hive repository links above.
-
-## Development
-
-```sh
-cd components/agent-cli-runtime
-bundle exec rake test
-gem build agent-cli-runtime.gemspec
+result = AgentCliRuntime.observe(
+  :codex,
+  exit_code: 0,
+  timed_out: false,
+  status: :completed,
+  usage: usage,
+  final_message: "Review complete"
+)
+result.status # => :completed
+result.usage  # => the normalized usage hash
 ```
 
-The root suite includes these package tests plus Hive/package parity coverage;
-run `bundle exec rake test:agent_cli_runtime` from the repository root for the
-standalone component gate alone.
+Malformed or unrelated events return `nil` from `extract_usage`; they do not
+invent zero-token usage. `observe` returns a frozen
+`AgentCliRuntime::ObservableResult` with bounded, redacted diagnostics.
 
-Release instructions live in the repository's `docs/RELEASING.md`. Releases
-use component-scoped tags and publish exact preverified gem bytes through
-RubyGems trusted publishing.
+## Compatibility
+
+Provider flags, event formats, and public value-object fields are
+SemVer-governed behavior. Additive fields are compatible within 0.1.x; removing
+or changing an existing field or meaning requires a new minor version while the
+gem remains pre-1.0.
 
 ## Security
 
 Diagnostics are bounded and redact common credential forms. The library never
 prints credential file contents or environment values. Report vulnerabilities
-through the Hive repository’s security policy.
+privately through the
+[package security policy](https://github.com/ivankuznetsov/agent-cli-runtime/security/policy).

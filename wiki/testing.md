@@ -1,9 +1,9 @@
 ---
 title: Testing
 type: reference
-source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release}.yml, packaging/live_agent_skills/, config/brakeman.ignore
+source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-26
+updated: 2026-07-27
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, release-proof]
 ---
 
@@ -12,10 +12,11 @@ e2e, eval, native package/bootstrap, authenticated agent skills, install
 verification, release proof, and Hivebox images. Offline tests pin the
 agent-first status/watch/action contracts, coherent daemon snapshots, canonical
 four-platform skill projections, safe consent-gated provisioning, native web
-service/readiness contracts, and the exact-artifact proof verifier. The offline
-candidate gate owns release readiness without provider credentials; the live
-agent workflow is an optional diagnostic that directly exercises native
-OpenClaw, Claude, Codex, and Pi discovery/use when credentials are available.
+service/readiness contracts, and the exact-artifact proof verifier. The trusted
+pre-tag candidate workflow owns release readiness without provider
+credentials; the live-agent workflow is an optional diagnostic that directly
+exercises native OpenClaw, Claude, Codex, and Pi discovery/use when credentials
+are available and can never replace a deterministic blocking row.
 
 ## Local feedback loop
 
@@ -32,6 +33,17 @@ local checkpoint, normally once before handoff:
 ```bash
 bundle exec rake test
 ```
+
+Pre-release candidate operations are separately scoped. `plan`, `list`,
+`inspect`, and `collect` are observational; `run`, `resume`, and `rerun` append
+local candidate evidence; only `dispatch` writes to GitHub. A successful local
+scope remains `qa_blocked`, while the trusted remote aggregate requires every
+deterministic cell and treats provider-backed live proof as advisory. See
+[[release-candidate]] for the exact commands, cache materialization argv,
+retry identities, and tag handoff. The default local runner has no production
+historical executor and reports `compliant_local_upgrade_executor_unavailable`;
+focused tests inject its fixed executor seam, while the real upgrade cells are
+hosted proof.
 
 The default suite excludes three expensive outer-proof files and skips the
 single large babysitter command-classification matrix. CI runs all four proofs
@@ -218,7 +230,10 @@ task default: :test
 | `workflow_package/*_test.rb`, `commands/workflow_{install,list,remove,update,publish}_test.rb`, `web/workflow_lifecycle_test.rb`, `workflow_lifecycle_schema_test.rb` | Legacy Honeycomb author-package canonicalization/security plus current canonical YAML/release fingerprint validation, v2 flat-catalog lifecycle and catalog/configuration snapshot materialization, exact actor mappings and optional-input redaction, exact/wildcard domain and shell/path-hook enforcement, direct-governance negation hardening, catalog/manifest/source-provenance binding, immutable store transaction/task-pin concurrency, isolated warnings for invalid selected configurations, incomplete-pin cleanup refusal, executable-mode hardening, Hivebox-to-real-CLI preview/apply delegation with package/selection/configuration identity rebinding, Rails `Workflow` row modelling, route-bound workflow-change operations, lifecycle preview/consent/ownership, post-commit warning semantics, closed JSON envelopes, deterministic legacy packaging, and injected fork/PR seams. |
 | `commands/daemon_test.rb` | `Hive::Commands::Daemon` and `Hive::Daemon::StatusReport` — lifecycle command routing, PID-file ownership/status handling, detached start/re-exec behavior, service install/enable/disable output, daemon-status service/binary fields, `safe_payload` web degradation, `binary_drift` classification including `unreadable`, queue inspection, start-path wiring of daemon/update/answer-digest config into the dispatcher, and `daemon.auto_retry.enabled` config threading into the dispatcher. |
 | `commands/setup/*_test.rb` | `Hive::Commands::Setup` — agent-skills-first ordering, one consent boundary, `--yes`, JSON/non-TTY refusal before diagnostics or agent discovery, diagnose-only `--no-bootstrap`, nested-init preflight suppression, phase-success predicate and JSON/process-exit agreement, the shared `phase(name)` StandardError-to-`ok:false` wrapper for QMD bootstrap, web-bundle, daemon-service, enrollment, and optional web-service phases, and hard diagnostic failures. |
-| `packaging/live_agent_proof_test.rb`, `release_contract_test.rb` | Exact-SHA release proof — deterministic one-build candidate manifest/archive, offline byte-for-byte verification of all four canonical projections, installed-version binding, web-bundle digest verification, and release-job dependency contracts. Optional authenticated proof coverage still pins four required evidence rows, command allowlists, native-activation attestation, secret scanning, Check Run binding, and selector rejection of stale or substituted proof. |
+| `packaging/live_agent_proof_test.rb`, `release_contract_test.rb` | Exact-SHA candidate construction — deterministic manifest/archive bytes, offline byte-for-byte verification of all four canonical projections, installed-version binding, and web-bundle digest verification before trusted hosted fan-out. Optional authenticated proof coverage still pins four required evidence rows, command allowlists, native-activation attestation, secret scanning, Check Run binding, and selector rejection of stale or substituted proof. |
+| `packaging/release_candidate_{baseline_catalog,baseline_cache_materializer,asset_verifier}_test.rb`, `integration/release_candidate_installed_target_test.rb` | Reviewed pre-release baselines — strict v0.6.9/v0.4.1/v0.4.2 catalog identity, exact package and checksum/signature/certificate metadata, checked-in digested runtime-closure manifests, non-floating latest-stable freshness, producer/observer dependency-lock and offline-closure completeness, catalog closure-policy attempt identity plus predecessor cache revalidation, read-only tag-scoped release-asset and explicit cache-materialization fetch argv, regular-file/symlink/substitution/archive safety, signed-checksum binding, role-only gem/skills targets, closed process environment, and engine-specific no-network/no-socket/no-device sandbox argv. These tests use synthetic cached bytes and command contracts; they do not run a historical package or container. |
+| `packaging/release_candidate_{remote_identity,remote_workflow,aggregate,hosted_stage,release_selector}_test.rb`, `release_contract_test.rb` | Trusted hosted candidate proof and exact-byte tag handoff — protected-main/workflow/action-lock/run/attempt/artifact identities, bounded request resolution/collection, closed blocking aggregation, exact ordinary-CI identity, predecessor retry composition, staged-before-install containment, full-SHA Actions, 30-day artifacts, the checkout-free final `checks: write` publisher, trusted Check/evidence selection, safe archive extraction, original-producer identity across retries, and manifest/version/latest-stable validation before publication. Tests use deterministic API/cache fixtures and do not dispatch GitHub Actions, run historical packages, create a tag, or publish. |
+| `packaging/release_candidate_{invariant_snapshot,process_teardown,upgrade_runner}_test.rb`, `integration/release_candidate_{fixed_phase_executor,latest_stable_upgrade,legacy_bench_v041_upgrade}_test.rb` | Pre-release upgrade survivors — fixed role-only producer/observer/candidate phase order, real-executor argv and exact legacy bench descriptor/instruction creation, required v0.4.2 collision observation, semantic status/doctor normalization, named task/config/attempt/receipt/web/service invariants, explicit migration diffs, strict second-run idempotency, bounded closed-environment subprocesses, process/service leak failure, authenticated-cache/sandbox no-start preflight, exact candidate-SHA next action, and cloned-prefix Linux/macOS candidate identity with stale-file rejection. Fixtures cannot satisfy the real producer contract; these tests do not run historical gems or a container. |
 | `user_service/user_service_test.rb`, `commands/{bot,daemon,web}/service_installer_test.rb`, `commands/service_installer/base_test.rb`, `commands/uninstall_test.rb` | `Hive::UserService` and thin Hive adapters — non-mutating inspect/plan, exact observation revalidation, drift refusal, atomic force backup/replace, typed manager partial failures, safe idempotent removal, systemd/launchd rendering and lifecycle behavior, cycle-free `WantedBy=default.target` daemon ordering, unchanged already-loaded launchd idempotency, unsupported-platform state, Homebrew stable-binary selection, macOS ProgramArguments `$0` parsing, web environment/path substitution, and uninstall ordering/warnings. |
 | `commands/{bot,daemon}_test.rb`, `integration/daemon_command_test.rb`, `integration/bot/bot_lifecycle_test.rb` | Shared service-install result presentation — bot/daemon-specific text prefixes and schemas, every success/outcome mapping, drift exit 64, manager failure exit 70, force/backup guidance, hostile-installer fallback envelopes, and schema-valid subprocess behavior after both commands converge on `ServiceInstaller::ResultPresenter`. |
 | `daemon/digest_scheduler_base_test.rb`, `daemon/answer_digest_scheduler_test.rb`, `london_date_test.rb`, `local_date_window_test.rb` | The retained shared scheduler-base contract, answer-digest cadence and cursor behavior, and calendar-window handling used by Hive's remaining host-local scheduling contracts. |
@@ -329,9 +344,23 @@ bundle exec rake e2e:lib_test
 bin/hive-e2e list
 bin/hive-e2e run
 bin/hive-e2e run --filter incident-regression --json
+bin/hive-e2e coverage --match "provider retry" --json
+bin/hive-e2e run --coverage workflow.full_pipeline
+bin/hive-e2e run --profile release
 ```
 
 The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes every built-in provider binary (Claude, Codex, Pi, and Grok) to `test/fixtures/fake-claude`, places the checked-in default-deny `gh` shim first on `PATH`, pins the direct `HIVE_GH_BIN` seam, and exposes only Bundler's resolved gem require paths through a protected `RUBYLIB` for every CLI, background, tmux, and replay process. Harness-owned home, dependency, agent, Hive, and GitHub paths cannot be replaced by scenario overrides. No scenario can fall through to a host `gh` or make a real GitHub request. Scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server; teardown captures the final pane, terminates unfinished detached workflow process groups from the run-scoped PID lifecycle log, and then stops tmux before GitHub verification and filesystem evidence capture.
+
+The semantic layer joins `test/e2e/coverage.yml` to each scenario's
+`coverage.primary` / `coverage.supporting` metadata. Catalog, parser, runner,
+and binary tests pin all-scenario classification, closed maturity/profile
+vocabulary, root-confined references, duplicate/unknown mapping rejection,
+lexical discovery, JSON/prose parity, required release-gap preflight, unique
+primary execution, and the separate versioned `selection.json` companion.
+Discovery conforms to `schemas/hive-e2e-coverage.v1.json`; semantic selection
+conforms to `schemas/hive-e2e-selection.v1.json` beside the ordinary
+`report.json`. Existing list/report v1 payloads and ordinary pattern/tag
+execution stay unchanged.
 
 Incident scenarios add stable incident and sibling metadata. Sibling-gated YAML
 remains visible in `report.json#scenario_metadata` with `pending: true`, while
@@ -389,9 +418,10 @@ cosign identity and checksum validation, the installed binary must run managed
 verifier supplies sandbox-local Ruby/Bundler launchers so the exact candidate
 gem wrapper can keep its private `GEM_HOME`/`GEM_PATH` without hiding Bundler
 from managed web dependency installation or asset compilation. The release
-contract tests require `web-bundle` to build and digest that archive before
-`candidate-gate`, require the candidate gate to exercise it, and forbid
-`release-finalize` from rebuilding it. The packaged-bootstrap integration test
+contract tests require the pre-tag candidate workflow to build and exercise
+that archive once, then require the tag workflow to select, download, rehash,
+and publish the same manifest-bound bytes without a fallback build. The
+packaged-bootstrap integration test
 uses a real `git archive HEAD:web`, checks its members against the tracked web
 tree, and verifies setup preserves every tracked file's bytes and executable
 bit after extraction and asset preparation.
@@ -497,13 +527,13 @@ gate.
 
 ## Exact-artifact Hive operating-skill verification
 
-The release-readiness owner is the offline `candidate-gate` in `release.yml`.
-It requires no provider keys: the exact tag checkout runs the canonical skill,
-manifest, OpenClaw projection, candidate-builder, and gem-installer tests; builds
-one gem/source/four-platform skill candidate; verifies manifest digests and
-every archive projection byte against `skills/hive/`; and invokes the privately
-installed candidate binary. The same job then exercises the exact managed web
-archive. Later jobs consume those artifacts without rebuilding them.
+The release-readiness owner is the trusted aggregate produced before a tag by
+`release-candidate.yml`. It requires no provider keys: one exact-SHA candidate
+contains the gem, committed source, four-platform skill archive, and managed
+web archive; blocking package/web/native/upgrade gates verify those bytes and
+the aggregate binds them to its evidence digest. A later explicit tag makes
+`release.yml` revalidate that Check/evidence/run/artifact chain and consume the
+same gem/skill/web bytes without rebuilding them.
 Focused managed-web unit coverage additionally distinguishes ordinary healthy
 same-version bootstrap (no work) from explicit `hive web install --force`
 (staged dependency/asset reprovision plus rollback-safe activation), pins that

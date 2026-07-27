@@ -4,12 +4,14 @@ require "json"
 require "open3"
 require "rbconfig"
 require "hive/agent_skills/canonical_skill"
+require_relative "../../packaging/release_candidate/aggregate"
 
 class ReleaseContractTest < Minitest::Test
   include HiveTestHelper
 
   ROOT = File.expand_path("../..", __dir__)
   RELEASE_WORKFLOW = File.join(ROOT, ".github/workflows/release.yml")
+  CANDIDATE_WORKFLOW = File.join(ROOT, ".github/workflows/release-candidate.yml")
   LIVE_AGENT_WORKFLOW = File.join(ROOT, ".github/workflows/live-agent-skills.yml")
   RELEASE_SELECTOR = File.join(ROOT, "packaging/live_agent_skills/select_release_proof.rb")
   SETUP_NODE_ACTION = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
@@ -134,70 +136,214 @@ class ReleaseContractTest < Minitest::Test
     refute_includes candidate_install_body, 'gem install "$gem_file"'
   end
 
-  def test_tag_release_builds_and_verifies_offline_exact_candidate
+  def test_tag_release_selects_and_reverifies_exact_pre_tag_candidate
     body = File.read(RELEASE_WORKFLOW)
     workflow = YAML.safe_load_file(RELEASE_WORKFLOW, aliases: true)
     jobs = workflow.fetch("jobs")
-    gate = jobs.fetch("candidate-gate")
-    gate_body = gate.fetch("steps").filter_map { |step| step["run"] }.join("\n")
+    selector = jobs.fetch("select-candidate")
+    selector_body = selector.fetch("steps").filter_map { |step| step["run"] }.join("\n")
 
-    refute jobs.key?("build")
-    assert_equal "web-bundle", gate.fetch("needs")
-    assert_equal "candidate-gate", jobs.fetch("install-gate").fetch("needs")
-    assert_equal [ "candidate-gate", "install-gate" ], jobs.fetch("release-finalize").fetch("needs")
-    assert_includes gate_body, '[[ "$candidate_sha" == "$(git rev-parse "${GITHUB_REF}^{commit}")" ]]'
-    assert_includes gate_body, "git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main"
-    assert_includes gate_body, 'git merge-base --is-ancestor "$candidate_sha" refs/remotes/origin/main'
-    assert_includes gate_body, "repos/${GITHUB_REPOSITORY}/branches/main"
-    assert_includes gate_body, "repository main branch is not protected"
-    assert_includes gate_body, "gem build hive.gemspec"
-    assert_includes gate_body, "git archive --format=tar.gz"
-    assert_includes gate_body, "packaging/live_agent_skills/build.rb"
-    assert_includes gate_body, "packaging/live_agent_skills/verify_candidate.rb"
-    assert_includes gate_body, "packaging/live_agent_skills/install_candidate_gem.sh"
-    assert_includes gate_body, '[[ "$installed_version" == "$version" ]]'
-    assert_includes gate_body, "test/unit/agent_skills/canonical_skill_test.rb"
-    assert_includes gate_body, "test/unit/agent_skills/manifest_test.rb"
-    assert_includes gate_body, "test/unit/openclaw_skills_test.rb"
-    assert_includes gate_body, "test/unit/packaging/live_agent_proof_test.rb"
-    assert_includes gate_body, "test/unit/live_agent_candidate_gem_installer_test.rb"
-    assert_includes gate_body, "test/unit/packaging/verify_release_test.rb"
-    refute_includes body, "commits/${candidate_sha}/check-runs"
-    refute_includes body, "packaging/live_agent_skills/select_release_proof.rb"
-    refute_includes body, "live-agent-skills-proof"
+    assert_equal({}, workflow.fetch("permissions"))
+    assert_equal "select-candidate", jobs.fetch("install-gate").fetch("needs")
+    assert_equal [ "select-candidate", "install-gate" ],
+                 jobs.fetch("release-finalize").fetch("needs")
+    assert_includes selector_body, 'candidate_sha="$(git rev-parse "${GITHUB_REF}^{commit}")"'
+    assert_includes selector_body, "commits/${candidate_sha}/check-runs?per_page=100"
+    assert_includes selector_body, "select_release_candidate.rb select"
+    assert_includes selector_body, "select_release_candidate.rb verify"
+    assert_includes selector_body, "select_release_candidate.rb digest"
+    assert_includes selector_body, "select_release_candidate.rb extract"
+    assert_includes selector_body, "select_release_candidate.rb action-lock"
+    assert_includes selector_body, "select_release_candidate.rb candidate"
+    assert_includes body, "select_release_candidate.rb publication"
+    assert_includes selector_body, "artifact.producer_run_id"
+    assert_includes selector_body, "ordinary_ci.run_id"
+    assert_includes selector_body,
+                    'git merge-base --is-ancestor "$workflow_sha" refs/remotes/origin/main'
+    assert_includes selector_body, "install_candidate_gem.sh"
+    assert_includes selector_body, "verify-managed-web-setup.sh"
+    assert_includes selector_body, ".public_files | [.gem, .skills, .web]"
+    %w[gem\ build git\ archive managed_web_archive.rb live_agent_skills/build.rb].each do |build|
+      refute_includes body, build
+    end
     refute_includes body, "OPENAI_API_KEY"
     refute_includes body, "ANTHROPIC_API_KEY"
     refute_includes body, "CODEX_API_KEY"
-    assert_includes body, "hive-proven-candidate"
-    assert_includes body, "hive-agent-skills-*.tar.gz"
-    assert_equal "Build and verify exact offline candidate", gate.fetch("name")
+    assert_includes body, "hive-selected-candidate-${{ github.run_id }}"
+    assert_equal "Select and verify trusted pre-tag candidate", selector.fetch("name")
   end
 
-  def test_release_builds_and_proves_the_exact_managed_web_archive_before_finalize
+  def test_candidate_workflow_is_exact_sha_pinned_and_code_free_at_aggregation
+    body = File.read(CANDIDATE_WORKFLOW)
+    workflow = YAML.safe_load_file(CANDIDATE_WORKFLOW, aliases: true)
+    jobs = workflow.fetch("jobs")
+    aggregate = jobs.fetch("aggregate")
+
+    assert_includes body, "workflow_dispatch:"
+    assert_includes body, "candidate_sha:"
+    assert_includes body, "request_id:"
+    assert_includes body, "run-name: hive-release-candidate:"
+    assert_equal({}, workflow.fetch("permissions"))
+    assert_equal false, workflow.dig("concurrency", "cancel-in-progress")
+    assert_includes workflow.dig("concurrency", "group"), "inputs.candidate_sha"
+    assert_operator body.scan("retention-days: 30").size, :>=, 2
+    assert_includes body, "git merge-base --is-ancestor"
+    assert_includes body, "branches/main"
+    assert_includes body, "action_lock_sha256"
+    assert_includes body, "source_run_id"
+    assert_includes body, "source_run_attempt"
+    assert_includes body, "source_artifact_id"
+    assert_includes body, "source_artifact_digest"
+    assert_includes body, "packaging/release_candidate/hosted_upgrade_lane.rb"
+    assert_includes body, "$HIVE_RC_RUN_ROOT/candidate/manifest.json"
+    assert_includes body, "/run/sandbox-attestation.json"
+    assert_includes body, "/run/baseline-cache-attestation.json"
+    assert_includes body, "/run/targets/"
+
+    external_uses = body.scan(/^\s*(?:-\s*)?uses:\s+([^@\s]+)@([^#\s]+)/).reject do |action, _revision|
+      action.start_with?("./")
+    end
+    refute_empty external_uses
+    external_uses.each do |action, revision|
+      assert_match(/\A[0-9a-f]{40}\z/, revision, "#{action} must be full-SHA pinned")
+    end
+    jobs.each_value do |job|
+      Array(job["steps"]).select { |step| step["uses"].to_s.start_with?("actions/checkout@") }.each do |step|
+        assert_equal false, step.dig("with", "persist-credentials")
+      end
+    end
+
+    assert_equal({ "actions" => "read", "checks" => "write" }, aggregate.fetch("permissions"))
+    aggregate_body = JSON.generate(aggregate)
+    refute_includes aggregate_body, "actions/checkout"
+    refute_includes aggregate_body, "packaging/release_candidate"
+    refute_includes aggregate_body, "candidate/manifest.json"
+    jobs.reject { |name, _job| name == "aggregate" }.each do |name, job|
+      refute_equal "write", job.dig("permissions", "checks"), name
+    end
+
+    %w[OPENAI_API_KEY ANTHROPIC_API_KEY CODEX_API_KEY CLAUDE_API_KEY].each do |secret|
+      refute_includes body, secret
+    end
+    refute_match(/\b(?:git tag|gh release create|gem push|docker push)\b/, body)
+    verifier = read("packaging/release_candidate/verify_hosted_gate.sh")
+    assert_includes verifier, "candidate-controlled harness drift"
+    assert_includes body, ".trusted-control/packaging/release_candidate/verify_hosted_gate.sh"
+    assert_includes body, "--cap-drop=ALL"
+    assert_includes body, "--security-opt=no-new-privileges"
+    assert_includes body, "--network=none"
+    assert_match(/ruby@sha256:[0-9a-f]{64}/, body)
+    refute_includes body, "sudo unshare"
+  end
+
+  def test_candidate_version_gate_reads_the_reviewed_catalog
+    body = File.read(CANDIDATE_WORKFLOW)
+    workflow = YAML.safe_load_file(CANDIDATE_WORKFLOW, aliases: true)
+    job = workflow.fetch("jobs").fetch("candidate-version")
+    command = job.fetch("steps").last.fetch("run")
+
+    assert_includes command, "BaselineCatalog.load"
+    assert_includes command, "latest_stable.version"
+    assert_includes command, "BASELINE_VERSION"
+    refute_match(/Gem::Version\.new\(\"0\.6\.9\"\)/, command)
+    assert_includes body, "trusted_control=\"$RUNNER_TEMP/trusted-control\""
+    assert_includes body,
+                    '-r"$trusted_control/packaging/release_candidate/aggregate"'
+  end
+
+  def test_candidate_workflow_declares_the_closed_required_job_registry
+    workflow = YAML.safe_load_file(CANDIDATE_WORKFLOW, aliases: true)
+    names = workflow.fetch("jobs").values.flat_map do |job|
+      [
+        job.fetch("name"),
+        *Array(job.dig("strategy", "matrix", "include")).filter_map { |row| row["job_name"] }
+      ]
+    end
+
+    HiveReleaseCandidate::Aggregate::REQUIRED_JOBS.each do |required|
+      assert_includes names, required
+    end
+    assert_includes names, "Protected ordinary CI"
+    assert_includes names, "Trusted release candidate aggregate"
+  end
+
+  def test_candidate_retry_executes_only_selected_receipted_replacements
+    body = File.read(CANDIDATE_WORKFLOW)
+    workflow = YAML.safe_load_file(CANDIDATE_WORKFLOW, aliases: true)
+    jobs = workflow.fetch("jobs")
+
+    assert_includes body, "selected_gates"
+    assert_includes body, "RetrySelection"
+    assert_includes body, "source_evidence_sha256"
+    assert_includes body, "source_artifact_run_id"
+    assert_includes body, "source_artifact_run_attempt"
+    assert_includes body, "source_artifact_name"
+    assert_includes body, '.external_id == ("hive-release-candidate:v1:"'
+    assert_includes body, "display_title"
+    refute_includes body, "|| true"
+
+    %w[catalog release-e2e package managed-web freshness candidate-version].each do |job_name|
+      job = jobs.fetch(job_name)
+      assert_includes job.fetch("if"), "selected_gates"
+      assert_gate_receipt_precedes_execution(job, job_name)
+    end
+    %w[native upgrade].each do |job_name|
+      job = jobs.fetch(job_name)
+      executable = job.fetch("steps").reject do |step|
+        step["name"].to_s.start_with?("Retain ")
+      end
+      executable.each do |step|
+        assert_includes step.fetch("if"), "matrix.job_name", "#{job_name}: #{step["name"] || step["uses"]}"
+      end
+      assert_gate_receipt_precedes_execution(job, job_name)
+    end
+
+    validate_permissions = jobs.fetch("validate").fetch("permissions")
+    assert_equal "read", validate_permissions.fetch("actions")
+    assert_equal "read", validate_permissions.fetch("checks")
+    aggregate_body = jobs.fetch("aggregate").fetch("steps").last.fetch("run")
+    assert_includes aggregate_body, "conclusion=failure"
+    assert_includes aggregate_body, "if test \"$qa_status\" = qa_ready"
+    assert_includes aggregate_body, "external_id"
+  end
+
+  def test_release_publication_graph_waits_for_exact_selected_bytes
     workflow = YAML.safe_load_file(RELEASE_WORKFLOW, aliases: true)
     jobs = workflow.fetch("jobs")
-    web_bundle = jobs.fetch("web-bundle")
-    proof = jobs.fetch("candidate-gate")
+    selector = jobs.fetch("select-candidate")
+    install = jobs.fetch("install-gate")
     finalize = jobs.fetch("release-finalize")
 
-    package_step = web_bundle.fetch("steps").find do |step|
-      step["name"] == "Build exact managed web archive"
-    end
-    refute_nil package_step
-    assert_includes package_step.fetch("run"), "git archive --format=tar.gz"
-    assert_includes package_step.fetch("run"), 'echo "sha256=$web_sha" >> "$GITHUB_OUTPUT"'
-    assert_equal "${{ steps.archive.outputs.sha256 }}", web_bundle.dig("outputs", "sha256")
-
-    proof_body = proof.fetch("steps").filter_map { |step| step["run"] }.join("\n")
-    assert_equal "web-bundle", proof.fetch("needs")
-    assert_includes proof_body, "EXPECTED_WEB_SHA"
-    assert_includes proof_body, "verify-managed-web-setup.sh"
-    assert_includes proof_body, 'hive_bin="$RUNNER_TEMP/proven-gems/bin/hive"'
-    assert_includes proof_body, "cp \"$web_archive\" proven/"
+    assert_nil selector["needs"]
+    assert_equal "select-candidate", install.fetch("needs")
+    assert_equal [ "select-candidate", "install-gate" ], finalize.fetch("needs")
 
     finalize_body = finalize.fetch("steps").filter_map { |step| step["run"] }.join("\n")
-    refute_includes finalize_body, "git archive"
-    refute finalize.fetch("steps").any? { |step| step["name"] == "Package managed web bundle" }
+    assert_includes finalize_body, "select_release_candidate.rb publication"
+    assert_includes finalize_body, "selected/dist/SHA256SUMS"
+    assert_includes finalize_body, 'gh release create "$REF_NAME" selected/dist/*'
+    refute_match(/\b(?:gem build|git archive)\b/, finalize_body)
+  end
+
+  def test_release_and_candidate_workflows_pin_actions_and_disable_checkout_credentials
+    [ RELEASE_WORKFLOW, CANDIDATE_WORKFLOW ].each do |path|
+      body = File.read(path)
+      external = body.scan(/^\s*(?:-\s*)?uses:\s+([^@\s]+)@([^#\s]+)/).reject do |action, _revision|
+        action.start_with?("./")
+      end
+      refute_empty external
+      external.each do |action, revision|
+        assert_match(/\A[0-9a-f]{40}\z/, revision, "#{action} in #{path}")
+      end
+      workflow = YAML.safe_load_file(path, aliases: true)
+      workflow.fetch("jobs").each_value do |job|
+        Array(job["steps"]).select do |step|
+          step["uses"].to_s.start_with?("actions/checkout@")
+        end.each do |step|
+          assert_equal false, step.dig("with", "persist-credentials")
+        end
+      end
+    end
   end
 
   def test_release_selector_executes_the_trusted_exact_sha_fixture_contract
@@ -264,13 +410,24 @@ class ReleaseContractTest < Minitest::Test
       /sha256sum hive-cli-\*\.gem hive-agent-skills-\*\.tar\.gz hive-web-\*\.tar\.gz > SHA256SUMS/,
       workflow
     )
-    assert_includes workflow, "hive-web-${version}.tar.gz"
+    assert_includes workflow, ".public_files | [.gem, .skills, .web]"
     assert_includes workflow,
                     '--certificate-identity-regexp "^https://github\\.com/ivankuznetsov/hive/' \
                     '\\.github/workflows/release\\.yml@refs/tags/${REF_NAME}$"'
   end
 
   private
+
+  def assert_gate_receipt_precedes_execution(job, label)
+    steps = job.fetch("steps")
+    verify_index = steps.index { |step| step["name"].to_s.start_with?("Attest exact producer") }
+    upload_index = steps.index { |step| step["name"].to_s.start_with?("Retain ") }
+    refute_nil verify_index, label
+    refute_nil upload_index, label
+    assert_operator verify_index, :<, upload_index, label
+    later_run = steps[(upload_index + 1)..].any? { |step| step["run"] }
+    assert later_run, "#{label} must upload its immutable receipt before gate execution"
+  end
 
   def read(path)
     File.read(File.join(ROOT, path))

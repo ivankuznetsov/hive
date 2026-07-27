@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "$#" -eq 2 ]]
+[[ "$1" == "upgrade" ]]
+[[ "$2" == "ivankuznetsov/hive/hive" ]]
+exec "${HIVE_RC_CONTROL_ROOT:?}/channel_update_fixture.sh"

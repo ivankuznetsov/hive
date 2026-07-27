@@ -678,6 +678,47 @@ class ArtifactFirewallTest < Minitest::Test
     end
   end
 
+  def test_required_output_rejects_descriptor_substitution_races
+    with_tmp_dir do |dir|
+      non_regular = File.join(dir, "non-regular.md")
+      symlink = File.join(dir, "symlink.md")
+      File.write(non_regular, "replaced after lstat\n")
+      File.write(symlink, "replaced after lstat\n")
+      manifest = build_manifest(
+        dir,
+        outputs: {
+          "non_regular" => non_regular,
+          "symlink" => symlink
+        },
+        roots: [ dir ]
+      )
+      opened_stat = Struct.new(:file?).new(false)
+      opened_file = Struct.new(:stat) do
+        def close = nil
+      end.new(opened_stat)
+      original_open = File.method(:open)
+      descriptor_substitution = lambda do |path, *args, **kwargs, &block|
+        case path
+        when non_regular then opened_file
+        when symlink then raise Errno::ELOOP, path
+        else original_open.call(path, *args, **kwargs, &block)
+        end
+      end
+
+      report = with_replaced_singleton_method(
+        File, :open, descriptor_substitution
+      ) do
+        Hive::ArtifactFirewall.validate_required_outputs(manifest)
+      end
+      kinds = report.required_output_violations.to_h do |violation|
+        [ violation.label, violation.kind ]
+      end
+
+      assert_equal :required_output_non_regular, kinds.fetch("non_regular")
+      assert_equal :required_output_symlink, kinds.fetch("symlink")
+    end
+  end
+
   def test_violation_rejects_unknown_kind
     error = assert_raises(ArgumentError) do
       Hive::ArtifactFirewall::Violation.new(

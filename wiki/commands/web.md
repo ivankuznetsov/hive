@@ -208,9 +208,14 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
   link to the native task resource and reuse the same Retry, Approve, Run, and
   Diff forms as the task page. There is deliberately no parallel drag/drop,
   drawer, cursor, transition, or audit subsystem: workflow mutation continues
-  through the existing task controllers. Each band scrolls horizontally
-  inside the page at narrow widths. `Grid` retains the compact per-project task
-  rows. Both ordinary views consume status's workflow-aware archive projection:
+  through the existing task controllers. The application shell and primary
+  navigation use the full viewport width with fluid edge gutters; the project
+  rail grows to a bounded desktop width while the status content receives all
+  remaining space. Kanban tracks grow beyond their comfortable minimum when a
+  large screen has room, and each band scrolls horizontally inside the page
+  when it does not. `Grid` retains the compact per-project task rows and gains
+  the same fluid content area. Both ordinary views consume status's
+  workflow-aware archive projection:
   expired archived rows are absent, and a positive project count renders
   `… and 1 older archived task (hive archive to view)` or
   `… and N older archived tasks (hive archive to view)` as a direct link to the

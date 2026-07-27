@@ -104,7 +104,7 @@ jobs:
         run: ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --integrity-only
       - name: Retain e2e reports and failure evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hive-e2e-report
           path: ${{ runner.temp }}/hive-e2e-runs

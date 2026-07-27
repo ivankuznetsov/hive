@@ -1121,6 +1121,30 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_expected_output_availability_rejects_symlink
+    with_tmp_task do |task|
+      target = File.join(task.folder, "target.md")
+      output = File.join(task.folder, "expected.md")
+      File.write(target, "done\n")
+      File.symlink(target, output)
+
+      refute Hive::ClaudeLauncher.expected_output_available?(output)
+    end
+  end
+
+  def test_expected_output_availability_rejects_firewall_error
+    with_tmp_task do |task|
+      output = File.join(task.folder, "expected.md")
+      failure = ->(_manifest) { raise Hive::ArtifactFirewall::InvalidManifest, "invalid" }
+
+      with_replaced_singleton_method(
+        Hive::ArtifactFirewall, :validate_required_outputs, failure
+      ) do
+        refute Hive::ClaudeLauncher.expected_output_available?(output)
+      end
+    end
+  end
+
   def test_wait_for_expected_output_accepts_ready_prompt_without_done_file
     with_tmp_task do |task|
       output = File.join(task.folder, "result.md")

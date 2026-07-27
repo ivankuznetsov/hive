@@ -375,7 +375,10 @@ identity; legacy provider-only snapshots retain provider-only comparison. The
 current config may revoke or narrow that
 snapshot; it cannot relax captured contract/dependency guards, lower
 confidence/leverage thresholds, add a validation command, switch identities, or
-otherwise broaden an old job.
+otherwise broaden an old job. A revoked action remains nonterminal so restored
+authority can resume it, but Hive probes that durable hold at most hourly
+instead of launching an action child every daemon minute. Other transient
+action failures retain the ordinary one-minute retry cadence.
 
 Fixes inherit the resolved refactor identity by default and may independently
 override `refactor_patrol.auto_fix.agent`, `.model`, and `.effort`. The selected
@@ -466,6 +469,15 @@ continuation evidence, so disabled registrations still participate in unique
 repository ownership. Continuation-only claims may reconcile an existing
 request (or record completion of an already-intended push), but cannot create a
 replacement patch or begin a new push/PR phase.
+
+The Git mechanism for those reads and writes is the boundary-ready
+`Hive::AgentGitGate`. `PrOpener` requests managed URL/OID observations and its
+push compatibility call resolves the local branch once, publishes the
+immutable commit under the ledger-selected exact lease, and independently
+observes the remote afterward. The resulting component receipt records
+expected/before/published/after OIDs and a non-secret transport fingerprint.
+The component cannot invent replacement authority: the append-only patrol
+ledger above it remains the only source for the expected old OID.
 
 After `gh pr create`, an
 exact-host/repository `gh pr view` must prove the returned URL/number, OPEN

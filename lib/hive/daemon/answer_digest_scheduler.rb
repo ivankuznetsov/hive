@@ -55,8 +55,7 @@ module Hive
         # so a bare `exit_code.to_i.zero?` would treat a killed digest as a
         # success and silently advance the cursor past that date. Treat a nil
         # (signalled / unknown) exit as a failure so the day is retried.
-        # (Rationale carried verbatim from DigestScheduler#complete, the
-        # deliberate mirror.)
+        # This keeps a signalled child from advancing the daily cursor.
         unless exit_code && exit_code.to_i.zero?
           record_failure(now)
           return

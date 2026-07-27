@@ -10,6 +10,7 @@ require "hive/claude_launcher"
 require "hive/model_routing"
 require "hive/stages/base"
 require "hive/scripts/workflow_policy_hook"
+require "hive/workflow_package/runtime_policy"
 
 # Direct coverage for Hive::Stages::Base.spawn_agent: profile check_version! /
 # preflight! ordering, the warn_isolation_reduced trigger when the configured
@@ -44,6 +45,46 @@ class SpawnAgentTest < Minitest::Test
     folder = File.join(dir, ".hive-state", "stages", stage, slug)
     FileUtils.mkdir_p(folder)
     Hive::Task.new(folder)
+  end
+
+  def grok_stream_profile(binary)
+    Hive::AgentProfile.new(
+      name: :grok,
+      bin_default: binary,
+      headless_flag: "-p",
+      prompt_style: :headless_flag_value,
+      version_flag: "--version",
+      skill_syntax_format: "/%{skill}",
+      status_detection_mode: :exit_code_only,
+      structured_output_protocol: :grok_end
+    )
+  end
+
+  def managed_output_policy(task, binary, output)
+    Hive::WorkflowPackage::RuntimePolicy::Policy.new(
+      permission_mode: nil,
+      allowed_tools: [].freeze,
+      disallowed_tools: [].freeze,
+      directories: [].freeze,
+      commands: [].freeze,
+      domains: [].freeze,
+      executables: {}.freeze,
+      environment: {
+        "HOME" => task.folder,
+        "PATH" => ENV.fetch("PATH", "/usr/bin")
+      }.freeze,
+      settings_path: nil,
+      mcp_config_path: nil,
+      policy_path: nil,
+      cli_flags: [].freeze,
+      permission_flags: [].freeze,
+      agent_add_dirs: [].freeze,
+      command_prefix: [].freeze,
+      executable: binary,
+      task_root: task.folder,
+      output_paths: { File.basename(output) => output }.freeze,
+      cleanup_paths: [].freeze
+    ).freeze
   end
 
   # --- resolve_template_path ----------------------------------------------
@@ -336,6 +377,125 @@ class SpawnAgentTest < Minitest::Test
       refute File.exist?(File.join(task.log_dir, "isolation-warnings.log"))
       refute File.exist?(File.join(task.log_dir, "config-warnings.log"))
       assert_equal "<!-- WAITING -->\n", File.read(task.state_file)
+    end
+  end
+
+  def test_invalid_managed_output_becomes_typed_error_without_writing
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p(package)
+      output = File.join(task.folder, "result.md")
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit(./result.md)" ]
+          },
+          task_folder: task.folder,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          managed_outputs: [ output ]
+        )
+      end
+      fake_agent = Object.new
+      fake_agent.define_singleton_method(:run!) do
+        {
+          status: :ok,
+          final_message: '{"files":',
+          final_message_truncated: false
+        }
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::Agent, :new, ->(**_kwargs) { fake_agent }
+      ) do
+        Hive::Stages::Base.spawn_agent(
+          task,
+          prompt: "x",
+          max_budget_usd: 1,
+          timeout_sec: 5,
+          runtime_policy: policy
+        )
+      end
+
+      assert_equal :error, result[:status]
+      assert_equal "managed_output_invalid", result[:error_reason]
+      assert_includes result[:error_message], "invalid structured output"
+      refute File.exist?(output)
+    end
+  end
+
+  def test_managed_grok_publishes_the_terminal_structured_output
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      output = File.join(task.folder, "result.md")
+      binary = File.join(dir, "fake-grok")
+      streamed = JSON.generate("files" => { "result.md" => "stale stream\n" })
+      terminal = JSON.generate(
+        "type" => "end",
+        "structuredOutput" => { "files" => { "result.md" => "terminal result\n" } }
+      )
+      File.write(binary, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          printf '%s\n' 'grok 0.2.102'
+          exit 0
+        fi
+        printf '%s\n' '#{JSON.generate("type" => "text", "data" => streamed)}'
+        printf '%s\n' '#{terminal}'
+      SH
+      File.chmod(0o755, binary)
+      profile = grok_stream_profile(binary)
+      policy = managed_output_policy(task, binary, output)
+
+      result = Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x",
+        max_budget_usd: nil,
+        timeout_sec: 5,
+        profile: profile,
+        runtime_policy: policy
+      )
+
+      assert_equal :ok, result[:status]
+      assert_equal :structured, result[:final_message_source]
+      assert_equal "terminal result\n", File.read(output)
+    end
+  end
+
+  def test_managed_grok_rejects_streamed_json_after_invalid_terminal_output
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      output = File.join(task.folder, "result.md")
+      binary = File.join(dir, "fake-grok")
+      streamed = JSON.generate("files" => { "result.md" => "stale stream\n" })
+      File.write(binary, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          printf '%s\n' 'grok 0.2.102'
+          exit 0
+        fi
+        printf '%s\n' '#{JSON.generate("type" => "text", "data" => streamed)}'
+        printf '%s\n' '{"type":"end","structuredOutput":null}'
+      SH
+      File.chmod(0o755, binary)
+      profile = grok_stream_profile(binary)
+      policy = managed_output_policy(task, binary, output)
+
+      result = Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x",
+        max_budget_usd: nil,
+        timeout_sec: 5,
+        profile: profile,
+        runtime_policy: policy
+      )
+
+      assert_equal :error, result[:status]
+      assert_equal "managed_output_invalid", result[:error_reason]
+      assert_equal :structured_invalid, result[:final_message_source]
+      refute File.exist?(output)
     end
   end
 

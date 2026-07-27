@@ -107,13 +107,17 @@ class AgentTest < Minitest::Test
       ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
       ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
 
-      result = Hive::Agent.new(task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5).run!
+      agent = Hive::Agent.new(task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5)
+      result = agent.run!
 
       assert_equal 0, result[:exit_code]
       assert_equal :waiting, result[:status]
       assert_equal :waiting, Hive::Markers.current(task.state_file).name
       assert File.exist?(result[:log_file])
       assert_equal 0o600, File.stat(result[:log_file]).mode & 0o777
+      assert_instance_of Hive::AgentRuntime::ObservableResult, agent.observable_result
+      assert_equal :waiting, agent.observable_result.status
+      assert_equal result[:exit_code], agent.observable_result.exit_code
     end
   end
 
@@ -147,6 +151,61 @@ class AgentTest < Minitest::Test
       assert_includes log, "profile=claude"
       refute_includes log, "cmd=["
       assert_equal 0o600, File.stat(result[:log_file]).mode & 0o777
+    end
+  end
+
+  def test_log_and_start_event_record_typed_model_and_effective_effort_without_serializing_argv
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+      profile = Hive::AgentProfiles.lookup(:claude)
+      launch_arguments = profile.identity_arguments(model: "claude-opus-4-8", effort: "high")
+
+      result = Hive::Agent.new(
+        task: task, prompt: "do not log this prompt", max_budget_usd: 1, timeout_sec: 5,
+        profile: profile, launch_arguments: launch_arguments
+      ).run!
+
+      log = File.read(result.fetch(:log_file))
+      start_event = File.readlines(File.join(task.folder, "events.jsonl"), chomp: true)
+                        .map { |line| JSON.parse(line) }
+                        .find { |event| event.fetch("event_type") == "agent_start" }
+      [ log, start_event.fetch("message") ].each do |receipt|
+        assert_includes receipt, "model=claude-opus-4-8"
+        assert_includes receipt, "requested_effort=high"
+        assert_includes receipt, "effective_effort=high"
+        assert_includes receipt, "model_pinned=true"
+        assert_includes receipt, "effort_supported=true"
+        refute_includes receipt, "--model"
+        refute_includes receipt, "do not log this prompt"
+      end
+    end
+  end
+
+  def test_launch_arguments_reject_invalid_types_and_conflicting_native_argv
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      profile = Hive::AgentProfiles.lookup(:claude)
+      launch_arguments = profile.identity_arguments(model: "claude-opus-4-8", effort: "high")
+
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+          profile: profile, launch_arguments: {}
+        )
+      end
+      assert_includes error.message, "LaunchArguments"
+
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+          profile: profile, launch_arguments: launch_arguments,
+          identity_arguments: [ "--model", "different-model" ]
+        )
+      end
+      assert_includes error.message, "different native argv"
     end
   end
 
@@ -249,7 +308,8 @@ class AgentTest < Minitest::Test
         prompt_style: :headless_flag_value,
         version_flag: "--version",
         skill_syntax_format: "/%{skill}",
-        status_detection_mode: :exit_code_only
+        status_detection_mode: :exit_code_only,
+        structured_output_protocol: :grok_end
       )
 
       result = Hive::Agent.new(
@@ -260,6 +320,126 @@ class AgentTest < Minitest::Test
       assert_equal :ok, result[:status]
       assert_equal "Here&apos;s a summary", result[:final_message]
       assert_equal :structured, result[:final_message_source]
+    end
+  end
+
+  def test_grok_terminal_structured_output_replaces_streaming_text
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      bin = File.join(dir, "fake-grok")
+      File.write(bin, <<~SH)
+        #!/bin/sh
+        printf '%s\n' '{"type":"text","data":"review prose"}'
+        printf '%s\n' '{"type":"end","stopReason":"EndTurn","structuredOutput":{"files":{"reviews/adversarial-01.md":"Verdict: quota exceeded private result\\n"}}}'
+      SH
+      File.chmod(0o755, bin)
+      profile = Hive::AgentProfile.new(
+        name: :grok,
+        bin_default: bin,
+        headless_flag: "-p",
+        prompt_style: :headless_flag_value,
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}",
+        status_detection_mode: :exit_code_only,
+        structured_output_protocol: :grok_end
+      )
+
+      result = Hive::Agent.new(
+        task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+        profile: profile
+      ).run!
+      log = File.read(result.fetch(:log_file))
+
+      assert_equal(
+        JSON.generate(
+          "files" => {
+            "reviews/adversarial-01.md" => "Verdict: quota exceeded private result\n"
+          }
+        ),
+        result[:final_message]
+      )
+      assert_equal :structured, result[:final_message_source]
+      assert_nil result[:limit_text]
+      refute_includes log, "review prose"
+      refute_includes log, "quota exceeded private result"
+      assert_includes log, "[structured message omitted type=end]"
+    end
+  end
+
+  def test_grok_malformed_terminal_structured_output_never_persists_to_log
+    {
+      "string" => '"sensitive malformed output"',
+      "array" => '["sensitive malformed output"]',
+      "null" => "null"
+    }.each do |name, value|
+      with_tmp_dir do |dir|
+        task = make_task(dir)
+        bin = File.join(dir, "fake-grok")
+        File.write(bin, <<~SH)
+          #!/bin/sh
+          printf '%s\n' '{"type":"text","data":"review prose"}'
+          printf '%s\n' '{"type":"end","stopReason":"EndTurn","structuredOutput":#{value}}'
+        SH
+        File.chmod(0o755, bin)
+        profile = Hive::AgentProfile.new(
+          name: :grok,
+          bin_default: bin,
+          headless_flag: "-p",
+          prompt_style: :headless_flag_value,
+          version_flag: "--version",
+          skill_syntax_format: "/%{skill}",
+          status_detection_mode: :exit_code_only,
+          structured_output_protocol: :grok_end
+        )
+
+        result = Hive::Agent.new(
+          task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+          profile: profile
+        ).run!
+        log = File.read(result.fetch(:log_file))
+
+        assert_equal "review prose", result[:final_message], name
+        refute_includes log, '"structuredOutput":', name
+        refute_includes log, "sensitive malformed output", name
+        assert_includes log, "[structured message omitted type=end]", name
+      end
+    end
+  end
+
+  def test_grok_unparseable_terminal_payload_is_opaque_and_not_a_quota_signal
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      bin = File.join(dir, "fake-grok")
+      File.write(bin, <<~SH)
+        #!/bin/sh
+        printf '%s\n' '{"type":"text","data":"review prose"}'
+        printf '%s\n' '{"type":"end","structuredOutput":{"files":{"review.md":"quota exceeded private payload"}'
+        exit 1
+      SH
+      File.chmod(0o755, bin)
+      profile = Hive::AgentProfile.new(
+        name: :grok,
+        bin_default: bin,
+        headless_flag: "-p",
+        prompt_style: :headless_flag_value,
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}",
+        status_detection_mode: :exit_code_only,
+        structured_output_protocol: :grok_end
+      )
+
+      result = Hive::Agent.new(
+        task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+        profile: profile
+      ).run!
+      log = File.read(result.fetch(:log_file))
+
+      assert_equal "review prose", result[:final_message]
+      assert_nil result[:limit_text]
+      refute_includes result[:error_message].to_s, "private payload"
+      refute_includes log, '"structuredOutput":'
+      refute_includes log, "private payload"
+      assert_includes log, "[structured message omitted type=end]"
     end
   end
 
@@ -390,6 +570,7 @@ class AgentTest < Minitest::Test
                               identity_arguments: identity.native_arguments)
 
       cmd = agent.send(:build_cmd)
+      profile.permission_flags.each { |argument| assert_includes cmd, argument }
       assert_equal %w[--model gpt-5.6-terra], cmd.each_cons(2).find { |a, _| a == "--model" }
       assert_equal [ "-c", "model_reasoning_effort=medium" ],
                    cmd.each_cons(2).find { |a, _| a == "-c" }
@@ -505,8 +686,49 @@ class AgentTest < Minitest::Test
         profile: Hive::AgentProfiles.lookup(:codex), cli_flags: [ "--model", "unsafe" ]
       )
 
-      error = assert_raises(ArgumentError) { agent.send(:build_cmd) }
-      assert_includes error.message, "cli_flags are claude-specific"
+      error = assert_raises(Hive::AgentRuntime::UnsupportedCapability) { agent.send(:build_cmd) }
+      assert_equal :raw_cli_arguments, error.evidence.capability
+      assert_equal false, error.evidence.supported
+    end
+  end
+
+  def test_managed_runtime_policy_can_supply_trusted_non_claude_argv
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p(package)
+      output = File.join(task.folder, "result.md")
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit(./result.md)" ]
+          },
+          task_folder: task.folder,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          managed_outputs: [ output ]
+        )
+      end
+      agent = Hive::Agent.new(
+        task: task,
+        prompt: "test",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        profile: Hive::AgentProfiles.lookup(:codex),
+        runtime_policy: policy
+      )
+
+      cmd = agent.send(:build_cmd)
+      assert_equal File.realpath("/bin/true"), cmd.first
+      assert_includes cmd, "default_permissions=\"hive-managed\""
+      assert_includes cmd, "--output-schema"
+      assert_includes cmd, "--ephemeral"
+      assert_includes cmd, "--ignore-user-config"
+      assert_includes cmd, "--ignore-rules"
+      refute_includes cmd, "--dangerously-bypass-approvals-and-sandbox"
+    ensure
+      policy&.cleanup!
     end
   end
 
@@ -762,6 +984,94 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_classifies_structured_claude_max_budget_result_without_result_text
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "result",
+        "subtype" => "error_max_budget_usd",
+        "is_error" => true,
+        "total_cost_usd" => 1.047936,
+        "errors" => [ "Reached maximum budget ($1)" ]
+      )
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1.0, timeout_sec: 5
+      ).run!
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "budget_exhausted", result.fetch(:failure_origin)
+      assert_equal(
+        {
+          provider: "claude",
+          subtype: "error_max_budget_usd",
+          configured_cap_usd: 1.0,
+          observed_cost_usd: 1.047936,
+          diagnostic: "Reached maximum budget ($1)",
+          remedy: "raise_stage_budget"
+        },
+        result.fetch(:failure_details)
+      )
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal "budget_exhausted", marker.attrs.fetch("reason")
+      assert_equal "claude", marker.attrs.fetch("provider")
+      assert_equal "error_max_budget_usd", marker.attrs.fetch("subtype")
+      assert_equal "1.0", marker.attrs.fetch("max_budget_usd")
+      assert_equal "1.047936", marker.attrs.fetch("observed_cost_usd")
+      assert_equal "raise_stage_budget", marker.attrs.fetch("remedy")
+      refute Hive::AgentLimit.held?(marker.name, marker.attrs)
+    end
+  end
+
+  def test_successful_structured_result_that_mentions_budget_is_not_budget_exhaustion
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "result",
+        "subtype" => "success",
+        "result" => "The project budget is documented."
+      )
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n### Q1. Scope?\n### A1.\n<!-- WAITING -->\n"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1.0, timeout_sec: 5
+      ).run!
+
+      assert_equal :waiting, result.fetch(:status)
+      refute result.key?(:failure_origin)
+      assert_equal :waiting, Hive::Markers.current(task.state_file).name
+    end
+  end
+
+  def test_current_terminal_marker_wins_over_trailing_structured_budget_diagnostic
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "result",
+        "subtype" => "error_max_budget_usd",
+        "is_error" => true,
+        "total_cost_usd" => 1.047936,
+        "errors" => [ "Reached maximum budget ($1)" ]
+      )
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n### Q1. Scope?\n### A1.\n<!-- WAITING -->\n"
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1.0, timeout_sec: 5
+      ).run!
+
+      assert_equal :waiting, result.fetch(:status)
+      assert_equal "budget_exhausted", result.fetch(:failure_origin)
+      assert_equal :waiting, Hive::Markers.current(task.state_file).name
+    end
+  end
+
   def test_oversized_structured_result_is_reported_without_a_corrupt_prefix
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -978,6 +1288,25 @@ class AgentTest < Minitest::Test
 
       assert_equal :ok, result.fetch(:status)
       refute result.key?(:error_message)
+    end
+  end
+
+  def test_expected_output_firewall_error_is_treated_as_missing
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      output = File.join(dir, "findings.json")
+      agent = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1,
+        timeout_sec: 5, status_mode: :output_file_exists,
+        expected_output: output
+      )
+      failure = ->(_manifest) { raise Hive::ArtifactFirewall::InvalidManifest, "invalid" }
+
+      with_replaced_singleton_method(
+        Hive::ArtifactFirewall, :validate_required_outputs, failure
+      ) do
+        assert_nil agent.send(:expected_output_report)
+      end
     end
   end
 
@@ -1757,5 +2086,25 @@ class AgentTest < Minitest::Test
     agent.instance_variable_set(:@task, task)
 
     assert_equal "6-review", agent.send(:event_stage)
+  end
+
+  def test_state_file_completion_fails_closed_when_the_artifact_cannot_be_statted
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      agent = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5,
+        status_mode: :state_file_marker
+      )
+      original = File.method(:size)
+
+      with_replaced_singleton_method(File, :size, lambda { |path|
+        raise Errno::EACCES if path == task.state_file
+
+        original.call(path)
+      }) do
+        refute agent.send(:completed_state_file_artifact?)
+      end
+    end
   end
 end

@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-07-17
+updated: 2026-07-25
 tags: [module, status, action, classifier, diagnostic]
 ---
 
@@ -23,7 +23,7 @@ action.payload     # { "key", "label", "command", "next_action" } for JSON emiss
 
 ## Red-status diagnostic (`#diagnostic`)
 
-`#diagnostic` returns a Hash matching the `Diagnostic` shape under both `hive-status.v2` (`tasks[].diagnostic`) and `hive-status-diagnose.v1` (`SuccessPayload.diagnostic`). It is non-nil for exactly three action keys: `recover_review`, `recover_execute`, and `error` (see `#diagnostic_action?`). Every other row returns `nil`.
+`#diagnostic` returns a Hash matching the `Diagnostic` shape under both the current `hive-status` contract (`tasks[].diagnostic`) and `hive-status-diagnose.v2` (`SuccessPayload.diagnostic`). It is non-nil for exactly three action keys: `recover_review`, `recover_execute`, and `error` (see `#diagnostic_action?`). Every other row returns `nil`.
 
 The payload is the local-extraction fallback. When a fresh agent-written `<task.folder>/diagnostics/red-status.md` exists (frontmatter `marker_signature` matches the current marker's SHA256 and `generated_by` is in `Hive::Schemas::DIAGNOSTIC_GENERATORS`), `diagnostic_generated_by` returns the producing generator name (`claude`/`codex`/`pi`/`grok`) and the artifact body becomes the source of truth. Otherwise it bounds the output via `DIAGNOSTIC_SUMMARY_MAX` (120 chars), `DIAGNOSTIC_DETAIL_MAX` (4000 chars), and `ARTIFACT_PATHS_MAX` (20 paths). All summary/detail text passes through `redact` (using `Hive::SecretPatterns`) before emission.
 
@@ -31,7 +31,7 @@ Diagnostic artifacts are resolved with `File.realpath` and accepted only when th
 
 `marker_signature` is the SHA256 hex of `marker.name + sorted(attrs)` joined by newline. It's the freshness key shared with `Hive::DiagnosisAgent` (which validates it pre-write) and the TUI live-update gate (`Hive::Tui::Update#red_status_marker_signature`); producer + both consumers compute identical bytes.
 
-`suggested_next_action` is populated for `:review_error` / `:review_ci_stale` / wall-clock `:review_stale` / `:error` markers via `retry_command_string` (`hive markers clear ... && hive run ...` as a shell one-liner). `:error` retry commands prefer `--match-attr marker_id=<current>` and fall back to observed `reason`/`exit_code` pairs for legacy markers; marker summaries and details hide internal `marker_id` values. For `:execute_stale`, legacy `:execute_waiting findings_count>0`, and max-passes `:review_stale`, the value reports `kind: manual_fix` with `command: nil` — the operator must edit or inspect findings before retry.
+`suggested_next_action` is populated for `:review_error` / `:review_ci_stale` / wall-clock `:review_stale` / `:error` markers with the guarded agent action `hive act workflow.retry PROJECT:SLUG --observation TOKEN`. The token binds the complete current observation, including marker occurrence; direct `markers clear && run` recipes are intentionally not published because they bypass the durable lifecycle. For `:execute_stale`, legacy `:execute_waiting findings_count>0`, and max-passes `:review_stale`, the value reports `kind: manual_fix` with `command: nil` — the operator must edit or inspect findings before retry.
 
 EXECUTE_STALE rows and legacy `EXECUTE_WAITING findings_count>0` rows emit a non-nil `diagnostic` even though `Hive::Tui::KeyMap#red_detail_row?` does not yet open the detail view for them; bot/daemon/external-agent consumers of `hive status --json` rely on the field to explain why an EXECUTE_STALE task is stuck.
 
@@ -115,7 +115,7 @@ Runtime liveness can short-circuit per-stage dispatch before marker lookup:
 
 - **`live_task_lock: true`** → `agent_running` (label "Agent running", command nil). `Hive::Commands::Status` sets this when a task `.lock` holder PID is alive and its recorded process start time still matches. This covers pre-marker work inside `hive run`, such as auto-rebase before `REVIEW_WORKING` is written, so status and the TUI do not offer a duplicate runnable command that would immediately hit `ConcurrentRunError`.
 - **`:agent_working`** → `agent_running` (label "Agent running", command nil) when the agent is actually alive. A `hive run` is in flight; surfacing a workflow command would send the user (or an agent retry loop) straight into `ConcurrentRunError`. **Stale carve-out:** when the caller passes `pid_alive:` and `state_file_mtime:` kwargs and either (a) `pid_alive` is `false` (the per-task `.lock` recorded a `claude_pid` that's now dead), or (b) `pid_alive` is `nil` (no `.lock` claude_pid), the marker has no `pid` attr, and the state-file mtime is older than `agent_marker_grace_sec` (default 300s; threaded from `daemon.agent_marker_grace_sec` by `Hive::Commands::Status`), the action is reclassified as `:error` with a synthesized diagnostic (summary describes "agent process not alive" / "agent never attached"; detail explains the daemon will heal the on-disk marker within ~30s). This makes the row a recoverable red status immediately, without waiting for the daemon's `StaleAgentHealer` to rewrite the marker on disk.
-- **`:error`** → always `error` at the status/action layer. The stage agent recorded a failure; recovery is manual unless diagnostics expose a guarded retry command or the daemon healer owns one of its narrow auto-clear paths. The healer-written subset (`reason=agent_died` / `reason=agent_orphaned`) must be re-read through `hive status --json` / red-status detail after the daemon rewrites the marker so consumers use the current `suggested_next_action.command` with the `marker_id` guard. Separately, `StaleAgentHealer` may auto-clear no-live-lock terminal `ERROR reason=tmux_session_terminated` / `reason=agent_orphaned` in non-review stages; `3-plan` additionally queues a same-stage `hive plan ... --from 3-plan` rerun because an empty markerless `plan.md` remains `:error` here and is skipped by daemon policy.
+- **`:error`** → always `error` at the status/action layer. The stage agent recorded a failure; automatic and operator-triggered recovery both submit a fresh observation to `RecoveryCoordinator`. Consumers must refresh status before invoking the guarded `workflow.retry` action; no surface should construct its own marker-clear recipe. `StaleAgentHealer` uses the same coordinator for cooled terminal errors, including `tmux_session_terminated` / `agent_orphaned`. The coordinator derives the owning workflow command for every stage; `3-plan` therefore needs no separate clear/requeue mechanism even when an empty markerless `plan.md` would otherwise remain `:error`.
 
 `:execute_stale` maps to `RECOVER_EXECUTE` and emits `hive findings <slug>` rather than a workflow verb. Legacy `:execute_waiting findings_count>0` uses the same recovery surface so old state folders do not fall through to generic edit guidance. Running `hive develop <slug>` on either shape would refuse or loop on a non-terminal marker; pointing the user at `findings` opens the recovery loop instead.
 

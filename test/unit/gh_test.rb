@@ -286,7 +286,7 @@ class GhUnitTest < Minitest::Test
 
       pr = Hive::Gh.lookup_merged_pr(dir, "feat-x-260424-aaaa")
       assert_equal "MERGED", pr.fetch("state")
-      assert_equal "https://example.com/pr/1", pr.fetch("url")
+      assert_equal "https://github.com/acme/app/pull/1", pr.fetch("url")
     ensure
       ENV.delete("HIVE_FAKE_GH_PR_EXISTS")
       ENV.delete("HIVE_FAKE_GH_PR_STATE")
@@ -393,6 +393,294 @@ class GhUnitTest < Minitest::Test
     refute_nil view_call, "expected a `gh pr view` call"
     assert_equal "/tmp/some-project", view_call.last.fetch(:chdir),
                  "pr_metadata must forward chdir: to capture3 so --project queries the right repo"
+  end
+
+  def test_pull_request_url_parser_is_canonical_and_rejects_port_drift
+    assert_equal(
+      {
+        "url" => "https://github.com/acme/app/pull/42",
+        "host" => "github.com",
+        "repository" => "acme/app",
+        "number" => 42
+      },
+      Hive::Gh.parse_pull_request_url(
+        "https://GitHub.com/Acme/App/pull/42"
+      )
+    )
+    assert_nil Hive::Gh.parse_pull_request_url(
+      "https://github.com:8443/acme/app/pull/42"
+    )
+    assert_nil Hive::Gh.parse_pull_request_url(
+      "https://user@github.com/acme/app/pull/42"
+    )
+    assert_nil Hive::Gh.parse_pull_request_url(
+      "https://github.com/acme/app/pull/42?view=1"
+    )
+  end
+
+  def test_closure_transport_propagates_one_timeout_to_every_nested_call
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    oid = "a" * 40
+    responses = [
+      [
+        JSON.generate(
+          "number" => 42,
+          "url" => "https://github.com/acme/app/pull/42",
+          "state" => "MERGED",
+          "mergedAt" => "2026-07-25T10:00:00Z",
+          "mergeCommit" => { "oid" => oid },
+          "baseRefName" => "main",
+          "headRefOid" => "b" * 40
+        ),
+        "",
+        ok
+      ],
+      [ "main\n", "", ok ],
+      [ "#{oid}\n", "", ok ],
+      [ "ahead\n", "", ok ]
+    ]
+    calls = []
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
+      calls << [ cmd, kwargs ]
+      responses.shift
+    }) do
+      facts = Hive::Gh.closure_pr_facts(
+        host: "github.com",
+        repository: "acme/app",
+        number: 42,
+        timeout_sec: 7
+      )
+      assert facts.fetch("reachable_from_default")
+    end
+
+    assert_equal 4, calls.length
+    calls.each do |_cmd, kwargs|
+      assert_equal 7, kwargs.fetch(:timeout_sec)
+      assert_operator kwargs.fetch(:max_stdout_bytes), :<=, 128 * 1024
+    end
+  end
+
+  def test_persist_pr_identity_preserves_body_and_replaces_binding
+    with_tmp_dir do |dir|
+      path = File.join(dir, "pr.md")
+      File.write(
+        path,
+        "---\npr_url: https://github.com/acme/app/pull/1\n" \
+        "pr_number: 1\nhead_sha: #{'a' * 40}\ncustom: keep\n---\n\nBody\n"
+      )
+
+      Hive::Gh.persist_pr_identity!(
+        path,
+        pr_url: "https://github.com/acme/app/pull/42",
+        pr_number: 42,
+        head_oid: "b" * 40
+      )
+
+      frontmatter = Hive::Gh.pr_frontmatter(path)
+      assert_equal "https://github.com/acme/app/pull/42", frontmatter["pr_url"]
+      assert_equal 42, frontmatter["pr_number"]
+      assert_equal "b" * 40, frontmatter["head_oid"]
+      assert_equal "keep", frontmatter["custom"]
+      assert_includes File.read(path), "Body"
+    end
+  end
+
+  def test_closure_identity_helpers_fail_closed_for_every_invalid_transport_shape
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    oid = "a" * 40
+
+    assert_nil Hive::Gh.parse_pull_request_url("http://[")
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.persist_pr_identity!(
+        "/tmp/unused",
+        pr_url: "https://github.com/acme/app/pull/42",
+        pr_number: 43,
+        head_oid: oid
+      )
+    end
+    assert_match(/not canonical/, error.message)
+    assert_raises(Hive::GhError) do
+      Hive::Gh.persist_pr_identity!(
+        "/tmp/unused",
+        pr_url: "https://github.com/acme/app/pull/42",
+        pr_number: "not-a-number",
+        head_oid: oid
+      )
+    end
+
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ "", "offline", failed ] }
+    ) do
+      error = assert_raises(Hive::GhError) do
+        Hive::Gh.closure_pr_facts(
+          host: "github.com", repository: "acme/app", number: 42,
+          default_branch: "main"
+        )
+      end
+      assert_match(/offline/, error.message)
+    end
+
+    wrong_number = JSON.generate(
+      "number" => 43, "url" => "https://github.com/acme/app/pull/43",
+      "state" => "MERGED", "mergeCommit" => oid, "headRefOid" => "b" * 40
+    )
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ wrong_number, "", ok ] }
+    ) do
+      assert_raises(Hive::GhError) do
+        Hive::Gh.closure_pr_facts(
+          host: "github.com", repository: "acme/app", number: 42,
+          default_branch: "main"
+        )
+      end
+    end
+
+    string_merge = JSON.generate(
+      "number" => 42, "url" => "https://github.com/acme/app/pull/42",
+      "state" => "MERGED", "mergeCommit" => oid, "headRefOid" => "b" * 40
+    )
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ string_merge, "", ok ] }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Gh, :closure_commit_facts,
+        ->(**) { { "reachable_from_default" => true } }
+      ) do
+        facts = Hive::Gh.closure_pr_facts(
+          host: "github.com", repository: "acme/app", number: 42,
+          default_branch: "main"
+        )
+        assert_equal oid, facts.fetch("merge_oid")
+      end
+    end
+
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ "{", "", ok ] }
+    ) do
+      assert_raises(Hive::GhError) do
+        Hive::Gh.closure_pr_facts(
+          host: "github.com", repository: "acme/app", number: 42,
+          default_branch: "main"
+        )
+      end
+    end
+    assert_raises(Hive::GhError) do
+      Hive::Gh.closure_pr_facts(
+        host: "github.com", repository: "acme/app", number: "bad",
+        default_branch: "main"
+      )
+    end
+
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ "", "api down", failed ] }
+    ) do
+      assert_raises(Hive::GhError) do
+        Hive::Gh.closure_default_branch(
+          host: "github.com", repository: "acme/app"
+        )
+      end
+    end
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ "-unsafe\n", "", ok ] }
+    ) do
+      assert_raises(Hive::GhError) do
+        Hive::Gh.closure_default_branch(
+          host: "github.com", repository: "acme/app"
+        )
+      end
+    end
+
+    assert_raises(Hive::GhError) do
+      Hive::Gh.closure_commit_facts(
+        host: "github.com", repository: "acme/app",
+        oid: "short", default_branch: "main"
+      )
+    end
+    assert_raises(Hive::GhError) do
+      Hive::Gh.closure_commit_facts(
+        host: "github.com", repository: "acme/app",
+        oid: oid, default_branch: "-unsafe"
+      )
+    end
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ "", "missing commit", failed ] }
+    ) do
+      assert_raises(Hive::GhError) do
+        Hive::Gh.closure_commit_facts(
+          host: "github.com", repository: "acme/app",
+          oid: oid, default_branch: "main"
+        )
+      end
+    end
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { [ "#{'b' * 40}\n", "", ok ] }
+    ) do
+      assert_raises(Hive::GhError) do
+        Hive::Gh.closure_commit_facts(
+          host: "github.com", repository: "acme/app",
+          oid: oid, default_branch: "main"
+        )
+      end
+    end
+    responses = [
+      [ "#{oid}\n", "", ok ],
+      [ "", "compare down", failed ]
+    ]
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { responses.shift }
+    ) do
+      error = assert_raises(Hive::GhError) do
+        Hive::Gh.closure_commit_facts(
+          host: "github.com", repository: "acme/app",
+          oid: oid, default_branch: "main"
+        )
+      end
+      assert_match(/compare down/, error.message)
+    end
+
+    [
+      lambda do
+        Hive::Gh.closure_pr_facts(
+          host: "github.com", repository: "acme/app", number: 42,
+          default_branch: "main"
+        )
+      end,
+      lambda do
+        Hive::Gh.closure_default_branch(
+          host: "github.com", repository: "acme/app"
+        )
+      end,
+      lambda do
+        Hive::Gh.closure_commit_facts(
+          host: "github.com", repository: "acme/app",
+          oid: oid, default_branch: "main"
+        )
+      end
+    ].each do |operation|
+      with_replaced_singleton_method(
+        Hive::Gh, :capture3, ->(*, **) { [ "stdout failure", "", failed ] }
+      ) do
+        error = assert_raises(Hive::GhError, &operation)
+        assert_match(/stdout failure/, error.message)
+      end
+    end
+
+    responses = [
+      [ "#{oid}\n", "", ok ],
+      [ "compare stdout failure", "", failed ]
+    ]
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, ->(*, **) { responses.shift }
+    ) do
+      error = assert_raises(Hive::GhError) do
+        Hive::Gh.closure_commit_facts(
+          host: "github.com", repository: "acme/app",
+          oid: oid, default_branch: "main"
+        )
+      end
+      assert_match(/compare stdout failure/, error.message)
+    end
   end
 
   def test_pr_metadata_raises_on_gh_pr_view_failure
@@ -618,18 +906,24 @@ end
 
 def test_push_exact_oid_names_immutable_source_and_never_forces
   captured = nil
-  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
   oid = "a" * 40
-  with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |path, *args, **_kwargs|
-    captured = [ path, *args ]
-    [ "", "", ok ]
+  receipt = Hive::AgentGitGate::PublicationReceipt.new(
+    remote_fingerprint: "f" * 64, branch: "feature",
+    expected_oid: nil, before_oid: nil,
+    published_oid: oid, after_oid: oid
+  )
+  with_replaced_singleton_method(Hive::AgentGitGate, :publish, lambda { |**kwargs|
+    captured = kwargs
+    receipt
   }) do
     result = Hive::Gh.push_exact_oid("/tmp/wt", oid, "feature")
     assert result.success?
   end
 
-  assert_equal [ "/tmp/wt", "push", "origin", "#{oid}:refs/heads/feature" ], captured
-  refute captured.any? { |arg| arg.include?("force") }
+  assert_equal "/tmp/wt", captured.fetch(:repository_path)
+  assert_equal oid, captured.fetch(:oid)
+  assert_equal "feature", captured.fetch(:branch)
+  assert captured.fetch(:expected_remote_absent)
 end
 
 def test_push_exact_oid_returns_bounded_failure_for_invalid_identity
@@ -644,28 +938,66 @@ end
 
 def test_managed_origin_push_url_uses_hardened_git_boundary
   captured = nil
-  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |path, *args, **_kwargs|
-    captured = [ path, *args ]
-    [ "git@github.com:acme/widgets.git\n", "", ok ]
+  with_replaced_singleton_method(Hive::AgentGitGate, :remote_urls, lambda { |**kwargs|
+    captured = kwargs
+    [ "git@github.com:acme/widgets.git" ]
   }) do
     assert_equal "git@github.com:acme/widgets.git", Hive::Gh.origin_push_url("/tmp/wt", managed: true)
   end
-  assert_equal [ "/tmp/wt", "remote", "get-url", "--push", "--all", "origin" ], captured
+  assert_equal "/tmp/wt", captured.fetch(:repository_path)
+  assert_equal "origin", captured.fetch(:remote)
+  assert captured.fetch(:push)
+end
+
+def test_managed_git_boundary_failures_are_translated_to_gh_errors
+  with_replaced_singleton_method(
+    Hive::AgentGitGate, :observe_remote_branch,
+    ->(**) { raise Hive::AgentGitGate::CommandFailed, "observation failed" }
+  ) do
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.remote_branch_oid("/tmp/wt", "feature", managed: true)
+    end
+    assert_includes error.message, "observation failed"
+  end
+
+  with_replaced_singleton_method(
+    Hive::AgentGitGate, :remote_urls,
+    ->(**) { %w[https://one.example/repo.git https://two.example/repo.git] }
+  ) do
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.origin_push_url("/tmp/wt", managed: true)
+    end
+    assert_includes error.message, "2 records"
+  end
+
+  with_replaced_singleton_method(
+    Hive::AgentGitGate, :remote_urls,
+    ->(**) { raise Hive::AgentGitGate::CommandFailed, "URL lookup failed" }
+  ) do
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.origin_push_url("/tmp/wt", managed: true)
+    end
+    assert_includes error.message, "URL lookup failed"
+  end
 end
 
 def test_managed_remote_branch_lookup_uses_hardened_git_boundary
   captured = nil
-  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  with_replaced_singleton_method(Hive::ManagedGit, :capture3, lambda { |path, *args, **_kwargs|
-    captured = [ path, *args ]
-    [ "#{'a' * 40}\trefs/heads/feature\n", "", ok ]
+  observation = Hive::AgentGitGate::RemoteObservation.new(
+    remote_fingerprint: "f" * 64,
+    branch: "feature", ref: "refs/heads/feature", oid: "a" * 40
+  )
+  with_replaced_singleton_method(Hive::AgentGitGate, :observe_remote_branch, lambda { |**kwargs|
+    captured = kwargs
+    observation
   }) do
     oid = Hive::Gh.remote_branch_oid("/tmp/wt", "feature", managed: true)
     assert_equal "a" * 40, oid
   end
 
-  assert_equal [ "/tmp/wt", "ls-remote", "--heads", "origin", "refs/heads/feature" ], captured
+  assert_equal "/tmp/wt", captured.fetch(:repository_path)
+  assert_equal "feature", captured.fetch(:branch)
+  assert_equal "origin", captured.fetch(:remote)
 end
 
 def test_create_draft_pr_uses_explicit_args_and_always_removes_body_tempfile
@@ -694,34 +1026,36 @@ end
 
 def test_push_branch_uses_exact_expected_oid_lease
   captured = nil
-  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
-    captured = cmd
-    [ "", "", ok ]
+  with_replaced_singleton_method(Hive::AgentGitGate, :publish_local_branch, lambda { |**kwargs|
+    captured = kwargs
+    true
   }) do
-    Hive::Gh.push_branch(
+    result = Hive::Gh.push_branch(
       "/tmp/wt", "feature", expected_remote_oid: "a" * 40
     )
+    assert result.success?
   end
 
-  assert_includes captured, "--force-with-lease=refs/heads/feature:#{'a' * 40}"
+  assert_equal "a" * 40, captured.fetch(:expected_remote_oid)
+  refute captured.fetch(:expected_remote_absent)
 end
 
 def test_push_branch_uses_absence_lease_and_exact_validated_remote_url
   captured = nil
-  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
   remote = "git@github.com:acme/demo.git"
-  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
-    captured = cmd
-    [ "", "", ok ]
+  with_replaced_singleton_method(Hive::AgentGitGate, :publish_local_branch, lambda { |**kwargs|
+    captured = kwargs
+    true
   }) do
-    Hive::Gh.push_branch(
+    result = Hive::Gh.push_branch(
       "/tmp/wt", "feature", expected_remote_absent: true, remote: remote
     )
+    assert result.success?
   end
 
-  assert_includes captured, "--force-with-lease=refs/heads/feature:"
-  assert_equal [ remote, "feature" ], captured.last(2)
+  assert captured.fetch(:expected_remote_absent)
+  assert_equal remote, captured.fetch(:remote)
+  assert_equal "feature", captured.fetch(:branch)
 end
 
 def test_remote_branch_oid_uses_exact_validated_remote_url

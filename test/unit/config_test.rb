@@ -3102,22 +3102,6 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_digest_registered_projects_preserves_malformed_rows_for_adapter_validation
-    with_tmp_global_config do
-      malformed = { "name" => "Broken", "path" => 123 }
-      valid = { "name" => "Working", "path" => "/tmp/working" }
-      Hive::Config.send(
-        :write_global_config!,
-        { "registered_projects" => [ malformed, valid ] }
-      )
-
-      assert_equal [ "Working" ], Hive::Config.registered_projects.map { |entry| entry.fetch("name") }
-      rows = Hive::Config.digest_registered_projects
-      assert_equal malformed, rows.first
-      assert_equal "Working", rows.last.fetch("name")
-    end
-  end
-
   def test_register_project_still_works_on_first_call_with_fresh_hive_home
     # `register_project` must continue to lazy-create config.yml on first
     # use even though `registered_projects` now validates HIVE_HOME. The
@@ -3689,10 +3673,9 @@ class ConfigTest < Minitest::Test
       # R-02 per-child timeout knobs.
       assert_equal 0,     cfg.dig("daemon", "child_timeout_sec")
       assert_equal 30,    cfg.dig("daemon", "child_kill_grace_sec")
-      # The digest and answer-digest verbs ship a non-zero default cap so a
-      # wedged child can't pin the single global digest slot forever; every
-      # other verb stays at the (disabled) child_timeout_sec default.
-      assert_equal({ "digest" => 3600, "answer-digest" => 3600 },
+      # Answer-digest ships a non-zero default cap so a wedged child cannot
+      # pin the single global digest slot forever.
+      assert_equal({ "answer-digest" => 3600 },
                    cfg.dig("daemon", "child_verb_timeouts"))
     end
   end
@@ -3721,10 +3704,8 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
       assert_equal 10800, cfg.dig("daemon", "child_verb_timeouts", "review")
       assert_equal 5400,  cfg.dig("daemon", "child_verb_timeouts", "develop")
-      # A user override deep-merges with the seeded default, so the digest
-      # wedge backstop survives an operator setting other verb timeouts.
-      assert_equal 3600,  cfg.dig("daemon", "child_verb_timeouts", "digest"),
-                   "an operator override must not wipe the default digest verb timeout"
+      # A user override deep-merges with the seeded default.
+      assert_equal 3600, cfg.dig("daemon", "child_verb_timeouts", "answer-digest")
     end
   end
 
@@ -4156,15 +4137,13 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  # ── Daily digest global settings ─────────────────────────────────────
+  # ── Answer digest global settings ────────────────────────────────────
 
-  def test_load_returns_documented_digest_defaults_when_key_absent
+  def test_load_returns_documented_answer_digest_defaults_when_key_absent
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
 
-      assert_equal false, cfg.dig("digest", "enabled")
-      refute cfg.fetch("digest").key?("agent")
-      assert_equal 7, cfg.dig("digest", "max_catchup_days")
+      refute cfg.key?("digest")
       assert_equal false, cfg.dig("answer_digest", "enabled")
       assert_equal 9, cfg.dig("answer_digest", "hour")
     end
@@ -4225,219 +4204,18 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_global_digest_block_honors_overrides
+  def test_load_rejects_removed_digest_configuration
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)
         registered_projects: []
         digest:
           enabled: true
-          agent: codex
-          max_catchup_days: 3
       YAML
 
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal true, cfg["enabled"]
-      assert_equal "codex", cfg["agent"]
-      assert_equal 3, cfg["max_catchup_days"]
-    end
-  end
-
-  def test_load_global_digest_config_parses_only_global_digest_models
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          enabled: true
-          max_catchup_days: 3
-        models:
-          digest:
-            model: " gpt-5.6-sol "
-            effort: xhigh
-      YAML
-
-      cfg = Hive::Config.load_global_digest_config
-
-      assert_equal true, cfg.dig("digest", "enabled")
-      assert_equal 3, cfg.dig("digest", "max_catchup_days")
-      assert_equal(
-        { "model" => "gpt-5.6-sol", "effort" => "xhigh" },
-        cfg.dig("models", "digest")
-      )
-      assert_equal cfg.fetch("models"), Hive::Config.load_global_models
-      refute Hive::Config.load_global_digest_block.key?("models"),
-             "the established scheduler block shape must remain unchanged"
-    end
-  end
-
-  def test_load_global_digest_config_rejects_project_owned_and_malformed_models
-    with_tmp_global_config do |home|
-      path = File.join(home, "config.yml")
-      File.write(path, <<~YAML)
-        registered_projects: []
-        models:
-          plan:
-            model: gpt-5.6-sol
-      YAML
-
-      error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
-      assert_match(/models\.plan.*project config/i, error.message)
-      assert_includes error.message, path
-
-      File.write(path, <<~YAML)
-        registered_projects: []
-        models: []
-      YAML
-
-      error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
-      assert_match(/models.*mapping/i, error.message)
-    end
-  end
-
-  def test_load_global_models_preserves_absence
-    with_tmp_global_config do
-      assert_same Hive::ModelRouting::EMPTY_MODELS, Hive::Config.load_global_models
-    end
-  end
-
-  def test_load_global_digest_block_defaults_enabled_on_when_bot_configured
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        bot:
-          enabled: true
-          chat_id_allowlist:
-            - 60499527
-      YAML
-
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal true, cfg["enabled"],
-                   "digest should auto-enable when the Telegram bot is configured with a chat"
-    end
-  end
-
-  def test_load_global_digest_block_honors_explicit_disable_even_with_bot
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          enabled: false
-        bot:
-          enabled: true
-          chat_id_allowlist:
-            - 60499527
-      YAML
-
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal false, cfg["enabled"],
-                   "an explicit digest.enabled: false must always be honored as an opt-out"
-    end
-  end
-
-  def test_load_global_digest_block_stays_off_without_a_deliverable_bot
-    with_tmp_global_config do |home|
-      # Bot enabled but no chat to deliver to: auto-enabling would only
-      # dispatch a paid changelog generator that then fails at send time.
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        bot:
-          enabled: true
-          chat_id_allowlist: []
-      YAML
-
-      assert_equal false, Hive::Config.load_global_digest_block["enabled"],
-                   "no allowlisted chat means no deliverable digest, so stay off"
-    end
-
-    with_tmp_global_config do |home|
-      # Chat present but bot disabled: the user has not turned Telegram on.
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        bot:
-          enabled: false
-          chat_id_allowlist:
-            - 60499527
-      YAML
-
-      assert_equal false, Hive::Config.load_global_digest_block["enabled"],
-                   "a disabled bot means Telegram is not set up, so stay off"
-    end
-  end
-
-  def test_load_global_digest_block_allows_zero_max_catchup_days_as_unbounded
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          max_catchup_days: 0
-      YAML
-
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal 0, cfg["max_catchup_days"]
-    end
-  end
-
-  def test_load_global_digest_block_rejects_bad_shapes_and_values
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest: enabled
-      YAML
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
-      assert_match(/digest.*must be a Hash/, err.message)
-
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          enabled: sometimes
-      YAML
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
-      assert_match(/digest\.enabled.*must be a boolean/, err.message)
-
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          max_catchup_days: -1
-      YAML
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
-      assert_match(/digest\.max_catchup_days.*>= 0/, err.message)
-    end
-  end
-
-  def test_digest_loaders_reject_removed_source_selector_even_when_null
-    [ "shipped", nil ].each do |source|
-      with_tmp_global_config do |home|
-        File.write(File.join(home, "config.yml"), YAML.dump(
-          "registered_projects" => [],
-          "digest" => { "enabled" => true, "source" => source }
-        ))
-
-        error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
-        assert_match(/digest\.source is unsupported/, error.message)
-      end
-    end
-  end
-
-  def test_digest_block_contains_only_scheduler_settings
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          enabled: true
-          max_catchup_days: 12
-      YAML
-
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal true, cfg.fetch("enabled")
-      assert_equal 12, cfg.fetch("max_catchup_days")
-      refute cfg.key?("agent")
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daemon }
+      assert_match(/digest configuration is no longer supported/, error.message)
+      assert_match(/prdigest prose --deliver/, error.message)
+      assert_match(/prdigest facts/, error.message)
     end
   end
 

@@ -1,0 +1,477 @@
+schema_version: 1
+
+# Architecture metadata for Hive-first reusable components. This catalog and
+# its test-only contract enforce declared source boundaries; they are not a
+# runtime security sandbox and cannot prevent reflection or monkeypatching.
+components:
+  - id: attempts
+    name: Attempts admission / future RunReceipt
+    state: candidate
+    entrypoint:
+      file: lib/hive/attempts/api.rb
+      require: hive/attempts/api
+      constant: Hive::Attempts::API
+    public_contract:
+      values:
+        - Hive::Attempts::ClientResult
+        - Hive::Attempts::DispatchResult
+      errors:
+        - Hive::Attempts::UnsupportedDetachment
+    owned_paths:
+      - lib/hive/attempts
+    state_contracts:
+      - "$HIVE_HOME/attempts/v2 records, framed logs, outputs, generation locks, leases, receipts, and lost-outcome evidence"
+    schema_contracts:
+      - "hive-attempt v2 is the only runtime reader/writer; Hive::Recovery::Migration owns the one-off cutover"
+    lock_contracts:
+      - "admission lock before generation lock; record transitions use guarded CAS"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/agent_limit
+      - hive/atomic_file
+      - hive/conditions/generation_tracker
+      - hive/config
+      - hive/dependency_snapshot
+      - hive/lock
+      - hive/markers
+      - hive/paths
+      - hive/stringify_keys
+      - hive/task
+      - hive/task_resolver
+    internal_collaborators:
+      - Hive::Attempts::Entrypoint
+      - Hive::Attempts::ConfiguredDispatcher
+      - Hive::Attempts::Dispatcher
+      - Hive::Attempts::DetachedLauncher
+      - Hive::Attempts::Client
+      - Hive::Attempts::Store
+      - Hive::Attempts::Supervisor
+      - Hive::Attempts::Reconciler
+      - Hive::Attempts::ProcessIdentity
+      - Hive::Attempts::CapacitySnapshot
+      - Hive::Attempts::LostOutcomeStore
+      - Hive::Attempts::LostOutcomeProcessor
+    forbidden_constructions:
+      - Hive::Attempts::Entrypoint
+      - Hive::Attempts::ConfiguredDispatcher
+      - Hive::Attempts::Dispatcher
+      - Hive::Attempts::DetachedLauncher
+      - Hive::Attempts::Client
+      - Hive::Attempts::Store
+      - Hive::Attempts::Supervisor
+      - Hive::Attempts::Reconciler
+      - Hive::Attempts::ProcessIdentity
+      - Hive::Attempts::CapacitySnapshot
+      - Hive::Attempts::LostOutcomeStore
+      - Hive::Attempts::LostOutcomeProcessor
+    authorized_internal_constructions:
+      - constant: Hive::Attempts::Store
+        files:
+          - lib/hive/commands/attempt_supervise.rb
+          - lib/hive/commands/daemon.rb
+          - lib/hive/conditions/execute_boundary.rb
+          - lib/hive/implementation_identity/store.rb
+          - lib/hive/task_closure.rb
+          - lib/hive/task_projection/store.rb
+        reason: "Existing Hive composition, read-only consumers, execution-boundary checks, and closure verification share the canonical durable store; they are not alternate admission producers."
+      - constant: Hive::Attempts::Supervisor
+        files:
+          - lib/hive/commands/attempt_supervise.rb
+        reason: "The private supervisor argv adapter is the process handoff owned by DetachedLauncher."
+      - constant: Hive::Attempts::Reconciler
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The daemon composition root injects reconciliation into its scheduler without exposing lifecycle operations through the admission facade."
+      - constant: Hive::Attempts::ProcessIdentity
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The daemon composition root shares one process-identity verifier across reconciliation and loss handling."
+      - constant: Hive::Attempts::LostOutcomeStore
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The daemon composition root owns internal loss evidence persistence and injection."
+      - constant: Hive::Attempts::LostOutcomeProcessor
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The daemon composition root owns internal loss-policy wiring; it is not a public recovery operation."
+    hive_consumers:
+      - lib/hive/commands/run.rb
+      - lib/hive/commands/stage_action.rb
+      - lib/hive/commands/daemon.rb
+      - lib/hive/bot/dispatch_request_writer.rb
+    mutation_authority: "The facade accepts explicit admission requests; named Hive composition sites wire internal stores and supervisors that retain durable transition authority."
+    recovery_surface: "The facade admits successors; reconciliation, healing, cancellation, export, and generic lifecycle policy remain internal."
+    wiki_page: wiki/modules/attempts.md
+    focused_tests:
+      - test/unit/attempts/api_test.rb
+    migration_exceptions: []
+
+  - id: user-service
+    name: UserService
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/user_service.rb
+      require: hive/user_service
+      constant: Hive::UserService
+    public_contract:
+      values:
+        - Hive::UserService::Definition
+        - Hive::UserService::Plan
+        - Hive::UserService::Status
+        - Hive::UserService::Result
+      errors:
+        - ArgumentError
+    owned_paths:
+      - lib/hive/user_service.rb
+      - lib/hive/user_service
+    state_contracts:
+      - "Per-user systemd unit or launchd plist, manager observations, and timestamped backups"
+    schema_contracts:
+      - "Definition, Plan, Status, and Result are platform-neutral; Hive command JSON and messages remain adapter-owned"
+    lock_contracts:
+      - "No cross-manager transaction; apply and remove revalidate the exact observed file and manager state before mutation"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/atomic_file
+    internal_collaborators:
+      - Hive::UserService::Manager
+    forbidden_constructions:
+      - Hive::UserService::Manager
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/commands/service_installer/base.rb
+      - lib/hive/commands/daemon/service_installer.rb
+      - lib/hive/commands/bot/service_installer.rb
+      - lib/hive/commands/web/service_installer.rb
+      - lib/hive/commands/daemon.rb
+      - lib/hive/commands/bot.rb
+      - lib/hive/commands/web.rb
+      - lib/hive/commands/setup.rb
+      - lib/hive/commands/init.rb
+      - lib/hive/commands/uninstall.rb
+      - lib/hive/web/service_status.rb
+    mutation_authority: "Hive command adapters authorize install, force replacement, restart, and remove."
+    recovery_surface: "Typed outcomes report backup paths, final observed state, and partial manager/file failures."
+    wiki_page: wiki/modules/user_service.md
+    focused_tests:
+      - test/unit/user_service/user_service_test.rb
+      - test/unit/commands/service_installer/base_test.rb
+      - test/unit/commands/daemon/service_installer_test.rb
+      - test/unit/commands/bot/service_installer_test.rb
+      - test/unit/commands/web/service_installer_test.rb
+      - test/unit/commands/uninstall_test.rb
+    migration_exceptions: []
+
+  - id: agent-abi
+    name: Agent ABI
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/agent_runtime.rb
+      require: hive/agent_runtime
+      constant: Hive::AgentRuntime
+    public_contract:
+      values:
+        - Hive::AgentRuntime::Request
+        - Hive::AgentRuntime::CompiledInvocation
+        - Hive::AgentRuntime::CapabilityEvidence
+        - Hive::AgentRuntime::ProbeResult
+        - Hive::AgentRuntime::ObservableResult
+        - Hive::AgentProfile
+        - Hive::AgentProfiles
+      errors:
+        - Hive::AgentError
+        - Hive::AgentRuntime::UnsupportedCapability
+        - Hive::AgentRuntime::ProbeError
+        - Hive::AgentRuntime::CompilationError
+    owned_paths:
+      - lib/hive/agent_runtime.rb
+      - lib/hive/agent_profile.rb
+      - lib/hive/agent_profiles.rb
+      - lib/hive/agent_profiles
+    state_contracts:
+      - "Provider executable, version, capability, and observable result evidence"
+    schema_contracts:
+      - "Provider profile constructor and registry extension point remain compatible"
+    lock_contracts:
+      - "Version/capability probes are bounded and reap descendant process groups"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/implementation_identity
+      - hive/permission_scope
+      - hive/secret_patterns
+      - hive/skill_check
+    internal_collaborators:
+      - Hive::AgentProfiles::UsageExtractors
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/agent.rb
+      - lib/hive/claude_launcher.rb
+      - lib/hive/diagnosis_agent.rb
+      - lib/hive/display_name/generator.rb
+      - lib/hive/patrol/agent_launch.rb
+      - lib/hive/reviewers/codex_review.rb
+      - lib/hive/stages/base.rb
+      - lib/hive/tui/bubble_model.rb
+    mutation_authority: "Hive orchestration selects profiles and permission policy; adapters only compile and observe."
+    recovery_surface: "Probe and invocation failures return bounded evidence; workflow retry policy stays in Hive."
+    wiki_page: wiki/modules/agent_profile.md
+    focused_tests:
+      - test/unit/agent_runtime_test.rb
+      - test/unit/agent_profile_test.rb
+      - test/unit/agent_profiles_test.rb
+      - test/unit/agent_profile_modes_test.rb
+      - test/unit/agent_test.rb
+    migration_exceptions: []
+
+  - id: agent-artifact-firewall
+    name: Agent Artifact Firewall
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/artifact_firewall.rb
+      require: hive/artifact_firewall
+      constant: Hive::ArtifactFirewall
+    public_contract:
+      values:
+        - Hive::ArtifactFirewall::Manifest
+        - Hive::ArtifactFirewall::Snapshot
+        - Hive::ArtifactFirewall::Violation
+        - Hive::ArtifactFirewall::Restoration
+        - Hive::ArtifactFirewall::Report
+      errors:
+        - Hive::ArtifactFirewall::Error
+        - Hive::ArtifactFirewall::InvalidManifest
+        - Hive::ArtifactFirewall::CaptureError
+        - Hive::ArtifactFirewall::InvalidSnapshot
+    owned_paths:
+      - lib/hive/artifact_firewall.rb
+      - lib/hive/protected_files.rb
+    state_contracts:
+      - "In-memory no-follow protected-anchor capture plus bounded post-spawn custody report"
+    schema_contracts:
+      - "Manifest, Snapshot, Violation, Restoration, and Report schema v1; stage markers and outcomes remain Hive-owned"
+    lock_contracts:
+      - "No-follow identity checks and atomic per-file restore; same-user application custody only, with no sandbox or filesystem transaction claim"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/atomic_file
+      - hive/secret_patterns
+    internal_collaborators:
+      - Hive::ProtectedFiles
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/agent.rb
+      - lib/hive/claude_launcher.rb
+      - lib/hive/stages/execute.rb
+      - lib/hive/stages/finalize.rb
+      - lib/hive/stages/open_pr.rb
+      - lib/hive/stages/review.rb
+      - lib/hive/stages/review/ci_fix.rb
+      - lib/hive/stages/review/triage.rb
+      - lib/hive/stages/agent_worktree.rb
+    mutation_authority: "Hive stage adapters declare protected, allowed, and required paths."
+    recovery_surface: "Typed reports distinguish tampering, output rejection, verified restoration, and restoration failure with bounded redacted diagnostics."
+    wiki_page: wiki/modules/protected_files.md
+    focused_tests:
+      - test/unit/artifact_firewall_test.rb
+      - test/unit/agent_profile_modes_test.rb
+      - test/unit/claude_launcher_test.rb
+      - test/unit/protected_files_test.rb
+      - test/unit/secret_patterns_test.rb
+      - test/unit/stages/agent_test.rb
+      - test/unit/stages/execute_test.rb
+      - test/unit/stages/open_pr_test.rb
+      - test/unit/stages/review/ci_fix_test.rb
+      - test/unit/stages/review/triage_test.rb
+    migration_exceptions: []
+
+  - id: skillpack
+    name: Skillpack
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/agent_skills.rb
+      require: hive/agent_skills
+      constant: Hive::AgentSkills
+    public_contract:
+      values:
+        - Hive::AgentSkills::Plan
+        - Hive::AgentSkills::Projection
+        - Hive::AgentSkills::ProjectionReport
+      errors:
+        - Hive::AgentSkills::Error
+        - Hive::AgentSkills::ForeignContent
+        - Hive::AgentSkills::StalePlan
+        - Hive::AgentSkills::UnsafePath
+        - Hive::AgentSkills::ValidationError
+    owned_paths:
+      - lib/hive/agent_skills.rb
+      - lib/hive/agent_skills
+      - config/agent-skills.yml
+    state_contracts:
+      - "Canonical skill source and projected agent-home directories"
+    schema_contracts:
+      - "config/agent-skills.yml manifest and projection provenance"
+    lock_contracts:
+      - "Private staging and complete-directory atomic publication"
+    component_dependencies:
+      - agent-abi
+    allowed_hive_dependencies:
+      - hive/atomic_file
+      - hive/config
+      - hive/errors
+      - hive/skill_check
+      - hive/version
+    internal_collaborators:
+      - Hive::AgentSkills::Adapters::Registry
+      - Hive::AgentSkills::CanonicalSkill
+      - Hive::AgentSkills::CommandRunner
+      - Hive::AgentSkills::DirectoryPublisher
+      - Hive::AgentSkills::Inspector
+      - Hive::AgentSkills::Manifest
+      - Hive::AgentSkills::Provisioner
+      - Hive::AgentSkills::TargetResolver
+    forbidden_constructions:
+      - Hive::AgentSkills::Adapters::Registry
+      - Hive::AgentSkills::CanonicalSkill
+      - Hive::AgentSkills::CommandRunner
+      - Hive::AgentSkills::DirectoryPublisher
+      - Hive::AgentSkills::Inspector
+      - Hive::AgentSkills::Manifest
+      - Hive::AgentSkills::Provisioner
+      - Hive::AgentSkills::TargetResolver
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/commands/doctor.rb
+      - lib/hive/commands/init.rb
+      - lib/hive/commands/setup_agents.rb
+      - lib/hive/web/agent_skills.rb
+    mutation_authority: "Hive adapters choose canonical sources and trusted agent-home roots; the facade applies only its revalidated projection plan."
+    recovery_surface: "Typed refusal and stale-plan errors preserve foreign trees; atomic publication preserves or restores the prior managed directory on failure."
+    wiki_page: wiki/commands/setup-agents.md
+    focused_tests:
+      - test/unit/agent_skills/facade_test.rb
+      - test/unit/agent_skills/canonical_skill_test.rb
+      - test/unit/agent_skills/directory_publisher_test.rb
+      - test/unit/agent_skills/inspector_test.rb
+      - test/unit/agent_skills/manifest_test.rb
+      - test/unit/agent_skills/provisioner_test.rb
+      - test/unit/agent_skills/bundled_skill_test.rb
+      - test/unit/agent_skills/openclaw_test.rb
+      - test/unit/commands/setup_agents_test.rb
+      - test/integration/agent_skill_adapters_test.rb
+      - test/integration/setup_agents_test.rb
+    migration_exceptions: []
+
+  - id: safe-agent-git-gate
+    name: Safe Agent Git Gate
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/agent_git_gate.rb
+      require: hive/agent_git_gate
+      constant: Hive::AgentGitGate
+    public_contract:
+      values:
+        - Hive::AgentGitGate::ReadResult
+        - Hive::AgentGitGate::RemoteObservation
+        - Hive::AgentGitGate::MaterializationReceipt
+        - Hive::AgentGitGate::PublicationReceipt
+      errors:
+        - Hive::AgentGitGate::InvalidRequest
+        - Hive::AgentGitGate::UnsupportedOperation
+        - Hive::AgentGitGate::CommandFailed
+        - Hive::AgentGitGate::RemoteConflict
+        - Hive::AgentGitGate::MaterializationFailed
+        - Hive::AgentGitGate::PublicationFailed
+    owned_paths:
+      - lib/hive/agent_git_gate.rb
+      - lib/hive/managed_git.rb
+    state_contracts:
+      - "Repository objects, refs, worktrees, and publication receipts"
+    schema_contracts:
+      - "Expected remote object identity and before/after publication receipt"
+    lock_contracts:
+      - "Expected-OID lease is revalidated at publication"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/errors
+      - hive/git_ref
+    internal_collaborators:
+      - Hive::ManagedGit
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/gh.rb
+      - lib/hive/worktree.rb
+      - lib/hive/stages/agent_report.rb
+      - lib/hive/stages/draft_pr_handoff.rb
+      - lib/hive/refactor_patrol/pr_opener.rb
+    mutation_authority: "Hive injects credential, transport, branch, PR, and operator-approval policy."
+    recovery_surface: "Receipts preserve observed identities; publication failure remains explicit and retryable."
+    wiki_page: wiki/modules/agent_git_gate.md
+    focused_tests:
+      - test/unit/agent_git_gate_test.rb
+      - test/unit/managed_git_test.rb
+      - test/unit/gh_test.rb
+      - test/unit/worktree_test.rb
+      - test/unit/stages/agent_report_test.rb
+      - test/unit/stages/draft_pr_handoff_test.rb
+      - test/unit/refactor_patrol/pr_opener_test.rb
+    migration_exceptions: []
+
+  - id: work-ledger
+    name: WorkLedger
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/work_ledger.rb
+      require: hive/work_ledger
+      constant: Hive::WorkLedger
+    public_contract:
+      values:
+        - Hive::WorkLedger::AppendReceipt
+        - Hive::WorkLedger::DescriptorReceipt
+        - Hive::WorkLedger::JournalHandle
+        - Hive::WorkLedger::ReplayReceipt
+      errors:
+        - Hive::WorkLedger::AppendFailed
+        - Hive::WorkLedger::Conflict
+        - Hive::WorkLedger::InvalidDescriptor
+        - Hive::WorkLedger::InvalidRecord
+        - Hive::WorkLedger::InvalidRequest
+        - Hive::WorkLedger::ReplayFailed
+    owned_paths:
+      - lib/hive/work_ledger.rb
+      - lib/hive/work_ledger
+    state_contracts:
+      - "Caller-owned append-only JSONL records and ordered structural descriptors"
+    schema_contracts:
+      - "No WorkLedger disk schema; callers inject record identity and validation while Hive owns journal/projection compatibility"
+    lock_contracts:
+      - "JSONL appends take one caller-named exclusive lock, write complete batches, fsync, and roll back to the prior durable byte boundary on failure"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/atomic_file
+      - hive/errors
+    internal_collaborators:
+      - Hive::WorkLedger::DescriptorValidator
+      - Hive::WorkLedger::Journal
+      - Hive::WorkLedger::Replay
+    forbidden_constructions:
+      - Hive::WorkLedger::DescriptorValidator
+      - Hive::WorkLedger::Journal
+      - Hive::WorkLedger::Replay
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/task_journal.rb
+      - lib/hive/task_projection.rb
+      - lib/hive/workflow.rb
+    mutation_authority: "Callers supply the exact ledger and lock paths plus validated records; Hive event, condition, task-path, transition, Git, and migration policy remains above the seam."
+    recovery_surface: "Typed receipts bind exact cursor/hash/identity; replay preserves source bytes, duplicate identities fail closed, and partial appends roll back."
+    wiki_page: wiki/state-model.md
+    focused_tests:
+      - test/unit/work_ledger_test.rb
+      - test/unit/task_journal_test.rb
+      - test/unit/task_projection/store_test.rb
+      - test/unit/task_projection_test.rb
+      - test/unit/workflow_test.rb
+    migration_exceptions: []

@@ -16,8 +16,15 @@ module Hive
   class AgentProfile
     PROMPT_STYLES = %i[positional headless_flag_value stdin].freeze
     ROUTING_ARGUMENT_PLACEMENTS = %i[global subcommand].freeze
+    STRUCTURED_OUTPUT_PROTOCOLS = %i[grok_end].freeze
     WORKSPACE_WRITE_PERMISSION_MODE = "workspace-write".freeze
     READ_ONLY_PERMISSION_MODE = "read-only".freeze
+    TOOL_SCOPE_FLAGS_UNSET = Object.new.freeze
+    LEGACY_CLAUDE_TOOL_SCOPE_FLAGS = {
+      allowed: "--allowedTools",
+      disallowed: "--disallowedTools"
+    }.freeze
+    private_constant :TOOL_SCOPE_FLAGS_UNSET, :LEGACY_CLAUDE_TOOL_SCOPE_FLAGS
     # Status-detection modes. handle_exit branches on these:
     #
     # - :state_file_marker -- read the marker on task.state_file (today's
@@ -37,6 +44,9 @@ module Hive
     CAPTURE_POLL_INTERVAL_SEC = 0.01
     CAPTURE_TERM_GRACE_SEC = 0.2
     CAPTURE_REAP_GRACE_SEC = 0.2
+    VERSION_TOKEN_PATTERN =
+      /(?<![0-9A-Za-z])v?(\d+\.\d+\.\d+(?:[.-][0-9A-Za-z]+)*)(?![0-9A-Za-z])/
+    private_constant :VERSION_TOKEN_PATTERN
 
     RoutingArguments = Data.define(
       :profile_name, :stage, :model, :effort, :provenance,
@@ -78,7 +88,9 @@ module Hive
                 :model_argument_builder, :effort_argument_builder,
                 :launcher_identity, :policy_capabilities,
                 :routed_effort_values, :routing_argument_placement,
-                :routed_model_argument_builder, :routed_effort_argument_builder
+                :routed_model_argument_builder, :routed_effort_argument_builder,
+                :tool_scope_flags,
+                :structured_output_protocol
 
     # Public API — do not break.
     #
@@ -121,6 +133,18 @@ module Hive
     #   initial_context_tokens: default 0. Conservative admission reserve for
     #                           provider-owned context sent before the first
     #                           streamed usage event.
+    #   tool_scope_flags:      default {} except for a profile named :claude,
+    #                          where omission preserves the legacy
+    #                          --allowedTools/--disallowedTools mapping. Pass
+    #                          an explicit {} to opt out. Maps
+    #                          :allowed/:disallowed tool scopes to the
+    #                          provider's corresponding flags.
+    #   raw_cli_arguments_supported: default false. Explicit opt-in for
+    #                          legacy provider-native argv passthrough.
+    #   structured_output_protocol: default nil. Explicitly opts a profile
+    #                          into a provider stream shape that can replace
+    #                          ordinary assistant text. Today only
+    #                          :grok_end is supported.
     #   prompt_style:          default :stdin for a profile named :codex,
     #                          otherwise :positional (backward compatible
     #                          with pre-profile-style custom registrations)
@@ -160,7 +184,10 @@ module Hive
                    routed_effort_values: nil,
                    routing_argument_placement: :subcommand,
                    routed_model_argument_builder: nil,
-                   routed_effort_argument_builder: nil)
+                   routed_effort_argument_builder: nil,
+                   tool_scope_flags: TOOL_SCOPE_FLAGS_UNSET,
+                   raw_cli_arguments_supported: false,
+                   structured_output_protocol: nil)
       prompt_style ||= name.to_sym == :codex ? :stdin : :positional
       unless PROMPT_STYLES.include?(prompt_style)
         raise ArgumentError,
@@ -180,6 +207,12 @@ module Hive
         raise ArgumentError,
               "unknown routing_argument_placement: #{routing_argument_placement.inspect}; " \
               "valid: #{ROUTING_ARGUMENT_PLACEMENTS.inspect}"
+      end
+      if structured_output_protocol &&
+         !STRUCTURED_OUTPUT_PROTOCOLS.include?(structured_output_protocol.to_sym)
+        raise ArgumentError,
+              "unknown structured_output_protocol: #{structured_output_protocol.inspect}; " \
+              "valid: #{STRUCTURED_OUTPUT_PROTOCOLS.inspect}"
       end
 
       @name = name
@@ -213,6 +246,11 @@ module Hive
       @routing_argument_placement = routing_argument_placement
       @routed_model_argument_builder = routed_model_argument_builder || @model_argument_builder
       @routed_effort_argument_builder = routed_effort_argument_builder || @effort_argument_builder
+      @tool_scope_flags = normalize_tool_scope_flags(
+        default_tool_scope_flags(name, tool_scope_flags)
+      )
+      @raw_cli_arguments_supported = raw_cli_arguments_supported == true
+      @structured_output_protocol = structured_output_protocol&.to_sym
 
       freeze
     end
@@ -301,6 +339,10 @@ module Hive
 
     def read_only_supported?
       !@read_only_flags.empty?
+    end
+
+    def raw_cli_arguments_supported?
+      @raw_cli_arguments_supported
     end
 
     def concrete_default_model(cfg: nil, project_root: nil, home: nil)
@@ -562,8 +604,16 @@ module Hive
       end
       raise Hive::AgentError, "#{@name} binary not runnable: #{bin}" unless status.success?
 
-      version = out[/\d+\.\d+\.\d+/]
-      raise Hive::AgentError, "could not parse #{@name} #{@version_flag} output: #{out.inspect}" unless version
+      versions = out.scan(VERSION_TOKEN_PATTERN).flatten.uniq
+      if versions.empty?
+        raise Hive::AgentError,
+              "could not parse #{@name} #{@version_flag} output: #{out.inspect}"
+      end
+      if versions.length > 1
+        raise Hive::AgentError,
+              "ambiguous #{@name} #{@version_flag} output: #{versions.join(', ')}"
+      end
+      version = versions.fetch(0)
 
       if @min_version
         cmp = version_tuple(version) <=> version_tuple(@min_version)
@@ -606,6 +656,30 @@ module Hive
         end
         normalized[name.to_sym] = flags.freeze
       end.freeze
+    end
+
+    def normalize_tool_scope_flags(flags)
+      unless flags.is_a?(Hash)
+        raise ArgumentError, "tool_scope_flags must be a Hash; got #{flags.class}"
+      end
+
+      flags.each_with_object({}) do |(scope, raw_flag), normalized|
+        name = scope.to_sym
+        unless %i[allowed disallowed].include?(name)
+          raise ArgumentError, "unknown tool scope #{scope.inspect}; valid: [:allowed, :disallowed]"
+        end
+        flag = raw_flag.to_s
+        raise ArgumentError, "tool scope #{scope.inspect} must declare a flag" if flag.empty?
+
+        normalized[name] = flag.freeze
+      end.freeze
+    end
+
+    def default_tool_scope_flags(name, flags)
+      return flags unless flags.equal?(TOOL_SCOPE_FLAGS_UNSET)
+      return LEGACY_CLAUDE_TOOL_SCOPE_FLAGS if name.to_sym == :claude
+
+      {}
     end
 
     def capture_help!(capability_flags)
@@ -752,7 +826,10 @@ module Hive
         routed_effort_values: @routed_effort_values&.dup,
         routing_argument_placement: @routing_argument_placement,
         routed_model_argument_builder: @routed_model_argument_builder,
-        routed_effort_argument_builder: @routed_effort_argument_builder
+        routed_effort_argument_builder: @routed_effort_argument_builder,
+        tool_scope_flags: @tool_scope_flags.dup,
+        raw_cli_arguments_supported: @raw_cli_arguments_supported,
+        structured_output_protocol: @structured_output_protocol
       }
     end
 

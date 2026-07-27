@@ -4,6 +4,8 @@ require "hive/conditions/migration"
 require "hive/conditions/recovery_action"
 require "hive/plan_frontmatter"
 require "hive/task_projection/store"
+require "hive/task_closure"
+require "hive/conditions/evidence"
 
 module Hive
   module Conditions
@@ -59,6 +61,23 @@ module Hive
             rerun_with: "hive develop #{task.folder.shellescape} --from 4-execute"
           )
         )
+      end
+
+      # Dedicated closure receipts are not attempt success evidence and never
+      # weaken the ordinary marker/condition transition. StageAction calls
+      # this separate guard only for its private evidence-bound archive path.
+      def validate_closure!(task, receipt_digest:, project: nil)
+        evidence = Hive::TaskClosure.transition_evidence(
+          task, receipt_digest: receipt_digest, project: project
+        )
+        unless evidence
+          raise Hive::TaskClosure::InvalidReceipt,
+                "closure receipt is absent, invalid, or stale for this task generation"
+        end
+        Hive::Conditions::Evidence.validate!(
+          evidence, allowed: [ :task_closure ]
+        )
+        true
       end
 
       def audit_force!(task:, projection:, projection_store:, marker:, result:, source:)

@@ -1,8 +1,8 @@
 require "digest"
 require "fileutils"
+require "hive/artifact_firewall"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
-require "hive/protected_files"
 require "hive/reviewers/plan_context"
 require "hive/reviewers/synthetic_task"
 require "hive/stages/base"
@@ -37,7 +37,7 @@ module Hive
         # Files the triage agent must NOT modify. The reviewer files
         # are deliberately NOT in this list — triage's job is to edit
         # them in place. The escalations file is new and SHA-irrelevant.
-        PROTECTED_FILES = Hive::ProtectedFiles::ORCHESTRATOR_OWNED
+        PROTECTED_FILES = Hive::ArtifactFirewall::ORCHESTRATOR_OWNED
 
         # The base-bound suppression list is orchestrator-owned: only the
         # runner's strip_suppressed! (before this spawn) and
@@ -89,10 +89,13 @@ module Hive
             escalations_path: escalations
           )
 
-          protected_capture = Hive::ProtectedFiles.capture(
-            ctx.task_folder, TRIAGE_PROTECTED_FILES
+          custody_manifest = Hive::ArtifactFirewall::Manifest.new(
+            root: ctx.task_folder,
+            protected_anchors: TRIAGE_PROTECTED_FILES,
+            permitted_writable_roots: [ ctx.task_folder, ctx.worktree_path ],
+            required_outputs: { File.basename(escalations) => escalations }
           )
-          before = Hive::ProtectedFiles.snapshot(ctx.task_folder, TRIAGE_PROTECTED_FILES)
+          custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
           task = synthetic_task(ctx)
           scope = Hive::Stages::Base.stage_permission_scope(
             cfg, "review.triage", task, profile,
@@ -110,43 +113,55 @@ module Hive
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :output_file_exists
           }
-          spawn_result =
-            if profile.name == :claude
-              Hive::Stages::Base.spawn_claude!(
-                task,
-                cfg,
-                **kwargs,
-                session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-triage-pass#{ctx.pass}", task)
-              )
-            else
-              Hive::Stages::Base.spawn_agent(task, **kwargs)
-            end
-          after = Hive::ProtectedFiles.snapshot(ctx.task_folder, TRIAGE_PROTECTED_FILES)
-
-          tampered = Hive::ProtectedFiles.diff(before, after)
-          if tampered.any?
-            restored, restore_error = Hive::ProtectedFiles.restore_safely(
-              ctx.task_folder, protected_capture, tampered
+          begin
+            spawn_result =
+              if profile.name == :claude
+                Hive::Stages::Base.spawn_claude!(
+                  task,
+                  cfg,
+                  **kwargs,
+                  session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-triage-pass#{ctx.pass}", task)
+                )
+              else
+                Hive::Stages::Base.spawn_agent(task, **kwargs)
+              end
+          ensure
+            custody_report = Hive::ArtifactFirewall.validate_and_restore(
+              custody_manifest, custody_snapshot
             )
-            unless restored
+          end
+
+          if custody_report.tampered?
+            unless custody_report.restored?
               return Result.new(
                 status: :error,
                 escalations_path: escalations,
-                error_message: "triage protected-file restore failed: #{restore_error}",
-                tampered_files: tampered,
+                error_message: "triage protected-file restore failed: " \
+                               "#{custody_report.restore_diagnostic}",
+                tampered_files: custody_report.tampered_labels,
                 limit_text: nil
               )
             end
             return Result.new(
               status: :tampered,
               escalations_path: escalations,
-              error_message: "triage agent modified protected files: #{tampered.join(', ')}",
-              tampered_files: tampered,
+              error_message: "triage agent modified protected files: " \
+                             "#{custody_report.tampered_labels.join(', ')}",
+              tampered_files: custody_report.tampered_labels,
               limit_text: nil
             )
           end
 
           if spawn_result[:status] == :ok
+            unless custody_report.required_outputs_valid?
+              return Result.new(
+                status: :error,
+                escalations_path: escalations,
+                error_message: custody_report.diagnostic,
+                tampered_files: [],
+                limit_text: nil
+              )
+            end
             Result.new(
               status: :ok,
               escalations_path: escalations,

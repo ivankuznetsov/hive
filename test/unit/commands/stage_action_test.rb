@@ -152,17 +152,6 @@ class CommandsStageActionTest < Minitest::Test
                  calls.first.fetch(:argv)
   end
 
-  def test_durable_worker_argv_preserves_recovery_reason
-    task = Struct.new(:folder).new("/tmp/task-folder")
-    command = Hive::Commands::StageAction.new(
-      "plan", "some-slug", recover_merged_error_reason: "ci_failed"
-    )
-    assert_equal [
-      "hive", "plan", "/tmp/task-folder",
-      "--recover-merged-error-reason", "ci_failed"
-    ], command.send(:durable_worker_argv, task)
-  end
-
   def test_lost_durable_attempt_emits_versioned_json_error_envelope
     task = Struct.new(:folder, :slug, :project_root, :project_name).new(
       "/tmp/task-folder", "some-slug", "/tmp/project", "demo"
@@ -315,5 +304,44 @@ class CommandsStageActionTest < Minitest::Test
       assert_equal 7, exit_error.status
     end
     assert_empty out
+  end
+
+  def test_closure_receipt_authorizes_only_archive_and_resumes_markerless_terminal_task
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "task.md")
+      File.write(state_file, "# task\n")
+      task = Struct.new(:folder, :state_file, :slug).new(
+        dir, state_file, "task"
+      )
+      wrong_verb = Hive::Commands::StageAction.new(
+        "plan", task.folder, closure_receipt_digest: "a" * 64
+      )
+      assert_raises(Hive::TaskClosure::InvalidReceipt) do
+        wrong_verb.send(
+          :close_with_receipt, task, "4-execute", Hive::Stages::DIRS.last
+        )
+      end
+
+      archive = Hive::Commands::StageAction.new(
+        "archive", task.folder, closure_receipt_digest: "a" * 64
+      )
+      runs = []
+      archive.define_singleton_method(:run_at) do |folder, observation_guard:|
+        runs << [ folder, observation_guard ]
+      end
+      with_replaced_singleton_method(
+        Hive::Conditions::TransitionGuard, :validate_closure!, ->(*) { true }
+      ) do
+        with_replaced_singleton_method(Hive::Task, :new, ->(*) { task }) do
+          archive.send(
+            :close_with_receipt,
+            task,
+            Hive::Stages::DIRS.last,
+            Hive::Stages::DIRS.last
+          )
+        end
+      end
+      assert_equal [ [ task.folder, nil ] ], runs
+    end
   end
 end

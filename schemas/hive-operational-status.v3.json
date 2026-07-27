@@ -1,0 +1,485 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:operational-status:v3",
+  "title": "hive operational status output (v3)",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "generated_at", "completeness",
+        "source", "summary", "daemon", "scheduler", "archive", "issues", "tasks"
+      ],
+      "properties": {
+    "schema": { "const": "hive-operational-status" },
+    "schema_version": { "const": 3 },
+    "ok": { "const": true },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "completeness": { "$ref": "#/$defs/Completeness" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_graph", "scheduler"],
+      "properties": {
+        "task_graph": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "schema_version", "generated_at", "status", "projects_total", "projects_healthy"],
+          "properties": {
+            "schema": { "const": "hive-status" },
+            "schema_version": { "type": "integer", "minimum": 1 },
+            "generated_at": { "type": "string", "format": "date-time" },
+            "status": { "$ref": "#/$defs/Completeness" },
+            "projects_total": { "type": "integer", "minimum": 0 },
+            "projects_healthy": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "scheduler": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "observed_at"],
+          "properties": {
+            "status": { "$ref": "#/$defs/SchedulerStatus" },
+            "observed_at": { "type": ["string", "null"], "format": "date-time" }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "overall_state", "active", "archived", "hidden_archived_task_count",
+        "projects_total", "projects_healthy", "states"
+      ],
+      "properties": {
+        "overall_state": { "$ref": "#/$defs/State" },
+        "active": { "type": "integer", "minimum": 0 },
+        "archived": { "type": "integer", "minimum": 0 },
+        "hidden_archived_task_count": { "type": "integer", "minimum": 0 },
+        "projects_total": { "type": "integer", "minimum": 0 },
+        "projects_healthy": { "type": "integer", "minimum": 0 },
+        "states": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "unknown", "running", "needs_repair", "waiting_on_you",
+            "waiting_on_provider_or_scheduler", "completion_ready", "idle"
+          ],
+          "properties": {
+            "unknown": { "type": "integer", "minimum": 0 },
+            "running": { "type": "integer", "minimum": 0 },
+            "needs_repair": { "type": "integer", "minimum": 0 },
+            "waiting_on_you": { "type": "integer", "minimum": 0 },
+            "waiting_on_provider_or_scheduler": { "type": "integer", "minimum": 0 },
+            "completion_ready": { "type": "integer", "minimum": 0 },
+            "idle": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "daemon": { "$ref": "#/$defs/Daemon" },
+    "scheduler": { "$ref": "#/$defs/Scheduler" },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "by_project", "closures"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "by_project": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["project", "count"],
+            "properties": {
+              "project": { "type": "string" },
+              "count": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "closures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "project", "slug", "reason", "authority",
+              "receipt_digest", "evidence"
+            ],
+            "properties": {
+              "project": { "type": "string" },
+              "slug": { "type": "string" },
+              "reason": { "type": "string", "enum": ["already_delivered", "superseded"] },
+              "authority": { "type": "string", "enum": ["remote_merge", "operator_attestation"] },
+              "receipt_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "evidence": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+            }
+          }
+        }
+      }
+    },
+    "issues": { "type": "array", "items": { "$ref": "#/$defs/Issue" } },
+        "tasks": { "type": "array", "items": { "$ref": "#/$defs/Task" } }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-operational-status" },
+        "schema_version": { "const": 3 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "type": "string", "enum": ["config", "internal", "error"] },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "candidates": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "id": { "type": "string" },
+        "path": { "type": "string" }
+      }
+    },
+    "Completeness": { "type": "string", "enum": ["complete", "partial", "unknown"] },
+    "State": {
+      "type": "string",
+      "enum": [
+        "unknown", "running", "needs_repair", "waiting_on_you",
+        "waiting_on_provider_or_scheduler", "completion_ready", "idle"
+      ]
+    },
+    "SchedulerStatus": {
+      "type": "string",
+      "enum": ["not_applicable", "unavailable", "current", "stale", "invalid"]
+    },
+    "Daemon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "generation", "pid", "process_start_time", "phase", "observed_at"],
+      "properties": {
+        "status": { "type": "string", "enum": ["not_applicable", "healthy", "degraded", "stopped", "unknown"] },
+        "generation": { "type": ["string", "null"] },
+        "pid": { "type": ["integer", "null"], "minimum": 1 },
+        "process_start_time": { "type": ["string", "null"] },
+        "phase": { "type": ["string", "null"], "enum": ["started", "failed", "complete", null] },
+        "observed_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "Scheduler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "reason", "observed_at", "valid_until", "tick_sequence",
+        "capacity", "queue", "provider_holds"
+      ],
+      "properties": {
+        "status": { "$ref": "#/$defs/SchedulerStatus" },
+        "reason": { "type": ["string", "null"] },
+        "observed_at": { "type": ["string", "null"], "format": "date-time" },
+        "valid_until": { "type": ["string", "null"], "format": "date-time" },
+        "tick_sequence": { "type": ["integer", "null"], "minimum": 0 },
+        "capacity": { "type": ["object", "null"], "additionalProperties": true },
+        "queue": { "type": ["object", "null"], "additionalProperties": true },
+        "provider_holds": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+      }
+    },
+    "Issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "source", "project", "task", "message", "remediation"],
+      "properties": {
+        "code": { "type": "string" },
+        "severity": { "type": "string", "enum": ["info", "warning", "error"] },
+        "source": { "type": "string" },
+        "project": { "type": ["string", "null"] },
+        "task": { "type": ["string", "null"] },
+        "message": { "type": "string" },
+        "remediation": { "type": "string" }
+      }
+    },
+    "Task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity", "workflow", "position", "liveness", "state", "blocker_owner",
+        "reason", "reasons", "provider", "retry", "recovery", "closure",
+        "dependency", "freshness", "evidence", "action"
+      ],
+      "properties": {
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["project", "slug", "id", "display_name", "folder"],
+          "properties": {
+            "project": { "type": "string" },
+            "slug": { "type": "string" },
+            "id": { "type": ["integer", "null"] },
+            "display_name": { "type": ["string", "null"] },
+            "folder": { "type": "string" }
+          }
+        },
+        "workflow": { "type": ["string", "null"] },
+        "position": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stage", "marker"],
+          "properties": {
+            "stage": { "type": "string" },
+            "marker": { "type": "string" }
+          }
+        },
+        "liveness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "pid", "attempt_id", "task_generation"],
+          "properties": {
+            "status": { "type": "string", "enum": ["running", "not_running", "stale"] },
+            "pid": { "type": ["integer", "null"], "minimum": 1 },
+            "attempt_id": { "type": ["string", "null"] },
+            "task_generation": { "type": ["string", "null"] }
+          }
+        },
+        "state": { "$ref": "#/$defs/State" },
+        "blocker_owner": {
+          "type": "string",
+          "enum": ["agent", "operator", "provider", "scheduler", "hive", "none", "unknown"]
+        },
+        "reason": { "type": "string" },
+        "reasons": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Reason" } },
+        "provider": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "retry_after"],
+              "properties": {
+                "name": { "type": ["string", "null"] },
+                "retry_after": { "type": ["string", "null"], "format": "date-time" }
+              }
+            }
+          ]
+        },
+        "retry": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["due", "retry_at", "safe", "safety_reason"],
+              "properties": {
+                "due": { "type": "boolean" },
+                "retry_at": { "type": ["string", "null"], "format": "date-time" },
+                "safe": { "type": "boolean" },
+                "safety_reason": { "type": ["string", "null"] }
+              }
+            }
+          ]
+        },
+        "recovery": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/Recovery" }
+          ]
+        },
+        "closure": { "$ref": "#/$defs/Closure" },
+        "dependency": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["blocked", "blocked_by", "dependency_stage", "admission_error"],
+          "properties": {
+            "blocked": { "type": "boolean" },
+            "blocked_by": { "type": ["string", "null"] },
+            "dependency_stage": { "type": ["string", "null"] },
+            "admission_error": { "type": ["object", "null"], "additionalProperties": true }
+          }
+        },
+        "freshness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["task_observed_at", "scheduler_status"],
+          "properties": {
+            "task_observed_at": { "type": "string", "format": "date-time" },
+            "scheduler_status": { "$ref": "#/$defs/SchedulerStatus" }
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["task_action", "task_action_label", "marker_attrs", "diagnostic", "condition_warning", "held"],
+          "properties": {
+            "task_action": { "type": "string" },
+            "task_action_label": { "type": "string" },
+            "marker_attrs": { "type": "object", "additionalProperties": true },
+            "diagnostic": { "type": ["object", "null"], "additionalProperties": true },
+            "condition_warning": { "type": ["string", "null"] },
+            "held": { "type": ["object", "null"], "additionalProperties": true }
+          }
+        },
+        "action": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/Action" }
+          ]
+        }
+      }
+    },
+    "Reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "source", "freshness"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "source": { "type": "string" },
+        "freshness": { "type": "string", "enum": ["current", "stale", "unavailable"] }
+      }
+    },
+    "Recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "request_id", "attempt_id", "phase", "failure_origin",
+        "next_eligible_at", "owner", "reason", "remediation", "retry_count",
+        "provider_hint", "terminal_outcome", "terminal_at"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["queued", "cooldown", "running", "blocked", "terminal", "unavailable"]
+        },
+        "request_id": { "type": ["string", "null"] },
+        "attempt_id": { "type": ["string", "null"] },
+        "phase": {
+          "type": ["string", "null"],
+          "enum": ["admitted", "cleared", "dispatched", "terminal", null]
+        },
+        "failure_origin": { "type": ["string", "null"] },
+        "next_eligible_at": { "type": ["string", "null"], "format": "date-time" },
+        "owner": {
+          "type": ["string", "null"],
+          "enum": ["agent", "operator", "provider", "scheduler", "hive", "none", "unknown", null]
+        },
+        "reason": { "type": ["string", "null"] },
+        "remediation": { "type": ["string", "null"] },
+        "retry_count": { "type": ["integer", "null"], "minimum": 0 },
+        "terminal_outcome": { "type": ["string", "null"] },
+        "terminal_at": { "type": ["string", "null"], "format": "date-time" },
+        "provider_hint": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["retry_after", "display_only"],
+              "properties": {
+                "retry_after": { "type": "string" },
+                "display_only": { "const": true }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "Closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "reason", "authority", "receipt_digest", "evidence",
+        "diagnostic", "quarantine_path", "action"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["operator_required", "confirmed_pending_transition", "blocked"]
+        },
+        "reason": {
+          "type": ["string", "null"],
+          "enum": ["already_delivered", "superseded", null]
+        },
+        "authority": {
+          "type": ["string", "null"],
+          "enum": ["remote_merge", "operator_attestation", null]
+        },
+        "receipt_digest": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "diagnostic": {
+          "type": ["string", "null"],
+          "maxLength": 240
+        },
+        "quarantine_path": {
+          "type": ["string", "null"],
+          "maxLength": 4096
+        },
+        "action": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/ClosureAction" }
+          ]
+        }
+      }
+    },
+    "ClosureAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_id", "target", "risk_class", "confirmation_required",
+        "supported_reasons", "provenance"
+      ],
+      "properties": {
+        "action_id": { "const": "workflow.close_with_evidence" },
+        "target": { "type": "string", "pattern": "^.+:.+$" },
+        "risk_class": { "const": "operator_attested" },
+        "confirmation_required": { "const": true },
+        "supported_reasons": {
+          "type": "array",
+          "const": ["already_delivered", "superseded"]
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "task_action"],
+          "properties": {
+            "source": { "const": "hive-operational-status" },
+            "task_action": { "type": "string" }
+          }
+        }
+      }
+    },
+    "Action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_id", "target", "observation_token", "risk_class",
+        "confirmation_required", "provenance"
+      ],
+      "properties": {
+        "action_id": { "type": "string", "enum": ["workflow.advance", "workflow.retry"] },
+        "target": { "type": "string", "pattern": "^.+:.+$" },
+        "observation_token": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "risk_class": { "const": "routine_idempotent" },
+        "confirmation_required": { "const": false },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "task_action"],
+          "properties": {
+            "source": { "const": "hive-operational-status" },
+            "task_action": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

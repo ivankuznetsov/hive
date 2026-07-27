@@ -1,4 +1,6 @@
 require "test_helper"
+require "base64"
+require "json"
 require "hive/bot/handlers/slash_handlers"
 require "hive/bot/handlers/callback_handlers"
 require "hive/bot/idea_draft_store"
@@ -9,7 +11,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :stage, :question_n, :answer_text, :mode,
                       :intent, :alert_reset, :clear_keyboard, :format,
-                      :attachment, keyword_init: true)
+                      :attachment, :recovery, keyword_init: true)
   Update = Struct.new(:text, :chat_id, keyword_init: true) do
     def effective_text = text
     def media? = false
@@ -93,6 +95,62 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_includes result.text, "/approve <id|slug>"
     assert_includes result.text, "/autofix <id|slug>"
     assert_includes result.text, "/details <id|slug>"
+    assert_includes result.text, "/close <id|slug>"
+  end
+
+  def test_close_builds_a_bounded_verify_then_confirm_callback
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+    result = handlers.closure(Update.new(
+      text: "/close 9281 --reason already_delivered " \
+            "--evidence https://github.com/ivankuznetsov/hive/pull/42",
+      chat_id: 1
+    ))
+
+    assert_equal :reply, result.action
+    assert_match(/Nothing is archived until verification/, result.text)
+    token = result.reply_markup.dig(0, 0, :callback_data)
+    assert_operator token.bytesize, :<=,
+                    Hive::Bot::NotificationBuilders::CALLBACK_DATA_MAX
+    callback = Hive::Bot::NotificationBuilders.resolve_callback(token)
+    prefix, encoded = callback.split(":", 2)
+    payload = JSON.parse(Base64.urlsafe_decode64(encoded))
+
+    assert_equal "closure_preview", prefix
+    assert_equal "hive", payload.fetch("project")
+    assert_equal REVIEW_ERROR_ROW.slug, payload.fetch("slug")
+    assert_equal "already_delivered", payload.dig("input", "reason")
+    assert_equal [ "https://github.com/ivankuznetsov/hive/pull/42" ],
+                 payload.dig("input", "evidence")
+  end
+
+  def test_close_requires_explicit_reason_and_evidence
+    result = @handlers.closure(Update.new(
+      text: "/close task-260525-abcd --reason already_delivered",
+      chat_id: 1
+    ))
+
+    assert_equal :reply, result.action
+    assert_match(%r{\AUse /close}, result.text)
+    assert_match(/at least one --evidence/, result.text)
+    assert_nil result.reply_markup
+  end
+
+  def test_close_rejects_duplicate_and_unknown_options
+    commands = [
+      "/close task --reason superseded --evidence acme/app#42 " \
+        "--successor app:first --successor app:second --attestation shipped",
+      "/close task --reason superseded --evidence acme/app#42 " \
+        "--successor app:next --attestation shipped --attestation twice",
+      "/close task --reason already_delivered --evidence acme/app#42 --mystery value",
+      "/close task --reason unsupported --evidence acme/app#42"
+    ]
+
+    commands.each do |command|
+      result = @handlers.closure(Update.new(text: command, chat_id: 1))
+      assert_equal :reply, result.action
+      assert_match(%r{\AUse /close}, result.text)
+      assert_nil result.reply_markup
+    end
   end
 
   def test_status_with_json_flag_sets_format_json
@@ -148,7 +206,10 @@ class HiveBotSlashHandlersTest < Minitest::Test
     stage: "6-review",
     workflow: "coding",
     marker: "review_error",
-    attrs: { "phase" => "fix", "pass" => "2" },
+    attrs: {
+      "phase" => "fix", "pass" => "2", "reason" => "fix_failed",
+      "marker_id" => "review-generation-1"
+    },
     folder: "/tmp/stuck-260525-abcd",
     action: "recover_review",
     action_label: "Needs recovery",
@@ -368,8 +429,8 @@ class HiveBotSlashHandlersTest < Minitest::Test
     # sequence, while the miss path must leave it nil rather than dispatch
     # against an unintended row. (Bare `assert_nil` here would pass for any
     # :reply regardless of correctness.)
-    refute_nil handlers.autofix(Update.new(text: "/autofix #9281", chat_id: 1)).commands,
-               "control: a matching id populates the recovery commands"
+    refute_nil handlers.autofix(Update.new(text: "/autofix #9281", chat_id: 1)).recovery,
+               "control: a matching id populates the recovery observation"
     assert_nil result.commands,
                "a missing id must not populate the recovery commands the success path sets"
   end
@@ -431,7 +492,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     result = handlers.autofix(Update.new(text: "/autofix 9281-260525-abcd", chat_id: 1))
 
-    assert_equal :dispatch_commands, result.action
+    assert_equal :dispatch_recovery, result.action
     assert_equal "9281-260525-abcd", result.slug
   end
 
@@ -497,23 +558,22 @@ class HiveBotSlashHandlersTest < Minitest::Test
   end
 
   def assert_review_error_autofix_result(result)
-    assert_equal :dispatch_commands, result.action
+    assert_equal :dispatch_recovery, result.action
     assert_equal "hive", result.project
     assert_equal "stuck-260525-abcd", result.slug
     assert_nil result.text, "a successful autofix dispatch carries no operator reply text"
-    assert_equal [
-      [ "hive", "markers", "clear", "stuck-260525-abcd", "--name", "REVIEW_ERROR",
-        "--project", "hive", "--match-attr", "pass=2,phase=fix", "--json" ],
-      [ "hive", "review", "stuck-260525-abcd", "--from", "6-review", "--project", "hive", "--json" ]
-    ], result.commands
+    assert_equal REVIEW_ERROR_ROW, result.recovery
+    assert_nil result.commands
     assert_equal({ project: "hive", slug: "stuck-260525-abcd", stage: "6-review",
-                   marker: "review_error", match_attr: "pass=2,phase=fix" }, result.alert_reset)
+                   marker: "review_error",
+                   match_attr: "marker_id=review-generation-1,reason=fix_failed" },
+                 result.alert_reset)
     refute result.clear_keyboard,
            "slash path must NOT clear keyboard (no inline button was tapped)"
   end
 
   def test_autofix_slash_and_inline_button_dispatch_byte_identical_argv
-    # The whole point of RecoverySequence is that the /autofix slash command
+    # The whole point of RecoveryResultBuilder is that the /autofix slash command
     # and the inline 🔧 Autofix button produce IDENTICAL dispatches for the
     # same row. Drive BOTH surfaces from the same Row and compare — without
     # this, the two surfaces could silently diverge (the prior test only
@@ -524,11 +584,11 @@ class HiveBotSlashHandlersTest < Minitest::Test
     callback_data = Hive::Bot::NotificationBuilders.autofix_callback(row)
     button = Hive::Bot::Handlers::CallbackHandlers.new(
       pending_ideas: {}, set_last_project: ->(_p) { }, conversation_store: nil,
-      result_class: Result, logger: nil
+      result_class: Result, logger: nil, status_snapshot_provider: -> { [ row ] }
     ).handle(:callback_autofix, Struct.new(:callback_data).new(callback_data))
 
-    assert_equal button.commands, slash.commands,
-                 "slash and inline-button autofix must dispatch byte-identical argv for the same row"
+    assert_equal button.recovery, slash.recovery,
+                 "slash and inline-button autofix must submit the same observed row"
     assert_equal button.alert_reset, slash.alert_reset,
                  "alert_reset must match across surfaces so dedupe behaves identically"
     # The one legitimate divergence: the button clears its inline keyboard;
@@ -625,7 +685,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     result = handlers.autofix(Update.new(text: "/autofix tampered-260525-abcd", chat_id: 1))
 
-    assert_equal :dispatch_commands, result.action
+    assert_equal :dispatch_recovery, result.action
   end
 
   def test_autofix_retries_fix_status_check_failed_row
@@ -641,12 +701,12 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     result = handlers.autofix(Update.new(text: "/autofix status-260530-abcd", chat_id: 1))
 
-    assert_equal :dispatch_commands, result.action
+    assert_equal :dispatch_recovery, result.action
   end
 
   def test_autofix_no_retry_verb_for_stage_replies_cleanly
     # A retryable 9-done row passes the retryable gate but has no retry verb,
-    # so RecoverySequence.build's stage check produces the clean refusal.
+    # so RecoveryResultBuilder.build's stage check produces the clean refusal.
     done_retryable = Row.new(project: "hive", slug: "done-260525-abcd", stage: "9-done",
                              marker: "review_error", attrs: {},
                              diagnostic: { "suggested_next_action" => { "kind" => "retry" } })

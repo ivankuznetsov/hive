@@ -3,12 +3,12 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-07-24
+updated: 2026-07-26
 tags: [attempts, ownership, leases, daemon, recovery]
 ---
 
 **TLDR**: Every accepted task-stage launch has one immutable attempt ID and
-one versioned JSON lease/receipt under `$HIVE_HOME/attempts/v1/`. A detached
+one versioned JSON lease/receipt under `$HIVE_HOME/attempts/v2/`. A detached
 supervisor wrapper—not the CLI, bot, web process, or daemon—owns the worker
 group, heartbeat, framed output, exit status, and terminal receipt. The daemon
 reconciles and applies policy; it does not own or reap task agents.
@@ -19,7 +19,7 @@ reconciles and applies policy; it does not own or reap task agents.
 |--------|----------------|
 | `API` | Provide Hive commands, bot delivery, and daemon recovery with the stable admission operations `dispatch`, `dispatch_request`, and `dispatch_successor`, while keeping one injected store shared by its foreground and daemon adapters. |
 | `Contracts` | Define the public `ClientResult`, `DispatchResult`, and `UnsupportedDetachment` values independently of the internal client, dispatcher, and launcher implementations. |
-| `Record`, `Store` | Write v2 records, ingest v1/v2, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. |
+| `Record`, `Store` | Read and write only v2 records, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. The default store fails closed while an old v1 root remains; daemon/bot startup or explicit `hive migrate` owns the one-off mutation. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, and expose process-local compatibility projections after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
 | `Dispatcher` | Resolve receipt replay, live duplicate attachment, loss deferral, capacity, fresh admission, and explicit successors. |
@@ -29,7 +29,6 @@ reconciles and applies policy; it does not own or reap task agents.
 | `CommandDispatch` | Give `hive run` and workflow stage commands one attach-result policy: shared durable dispatch, lost-attempt translation, receipt exit propagation, and single-document JSON fallback when a failed worker emitted no stdout. |
 | `Reconciler`, `ProcessIdentity` | Adopt without `wait2`, detect PID/start/session/group mismatch, preserve suspects, expire launches, and normalize loss. |
 | `DirtyStateCapture`, `LostOutcomeStore` | Inventory partial git/untracked/binary work without mutation and make cleanup/successor policy restart-idempotent. |
-| `LegacyBackfiller` | Create a compatibility lease only when legacy task/PID/start identity is trustworthy. |
 
 ## Admission API boundary
 
@@ -52,10 +51,34 @@ It creates an in-monorepo seam that Hive can exercise first; a separately
 published package remains a later response to demonstrated non-Hive demand,
 not a requirement of the module design.
 
+The component catalog keeps this admission slice as a guarded reference
+`candidate`. Its facade, result contracts, focused clean-process load, and
+exact internal-construction sites are enforced now. U8 removed the former
+Attempts/WorkLedger catalog dependency and reciprocal-source exception:
+task-journal generation reads and `TaskProjection::Store` are Hive adapters,
+not source owned by the policy-light WorkLedger component. Attempts remains a
+candidate because this guarded reference does not turn the full durable-attempt
+lifecycle into a supported component API:
+reconciliation, supervision, capacity, loss processing, cancellation, export,
+and raw store operations remain internal. The supported facade still has only
+`dispatch`, `dispatch_request`, and `dispatch_successor`; its clean-process
+load brings in the result contracts without commands, stages, web code, or
+other candidate entry points.
+
+Hive still has narrow, cataloged internal construction sites: the daemon
+composition root wires reconciliation and loss processing, the private
+supervisor argv adapter starts the owner wrapper, and read-only compatibility
+adapters plus `TaskClosure`'s active-attempt verification open the canonical
+store. These sites are not alternate admission producers. The
+component-boundary test pins each file/constant pair and rejects the same
+construction from any newly listed file even while Attempts remains a
+candidate. Authorization is file-granular, so it does not distinguish a second
+call site inside an already authorized composition root.
+
 ## Storage and identity
 
 ```text
-$HIVE_HOME/attempts/v1/
+$HIVE_HOME/attempts/v2/
 ├── records/<attempt-id>.json
 ├── logs/<attempt-id>.frames
 ├── outputs/<attempt-id>/...
@@ -94,11 +117,20 @@ it.
 
 Condition projection adds an explicit numeric `task_input_epoch` to attempt
 records/context while retaining the prerequisite's opaque ownership generation
-as `ownership_generation`. That wire shape is `hive-attempt` v2; the original
-v1 schema remains unchanged. Old v1 records remain readable and bridge to
-epoch 0 in memory; they are not rewritten. Every non-legacy condition event must
-name a durable attempt whose task/stage ownership matches the record. Retry and
-adoption reuse the numeric epoch when accepted inputs are unchanged.
+as `ownership_generation`. `hive-attempt` v2 is now the sole runtime shape.
+`Hive::Recovery::Migration` moves the old `attempts/v1` tree once, rewrites v1
+records with `ownership_generation` and epoch 0, removes the obsolete
+compatibility flag, and leaves a receipt in the state home. Final compatibility
+leases are archived outside the active store. Any live attempt in the old tree
+blocks the rename because its detached old-binary supervisor still owns the v1
+path; a live compatibility lease is likewise never guessed into the new
+ownership model. If an old reader recreates only empty directories beside the
+current v2 tree, migration prunes them with empty-only `rmdir`; a file, symlink,
+or concurrent writer remains an ambiguous dual root and fails closed. Old
+schema files and in-memory normalization paths are removed. Every condition
+event must name a durable attempt whose task/stage ownership matches the
+record. Retry and adoption reuse the numeric epoch when accepted inputs are
+unchanged.
 
 ## State protocol
 
@@ -120,8 +152,9 @@ worker.
 ## Admission and execution
 
 Public `hive run` and workflow verbs enter `Attempts::API`, which delegates to
-its foreground adapter. Bot/web v3 requests, daemon queue/auto-advance, and
-recovery use the same API boundary; pending v2 requests remain readable. The
+its foreground adapter. Bot/web v4 requests, daemon queue/auto-advance, and
+recovery use the same API boundary. Runtime queue readers accept v4 only; the
+same one-off migration upgrades pending v1-v3 files before they are opened. The
 launcher double-forks into a distinct session. The dispatcher gives the wrapper
 a one-time random capability through an inherited pipe; the private
 `__attempt-supervise` route accepts no worker command argv and can claim only
@@ -197,17 +230,17 @@ signals an unverifiable process group. Once the worker is absent,
 `DirtyStateCapture` records HEAD, porcelain-v2 status, binary patches, and
 hashed untracked metadata without stash/reset/checkout/clean/add/commit.
 
-One `ERROR reason=attempt_lost` compatibility marker is projected. Only the
-lease-aware stale-agent healer consumes it; legacy marker discovery skips it.
-The marker remains while its successor lineage is unresolved, live, lost, or
-successful. Once one unambiguous lineage ends in a terminal failed/cancelled
-successor, the healer releases the marker through the same cooldown, current
-safety check, task lock, and marker-generation guard as every other error so a
-fresh ordinary admission can retry the resolved generation. Unreadable or
-ambiguous lineage evidence fails closed. `retry_charge` remains durable
-lineage/accounting evidence but is not an exhaustion budget. Unsafe cleanup,
-temporarily missing task lookup, and lost successors remain retryable until the
-process becomes safely absent or a successor is admitted. Unsafe
+Attempt loss does not project an `ERROR reason=attempt_lost` compatibility
+marker. The attempt ledger and `LostOutcomeStore` are the sole durable loss
+lifecycle: `StaleAgentHealer#heal_attempt_losses` verifies orphan cleanup,
+captures dirty state, and asks the shared attempt dispatcher to admit a
+same-generation successor. Conditions and status may expose `attempt_lost` as
+read-only health, but marker recovery does not interpret attempt lineage.
+
+`retry_charge` remains durable lineage/accounting evidence but is not an
+exhaustion budget. Unsafe cleanup, temporarily missing task lookup, and lost
+successors remain retryable until the process becomes safely absent or a
+successor is admitted. Unsafe
 orphan-cleanup inspection itself is paced by the shared cooldown, so one
 unreaped process cannot trigger expensive cleanup on every daemon tick.
 Successor dispatch attempts use the same persisted cooldown; a deferred
@@ -221,6 +254,10 @@ an admitted successor and later complete from its receipt. If the daemon
 crashes after admission but before stamping the queue claim, restart repairs
 correlation by the immutable request ID before deciding whether the claim is
 live.
+
+If a successor itself terminates with a normal recoverable failure marker, that
+fresh marker enters the ordinary `RecoveryCoordinator` lifecycle. It is not a
+special attempt-loss branch.
 
 ## Tests
 

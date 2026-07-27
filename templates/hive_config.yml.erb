@@ -29,22 +29,6 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 #   log_max_files: 5
 #   last_seen_state_file: ~/Dev/hive/.bot.last_seen_update_id
 
-# Daily merged-PR changelist for the previous Europe/London calendar day.
-# Defaults ON whenever the Telegram bot is enabled with at least one allowlisted
-# chat. The daemon schedules `hive digest`, which passes the registered GitHub
-# repositories and Telegram destination to the standalone PRDigest CLI. Set
-# enabled: false to opt out. There is no source selector or task-based mode.
-#
-# digest:
-#   enabled: false         # only needed to opt OUT; otherwise auto-on with the bot
-#   max_catchup_days: 7
-#
-# `digest` is the only globally owned per-stage model route. It changes
-# model/effort only and never selects the digest provider:
-# models:
-#   digest:
-#     model: gpt-5.6-terra
-
 # Daily pending-answer digest. When enabled, the daemon schedules one global
 # `hive answer-digest` subprocess at/after the configured local hour. Empty
 # snapshots are silent.

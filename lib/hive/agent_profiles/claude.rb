@@ -44,6 +44,11 @@ module Hive
       },
       routed_effort_values: %w[default inherit low medium high xhigh max],
       launcher_identity: "claude-code/v1",
+      tool_scope_flags: {
+        allowed: "--allowedTools",
+        disallowed: "--disallowedTools"
+      },
+      raw_cli_arguments_supported: true,
       cli_capabilities: {
         safe_mode: [ "--safe-mode" ],
         patrol_review_context: [

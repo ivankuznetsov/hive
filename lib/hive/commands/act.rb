@@ -74,9 +74,17 @@ module Hive
           )
           @stdout_written = true
         else
-          puts "advanced #{@target} — #{result.fetch('task_state')} at " \
-               "#{result.fetch('stage')} (#{result.fetch('marker')})"
+          if (recovery = result["recovery"])
+            puts recovery_summary(recovery)
+          else
+            puts "advanced #{@target} — #{result.fetch('task_state')} at " \
+                 "#{result.fetch('stage')} (#{result.fetch('marker')})"
+          end
         end
+      end
+
+      def recovery_summary(recovery)
+        "#{Hive::Daemon::RecoveryCoordinator::Receipt.from_h(recovery).human_summary}\n"
       end
     end
   end

@@ -10,7 +10,8 @@ module Hive
         attempt_lease: %w[attempt_id lease_version state],
         commit: %w[sha branch],
         file: %w[path digest],
-        pull_request: %w[url number observed_head_sha state]
+        pull_request: %w[url number observed_head_sha state],
+        task_closure: %w[receipt_digest evidence_digest reason authority]
       }.freeze
 
       module_function
@@ -43,6 +44,17 @@ module Hive
         end
         if type == :file && !evidence["digest"].to_s.match?(/\A[0-9a-f]{64}\z/)
           raise InvalidEvidence, "file evidence digest must be a SHA-256 hex value"
+        end
+        if type == :task_closure
+          %w[receipt_digest evidence_digest].each do |field|
+            unless evidence[field].to_s.match?(/\A[0-9a-f]{64}\z/)
+              raise InvalidEvidence, "task_closure evidence #{field} must be a SHA-256 hex value"
+            end
+          end
+          unless %w[already_delivered superseded].include?(evidence["reason"].to_s) &&
+                 %w[remote_merge operator_attestation].include?(evidence["authority"].to_s)
+            raise InvalidEvidence, "task_closure evidence reason or authority is unsupported"
+          end
         end
         return unless %i[commit pull_request].include?(type)
 

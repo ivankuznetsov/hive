@@ -297,6 +297,41 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_restores_custody_before_propagating_spawn_exception
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      original_plan = File.binread(File.join(task.folder, "plan.md"))
+      write_pointer(
+        task,
+        "path" => File.join(dir, "worktree"),
+        "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "base", branch: task.slug, dirty: false, ancestor_result: true
+      )
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          lambda { |_task, _cfg, _path, **_kwargs|
+            File.write(File.join(task.folder, "plan.md"), "forged\n")
+            raise IOError, "provider stream failed"
+          }
+        ) do
+          error = assert_raises(IOError) do
+            Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
+          end
+
+          assert_equal "provider stream failed", error.message
+        end
+      end
+
+      assert_equal original_plan, File.binread(File.join(task.folder, "plan.md"))
+    end
+  end
+
   # `agent_failed?` is true for :timeout as well as :error, and the
   # non-limit branch records `status: impl_result[:status]` verbatim — so a
   # timeout (e.g. the exit_code_only "stop hook did not signal completion"

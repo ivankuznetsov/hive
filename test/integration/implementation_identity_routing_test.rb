@@ -176,7 +176,7 @@ class ImplementationIdentityRoutingTest < Minitest::Test
     end
   end
 
-  def test_pi_and_grok_open_pr_keep_provider_default_unpinned_and_report_unsupported_effort
+  def test_pi_and_grok_open_pr_keep_provider_default_unpinned_and_report_native_effort_support
     with_tmp_dir do |project_root|
       FileUtils.mkdir_p(File.join(project_root, ".pi"))
       File.write(File.join(project_root, ".pi", "settings.json"),
@@ -185,7 +185,18 @@ class ImplementationIdentityRoutingTest < Minitest::Test
       File.write(File.join(project_root, ".grok", "settings.json"),
                  JSON.generate("model" => "grok-4.5"))
 
-      { "pi" => "anthropic/claude-sonnet-4", "grok" => "grok-4.5" }.each do |provider, model|
+      expectations = {
+        "pi" => {
+          model: "anthropic/claude-sonnet-4", native_arguments: [],
+          effort_supported: false, effective_effort: nil
+        },
+        "grok" => {
+          model: "grok-4.5", native_arguments: [ "--reasoning-effort", "medium" ],
+          effort_supported: true, effective_effort: "medium"
+        }
+      }
+      expectations.each do |provider, expected|
+        model = expected.fetch(:model)
         cfg = identity_config(project_root, provider: provider, model: model)
         resolver = Hive::ImplementationIdentity::Resolver.new(cfg: cfg)
         execute = resolver.resolve_execute(generation: 1, attempt_id: "#{provider}-execute")
@@ -194,10 +205,14 @@ class ImplementationIdentityRoutingTest < Minitest::Test
         assert_equal provider, open_pr.provider
         assert_equal model, open_pr.model
         assert_equal false, open_pr.model_pinned
-        assert_equal [], open_pr.native_arguments
+        assert_equal expected.fetch(:native_arguments), open_pr.native_arguments
         assert_equal "medium", open_pr.requested_effort
-        assert_equal false, open_pr.effort_supported
-        assert_nil open_pr.effective_effort
+        assert_equal expected.fetch(:effort_supported), open_pr.effort_supported
+        if expected.fetch(:effective_effort)
+          assert_equal expected.fetch(:effective_effort), open_pr.effective_effort
+        else
+          assert_nil open_pr.effective_effort
+        end
       end
     end
   end

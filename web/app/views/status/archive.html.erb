@@ -1,0 +1,63 @@
+<% content_for(:title, "#{web_product_name} — archive") %>
+
+<div class="status-layout">
+  <%= render "status/project_nav", projects: @projects,
+        selected_project: @selected_project&.name %>
+  <div class="status-main">
+    <div class="status-view-toolbar">
+      <div>
+        <h1>Archive</h1>
+        <p class="muted">The complete terminal task record, unaffected by ordinary visibility retention.</p>
+      </div>
+      <%= link_to "Back to status",
+            board_path(project: @selected_project&.name),
+            class: "btn btn-ghost btn-sm" %>
+    </div>
+
+    <div id="status-archive">
+      <% if @visible_projects.empty? %>
+        <div class="empty-state">
+          <p>No projects yet.</p>
+          <p class="hint"><%= link_to "Add a repository", repos_path %> to start the pipeline.</p>
+        </div>
+      <% else %>
+        <% @visible_projects.each do |project| %>
+          <section class="project-section" data-project-name="<%= project.name %>">
+            <div class="project-title">
+              <h2><%= project.name %></h2>
+              <span class="muted"><%= pluralize(project.archived_tasks.size, "archived task") %></span>
+            </div>
+            <% if project["error"].present? %>
+              <div class="state-banner state-banner-error" role="status">
+                Project status unavailable: <%= project["error"].humanize.downcase %>.
+              </div>
+            <% end %>
+            <% if project.archived_tasks.empty? %>
+              <div class="empty-state">
+                <p>No archived tasks.</p>
+              </div>
+            <% else %>
+              <div class="task-list">
+                <% project.archived_tasks.each do |task| %>
+                  <article class="task-row" data-task-slug="<%= task.slug %>">
+                    <div class="task-name">
+                      <%= link_to task.title,
+                            task_path(project.name, task.slug, source: "archive") %>
+                      <span class="task-slug"><%= task.slug %></span>
+                    </div>
+                    <%= stage_badge(task["stage"]) %>
+                    <span class="task-meta">
+                      <%= status_dot(task) %>
+                      <%= task.status_label %>
+                    </span>
+                    <span class="task-meta faint"><%= relative_age(task["age_seconds"]) %></span>
+                  </article>
+                <% end %>
+              </div>
+            <% end %>
+          </section>
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+</div>

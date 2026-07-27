@@ -21,11 +21,11 @@ module Hive
     # the bot never observes a partial document, per-file unlink on
     # consumption, no cross-process lock.
     #
-    # Schema (`hive-dispatch-result`, version 1):
+    # Schema (`hive-dispatch-result`, version 2):
     #
     #   {
     #     "schema": "hive-dispatch-result",
-    #     "schema_version": 1,
+    #     "schema_version": 2,
     #     "result_id": "<hex>",
     #     "created_at": "2026-05-28T18:14:02Z",
     #     "chat_id": 123456789,
@@ -34,14 +34,13 @@ module Hive
     #     "slug": "explore-...",
     #     "request_id": "<hex>",
     #     "exit_code": 4,
-    #     "command": "hive markers clear ..."
+    #     "command": "hive review ..."
     #   }
     module DispatchResultQueue
       module_function
 
       SCHEMA = "hive-dispatch-result".freeze
       SCHEMA_VERSION = 2
-      SUPPORTED_SCHEMA_VERSIONS = [ 1, 2 ].freeze
       DIRNAME = "dispatch_results".freeze
 
       # Age after which a notice is considered stale: not worth relaying
@@ -182,7 +181,7 @@ module Hive
           return :not_a_hash unless data.is_a?(Hash)
           return :wrong_schema unless data["schema"] == SCHEMA
           schema_version = data["schema_version"]
-          return :unknown_schema_version unless SUPPORTED_SCHEMA_VERSIONS.include?(schema_version)
+          return :unknown_schema_version unless schema_version == SCHEMA_VERSION
 
           result_id = data["result_id"].to_s
           return :missing_result_id if result_id.empty?

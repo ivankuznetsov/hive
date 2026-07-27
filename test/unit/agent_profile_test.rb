@@ -13,6 +13,28 @@ class AgentProfileTest < Minitest::Test
     assert_predicate capable.policy_capabilities, :frozen?
   end
 
+  def test_runtime_adapter_fields_are_optional_validated_and_frozen
+    profile = make_profile
+    assert_equal({}, profile.tool_scope_flags)
+    refute profile.raw_cli_arguments_supported?
+    assert_nil profile.structured_output_protocol
+
+    capable = make_profile(
+      tool_scope_flags: { allowed: "--allow", disallowed: "--deny" },
+      raw_cli_arguments_supported: true,
+      structured_output_protocol: :grok_end
+    )
+    assert_equal({ allowed: "--allow", disallowed: "--deny" }, capable.tool_scope_flags)
+    assert_predicate capable.tool_scope_flags, :frozen?
+    assert capable.raw_cli_arguments_supported?
+    assert_equal :grok_end, capable.structured_output_protocol
+
+    assert_raises(ArgumentError) { make_profile(tool_scope_flags: []) }
+    assert_raises(ArgumentError) { make_profile(tool_scope_flags: { unknown: "--flag" }) }
+    assert_raises(ArgumentError) { make_profile(tool_scope_flags: { allowed: "" }) }
+    assert_raises(ArgumentError) { make_profile(structured_output_protocol: :unknown) }
+  end
+
   include HiveTestHelper
 
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)
@@ -369,6 +391,27 @@ class AgentProfileTest < Minitest::Test
     assert_match(/below minimum/, err.message)
   end
 
+  def test_check_version_rejects_ambiguous_version_output
+    profile = make_profile(min_version: "1.0.0")
+    ENV["HIVE_FAKE_CLAUDE_VERSION"] =
+      "wrapper 9.9.9 delegates to claude 2.0.0"
+
+    err = assert_raises(Hive::AgentError) { profile.check_version! }
+
+    assert_match(/ambiguous/, err.message)
+    assert_match(/9\.9\.9, 2\.0\.0/, err.message)
+  end
+
+  def test_check_version_rejects_output_without_a_version
+    profile = make_profile(min_version: "1.0.0")
+    ENV["HIVE_FAKE_CLAUDE_VERSION"] = "version unavailable"
+
+    err = assert_raises(Hive::AgentError) { profile.check_version! }
+
+    assert_match(/could not parse/, err.message)
+    assert_match(/version unavailable/, err.message)
+  end
+
   def test_check_version_raises_when_binary_not_runnable
     profile = make_profile(bin_default: "/this/does/not/exist", env_bin_override_key: nil)
     err = assert_raises(Hive::AgentError) { profile.check_version! }
@@ -685,6 +728,18 @@ class AgentProfileTest < Minitest::Test
     assert_same model_builder, overridden.model_argument_builder
     assert_same effort_builder, overridden.effort_argument_builder
     assert_equal "custom-launcher/v2", overridden.launcher_identity
+  end
+
+  def test_with_overrides_preserves_runtime_adapter_fields
+    profile = make_profile(
+      tool_scope_flags: { allowed: "--allow" },
+      raw_cli_arguments_supported: true
+    )
+
+    overridden = profile.with_overrides("min_version" => "9.9.9")
+
+    assert_equal({ allowed: "--allow" }, overridden.tool_scope_flags)
+    assert overridden.raw_cli_arguments_supported?
   end
 
   # --- with_overrides ---------------------------------------------------

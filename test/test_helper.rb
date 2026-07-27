@@ -20,6 +20,36 @@ require "stringio"
 require "yaml"
 require "shellwords"
 require "English"
+
+# Never let a normal test subprocess inherit the operator's Hive state, home,
+# XDG roots, agent configuration, GitHub configuration, or global Git config.
+# Set only HOME and remove the optional overrides so production defaults keep
+# following HOME when an individual test replaces it. Authenticated smoke tests
+# opt out explicitly because they exercise the operator's real agent login.
+unless ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
+  HIVE_TEST_USER_ROOT = Dir.mktmpdir("hive-test-user").freeze
+  test_home = File.join(HIVE_TEST_USER_ROOT, "home")
+  FileUtils.mkdir_p(test_home)
+  ENV["HOME"] = test_home
+  %w[
+    HIVE_HOME
+    XDG_CONFIG_HOME
+    XDG_DATA_HOME
+    XDG_STATE_HOME
+    XDG_CACHE_HOME
+    XDG_BIN_HOME
+    CLAUDE_CONFIG_DIR
+    CODEX_HOME
+    PI_CODING_AGENT_DIR
+    GROK_HOME
+    GH_CONFIG_DIR
+    GIT_CONFIG_GLOBAL
+  ].each { |key| ENV.delete(key) }
+  Minitest.after_run do
+    FileUtils.rm_rf(HIVE_TEST_USER_ROOT)
+  end
+end
+
 require "hive"
 require_relative "support/workflow_helpers"
 
@@ -154,6 +184,26 @@ module HiveTestHelper
     )
     context.instance_variable_set(:@generation_validated, true)
     with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) { yield }
+  end
+
+  # Tests whose subject is a surrounding workflow transition can opt out of
+  # visual capture explicitly. CapturePolicy has dedicated unit/integration
+  # coverage; letting an unrelated fixture's intentionally synthetic worktree
+  # fail closed would turn those tests into accidental capture tests.
+  def with_not_applicable_capture_policy
+    require "hive/artifacts/capture_policy"
+    receipt = {
+      "result" => "not_applicable",
+      "rationale" => "The test fixture has deterministic nonvisual scope.",
+      "task_generation" => "test-generation"
+    }
+    policy = Object.new
+    policy.define_singleton_method(:ensure!) { receipt }
+    policy.define_singleton_method(:capture_satisfied?) { true }
+    replacement = ->(_task, project:, **) { policy }
+    with_replaced_singleton_method(
+      Hive::Artifacts::CapturePolicy, :for_task, replacement
+    ) { yield }
   end
 
   def with_env(overrides)

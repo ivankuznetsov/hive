@@ -9,6 +9,131 @@ gem, and `hive setup` authenticates and installs the matching web bundle:
   [`ivankuznetsov/homebrew-hive`](https://github.com/ivankuznetsov/homebrew-hive) tap.
 - **AUR** — `yay -S hive-bin` (or `paru -S hive-bin`).
 
+## Releasing `agent-cli-runtime`
+
+`agent-cli-runtime` is independently versioned inside this monorepo. Its
+release does not bump, tag, publish, or deploy Hive. Development stays under
+`components/agent-cli-runtime/`; Hive remains the primary consumer, and the
+released package is installed from RubyGems by downstream consumers.
+
+One-time account setup:
+
+1. Create an active GitHub tag ruleset targeting
+   `components/agent-cli-runtime/v*`. Restrict tag creation, update, and
+   deletion to the release maintainers, keep the bypass list equally narrow,
+   and do not rely on the broader Hive `v*` rule to cover component tags.
+2. Create the GitHub environment `agent-cli-runtime-release`. Require at least
+   one release-maintainer reviewer, prevent self-review where the repository
+   plan supports it, and restrict deployments to tags matching
+   `components/agent-cli-runtime/v*`. Those tags are separately protected by
+   the component tag ruleset. This environment is the final human approval
+   boundary before RubyGems OIDC is issued.
+3. Before the first publication, configure a RubyGems pending trusted publisher
+   with exactly:
+
+   - gem: `agent-cli-runtime`
+   - repository owner: `ivankuznetsov`
+   - repository name: `hive`
+   - workflow: `agent-cli-runtime-release.yml`
+   - environment: `agent-cli-runtime-release`
+
+The environment and workflow names are part of the OIDC identity. Do not add a
+long-lived RubyGems API key to GitHub. Before accepting the first component
+release as ready, verify the component tag ruleset and environment protection
+in repository settings; a protected `main` branch alone is insufficient.
+
+To publish an approved version:
+
+1. Update
+   `components/agent-cli-runtime/lib/agent_cli_runtime/version.rb` and its
+   package changelog in a package PR. Run the package tests and exact candidate
+   verifier.
+2. Merge the package PR while leaving `hive.gemspec`, Hive's lockfiles, and
+   Hive's dependency loading unchanged. During the temporary duplication
+   window, any contract correction shared with Hive's internal implementation
+   must land in lockstep and remain covered by package/Hive parity tests.
+3. Record the full protected-`main` commit and verify that the version is not
+   already present on RubyGems. Confirm the component tag ruleset is active and
+   that `agent-cli-runtime-release` still requires the intended reviewers and
+   permits only matching component tags.
+4. Create and push
+   `components/agent-cli-runtime/vX.Y.Z` at that exact commit. The component
+   workflow rejects malformed tags, version mismatches, dirty candidates, and
+   commits not reachable from `main`.
+5. Watch **candidate → install (Linux and macOS) → publish**. Only `publish`
+   receives an OIDC token. It downloads the previously built candidate,
+   revalidates its checksum, and pushes those exact bytes without rebuilding.
+   The candidate is retained for 30 days so an approval delay does not silently
+   replace it with rebuilt bytes; every job has a 15-minute execution timeout.
+6. From a fresh gem home, install `agent-cli-runtime` at the exact version,
+   require `agent_cli_runtime`, run `agent-runtime --version`, and exercise a
+   JSON probe. Compare the downloaded gem checksum and metadata with the
+   workflow candidate before allowing a Hive dependency cutover.
+
+Ordinary path changes and Hive `vX.Y.Z` tags cannot publish this package.
+Component tags cannot enter Hive's root release workflow. If the workflow fails
+before `gem push`, fix the source or release machinery and move the component
+tag only while no registry version exists. If RubyGems accepted the version,
+never overwrite or reuse it: keep Hive's cutover blocked and prepare a
+separately approved fix-forward version. Yanking or transferring ownership
+requires separate explicit authorization.
+
+### Distribution mirror
+
+[`ivankuznetsov/agent-cli-runtime`](https://github.com/ivankuznetsov/agent-cli-runtime)
+is a public, read-only distribution mirror. It gives the gem a focused
+description, topics, source browser, and release history without splitting
+development across repositories. Hive remains the canonical source, issue
+tracker, pull-request surface, and release authority.
+
+The mirror's `main` branch is synchronized one way from
+`components/agent-cli-runtime/` by **Sync from Hive monorepo**, on a six-hour
+schedule or manual dispatch. Each snapshot records its exact canonical
+component commit in `.mirror-source.json`. The sync excludes the component's
+`mirror/` administration directory from the public package tree and installs
+the canonical workflow, contribution, and security files. The workflow
+executes the projector from the canonical Hive checkout, so projector and
+administration changes take effect atomically.
+New mirror-only administration must first be added to the canonical
+`mirror/` allowlist in Hive; unsourced target-only files are removed. Any
+missing canonical admin file fails before mutating the mirror.
+
+Both mirror workflows use the repository-scoped private deploy key in the
+`MIRROR_DEPLOY_KEY` Actions secret for Git pushes. Its public half must be a
+write-enabled deploy key on `ivankuznetsov/agent-cli-runtime`, and the private
+half must not be reused by any other repository. This credential is required
+because GitHub's generated `GITHUB_TOKEN` cannot update files under
+`.github/workflows`, even with `contents: write`. The sync otherwise keeps its
+generated token read-only; the release workflow uses that short-lived token
+only for ruleset inspection and GitHub release creation.
+
+After an approved component version has been published from Hive, manually run
+**Mirror a component release** in the mirror with `vX.Y.Z`. The workflow checks
+out the fully qualified protected
+`refs/tags/components/agent-cli-runtime/vX.Y.Z` ref and runs the component's
+release preflight against canonical `main`. It then verifies the exact version
+is already available from RubyGems and constructs an orphan source snapshot
+locally. An independent Git archive of the canonical tag, excluding only
+`mirror/` and adding the source manifest, defines the expected tree. The
+projected tree must match it before the workflow builds and installs the gem and
+exercises `agent-runtime --version`. Only then does it push the mirror tag and
+create the GitHub release. Existing mirror tags are accepted only when their
+complete tree matches the independently reconstructed canonical snapshot.
+
+The mirror repository must have the `MIRROR_DEPLOY_KEY` credential described
+above and an active tag ruleset targeting `refs/tags/v*` that restricts updates
+and deletion and blocks non-fast-forward movement. Leave initial creation
+available to the verified workflow; never add a bypass that can replace an
+existing release tag. The workflow checks the live ruleset through the GitHub
+API and refuses to create a local release tag when the immutable-tag policy is
+absent.
+
+The mirror workflow never pushes to Hive or RubyGems and cannot choose or
+publish a version. Do not accept issues, pull requests, independent commits, or
+release decisions there. Changes flow through Hive first; running the mirror
+jobs is a distribution follow-up, not release authority. Both mirror workflows
+pin third-party Actions to reviewed commit SHAs.
+
 A maintainer's explicit `vX.Y.Z` tag triggers `.github/workflows/release.yml`.
 The workflow requires no model-provider credentials. On GitHub-hosted runners,
 it proves the exact tag candidate as follows:

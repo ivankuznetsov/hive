@@ -17,7 +17,7 @@ metadata:
 platform: openclaw
 invocation: /hive
 skill-version: 0.1.3
-canonical-digest: 0fa48608706f0e118ae8f73f18355f84a4f4b627716e396df7eed64d3be19255
+canonical-digest: 6eaab3df0089b45d35edc50ca886aeb2d39dcb29524da76422de667ec75bab14
 hive-version: 0.6.9
 -->
 
@@ -58,6 +58,6 @@ Ask before destructive or administrative changes, marker clearing, force/bypass 
 
 - Read [status-and-watch.md](references/status-and-watch.md) for status interpretation, reporting, compatibility, and native watch semantics.
 - Read [workflow-actions.md](references/workflow-actions.md) for task creation, direct workflow verbs, daemon ownership, closed actions, and completion checks.
-- Read [recovery.md](references/recovery.md) for diagnosis, healer ownership, provider holds, stale workers, and guarded marker recovery.
+- Read [recovery.md](references/recovery.md) for diagnosis, coordinator ownership, provider holds, stale workers, migration, and guarded recovery.
 - Read [setup-and-platforms.md](references/setup-and-platforms.md) for installation, initialization, agent-skill setup, and platform invocation conventions.
 - Read [safety.md](references/safety.md) before any admin, force, credential, external-publication, deployment, or release-sensitive operation.

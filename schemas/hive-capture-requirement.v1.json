@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-capture-requirement.v1.json",
+  "title": "Hive task capture requirement (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "task", "project", "task_generation",
+    "implementation_base", "implementation_head", "changed_paths_digest",
+    "changed_paths", "classifier_version", "result", "rationale", "override",
+    "classified_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-capture-requirement" },
+    "schema_version": { "const": 1 },
+    "task": { "type": "string", "minLength": 1 },
+    "project": { "type": "string", "minLength": 1 },
+    "task_generation": { "type": "string", "minLength": 1 },
+    "implementation_base": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40,64}$" },
+    "implementation_head": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40,64}$" },
+    "changed_paths_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "changed_paths": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "classifier_version": { "const": "visual-paths-v1" },
+    "result": { "enum": ["required", "not_applicable"] },
+    "rationale": { "type": "string", "minLength": 1 },
+    "override": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "actor", "rationale", "confirmed_at", "task_generation"],
+          "properties": {
+            "kind": { "enum": ["promotion", "confirmed_demotion"] },
+            "actor": { "type": "string", "minLength": 1 },
+            "rationale": { "type": "string", "minLength": 1 },
+            "confirmed_at": { "type": "string", "format": "date-time" },
+            "task_generation": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "classified_at": { "type": "string", "format": "date-time" }
+  }
+}

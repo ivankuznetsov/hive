@@ -3,11 +3,18 @@ require "json"
 module Hive
   class Agent
     module MessageExtractor
+      MAX_FAILURE_DIAGNOSTIC_BYTES = 200
+      GROK_END_TYPE_FIELD = /"type"\s*:\s*"end"/.freeze
+      GROK_STRUCTURED_OUTPUT_FIELD = /"structuredOutput"\s*:/.freeze
+
       class Accumulator
         attr_reader :source
 
-        def initialize(max_bytes:)
+        def initialize(max_bytes:, structured_output_protocol: nil,
+                       require_terminal_structured_output: false)
           @max_bytes = max_bytes.to_i
+          @structured_output_protocol = structured_output_protocol
+          @require_terminal_structured_output = require_terminal_structured_output
           @structured = nil
           @streaming = false
           @plain_tail = +""
@@ -17,7 +24,29 @@ module Hive
         def truncated? = @source == :structured_truncated
 
         def observe(data, raw_line: nil)
-          message = MessageExtractor.extract(data)
+          if MessageExtractor.sensitive_payload?(
+            data,
+            raw_line: raw_line,
+            structured_output_protocol: @structured_output_protocol
+          )
+            message = MessageExtractor.extract(
+              data,
+              structured_output_protocol: @structured_output_protocol
+            )
+            if message
+              replace_structured(message)
+            elsif @require_terminal_structured_output
+              mark_structured_invalid
+            end
+            @streaming = false
+            return message
+          end
+          return nil if structured_invalid?
+
+          message = MessageExtractor.extract(
+            data,
+            structured_output_protocol: @structured_output_protocol
+          )
           if message
             if MessageExtractor.streaming_text_event?(data)
               reset_structured_stream unless @streaming
@@ -29,13 +58,14 @@ module Hive
             end
           elsif data.nil? && raw_line
             @plain_tail << raw_line
-            @plain_tail = @plain_tail.byteslice(-@max_bytes, @max_bytes) || @plain_tail
+            tail = @plain_tail.byteslice(-@max_bytes, @max_bytes) || @plain_tail
+            @plain_tail = tail.scrub("")
           end
           message
         end
 
         def value
-          return nil if truncated?
+          return nil if truncated? || structured_invalid?
           return @structured unless @structured.nil?
 
           plain = @plain_tail.strip
@@ -70,17 +100,49 @@ module Hive
           @structured = nil
           @source = :structured_truncated
         end
+
+        def mark_structured_invalid
+          @structured = nil
+          @plain_tail.clear
+          @source = :structured_invalid
+        end
+
+        def structured_invalid? = @source == :structured_invalid
       end
 
       module_function
 
-      def extract(data)
+      # Claude reports a per-invocation `--max-budget-usd` stop as a
+      # structured result event whose `result` field is absent. Keep this
+      # protocol signal separate from prose and from provider account quota:
+      # ordinary assistant text is not authoritative failure metadata.
+      def extract_failure(data)
+        data = parse_json_line(data) if data.is_a?(String)
+        return nil unless data.is_a?(Hash)
+        return nil unless data["type"] == "result"
+        return nil unless data["subtype"] == "error_max_budget_usd"
+
+        {
+          origin: "budget_exhausted",
+          subtype: data["subtype"],
+          observed_cost_usd: finite_number(data["total_cost_usd"]),
+          diagnostic: bounded_diagnostic(Array(data["errors"]).first),
+          remedy: "raise_stage_budget"
+        }.compact
+      end
+
+      def extract(data, structured_output_protocol: nil)
         data = parse_json_line(data) if data.is_a?(String)
         return nil unless data.is_a?(Hash)
 
         case data["type"]
         when "text"
           text_chunk(data["data"])
+        when "end"
+          return nil unless structured_output_protocol == :grok_end
+
+          structured_output = data["structuredOutput"]
+          JSON.generate(structured_output) if structured_output.is_a?(Hash)
         when "result"
           text_value(data["result"])
         when "item.completed"
@@ -103,6 +165,27 @@ module Hive
 
       def streaming_text_event?(data)
         data.is_a?(Hash) && data["type"] == "text"
+      end
+
+      def sensitive_payload?(data, raw_line: nil, structured_output_protocol: nil)
+        return false unless structured_output_protocol == :grok_end
+        return sensitive_payload_event?(data, structured_output_protocol:) if data.is_a?(Hash)
+
+        data.nil? && sensitive_payload_line?(raw_line, structured_output_protocol:)
+      end
+
+      def sensitive_payload_event?(data, structured_output_protocol: nil)
+        structured_output_protocol == :grok_end &&
+          data.is_a?(Hash) &&
+          data["type"] == "end" &&
+          data.key?("structuredOutput")
+      end
+
+      def sensitive_payload_line?(line, structured_output_protocol: nil)
+        return false unless structured_output_protocol == :grok_end
+
+        text = line.to_s.scrub
+        text.match?(GROK_END_TYPE_FIELD) && text.match?(GROK_STRUCTURED_OUTPUT_FIELD)
       end
 
       def parse_json_line(line)
@@ -131,6 +214,20 @@ module Hive
       def text_chunk(value)
         text = value.to_s
         text.empty? ? nil : text
+      end
+
+      def finite_number(value)
+        number = Float(value)
+        number.finite? ? number : nil
+      rescue ArgumentError, TypeError
+        nil
+      end
+
+      def bounded_diagnostic(value)
+        text = value.to_s.strip
+        return nil if text.empty?
+
+        text.byteslice(0, MAX_FAILURE_DIAGNOSTIC_BYTES).to_s.scrub
       end
     end
   end

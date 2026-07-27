@@ -1,6 +1,9 @@
+require "time"
 require "hive/paths"
 require "hive/daemon/dispatch_request_queue"
 require "hive/attempts/api"
+require "hive/recovery/api"
+require "hive/task"
 require "hive/task_resolver"
 require "hive/workflows"
 
@@ -92,6 +95,21 @@ module Hive
           request_id, state_home: state_home
         )
         raise
+      end
+
+      # All ERROR / REVIEW_ERROR callers cross this boundary. Surface-specific
+      # rows are normalized once, then the coordinator owns cooldown, lock,
+      # safety, marker generation, durable admission, and lifecycle truth.
+      def recover!(row:, project: nil, requestor: "bot", chat_id: nil,
+                   update_id: nil, request_id: nil, observation_token: nil,
+                   state_home: Hive::Paths.state_home, now: Time.now,
+                   coordinator: nil)
+        Hive::Recovery::API.recover!(
+          row: row, project: project, requestor: requestor,
+          chat_id: chat_id, update_id: update_id, request_id: request_id,
+          observation_token: observation_token, state_home: state_home,
+          now: now, coordinator: coordinator
+        )
       end
 
       def write_sequence!(request_id:, remaining_argvs:, state_home: Hive::Paths.state_home)

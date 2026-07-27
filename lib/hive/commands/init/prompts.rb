@@ -71,9 +71,19 @@ module Hive
           }.freeze,
           "pr-review-toolkit" => {
             "kind" => "agent", "agent" => "claude", "capability" => "pr-review-toolkit:review-pr"
+          }.freeze,
+          "grok-ce-code-review" => {
+            "kind" => "agent", "agent" => "grok", "capability" => "ce-code-review"
           }.freeze
         }.freeze
-        DEFAULT_REVIEWER_NAMES = REVIEWER_CAPABILITIES.keys.freeze
+        AVAILABLE_REVIEWER_NAMES = REVIEWER_CAPABILITIES.keys.freeze
+        # Keep fresh-project defaults stable: Grok is available when selected,
+        # but does not become a credential/install prerequisite implicitly.
+        DEFAULT_REVIEWER_NAMES = %w[
+          claude-ce-code-review
+          codex-ce-code-review
+          pr-review-toolkit
+        ].freeze
         PATROL_REVIEWER_NAMES = %w[
           codex-native-review
           codex-ce-code-review
@@ -144,7 +154,7 @@ module Hive
         #     "claude_mode"      => String,           # tmux | headless
         #     "claude_permission_mode" => String,      # Claude Code permission mode
         #     "development_agent" => String,           # one of @registered_agents
-        #     "enabled_reviewers" => Array<String>,    # subset of DEFAULT_REVIEWER_NAMES
+        #     "enabled_reviewers" => Array<String>,    # subset of AVAILABLE_REVIEWER_NAMES
         #     "patrol_reviewers"  => Array<String>,    # subset of PATROL_REVIEWER_NAMES
         #     "patrol_mode"       => String,           # ultrapatrol | high | medium | low | off
         #     "triage_bias"       => String,           # courageous | safetyist
@@ -417,8 +427,8 @@ module Hive
 
         def prompt_reviewers
           @output.puts ""
-          @output.puts "Review agents — pick numbers/names, comma-separated, blank = all enabled:"
-          DEFAULT_REVIEWER_NAMES.each_with_index { |name, i| @output.puts "  #{i + 1}) #{name}" }
+          @output.puts "Review agents — pick numbers/names, comma-separated; blank = recommended defaults:"
+          AVAILABLE_REVIEWER_NAMES.each_with_index { |name, i| @output.puts "  #{i + 1}) #{name}" }
           loop do
             @output.print "  > "
             @output.flush
@@ -436,8 +446,8 @@ module Hive
         def resolve_reviewer_tokens(answer)
           resolve_reviewer_tokens_from(
             answer,
-            choices: DEFAULT_REVIEWER_NAMES,
-            empty_message: "input had no reviewer tokens; type a name/index list, or blank for all"
+            choices: AVAILABLE_REVIEWER_NAMES,
+            empty_message: "input had no reviewer tokens; type a name/index list, or blank for defaults"
           )
         end
 

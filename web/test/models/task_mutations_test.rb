@@ -49,7 +49,7 @@ class TaskMutationsTest < ActiveSupport::TestCase
     assert_match(/cannot queue this dispatch/, error.message)
   end
 
-  test "queues guarded marker clear before the recovery rerun" do
+  test "routes recovery through the shared coordinator writer" do
     subject = task(
       "stage" => "6-review",
       "workflow" => "coding",
@@ -59,17 +59,29 @@ class TaskMutationsTest < ActiveSupport::TestCase
         "marker_id" => "review-generation-1"
       }
     )
+    receipt = Hive::Daemon::RecoveryCoordinator::Receipt.new(
+      status: "queued", request_id: "recovery-1", attempt_id: nil,
+      phase: "admitted", failure_origin: "merge_conflict",
+      next_eligible_at: Time.current.iso8601(6), owner: "scheduler",
+      reason: nil, remediation: nil, retry_count: 1, provider_hint: nil
+    )
+    captured = nil
+    replacement = proc do |**kwargs|
+      captured = kwargs
+      receipt
+    end
 
-    request_id = subject.recover!
-    contents = queue_files(request_id).map { |path| File.read(path) }.join("\n")
+    actual = with_replaced_singleton_method(
+      Hive::Recovery::API, :recover!, replacement
+    ) { subject.recover! }
 
-    assert_includes contents, "markers"
-    assert_includes contents, "marker_id=review-generation-1,reason=merge_conflict"
-    refute_includes contents, "pass=1"
-    assert_includes contents, "review"
+    assert_equal receipt, actual
+    assert_equal subject, captured.fetch(:row)
+    assert_equal "demo", captured.fetch(:project)
+    assert_equal "web", captured.fetch(:requestor)
   end
 
-  test "discards the recovery sequence when the first request cannot be written" do
+  test "surfaces coordinator writer failure" do
     subject = task(
       "stage" => "6-review",
       "workflow" => "coding",
@@ -78,11 +90,11 @@ class TaskMutationsTest < ActiveSupport::TestCase
     )
     replacement = proc { |**| raise Errno::ENOSPC, "no space left on device" }
 
-    with_replaced_singleton_method(Hive::Bot::DispatchRequestWriter, :write!, replacement) do
+    with_replaced_singleton_method(Hive::Recovery::API, :recover!, replacement) do
       assert_raises(Errno::ENOSPC) { subject.recover! }
     end
 
-    assert_empty Dir[File.join(Hive::Paths.state_home, "**", "*.sequence")]
+    assert_empty queue_files
   end
 
   test "refuses recovery without a failure marker" do
@@ -108,17 +120,44 @@ class TaskMutationsTest < ActiveSupport::TestCase
     assert_empty queue_files
   end
 
-  test "recovers a generic workflow with run and stage scope" do
+  test "routes max pass review recovery through the explicit intervention flow" do
+    folder = Pathname(Dir.mktmpdir("hive-web-review-escalation"))
+    folder.join("reviews").mkpath
+    folder.join("reviews/escalations-02.md").write("# Questions\n")
+    subject = task(
+      "stage" => "6-review",
+      "workflow" => "coding",
+      "marker" => "review_stale",
+      "attrs" => { "pass" => "2", "marker_id" => "marker-2" },
+      "folder" => folder.to_s
+    )
+
+    error = assert_raises(Hive::Error) { subject.recover! }
+
+    assert_match(/edit the current review escalation/, error.message)
+    assert_empty queue_files
+  ensure
+    FileUtils.remove_entry(folder) if folder&.exist?
+  end
+
+  test "routes a generic workflow recovery through the same writer" do
     subject = task(
       "stage" => "2-gather", "workflow" => "research", "marker" => "error", "attrs" => {}
     )
 
-    request_id = subject.recover!
-    contents = queue_files(request_id).map { |path| File.read(path) }.join("\n")
+    captured = nil
+    receipt = Struct.new(:status).new("queued")
+    replacement = proc do |**kwargs|
+      captured = kwargs
+      receipt
+    end
+    actual = with_replaced_singleton_method(
+      Hive::Recovery::API, :recover!, replacement
+    ) { subject.recover! }
 
-    assert_includes contents, "--stage"
-    assert_includes contents, "2-gather"
-    refute_includes contents, "--from"
+    assert_equal receipt, actual
+    assert_equal subject, captured.fetch(:row)
+    assert_equal "web", captured.fetch(:requestor)
   end
 
   test "reject sends a coding task to its immediately prior gate" do

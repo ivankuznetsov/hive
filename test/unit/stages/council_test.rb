@@ -1,4 +1,6 @@
 require "test_helper"
+require "json"
+require "rbconfig"
 require "hive/markers"
 require "hive/stages/council"
 
@@ -180,6 +182,74 @@ class StagesCouncilTest < Minitest::Test
           assert_equal context_slots, prompt_slots
         end
       end
+    end
+  end
+
+  def test_managed_portable_council_materializes_codex_review_and_grok_revision
+    with_tmp_dir do |project|
+      workflow = portable_managed_council_workflow
+      task = task_for(project, workflow: workflow)
+      package_root = prepare_managed_council_task(task, project)
+      target = File.join(task.folder, "draft.md")
+      original = "Architecture draft\n"
+      revised = "Revised architecture with explicit risks.\n"
+      first_review = "Verdict: changes_requested\n\n## Required edits\n- Expand risks.\n"
+      second_review = "Verdict: ready\n"
+      File.write(target, original)
+      auth_path = File.join(project, "grok-auth.json")
+      File.write(auth_path, '{"access_token":"fake"}')
+      responses = [
+        { profile: :codex, content: first_review },
+        { profile: :grok, content: revised },
+        { profile: :codex, content: second_review }
+      ]
+
+      launches = with_available_grok_sandbox do
+        with_env("GROK_AUTH_PATH" => auth_path) do
+          with_fake_managed_provider_responses(responses) do |captured|
+            result = Hive::Stages::Council.run!(task, portable_agent_cfg)
+
+            assert_equal({ commit: "complete", status: :complete }, result)
+            captured
+          end
+        end
+      end
+
+      assert_equal [ :codex, :grok, :codex ], launches.map { |launch| launch.fetch(:profile) }
+      assert launches.all? do |launch|
+        launch.fetch(:policy).is_a?(Hive::WorkflowPackage::RuntimePolicy::Policy)
+      end
+      assert_equal [ nil, original, nil ], launches.map { |launch| launch.fetch(:before).values.fetch(0) },
+                   "the fake providers must not write their declared output directly"
+      assert_equal first_review, File.read(File.join(task.folder, "reviews", "codex-01.md"))
+      assert_equal revised, File.read(target)
+      assert_equal second_review, File.read(File.join(task.folder, "reviews", "codex-02.md"))
+      assert_equal package_root, launches.first.fetch(:policy).directories.fetch(1)
+    end
+  end
+
+  def test_malformed_managed_codex_review_fails_without_provider_file_write
+    with_tmp_dir do |project|
+      workflow = portable_managed_council_workflow(revise: false)
+      task = task_for(project, workflow: workflow)
+      prepare_managed_council_task(task, project)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+      review_path = File.join(task.folder, "reviews", "codex-01.md")
+
+      launches = with_fake_managed_provider_responses(
+        [ { profile: :codex, final_message: "not-json" } ]
+      ) do |captured|
+        result = Hive::Stages::Council.run!(task, portable_agent_cfg)
+
+        assert_equal({ commit: "error", status: :error }, result)
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal "council_failed", marker.attrs.fetch("reason")
+        assert_includes marker.attrs.fetch("message"), "invalid structured output"
+        captured
+      end
+
+      assert_nil launches.fetch(0).fetch(:before).fetch("reviews/codex-01.md")
+      refute File.exist?(review_path), "malformed output must not create the reviewer file"
     end
   end
 
@@ -681,6 +751,107 @@ class StagesCouncilTest < Minitest::Test
         :stage_permission_scope,
         ->(*, **) { scope }
       ) { yield }
+    end
+
+    def with_fake_managed_provider_responses(responses)
+      remaining = responses.dup
+      launches = []
+      fake_new = lambda do |**kwargs|
+        profile = kwargs.fetch(:profile)
+        policy = kwargs.fetch(:runtime_policy)
+        response = remaining.shift || raise("unexpected #{profile.name} provider launch")
+        raise "expected #{response.fetch(:profile)}, got #{profile.name}" unless response.fetch(:profile) == profile.name
+
+        fake_agent = Object.new
+        fake_agent.define_singleton_method(:run!) do
+          before = policy.output_paths.transform_values do |path|
+            File.binread(path) if File.file?(path)
+          end
+          launches << { profile: profile.name, policy: policy, before: before }
+          final_message = response.fetch(:final_message) do
+            relative = policy.output_paths.keys.fetch(0)
+            JSON.generate("files" => { relative => response.fetch(:content) })
+          end
+          {
+            status: :ok,
+            final_message: final_message,
+            final_message_truncated: false
+          }
+        end
+        fake_agent
+      end
+
+      with_replaced_singleton_method(Hive::Agent, :new, fake_new) do
+        result = yield launches
+        raise "unused fake provider responses" unless remaining.empty?
+
+        result
+      end
+    end
+
+    def with_available_grok_sandbox
+      sandbox = Hive::WorkflowPackage::RuntimePolicy::GROK_SANDBOX_PATH
+      original_file = File.method(:file?)
+      original_executable = File.method(:executable?)
+      file_check = ->(path) { path == sandbox || original_file.call(path) }
+      executable_check = ->(path) { path == sandbox || original_executable.call(path) }
+
+      with_replaced_singleton_method(File, :file?, file_check) do
+        with_replaced_singleton_method(File, :executable?, executable_check) { yield }
+      end
+    end
+
+    def prepare_managed_council_task(task, project)
+      package_root = File.join(project, ".hive-state", "workflows", "demo", "versions", "a" * 40)
+      FileUtils.mkdir_p(package_root)
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:managed_runtime_context) do |_slot|
+        { package_root: package_root, environment: {} }
+      end
+      task.define_singleton_method(:managed_prompt) { |_slot, body, _context| body }
+      package_root
+    end
+
+    def portable_agent_cfg
+      profile_override = { "bin" => RbConfig.ruby, "min_version" => "0.0.0" }
+      { "agents" => { "codex" => profile_override, "grok" => profile_override } }
+    end
+
+    def portable_managed_council_workflow(revise: true)
+      reviser = if revise
+        Hive::Workflow::Revise.new(
+          prompt: "Revise the draft.", agent: "grok", model: "grok-child",
+          permissions: {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit(./draft.md)" ]
+          }
+        )
+      end
+      Hive::Workflow.new(
+        id: :portable_managed_council,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "draft", index: 1, state_file: "draft.md", kind: :agent, skill: "/draft"
+          ),
+          Hive::Workflow::Stage.new(
+            name: "review", index: 2, state_file: "review.md", kind: :council,
+            reviewers: [
+              Hive::Workflow::Reviewer.new(
+                name: "codex", prompt: "Review the draft.", agent: "codex",
+                model: "codex-child",
+                permissions: {
+                  "preset" => "scoped",
+                  "tools" => [ "Read", "Edit(./reviews/**)" ]
+                }
+              )
+            ],
+            council: Hive::Workflow::Council.new(
+              quorum: 1, max_rounds: 2, exit_rule: :consensus, revise: reviser
+            )
+          ),
+          Hive::Workflow::Stage.new(name: "done", index: 3, state_file: "done.md", kind: :inert)
+        ]
+      )
     end
 
     def mixed_provider_council_workflow(managed_children: true)

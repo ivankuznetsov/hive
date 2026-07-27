@@ -1,8 +1,10 @@
 require "securerandom"
+require "shellwords"
 require "time"
 require "hive/bot/notification_builders"
 require "hive/bot/idea_keyboards"
-require "hive/bot/handlers/recovery_sequence"
+require "hive/bot/handlers/recovery_result_builder"
+require "hive/task_closure_contract"
 
 module Hive
   module Bot
@@ -288,7 +290,8 @@ module Hive
             action: :reply,
             text: "Send any message to capture an idea. Commands: /status [project], /waiting, " \
                   "/queue, /idea [text], /answer <id|slug>, /approve <id|slug>, /autofix <id|slug>, " \
-                  "/details <id|slug>, /done, /help"
+                  "/details <id|slug>, /close <id|slug> --reason <reason> --evidence <ref>, " \
+                  "/done, /help"
           )
         end
 
@@ -317,7 +320,7 @@ module Hive
           # (including the diagnostic), so a directly-typed /autofix on a row
           # that isn't auto-retryable — a manual-only state, or a non-error
           # recovery row whose diagnostic carries no retry suggestion — must
-          # refuse here rather than dispatch markers-clear + a retry verb.
+          # refuse here rather than submit a coordinator recovery request.
           # Without this, manually typing /autofix bypassed the retryability
           # gate that both other surfaces enforce.
           unless Hive::Bot::NotificationBuilders.retryable_recovery?(row)
@@ -329,11 +332,12 @@ module Hive
           # tapped, so there's no keyboard to clear on the originating
           # message. The inline-button path (CallbackHandlers#autofix) sets it
           # to true. This is the only legitimate divergence between surfaces.
-          # We forward row.attrs for guarded marker matching.
-          RecoverySequence.build(
+          # We forward row.attrs for guarded marker comparison.
+          RecoveryResultBuilder.build(
             project: row.project, slug: row.slug, stage: row.stage,
             marker: row.marker, match_attr: match_attr, attrs: row.attrs,
             workflow: row.respond_to?(:workflow) ? row.workflow : nil,
+            row: row,
             result_class: @result_class, clear_keyboard: false
           )
         end
@@ -348,7 +352,89 @@ module Hive
           @result_class.new(action: :reply, text: render_details_reply(row))
         end
 
+        def closure(update)
+          target, input = parse_closure_command(effective_text(update))
+          row, error = resolve_status_row(target)
+          return @result_class.new(action: :reply, text: error) if error
+
+          payload = {
+            "project" => row.project.to_s,
+            "slug" => row.slug.to_s,
+            "input" => input
+          }
+          callback = Hive::Bot::NotificationBuilders.encode_closure_callback(
+            "closure_preview", payload
+          )
+          @result_class.new(
+            action: :reply,
+            text: "Review #{input.fetch('reason').tr('_', ' ')} closure for " \
+                  "#{row.project}/#{row.slug} using #{input.fetch('evidence').length} evidence item(s). " \
+                  "Nothing is archived until verification and a separate confirmation.",
+            reply_markup: [
+              [
+                Hive::Bot::NotificationBuilders.button(
+                  "Verify evidence", callback
+                )
+              ]
+            ]
+          )
+        rescue ArgumentError => e
+          @result_class.new(action: :reply, text: "#{closure_usage}\n#{e.message}")
+        end
+
         private
+
+        def parse_closure_command(text)
+          tokens = Shellwords.split(text.to_s.sub(%r{\A/close\b}, "").strip)
+          target = tokens.shift.to_s
+          raise ArgumentError, "task id or slug is required" if target.empty?
+
+          input = {
+            "reason" => nil,
+            "evidence" => [],
+            "successor" => nil,
+            "attestation" => nil
+          }
+          until tokens.empty?
+            option = tokens.shift
+            value = tokens.shift
+            raise ArgumentError, "#{option} requires a value" if value.nil?
+
+            case option
+            when "--reason"
+              raise ArgumentError, "--reason may be supplied only once" if input["reason"]
+
+              input["reason"] = value
+            when "--evidence"
+              input["evidence"] << value
+            when "--successor"
+              raise ArgumentError, "--successor may be supplied only once" if input["successor"]
+
+              input["successor"] = value
+            when "--attestation"
+              raise ArgumentError, "--attestation may be supplied only once" if input["attestation"]
+
+              input["attestation"] = value
+            else
+              raise ArgumentError, "unknown closure option #{option.inspect}"
+            end
+          end
+
+          unless Hive::TaskClosureContract::REASONS.include?(input["reason"])
+            raise ArgumentError,
+                  "--reason must be one of #{Hive::TaskClosureContract::REASONS.join(', ')}"
+          end
+          raise ArgumentError, "at least one --evidence reference is required" if
+            input["evidence"].empty?
+
+          [ target, input ]
+        end
+
+        def closure_usage
+          "Use /close <id|slug> --reason <already_delivered|superseded> " \
+            "--evidence <PR-or-commit> [--evidence <ref>] " \
+            "[--successor project:slug --attestation \"statement\"]."
+        end
 
         # details_reply renders from a live Row and never raises today, but it
         # runs OUTSIDE resolve_status_row's degrade rescue. A render-time fault

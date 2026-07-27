@@ -1,6 +1,7 @@
 require "hive/reviewers/base"
 require "hive/reviewers/plan_context"
 require "hive/reviewers/synthetic_task"
+require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/stages/base"
 
@@ -152,7 +153,7 @@ module Hive
         # silently running `codex review` with the declared scope discarded.
         enforce_permission_scope_gate!(profile)
         begin
-          profile.check_version!
+          Hive::AgentRuntime.prepare!(profile)
         rescue Hive::AgentError => e
           return error_result("preflight failed: #{e.message}")
         end

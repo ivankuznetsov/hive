@@ -1,9 +1,8 @@
 require "cgi"
-require "fileutils"
 require "hive/install_channel"
 require "hive/invoked_binary"
 require "hive/commands/service_installer/outcome"
-require "open3"
+require "hive/user_service"
 require "rbconfig"
 require "shellwords"
 
@@ -36,8 +35,6 @@ module Hive
           @systemctl_available = systemctl_available
           @launchctl_available = launchctl_available
           @messages = []
-          @last_backup_path = nil
-          @last_restart_invoked = false
         end
 
         # `force:` overwrites an existing unit whose content differs from
@@ -47,17 +44,15 @@ module Hive
         # `restart` instead of `enable --now` — restart is the only way
         # to pick up new Environment= lines from an already-running unit.
         def install!(autostart:, force: false)
-          @last_backup_path = nil
-          @last_restart_invoked = false
-          kind =
-            case platform
-            when :macos then install_macos!(autostart: autostart, force: force)
-            when :linux then install_linux!(autostart: autostart, force: force)
-            when :unsupported_host
-              @messages << "#{cli_label} autostart not supported on this platform; run `hive #{cli_label} start` manually."
-              :unsupported
-            end
-          Outcome.new(kind, backup_path: @last_backup_path, restarted: @last_restart_invoked)
+          @messages.clear
+          service = user_service
+          result = service.apply(service.plan(autostart: autostart, force: force))
+          record_user_service_messages(result)
+          Outcome.new(
+            install_outcome_kind(result.kind),
+            backup_path: result.backup_path,
+            restarted: result.restarted
+          )
         end
 
         # Wire-friendly platform key for the install envelope. Mirrors
@@ -77,22 +72,19 @@ module Hive
         # `hive daemon status` so agents can query install state without
         # the side effects of `install!`.
         def service_state
-          {
-            "platform" => envelope_platform,
-            "unit_path" => target_path,
-            "service_installed" => !target_path.nil? && File.exist?(target_path),
-            "service_enabled" => service_enabled?
-          }
+          user_service.inspect.to_h.slice(
+            "platform",
+            "unit_path",
+            "service_installed",
+            "service_enabled"
+          )
         end
 
         # Rich lifecycle snapshot for callers that need more than the legacy
         # installed/enabled contract. Kept separate so daemon/bot schemas do
         # not acquire web-only keys merely because they share this base.
         def service_lifecycle_state
-          service_state.merge(
-            "service_running" => service_running?,
-            "service_manager_available" => service_manager_available?
-          )
+          user_service.inspect.to_h
         end
 
         def expected_binary
@@ -116,6 +108,32 @@ module Hive
           when :macos then File.join(@home, "Library/LaunchAgents", "#{launchd_label}.plist")
           when :linux then File.join(@home, ".config/systemd/user", "#{service_name}.service")
           end
+        end
+
+        def service_definition(include_content: true)
+          supported_platform =
+            case platform
+            when :linux then :linux
+            when :macos then :macos
+            else :unsupported
+            end
+          Hive::UserService::Definition.new(
+            platform: supported_platform,
+            service_name: service_name,
+            launchd_label: launchd_label,
+            target_path: supported_platform == :unsupported ? nil : target_path,
+            content: if include_content
+                       case supported_platform
+                       when :linux then render_systemd
+                       when :macos then render_launchd
+                       end
+                     end
+          )
+        end
+
+        def remove!
+          service = user_service(definition: service_definition(include_content: false))
+          service.remove(service.plan_remove)
         end
 
         # ── Subclass hooks ─────────────────────────────────────────────
@@ -155,138 +173,74 @@ module Hive
 
         private
 
-        def install_macos!(autostart:, force:)
-          path = target_path
-          write_result = write_if_safe(path, render_launchd, force: force)
-          return :drifted if write_result == :drifted
-
-          if autostart
-            # `launchctl load` is not idempotent: loading an already-loaded
-            # plist returns non-zero even when the existing job is healthy.
-            # An unchanged loaded unit therefore needs no mutation at all.
-            return write_result if write_result == :unchanged && service_enabled?
-
-            if write_result == :upgraded
-              # launchd does not pick up a rewritten plist while the
-              # service is loaded; new EnvironmentVariables would be
-              # ignored. Unload first (plist may not be currently
-              # loaded; that's benign), then load the refreshed file.
-              # Capture the unload exit code in `messages` so the
-              # operator can distinguish "plist wasn't loaded yet"
-              # (benign) from "launchd refused to unload" (real
-              # failure — the subsequent `load` would then silently
-              # no-op against the still-loaded old plist and the
-              # operator's `--force` would lie about restarting).
-              unload_ok = @runner.call([ "launchctl", "unload", path ])
-              unless unload_ok
-                @messages << "launchctl unload returned non-zero for #{path} (benign if plist " \
-                             "was not loaded; otherwise launchd refused — run `launchctl bootout " \
-                             "gui/$(id -u) #{path}` to force unload, then re-run `hive #{cli_label} install --force`)"
-              end
-              @last_restart_invoked = true
-            end
-            ok = @runner.call([ "launchctl", "load", path ])
-            unless ok
-              @messages << "launchctl load failed for #{path}; run `launchctl load #{path}` manually"
-              return :failed
-            end
-          end
-          # Preserve the write_result distinction (:written / :upgraded /
-          # :unchanged) for the operator-facing success summary. A flat
-          # :ok would hide whether install actually wrote, upgraded, or
-          # no-op'd.
-          write_result
+        def user_service(definition: service_definition)
+          Hive::UserService.new(
+            definition: definition,
+            runner: @runner,
+            query_available: -> { manager_query_available? },
+            manager_available: -> { service_manager_available? },
+            status_reader: @status_reader,
+            launchd_running_via_list: @runner_injected && !@status_reader,
+            event_handler: method(:handle_user_service_event)
+          )
         end
 
-        def install_linux!(autostart:, force:)
-          path = target_path
-          write_result = write_if_safe(path, render_systemd, force: force)
-          return :drifted if write_result == :drifted
-
-          if autostart
-            if systemctl_available?
-              ok_reload = @runner.call(%w[systemctl --user daemon-reload])
-              # Force-upgrade restarts the running unit so new
-              # Environment= lines take effect. `:written` and
-              # `:unchanged` use `enable --now` which is idempotent on
-              # an already-enabled-and-running unit and restores retry-
-              # after-failed-enable semantics when the file already
-              # matches the template.
-              start_argv =
-                if write_result == :upgraded
-                  @last_restart_invoked = true
-                  # The unit's TimeoutStopSec=900 means restart can
-                  # block the caller up to ~15 minutes if children are
-                  # still draining. Surface the worst case BEFORE the
-                  # blocking call so operators don't Ctrl-C halfway
-                  # through and leave the upgrade half-applied.
-                  warning = upgrade_restart_warning
-                  @messages << warning if warning
-                  [ "systemctl", "--user", "restart", service_name ]
-                else
-                  [ "systemctl", "--user", "enable", "--now", service_name ]
-                end
-              ok_start = @runner.call(start_argv)
-              unless ok_reload && ok_start
-                @messages << "systemctl --user enable failed; run `systemctl --user enable --now #{service_name}` manually"
-                return :failed
-              end
-            else
-              # The unit file was written above, but this host has no
-              # systemd-user to enable it with. That is a known-platform
-              # limitation (WSL without systemd, minimal containers), not
-              # a failure — return :autostart_unavailable so the caller
-              # exits 0 and does not treat a reboot-survivable repair as
-              # a software fault. macOS keeps returning :failed when
-              # launchctl actually rejects a load, because launchd is
-              # always present there.
-              @messages << "systemd not detected; #{unit_noun} was written but autostart was not enabled. " \
-                           "Enable systemd in WSL or run `hive #{cli_label} start` manually."
-              return :autostart_unavailable
-            end
+        def manager_query_available?
+          case platform
+          when :linux then systemctl_available?
+          when :macos then launchctl_available?
+          else false
           end
-          # Preserve the write_result distinction for the operator-facing
-          # success summary (see install_macos! comment).
-          write_result
         end
 
-        def write_if_safe(path, content, force: false)
-          if File.exist?(path)
-            existing = File.read(path)
-            return :unchanged if existing == content
+        def handle_user_service_event(event, _definition)
+          return unless event == :before_restart
 
-            unless force
-              @messages << "#{service_noun} already exists at #{path}; leaving user-customized file untouched. " \
-                           "Re-run with `hive #{cli_label} install --force` to overwrite (the previous file will " \
-                           "be backed up to #{path}.bak-<timestamp>)."
-              return :drifted
-            end
-
-            backup_path = "#{path}.bak-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}"
-            atomic_write(backup_path, existing)
-            atomic_write(path, content)
-            @last_backup_path = backup_path
-            @messages << "upgraded existing unit at #{path}; previous content backed up to #{backup_path}"
-            return :upgraded
-          end
-
-          FileUtils.mkdir_p(File.dirname(path))
-          atomic_write(path, content)
-          :written
+          warning = upgrade_restart_warning
+          @messages << warning if warning
         end
 
-        # Tempfile + rename in the same directory. Either the target has
-        # the old content or the new content; no torn-write window can
-        # leave it truncated or partially written. Mirrors the pattern
-        # `Hive::Markers#write_atomic` uses for state files.
-        def atomic_write(path, content)
-          FileUtils.mkdir_p(File.dirname(path))
-          tmp = "#{path}.tmp.#{Process.pid}.#{rand(1_000_000)}"
-          begin
-            File.write(tmp, content)
-            File.rename(tmp, path)
-          ensure
-            File.unlink(tmp) if File.exist?(tmp)
+        def install_outcome_kind(kind)
+          return kind if Hive::Commands::ServiceInstaller::Outcome::WIRE.key?(kind)
+
+          :failed
+        end
+
+        def record_user_service_messages(result, path: target_path)
+          if result.kind == :unsupported
+            @messages << "#{cli_label} autostart not supported on this platform; " \
+                         "run `hive #{cli_label} start` manually."
+          end
+          if result.diagnostics.include?(:drift_detected)
+            @messages << "#{service_noun} already exists at #{path}; leaving user-customized file untouched. " \
+                         "Re-run with `hive #{cli_label} install --force` to overwrite (the previous file will " \
+                         "be backed up to #{path}.bak-<timestamp>)."
+          end
+          if result.diagnostics.include?(:backup_written)
+            @messages << "upgraded existing unit at #{path}; previous content backed up to #{result.backup_path}"
+          end
+          if result.diagnostics.include?(:autostart_unavailable)
+            @messages << "systemd not detected; #{unit_noun} was written but autostart was not enabled. " \
+                         "Enable systemd in WSL or run `hive #{cli_label} start` manually."
+          end
+          if result.diagnostics.include?(:systemd_apply_failed)
+            @messages << "systemctl --user enable failed; " \
+                         "run `systemctl --user enable --now #{service_name}` manually"
+          end
+          if result.diagnostics.include?(:launchd_unload_failed)
+            @messages << "launchctl unload returned non-zero for #{path} (benign if plist " \
+                         "was not loaded; otherwise launchd refused — run `launchctl bootout " \
+                         "gui/$(id -u) #{path}` to force unload, then re-run " \
+                         "`hive #{cli_label} install --force`)"
+          end
+          if result.diagnostics.include?(:launchd_load_failed)
+            @messages << "launchctl load failed for #{path}; run `launchctl load #{path}` manually"
+          end
+          if result.diagnostics.include?(:stale_plan)
+            @messages << "#{service_noun} changed after it was inspected; no changes were made. Re-run the command."
+          end
+          if result.diagnostics.include?(:unsafe_unit_path)
+            @messages << "refusing unsafe #{unit_noun} path at #{path}; remove it manually"
           end
         end
 
@@ -442,51 +396,6 @@ module Hive
           false
         end
 
-        # Non-mutating "is autostart enabled?" probe. Each platform uses a
-        # read-only service-manager query that exits 0 when the service is
-        # enabled/loaded; nothing is written, enabled, or loaded here.
-        def service_enabled?
-          case platform
-          when :linux
-            return false unless systemctl_available?
-
-            # `is-enabled` exits 0 only when the unit is enabled — purely
-            # a query, no state change.
-            !!@runner.call([ "systemctl", "--user", "is-enabled", service_name ])
-          when :macos
-            return false unless launchctl_available?
-
-            # `launchctl list <label>` exits 0 only when the job is loaded.
-            !!@runner.call([ "launchctl", "list", launchd_label ])
-          else
-            false
-          end
-        end
-
-        # Non-mutating "is the managed process active?" probe. Keep this in
-        # the shared installer so setup, daemon, bot, and web status cannot
-        # invent platform-specific lifecycle commands independently.
-        def service_running?
-          case platform
-          when :linux
-            return false unless systemctl_available?
-
-            !!@runner.call([ "systemctl", "--user", "is-active", "--quiet", service_name ])
-          when :macos
-            return false unless launchctl_available?
-
-            # A loaded launchd job can be waiting with no process. `print`
-            # exposes the actual state, so only `state = running` counts. Unit
-            # tests and older injected runners retain the boolean seam.
-            return !!@runner.call([ "launchctl", "list", launchd_label ]) if @runner_injected && !@status_reader
-
-            output, ok = read_status([ "launchctl", "print", "gui/#{Process.uid}/#{launchd_label}" ])
-            ok && output.match?(/\bstate\s*=\s*running\b/i)
-          else
-            false
-          end
-        end
-
         def service_manager_available?
           case platform
           when :linux
@@ -497,15 +406,6 @@ module Hive
           when :macos then launchctl_available?
           else false
           end
-        end
-
-        def read_status(argv)
-          return @status_reader.call(argv) if @status_reader
-
-          output, status = Open3.capture2e(*argv)
-          [ output, status.success? ]
-        rescue Errno::ENOENT
-          [ "", false ]
         end
 
         # Mirror systemctl_available? for macOS: distinguish "launchctl

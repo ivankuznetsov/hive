@@ -14,7 +14,8 @@ class HiveBotSupervisorTest < Minitest::Test
   StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, keyword_init: true)
 
   FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears,
-                            :commands_registered, :raise_on_set_my_commands, keyword_init: true) do
+                            :commands_registered, :raise_on_set_my_commands,
+                            :edits, :raise_on_edit, keyword_init: true) do
     def send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
       raise raise_on_send if raise_on_send
 
@@ -23,6 +24,17 @@ class HiveBotSupervisorTest < Minitest::Test
 
     def edit_message_reply_markup(chat_id:, message_id:, reply_markup: nil)
       (self.keyboard_clears ||= []) << { chat_id: chat_id, message_id: message_id, reply_markup: reply_markup }
+    end
+
+    def edit_message_text(chat_id:, message_id:, text:, reply_markup: nil)
+      raise raise_on_edit if raise_on_edit
+
+      (self.edits ||= []) << {
+        chat_id: chat_id,
+        message_id: message_id,
+        text: text,
+        reply_markup: reply_markup
+      }
     end
 
     def set_my_commands(commands:)
@@ -61,7 +73,7 @@ class HiveBotSupervisorTest < Minitest::Test
   class FakeRouter
     Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands, :project, :slug,
                         :stage, :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
-                        :intent, :attachment,
+                        :intent, :attachment, :recovery,
                         keyword_init: true)
   end
 
@@ -94,6 +106,7 @@ class HiveBotSupervisorTest < Minitest::Test
   # land here instead. `write!` returns a request_id so the supervisor's
   # logging path that includes it stays exercised.
   FakeDispatchRequestWriter = Struct.new(:writes, :sequences, :discarded_sequences,
+                                         :recoveries, :recovery_receipt,
                                          :next_request_id, :raise_on_write,
                                          :raise_on_sequence, :raise_on_discard,
                                          keyword_init: true) do
@@ -124,6 +137,11 @@ class HiveBotSupervisorTest < Minitest::Test
 
       (self.discarded_sequences ||= []) << request_id
       true
+    end
+
+    def recover!(**kwargs)
+      (self.recoveries ||= []) << kwargs
+      recovery_receipt
     end
   end
 
@@ -172,14 +190,16 @@ class HiveBotSupervisorTest < Minitest::Test
     @idea_draft_store = Hive::Bot::IdeaDraftStore.new
     @transcriber = FakeTranscriber.new(results: [], calls: [])
     @notification_dispatcher = FakeNotificationDispatcher.new(processed: [], reset_tasks: [])
-    @dispatch_request_writer = FakeDispatchRequestWriter.new(writes: [], sequences: [], discarded_sequences: [])
+    @dispatch_request_writer = FakeDispatchRequestWriter.new(
+      writes: [], sequences: [], discarded_sequences: [], recoveries: []
+    )
     # Drive the real constructor so any future invariant added to
     # Supervisor#initialize is exercised by every test in this file. We
     # inject all collaborators so the constructor's `||=` defaults never
     # touch disk or the network.
     @config = {
       "chat_id_allowlist" => [ 42, 43 ],
-      "clear_retry_grace_sec" => 1,
+      "command_sequence_grace_sec" => 1,
       "conversation_ttl_sec" => 60,
       "poll_interval_sec" => 1,
       "idea_attachment_max_bytes" => 20 * 1024 * 1024,
@@ -1156,7 +1176,7 @@ class HiveBotSupervisorTest < Minitest::Test
                  "a failed tick must leave the last good snapshot intact, not overwrite it"
   end
 
-  def test_reload_rewires_status_snapshot_provider_into_the_rebuilt_router
+  def test_reload_rewires_status_snapshot_provider_into_canonical_recovery
     # Regression guard: reload_config_if_requested rebuilds @router, and that
     # rebuild must keep the status_snapshot_provider wiring. The original bug
     # rebuilt the Router without it, so after any `hive bot reload` /autofix
@@ -1188,20 +1208,19 @@ class HiveBotSupervisorTest < Minitest::Test
     )
     supervisor.process_update(update)
 
-    queued = @dispatch_request_writer.writes.map { |w| w[:argv] }
-    assert(queued.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
-           "after SIGHUP reload, /autofix must still resolve the slug and queue the " \
-           "recover sequence — proving the rebuilt Router kept status_snapshot_provider")
+    assert_equal 1, @dispatch_request_writer.recoveries.size,
+                 "after SIGHUP reload, /autofix must still resolve the cached row " \
+                 "through the rebuilt Router and submit canonical recovery"
     assert_empty @child_supervisor.dispatched,
                  "queue-routable verbs must not spawn from the bot (single-dispatcher invariant)"
   end
 
-  def test_default_status_snapshot_provider_dispatches_recover_sequence_for_cached_row
+  def test_default_status_snapshot_provider_dispatches_canonical_recovery_for_cached_row
     # Exercises the full default wiring (real Router built by the constructor)
     # end-to-end: the status_snapshot_provider lambda must reach
-    # latest_status_rows, resolve the cached row, and dispatch the recover
-    # sequence. Asserts the dispatched argv, not merely "some message sent",
-    # so the lambda returning [] or the row failing to resolve would fail.
+    # latest_status_rows, resolve the cached row, and dispatch canonical
+    # recovery. Asserting the writer call, not merely "some message sent",
+    # means an empty provider or unresolved row still fails.
     retryable = row(slug: "wire-260526-aaaa", stage: "6-review", action: "recover_review",
                     marker: "review_error", attrs: { "pass" => "2" },
                     diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
@@ -1220,10 +1239,9 @@ class HiveBotSupervisorTest < Minitest::Test
     )
     supervisor.process_update(update)
 
-    queued = @dispatch_request_writer.writes.map { |w| w[:argv] }
-    assert(queued.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
-           "default snapshot provider must route /autofix through latest_status_rows " \
-           "to a real recover-sequence queued dispatch")
+    assert_equal 1, @dispatch_request_writer.recoveries.size,
+                 "default snapshot provider must route /autofix through " \
+                 "latest_status_rows to canonical recovery"
     assert_empty @child_supervisor.dispatched,
                  "queue-routable verbs must not spawn from the bot (single-dispatcher invariant)"
   end
@@ -1311,7 +1329,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
   def test_trigger_for_result_maps_intents_for_telemetry
     %i[
-      slash_done callback_autofix callback_clear_and_retry callback_approve
+      slash_done callback_autofix callback_approve
       callback_approve_plan callback_rerun
       callback_findings_accept_all callback_findings_reject_all callback_show_details
     ].each do |intent|
@@ -1351,7 +1369,7 @@ class HiveBotSupervisorTest < Minitest::Test
     commands = registered.first
     assert_equal Hive::Bot::Supervisor::BOT_COMMANDS, commands
     slash_names = commands.map { |cmd| cmd.fetch(:command) }
-    assert_equal %w[idea status waiting queue answer approve autofix details done help], slash_names
+    assert_equal %w[idea status waiting queue answer approve autofix details close done help], slash_names
     assert(commands.all? { |cmd| cmd.fetch(:description).length.between?(1, 256) },
            "every command description must be non-empty and within Telegram's 256-char cap")
     # Pin the A5 discoverability copy: the typeable command menu must advertise
@@ -1679,7 +1697,10 @@ class HiveBotSupervisorTest < Minitest::Test
                          action: "needs_input", marker: "review_waiting")
     retryable_recovery = row(slug: "stuck-260526-cccc", stage: "6-review",
                              action: "recover_review", marker: "review_error",
-                             attrs: { "phase" => "fix", "pass" => "2" },
+                             attrs: {
+                               "phase" => "fix", "pass" => "2",
+                               "marker_id" => "0123456789abcdef"
+                             },
                              diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
     manual_recovery = row(slug: "stale-260526-dddd", stage: "4-execute",
                           action: "recover_review", marker: "execute_stale",
@@ -2152,6 +2173,37 @@ class HiveBotSupervisorTest < Minitest::Test
                  @dispatch_request_writer.sequences.first[:remaining_argvs]
   end
 
+  def test_execute_recovery_renders_the_canonical_receipt_without_commands
+    receipt = Hive::Daemon::RecoveryCoordinator::Receipt.new(
+      status: "blocked", request_id: "recovery-1", attempt_id: nil,
+      phase: "admitted", failure_origin: "timeout", next_eligible_at: nil,
+      owner: "operator", reason: "generation_conflict",
+      remediation: "refresh status; task or marker generation changed",
+      retry_count: 1, provider_hint: nil
+    )
+    @dispatch_request_writer.recovery_receipt = receipt
+    observed = { marker: "error", attrs: { "marker_id" => "m1" } }
+    result = FakeRouter::Result.new(
+      action: :dispatch_recovery,
+      project: "hive",
+      slug: "task",
+      recovery: observed,
+      alert_reset: { project: "hive", slug: "task", stage: "4-execute" }
+    )
+
+    actual = @supervisor.send(
+      :execute_recovery, result, Update.new(chat_id: 42, update_id: 12)
+    )
+
+    assert_equal receipt, actual
+    assert_empty @child_supervisor.dispatched
+    assert_empty @dispatch_request_writer.writes
+    assert_equal observed, @dispatch_request_writer.recoveries.first.fetch(:row)
+    assert_match(/\ARecovery blocked/, @telegram.messages.last.fetch(:text))
+    assert_empty @notification_dispatcher.reset_tasks,
+                 "a blocked receipt must not clear the existing recovery alert"
+  end
+
   # AC-05 (PR #241 ce-code-review): the all-queue-routable path must NOT
   # reset the alert at enqueue time. The daemon hasn't run `markers clear`
   # yet, so removing the fingerprint here would let the next status tick
@@ -2180,7 +2232,7 @@ class HiveBotSupervisorTest < Minitest::Test
   # Mixed sequence: `accept-finding` (not queue-routable, spawns) +
   # retry verb (queue-routable, writes a request). The findings
   # callbacks are the one remaining mixed surface in the codebase
-  # — `RecoverySequence` is now all-queue. The bot waits on the
+  # — `RecoveryResultBuilder` is now all-queue. The bot waits on the
   # accept-finding child like before; the retry verb lands in the
   # queue with no wait.
   def test_dispatch_command_sequence_mixed_spawn_and_queue_waits_then_enqueues
@@ -2848,6 +2900,38 @@ class HiveBotSupervisorTest < Minitest::Test
     event = @logger.events.last
     assert_equal :send_failure, event.fetch(:name)
     assert_equal "offline", event.fetch(:payload).fetch(:message)
+  end
+
+  def test_edit_reply_edits_callback_messages_and_falls_back_or_logs_safely
+    result = FakeRouter::Result.new(
+      action: :edit_reply,
+      text: "closure verified",
+      reply_markup: { inline_keyboard: [] }
+    )
+    @supervisor.send(
+      :execute_result,
+      result,
+      Update.new(chat_id: 42, update_id: 1, message_id: 99)
+    )
+    assert_equal "closure verified", @telegram.edits.last.fetch(:text)
+    assert_equal 99, @telegram.edits.last.fetch(:message_id)
+
+    @supervisor.send(
+      :safe_edit_message,
+      Update.new(chat_id: 42, update_id: 2),
+      text: "fallback"
+    )
+    assert_equal "fallback", @telegram.messages.last.fetch(:text)
+
+    @telegram.raise_on_edit = RuntimeError.new("edit offline")
+    assert_nil @supervisor.send(
+      :safe_edit_message,
+      Update.new(chat_id: 42, update_id: 3, message_id: 100),
+      text: "cannot edit"
+    )
+    event = @logger.events.last
+    assert_equal :send_failure, event.fetch(:name)
+    assert_equal "edit_message_text", event.fetch(:payload).fetch(:source)
   end
 
   def test_status_tick_processes_rows_only_when_status_is_ok

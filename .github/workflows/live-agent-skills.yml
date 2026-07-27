@@ -25,7 +25,7 @@ jobs:
       candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
       workflow_revision: ${{ steps.candidate.outputs.workflow_revision }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Validate dispatch and candidate trust
@@ -79,7 +79,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate.outputs.candidate_sha }}
           fetch-depth: 0
@@ -101,7 +101,7 @@ jobs:
           git archive --format=tar.gz --output="$source_archive" "$CANDIDATE_SHA"
           ruby packaging/live_agent_skills/build.rb \
             "$CANDIDATE_SHA" "$gem_file" "$source_archive" dist/live-agent-candidate
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: live-agent-candidate-artifacts-${{ github.run_attempt }}
           path: dist/live-agent-candidate
@@ -134,7 +134,7 @@ jobs:
             display: Pi
             npm_package: "@mariozechner/pi-coding-agent"
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: live-agent-candidate-artifacts-${{ github.run_attempt }}
           path: candidate-artifacts
@@ -148,7 +148,7 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
       - name: Install the native agent CLI in the ephemeral runner
@@ -187,7 +187,7 @@ jobs:
           bundle exec ruby -Itest test/smoke/live_hive_operating_skill_smoke_test.rb
       - name: Upload redacted structural evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: live-agent-evidence-${{ matrix.platform }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/live-agent-evidence/${{ matrix.platform }}.json
@@ -205,11 +205,11 @@ jobs:
     outputs:
       attestation_sha256: ${{ steps.attest.outputs.attestation_sha256 }}
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: live-agent-candidate-artifacts-${{ github.run_attempt }}
           path: candidate-artifacts
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: live-agent-evidence-*-${{ github.run_attempt }}
           path: evidence
@@ -237,14 +237,14 @@ jobs:
             candidate-artifacts evidence proof)"
           attestation_sha256="$(jq -er '.attestation_sha256' <<<"$result")"
           echo "attestation_sha256=$attestation_sha256" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: live-agent-skills-proof-${{ github.run_attempt }}
           path: proof
           if-no-files-found: error
           retention-days: 7
       - name: Create trusted candidate Check Run
-        uses: actions/github-script@v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CANDIDATE_SHA: ${{ needs.validate.outputs.candidate_sha }}
           WORKFLOW_REVISION: ${{ needs.validate.outputs.workflow_revision }}

@@ -3,11 +3,60 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-07-23
+updated: 2026-07-26
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records Hive web's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records Hive web's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit).
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records Hive web's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records Hive web's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit); ADR-038 keeps reusable components in the Hive monorepo, establishes Hive-first internal boundaries before packaging, and makes standalone gem publication conditional on real external demand and an explicit release decision.
+
+## ADR-038: Reusable components stay in the monorepo and earn packaging after Hive-first boundaries
+
+**Status:** Active (strategy recorded 2026-07-25; the internal-boundary graph was audited on 2026-07-26).
+
+**Context:** Repo-grounded extraction analysis found seven mechanisms with plausible standalone value: RunReceipt, UserService, Agent Artifact Firewall, Agent ABI, Skillpack, Safe Agent Git Gate, and WorkLedger. Splitting them into separate repositories would weaken Hive's most useful maintenance property for humans and agents: one checkout exposes the callers, durable state, compatibility fixtures, integration tests, release machinery, and implementation together. Packaging them immediately inside the monorepo would preserve navigation but still freeze accidental Hive dependencies and create version/release obligations before an external consumer exists.
+
+**Decision:** Hive remains the canonical monorepo and the first and primary consumer of every reusable component. Establish and enforce internal Ruby boundaries first: one supported entry point or facade, structured public values and errors, an acyclic dependency direction, explicit state/schema/lock ownership, clean-process loading, and all Hive production consumers routed through the boundary. Existing module wiki pages plus one component catalog are the canonical agent context; do not add a parallel `.context.md` hierarchy.
+
+Implementation readiness and standalone product value are different rankings.
+The final audit retains six `boundary-ready` components: UserService, Agent ABI,
+Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger.
+`Hive::Attempts::API` remains the sole guarded `candidate`: its focused
+clean-load behavior, result contracts, and exact internal composition and
+compatibility sites are enforced without adding generic lifecycle,
+cancellation, export, or raw-store APIs. U8 removed the former reciprocal
+Attempts/WorkLedger catalog edge by keeping `TaskProjection::Store` as a
+Hive-owned adapter rather than WorkLedger-owned source, so the final catalog has
+no migration exceptions. RunReceipt remains the strongest standalone
+opportunity without forcing the largest refactor first. Operational
+status/Statewatch, layout migration, standalone capability probes, separate
+lease/capsule products, generic status rendering, and a new local-agent
+framework remain rejected or folded ideas rather than package commitments.
+
+A component becomes package-eligible only after its internal boundary is stable, a named non-Hive adopter or maintained integration proves demand, the component loads and tests independently without an upward Hive dependency, compatibility and maintenance ownership are explicit, and an exact built gem installs cleanly. A qualifying package stays in this repository under `components/<gem-name>/`, uses independent SemVer, and remains a path dependency for source development while released `hive-cli` declares a normal compatible dependency. Package publication is explicit and component-scoped; path changes may select tests but never publish.
+
+**Consequences:** The initial work changes module ownership and dependency
+discipline before release topology. Each component lands in its own reviewable
+PR with focused tests, a full Hive integration checkpoint, hosted CI, and wiki
+updates. No gem name, namespace, version, package directory, tag, or publication
+is implied by reaching an internal boundary.
+
+Agent ABI is the first component to pass the later package gate. It has the
+approved public identity `agent-cli-runtime` 0.1.0, namespace
+`AgentCliRuntime`, require path `agent_cli_runtime`, and executable
+`agent-runtime`, with HiveBench as its named non-Hive adopter. The package
+remains under `components/agent-cli-runtime/`; its package-only landing does not
+change Hive's dependency graph. Publication uses the disjoint
+`components/agent-cli-runtime/vX.Y.Z` tag and exact-artifact trusted publishing.
+Hive's dependency cutover remains separate and follows only after remote
+RubyGems verification.
+
+`config/component-boundaries.yml` is the canonical machine-readable inventory,
+and [[component-boundaries]] explains its states and enforcement. A test-only
+contract validates path ownership, the dependency DAG, bounded exceptions,
+selected forbidden Ruby edges, and clean-process loading without presenting
+source scanning as a security sandbox.
+
+Future package work uses a package-first, publish-first, Hive-cutover-last sequence so protected `main` never releases a Hive gem that depends on an unavailable component. Component release tags or manually approved workflows must be disjoint from Hive's root `v*.*.*` release trigger, build once, install and verify the exact artifact, and require an explicit release decision. The detailed implementation contracts are `docs/plans/2026-07-25-001-refactor-internal-component-boundaries-plan.md` and `docs/plans/2026-07-25-002-feat-standalone-component-gems-plan.md`.
 
 ## ADR-037: Hive web is the shared vanilla Rails 8 + Turbo app for native Hive and Hivebox
 
@@ -150,11 +199,11 @@ behavior is covered in [[commands/web]].
 
 **Context:** ADR-026 made the Telegram bot a subprocess caller — it directly `Process.spawn`ed `hive run` (and friends) on its own. ADR-024 made the daemon track per-slug `state_file_mtime` baselines to suppress redundant edit-resume dispatches; that tracking relies on the daemon being the writer that observes the post-completion mtime via its own `ChildSupervisor.reap_all`. When the bot was a parallel writer of `hive run`, the daemon's `ConcurrencyController#observe_state_file_mtime` was never called for bot-driven children. The daemon's baseline went stale, and on its next tick the agent's own write to brainstorm.md looked like a "new user edit" — the daemon dispatched a redundant runner that held `Hive::Lock.with_task_lock` for 1–2 min, during which the bot rejected legitimate user answers with "Try again — another run holds the lock." Diagnosed 2026-05-28 on `explore-the-simplest-way-to-260528-2503`.
 
-**Decision:** Eliminate the dual-writer for state-mutating `hive` verbs by routing all of them through a file-backed request queue at `<state_home>/dispatch_requests/`. The bot stops being a subprocess caller for the allowlisted verb set; instead it writes a JSON request file via `Hive::Bot::DispatchRequestWriter.write!` (atomic via tmp + rename). Hive web later reused the same producer path for stage-run/recovery requests, and `Hive::Daemon::StaleAgentHealer` now enqueues `3-plan` reruns as `requestor=healer`. The daemon's tick loop scans the queue via `Hive::Daemon::DispatchRequestQueue.pending`, validates argv against `ALLOWED_VERBS` (and the request's slug against ADR-012's regex + project against a name regex), and dispatches through the same code path as auto-advance. The daemon's existing reap + `refresh_post_completion_mtime` then keeps the baseline current.
+**Decision:** Eliminate the dual-writer for state-mutating `hive` verbs by routing all of them through a file-backed request queue at `<state_home>/dispatch_requests/`. The bot stops being a subprocess caller for the allowlisted verb set; instead it writes a JSON request file via `Hive::Bot::DispatchRequestWriter.write!` (atomic via tmp + rename). Hive web later reused the same producer path. Recoverable-marker adapters now submit observations through `Hive::Recovery::API`; one `RecoveryCoordinator` persists the retry request and owns the guarded marker transition. `StaleAgentHealer` is only the automatic scheduler, with no special `3-plan` clear/requeue path. The daemon's tick loop scans the queue via `Hive::Daemon::DispatchRequestQueue.pending`, validates argv against `ALLOWED_VERBS` (and the request's slug against ADR-012's regex + project against a name regex), and dispatches through the same durable-attempt path as auto-advance. The daemon's completion observation then keeps the baseline current.
 
-The queue schema is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published under `schemas/` (per ADR-025 — every entry in SCHEMA_VERSIONS must have a corresponding schema file). `hive-dispatch-request.v1.json` was the original bot-only contract; current code writes `hive-dispatch-request.v2.json`, whose breaking change is the `requestor` enum gaining `healer` while preserving `bot` for Telegram and Hive web. The live queue is strict-version-matched: mismatched versions are rejected as malformed/`unknown_schema_version`, so future queue-shape changes require a coordinated producer/daemon bump plus a new schema file before emission.
+The queue schema is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published under `schemas/` (per ADR-025 — every entry in SCHEMA_VERSIONS must have a corresponding schema file). Current producers emit `hive-dispatch-request.v4`. V4 carries generation intent for ordinary delivery and, for recovery, canonical task/stage/marker identity plus the crash-restartable `admitted → cleared → dispatched → terminal` lifecycle. Pending v2/v3 delivery records remain readable only to drain work written by an older installed daemon; no producer emits them. Recovery requests never use a sequence sidecar or adapter-owned clear/run pair.
 
-The allowlist is closed: `run develop brainstorm plan review open-pr artifacts finalize archive markers`. Adding a new state-mutating verb to the daemon requires updating `ALLOWED_VERBS` and the schema's `$defs.ALLOWED_VERBS` in lockstep — a unit test asserts cross-list equality.
+The allowlist is closed: `run develop brainstorm plan review open-pr artifacts finalize archive markers daemon`. Adding a new state-mutating verb to the daemon requires updating `ALLOWED_VERBS` and the schema's `$defs.ALLOWED_VERBS` in lockstep — a unit test asserts cross-list equality.
 
 **Relationship to ADR-026:** ADR-026's "subprocess caller" model still holds for the **non-queue-routable** verbs that don't bump task-state mtime: `hive status`, `hive doctor`, `hive new`, `hive approve`, `hive accept-finding`, `hive reject-finding`. The bot's `ChildSupervisor#dispatch` continues to spawn those directly via `Process.spawn`. The line is drawn at "does this verb's child write to the task state file?" — if yes, queue-route; if no, direct-spawn.
 
@@ -402,7 +451,7 @@ Meanwhile the system grew its own load-bearing safety net: `hive approve` (`wiki
   1. **Q&A waits** (`:waiting`, `:execute_waiting`) — agent asked questions, user answers in the file.
   2. **Triage waits** (`:review_waiting`, including `reason=fix_guardrail`) — user ticks `[x]` on accepted findings or removes rogue commits.
   3. **Recovery waits** (`:execute_stale`, `:review_stale`, `:review_ci_stale`, `:review_error`, `:error`) — these markers EXIST to demand human intervention; skipping them is correct.
-  4. **External-state waits** — 8-finalize/`:complete` whose PR is open on GitHub. Daemon polls `gh pr view --json state` and auto-archives on `MERGED`. The merge itself remains a human gesture (the green button on GitHub); the daemon detects the merge and removes the bookkeeping burden.
+  4. **External-state waits** — any task-bound PR in coding stages 5–8 that is still open on GitHub. The daemon durably observes the exact task generation, verifies repository/head/reachable merge facts, checkpoints required architecture intake, and uses an evidence-bound closure receipt on `MERGED`. The merge itself remains a human gesture (the green button on GitHub); the daemon detects delivery and removes the bookkeeping burden without a marker-reason bypass.
 
 `3-plan`/`:waiting` is not a Q&A wait. It is the plan-approval pause
 used by the manual TUI/editor flow. For daemon-enabled projects,
@@ -469,7 +518,8 @@ Hive's deployment model (single binary, no third-party consumers on different ve
 **Decision:** Add `hive bot` as a long-running Telegram process. It long-polls Telegram, authenticates by a global `bot.chat_id_allowlist`, watches the same `hive status --json` stream as the daemon, and turns waiting/recovery rows into mobile interactions. The bot is a subprocess caller:
 
 1. Stage approvals dispatch workflow verbs (`hive plan` / `develop` / `review` / `pr` / `archive`) with `--from <stage> --project <project> --json`.
-2. Recovery buttons dispatch `hive markers clear` and then the appropriate workflow verb when safe.
+2. Recovery buttons submit the observed marker identity through `Hive::Recovery::API`; the single
+   `RecoveryCoordinator` validates, persists, and dispatches one identity-bound retry request.
 3. Review triage buttons dispatch `hive accept-finding` / `hive reject-finding`.
 4. `/idea` dispatches `hive new`.
 5. `/status` and `/queue` render the status rows; they do not scan task folders directly.
@@ -481,7 +531,7 @@ Path B is the default: the operator reads the question and replies in Telegram; 
 **Relationship to ADR-024:** ADR-024 says approval is given once per project when the daemon is enabled. ADR-026 adds a mobile input surface for the gates the daemon deliberately cannot cross. Tapping Approve in Telegram is the same approval gesture as running the workflow verb in a terminal; safety still lives in `Hive::Commands::Approve::VALID_TERMINAL_MARKERS`, `Hive::TaskAction`, marker clear allowlists, and the existing command contracts.
 
 **Consequences:**
-- The mobile phone becomes a complete surface for the daemon's human-input gaps: answer brainstorm questions, clear/retry recoverable errors, triage findings, approve transitions, capture ideas, and read the cross-project queue.
+- The mobile phone becomes a complete surface for the daemon's human-input gaps: answer brainstorm questions, request recovery for recoverable errors, triage findings, approve transitions, capture ideas, and read the cross-project queue.
 - Telegram session compromise has the same blast radius as the operator's terminal session for bot-supported actions. MVP deliberately has no per-action PIN, read-only mode, team ACLs, or audit attribution beyond JSON logs.
 - No new persistence sidecar is introduced for conversations. `brainstorm.md` is the source of truth; after a bot restart, parsing the file identifies the next unanswered question.
 - The bot token is environment-only (`HIVE_TELEGRAM_BOT_TOKEN`); it is never stored in config or logged.
@@ -539,17 +589,17 @@ Historical schemas (`schemas/hive-status.v1.json`, `schemas/hive-stage-action.v1
 
 ## ADR-030: Daily digest defaults ON when the Telegram bot is configured; drop the separate `bot.digest_chat_id`
 
-**Status:** Active
+**Status:** Superseded by ADR-040
 
 **Context:** The predecessor digest was opt-in (`digest.enabled` defaulted to `false`), so an operator who had already set up the Telegram bot with an allowlisted chat still received nothing until they discovered and set `digest.enabled: true` — the most common "why didn't I get a digest" case. The separate `bot.digest_chat_id` override added a second delivery-target knob that nobody needed: `Digest::Sender.resolve_chat_id` already fell back to `bot.chat_id_allowlist[0]`, which is where operators wanted the digest anyway.
 
 **Decision:** Make the digest opt-out instead of opt-in. `Config.load_global_digest_block` now derives `digest.enabled` from the bot config when the operator has not pinned it either way: it is `true` when `bot.enabled == true` and `bot.chat_id_allowlist` has at least one integer chat, else `false`. An explicit `digest.enabled` (true **or** false) is always honored — only the unset case is derived (`override.key?("enabled")` gate). Both scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher's SIGHUP reconfigure) go through `load_global_digest_block`, so the derived value flows everywhere with no second code path. Remove `bot.digest_chat_id` entirely — from `DEFAULTS`, its validator (`validate_bot_digest_chat_id!`), the config template, and the JSON schema description. The current shared `Config.telegram_chat_id!` helper resolves `bot.chat_id_allowlist[0]` for PRDigest delegation and the separate answer digest.
 
-**Consequences:** Anyone running the Telegram bot with an allowlisted chat starts getting the digest for each completed Europe/London day (the first enabled tick only initializes `digest_state.json`; it does not back-fill history). The auto-enable requires a deliverable chat so PRDigest is not launched without a recipient. Operators who deliberately want no digest set `digest.enabled: false`. Existing configs that still carry `bot.digest_chat_id` are silently ignored and route to the allowlist instead. See [[modules/digest]], [[commands/digest]], [[modules/config]].
+**Consequences:** Anyone running the Telegram bot with an allowlisted chat started getting the digest for each completed Europe/London day. ADR-040 later removed this behavior and its configuration from Hive.
 
 ## ADR-031: PRDigest is the sole merged-PR digest engine
 
-**Status:** Active
+**Status:** Superseded by ADR-040
 
 **Context:** Hive and standalone PRDigest both implemented GitHub collection,
 Telegram rendering/chunking, state, and retry policy. A production later-chunk
@@ -569,10 +619,52 @@ keeping compatibility aliases.
 **Consequences:** Delivery fixes have one owner and `hive digest --json` is the
 `prdigest-result` contract. Hive has a runtime dependency on PRDigest and its
 PR cannot become releasable until the matching PRDigest version is published.
-Legacy in-flight Hive delivery state is reconciled manually rather than guessed,
-because automatic conversion could duplicate a Telegram chunk whose response
-was lost. See [[commands/digest]], [[modules/digest]], [[dependencies]], and
-[[modules/daemon]].
+Legacy in-flight Hive delivery state was reconciled manually rather than
+guessed, because automatic conversion could duplicate a Telegram chunk whose
+response was lost. ADR-040 later removed the adapter and dependency.
+
+## ADR-039: Pre-1.0 recovery/status migrations replace legacy contracts
+
+**Status:** Active
+
+**Context:** Hive has few external consumers, while retaining every historical
+status/recovery schema encouraged adapters to keep branching on old lifecycle
+shapes. The universal recovery and evidence-closure rollout needs one truthful
+projection, not another compatibility layer beside the earlier mechanisms.
+
+**Decision:** Migrate every in-repository producer and consumer in one change,
+then publish only the current `hive-status.v7`,
+`hive-operational-status.v3`, and `hive-act.v2` contracts. Remove their
+superseded schema files and compatibility assertions instead of accepting or
+translating older recovery/status documents. Older persisted task state is
+migrated at the task/state layer; wire-schema compatibility is not a second
+recovery mechanism.
+
+**Consequences:** A stale daemon, bot, TUI, or external validator receives an
+explicit schema-skew failure and must upgrade. The current contracts stay
+smaller and closed, and tests assert that superseded versions do not reappear.
+This supersedes ADR-028's decision to retain historical `hive-status` files;
+that earlier decision remains useful history but is no longer current policy.
+
+## ADR-040: PR digests live outside Hive
+
+**Status:** Active
+
+**Context:** PRDigest now has two purposeful surfaces: canonical JSON facts for
+agents and provider-written prose for standalone delivery. Hive's adapter and
+catch-up scheduler depended on the removed deterministic `prdigest run` path.
+Mapping that scheduler to facts would stop delivery, while mapping it to prose
+would duplicate provider and Telegram configuration inside Hive.
+
+**Decision:** Remove `hive digest`, its PRDigest adapter, its daily scheduler,
+and the `prdigest` runtime dependency. Hive does not discover, configure,
+schedule, or deliver PR digests. Operators schedule `prdigest prose --deliver`
+directly; agents invoke `prdigest facts`. A stale top-level `digest:` block is
+rejected when the Hive daemon starts, with those migration commands.
+
+**Consequences:** Hive has no PR-digest command, cursor, catch-up policy, result
+envelope, or runtime coupling. The unrelated Hive answer digest remains. ADR-030
+and ADR-031 describe removed behavior and are superseded by this decision.
 
 ## ADR-032: Per-stage controls overlay the current durable identity
 

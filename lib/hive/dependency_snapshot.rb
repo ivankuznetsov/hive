@@ -8,6 +8,9 @@ require "hive/config"
 require "hive/dependency_admission"
 require "hive/plan_frontmatter"
 require "hive/repository_identity"
+require "hive/markers"
+require "hive/task"
+require "hive/task_action"
 require "hive/workflows/project"
 require "hive/workflows/registry"
 
@@ -92,11 +95,13 @@ module Hive
     end
 
     def admission_context(registry_entries = Hive::Config.registered_projects,
-                          exclude_archived: false, fallback_context: nil)
+                          exclude_archived: false, fallback_context: nil,
+                          workflow_generations: nil)
       projects = registry_entries.map do |entry|
         admission_project(
           entry, exclude_archived: exclude_archived,
-          live_repository_identity: nil
+          live_repository_identity: nil,
+          workflow_generation: workflow_generation_for(entry, workflow_generations)
         )
       end
       identity_targets = cross_project_identity_targets(projects)
@@ -188,9 +193,20 @@ module Hive
     end
 
     def admission_project(entry, exclude_archived: false,
-                          live_repository_identity: :detect)
+                          live_repository_identity: :detect, workflow_generation: nil)
       root = File.expand_path(entry.fetch("path"))
-      config, config_error = admission_project_config(root)
+      if workflow_generation.is_a?(Exception)
+        raise workflow_generation
+      end
+      config, config_error =
+        if workflow_generation
+          [
+            workflow_generation.admission_config,
+            workflow_generation.admission_config_error
+          ]
+        else
+          admission_project_config(root)
+        end
       tasks = if config_error
         []
       else
@@ -198,7 +214,8 @@ module Hive
           root,
           config,
           project_name: entry.fetch("name"),
-          exclude_archived: exclude_archived
+          exclude_archived: exclude_archived,
+          workflow_generation: workflow_generation
         )
       end
       Hive::DependencyAdmission::ProjectSnapshot.new(
@@ -246,23 +263,67 @@ module Hive
       [ {}, "could not read #{path}: #{e.class}: #{e.message}" ]
     end
 
-    def admission_tasks(root, config, project_name: File.basename(root), exclude_archived: false)
-      folders = Dir.glob(File.join(root, ".hive-state", "stages", "*-*", "*"))
-        .select { |folder| File.directory?(folder) }
-        .sort
-      if exclude_archived
-        folders.reject! { |folder| File.basename(File.dirname(folder)) == Hive::ArchiveFilter::ARCHIVE_STAGE_DIR }
+    def admission_tasks(root, config, project_name: File.basename(root), exclude_archived: false,
+                        workflow_generation: nil)
+      scan = lambda do
+        stage_dirs =
+          if exclude_archived
+            active_stage_dirs_for(workflow_generation)
+          else
+            [ "*-*" ]
+          end
+        folders = stage_dirs.flat_map do |stage_dir|
+          Dir.glob(File.join(root, ".hive-state", "stages", stage_dir, "*"))
+        end.select { |folder| File.directory?(folder) }.uniq.sort
+        if exclude_archived
+          folders.reject! do |folder|
+            archived_folder?(
+              folder, config: config, project_name: project_name,
+              workflow_generation: workflow_generation
+            )
+          end
+        end
+        folders.map do |folder|
+          admission_task(
+            root, folder, config, project_name: project_name,
+            workflow_generation: workflow_generation
+          )
+        end
       end
+      return scan.call if workflow_generation
 
       Hive::Workflows::Project.synchronize do
         Hive::Workflows::Project.load!(root)
-        folders.map do |folder|
-          admission_task(root, folder, config, project_name: project_name)
-        end
+        scan.call
       end
     end
 
-    def admission_task(root, folder, config, project_name: File.basename(root))
+    def active_stage_dirs_for(workflow_generation)
+      return workflow_generation.active_stage_dirs if workflow_generation
+
+      Hive::Workflows::Registry.all
+        .flat_map { |workflow| workflow.stages[0...-1].map(&:dir) }
+        .uniq
+    end
+
+    # Presentation-only active snapshots may omit archived rows for cost, but
+    # the omission must follow the task's resolved workflow/action. A terminal
+    # directory in one workflow can be an ordinary running stage in another.
+    # Any classification failure fails open so malformed dependency metadata
+    # remains available to the admission layer as an explicit error.
+    def archived_folder?(folder, config:, project_name:, workflow_generation: nil)
+      task = Hive::Task.new(folder, workflow_generation: workflow_generation)
+      marker = Hive::Markers.current(task.state_file)
+      Hive::TaskAction.for(
+        task, marker, config: config,
+        project_name: project_name, project_count: 1
+      ).key == Hive::Schemas::TaskActionKind::ARCHIVED
+    rescue StandardError
+      false
+    end
+
+    def admission_task(root, folder, config, project_name: File.basename(root),
+                       workflow_generation: nil)
       original_folder_identity = folder_identity(folder)
       metadata = Hive::TaskMeta.read_for_admission(folder)
       plan = Hive::PlanFrontmatter.read(File.join(folder, "plan.md"))
@@ -270,8 +331,12 @@ module Hive
       workflow_stages = []
       validation_error = nil
       begin
-        Hive::Workflows::Project.assert_descriptor_loadable!(selector.to_sym, project_root: root)
-        workflow_stages = Hive::Workflows::Registry.fetch(selector.to_sym).stage_dirs
+        if workflow_generation
+          workflow_stages = workflow_generation.fetch(selector).stage_dirs
+        else
+          Hive::Workflows::Project.assert_descriptor_loadable!(selector.to_sym, project_root: root)
+          workflow_stages = Hive::Workflows::Registry.fetch(selector.to_sym).stage_dirs
+        end
       rescue StandardError => e
         validation_error = "workflow #{selector.inspect} could not be resolved: #{e.class}: #{e.message}"
       end
@@ -308,6 +373,14 @@ module Hive
       stat = File.stat(folder)
       [ stat.dev, stat.ino ]
     rescue SystemCallError
+      nil
+    end
+
+    def workflow_generation_for(entry, workflow_generations)
+      return nil unless workflow_generations
+
+      workflow_generations[File.expand_path(entry.fetch("path"))]
+    rescue KeyError, TypeError
       nil
     end
   end

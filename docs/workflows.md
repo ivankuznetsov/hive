@@ -54,7 +54,8 @@ This writes a minimal `inbox -> work -> done` workflow:
 
 The generated descriptor is valid immediately, and the placeholder
 `work.md` is the prompt for the `work` stage. Edit that file to define what the
-agent should do.
+agent should do. New scaffolds explicitly set
+`archive_visibility_retention_days: 3`.
 
 `README.md` and `honeycomb.yml` are publish-preflight inputs. The scaffolded
 summary and author are placeholders; edit them before running `workflow
@@ -171,6 +172,7 @@ produce the current `packages/<name>/<version>/manifest.yml` registry contract.
 
 ```yaml
 id: my-flow
+archive_visibility_retention_days: 3
 stages:
   - name: inbox
     kind: terminal
@@ -193,6 +195,16 @@ stages:
 Rules:
 
 - `id` must match the filename stem and `/\A[a-z0-9][a-z0-9-]*\z/`.
+- `archive_visibility_retention_days` accepts only a positive YAML integer or
+  the exact lowercase sentinel `never`. Each integer is a number of full
+  24-hour periods; a task remains visible at the exact boundary and hides only
+  after it. Omission defaults to `3` for legacy descriptors, while an explicit
+  `null`, zero, negative, float, numeric string, boolean, or alternate spelling
+  is invalid. Validation names the workflow, field, received value, and
+  accepted forms.
+- Retention changes ordinary visibility only. `never` keeps completed tasks in
+  ordinary views indefinitely; every policy leaves the dedicated archive
+  complete and never deletes, moves, reopens, or otherwise mutates a task.
 - `kind: terminal` creates an inert stage; it does not spawn an agent.
 - `kind: agent` spawns the generic stage runner.
 - `kind: council` runs a document review council over an input artifact.
@@ -328,7 +340,12 @@ above is nested descriptor data, not a project-config root key.
 
 The automatic implementation-owner policy applies only to the built-in coding workflow's `execute`, `open_pr`, `review.fix`, and `review.ci` boundaries. Descriptor-backed agent and council stages continue to resolve their own optional `agent`, `model`, and `effort` fields, and council reviewers are never inherited from the coding execute owner.
 
-Existing workflow descriptors continue to load: all new fields are optional.
+Existing workflow descriptors continue to load: an omitted
+`archive_visibility_retention_days` resolves to `3`. Hive-owned `coding`,
+`content`, and `bench` descriptors and newly generated `blank`/`research`
+descriptors declare `3` explicitly. The Honeycomb-owned Writing package should
+declare the field in its own repository; installed legacy generations remain
+correct through the omission default.
 Stages that omit both `workspace:` and `handoff:` retain task-folder execution
 and their existing completion behavior. The fields may not be enabled
 independently.

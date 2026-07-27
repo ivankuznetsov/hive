@@ -120,7 +120,7 @@ module Hive
         # rewrite, and the rewrite (using the body we read pre-write)
         # erases that fresh marker. The hive_commit follows under
         # `with_commit_lock` to serialise hive/state branch writes
-        # against any concurrent committer (auto-heal, run loop).
+        # against any concurrent committer (recovery coordinator, run loop).
         Hive::Markers.with_markers_lock(task.state_file) do
           marker = Hive::Markers.current(task.state_file)
           actual = marker.name.to_s.upcase
@@ -141,14 +141,11 @@ module Hive
         emit_success(task, normalized)
       end
 
-      # Cross-process race guard. The TUI observes an ERROR marker at
-      # time T and dispatches `hive markers clear` at T+1s. If a
-      # concurrent `hive run` writes a fresh ERROR marker in that
-      # window, the name-based check still passes. `--match-attr
-      # marker_id=<observed>` ties the clear to the specific generated
-      # marker when present; legacy callers can pass comma-separated
-      # observed attrs such as `reason=exit_code,exit_code=143` so
-      # different structured ERROR rotations still refuse.
+      # Cross-process race guard for explicit low-level operator repair.
+      # If a concurrent `hive run` writes a fresh marker between observation
+      # and this command, name-only matching is insufficient. `--match-attr
+      # marker_id=<observed>` binds the clear to the generated occurrence.
+      # Automated recovery never invokes this command; it uses the coordinator.
       def match_attr_or_raise!(task, marker)
         return if @match_attr.nil? || @match_attr.to_s.strip.empty?
 

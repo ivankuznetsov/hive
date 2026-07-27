@@ -121,7 +121,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
       payload = JSON.parse(out)
       assert_equal "hive-status", payload.fetch("schema")
-      assert_equal 6, payload.fetch("schema_version")
+      assert_equal 7, payload.fetch("schema_version")
       assert_equal false, payload.fetch("ok")
       assert_match(/--full cannot be combined with --json/, payload.fetch("message"))
 
@@ -165,28 +165,6 @@ class CliUsageErrorJsonTest < Minitest::Test
         assert_match message_pattern, payload["message"]
         refute payload.key?("schema"), "Screenote connect/disconnect JSON failures are unversioned"
         assert_match(/^hive: ERROR: /, err.lines.first)
-      end
-    end
-  end
-
-  def test_digest_thor_errors_use_the_prdigest_result_contract
-    cases = [
-      %w[digest --bad --json],
-      %w[digest extra --json]
-    ]
-
-    with_tmp_global_config do |home|
-      cases.each do |argv|
-        out, _err, status = run_hive(home, *argv)
-
-        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
-        payload = JSON.parse(out)
-        assert_equal "prdigest-result", payload.fetch("schema")
-        assert_equal 1, payload.fetch("schema_version")
-        assert_equal "failure", payload.fetch("status")
-        assert_equal "cli", payload.dig("error", "kind")
-        assert_nil payload.fetch("delivery")
-        refute payload.key?("ok")
       end
     end
   end

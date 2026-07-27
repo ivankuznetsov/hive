@@ -4,7 +4,7 @@ require "hive/agent_limit"
 require "hive/claude_launcher"
 require "hive/dependencies"
 require "hive/dependency_snapshot"
-require "hive/protected_files"
+require "hive/artifact_firewall"
 require "hive/stages/base"
 require "hive/worktree"
 require "hive/implementation_identity/store"
@@ -140,19 +140,28 @@ module Hive
         baseline_head = execute_baseline_head(task, worktree_git)
         return worktree_git_failed(task, cfg, worktree_path) unless baseline_head
 
-        protected_capture = Hive::ProtectedFiles.capture(task.folder, PROTECTED_FILES)
-        before_impl = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
-        impl_result = spawn_implementation(task, cfg, worktree_path, identity: identity)
-        after_impl = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
+        custody_manifest = Hive::ArtifactFirewall::Manifest.new(
+          root: task.folder,
+          protected_anchors: PROTECTED_FILES,
+          permitted_writable_roots: [ task.folder, worktree_path ]
+        )
+        custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
+        begin
+          impl_result = spawn_implementation(
+            task, cfg, worktree_path, identity: identity
+          )
+        ensure
+          custody_report = Hive::ArtifactFirewall.validate_and_restore(
+            custody_manifest, custody_snapshot
+          )
+        end
         append_implementation_output(task, impl_result)
 
-        if (tampered = Hive::ProtectedFiles.diff(before_impl, after_impl)).any?
-          restored, restore_error = Hive::ProtectedFiles.restore_safely(
-            task.folder, protected_capture, tampered
-          )
+        if custody_report.tampered?
           return record_tamper(
-            task, tampered, who: "implementer",
-            restored: restored, restore_error: restore_error
+            task, custody_report.tampered_labels, who: "implementer",
+            restored: custody_report.restored?,
+            restore_error: custody_report.restore_diagnostic
           )
         end
 

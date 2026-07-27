@@ -35,6 +35,7 @@ module Hive
       # Rollback succeeded. Preserve the typed exit code when possible
       # (e.g. GitError → 70) instead of collapsing every rollback to 1.
       raise original_error if original_error.is_a?(Hive::Error)
+      raise original_error if original_error.is_a?(Interrupt)
 
       raise Hive::Error, rolled_back_message.call(original_error)
     end

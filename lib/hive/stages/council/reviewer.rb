@@ -73,6 +73,7 @@ module Hive
         def run_agent!
           identity = launch_identity
           profile = Hive::Stages::Base.stage_profile(@cfg, @stage.name, explicit_agent: identity.fetch(:agent))
+          resource_limits = Hive::Stages::Base.stage_resource_limits(@cfg, @stage)
           actor_prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
             @cfg,
             @stage.name,
@@ -80,9 +81,9 @@ module Hive
             profile,
             prompt: prompt(profile),
             managed_slot: "stages.#{@stage.name}.reviewers.#{@reviewer.name}",
+            managed_outputs: [ @output_path ],
             **permission_kwargs
           )
-          resource_limits = Hive::Stages::Base.stage_resource_limits(@cfg, @stage)
           result = Hive::Stages::Base.spawn_agent(
             @task,
             prompt: actor_prompt,

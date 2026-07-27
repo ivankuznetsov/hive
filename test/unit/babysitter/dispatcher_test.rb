@@ -22,8 +22,14 @@ class BabysitterDispatcherTest < Minitest::Test
         with_tmp_dir do |disabled|
           data = YAML.safe_load(File.read(File.join(home, "config.yml")))
           data["registered_projects"] = [
-            { "name" => "enabled", "path" => enabled },
-            { "name" => "disabled", "path" => disabled }
+            {
+              "name" => "enabled", "path" => enabled,
+              "repository_identity" => "github.com/acme/enabled"
+            },
+            {
+              "name" => "disabled", "path" => disabled,
+              "repository_identity" => "github.com/acme/disabled"
+            }
           ]
           File.write(File.join(home, "config.yml"), data.to_yaml)
           write_project_config(enabled, babysitter: { "enabled" => true, "interval" => "30s" })
@@ -56,8 +62,14 @@ class BabysitterDispatcherTest < Minitest::Test
         with_tmp_dir do |two|
           data = YAML.safe_load(File.read(File.join(home, "config.yml")))
           data["registered_projects"] = [
-            { "name" => "one", "path" => one },
-            { "name" => "two", "path" => two }
+            {
+              "name" => "one", "path" => one,
+              "repository_identity" => "github.com/acme/one"
+            },
+            {
+              "name" => "two", "path" => two,
+              "repository_identity" => "github.com/acme/two"
+            }
           ]
           File.write(File.join(home, "config.yml"), data.to_yaml)
           write_project_config(one, babysitter: { "enabled" => true })
@@ -78,6 +90,40 @@ class BabysitterDispatcherTest < Minitest::Test
           logger&.close
         end
       end
+    end
+  end
+
+  def test_tick_skips_local_and_unresolved_repositories_before_github_calls
+    with_tmp_dir do |root|
+      local = File.join(root, "local")
+      unresolved = File.join(root, "unresolved")
+      [ local, unresolved ].each do |path|
+        FileUtils.mkdir_p(path)
+        write_project_config(path, babysitter: { "enabled" => true })
+      end
+      projects = [
+        {
+          "name" => "local", "path" => local,
+          "repository_identity" => "local:#{local}"
+        },
+        { "name" => "unresolved", "path" => unresolved }
+      ]
+      logger = Hive::Babysitter::Logger.new(path: File.join(root, "babysitter.log"))
+      dispatcher = Hive::Babysitter::Dispatcher.new(logger: logger)
+
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+        with_replaced_singleton_method(Hive::Babysitter::ProjectTick, :run, lambda { |*|
+          flunk "unsupported repositories must not reach GitHub polling"
+        }) do
+          assert_equal 0, dispatcher.tick
+        end
+      end
+
+      docs = File.readlines(File.join(root, "babysitter.log")).map { |line| JSON.parse(line) }
+      reasons = docs.filter_map { |doc| doc["reason"] if doc["event"] == "project_skipped" }
+      assert_equal %w[repository_identity_unresolved repository_local], reasons.sort
+    ensure
+      logger&.close
     end
   end
 end

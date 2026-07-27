@@ -14,6 +14,7 @@ module Hive
   # each CLI's flag mapping. Profiles ship in lib/hive/agent_profiles/.
   class AgentProfile
     PROMPT_STYLES = %i[positional headless_flag_value stdin].freeze
+    STRUCTURED_OUTPUT_PROTOCOLS = %i[grok_end].freeze
     WORKSPACE_WRITE_PERMISSION_MODE = "workspace-write".freeze
     READ_ONLY_PERMISSION_MODE = "read-only".freeze
     TOOL_SCOPE_FLAGS_UNSET = Object.new.freeze
@@ -54,7 +55,8 @@ module Hive
                 :workspace_write_flags, :read_only_flags, :cli_capabilities,
                 :initial_context_tokens, :default_model_resolver,
                 :model_argument_builder, :effort_argument_builder,
-                :launcher_identity, :policy_capabilities, :tool_scope_flags
+                :launcher_identity, :policy_capabilities, :tool_scope_flags,
+                :structured_output_protocol
 
     # Public API — do not break.
     #
@@ -105,6 +107,10 @@ module Hive
     #                          provider's corresponding flags.
     #   raw_cli_arguments_supported: default false. Explicit opt-in for
     #                          legacy provider-native argv passthrough.
+    #   structured_output_protocol: default nil. Explicitly opts a profile
+    #                          into a provider stream shape that can replace
+    #                          ordinary assistant text. Today only
+    #                          :grok_end is supported.
     #   prompt_style:          default :stdin for a profile named :codex,
     #                          otherwise :positional (backward compatible
     #                          with pre-profile-style custom registrations)
@@ -142,7 +148,8 @@ module Hive
                    launcher_identity: nil,
                    policy_capabilities: [],
                    tool_scope_flags: TOOL_SCOPE_FLAGS_UNSET,
-                   raw_cli_arguments_supported: false)
+                   raw_cli_arguments_supported: false,
+                   structured_output_protocol: nil)
       prompt_style ||= name.to_sym == :codex ? :stdin : :positional
       unless PROMPT_STYLES.include?(prompt_style)
         raise ArgumentError,
@@ -157,6 +164,12 @@ module Hive
 
       unless initial_context_tokens.is_a?(Integer) && initial_context_tokens >= 0
         raise ArgumentError, "initial_context_tokens must be a non-negative Integer"
+      end
+      if structured_output_protocol &&
+         !STRUCTURED_OUTPUT_PROTOCOLS.include?(structured_output_protocol.to_sym)
+        raise ArgumentError,
+              "unknown structured_output_protocol: #{structured_output_protocol.inspect}; " \
+              "valid: #{STRUCTURED_OUTPUT_PROTOCOLS.inspect}"
       end
 
       @name = name
@@ -189,6 +202,7 @@ module Hive
         default_tool_scope_flags(name, tool_scope_flags)
       )
       @raw_cli_arguments_supported = raw_cli_arguments_supported == true
+      @structured_output_protocol = structured_output_protocol&.to_sym
 
       freeze
     end
@@ -645,7 +659,8 @@ module Hive
         launcher_identity: @launcher_identity,
         policy_capabilities: @policy_capabilities.dup,
         tool_scope_flags: @tool_scope_flags.dup,
-        raw_cli_arguments_supported: @raw_cli_arguments_supported
+        raw_cli_arguments_supported: @raw_cli_arguments_supported,
+        structured_output_protocol: @structured_output_protocol
       }
     end
 

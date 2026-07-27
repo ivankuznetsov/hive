@@ -30,6 +30,41 @@ class AgentMessageExtractorTest < Minitest::Test
     assert Hive::Agent::MessageExtractor.streaming_text_event?(event)
   end
 
+  def test_grok_terminal_output_requires_an_explicit_profile_protocol
+    event = {
+      "type" => "end",
+      "structuredOutput" => { "files" => { "result.md" => "done\n" } }
+    }
+
+    assert_nil Hive::Agent::MessageExtractor.extract(event)
+    refute Hive::Agent::MessageExtractor.sensitive_payload_event?(event)
+    assert_equal(
+      JSON.generate(event.fetch("structuredOutput")),
+      Hive::Agent::MessageExtractor.extract(event, structured_output_protocol: :grok_end)
+    )
+    assert Hive::Agent::MessageExtractor.sensitive_payload_event?(
+      event,
+      structured_output_protocol: :grok_end
+    )
+  end
+
+  def test_strict_grok_terminal_output_invalidates_the_preceding_stream
+    accumulator = Hive::Agent::MessageExtractor::Accumulator.new(
+      max_bytes: 256,
+      structured_output_protocol: :grok_end,
+      require_terminal_structured_output: true
+    )
+    accumulator.observe({
+      "type" => "text",
+      "data" => '{"files":{"result.md":"stale but schema-valid\n"}}'
+    })
+    accumulator.observe({ "type" => "end", "structuredOutput" => nil })
+
+    assert_nil accumulator.value
+    assert_equal :structured_invalid, accumulator.source
+    refute accumulator.truncated?
+  end
+
   def test_accumulator_replaces_streaming_text_with_complete_result
     accumulator = Hive::Agent::MessageExtractor::Accumulator.new(max_bytes: 64)
     accumulator.observe({ "type" => "text", "data" => "streamed " })

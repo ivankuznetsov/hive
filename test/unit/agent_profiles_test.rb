@@ -205,6 +205,7 @@ class AgentProfilesTest < Minitest::Test
     assert_equal "-p", grok.headless_flag
     assert_equal "--always-approve", grok.permission_skip_flag
     assert_equal [ "--output-format", "streaming-json" ], grok.output_format_flags
+    assert_equal :grok_end, grok.structured_output_protocol
     assert grok.headless_supported
     assert_equal "/ce-code-review", grok.format_skill_invocation("ce-code-review")
   end

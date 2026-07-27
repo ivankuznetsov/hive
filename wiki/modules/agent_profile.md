@@ -140,7 +140,10 @@ generation/selection policy and `Reconstructor` retains recovery policy.
 - `pi` — no permission flag, no `--add-dir` (triggers `warn_isolation_reduced` when callers pass `add_dirs:` per ADR-018), preflight checks for `auth.json` beneath the same validated `PI_CODING_AGENT_DIR` (or default `~/.pi/agent`) used by skill discovery. Min version `0.70.2`. `:output_file_exists`.
 - `grok` — headless via `-p <prompt>`, `--always-approve`, and
   `--output-format streaming-json`; normalized effort is pinned with
-  `--reasoning-effort`. Preflight accepts `XAI_API_KEY`,
+  `--reasoning-effort`. The profile alone declares
+  `structured_output_protocol: :grok_end`, which scopes terminal
+  `end.structuredOutput` authority and opacity to Grok while leaving custom
+  profiles backward-compatible. Preflight accepts `XAI_API_KEY`,
   `GROK_CODE_XAI_API_KEY`, an explicit absolute credential file via
   `GROK_AUTH_PATH`, or `auth.json` under an absolute `GROK_HOME`/the default
   `~/.grok`; device login is `grok login --device-auth`. The direct path takes

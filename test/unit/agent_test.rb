@@ -307,7 +307,8 @@ class AgentTest < Minitest::Test
         prompt_style: :headless_flag_value,
         version_flag: "--version",
         skill_syntax_format: "/%{skill}",
-        status_detection_mode: :exit_code_only
+        status_detection_mode: :exit_code_only,
+        structured_output_protocol: :grok_end
       )
 
       result = Hive::Agent.new(
@@ -318,6 +319,126 @@ class AgentTest < Minitest::Test
       assert_equal :ok, result[:status]
       assert_equal "Here&apos;s a summary", result[:final_message]
       assert_equal :structured, result[:final_message_source]
+    end
+  end
+
+  def test_grok_terminal_structured_output_replaces_streaming_text
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      bin = File.join(dir, "fake-grok")
+      File.write(bin, <<~SH)
+        #!/bin/sh
+        printf '%s\n' '{"type":"text","data":"review prose"}'
+        printf '%s\n' '{"type":"end","stopReason":"EndTurn","structuredOutput":{"files":{"reviews/adversarial-01.md":"Verdict: quota exceeded private result\\n"}}}'
+      SH
+      File.chmod(0o755, bin)
+      profile = Hive::AgentProfile.new(
+        name: :grok,
+        bin_default: bin,
+        headless_flag: "-p",
+        prompt_style: :headless_flag_value,
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}",
+        status_detection_mode: :exit_code_only,
+        structured_output_protocol: :grok_end
+      )
+
+      result = Hive::Agent.new(
+        task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+        profile: profile
+      ).run!
+      log = File.read(result.fetch(:log_file))
+
+      assert_equal(
+        JSON.generate(
+          "files" => {
+            "reviews/adversarial-01.md" => "Verdict: quota exceeded private result\n"
+          }
+        ),
+        result[:final_message]
+      )
+      assert_equal :structured, result[:final_message_source]
+      assert_nil result[:limit_text]
+      refute_includes log, "review prose"
+      refute_includes log, "quota exceeded private result"
+      assert_includes log, "[structured message omitted type=end]"
+    end
+  end
+
+  def test_grok_malformed_terminal_structured_output_never_persists_to_log
+    {
+      "string" => '"sensitive malformed output"',
+      "array" => '["sensitive malformed output"]',
+      "null" => "null"
+    }.each do |name, value|
+      with_tmp_dir do |dir|
+        task = make_task(dir)
+        bin = File.join(dir, "fake-grok")
+        File.write(bin, <<~SH)
+          #!/bin/sh
+          printf '%s\n' '{"type":"text","data":"review prose"}'
+          printf '%s\n' '{"type":"end","stopReason":"EndTurn","structuredOutput":#{value}}'
+        SH
+        File.chmod(0o755, bin)
+        profile = Hive::AgentProfile.new(
+          name: :grok,
+          bin_default: bin,
+          headless_flag: "-p",
+          prompt_style: :headless_flag_value,
+          version_flag: "--version",
+          skill_syntax_format: "/%{skill}",
+          status_detection_mode: :exit_code_only,
+          structured_output_protocol: :grok_end
+        )
+
+        result = Hive::Agent.new(
+          task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+          profile: profile
+        ).run!
+        log = File.read(result.fetch(:log_file))
+
+        assert_equal "review prose", result[:final_message], name
+        refute_includes log, '"structuredOutput":', name
+        refute_includes log, "sensitive malformed output", name
+        assert_includes log, "[structured message omitted type=end]", name
+      end
+    end
+  end
+
+  def test_grok_unparseable_terminal_payload_is_opaque_and_not_a_quota_signal
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      bin = File.join(dir, "fake-grok")
+      File.write(bin, <<~SH)
+        #!/bin/sh
+        printf '%s\n' '{"type":"text","data":"review prose"}'
+        printf '%s\n' '{"type":"end","structuredOutput":{"files":{"review.md":"quota exceeded private payload"}'
+        exit 1
+      SH
+      File.chmod(0o755, bin)
+      profile = Hive::AgentProfile.new(
+        name: :grok,
+        bin_default: bin,
+        headless_flag: "-p",
+        prompt_style: :headless_flag_value,
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}",
+        status_detection_mode: :exit_code_only,
+        structured_output_protocol: :grok_end
+      )
+
+      result = Hive::Agent.new(
+        task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+        profile: profile
+      ).run!
+      log = File.read(result.fetch(:log_file))
+
+      assert_equal "review prose", result[:final_message]
+      assert_nil result[:limit_text]
+      refute_includes result[:error_message].to_s, "private payload"
+      refute_includes log, '"structuredOutput":'
+      refute_includes log, "private payload"
+      assert_includes log, "[structured message omitted type=end]"
     end
   end
 

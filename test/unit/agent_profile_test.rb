@@ -16,18 +16,22 @@ class AgentProfileTest < Minitest::Test
     profile = make_profile
     assert_equal({}, profile.tool_scope_flags)
     refute profile.raw_cli_arguments_supported?
+    assert_nil profile.structured_output_protocol
 
     capable = make_profile(
       tool_scope_flags: { allowed: "--allow", disallowed: "--deny" },
-      raw_cli_arguments_supported: true
+      raw_cli_arguments_supported: true,
+      structured_output_protocol: :grok_end
     )
     assert_equal({ allowed: "--allow", disallowed: "--deny" }, capable.tool_scope_flags)
     assert_predicate capable.tool_scope_flags, :frozen?
     assert capable.raw_cli_arguments_supported?
+    assert_equal :grok_end, capable.structured_output_protocol
 
     assert_raises(ArgumentError) { make_profile(tool_scope_flags: []) }
     assert_raises(ArgumentError) { make_profile(tool_scope_flags: { unknown: "--flag" }) }
     assert_raises(ArgumentError) { make_profile(tool_scope_flags: { allowed: "" }) }
+    assert_raises(ArgumentError) { make_profile(structured_output_protocol: :unknown) }
   end
 
   include HiveTestHelper

@@ -201,7 +201,16 @@ mount namespace, both receive a strict JSON output schema, and Hive alone
 writes the path-qualified `Edit(...)` targets. Hive validates the complete
 response before writing, rolls back already-published companion files on a
 later publication failure, and publishes the requested stage/state artifact
-last as the completion commit point. Codex executable discovery accepts valid
+last as the completion commit point. Grok returns the schema result on its
+terminal `end.structuredOutput` field after streaming human-readable prose;
+its profile explicitly declares the `:grok_end` output protocol, so Hive
+normalizes that terminal object as the final structured message without
+teaching the shape to custom or non-Grok profiles. Parsed and conservatively
+recognized unparseable terminal payloads stay out of durable logs, plain
+fallback, and quota diagnostics. For managed output, a malformed terminal
+value invalidates the preceding stream before host validation, so a
+schema-looking prose rendering cannot be published after Grok's terminal
+validation failed. Codex executable discovery accepts valid
 runtime provenance even when unrelated aggregate doctor checks fail, while a
 dedicated bounded probe and executable-path validation remain fail-closed. The
 probe uses an ephemeral empty Codex state root, so executable discovery does

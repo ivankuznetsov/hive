@@ -44,6 +44,12 @@ archive-mode uploads, while v8's default strict digest verification causes a
 corrupted or substituted artifact to fail the job instead of merely warning.
 The downloads run on GitHub-hosted runners, satisfying the Node 24 floor.
 
+The same workflow pins `actions/github-script` v9.0.0 to
+`3a2844b7e9c422d3c10d287c895573f7108da1b3` for its trusted Check Run
+publication step. Hive uses only the action-injected `github` and `context`
+objects: it neither imports the ESM-only `@actions/github` package nor defines
+a local `getOctokit`, so the v9 module-loading changes do not alter this script.
+
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
 tools. The v0.6.9 release-prep checkout is `0.6.9`: `lib/hive.rb`, root

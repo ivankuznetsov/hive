@@ -20,10 +20,10 @@ module Hive
       end
 
       def initialize(bytes:, record_id:, source_label:, record_label:, validator:)
-        @bytes = bytes
+        @bytes = bytes.is_a?(String) ? bytes.dup.freeze : bytes
         @record_id = record_id
-        @source_label = source_label.to_s
-        @record_label = record_label.to_s
+        @source_label = source_label.to_s.dup.freeze
+        @record_label = record_label.to_s.dup.freeze
         @validator = validator
       end
 

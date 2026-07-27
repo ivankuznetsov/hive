@@ -272,6 +272,11 @@ replay callback. Consequently `task-journal.jsonl` and
 WorkLedger formats. Task paths, store selection, migrations, transitions,
 overlays, Git actions, and status policy remain above the mechanism.
 
+Append and replay receipts contain detached, deeply frozen JSON record
+snapshots. Replay hashes a private copy of its source bytes, and idempotent
+append validates every historical record sharing the requested key before it
+returns an existing receipt.
+
 `<task>/task-projection.json` is an atomic, disposable materialized view bound
 to the journal cursor, last event ID, and SHA-256. It contains projected
 identity, current and superseded conditions, evidence, gate diagnostics,

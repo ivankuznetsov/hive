@@ -29,8 +29,8 @@ module Hive
       end
 
       def append(records)
-        record_ids = validate_batch!(records)
-        synchronize { append_unlocked(records, record_id: record_ids.last) }
+        prepared = prepare_batch!(records)
+        synchronize { append_unlocked(prepared) }
       rescue Error
         raise
       rescue StandardError => e
@@ -38,25 +38,26 @@ module Hive
       end
 
       def append_idempotent(record, idempotency_key:, key_for:, signature_for:)
-        record_id = validate_batch!([ record ]).first
+        validate_batch!([ record ])
         validate_callable!(key_for, "key_for")
         validate_callable!(signature_for, "signature_for")
-        key = idempotency_key.to_s
+        key = idempotency_key.to_s.dup.freeze
 
         synchronize do
-          existing = read_records_unlocked.find { |candidate| key_for.call(candidate) == key }
-          if existing
-            unless signature_for.call(existing) == signature_for.call(record)
+          existing = read_records_unlocked.select { |candidate| key_for.call(candidate) == key }
+          unless existing.empty?
+            requested_signature = signature_for.call(record)
+            unless existing.all? { |candidate| signature_for.call(candidate) == requested_signature }
               raise Conflict, "conflicting record for idempotency key #{idempotency_key.inspect}"
             end
 
             return current_receipt(
-              record_id: validated_record_id(existing),
-              records: [ existing ]
+              record_id: validated_record_id(existing.first),
+              records: [ existing.first ]
             )
           end
 
-          append_unlocked([ record ], record_id: record_id)
+          append_unlocked(prepare_batch!([ record ]))
         end
       rescue Error
         raise
@@ -76,7 +77,7 @@ module Hive
           unless id.is_a?(String) && !id.empty?
             raise InvalidRecord, "ledger record identity must be a non-empty string"
           end
-          id
+          id.dup.freeze
         end
       rescue KeyError, TypeError => e
         raise InvalidRecord, "ledger record identity is invalid: #{e.message}"
@@ -86,6 +87,13 @@ module Hive
         return if callable.respond_to?(:call)
 
         raise InvalidRequest, "#{label} must be callable"
+      end
+
+      def prepare_batch!(records)
+        record_ids = validate_batch!(records)
+        encoded = records.map { |record| JSON.generate(record) }
+        snapshots = encoded.map { |record| JSON.parse(record) }
+        [ encoded.map { |record| "#{record}\n" }.join, record_ids.last, snapshots ]
       end
 
       def synchronize
@@ -99,8 +107,8 @@ module Hive
         end
       end
 
-      def append_unlocked(records, record_id:)
-        lines = records.map { |record| "#{JSON.generate(record)}\n" }.join
+      def append_unlocked(prepared)
+        lines, record_id, records = prepared
         created = !File.exist?(path) || File.zero?(path)
         File.open(path, File::WRONLY | File::APPEND | File::CREAT, 0o644, encoding: "UTF-8") do |file|
           original_size = file.stat.size
@@ -151,7 +159,7 @@ module Hive
 
       def validated_record_id(record)
         id = @record_id.call(record)
-        return id if id.is_a?(String) && !id.empty?
+        return id.dup.freeze if id.is_a?(String) && !id.empty?
 
         raise InvalidRecord, "ledger record identity must be a non-empty string"
       end

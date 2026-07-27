@@ -215,6 +215,70 @@ class WorkLedgerTest < Minitest::Test
     end
   end
 
+  def test_idempotent_append_checks_every_existing_record_for_conflicts
+    with_tmp_dir do |dir|
+      path = File.join(dir, "ledger.jsonl")
+      existing = [
+        record("record-1", key: "request-1", value: "same"),
+        record("record-2", key: "request-1", value: "different")
+      ]
+      File.write(path, existing.map { |candidate| JSON.generate(candidate) }.join("\n") + "\n")
+      journal = ledger(path)
+
+      error = assert_raises(Hive::WorkLedger::Conflict) do
+        journal.append_idempotent(
+          record("record-3", key: "request-1", value: "same"),
+          idempotency_key: "request-1",
+          key_for: ->(candidate) { candidate["key"] },
+          signature_for: ->(candidate) { candidate["value"] }
+        )
+      end
+
+      assert_includes error.message, "request-1"
+      assert_equal 2, File.readlines(path).size
+    end
+  end
+
+  def test_receipts_are_deeply_immutable_copies_of_caller_values
+    with_tmp_dir do |dir|
+      id = +"record-1"
+      nested = +"original"
+      input = { "id" => id, "nested" => [ nested ] }
+      append = ledger(File.join(dir, "ledger.jsonl")).append([ input ])
+      id.replace("changed")
+      nested.replace("changed")
+      input["extra"] = true
+
+      assert_equal "record-1", append.record_id
+      assert_equal(
+        [ { "id" => "record-1", "nested" => [ "original" ] } ],
+        append.records
+      )
+      assert_predicate append.record_id, :frozen?
+      assert_predicate append.ledger_hash, :frozen?
+      assert_predicate append.records, :frozen?
+      assert_predicate append.records.first, :frozen?
+      assert_predicate append.records.first.fetch("nested"), :frozen?
+      assert_predicate append.records.first.fetch("nested").first, :frozen?
+    end
+
+    identity = +"demo"
+    names = [ +"inbox" ]
+    dirs = [ +"1-inbox" ]
+    descriptor = Hive::WorkLedger::DescriptorReceipt.new(
+      identity: identity, stage_names: names, stage_dirs: dirs
+    )
+    identity.replace("changed")
+    names.first.replace("changed")
+    dirs.first.replace("changed")
+    assert_equal "demo", descriptor.identity
+    assert_equal [ "inbox" ], descriptor.stage_names
+    assert_equal [ "1-inbox" ], descriptor.stage_dirs
+    assert_predicate descriptor.identity, :frozen?
+    assert_predicate descriptor.stage_names.first, :frozen?
+    assert_predicate descriptor.stage_dirs.first, :frozen?
+  end
+
   def test_append_waits_for_the_named_exclusive_lock
     with_tmp_dir do |dir|
       path = File.join(dir, "ledger.jsonl")
@@ -283,21 +347,31 @@ class WorkLedgerTest < Minitest::Test
       JSON.generate(record("record-1")),
       JSON.generate(record("record-2"))
     ].join("\n") + "\n"
+    original_bytes = bytes.dup
     validated = []
+    replacement = nil
 
     receipt = Hive::WorkLedger.replay(
       bytes: bytes,
       record_id: ->(candidate) { candidate["id"] }
     ) do |candidate, line_number|
       validated << [ candidate.fetch("id"), line_number ]
-      candidate.merge("validated" => true)
+      bytes.replace("{}\n") if line_number == 1
+      replacement = candidate.merge("validated" => true, "nested" => [ +"original" ])
     end
 
+    replacement.fetch("nested").first.replace("changed")
     assert_equal [ [ "record-1", 1 ], [ "record-2", 2 ] ], validated
-    assert_equal bytes.bytesize, receipt.cursor
-    assert_equal Digest::SHA256.hexdigest(bytes), receipt.ledger_hash
+    assert_equal original_bytes.bytesize, receipt.cursor
+    assert_equal Digest::SHA256.hexdigest(original_bytes), receipt.ledger_hash
     assert_equal "record-2", receipt.record_id
     assert receipt.records.all? { |candidate| candidate["validated"] }
+    assert_equal "original", receipt.records.last.dig("nested", 0)
+    assert_predicate receipt.record_id, :frozen?
+    assert_predicate receipt.ledger_hash, :frozen?
+    assert_predicate receipt.records, :frozen?
+    assert_predicate receipt.records.last, :frozen?
+    assert_predicate receipt.records.last.fetch("nested"), :frozen?
   end
 
   def test_replay_rejects_invalid_json_and_duplicate_record_identity

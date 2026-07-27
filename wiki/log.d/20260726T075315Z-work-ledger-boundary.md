@@ -33,3 +33,8 @@ projection fixtures.
 **Scope:** Hive remains the first and primary consumer. No gem, public journal
 or projection format, package version, tag, release, deployment, or repository
 split was introduced.
+
+**Review hardening:** Receipt record trees are now detached, deeply frozen JSON
+snapshots; replay binds its cursor and hash to a private copy of the supplied
+bytes; and idempotent lookup checks every historical key match so a later
+conflicting duplicate cannot be hidden by an earlier matching record.

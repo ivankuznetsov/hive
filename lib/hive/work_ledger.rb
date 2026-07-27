@@ -1,4 +1,5 @@
 require "hive/errors"
+require "json"
 
 module Hive
   # Policy-light mechanics for ordered descriptors and append-only JSONL
@@ -18,9 +19,58 @@ module Hive
     class AppendFailed < Error; end
     class ReplayFailed < Error; end
 
-    AppendReceipt = Data.define(:cursor, :record_id, :ledger_hash, :records)
-    ReplayReceipt = Data.define(:cursor, :record_id, :ledger_hash, :records)
-    DescriptorReceipt = Data.define(:identity, :stage_names, :stage_dirs)
+    module Values
+      module_function
+
+      def immutable_string(value)
+        value.to_s.dup.freeze
+      end
+
+      def immutable_optional_string(value)
+        value && immutable_string(value)
+      end
+
+      def immutable_json(value)
+        JSON.parse(JSON.generate(value), freeze: true)
+      end
+
+      def immutable_strings(values)
+        values.map { |value| immutable_string(value) }.freeze
+      end
+    end
+    private_constant :Values
+
+    AppendReceipt = Data.define(:cursor, :record_id, :ledger_hash, :records) do
+      def initialize(cursor:, record_id:, ledger_hash:, records:)
+        super(
+          cursor: Integer(cursor),
+          record_id: Values.immutable_string(record_id),
+          ledger_hash: Values.immutable_string(ledger_hash),
+          records: Values.immutable_json(records)
+        )
+      end
+    end
+
+    ReplayReceipt = Data.define(:cursor, :record_id, :ledger_hash, :records) do
+      def initialize(cursor:, record_id:, ledger_hash:, records:)
+        super(
+          cursor: Integer(cursor),
+          record_id: Values.immutable_optional_string(record_id),
+          ledger_hash: Values.immutable_string(ledger_hash),
+          records: Values.immutable_json(records)
+        )
+      end
+    end
+
+    DescriptorReceipt = Data.define(:identity, :stage_names, :stage_dirs) do
+      def initialize(identity:, stage_names:, stage_dirs:)
+        super(
+          identity: Values.immutable_string(identity),
+          stage_names: Values.immutable_strings(stage_names),
+          stage_dirs: Values.immutable_strings(stage_dirs)
+        )
+      end
+    end
 
     # Public append capability returned by `.journal`. Construction and path
     # normalization stay behind the facade while callers retain a small,

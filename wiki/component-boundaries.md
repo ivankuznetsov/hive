@@ -131,6 +131,12 @@ identity or exact ledger cursor, last record identity, and SHA-256. The entry
 point loads without Attempts, conditions, task journals, projections,
 workflows, commands, stages, or web runtime.
 
+Receipt strings and record trees are detached, deeply frozen JSON snapshots,
+so mutating a caller-owned input after append or validation cannot rewrite the
+reported durable identity. Replay snapshots its source bytes before invoking
+caller validation. Idempotent lookup checks every matching historical key and
+fails closed if any stored signature conflicts with the requested operation.
+
 WorkLedger deliberately defines no public disk schema. `Hive::Workflow` maps
 its stage structure into the validator, while `Hive::TaskJournal` owns the
 authoritative event envelope and attempt/condition validation and

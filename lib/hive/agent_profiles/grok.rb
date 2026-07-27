@@ -92,7 +92,8 @@ module Hive
       },
       model_argument_builder: ->(model) { [ "--model", model ] },
       effort_argument_builder: ->(effort) { [ "--reasoning-effort", effort ] },
-      launcher_identity: "grok-cli/v1"
+      launcher_identity: "grok-cli/v1",
+      structured_output_protocol: :grok_end
     )
 
     register(:grok, GROK)

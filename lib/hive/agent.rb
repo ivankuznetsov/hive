@@ -264,7 +264,12 @@ module Hive
     def spawn_and_wait
       cmd = build_cmd
       log_file = log_path
-      messages = Hive::Agent::MessageExtractor::Accumulator.new(max_bytes: FINAL_MESSAGE_TAIL_BYTES)
+      structured_output_protocol = @profile.structured_output_protocol
+      messages = Hive::Agent::MessageExtractor::Accumulator.new(
+        max_bytes: FINAL_MESSAGE_TAIL_BYTES,
+        structured_output_protocol: structured_output_protocol,
+        require_terminal_structured_output: @runtime_policy&.host_outputs? == true
+      )
       limit_text = nil
       structured_failure = nil
       last_usage = nil
@@ -318,13 +323,19 @@ module Hive
             # logical message can span multiple newline-delimited JSON events,
             # so per-line regex redaction cannot safely retain their payloads.
             json = parse_json_line(line)
+            sensitive_payload = Hive::Agent::MessageExtractor.sensitive_payload?(
+              json,
+              raw_line: line,
+              structured_output_protocol: structured_output_protocol
+            )
             message = messages.observe(json, raw_line: line)
             if structured_failure.nil? && @profile.name == :claude
               structured_failure = Hive::Agent::MessageExtractor.extract_failure(json)
             end
             if @log_stream
-              safe_line = if message || Hive::Agent::MessageExtractor.sensitive_payload_event?(json)
-                "[structured message omitted type=#{json.fetch('type', 'unknown')}]\n"
+              safe_line = if message || sensitive_payload
+                event_type = json.is_a?(Hash) ? json.fetch("type", "unknown") : "end"
+                "[structured message omitted type=#{event_type}]\n"
               else
                 Hive::SecretPatterns.redact(line)
               end
@@ -338,7 +349,7 @@ module Hive
             # MessageExtractor does not surface as a final message — so without
             # scanning the raw line the limit text never reaches handle_exit and
             # the run is misreported as a generic failure (exit_code=1).
-            if limit_text.nil? && Hive::AgentLimit.limit_reached?(line)
+            if limit_text.nil? && !sensitive_payload && Hive::AgentLimit.limit_reached?(line)
               detail = json && (json["message"] || (json["error"].is_a?(Hash) ? json["error"]["message"] : nil))
               limit_text = (detail || line).to_s.strip
             end
@@ -868,7 +879,10 @@ module Hive
     end
 
     def extract_final_message(data)
-      Hive::Agent::MessageExtractor.extract(data)
+      Hive::Agent::MessageExtractor.extract(
+        data,
+        structured_output_protocol: @profile.structured_output_protocol
+      )
     end
 
     def parse_json_line(line)

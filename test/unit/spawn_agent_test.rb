@@ -46,6 +46,46 @@ class SpawnAgentTest < Minitest::Test
     Hive::Task.new(folder)
   end
 
+  def grok_stream_profile(binary)
+    Hive::AgentProfile.new(
+      name: :grok,
+      bin_default: binary,
+      headless_flag: "-p",
+      prompt_style: :headless_flag_value,
+      version_flag: "--version",
+      skill_syntax_format: "/%{skill}",
+      status_detection_mode: :exit_code_only,
+      structured_output_protocol: :grok_end
+    )
+  end
+
+  def managed_output_policy(task, binary, output)
+    Hive::WorkflowPackage::RuntimePolicy::Policy.new(
+      permission_mode: nil,
+      allowed_tools: [].freeze,
+      disallowed_tools: [].freeze,
+      directories: [].freeze,
+      commands: [].freeze,
+      domains: [].freeze,
+      executables: {}.freeze,
+      environment: {
+        "HOME" => task.folder,
+        "PATH" => ENV.fetch("PATH", "/usr/bin")
+      }.freeze,
+      settings_path: nil,
+      mcp_config_path: nil,
+      policy_path: nil,
+      cli_flags: [].freeze,
+      permission_flags: [].freeze,
+      agent_add_dirs: [].freeze,
+      command_prefix: [].freeze,
+      executable: binary,
+      task_root: task.folder,
+      output_paths: { File.basename(output) => output }.freeze,
+      cleanup_paths: [].freeze
+    ).freeze
+  end
+
   # --- resolve_template_path ----------------------------------------------
 
   def test_resolve_template_path_rejects_missing_builtin
@@ -331,6 +371,79 @@ class SpawnAgentTest < Minitest::Test
       assert_equal :error, result[:status]
       assert_equal "managed_output_invalid", result[:error_reason]
       assert_includes result[:error_message], "invalid structured output"
+      refute File.exist?(output)
+    end
+  end
+
+  def test_managed_grok_publishes_the_terminal_structured_output
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      output = File.join(task.folder, "result.md")
+      binary = File.join(dir, "fake-grok")
+      streamed = JSON.generate("files" => { "result.md" => "stale stream\n" })
+      terminal = JSON.generate(
+        "type" => "end",
+        "structuredOutput" => { "files" => { "result.md" => "terminal result\n" } }
+      )
+      File.write(binary, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          printf '%s\n' 'grok 0.2.102'
+          exit 0
+        fi
+        printf '%s\n' '#{JSON.generate("type" => "text", "data" => streamed)}'
+        printf '%s\n' '#{terminal}'
+      SH
+      File.chmod(0o755, binary)
+      profile = grok_stream_profile(binary)
+      policy = managed_output_policy(task, binary, output)
+
+      result = Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x",
+        max_budget_usd: nil,
+        timeout_sec: 5,
+        profile: profile,
+        runtime_policy: policy
+      )
+
+      assert_equal :ok, result[:status]
+      assert_equal :structured, result[:final_message_source]
+      assert_equal "terminal result\n", File.read(output)
+    end
+  end
+
+  def test_managed_grok_rejects_streamed_json_after_invalid_terminal_output
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      output = File.join(task.folder, "result.md")
+      binary = File.join(dir, "fake-grok")
+      streamed = JSON.generate("files" => { "result.md" => "stale stream\n" })
+      File.write(binary, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          printf '%s\n' 'grok 0.2.102'
+          exit 0
+        fi
+        printf '%s\n' '#{JSON.generate("type" => "text", "data" => streamed)}'
+        printf '%s\n' '{"type":"end","structuredOutput":null}'
+      SH
+      File.chmod(0o755, binary)
+      profile = grok_stream_profile(binary)
+      policy = managed_output_policy(task, binary, output)
+
+      result = Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x",
+        max_budget_usd: nil,
+        timeout_sec: 5,
+        profile: profile,
+        runtime_policy: policy
+      )
+
+      assert_equal :error, result[:status]
+      assert_equal "managed_output_invalid", result[:error_reason]
+      assert_equal :structured_invalid, result[:final_message_source]
       refute File.exist?(output)
     end
   end

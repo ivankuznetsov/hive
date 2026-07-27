@@ -9,11 +9,16 @@ human-readable rendering before that event; treating the prose as the final
 message caused Hive's host-output validator to reject a valid schema result and
 surface `council_failed`.
 
-**Safety:** Any parsed terminal event carrying the `structuredOutput` key is
-now omitted from durable stream logs, including malformed non-object values.
-Invalid, missing, truncated, or incorrectly shaped managed output still fails
-closed before Hive writes any authorized target.
+**Safety:** Grok opts into this authority through the explicit
+`AgentProfile#structured_output_protocol = :grok_end` capability; custom and
+non-Grok profiles do not inherit the event shape. Parsed and conservatively
+recognized unparseable terminal payloads are omitted from durable logs, plain
+fallback, and quota diagnostics. A managed Grok run treats a non-object or
+unparseable terminal payload as an authority barrier, so schema-looking prose
+cannot bypass the CLI's failed terminal validation. Ordinary unstructured Grok
+runs retain their preceding human-readable stream.
 
 **Verified:** Added real Grok `streaming-json` event-shape regressions for a
-valid object plus malformed string, array, and null values; ran the focused
-agent, managed runtime-policy, and council test suites.
+valid object, malformed string/array/null values, syntactically invalid JSON,
+quota-like private payloads, a negative non-Grok profile, and the complete
+managed Agent-to-host-publication boundary.

@@ -106,14 +106,17 @@ module Hive
 
         return result("remote_outcome_unknown", false) if publication.key?(PR_CREATE_INTENT)
 
-        remote_url = @gh.origin_push_url(patch.worktree_path, cfg: @cfg)
+        remote_url = @gh.origin_push_url(
+          patch.worktree_path, cfg: @cfg, managed: true
+        )
         identity = @gh.repository_identity_from_remote(remote_url)
         unless identity["repository"].to_s.casecmp?(repository.to_s) &&
                identity["host"].to_s.casecmp?(host.to_s)
           return result("repository_identity_drift", false)
         end
         remote_oid = @gh.remote_branch_oid(
-          patch.worktree_path, patch.branch, cfg: @cfg, remote: remote_url
+          patch.worktree_path, patch.branch, cfg: @cfg, remote: remote_url,
+          managed: true
         )
         replaceable_oids = normalized_superseded_patch_commits(superseded_patch_commits)
         expected_oid = publication.dig(PUSH_INTENT, "expected_remote_oid")
@@ -369,7 +372,8 @@ module Hive
 
       def exact_remote_head?(patch, remote_url)
         @gh.remote_branch_oid(
-          patch.worktree_path, patch.branch, cfg: @cfg, remote: remote_url
+          patch.worktree_path, patch.branch, cfg: @cfg, remote: remote_url,
+          managed: true
         ) == patch.commit_sha
       end
 

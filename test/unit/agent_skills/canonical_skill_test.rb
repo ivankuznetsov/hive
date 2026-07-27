@@ -17,7 +17,7 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_match(/\A[0-9a-f]{64}\z/, skill.canonical_digest)
     assert_equal %w[description name], skill.frontmatter.keys.sort
     assert_operator skill.body.lines.size, :<, 120
-    assert_equal 5, skill.reference_paths.size
+    assert_equal 6, skill.reference_paths.size
     assert skill.reference_paths.all? { |path| path.start_with?("references/") }
     refute_includes skill.rendered_canonical_files.values.join("\n"), "{{HIVE_VERSION}}"
     assert_includes skill.rendered_canonical_files.fetch("references/setup-and-platforms.md"),
@@ -84,6 +84,9 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_includes text, "hive act ACTION_ID"
     assert_includes text, "Request another operational snapshot after any action"
     assert_includes text, "separate explicit release request"
+    assert_includes text, "bin/hive-release-candidate plan --sha FULL_SHA --json"
+    assert_includes text, "`dispatch` is the only release-candidate verb that writes to GitHub"
+    assert_includes text, "Never execute `next_action.argv`"
 
     %w[HIVE_WATCH_INTERVAL HIVE_WATCH_TIMEOUT mapfile].each do |legacy|
       refute_includes text, legacy

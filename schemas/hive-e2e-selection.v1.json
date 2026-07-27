@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-e2e-selection.v1.json",
+  "title": "hive-e2e semantic selection companion (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "catalog_digest", "profile", "coverage_ids",
+    "scenarios", "pending", "advisory", "planned", "replay_command"
+  ],
+  "properties": {
+    "schema": { "const": "hive-e2e-selection" },
+    "schema_version": { "const": 1 },
+    "catalog_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "profile": { "type": ["string", "null"] },
+    "coverage_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "scenarios": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "pending": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "advisory": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "planned": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "replay_command": { "type": ["string", "null"] }
+  }
+}

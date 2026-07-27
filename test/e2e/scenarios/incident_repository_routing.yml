@@ -1,6 +1,9 @@
 name: incident_repository_routing
 description: Proves repository identity routes or rejects work without attributing operations to another project.
 tags: [incident-regression]
+coverage:
+  primary: routing.repository
+  supporting: []
 incident_id: repository-routing
 sibling_task_id: "#9771"
 pending: false

@@ -1,0 +1,65 @@
+#!/usr/bin/env ruby
+
+# Deterministic executable used only to test the trusted U4 runner contract.
+# It is deliberately a fixture, never evidence for a required release lane.
+
+require "fileutils"
+require "json"
+require "yaml"
+
+role = File.basename(File.expand_path("..", __dir__))
+FileUtils.mkdir_p(ENV.fetch("HIVE_HOME"))
+File.open(File.join(ENV.fetch("HIVE_HOME"), "fixture-argv.jsonl"), "a") do |file|
+  file.puts(JSON.generate("role" => role, "argv" => ARGV))
+end
+
+command = ARGV.fetch(0, "")
+case command
+when "init"
+  project = ARGV.fetch(1)
+  state = File.join(project, ".hive-state")
+  FileUtils.mkdir_p(state)
+  unless File.directory?(File.join(state, ".git"))
+    system("git", "init", "-b", "hive/state", state, out: File::NULL, err: File::NULL) or exit 1
+    system("git", "-C", state, "config", "user.email", "fixture@example.invalid") or exit 1
+    system("git", "-C", state, "config", "user.name", "Fixture Hive") or exit 1
+  end
+  workflow_index = ARGV.index("--workflow")
+  workflow = workflow_index ? ARGV.fetch(workflow_index + 1) : "coding"
+  File.write(File.join(state, "config.yml"), YAML.dump(
+    "default_workflow" => workflow, "hive_state_path" => ".hive-state"
+  ))
+  File.write(File.join(ENV.fetch("HIVE_HOME"), "config.yml"), YAML.dump(
+    "projects" => [ { "name" => File.basename(project), "path" => project } ]
+  ))
+  system("git", "-C", state, "add", "config.yml")
+  system("git", "-C", state, "commit", "-m", "fixture init", out: File::NULL, err: File::NULL)
+  puts JSON.generate("schema" => "hive-init.v1", "workflow" => workflow)
+when "new"
+  if role == "observer"
+    warn "workflow descriptor workflows/bench.yml collides with registered workflow :bench"
+    exit 78
+  end
+  project_name = ARGV.fetch(1)
+  project = File.join(Dir.pwd, project_name)
+  state = File.join(project, ".hive-state")
+  task = File.join(state, "stages", "1-inbox", "legacy-campaign-260727-abcd")
+  FileUtils.mkdir_p(task)
+  workflow_index = ARGV.index("--workflow")
+  workflow = workflow_index ? ARGV.fetch(workflow_index + 1) : "coding"
+  File.write(File.join(task, "task.md"), "fixture task body\n")
+  File.write(File.join(task, "meta.yml"), YAML.dump(
+    "id" => 7, "slug" => File.basename(task), "workflow" => workflow,
+    "depends_on" => []
+  ))
+  puts JSON.generate("schema" => "hive-new.v1", "id" => 7, "slug" => File.basename(task))
+when "status"
+  puts JSON.generate("schema" => "hive-status", "schema_version" => 7, "projects" => [])
+when "doctor"
+  puts JSON.generate("schema" => "hive-doctor", "schema_version" => 2, "healthy" => true)
+when "migrate"
+  puts JSON.generate("schema" => "hive-migrate", "changed" => false)
+else
+  warn "fixture unsupported argv: #{ARGV.inspect}"
+  exit 64
+end

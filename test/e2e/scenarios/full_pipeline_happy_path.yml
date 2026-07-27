@@ -1,6 +1,9 @@
 name: full_pipeline_happy_path
 description: Real bin/hive subprocess flow from inbox to done without network PR creation.
 tags: [happy-path, cli-only]
+coverage:
+  primary: workflow.full_pipeline
+  supporting: []
 steps:
   - kind: cli
     args: [new, "{project}", "demo idea"]

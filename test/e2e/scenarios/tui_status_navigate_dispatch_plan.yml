@@ -1,6 +1,9 @@
 name: tui_status_navigate_dispatch_plan
 description: TUI verb-key dispatch — `p` on a ready-to-plan row spawns `bin/hive plan`, the TUI re-renders with the new state.
 tags: [tui]
+coverage:
+  primary: tui.dispatch_plan
+  supporting: []
 setup:
   tui_env:
     HIVE_FAKE_CLAUDE_WRITE_FILE: "{task_dir:3-plan}/plan.md"

@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-26
+updated: 2026-07-27
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -333,9 +333,9 @@ evidence closing the following June 16 gaps.
 Latest refresh (2026-07-22): the source version and installer references are
 prepared as v0.6.9. This release-prep branch does not itself prove a public tag,
 signed assets, Homebrew/AUR updates, ClawHub publication, or
-multi-architecture hivebox images. The release boundary uses an exact-tag
-offline candidate gate and does not require provider credentials. The live
-post-release dogfood evidence
+multi-architecture hivebox images. The release boundary uses trusted pre-tag
+candidate evidence plus exact-byte tag selection and does not require provider
+credentials. The live post-release dogfood evidence
 tracked below remains intentionally open until a separately authorized release
 is published and installed.
 Historical commit `54fd3455` still provides commit-message evidence for the
@@ -828,3 +828,38 @@ successful refresh. Focused tests cover those contracts. The remaining evidence
 is still the installed-main replay: use an explicit checkout bundle URL for
 unreleased dogfood, verify the unchanged-unit restart receipt, then confirm the
 managed lockfile and live service both identify the merged generation.
+
+## Pre-release upgrade-survivor contracts are implemented but real lanes are not yet run (2026-07-27)
+
+The reviewed catalog and installed-target layer now feed blocking
+latest-stable and historical upgrade gates. Fixed runner contracts pin the
+v0.4.1 producer, exact legacy bench descriptor/instructions, required v0.4.2
+collision observer, candidate migration, named semantic snapshots,
+idempotency, process/service teardown, and cloned-prefix Linux/macOS update
+oracles. Focused tests use an injected fixed executor with synthetic installed
+binaries and never count them as real producer evidence. The default local CLI
+keeps those gates unavailable as
+`compliant_local_upgrade_executor_unavailable`; it does not start a production
+historical container lane.
+
+The real authenticated v0.6.9 and v0.4.1/v0.4.2 packages have not yet run in a
+disposable OS sandbox on their required platform cells. The U5 hosted workflow
+now encodes staging, containment, freshness, ordinary-CI, closed aggregate, and
+checkout-free Check Run publication contracts, but it was not dispatched.
+Targeted retry preflight validates the exact source evidence and Check digest,
+resolves named/failed/missing gate display names, conditions every matrix
+operation on that closed selection, and composes immutable trusted-control
+receipts with provenance-preserving predecessor rows. Failed attempts retain
+`qa_blocked` evidence and a digest-bound failed Check. This closes the prior
+targeted-retry plumbing gap, but does not constitute hosted execution evidence.
+Do not treat U3 cache/target proof, U4 fixture proof, or U5 workflow contract
+tests as evidence that a historical upgrade or hosted candidate run completed.
+
+The reviewed offline-closure inventories are now checked in with exact
+filenames, sizes, and SHA-256 digests, and `plan` returns the explicit cache
+materializer argv when they are absent. That closes the manifest-definition
+gap, not the execution gap: no real hosted candidate, native-platform matrix,
+or historical package lane ran during this implementation. The current source
+version and latest-stable row are both 0.6.9, so `candidate_not_newer` must keep
+the candidate blocked. No version choice, tag, publication, deployment, or
+release was authorized.

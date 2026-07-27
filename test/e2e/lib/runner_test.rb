@@ -66,6 +66,42 @@ class E2ERunnerTest < Minitest::Test
     end
   end
 
+  def test_semantic_run_writes_versioned_selection_companion_without_changing_report
+    with_isolated_dirs do |scenarios_dir, runs_dir|
+      write_scenario(scenarios_dir, "selected", <<~YAML)
+        name: selected
+        steps:
+          - kind: cli
+            args: [version]
+      YAML
+      selection = {
+        "schema" => "hive-e2e-selection",
+        "schema_version" => 1,
+        "catalog_digest" => "a" * 64,
+        "profile" => nil,
+        "coverage_ids" => [ "test.selected" ],
+        "scenarios" => [ "selected" ],
+        "pending" => [],
+        "advisory" => [],
+        "planned" => [],
+        "replay_command" => "bin/hive-e2e run --coverage test.selected"
+      }
+
+      report = Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir)
+                                .run_all(selection: selection)
+      run_dir = Dir[File.join(runs_dir, "*")].first
+      written = JSON.parse(File.read(File.join(run_dir, "selection.json")))
+
+      assert_equal selection, written
+      schema = JSONSchemer.schema(JSON.parse(File.read(
+        Hive::E2E::Schemas.schema_path("hive-e2e-selection")
+      )))
+      assert_empty schema.validate(written).to_a
+      assert_equal "hive-e2e-report", report.fetch("schema")
+      refute report.key?("selection")
+    end
+  end
+
   def test_duplicate_scenario_names_fail_preflight
     with_isolated_dirs do |scenarios_dir, runs_dir|
       %w[first second].each do |file|

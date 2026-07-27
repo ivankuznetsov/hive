@@ -1,6 +1,9 @@
 name: watch_semantic_transitions
 description: Real hive watch subprocess emits one semantic transition and a schema-valid settled final without mutating task ownership.
 tags: [watch, cli-only]
+coverage:
+  primary: status.watch_transitions
+  supporting: []
 steps:
   - kind: seed_state
     stage: 2-brainstorm

@@ -361,6 +361,89 @@ class AgentProfileTest < Minitest::Test
 
     assert_equal :global, overridden.routing_argument_placement
     assert_equal %w[low high], overridden.routed_effort_values
+
+    error = assert_raises(ArgumentError) do
+      make_profile(routing_argument_placement: :interleaved)
+    end
+    assert_match(/unknown routing_argument_placement/, error.message)
+  end
+
+  def test_routed_controls_reject_invalid_types_unsupported_fields_and_values
+    profile = make_profile
+    provenance = Hive::ModelRouting::Provenance.new(kind: :exact, key: "plan")
+
+    assert_raises(ArgumentError) do
+      profile.validate_routed_control!(Object.new)
+    end
+
+    unsupported_model = Hive::ModelRouting::EffectiveControl.new(
+      stage: "plan",
+      profile: :test,
+      provider: :test,
+      field: :model,
+      value: "provider/model",
+      provenance: provenance
+    )
+    error = assert_raises(Hive::ConfigError) do
+      profile.validate_routed_control!(unsupported_model)
+    end
+    assert_match(/does not support model selection/, error.message)
+
+    unknown_field = Hive::ModelRouting::EffectiveControl.new(
+      stage: "plan",
+      profile: :test,
+      provider: :test,
+      field: :temperature,
+      value: "high",
+      provenance: provenance
+    )
+    error = assert_raises(ArgumentError) do
+      profile.validate_routed_control!(unknown_field)
+    end
+    assert_match(/unknown routed control field/, error.message)
+
+    non_scalar = Hive::ModelRouting::EffectiveControl.new(
+      stage: "plan",
+      profile: :test,
+      provider: :test,
+      field: :model,
+      value: 42,
+      provenance: provenance
+    )
+    error = assert_raises(Hive::ConfigError) do
+      profile.validate_routed_control!(non_scalar)
+    end
+    assert_match(/must be a non-blank scalar/, error.message)
+  end
+
+  def test_routing_argument_validation_rejects_untyped_cross_profile_and_tampered_values
+    profile = Hive::AgentProfiles.lookup(:codex)
+    arguments = profile.routing_arguments(
+      Hive::ModelRouting.resolve(
+        models: { "plan" => { "model" => "gpt-5.6-sol" } },
+        stage: "plan",
+        provider: :codex
+      )
+    )
+
+    assert_raises(ArgumentError) { profile.routing_arguments(Object.new) }
+    assert_raises(ArgumentError) { profile.validate_routing_arguments!(Object.new) }
+
+    cross_profile = Hive::AgentProfile::RoutingArguments.new(
+      **arguments.to_h.merge(profile_name: :claude)
+    )
+    error = assert_raises(ArgumentError) do
+      profile.validate_routing_arguments!(cross_profile)
+    end
+    assert_match(/cannot be used with :codex/, error.message)
+
+    tampered = Hive::AgentProfile::RoutingArguments.new(
+      **arguments.to_h.merge(global_arguments: arguments.global_arguments + [ "--tampered" ])
+    )
+    error = assert_raises(ArgumentError) do
+      profile.validate_routing_arguments!(tampered)
+    end
+    assert_match(/do not match agent profile :codex native rendering/, error.message)
   end
 
   def test_bin_uses_env_override_when_set

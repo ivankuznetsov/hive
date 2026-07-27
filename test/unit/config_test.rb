@@ -210,6 +210,36 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_treats_string_and_argv_review_ci_commands_as_reachable
+    [ "bundle exec rake test", [ "bundle", "exec", "rake", "test" ] ].each do |command|
+      with_tmp_dir do |dir|
+        config_path = File.join(dir, ".hive-state", "config.yml")
+        FileUtils.mkdir_p(File.dirname(config_path))
+        File.write(
+          config_path,
+          {
+            "review" => {
+              "ci" => {
+                "agent" => "pi",
+                "command" => command
+              }
+            },
+            "models" => {
+              "review_ci" => {
+                "effort" => "high"
+              }
+            }
+          }.to_yaml
+        )
+
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+        assert_match(/models\.review_ci\.effort/i, error.message)
+        assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
+      end
+    end
+  end
+
   def test_load_promotes_top_level_reviewers_for_upgrade_compatibility_and_warns_once
     with_tmp_dir do |dir|
       config_path = File.join(dir, ".hive-state", "config.yml")

@@ -114,6 +114,32 @@ class ModelRoutingTest < Minitest::Test
     end
   end
 
+  def test_structural_parser_rejects_keys_that_collide_after_normalization
+    stage_error = assert_raises(Hive::ConfigError) do
+      Hive::ModelRouting.parse(
+        {
+          "plan" => { "model" => "first" },
+          plan: { "model" => "second" }
+        },
+        source: "/tmp/project.yml"
+      )
+    end
+    assert_match(/models\.plan.*defined more than once/i, stage_error.message)
+
+    field_error = assert_raises(Hive::ConfigError) do
+      Hive::ModelRouting.parse(
+        {
+          "plan" => {
+            "model" => "first",
+            model: "second"
+          }
+        },
+        source: "/tmp/project.yml"
+      )
+    end
+    assert_match(/models\.plan\.model.*defined more than once/i, field_error.message)
+  end
+
   def test_structural_parser_rejects_removed_and_unknown_stages
     removed_error = assert_raises(Hive::ConfigError) do
       Hive::ModelRouting.parse(
@@ -266,6 +292,36 @@ class ModelRoutingTest < Minitest::Test
         legacy: {}
       )
     end
+  end
+
+  def test_inactive_resolution_falls_back_to_legacy_fields_without_stage_validation
+    result = Hive::ModelRouting.resolve(
+      models: nil,
+      stage: "legacy-only-stage",
+      current: {},
+      legacy: { model: "legacy-model", effort: "legacy-effort" }
+    )
+
+    assert_equal "legacy-model", result.model
+    assert_equal "legacy-effort", result.effort
+    assert_provenance result, :model, :legacy, nil
+    assert_provenance result, :effort, :legacy, nil
+    refute result.active?
+  end
+
+  def test_resolver_and_reachability_validator_reject_unparsed_shapes
+    resolve_error = assert_raises(Hive::ConfigError) do
+      Hive::ModelRouting.resolve(models: [ "plan" ], stage: "plan")
+    end
+    assert_match(/models must be a mapping/i, resolve_error.message)
+
+    calls_error = assert_raises(ArgumentError) do
+      Hive::ModelRouting.validate_effective!(
+        models: { "plan" => { "model" => "gpt-5.6-sol" } },
+        calls: [ "plan" ]
+      )
+    end
+    assert_match(/reachable model-routing calls must be mappings/i, calls_error.message)
   end
 
   def test_effective_validation_skips_disabled_and_fully_shadowed_coarse_controls

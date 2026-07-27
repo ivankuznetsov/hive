@@ -380,6 +380,33 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_spawn_rejects_resolution_and_rendered_routing_arguments_together
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      profile = Hive::AgentProfiles.lookup(:codex)
+      resolution = Hive::ModelRouting.resolve(
+        models: { "plan" => { "model" => "gpt-5.6-sol" } },
+        stage: "plan",
+        provider: :codex
+      )
+      arguments = profile.routing_arguments(resolution)
+
+      error = assert_raises(ArgumentError) do
+        Hive::Stages::Base.spawn_agent(
+          task,
+          prompt: "x",
+          max_budget_usd: 1,
+          timeout_sec: 5,
+          profile: profile,
+          routing_resolution: resolution,
+          routing_arguments: arguments
+        )
+      end
+
+      assert_match(/pass routing_resolution or routing_arguments, not both/, error.message)
+    end
+  end
+
   def test_invalid_managed_output_becomes_typed_error_without_writing
     with_tmp_dir do |dir|
       task = make_task(dir)

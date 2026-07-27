@@ -88,6 +88,32 @@ class RefactorPatrolAgentIdentityTest < Minitest::Test
     ).global_arguments
   end
 
+  def test_routed_default_model_is_materialized_before_identity_is_frozen
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".claude"))
+      File.write(
+        File.join(dir, ".claude", "settings.json"),
+        JSON.generate("model" => "claude-sonnet-4-6")
+      )
+      cfg = {
+        "project_root" => dir,
+        "execute" => {
+          "agent" => "claude", "model" => "claude-opus-4-1", "effort" => "high"
+        },
+        "models" => {
+          "patrol_review" => { "model" => "default" }
+        },
+        "refactor_patrol" => { "auto_fix" => {} }
+      }
+
+      identity = Hive::RefactorPatrol::AgentIdentity.new(cfg: cfg).review
+
+      assert_equal "claude-sonnet-4-6", identity.model
+      assert_equal "patrol_review", identity.routing.fetch("stage")
+      assert_equal "claude-sonnet-4-6", identity.routing.fetch("model")
+    end
+  end
+
   def test_blank_provider_override_fails_closed
     cfg = {
       "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" },

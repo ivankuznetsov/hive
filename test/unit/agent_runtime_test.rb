@@ -50,6 +50,24 @@ class AgentRuntimeTest < Minitest::Test
     end
   end
 
+  class RoutingBlindProfile
+    def initialize(delegate)
+      @delegate = delegate
+    end
+
+    def method_missing(name, ...)
+      return @delegate.public_send(name, ...) if @delegate.respond_to?(name)
+
+      super
+    end
+
+    def respond_to_missing?(name, include_private = false)
+      return false if name == :validate_routing_arguments!
+
+      @delegate.respond_to?(name, include_private) || super
+    end
+  end
+
   FailingUsageProfile = Struct.new(:name, :launcher_identity, keyword_init: true) do
     def extract_usage_event(_event)
       raise "invalid usage payload"
@@ -120,6 +138,24 @@ class AgentRuntimeTest < Minitest::Test
     end
 
     assert_includes error.message, "cannot be combined"
+  end
+
+  def test_typed_routing_rejects_profiles_without_the_validation_contract
+    delegate = Hive::AgentProfiles.lookup(:codex)
+    routing = delegate.routing_arguments(
+      Hive::ModelRouting.resolve(
+        models: { "plan" => { "model" => "gpt-5.6-sol" } },
+        stage: "plan",
+        provider: :codex
+      )
+    )
+
+    error = assert_raises(Hive::AgentRuntime::UnsupportedCapability) do
+      compile(RoutingBlindProfile.new(delegate), routing_arguments: routing)
+    end
+
+    assert_evidence error, :model_routing
+    assert_match(/does not support model routing/, error.message)
   end
 
   def test_builtin_prompt_transports_preserve_argv_and_stdin

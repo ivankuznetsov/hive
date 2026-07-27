@@ -1,7 +1,7 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, lib/hive/prdigest.rb, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
 updated: 2026-07-22
 tags: [commands, api, skills, agents, operational, provisioning]
@@ -11,7 +11,7 @@ tags: [commands, api, skills, agents, operational, provisioning]
 `hv` fallback launcher), the opt-in e2e harness, the Hive web command/routes
 documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
 setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
-corpus producer, `hive digest` as the daily Europe/London PR changelist producer,
+corpus producer,
 `hive pairing` as the Telegram first-contact approval surface, the read-only
 agent-first `hive status --operational --json`, bounded `hive watch`, closed
 `hive act`, the `hive doctor` / consent-safe setup split for one canonical Hive
@@ -31,7 +31,6 @@ one ClawHub listing per Hive verb.
 - `lib/hive/commands/connect.rb`
 - `lib/hive/commands/disconnect.rb`
 - `lib/hive/commands/bench_submit.rb`
-- `lib/hive/commands/digest.rb`
 - `lib/hive/commands/pairing.rb`
 - `lib/hive/commands/setup_agents.rb`
 - `lib/hive/commands/watch.rb`
@@ -41,7 +40,6 @@ one ClawHub listing per Hive verb.
 - `skills/hive/`
 - `lib/hive/agent_skills/**/*.rb`
 - `config/agent-skills.yml`
-- `lib/hive/prdigest.rb`
 - `lib/hive/web/**/*.rb`
 - `web/app/views/**`
 - `web/app/assets/**`
@@ -67,7 +65,7 @@ one ClawHub listing per Hive verb.
 GitHub PR, project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
 lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
-corpus-submission producer, the `hive digest` merged-PR changelist producer,
+corpus-submission producer,
 the [[commands/pairing]] Telegram pairing approval surface,
 [[commands/refactor-patrol]] as the architecture refactor thesis scanner (only
 its legacy on-demand v1 mode is reporting-only; merged-PR v2 can take separately
@@ -122,15 +120,6 @@ separate hive-bench corpus. It resolves a `9-done` task from registered
 projects, runs a local secret-token preflight, delegates extraction to
 hive-bench's checkout-local `harness/extract.rb`, then opens a GitHub PR from
 the hive-bench checkout. See [[commands/bench-submit]].
-
-`hive digest` bridges Hive's registered project scope to the standalone
-PRDigest CLI. Hive supplies an explicit Europe/London date, repository subset,
-and credential/config bridge; PRDigest owns fetch, safe HTML rendering,
-chunking, durable resume, and Telegram delivery. JSON is unchanged
-`prdigest-result` v1 and child exits are preserved. Repeatable `--repo` values
-can narrow but never expand registered scope. The daemon schedules it as a
-global, non-project-scoped child. See
-[[commands/digest]] and [[modules/digest]].
 
 `hive setup` is the local workstation provisioning bridge for installs that
 `hive setup` is the normal native workstation provisioning bridge: it first
@@ -272,5 +261,4 @@ exit `78`; JSON mode distinguishes them as `missing_repro` and
 - [[e2e]]
 - [[commands/web]]
 - [[commands/setup]]
-- [[commands/digest]]
 - [[commands/screenote]]

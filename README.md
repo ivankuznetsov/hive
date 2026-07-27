@@ -197,30 +197,12 @@ The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is 
 
 That is enough to understand what Hive does: it turns a rough idea into durable stage files, then keeps advancing the same task toward code, a pull request, review, and archive. Manual TUI keys still exist for power users who want to steer a specific stage themselves; the happy path is daemon-first. See [wiki/commands/tui.md](wiki/commands/tui.md) for the full dashboard reference.
 
-## Digest Reports
+## PR Digests
 
-`hive digest` delegates the complete merged-PR digest to the standalone
-[PRDigest](https://github.com/ivankuznetsov/prdigest) CLI. Hive supplies its
-registered `github.com` repositories, existing GitHub authentication, and the
-first allowlisted Telegram chat. PRDigest alone fetches, renders safe Telegram
-HTML, chunks, checkpoints, retries, and sends. Hive task and stage state never
-affects inclusion. Hive always invokes PRDigest's deterministic `run` command
-for one explicit date; it does not select PRDigest facts/prose modes, configure
-an AI provider, or forward provider credentials. Hive's own
-`digest.max_catchup_days` controls only daemon scheduling and is not copied into
-the child configuration.
-
-```bash
-hive digest --dry-run
-hive digest --date 2026-06-13 --repo owner/name --json
-```
-
-`--repo` is a repeatable, case-insensitive filter over registered repositories,
-not an arbitrary repository selector. Dry-run needs GitHub authentication but
-not Telegram credentials. `--json` is PRDigest's versioned
-`prdigest-result` document without a Hive wrapper, and its exit status is
-preserved. See [wiki/commands/digest.md](wiki/commands/digest.md) for the
-adapter, delivery, and migration contracts.
+[PRDigest](https://github.com/ivankuznetsov/prdigest) is a separate tool. Use
+`prdigest facts` when an agent will write the final message, or schedule
+`prdigest prose --deliver` for a standalone daily Telegram digest. Hive does
+not configure, schedule, or deliver PR digests.
 
 ## Manage Hive From Telegram in 2 Minutes
 

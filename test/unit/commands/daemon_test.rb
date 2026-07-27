@@ -69,14 +69,6 @@ class HiveCommandsDaemonTest < Minitest::Test
     { "check" => true, "auto" => true }
   end
 
-  def default_digest_config
-    {
-      "enabled" => false,
-      "agent" => nil,
-      "max_catchup_days" => Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
-    }
-  end
-
   def default_answer_digest_config
     {
       "enabled" => false,
@@ -85,14 +77,11 @@ class HiveCommandsDaemonTest < Minitest::Test
   end
 
   def with_global_start_config(config, update_config: default_update_config,
-                               digest_config: default_digest_config,
                                answer_digest_config: default_answer_digest_config)
     with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
       with_replaced_singleton_method(Hive::Config, :load_global_update, -> { update_config }) do
-        with_replaced_singleton_method(Hive::Config, :load_global_digest_block, -> { digest_config }) do
-          with_replaced_singleton_method(Hive::Config, :load_global_answer_digest_block, -> { answer_digest_config }) do
-            yield
-          end
+        with_replaced_singleton_method(Hive::Config, :load_global_answer_digest_block, -> { answer_digest_config }) do
+          yield
         end
       end
     end
@@ -106,13 +95,11 @@ class HiveCommandsDaemonTest < Minitest::Test
     captured = nil
 
     update_config = default_update_config
-    digest_config = default_digest_config
     answer_digest_config = default_answer_digest_config
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
       with_global_start_config(
         config,
         update_config: update_config,
-        digest_config: digest_config,
         answer_digest_config: answer_digest_config
       ) do
         with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
@@ -129,13 +116,11 @@ class HiveCommandsDaemonTest < Minitest::Test
       {
         "daemon" => config,
         "update" => update_config,
-        "digest" => digest_config,
         "answer_digest" => answer_digest_config
       },
       captured.fetch(:config)
     )
     assert_equal true, captured.fetch(:dry_run)
-    assert_instance_of Hive::Daemon::DigestScheduler, captured.fetch(:digest_scheduler)
     assert_instance_of Hive::Daemon::AnswerDigestScheduler, captured.fetch(:answer_digest_scheduler)
     attempts_api = captured.fetch(:attempt_dispatcher)
     assert_instance_of Hive::Attempts::API, attempts_api

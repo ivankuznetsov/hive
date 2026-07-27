@@ -880,63 +880,6 @@ module Hive
       ).call
     end
 
-    desc "digest", "Run PRDigest for Hive's registered GitHub repositories"
-    # wrap: false so the Examples / Exit codes blocks keep their line breaks
-    # instead of being reflowed into one paragraph.
-    long_desc <<~DESC, wrap: false
-      Delegates the complete merged-PR digest to the standalone `prdigest` CLI.
-      Hive resolves its registered github.com repositories, Telegram destination,
-      and existing GitHub authentication, writes a private temporary config, and
-      invokes PRDigest. PRDigest alone fetches, renders, chunks, checkpoints, and
-      sends the digest. Hive tasks and stage folders never affect inclusion.
-
-      Without --date, Hive passes the Europe/London calendar day that just ended.
-      Repeat --repo owner/name to filter the registered repository set; unknown
-      or unregistered repositories fail instead of expanding scope. Use
-      --dry-run to print the exact composed message without Telegram credentials.
-
-      With --json, emits PRDigest's versioned `prdigest-result` document without
-      a Hive wrapper. Its delivery object carries accepted_chunks, total_chunks,
-      failed_chunk, and status. PRDigest exit codes are preserved.
-
-      Examples:
-        hive digest                          # yesterday, send to Telegram
-        hive digest --date 2026-06-13        # a specific London day
-        hive digest --dry-run                # print the composed message, send nothing
-        hive digest --date 2026-06-13 --json # machine-readable prdigest-result
-        hive digest --repo owner/name --repo other/repo --json
-
-      Exit codes:
-        0  completed or dry-run
-        1  unexpected/render failure
-        2  PRDigest CLI/configuration failure
-        3  GitHub failure
-        4  Telegram/delivery-checkpoint failure
-        5  PRDigest cursor-state failure
-        6  failure after earlier durable progress
-        78 Hive adapter configuration failure (unregistered repo/missing binary/auth)
-        64 bad flags / malformed --json (Thor usage error)
-        70 invalid PRDigest output or unexpected adapter error
-    DESC
-    option :date, type: :string, desc: "Europe/London calendar date to digest (YYYY-MM-DD)"
-    option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"
-    # repeatable: true so a repeated `--repo a/b --repo c/d` accumulates
-    # (Thor collects each occurrence into a nested array) instead of the last
-    # flag silently overwriting the earlier ones — the space-listed form
-    # `--repo a/b c/d` still works too. `.flatten` collapses both forms to a
-    # flat list of owner/name slugs for the command.
-    option :repo, type: :array, default: [], repeatable: true,
-                  desc: "filter registered GitHub repositories by owner/name (repeatable)"
-    def digest
-      require "hive/commands/digest"
-      Hive::Commands::Digest.new(
-        date: options[:date],
-        dry_run: options[:dry_run],
-        json: options[:json],
-        repos: options[:repo].flatten
-      ).call
-    end
-
     desc "answer-digest", "Send a daily digest of tasks waiting on human input"
     # wrap: false so the Examples / Exit codes blocks keep their line breaks.
     long_desc <<~DESC, wrap: false

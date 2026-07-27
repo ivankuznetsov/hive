@@ -169,28 +169,6 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
-  def test_digest_thor_errors_use_the_prdigest_result_contract
-    cases = [
-      %w[digest --bad --json],
-      %w[digest extra --json]
-    ]
-
-    with_tmp_global_config do |home|
-      cases.each do |argv|
-        out, _err, status = run_hive(home, *argv)
-
-        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
-        payload = JSON.parse(out)
-        assert_equal "prdigest-result", payload.fetch("schema")
-        assert_equal 1, payload.fetch("schema_version")
-        assert_equal "failure", payload.fetch("status")
-        assert_equal "cli", payload.dig("error", "kind")
-        assert_nil payload.fetch("delivery")
-        refute payload.key?("ok")
-      end
-    end
-  end
-
   def test_setup_extra_positional_json_usage_error_uses_setup_envelope
     with_tmp_global_config do |home|
       out, err, status = run_hive(home, "setup", "extra", "--json")

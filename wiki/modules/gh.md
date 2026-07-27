@@ -37,11 +37,6 @@ tags: [github, gh, module, pr, closure, evidence]
 | `scan_pr_for_secrets(state_file:, pr_url:, cfg: nil)` | Scans local state-file text plus remote PR body for `Hive::SecretPatterns`; returns `ScanResult` with `fetch_failed` instead of silently treating remote fetch errors as clean. |
 | `capture3(*cmd, chdir: nil, cfg: nil, timeout_sec: nil, max_stdout_bytes: nil, stdout_path: nil)` | Shared subprocess wrapper used by the helpers above. `stdout_path` streams bytes directly to a mode-0600 file while retaining the same deadline and byte ceiling. |
 
-The old `digest_*` REST helpers and `pr_body` compatibility reader were removed
-with `Hive::Digest`. PRDigest now owns merged-PR retrieval; Hive's adapter uses
-only the bounded `capture3` boundary to query `gh auth token` when neither
-`GITHUB_TOKEN` nor `GH_TOKEN` is already present.
-
 ## Architecture-patrol adapter
 
 `Hive::RefactorPatrol::GithubGateway`

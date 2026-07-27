@@ -353,21 +353,15 @@ module Hive
         # `child_kill_grace_sec: 0` does NOT mean immediate KILL (it means
         # "KILL on the next tick after TERM"). (#266)
         #
-        # The `digest` and `answer-digest` verbs ship a non-zero DEFAULT cap
-        # (every other verb stays at `child_timeout_sec`=0/disabled) because
-        # each holds the single global digest slot (can_dispatch_digest?): a
-        # child that wedges on an unbounded leg — a hung GitHub collection
-        # request, or a black-holed Telegram socket — would otherwise pin that
-        # slot forever, leave the scheduler's in-memory `@pending` marker set,
-        # and silently disable ALL future digests/answer-digests until a
-        # daemon restart. A reaped child exits non-zero, so the scheduler
-        # retries the date on backoff. 3600s is a generous ceiling above
-        # PRDigest's bounded network work while still bounding a wedged child.
-        # `answer-digest` shares the same cap because its status fetch or
-        # Telegram socket can also wedge.
+        # `answer-digest` ships a non-zero DEFAULT cap (every other verb stays
+        # at `child_timeout_sec`=0/disabled) because it holds the single global
+        # digest slot (can_dispatch_digest?). A black-holed Telegram socket
+        # would otherwise pin that slot and leave the scheduler pending until
+        # restart. A reaped child exits non-zero, so the scheduler retries the
+        # date on backoff.
         "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
-        "child_verb_timeouts" => { "digest" => 3600, "answer-digest" => 3600 },
+        "child_verb_timeouts" => { "answer-digest" => 3600 },
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5
       },
@@ -561,14 +555,6 @@ module Hive
           "max_context_files" => 6,
           "max_owned_files" => 6
         }
-      },
-      # Daily merged-PR changelist. The daemon schedules one global
-      # `hive digest` subprocess for each completed Europe/London day; the
-      # subprocess sends one chunk-safe Telegram changelist across registered
-      # GitHub projects.
-      "digest" => {
-        "enabled" => false,
-        "max_catchup_days" => 7
       },
       # Daily pending-answer digest. The daemon schedules one global
       # `hive answer-digest` subprocess at/after the configured local hour;
@@ -1148,14 +1134,6 @@ module Hive
       registered_project_entries(preserve_invalid: false)
     end
 
-    # Digest delegation must account for every persisted registry row. Other
-    # commands retain the tolerant loader contract above, while the PRDigest
-    # adapter receives malformed rows and fails closed instead of silently
-    # publishing an incomplete repository set.
-    def digest_registered_projects
-      registered_project_entries(preserve_invalid: true)
-    end
-
     def registered_project_entries(preserve_invalid:)
       Hive::Paths.ensure_migrated!
       validate_hive_home!
@@ -1491,6 +1469,7 @@ module Hive
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
       raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+      validate_removed_digest!(data, path)
 
       override = data["daemon"] || {}
       unless override.is_a?(Hash)
@@ -1528,12 +1507,11 @@ module Hive
       merged
     end
 
-    # Shared loader for a single named global config block (`digest`,
-    # `answer_digest`): runs the ensure_migrated!/validate_hive_home!/path +
+    # Shared loader for a single named global config block such as
+    # `answer_digest`: runs the ensure_migrated!/validate_hive_home!/path +
     # shape-check preamble, deep-merges the override over DEFAULTS[key], runs the
     # block's own validator, and returns the merged hash. An optional block
-    # receives (merged, data, override) for per-block derivations (e.g. the
-    # digest's telegram-default `enabled`) and returns the merged hash to validate.
+    # receives (merged, data, override) and returns the merged hash to validate.
     def load_global_block(key, validator:)
       Hive::Paths.ensure_migrated!
       validate_hive_home!
@@ -1553,33 +1531,8 @@ module Hive
       merged
     end
 
-    # The `digest` block only (enabled / max_catchup_days), merged over
-    # defaults. Used by the daemon scheduler and the PRDigest CLI adapter.
-    def load_global_digest_block
-      load_global_block("digest", validator: :validate_digest!) do |merged, data, override|
-        # Opt-out beats opt-in: when the operator hasn't pinned digest.enabled
-        # either way, default it ON for anyone who already has the Telegram bot
-        # configured with a deliverable chat. An explicit digest.enabled (true
-        # OR false) is always honored — only the unset case is derived.
-        merged["enabled"] = telegram_digest_default?(data) unless override.key?("enabled")
-        merged
-      end
-    end
-
     def load_global_answer_digest_block
       load_global_block("answer_digest", validator: :validate_answer_digest!)
-    end
-
-    # True when the global Telegram bot is enabled and has at least one
-    # allowlisted chat to deliver to — the signal that "the user has Telegram
-    # set up", used to default the daily digest on. Reads the raw config so
-    # it never depends on bot-block defaults; the bot block's own shape is
-    # validated on its own load path.
-    def telegram_digest_default?(data)
-      bot = data["bot"]
-      return false unless bot.is_a?(Hash) && bot["enabled"] == true
-
-      Array(bot["chat_id_allowlist"]).any? { |id| id.is_a?(Integer) }
     end
 
     def load_global_web
@@ -1906,7 +1859,7 @@ module Hive
       validate_babysitter!(cfg, source_path)
       validate_patrol!(cfg, source_path)
       validate_refactor_patrol!(cfg, source_path)
-      validate_digest!(cfg, source_path)
+      validate_removed_digest!(cfg, source_path)
       validate_answer_digest!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
@@ -1938,7 +1891,6 @@ module Hive
       babysitter
       patrol
       refactor_patrol
-      digest
       answer_digest
       bot
       rebase
@@ -3196,32 +3148,12 @@ module Hive
             ">= #{min}; got #{value.inspect} (#{value.class})"
     end
 
-    def validate_digest!(cfg, source_path)
-      digest = cfg["digest"]
-      return if digest.nil?
-
-      if digest.key?("source")
-        raise ConfigError,
-              "digest.source is unsupported; PRDigest always reads registered repositories. " \
-              "Remove it from #{describe_source(source_path)}"
-      end
-
-      enabled = digest["enabled"]
-      unless enabled.nil? || enabled == true || enabled == false
-        raise ConfigError,
-              "digest.enabled in #{describe_source(source_path)} must be a boolean " \
-              "(true / false); got #{enabled.inspect} (#{enabled.class})"
-      end
-
-      max_catchup_days = digest["max_catchup_days"]
-      return if max_catchup_days.nil?
-      # 0 = unbounded catch-up (DigestScheduler#apply_catchup_cap treats it
-      # as "no cap"); negatives are clamped to 0 there, so reject them here.
-      return if max_catchup_days.is_a?(Integer) && max_catchup_days >= 0
+    def validate_removed_digest!(cfg, source_path)
+      return unless cfg.key?("digest")
 
       raise ConfigError,
-            "digest.max_catchup_days in #{describe_source(source_path)} must be an integer >= 0 " \
-            "(0 = unbounded); got #{max_catchup_days.inspect} (#{max_catchup_days.class})"
+            "digest configuration is no longer supported in #{describe_source(source_path)}; " \
+            "schedule `prdigest prose --deliver` directly or use `prdigest facts` from an agent"
     end
 
     def validate_answer_digest!(cfg, source_path)

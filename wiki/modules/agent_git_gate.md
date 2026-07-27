@@ -3,7 +3,7 @@ title: Hive::AgentGitGate
 type: module
 source: lib/hive/agent_git_gate.rb, lib/hive/managed_git.rb
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-07-27
 tags: [git, security, publication, worktree, boundary]
 ---
 
@@ -76,11 +76,17 @@ and supplies fixed config that neutralizes:
 - external diff, textconv, pager, and interactive diff filters;
 - repository-selected clean/smudge/process filters, URL rewrites, credential
   helpers, and custom remote upload/receive programs (the operation refuses
-  repository-local executable config before spawn);
+  repository-local executable config before spawn, including config reached
+  through local `include` directives; an unreadable or otherwise uninspectable
+  config fails closed);
+- repository-selected HTTP transport policy, alternate-ref commands, and
+  working-tree redirection;
 - inherited credential, SSH-command, askpass, and config-count helpers; and
 - `ext` and `file` transports by default.
 
-HTTPS credentials are delegated to `gh auth git-credential`; SSH may use the
+HTTPS credentials are delegated to `gh auth git-credential`; embedded HTTPS
+userinfo is refused. SSH and Git URLs may carry a username but not embedded
+passwords, and explicit transport ports remain valid. SSH may use the
 controller's agent socket. A caller can explicitly permit local file transport
 only for a scoped operation. Hive's `Gh` compatibility adapter accepts that
 injected policy from `agent_git_gate.allow_local_transport: true`; it is used

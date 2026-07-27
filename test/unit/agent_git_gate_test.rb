@@ -120,7 +120,10 @@ class AgentGitGateTest < Minitest::Test
     dangerous = {
       "credential.helper" => "!false",
       "url.ext::false.insteadOf" => "https://example.com/",
-      "remote.origin.uploadpack" => "/tmp/agent-selected-upload-pack"
+      "remote.origin.uploadpack" => "/tmp/agent-selected-upload-pack",
+      "core.alternateRefsCommand" => "/tmp/agent-selected-alternate-refs",
+      "core.worktree" => "/tmp/agent-selected-worktree",
+      "http.sslVerify" => "false"
     }
 
     with_tmp_git_repo do |repo|
@@ -132,6 +135,41 @@ class AgentGitGateTest < Minitest::Test
         assert_includes error.message, "executable Git helpers", name
         run!("git", "-C", repo, "config", "--local", "--unset", name)
       end
+    end
+  end
+
+  def test_repository_selected_helpers_in_included_local_config_fail_closed
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("agent-git-included-config") do |root|
+        included = File.join(root, "included.config")
+        File.write(included, <<~CONFIG)
+          [filter "audit"]
+            clean = /tmp/agent-selected-filter
+        CONFIG
+        run!("git", "-C", repo, "config", "--local", "include.path", included)
+        assert_equal "/tmp/agent-selected-filter", run!(
+          "git", "-C", repo, "config", "--local", "--includes",
+          "--get", "filter.audit.clean"
+        ).strip
+
+        error = assert_raises(Hive::AgentGitGate::InvalidRequest) do
+          Hive::AgentGitGate.read(repo, :head_oid)
+        end
+        assert_includes error.message, "executable Git helpers"
+      end
+    end
+  end
+
+  def test_repository_config_inspection_failure_fails_closed
+    failed = GateStatus.new(exitstatus: 1)
+    with_replaced_singleton_method(
+      Hive::ManagedGit, :executable_local_config,
+      ->(*) { [ [], "inspection failed", failed ] }
+    ) do
+      error = assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate.read("/tmp", :head_oid)
+      end
+      assert_includes error.message, "could not be inspected safely"
     end
   end
 
@@ -544,18 +582,31 @@ class AgentGitGateTest < Minitest::Test
   end
 
   def test_transport_and_branch_validation_cover_supported_and_refused_shapes
-    scp = Hive::AgentGitGate.send(
-      :validate_transport_target, "git@example.com:acme/repo.git",
-      allow_local_transport: false
-    )
-    https = Hive::AgentGitGate.send(
-      :validate_transport_target, "https://example.com/acme/repo.git",
-      allow_local_transport: false
-    )
-    assert_predicate scp, :frozen?
-    assert_predicate https, :frozen?
+    accepted = [
+      "git@example.com:acme/repo.git",
+      "https://example.com/acme/repo.git",
+      "https://example.com:8443/acme/repo.git",
+      "ssh://git@example.com:2222/acme/repo.git",
+      "git://reader@example.com:9418/acme/repo.git"
+    ]
+    accepted.each do |target|
+      value = Hive::AgentGitGate.send(
+        :validate_transport_target, target, allow_local_transport: false
+      )
+      assert_equal target, value
+      assert_predicate value, :frozen?
+    end
 
-    [ "-bad", "http://example.com/repo.git" ].each do |target|
+    [
+      "-bad",
+      "http://example.com/repo.git",
+      "ssh:///repo.git",
+      "ssh://git@/repo.git",
+      "ssh://git@@example.com/repo.git",
+      "https://token@example.com/repo.git",
+      "ssh://git:token@example.com/repo.git",
+      "git://reader%3Atoken@example.com/repo.git"
+    ].each do |target|
       assert_raises(Hive::AgentGitGate::InvalidRequest) do
         Hive::AgentGitGate.send(
           :validate_transport_target, target, allow_local_transport: false
@@ -566,6 +617,152 @@ class AgentGitGateTest < Minitest::Test
       Hive::AgentGitGate.observe_remote_branch(
         repository_path: "/tmp", branch: "bad//branch",
         remote: "https://example.com/repo.git"
+      )
+    end
+  end
+
+  def test_public_values_reject_invalid_shapes
+    valid_read = {
+      operation: :status, stdout: "", stderr: "",
+      exitstatus: 0, overflow: false
+    }
+    [
+      valid_read.merge(operation: Object.new),
+      valid_read.merge(stdout: Object.new),
+      valid_read.merge(overflow: nil),
+      valid_read.merge(exitstatus: -1),
+      valid_read.merge(exitstatus: Object.new)
+    ].each do |attributes|
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate::ReadResult.new(**attributes)
+      end
+    end
+
+    valid_observation = {
+      remote_fingerprint: "f" * 64, branch: "main",
+      ref: "refs/heads/main", oid: "a" * 40
+    }
+    [
+      valid_observation.merge(remote_fingerprint: "not-a-fingerprint"),
+      valid_observation.merge(branch: "bad//branch", ref: "refs/heads/bad//branch"),
+      valid_observation.merge(ref: "refs/heads/other"),
+      valid_observation.merge(oid: "not-an-oid")
+    ].each do |attributes|
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate::RemoteObservation.new(**attributes)
+      end
+    end
+
+    valid_materialization = {
+      destination: "/tmp/agent-git/exact",
+      oid: "a" * 40,
+      disposition: :created
+    }
+    [
+      valid_materialization.merge(destination: "relative"),
+      valid_materialization.merge(oid: "not-an-oid"),
+      valid_materialization.merge(disposition: :unknown)
+    ].each do |attributes|
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate::MaterializationReceipt.new(**attributes)
+      end
+    end
+
+    valid_publication = {
+      remote_fingerprint: "f" * 64, branch: "main",
+      expected_oid: "a" * 40, before_oid: "a" * 40,
+      published_oid: "b" * 40, after_oid: "b" * 40
+    }
+    [
+      valid_publication.merge(remote_fingerprint: "not-a-fingerprint"),
+      valid_publication.merge(branch: "bad//branch"),
+      valid_publication.merge(expected_oid: "not-an-oid"),
+      valid_publication.merge(before_oid: "b" * 40),
+      valid_publication.merge(published_oid: "not-an-oid"),
+      valid_publication.merge(after_oid: "c" * 40)
+    ].each do |attributes|
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate::PublicationReceipt.new(**attributes)
+      end
+    end
+  end
+
+  def test_public_values_copy_input_bytes_and_enforce_identity_invariants
+    stdout = +"output"
+    stderr = +"warning"
+    result = Hive::AgentGitGate::ReadResult.new(
+      operation: "status", stdout: stdout, stderr: stderr,
+      exitstatus: "0", overflow: false
+    )
+    stdout.replace("changed")
+    stderr.replace("changed")
+    assert_equal :status, result.operation
+    assert_equal "output", result.stdout
+    assert_equal "warning", result.stderr
+    assert_predicate result.stdout, :frozen?
+    assert_predicate result.stderr, :frozen?
+
+    fingerprint = "f" * 64
+    branch = +"agent/change"
+    ref = +"refs/heads/agent/change"
+    oid = "a" * 40
+    observation = Hive::AgentGitGate::RemoteObservation.new(
+      remote_fingerprint: fingerprint, branch: branch, ref: ref, oid: oid
+    )
+    fingerprint.replace("0" * 64)
+    branch.replace("other")
+    ref.replace("refs/heads/other")
+    oid.replace("b" * 40)
+    assert_equal "f" * 64, observation.remote_fingerprint
+    assert_equal "agent/change", observation.branch
+    assert_equal "refs/heads/agent/change", observation.ref
+    assert_equal "a" * 40, observation.oid
+    assert_predicate observation.remote_fingerprint, :frozen?
+    assert_predicate observation.branch, :frozen?
+    assert_predicate observation.ref, :frozen?
+    assert_predicate observation.oid, :frozen?
+
+    assert_raises(Hive::AgentGitGate::InvalidRequest) do
+      Hive::AgentGitGate::RemoteObservation.new(
+        remote_fingerprint: "f" * 64, branch: "main",
+        ref: "--upload-pack=helper", oid: "a" * 40
+      )
+    end
+
+    destination = +"/tmp/agent-git/exact"
+    materialized_oid = "c" * 40
+    materialization = Hive::AgentGitGate::MaterializationReceipt.new(
+      destination: destination, oid: materialized_oid, disposition: :created
+    )
+    destination.replace("/tmp/changed")
+    materialized_oid.replace("d" * 40)
+    assert_equal "/tmp/agent-git/exact", materialization.destination
+    assert_equal "c" * 40, materialization.oid
+    assert_predicate materialization.destination, :frozen?
+    assert_predicate materialization.oid, :frozen?
+
+    receipt_fingerprint = "e" * 64
+    receipt_branch = +"agent/change"
+    published = "f" * 40
+    receipt = Hive::AgentGitGate::PublicationReceipt.new(
+      remote_fingerprint: receipt_fingerprint, branch: receipt_branch,
+      expected_oid: nil, before_oid: nil,
+      published_oid: published, after_oid: published
+    )
+    receipt_fingerprint.replace("0" * 64)
+    receipt_branch.replace("other")
+    published.replace("0" * 40)
+    assert_equal "e" * 64, receipt.remote_fingerprint
+    assert_equal "agent/change", receipt.branch
+    assert_equal "f" * 40, receipt.published_oid
+    assert_predicate receipt.remote_fingerprint, :frozen?
+    assert_predicate receipt.branch, :frozen?
+    assert_predicate receipt.published_oid, :frozen?
+    assert_raises(Hive::AgentGitGate::InvalidRequest) do
+      Hive::AgentGitGate::PublicationReceipt.new(
+        remote_fingerprint: "f" * 64, branch: "main",
+        expected_oid: "a" * 40, before_oid: "b" * 40,
+        published_oid: "c" * 40, after_oid: "c" * 40
       )
     end
   end

@@ -29,6 +29,31 @@ module Hive
     ReadResult = Data.define(
       :operation, :stdout, :stderr, :exitstatus, :overflow
     ) do
+      def initialize(operation:, stdout:, stderr:, exitstatus:, overflow:)
+        unless operation.is_a?(String) || operation.is_a?(Symbol)
+          raise InvalidRequest, "read result operation is invalid"
+        end
+        unless stdout.is_a?(String) && stderr.is_a?(String)
+          raise InvalidRequest, "read result output is invalid"
+        end
+        unless overflow == true || overflow == false
+          raise InvalidRequest, "read result overflow state is invalid"
+        end
+
+        status = Integer(exitstatus)
+        raise InvalidRequest, "read result exit status is invalid" if status.negative?
+
+        super(
+          operation: operation.to_sym,
+          stdout: stdout.dup.freeze,
+          stderr: stderr.dup.freeze,
+          exitstatus: status,
+          overflow: overflow
+        )
+      rescue ArgumentError, TypeError
+        raise InvalidRequest, "read result exit status is invalid"
+      end
+
       def success?
         exitstatus.zero? && !overflow
       end
@@ -37,6 +62,33 @@ module Hive
     RemoteObservation = Data.define(
       :remote_fingerprint, :branch, :ref, :oid
     ) do
+      def initialize(remote_fingerprint:, branch:, ref:, oid:)
+        fingerprint = remote_fingerprint.to_s.downcase
+        unless fingerprint.match?(/\A[0-9a-f]{64}\z/)
+          raise InvalidRequest, "remote observation fingerprint is invalid"
+        end
+
+        name = Hive::GitRef.validate_branch_name(branch)
+        expected_ref = "refs/heads/#{name}"
+        unless ref.to_s == expected_ref
+          raise InvalidRequest, "remote observation ref does not match its branch"
+        end
+
+        normalized_oid = oid&.to_s&.downcase
+        if normalized_oid && !normalized_oid.match?(OID)
+          raise InvalidRequest, "remote observation OID is invalid"
+        end
+
+        super(
+          remote_fingerprint: fingerprint.dup.freeze,
+          branch: name.dup.freeze,
+          ref: expected_ref.freeze,
+          oid: normalized_oid&.dup&.freeze
+        )
+      rescue ArgumentError, TypeError
+        raise InvalidRequest, "remote observation is invalid"
+      end
+
       def present?
         !oid.nil?
       end
@@ -44,14 +96,84 @@ module Hive
 
     MaterializationReceipt = Data.define(
       :destination, :oid, :disposition
-    )
+    ) do
+      def initialize(destination:, oid:, disposition:)
+        path = destination.to_s
+        unless !path.empty? && !path.match?(/[\0\r\n]/) &&
+               File.expand_path(path) == path
+          raise InvalidRequest, "materialization receipt destination is invalid"
+        end
+
+        normalized_oid = oid.to_s.downcase
+        unless normalized_oid.match?(OID)
+          raise InvalidRequest, "materialization receipt OID is invalid"
+        end
+        unless %i[created existing].include?(disposition)
+          raise InvalidRequest, "materialization receipt disposition is invalid"
+        end
+
+        super(
+          destination: path.dup.freeze,
+          oid: normalized_oid.dup.freeze,
+          disposition: disposition
+        )
+      end
+    end
 
     PublicationReceipt = Data.define(
       :remote_fingerprint, :branch, :expected_oid, :before_oid,
       :published_oid, :after_oid
     ) do
+      def initialize(remote_fingerprint:, branch:, expected_oid:, before_oid:,
+                     published_oid:, after_oid:)
+        fingerprint = remote_fingerprint.to_s.downcase
+        unless fingerprint.match?(/\A[0-9a-f]{64}\z/)
+          raise InvalidRequest, "publication receipt fingerprint is invalid"
+        end
+
+        name = Hive::GitRef.validate_branch_name(branch)
+        expected = normalized_optional_oid(expected_oid, "expected")
+        before = normalized_optional_oid(before_oid, "before")
+        published = normalized_oid(published_oid, "published")
+        after = normalized_oid(after_oid, "after")
+        unless expected == before
+          raise InvalidRequest, "publication receipt expectation does not match before state"
+        end
+        unless published == after
+          raise InvalidRequest, "publication receipt published state is not verified"
+        end
+
+        super(
+          remote_fingerprint: fingerprint.dup.freeze,
+          branch: name.dup.freeze,
+          expected_oid: expected&.dup&.freeze,
+          before_oid: before&.dup&.freeze,
+          published_oid: published.dup.freeze,
+          after_oid: after.dup.freeze
+        )
+      rescue ArgumentError, TypeError
+        raise InvalidRequest, "publication receipt is invalid"
+      end
+
       def success?
         after_oid == published_oid
+      end
+
+      private
+
+      def normalized_optional_oid(value, label)
+        return if value.nil?
+
+        normalized_oid(value, label)
+      end
+
+      def normalized_oid(value, label)
+        value = value.to_s.downcase
+        unless value.match?(OID)
+          raise InvalidRequest, "publication receipt #{label} OID is invalid"
+        end
+
+        value
       end
     end
 
@@ -503,8 +625,20 @@ module Hive
           raise InvalidRequest, "Git remote transport #{scheme.inspect} is not allowed"
         end
         authority = value.split("://", 2).last.split("/", 2).first
-        if scheme == "https" && authority.include?("@") ||
-            authority.split("@", 2).first.to_s.include?(":")
+        if authority.empty? || authority.count("@") > 1
+          raise InvalidRequest, "Git remote target authority is invalid"
+        end
+        userinfo, host = if authority.include?("@")
+          authority.split("@", 2)
+        else
+          [ nil, authority ]
+        end
+        if host.to_s.empty?
+          raise InvalidRequest, "Git remote target authority is invalid"
+        end
+        if userinfo && (
+          scheme == "https" || userinfo.match?(/:|%3a/i)
+        )
           raise InvalidRequest,
                 "Git remote credentials must be injected, not embedded in the target"
         end
@@ -658,7 +792,10 @@ module Hive
 
     def validate_repository_config!(repository)
       unsafe, _err, status = Hive::ManagedGit.executable_local_config(repository)
-      return unless status.success?
+      unless status.success?
+        raise InvalidRequest,
+              "repository-local Git configuration could not be inspected safely"
+      end
       return if unsafe.empty?
 
       raise InvalidRequest,

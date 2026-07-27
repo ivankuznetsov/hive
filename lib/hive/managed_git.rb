@@ -39,7 +39,8 @@ module Hive
       /\Aurl\..*\.(?:insteadof|pushinsteadof)\z/,
       /\Acredential(?:\..*)?\.helper\z/,
       /\Aremote\..*\.(?:uploadpack|receivepack)\z/,
-      /\Acore\.(?:gitproxy|pager)\z/,
+      /\Acore\.(?:alternaterefscommand|gitproxy|pager|worktree)\z/,
+      /\Ahttp(?:\..*)?\..+\z/,
       /\Apager\..*\z/
     ].freeze
 
@@ -127,7 +128,7 @@ module Hive
         environment,
         "git", "-C", File.expand_path(path),
         *CONFIG.flat_map { |entry| [ "-c", entry ] },
-        "config", "--local", "--name-only", "--null", "--list",
+        "config", "--local", "--includes", "--name-only", "--null", "--list",
         unsetenv_others: true
       )
       return [ [], err, status ] unless status.success?

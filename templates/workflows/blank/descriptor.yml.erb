@@ -11,6 +11,8 @@ stages:
     kind: agent
     state_file: work.md
     instruction: ./<%= id %>/work.md
+    mapping_role: development
+    mapping_contract: <%= id %>-work-v1
     permissions: read-only
   - name: done
     kind: terminal

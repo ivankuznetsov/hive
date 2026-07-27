@@ -98,6 +98,22 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes text, "Do not print, copy wholesale, or persist agent credentials"
   end
 
+  def test_projection_binds_workflow_publication_to_confirmed_dry_run_bytes
+    text = projection_text
+
+    assert_includes text, "hive workflow publish NAME --version VERSION --dry-run --json"
+    assert_includes text, "--expected-release-digest RELEASE_DIGEST --json"
+    assert_includes text, "state: validated"
+    assert_includes text, "freshness: not_checked"
+    assert_includes text, "pending_review"
+    assert_includes text, "merged_pending_listing"
+    assert_includes text, "closed_unmerged"
+    assert_includes text, "Retry only the"
+    assert_includes text, "same confirmed name/version/release digest"
+    assert_includes text, "Never infer success from prose"
+    assert_includes text, "force-push"
+  end
+
   def test_projection_preserves_consent_safe_setup_from_canonical_source
     text = projection_text
 

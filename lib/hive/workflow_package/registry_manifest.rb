@@ -5,6 +5,7 @@ require "uri"
 require "hive/workflow_package/canonical_yaml"
 require "hive/workflow_package/diagnostic"
 require "hive/workflow_package/manifest"
+require "hive/workflow_package/safe_file"
 
 module Hive
   module WorkflowPackage
@@ -22,7 +23,17 @@ module Hive
       attr_reader :data, :bytes, :digest
 
       def self.load(path)
-        bytes = File.binread(path)
+        bytes = SafeFile.read(
+          path, max_bytes: Manifest::MAX_FILE_BYTES, error_class: PackageError,
+          message: Diagnostic.new(
+            rule_id: "manifest.unreadable", severity: :error, path: FILE_NAME,
+            message: "manifest is missing or unreadable"
+          )
+        ).first
+        load_bytes(bytes)
+      end
+
+      def self.load_bytes(bytes)
         utf8 = bytes.dup.force_encoding(Encoding::UTF_8)
         fail!("manifest.invalid_yaml", FILE_NAME, "manifest is not valid UTF-8 YAML") unless utf8.valid_encoding?
         data = Psych.safe_load(utf8, permitted_classes: [], permitted_symbols: [], aliases: false)
@@ -37,8 +48,6 @@ module Hive
         new(data, bytes)
       rescue Psych::Exception, EncodingError
         fail!("manifest.invalid_yaml", FILE_NAME, "manifest is not safe canonical UTF-8 YAML")
-      rescue Errno::ENOENT, Errno::EACCES, IOError
-        fail!("manifest.unreadable", FILE_NAME, "manifest is missing or unreadable")
       end
 
       def self.validate_shape!(data)

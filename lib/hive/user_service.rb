@@ -293,12 +293,11 @@ module Hive
     end
 
     def canonical_plan?(plan)
-      case plan.operation
-      when :apply
+      if plan.operation == :apply
         expected_action = apply_action(plan.status, force: plan.force)
         plan.action == expected_action &&
           plan.manager_observed == (plan.autostart && manager_action?(expected_action))
-      when :remove
+      else
         expected_action = plan.status.content_state == :absent ? :none : :remove
         expected_manager_observed =
           !%i[absent unsafe unreadable].include?(plan.status.content_state)
@@ -306,8 +305,6 @@ module Hive
           plan.manager_observed == expected_manager_observed &&
           !plan.autostart &&
           !plan.force
-      else
-        false
       end
     end
 

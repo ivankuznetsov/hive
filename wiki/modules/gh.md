@@ -1,13 +1,13 @@
 ---
 title: Hive::Gh
 type: module
-source: lib/hive/gh.rb, lib/hive/gh/repository_identity.rb, lib/hive/managed_git.rb
+source: lib/hive/gh.rb, lib/hive/gh/repository_identity.rb, lib/hive/agent_git_gate.rb
 created: 2026-06-08
 updated: 2026-07-25
 tags: [github, gh, module, pr, closure, evidence]
 ---
 
-**TLDR**: `Hive::Gh` is the shared GitHub CLI / git transport for PR publication, finalization, review mirroring, babysitter context, authentication, and repository identity. It wraps `gh`/`git` subprocesses with non-interactive environment defaults, a bounded network timeout, typed return structs, and fail-loud JSON parsing. `Hive::Gh::RepositoryIdentity` owns the strict GitHub host and owner/name validation used by both the transport and architecture patrol. Architecture-patrol-specific issue, merged-PR intake, and publication-proof protocol lives behind `Hive::RefactorPatrol::GithubGateway` instead of widening this global helper.
+**TLDR**: `Hive::Gh` is the shared GitHub CLI adapter for PR publication, finalization, review mirroring, babysitter context, authentication, and repository identity. It wraps `gh` subprocesses with non-interactive defaults, a bounded network timeout, typed return structs, and fail-loud JSON parsing. Managed Git observation/publication delegates to the boundary-ready [[modules/agent_git_gate]]. `Hive::Gh::RepositoryIdentity` owns strict GitHub host and owner/name validation. Architecture-patrol-specific issue, merged-PR intake, and publication-proof protocol lives behind `Hive::RefactorPatrol::GithubGateway` instead of widening this global helper.
 
 ## API Map
 
@@ -16,8 +16,8 @@ tags: [github, gh, module, pr, closure, evidence]
 | `ensure_authenticated!(cfg = nil, host: nil, timeout_sec: nil)` | Runs `gh auth status`, with `--hostname` when an exact host is supplied; raises `Hive::GhError` when authentication is missing. Architecture patrol passes the remaining slice of its one monotonic remote-operation deadline through `timeout_sec`. |
 | `push_branch(worktree_path, branch, cfg: nil, remote: "origin", ...)` | Runs `git push` and returns `PushResult(success:, stdout:, stderr:)`; supports upstream tracking plus exact expected-OID and expected-absence leases. Finalize keeps the default `-u origin` path, while architecture patrol supplies its captured URL with upstream writes disabled. |
 | `push_branch!(worktree_path, branch, cfg: nil, remote: "origin", ...)` | Hard-fail wrapper around `push_branch`; architecture patrol binds it to one already-validated URL instead of re-resolving mutable `origin`. |
-| `remote_branch_oid(worktree_path, branch, cfg: nil, remote: "origin", managed: false)` | Reads one exact `refs/heads/<branch>` OID through `git ls-remote`; validates the branch/response and can query the same captured URL later used for push. Managed draft-PR callers select the hardened `Hive::ManagedGit` process boundary. |
-| `push_exact_oid(worktree_path, head_oid, branch, ...)` | Managed draft-PR-only publication through `Hive::ManagedGit`: pushes `<validated-oid>:refs/heads/<branch>` with an ordinary non-force refspec. It never sets upstream state and has no force/lease mode. |
+| `remote_branch_oid(worktree_path, branch, cfg: nil, remote: "origin", managed: false)` | Reads one exact `refs/heads/<branch>` OID through `git ls-remote`; validates the branch/response and can query the same captured URL later used for push. Managed callers delegate to `Hive::AgentGitGate::RemoteObservation`. |
+| `push_exact_oid(worktree_path, head_oid, branch, ...)` | Managed draft-PR compatibility adapter over `Hive::AgentGitGate.publish`: resolves the immutable commit, requires exact remote absence, publishes under an exact lease, and succeeds only after the remote independently names that OID. |
 | `create_draft_pr(..., head:, base:, title:, body:)` | Creates one PR with explicit repository, `--draft`, plain head branch, base, title, and a mode-0600 temporary `--body-file` that is removed on every exit path. The response is not publication proof; the caller must reconcile PR identity. |
 | `origin_push_url(worktree_path, cfg: nil, timeout_sec: nil)` | Reads `git remote get-url --push --all origin` and requires exactly one record. Multiple push URLs fail closed because a normal named-remote push can target all of them. Architecture patrol supplies its remaining project-step deadline. |
 | `lookup_prs_for_branch(worktree_path, branch, repository: nil, host: nil, cfg: nil)` | Runs `gh pr list --head <branch> --state all --json ...` from the worktree cwd, optionally pinned to an explicit GitHub/GHES repository. Fail-loud on CLI or JSON shape errors. |
@@ -36,11 +36,6 @@ tags: [github, gh, module, pr, closure, evidence]
 | `pr_frontmatter(path)` | Safe YAML frontmatter reader for `pr.md`; malformed YAML warns and returns `{}`. |
 | `scan_pr_for_secrets(state_file:, pr_url:, cfg: nil)` | Scans local state-file text plus remote PR body for `Hive::SecretPatterns`; returns `ScanResult` with `fetch_failed` instead of silently treating remote fetch errors as clean. |
 | `capture3(*cmd, chdir: nil, cfg: nil, timeout_sec: nil, max_stdout_bytes: nil, stdout_path: nil)` | Shared subprocess wrapper used by the helpers above. `stdout_path` streams bytes directly to a mode-0600 file while retaining the same deadline and byte ceiling. |
-
-The old `digest_*` REST helpers and `pr_body` compatibility reader were removed
-with `Hive::Digest`. PRDigest now owns merged-PR retrieval; Hive's adapter uses
-only the bounded `capture3` boundary to query `gh auth token` when neither
-`GITHUB_TOKEN` nor `GH_TOKEN` is already present.
 
 ## Architecture-patrol adapter
 
@@ -82,8 +77,9 @@ the remote branch and all PR states before and after mutation, and accepts an
 OPEN draft or human-promoted OPEN PR only when repository/base/head identity
 matches the receipt. It never calls `push_branch`, force-pushes, marks a PR
 ready, edits, closes, merges, releases, publishes, or deploys.
-Post-agent Git commands are allow-listed by `Hive::ManagedGit` under a reduced
-environment and fixed config overrides. Repository hooks/fsmonitor/external
+Post-agent Git commands use the closed `Hive::AgentGitGate` vocabulary, whose
+private executor runs under a reduced environment and fixed config overrides.
+Repository hooks/fsmonitor/external
 diff or textconv, `ext`/`file` transports, inherited Git config, and arbitrary
 credential/SSH helper selection cannot execute in controller context; GitHub
 HTTPS credentials are delegated only to `gh auth git-credential`, while SSH
@@ -104,7 +100,10 @@ expected remote OID; `Hive::Gh` enforces the lease but does not decide which
 generation is replaceable. Any unrelated OID remains a conflict.
 The publisher captures one validated origin push URL and reuses it for OID
 lookup and push; multiple URLs or later named-remote rewrites cannot broaden or
-redirect that transaction. An arbitrary existing branch is a conflict.
+redirect that transaction. Publication pushes an immutable OID under the exact
+ledger-authorized OID/absence lease and returns only after a second remote
+observation proves the result. The receipt contains a transport fingerprint,
+not the URL or credentials. An arbitrary existing branch is a conflict.
 Existing same-branch OPEN PRs are reconcilable only when `isDraft` is explicitly false;
 an OPEN draft is conflicting remote state rather than proof of publication.
 After creation, `verify_pr_identity!` independently proves the PR still names
@@ -118,7 +117,7 @@ generation remain owned by [[commands/refactor-patrol]]'s job aggregate.
 
 ## Tests
 
-- `test/unit/gh_test.rb` covers shared frontmatter, secret-scan, PR lookup, remote-OID/lease, immutable exact-OID non-force push, restrictive draft-PR body tempfiles, repository identity, subprocess, and status APIs. The same file exercises `GithubGateway`'s created-PR proof, exact-host merged-PR detail intake, and GraphQL pagination through an injected transport, including the single-qualifier exact timestamp range used for merge catch-up.
+- `test/unit/gh_test.rb` covers shared frontmatter, secret-scan, PR lookup, managed remote observations, exact-OID/absence publication delegation, restrictive draft-PR body tempfiles, repository identity, subprocess, and status APIs. The same file exercises `GithubGateway`'s created-PR proof, exact-host merged-PR detail intake, and GraphQL pagination through an injected transport, including the single-qualifier exact timestamp range used for merge catch-up.
 - `test/unit/gh_issue_helpers_test.rb` covers `GithubGateway`'s full paginated inventory, pull-request exclusion, exact-marker delegation, explicit host/repository issue creation, and malformed/cross-repository fail-closed behavior. `test/unit/refactor_patrol/issue_filer_test.rb` covers exact-marker precedence plus strict legacy semantic grouping, malformed historical bodies, and pairwise-ambiguous matches.
 - `test/unit/refactor_patrol/pr_opener_test.rb` pins exact absence/OID leases and pre-create trunk checks. `test/unit/refactor_patrol/action_runner_test.rb` covers the real-git crash/restart path from a durably pushed stale generation through supersession, exact old-OID replacement, one verified PR, and one mandatory review handoff.
 - `test/unit/daemon/pr_merge_watcher_test.rb`, `test/unit/daemon/dispatcher_test.rb`, and `test/integration/run_stage_action_test.rb` cover the merged-finalize-error archive path that uses `pr_state`.

@@ -63,7 +63,10 @@ module Hive
         pid = Process.spawn(*cmd, **spawn_opts)
         w.close
         pgid = process_group(pid)
-        messages = Hive::Agent::MessageExtractor::Accumulator.new(max_bytes: TAIL_BYTES)
+        messages = Hive::Agent::MessageExtractor::Accumulator.new(
+          max_bytes: TAIL_BYTES,
+          structured_output_protocol: profile.structured_output_protocol
+        )
         reader = Thread.new do
           File.open(log_path, "a") do |log|
             r.each_line do |line|

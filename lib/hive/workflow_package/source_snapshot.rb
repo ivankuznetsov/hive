@@ -1,0 +1,305 @@
+require "fileutils"
+require "pathname"
+require "yaml"
+require "hive/workflow_package/authoring_metadata"
+require "hive/workflow_package/input_name"
+require "hive/workflow_package/registry_manifest"
+
+module Hive
+  module WorkflowPackage
+    class SourceSnapshot
+      MAX_FILE_BYTES = 1024 * 1024
+      MAX_TOTAL_BYTES = 10 * 1024 * 1024
+      MAX_FILES = 1000
+      SKILL_NAME = /\A[a-zA-Z0-9][a-zA-Z0-9._:\/-]{0,127}\z/
+      EXTENSION_KEYS = %w[tools prompt_assets optional_inputs].freeze
+      RESERVED_ASSETS = %w[README.md honeycomb.yml manifest.yml workflow.yml].freeze
+
+      FileRecord = Data.define(:path, :bytes, :mode, :source)
+      Snapshot = Data.define(
+        :name, :descriptor, :files, :tools, :prompt_assets, :optional_inputs,
+        :external_skills
+      ) do
+        def initialize(name:, descriptor:, files:, tools: [], prompt_assets: [],
+                       optional_inputs: [], external_skills: [])
+          super
+        end
+      end
+
+      def self.capture(name:, workflows_dir:, descriptor_path:, authored_dir:, metadata:)
+        new(
+          name: name, workflows_dir: workflows_dir, descriptor_path: descriptor_path,
+          authored_dir: authored_dir, metadata: metadata
+        ).capture
+      end
+
+      def initialize(name:, workflows_dir:, descriptor_path:, authored_dir:, metadata:)
+        @name = name.to_s
+        @workflows_dir = File.expand_path(workflows_dir)
+        @descriptor_path = File.expand_path(descriptor_path)
+        @authored_dir = File.expand_path(authored_dir)
+        @metadata = metadata
+        @total_bytes = 0
+      end
+
+      def capture
+        validate_roots!
+        descriptor_record = read_record(@descriptor_path, package_path: "workflow.yml")
+        descriptor = AuthoringMetadata.parse_yaml_map(descriptor_record.bytes, label: "workflow descriptor")
+        unless descriptor["id"] == @name
+          raise Hive::ConfigError, "workflow descriptor id must exactly match publish id #{@name.inspect}"
+        end
+        extension = validate_extension!(descriptor.delete("x-hive"))
+
+        instructions = {}
+        external_skills = []
+        rewritten = transform_descriptor(descriptor) do |key, value|
+          case key
+          when "instruction"
+            source, relative = resolve_owned_path(value, kind: "instruction")
+            packaged = normalize_path(File.join("instructions", relative), label: "instruction")
+            add_unique!(instructions, packaged, source)
+            packaged
+          when "skill"
+            validate_skill!(value)
+            external_skills << value
+            value
+          else
+            value
+          end
+        end
+        raise Hive::ConfigError, "workflow publish requires at least one referenced local instruction" if instructions.empty?
+
+        files = {
+          "workflow.yml" => FileRecord.new(
+            path: "workflow.yml", bytes: YAML.dump(rewritten), mode: 0o644, source: @descriptor_path
+          ),
+          "README.md" => read_record(File.join(@authored_dir, "README.md"), package_path: "README.md")
+        }
+        instructions.sort.each do |package_path, source|
+          files[package_path] = read_record(source, package_path: package_path)
+        end
+        Array(@metadata.assets).each do |relative|
+          normalized = normalize_path(relative, label: "asset")
+          if RESERVED_ASSETS.include?(normalized)
+            raise Hive::ConfigError, "declared asset #{normalized.inspect} is reserved authoring or generated metadata"
+          end
+          raise Hive::ConfigError, "declared asset collides with generated package path" if files.key?(normalized)
+          source, = resolve_owned_path(relative, kind: "asset", base: @authored_dir)
+          executable = extension.fetch("tools").include?(normalized)
+          files[normalized] = read_record(source, package_path: normalized, executable: executable)
+        end
+        declared_assets = Array(@metadata.assets)
+        behavior_assets = extension.fetch("tools") + extension.fetch("prompt_assets")
+        missing_assets = behavior_assets - declared_assets
+        unless missing_assets.empty?
+          raise Hive::ConfigError,
+                "x-hive behavior paths must also be declared assets: #{missing_assets.sort.join(', ')}"
+        end
+        raise Hive::ConfigError, "workflow package exceeds file-count limit" if files.length > MAX_FILES
+
+        Snapshot.new(
+          name: @name, descriptor: deep_freeze(rewritten), files: files.sort.to_h.freeze,
+          tools: extension.fetch("tools").freeze,
+          prompt_assets: extension.fetch("prompt_assets").freeze,
+          optional_inputs: deep_freeze(extension.fetch("optional_inputs")),
+          external_skills: external_skills.sort.uniq.freeze
+        ).freeze
+      end
+
+      private
+
+      def validate_roots!
+        [ [ @workflows_dir, "workflows root" ], [ @authored_dir, "authored workflow root" ] ].each do |path, label|
+          stat = File.lstat(path)
+          unless stat.directory? && !stat.symlink?
+            raise Hive::ConfigError, "#{label} must be a real directory, not a symlink"
+          end
+        end
+        prefix = @workflows_dir + File::SEPARATOR
+        unless @descriptor_path.start_with?(prefix) && @authored_dir.start_with?(prefix)
+          raise Hive::ConfigError, "workflow publication inputs must stay inside the owned workflows root"
+        end
+      rescue Errno::ENOENT, Errno::EACCES, IOError
+        raise Hive::ConfigError, "workflow publication source roots are missing or unreadable"
+      end
+
+      def transform_descriptor(value, &block)
+        case value
+        when Hash
+          value.each_with_object({}) do |(key, child), out|
+            out[key] = child.is_a?(Hash) || child.is_a?(Array) ? transform_descriptor(child, &block) : block.call(key, child)
+          end
+        when Array
+          value.map { |child| transform_descriptor(child, &block) }
+        else
+          value
+        end
+      end
+
+      def resolve_owned_path(value, kind:, base: @workflows_dir)
+        unless value.is_a?(String) && !value.strip.empty? && !value.include?("\\") && !value.include?("\0")
+          raise Hive::ConfigError, "workflow #{kind} reference must be a non-empty portable path"
+        end
+        source = File.expand_path(value, base)
+        prefix = @authored_dir + File::SEPARATOR
+        unless source.start_with?(prefix)
+          raise Hive::ConfigError, "workflow #{kind} must stay beneath the authored workflow root"
+        end
+        relative = Pathname.new(source).relative_path_from(Pathname.new(@authored_dir)).to_s
+        [ source, normalize_path(relative, label: kind) ]
+      end
+
+      def normalize_path(path, label:)
+        normalized = path.to_s.unicode_normalize(:nfc)
+        RegistryManifest.validate_relative_path!(normalized)
+        normalized
+      rescue PackageError
+        raise Hive::ConfigError, "workflow #{label} path is not a normalized safe relative path"
+      end
+
+      def add_unique!(values, package_path, source)
+        if values.key?(package_path) && values.fetch(package_path) != source
+          raise Hive::ConfigError, "workflow input paths collide after Unicode normalization"
+        end
+        values[package_path] = source
+      end
+
+      def validate_skill!(value)
+        unless value.is_a?(String) && SKILL_NAME.match?(value)
+          raise Hive::ConfigError, "workflow external skill dependency is malformed"
+        end
+      end
+
+      def read_record(source, package_path:, executable: false)
+        component_identity = validate_path_components!(source, package_path: package_path)
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        file = File.open(source, flags)
+        before = file.stat
+        unless before.file? && before.nlink == 1 && before.size <= MAX_FILE_BYTES
+          raise Hive::ConfigError, "workflow package input #{package_path.inspect} must be a bounded independent regular file"
+        end
+        bytes = file.read(MAX_FILE_BYTES + 1)
+        after = file.stat
+        current = File.lstat(source)
+        components_unchanged = component_identity == validate_path_components!(
+          source, package_path: package_path
+        )
+        identity = %i[dev ino size mtime ctime].all? { |field| before.public_send(field) == after.public_send(field) } &&
+                   before.dev == current.dev && before.ino == current.ino && !current.symlink? &&
+                   components_unchanged
+        unless identity && bytes.bytesize <= MAX_FILE_BYTES
+          raise Hive::ConfigError, "workflow package input #{package_path.inspect} changed while being read"
+        end
+        @total_bytes += bytes.bytesize
+        raise Hive::ConfigError, "workflow package inputs exceed total-byte limit" if @total_bytes > MAX_TOTAL_BYTES
+        if executable && (before.mode & 0o111).zero?
+          raise Hive::ConfigError, "workflow package tool #{package_path.inspect} must be executable"
+        end
+        mode = executable ? 0o755 : 0o644
+        FileRecord.new(path: package_path, bytes: bytes.freeze, mode: mode, source: source).freeze
+      rescue Errno::ELOOP, Errno::ENOENT, Errno::EACCES, IOError
+        raise Hive::ConfigError, "workflow package input #{package_path.inspect} is missing, linked, or unreadable"
+      ensure
+        file&.close
+      end
+
+      def validate_extension!(value)
+        value ||= {}
+        unless value.is_a?(Hash) && (value.keys - EXTENSION_KEYS).empty?
+          raise Hive::ConfigError, "workflow descriptor x-hive contains unsupported fields"
+        end
+        tools = validate_path_set!(value.fetch("tools", []), label: "tools")
+        prompt_assets = validate_path_set!(
+          value.fetch("prompt_assets", []), label: "prompt_assets"
+        )
+        optional_inputs = validate_optional_inputs!(value.fetch("optional_inputs", []))
+        {
+          "tools" => tools, "prompt_assets" => prompt_assets,
+          "optional_inputs" => optional_inputs
+        }.freeze
+      end
+
+      def validate_path_set!(value, label:)
+        unless value.is_a?(Array) && value.all? { |path| path.is_a?(String) }
+          raise Hive::ConfigError, "workflow descriptor x-hive #{label} must be a path array"
+        end
+        paths = value.map { |path| normalize_path(path, label: "x-hive #{label}") }
+        unless paths == paths.sort.uniq
+          raise Hive::ConfigError, "workflow descriptor x-hive #{label} must be sorted and unique"
+        end
+        paths
+      end
+
+      def validate_optional_inputs!(value)
+        unless value.is_a?(Array) && value.all? { |entry| entry.is_a?(Hash) }
+          raise Hive::ConfigError, "workflow descriptor x-hive optional_inputs must be an array"
+        end
+        inputs = value.map do |entry|
+          unless entry.keys.sort == %w[authorized_slots name] &&
+                 InputName.valid?(entry["name"]) &&
+                 entry["authorized_slots"].is_a?(Array) &&
+                 !entry["authorized_slots"].empty? &&
+                 entry["authorized_slots"].all? { |slot| slot.is_a?(String) && !slot.empty? } &&
+                 entry["authorized_slots"] == entry["authorized_slots"].sort.uniq
+            raise Hive::ConfigError, "workflow descriptor x-hive optional input is malformed"
+          end
+          {
+            "name" => entry.fetch("name"),
+            "authorized_slots" => entry.fetch("authorized_slots").dup.freeze
+          }.freeze
+        end
+        names = inputs.map { |entry| entry.fetch("name") }
+        unless names == names.sort.uniq
+          raise Hive::ConfigError, "workflow descriptor x-hive optional inputs must be sorted and unique"
+        end
+        inputs.freeze
+      end
+
+      def validate_path_components!(source, package_path:)
+        root =
+          if source.start_with?(@authored_dir + File::SEPARATOR)
+            @authored_dir
+          elsif source.start_with?(@workflows_dir + File::SEPARATOR)
+            @workflows_dir
+          end
+        unless root
+          raise Hive::ConfigError, "workflow package input #{package_path.inspect} escapes the owned workflow root"
+        end
+
+        relative = Pathname.new(source).relative_path_from(Pathname.new(root)).each_filename.to_a
+        cursor = root
+        identities = relative.map.with_index do |component, index|
+          cursor = File.join(cursor, component)
+          stat = File.lstat(cursor)
+          final = index == relative.length - 1
+          valid = !stat.symlink? && (final ? stat.file? : stat.directory?)
+          unless valid
+            raise Hive::ConfigError,
+                  "workflow package input #{package_path.inspect} contains a linked or invalid path component"
+          end
+          [ stat.dev, stat.ino, stat.mode, stat.mtime, stat.ctime ]
+        end
+        real_root = File.realpath(root)
+        real_source = File.realpath(source)
+        unless real_source.start_with?(real_root + File::SEPARATOR)
+          raise Hive::ConfigError, "workflow package input #{package_path.inspect} escapes the owned workflow root"
+        end
+        identities
+      rescue Errno::ELOOP, Errno::ENOENT, Errno::EACCES, IOError
+        raise Hive::ConfigError, "workflow package input #{package_path.inspect} is missing, linked, or unreadable"
+      end
+
+      def deep_freeze(value)
+        case value
+        when Hash
+          value.each { |key, child| deep_freeze(key); deep_freeze(child) }
+        when Array
+          value.each { |child| deep_freeze(child) }
+        end
+        value.freeze
+      end
+    end
+  end
+end

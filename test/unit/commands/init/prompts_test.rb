@@ -122,6 +122,23 @@ class InitPromptsTest < Minitest::Test
     assert_equal all_defaults, answers
   end
 
+  def test_minimal_defaults_disable_optional_automation
+    answers = Hive::Commands::Init::Prompts.minimal_defaults
+
+    assert_equal [], answers.fetch("enabled_reviewers")
+    assert_equal [], answers.fetch("patrol_reviewers")
+    assert_equal "off", answers.fetch("patrol_mode")
+    assert_equal false, answers.fetch("adhoc_auto_fix")
+    assert_equal false, answers.fetch("refactor_patrol_enabled")
+    assert_equal false, answers.fetch("daemon_enabled")
+    assert_equal false, answers.fetch("babysitter_enabled")
+    assert_equal false, answers.fetch("daemon_autostart")
+    assert_equal Hive::Commands::Init::Prompts::LIMIT_KEYS.sort,
+                 answers.fetch("budgets").keys.sort
+    assert_equal Hive::Commands::Init::Prompts::LIMIT_KEYS.sort,
+                 answers.fetch("timeouts").keys.sort
+  end
+
   def test_non_tty_recommends_refactor_patrol_without_arming_legacy_config
     prompts, _output = make_prompts("", tty: false)
     answers = prompts.collect

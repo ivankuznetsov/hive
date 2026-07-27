@@ -70,14 +70,18 @@ to disable inherited Claude settings, hooks, plugins, or MCP configuration.
 Use hivebox or another OS/container boundary when those sources must be
 isolated as well as the actor's Hive-supplied tool scope.
 
-The legacy exact-policy compiler used by the separate publish/admission path
-can still materialize private settings, strict MCP configuration, and a
-pre-tool hook for its command/domain contract. Those generated artifacts are
-not the V2 actor-spawn contract described above.
+The publisher traverses every executable actor, rejects missing or understated
+policy disclosure, and projects the exact policies into Honeycomb's conservative
+coarse permission union. High-risk but reviewable packages remain visible to
+registry reviewers; publication does not manufacture approval evidence.
 
 Admission runs before installation/update, then the policy is compiled again
-from the task-pinned manifest immediately before spawn. The still-legacy
-`workflow publish` path performs its existing exact-policy admission separately.
+from the task-pinned manifest immediately before spawn. `workflow publish`
+runs authoring validation, conservative exact-actor disclosure projection,
+consumer validation, and the pinned local Honeycomb lint before any remote
+interaction. It deliberately does not apply the current runtime admission
+limit to author submission, so a correctly disclosed high-risk package remains
+reviewable even when this Hive version cannot yet install it.
 Codex, Pi, Grok,
 custom profiles without the full `policy_capabilities` set, and explicit
 managed actors selecting them fail closed. These controls reduce agent/tool

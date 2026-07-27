@@ -1,4 +1,6 @@
 require "json"
+require "tmpdir"
+require "fileutils"
 require "hive/config"
 require "hive/task"
 require "hive/markers"
@@ -14,6 +16,9 @@ require "hive/dependency_snapshot"
 require "hive/attempts/context"
 require "hive/conditions/transition_guard"
 require "hive/attempts/command_dispatch"
+require "hive/task_meta"
+require "hive/commit_or_rollback"
+require "hive/completion_time"
 
 module Hive
   module Commands
@@ -34,10 +39,61 @@ module Hive
       # only when the runner result carries the corresponding data — currently
       # `cleanup_instructions:` from the terminal `done` stage. See
       # schemas/hive-run.v1.json $defs.SuccessPayload.properties.
-      OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
+      OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions allowed_outcomes].freeze
+
+      # Exact pre-run task-folder snapshot used only for terminal runners. Lock
+      # artifacts are process-owned and intentionally remain live across a
+      # restore; every other entry is restored byte-for-byte on a failed
+      # completion commit or interrupt.
+      class TerminalStateSnapshot
+        LOCK_ARTIFACT = /\A\.lock(?:\z|\.tmp\.)/.freeze
+
+        def self.capture(folder)
+          root = Dir.mktmpdir("hive-terminal-state-")
+          backup = File.join(root, "task")
+          begin
+            FileUtils.mkdir_p(backup)
+            Dir.children(folder).each do |name|
+              next if name.match?(LOCK_ARTIFACT)
+
+              FileUtils.copy_entry(
+                File.join(folder, name), File.join(backup, name), true, false, true
+              )
+            end
+          rescue Exception
+            FileUtils.rm_rf(root)
+            raise
+          end
+          new(folder, root, backup)
+        end
+
+        def initialize(folder, root, backup)
+          @folder = folder
+          @root = root
+          @backup = backup
+        end
+
+        def restore
+          Dir.children(@folder).each do |name|
+            next if name.match?(LOCK_ARTIFACT)
+
+            FileUtils.rm_rf(File.join(@folder, name))
+          end
+          Dir.children(@backup).each do |name|
+            FileUtils.copy_entry(
+              File.join(@backup, name), File.join(@folder, name), true, false, true
+            )
+          end
+        end
+
+        def close
+          FileUtils.rm_rf(@root)
+        end
+      end
 
       def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false,
-                     durable: false, attempt_entrypoint: nil, observation_guard: nil)
+                     durable: false, attempt_entrypoint: nil, observation_guard: nil,
+                     clock: -> { Time.now.utc })
         @target = target
         @project_filter = project
         @stage_filter = stage
@@ -47,6 +103,7 @@ module Hive
         @durable = durable
         @attempts_api = attempt_entrypoint
         @observation_guard = observation_guard
+        @clock = clock
       end
 
       def call
@@ -77,6 +134,12 @@ module Hive
           @observation_guard&.call(task)
           cfg = Hive::Config.load(task.project_root)
           marker = Hive::Markers.current(task.state_file)
+          if human_stage?(task)
+            @rebase_result = human_stage_rebase_result
+            status = marker.name == :complete ? :complete : :needs_input
+            report(task, { commit: nil, status: status })
+            return
+          end
           if marker.name == :manual_steering
             @rebase_result = manual_steering_rebase_result
             report(task, { commit: nil, status: :manual_steering })
@@ -85,9 +148,25 @@ module Hive
 
           @rebase_result = perform_rebase(task, cfg)
           runner = pick_runner(task)
-          result = Hive::Stages::Base.with_stage_events(task, cfg: cfg) { runner.call(task, cfg) }
-          commit_after(task, result)
+          terminal_snapshot = terminal_state_snapshot(task)
+          legacy_completed_at = legacy_completed_at_before_run(task, marker, config: cfg)
+          begin
+            result = Hive::Stages::Base.with_stage_events(task, cfg: cfg) { runner.call(task, cfg) }
+          rescue Exception => e
+            if terminal_snapshot
+              rollback_terminal_state!(
+                task, terminal_snapshot, Hive::GitOps.new(task.project_root), e
+              )
+            end
+            raise
+          end
+          commit_after(
+            task, result, config: cfg, terminal_snapshot: terminal_snapshot,
+            completion_time: legacy_completed_at
+          )
           report(task, result)
+        ensure
+          terminal_snapshot&.close
         end
       end
 
@@ -176,19 +255,85 @@ module Hive
         Hive::Rebase::Result.skipped(:manual_steering)
       end
 
+      def human_stage_rebase_result
+        require "hive/rebase"
+
+        Hive::Rebase::Result.skipped(:human_stage)
+      end
+
       def pick_runner(task)
         Hive::Stages::Resolver.resolve(task, descriptor: task.workflow)
       end
 
-      def commit_after(task, result)
-        return unless result && result[:commit]
+      def commit_after(task, result, config: nil, terminal_snapshot: nil, completion_time: nil)
+        marker = Hive::Markers.current(task.state_file)
+        archived = Hive::TaskAction.for(task, marker, config: config).key ==
+                   Hive::Schemas::TaskActionKind::ARCHIVED
+        action = result.is_a?(Hash) ? result[:commit] : nil
+        return unless action || archived
 
         ops = Hive::GitOps.new(task.project_root)
+        owned_snapshot = archived && terminal_snapshot.nil?
+        terminal_snapshot ||= TerminalStateSnapshot.capture(task.folder) if archived
         Hive::Lock.with_commit_lock(task.hive_state_path) do
-          ops.hive_commit(stage_name: "#{task.stage_index}-#{task.stage_name}",
-                          slug: task.slug,
-                          action: result[:commit])
+          begin
+            stamp_completed_at(task, completion_time) if archived
+            ops.hive_commit(
+              stage_name: "#{task.stage_index}-#{task.stage_name}",
+              slug: task.slug,
+              action: action || "completed"
+            )
+          rescue Hive::Error, Hive::TaskMeta::InvalidMetadata,
+                 SystemCallError, IOError, ArgumentError, Interrupt => e
+            if archived && terminal_snapshot
+              rollback_terminal_state!(task, terminal_snapshot, ops, e)
+            else
+              raise
+            end
+          end
         end
+      ensure
+        terminal_snapshot&.close if owned_snapshot
+      end
+
+      def stamp_completed_at(task, completion_time = nil)
+        Hive::TaskMeta.write_completed_at_once(task.folder, completion_time || @clock.call)
+      end
+
+      def rollback_terminal_state!(task, snapshot, ops, original_error)
+        Hive::CommitOrRollback.attempt!(
+          original_error,
+          on_undo: lambda do
+            snapshot.restore
+            relative = File.join("stages", "#{task.stage_index}-#{task.stage_name}", task.slug)
+            ops.run_git!("-C", task.hive_state_path, "add", "-A", "--", relative)
+          end,
+          rolled_back_message: lambda do |error|
+            "run completion commit aborted; terminal task state rolled back. " \
+              "underlying: #{error.class}: #{error.message}"
+          end,
+          rollback_failed_message: lambda do |commit_error, rollback_error|
+            "run completion commit aborted AND terminal task state rollback failed. " \
+              "commit error: #{commit_error.class}: #{commit_error.message}. " \
+              "rollback error: #{rollback_error.class}: #{rollback_error.message}"
+          end
+        )
+      end
+
+      def terminal_state_snapshot(task)
+        terminal = task.action_workflow.stages.last
+        return nil unless terminal.dir == "#{task.stage_index}-#{task.stage_name}"
+        return nil unless [ :agent, :council ].include?(terminal.kind)
+
+        TerminalStateSnapshot.capture(task.folder)
+      end
+
+      def legacy_completed_at_before_run(task, marker, config:)
+        return nil if task.completed_at
+        return nil unless Hive::TaskAction.for(task, marker, config: config).key ==
+                          Hive::Schemas::TaskActionKind::ARCHIVED
+
+        Hive::CompletionTime.discover(task)
       end
 
       def report(task, result)
@@ -240,6 +385,7 @@ module Hive
         if result.is_a?(Hash) && result[:cleanup_instructions]
           payload["cleanup_instructions"] = result[:cleanup_instructions]
         end
+        payload["allowed_outcomes"] = allowed_outcomes(task) if human_decision_required?(task, marker)
         # The JSON payload is written to stdout *before* the raise. bin/hive
         # rescues Hive::Error and calls `exit(e.exit_code)`; Ruby's normal
         # interpreter shutdown flushes stdout via IO finalizers, so the
@@ -277,6 +423,21 @@ module Hive
 
       def json_next_action(task, marker)
         kind = Hive::Schemas::NextActionKind
+        if human_stage?(task)
+          if marker.name == :complete
+            return { "kind" => kind::NO_OP, "reason" => "human_stage_complete" }
+          end
+
+          decision_id = marker.attrs["decision_id"].to_s
+          return {
+            "kind" => kind::NO_OP,
+            "reason" => "human_decision_required",
+            "allowed_outcomes" => allowed_outcomes(task),
+            "decide_with" => "hive decide #{task.slug} <outcome> --from #{task.stage_name} " \
+                             "--decision-id #{decision_id}"
+          }
+        end
+
         case marker.name
         when :waiting
           { "kind" => kind::EDIT, "target" => task.state_file, "rerun_with" => friendly_command(task, marker) }
@@ -463,6 +624,18 @@ module Hive
         end
         puts "hive: marker=#{marker.name}"
         puts "  state_file: #{task.state_file}"
+        if human_stage?(task)
+          if marker.name == :complete
+            puts "  complete: human workflow outcome recorded"
+            return
+          end
+
+          decision_id = marker.attrs["decision_id"].to_s
+          puts "  outcomes: #{allowed_outcomes(task).map { |outcome| outcome.fetch('name') }.join(', ')}"
+          puts "  next: hive decide #{task.slug} <outcome> --from #{task.stage_name} " \
+               "--decision-id #{decision_id}"
+          return
+        end
         case marker.name
         when :waiting
           puts "  next: edit the file, then `#{friendly_command(task, marker)}` again"
@@ -526,6 +699,18 @@ module Hive
       def project_name_for(task)
         project = Hive::Config.registered_projects.find { |p| p["path"] == task.project_root }
         project ? project["name"] : task.project_name
+      end
+
+      def human_stage?(task)
+        task.workflow.stage_named(task.stage_name)&.kind == :human
+      end
+
+      def human_decision_required?(task, marker)
+        human_stage?(task) && marker.name != :complete
+      end
+
+      def allowed_outcomes(task)
+        Hive::TaskAction.for(task, Hive::Markers.current(task.state_file)).allowed_outcomes
       end
 
       # Map a Hive::Error subclass to a RunErrorKind value. Ordering matters:

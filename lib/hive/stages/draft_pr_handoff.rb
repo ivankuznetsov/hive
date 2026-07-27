@@ -3,11 +3,11 @@ require "json"
 require "open3"
 require "uri"
 require "yaml"
+require "hive/agent_git_gate"
 require "hive/atomic_file"
 require "hive/draft_pr_receipt"
 require "hive/gh"
 require "hive/markers"
-require "hive/managed_git"
 require "hive/secret_patterns"
 require "hive/worktree"
 
@@ -409,11 +409,11 @@ module Hive
         observed = "#{identity.fetch('host').downcase}/#{identity.fetch('repository').downcase}"
         raise IdentityError, "origin push repository changed after agent execution" unless observed == context.repository
 
-        fetch_out, fetch_err, fetch_status = Hive::ManagedGit.capture3(
-          context.worktree_path, "remote", "get-url", "--all", "origin"
+        urls = Hive::AgentGitGate.remote_urls(
+          repository_path: context.worktree_path,
+          remote: "origin",
+          push: false
         )
-        raise IdentityError, "origin fetch repository is unavailable" unless fetch_status.success?
-        urls = fetch_out.lines.map(&:strip).reject(&:empty?)
         raise IdentityError, "origin fetch repository is ambiguous" unless urls.one?
         fetch_identity = Hive::Gh.repository_identity_from_remote(urls.first)
         fetch_repo = "#{fetch_identity.fetch('host').downcase}/#{fetch_identity.fetch('repository').downcase}"
@@ -427,22 +427,25 @@ module Hive
           raise RecoverableError, "recorded base branch could not be observed remotely"
         end
         raise IdentityError, "recorded base branch moved during repair" unless base == context.base_oid
-      rescue KeyError, Hive::GhError => e
+      rescue KeyError, Hive::AgentGitGate::Error, Hive::GhError => e
         raise IdentityError, "remote identity preflight failed: #{e.class}"
       end
       private_class_method :preflight_remote!
 
       def assert_local_identity!(context, expected_head)
-        branch = git!(context.worktree_path, "symbolic-ref", "--quiet", "--short", "HEAD").strip
+        branch = git_read!(context.worktree_path, :current_branch).strip
         raise IdentityError, "worktree branch changed after agent validation" unless branch == context.task_branch
-        head = git!(context.worktree_path, "rev-parse", "HEAD").strip.downcase
+        head = git_read!(context.worktree_path, :head_oid).strip.downcase
         raise IdentityError, "worktree HEAD changed after publication scan" unless head == expected_head
-        status = git!(context.worktree_path, "status", "--porcelain=v1", "--untracked-files=all")
+        status = git_read!(context.worktree_path, :status)
         raise IdentityError, "worktree became dirty after agent validation" unless status.empty?
-        _out, _err, ancestry = Hive::ManagedGit.capture3(
-          context.worktree_path, "merge-base", "--is-ancestor", context.base_oid, head
+        ancestry = Hive::AgentGitGate.read(
+          context.worktree_path, :ancestor,
+          base_oid: context.base_oid, head_oid: head
         )
         raise IdentityError, "worktree head is no longer descended from recorded base" unless ancestry.success?
+      rescue Hive::AgentGitGate::Error => e
+        raise IdentityError, e.message
       end
       private_class_method :assert_local_identity!
 
@@ -496,8 +499,9 @@ module Hive
         add_piece.call(report_source, "repair report")
         add_piece.call(projected.title, "PR title")
         add_piece.call(projected.body, "PR body")
-        commits = git_binary!(
-          context.worktree_path, "rev-list", "--reverse", "#{context.base_oid}..#{head_oid}",
+        commits = git_read_binary!(
+          context.worktree_path, :commits,
+          base_oid: context.base_oid, head_oid: head_oid,
           max_bytes: MAX_OBJECT_LIST_BYTES
         )
                   .lines.map(&:strip).reject(&:empty?)
@@ -506,16 +510,17 @@ module Hive
           raise QuarantineError, "repair history exceeds #{MAX_COMMITS} commits"
         end
         commits.each do |oid|
-          object_size = git!(context.worktree_path, "cat-file", "-s", oid).to_i
+          object_size = git_read!(
+            context.worktree_path, :object_size, oid: oid
+          ).to_i
           reject_oversized_object!(object_size, "commit object")
-          commit = git_binary!(
-            context.worktree_path, "cat-file", "-p", oid,
+          commit = git_read_binary!(
+            context.worktree_path, :object_content, oid: oid,
             max_bytes: MAX_OBJECT_BYTES
           )
           scan_blob!(commit, source: "commit object")
-          diff = git_binary!(
-            context.worktree_path, "show", "--format=fuller", "--no-ext-diff",
-            "--no-renames", "--no-textconv", "--binary", oid,
+          diff = git_read_binary!(
+            context.worktree_path, :commit_patch, oid: oid,
             max_bytes: MAX_DIFF_BYTES
           )
           scan_blob!(diff, source: "commit diff")
@@ -523,35 +528,43 @@ module Hive
           add_piece.call(diff, "commit diff")
         end
 
-        objects = git_binary!(
-          context.worktree_path, "rev-list", "--objects", "#{context.base_oid}..#{head_oid}",
+        objects = git_read_binary!(
+          context.worktree_path, :object_list,
+          base_oid: context.base_oid, head_oid: head_oid,
           max_bytes: MAX_OBJECT_LIST_BYTES
         ).lines
         raise QuarantineError, "repair history exceeds #{MAX_OBJECTS} objects" if objects.length > MAX_OBJECTS
         objects.each do |line|
           oid = line.split(" ", 2).first.to_s
-          type = git!(context.worktree_path, "cat-file", "-t", oid).strip
+          type = git_read!(
+            context.worktree_path, :object_type, oid: oid
+          ).strip
           next unless type == "blob"
 
-          object_size = git!(context.worktree_path, "cat-file", "-s", oid).to_i
+          object_size = git_read!(
+            context.worktree_path, :object_size, oid: oid
+          ).to_i
           reject_oversized_object!(object_size, "reachable commit blob")
-          blob = git_binary!(
-            context.worktree_path, "cat-file", "-p", oid,
+          blob = git_read_binary!(
+            context.worktree_path, :object_content, oid: oid,
             max_bytes: MAX_OBJECT_BYTES
           )
           scan_blob!(blob, source: "reachable commit blob")
           add_piece.call(blob, "reachable commit blob")
         end
 
-        final_paths = git_binary!(
-          context.worktree_path, "diff", "--name-only", "--diff-filter=ACMRT", "-z",
-          context.base_oid, head_oid, max_bytes: MAX_PATH_LIST_BYTES
+        final_paths = git_read_binary!(
+          context.worktree_path, :changed_paths,
+          base_oid: context.base_oid, head_oid: head_oid,
+          max_bytes: MAX_PATH_LIST_BYTES
         ).split("\0").reject(&:empty?)
         final_paths.each do |path|
-          object_size = git!(context.worktree_path, "cat-file", "-s", "#{head_oid}:#{path}").to_i
+          object_size = git_read!(
+            context.worktree_path, :object_size, oid: head_oid, path: path
+          ).to_i
           reject_oversized_object!(object_size, "final changed file")
-          content = git_binary!(
-            context.worktree_path, "show", "#{head_oid}:#{path}",
+          content = git_read_binary!(
+            context.worktree_path, :object_content, oid: head_oid, path: path,
             max_bytes: MAX_OBJECT_BYTES
           )
           scan_blob!(content, source: "final changed file")
@@ -631,30 +644,13 @@ module Hive
       private_class_method :complete_no_fix_cleanup
 
       def cleanup_no_fix_worktree(task, path)
-        target = File.expand_path(path)
-        out, err, status = Hive::ManagedGit.capture3(
-          task.project_root, "worktree", "list", "--porcelain"
+        Hive::AgentGitGate.remove_materialization(
+          repository_path: task.project_root,
+          destination: path,
+          destination_root: File.dirname(File.expand_path(path))
         )
-        unless status.success?
-          detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
-          raise Hive::WorktreeError, "git worktree list failed: #{detail[0, 200]}"
-        end
-        registered = out.lines.filter_map do |line|
-          File.expand_path(line.delete_prefix("worktree ").strip) if line.start_with?("worktree ")
-        end
-        return :absent unless registered.include?(target) || File.exist?(target)
-
-        unless registered.include?(target)
-          raise Hive::WorktreeError, "no-fix worktree path is not registered"
-        end
-
-        remove_out, remove_err, remove_status = Hive::ManagedGit.capture3(
-          task.project_root, "worktree", "remove", target
-        )
-        return :removed if remove_status.success?
-
-        detail = remove_err.to_s.strip.empty? ? remove_out.to_s.strip : remove_err.to_s.strip
-        raise Hive::WorktreeError, "git worktree remove failed: #{detail[0, 200]}"
+      rescue Hive::AgentGitGate::Error => e
+        raise Hive::WorktreeError, e.message
       end
       private_class_method :cleanup_no_fix_worktree
 
@@ -763,73 +759,74 @@ module Hive
       end
       private_class_method :write_pr_metadata!
 
-      def git!(path, *args)
-        out, err, status = Hive::ManagedGit.capture3(path, *args)
-        return out if status.success?
+      def git_read!(path, operation, **parameters)
+        result = Hive::AgentGitGate.read(path, operation, **parameters)
+        return result.stdout if result.success?
 
-        detail = err.to_s.strip
-        detail = out.to_s.strip if detail.empty?
-        raise IdentityError, "git #{args.first} failed during handoff: #{detail[0, 200]}"
+        detail = result.stderr.strip
+        detail = result.stdout.strip if detail.empty?
+        raise IdentityError,
+              "hardened Git #{operation} failed during handoff: #{detail[0, 200]}"
+      rescue Hive::AgentGitGate::Error => e
+        raise IdentityError, e.message
+      end
+      private_class_method :git_read!
+
+      def git_read_binary!(path, operation, max_bytes:, **parameters)
+        result = Hive::AgentGitGate.read(
+          path, operation, max_stdout_bytes: max_bytes, **parameters
+        )
+        if result.overflow
+          raise QuarantineError,
+                "hardened Git #{operation} output exceeds #{max_bytes} bytes"
+        end
+        return result.stdout if result.success?
+
+        detail = result.stderr.encode(
+          "UTF-8", invalid: :replace, undef: :replace, replace: "?"
+        ).strip
+        raise IdentityError,
+              "hardened Git #{operation} failed during publication scan: #{detail[0, 200]}"
+      rescue Hive::AgentGitGate::Error => e
+        raise IdentityError, e.message
+      end
+      private_class_method :git_read_binary!
+
+      # Private compatibility shims keep older focused tests and exception
+      # wording stable while still translating a closed set of historical argv
+      # shapes into the public gate vocabulary. Unknown shapes fail closed.
+      def git!(path, *args)
+        operation, parameters = legacy_git_read(args)
+        git_read!(path, operation, **parameters)
       end
       private_class_method :git!
 
       def git_binary!(path, *args, max_bytes: nil)
-        out, err, status, overflow = if max_bytes
-          capture_git_binary(path, args, max_bytes)
+        operation, parameters = if args.length == 2 && args.first == "show"
+          oid, object_path = args.last.split(":", 2)
+          oid = git_read!(path, :head_oid).strip if oid == "HEAD"
+          [ :object_content, { oid: oid, path: object_path } ]
         else
-          [ *Hive::ManagedGit.capture3(path, *args, binmode: true), false ]
+          legacy_git_read(args)
         end
-        if overflow
-          raise QuarantineError, "git #{args.first} output exceeds #{max_bytes} bytes"
-        end
-        if status.success?
-          return out
-        end
-
-        detail = err.to_s.encode("UTF-8", invalid: :replace, undef: :replace, replace: "?").strip
-        raise IdentityError, "git #{args.first} failed during publication scan: #{detail[0, 200]}"
+        git_read_binary!(
+          path, operation,
+          max_bytes: max_bytes || MAX_DIFF_BYTES,
+          **parameters
+        )
       end
       private_class_method :git_binary!
 
-      def capture_git_binary(path, args, max_bytes)
-        out = String.new(capacity: [ max_bytes, 16 * 1024 ].min, encoding: Encoding::BINARY)
-        err = String.new(capacity: MAX_GIT_ERROR_BYTES, encoding: Encoding::BINARY)
-        overflow = false
-        status = nil
-        Hive::ManagedGit.popen3(path, *args, pgroup: true) do |stdin, stdout, stderr, wait|
-          stdin.close
-          stdout.binmode
-          stderr.binmode
-          streams = { stdout => [ out, max_bytes ], stderr => [ err, MAX_GIT_ERROR_BYTES ] }
-          until streams.empty?
-            readable = IO.select(streams.keys)&.first || []
-            readable.each do |stream|
-              chunk = stream.read_nonblock(16 * 1024, exception: false)
-              if chunk.nil?
-                streams.delete(stream)
-                next
-              end
-              next if chunk == :wait_readable
-
-              target, limit = streams.fetch(stream)
-              available = limit - target.bytesize
-              target << chunk.byteslice(0, available) if available.positive?
-              next unless stream.equal?(stdout) && chunk.bytesize > available && !overflow
-
-              overflow = true
-              Process.kill("KILL", -wait.pid)
-            rescue Errno::ESRCH
-              nil
-            end
-          end
-          status = wait.value
-        ensure
-          stdout.close unless stdout.closed?
-          stderr.close unless stderr.closed?
+      def legacy_git_read(args)
+        case args
+        when [ "status" ], [ "status", "--porcelain=v1", "--untracked-files=all" ]
+          [ :status, {} ]
+        else
+          raise IdentityError,
+                "unsupported legacy hardened Git operation #{args.first.inspect}"
         end
-        [ out, err, status, overflow ]
       end
-      private_class_method :capture_git_binary
+      private_class_method :legacy_git_read
     end
   end
 end

@@ -1,6 +1,9 @@
 name: review_with_findings_then_develop
 description: Findings JSON plus accept-finding toggles on a seeded execute review file.
 tags: [cli-only, findings]
+coverage:
+  primary: review.findings_cycle
+  supporting: []
 steps:
   - kind: seed_state
     stage: 4-execute

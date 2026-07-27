@@ -3,6 +3,30 @@ require "application_system_test_case"
 class KanbanBoardTest < ApplicationSystemTestCase
   teardown { StatusBroadcaster.stop! }
 
+  test "operator follows an ordinary hidden summary into the complete archive and task detail" do
+    project = create_hive_project!("kanban-archive-app")
+    slug = create_task!(project, "Keep the complete archive reachable")
+    source = stage_dir(project, "1-inbox").join(slug)
+    archived = stage_dir(project, "9-done").join(slug)
+    FileUtils.mv(source, archived)
+    archived.join("task.md").write("<!-- COMPLETE -->\n")
+    Hive::TaskMeta.rewrite(
+      archived.to_s,
+      completed_at: Time.now.utc - (4 * Hive::ArchiveFilter::SECONDS_PER_DAY)
+    )
+
+    visit dev_login_path(as: "alice")
+
+    assert_no_selector ".kanban-card[data-task-slug='#{slug}']"
+    find(".archive-summary a", text: "… and 1 older archived task (hive archive to view)").click
+    assert_current_path archive_path(project:)
+    assert_selector "#status-archive [data-task-slug='#{slug}']"
+
+    find("[data-task-slug='#{slug}'] a", text: "Keep the complete archive reachable").click
+    assert_current_path task_path(project, slug, source: "archive")
+    assert_selector ".task-header", text: "Keep the complete archive reachable"
+  end
+
   test "operator switches between the live board and grid without losing the preference" do
     project = create_hive_project!("kanban-browser-app")
     slug = create_task!(project, "Move through a native board")
@@ -70,6 +94,39 @@ class KanbanBoardTest < ApplicationSystemTestCase
                     "the columns should scroll inside the board rather than widening the page"
     assert_operator metrics.fetch("columnsScrollWidth"), :>, metrics.fetch("columnsClientWidth")
     assert_operator metrics.fetch("columnsScrollLeft"), :>, 0
+  end
+
+  test "board uses the available width on large screens" do
+    project = create_hive_project!("kanban-wide-app")
+    create_task!(project, "Use the whole workspace")
+    visit dev_login_path(as: "alice")
+    page.current_window.resize_to(3840, 1400)
+
+    metrics = page.evaluate_script(<<~JS)
+      (() => {
+        const viewport = document.documentElement.clientWidth
+        const main = document.querySelector("main").getBoundingClientRect()
+        const topbar = document.querySelector(".topbar-inner").getBoundingClientRect()
+        const statusMain = document.querySelector(".status-main").getBoundingClientRect()
+        const column = document.querySelector(".kanban-column").getBoundingClientRect()
+        return {
+          viewport,
+          mainWidth: main.width,
+          topbarWidth: topbar.width,
+          statusMainWidth: statusMain.width,
+          columnWidth: column.width
+        }
+      })()
+    JS
+
+    assert_operator metrics.fetch("viewport") - metrics.fetch("mainWidth"), :<=, 80,
+                    "the application shell should keep only fluid edge gutters"
+    assert_in_delta metrics.fetch("mainWidth"), metrics.fetch("topbarWidth"), 1,
+                    "navigation and page content should share the full-width shell"
+    assert_operator metrics.fetch("statusMainWidth"), :>, 3_400,
+                    "the project rail must leave the rest of a large screen to task content"
+    assert_operator metrics.fetch("columnWidth"), :>, 310,
+                    "kanban columns should grow after their comfortable minimum instead of staying capped"
   end
 
   test "project filter survives a view switch" do

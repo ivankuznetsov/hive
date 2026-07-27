@@ -2,7 +2,9 @@ require_relative "../../test_helper"
 require "fileutils"
 require "json"
 require "open3"
+require "psych"
 require "rbconfig"
+require "json_schemer"
 require_relative "paths"
 
 class E2EBinaryTest < Minitest::Test
@@ -16,11 +18,33 @@ class E2EBinaryTest < Minitest::Test
     flunk "expected exactly one parseable JSON document on stdout: #{e.message}"
   end
 
-  def with_temp_scenario(name, body)
+  def with_temp_scenario(name, body, catalog: true)
     path = File.join(Hive::E2E::Paths.scenarios_dir, "#{name}.yml")
-    File.write(path, body)
+    coverage_id = "test.#{name}"
+    coverage_path = File.join(Hive::E2E::Paths.e2e_root, "coverage.yml")
+    original_catalog = File.binread(coverage_path)
+    scenario_body = body
+    unless body.match?(/^coverage:/)
+      scenario_body = "#{body.rstrip}\ncoverage:\n  primary: #{coverage_id}\n  supporting: []\n"
+    end
+    File.write(path, scenario_body)
+    if catalog
+      catalog_data = Psych.safe_load(original_catalog, aliases: false)
+      catalog_data.fetch("coverage") << {
+        "id" => coverage_id,
+        "title" => "Synthetic binary contract",
+        "description" => "Temporary binary-level scenario used by the focused harness tests.",
+        "maturity" => "required",
+        "profiles" => [ "release" ],
+        "constraints" => { "platforms" => [], "providers" => [] },
+        "docs" => [ "wiki/e2e.md" ],
+        "code" => [ "test/e2e/scenarios/#{name}.yml" ]
+      }
+      File.write(coverage_path, Psych.dump(catalog_data))
+    end
     yield
   ensure
+    File.binwrite(coverage_path, original_catalog) if original_catalog
     FileUtils.rm_f(path) if path
   end
 
@@ -56,6 +80,100 @@ class E2EBinaryTest < Minitest::Test
     assert incident
     assert_match(/\A#\d+\z/, incident.fetch("sibling_task_id"))
     assert_includes [ true, false ], incident.fetch("pending")
+  end
+
+  def test_coverage_json_exact_match_is_schema_valid_and_has_one_safe_command
+    out, err, status = Open3.capture3(
+      hive_e2e, "coverage", "--match", "workflow.full_pipeline", "--json"
+    )
+
+    assert status.success?, err
+    payload = parse_single_json_document(out)
+    assert_equal "hive-e2e-coverage", payload.fetch("schema")
+    assert_equal [ "workflow.full_pipeline" ],
+                 payload.fetch("matches").map { |match| match.fetch("id") }
+    assert_equal "bin/hive-e2e run --coverage workflow.full_pipeline",
+                 payload.dig("matches", 0, "runnable_command")
+    schema = JSONSchemer.schema(JSON.parse(File.read(
+      File.join(Hive::E2E::Paths.repo_root, "schemas", "hive-e2e-coverage.v1.json")
+    )))
+    assert_empty schema.validate(payload).to_a
+  end
+
+  def test_coverage_substring_order_human_output_and_no_match_contract
+    out, err, status = Open3.capture3(hive_e2e, "coverage", "--match", "update", "--json")
+    assert status.success?, err
+    ids = JSON.parse(out).fetch("matches").map { |match| match.fetch("id") }
+    assert_equal ids.sort, ids
+
+    out, err, status = Open3.capture3(
+      hive_e2e, "coverage", "--match", "recovery.provider_limit"
+    )
+    assert status.success?, err
+    assert_includes out, "recovery.provider_limit"
+    refute_includes out, "bin/hive-e2e run --coverage recovery.provider_limit"
+
+    out, err, status = Open3.capture3(
+      hive_e2e, "coverage", "--match", "definitely-no-coverage", "--json"
+    )
+    assert_equal 64, status.exitstatus
+    assert_empty err
+    assert_equal "no_scenarios", JSON.parse(out).fetch("error_kind")
+  end
+
+  def test_run_coverage_executes_only_primary_and_writes_selection_companion
+    Dir.mktmpdir("e2e-semantic-run") do |runs_dir|
+      out, err, status = Open3.capture3(
+        { "HIVE_E2E_RUNS_DIR" => runs_dir },
+        hive_e2e, "run", "--coverage", "runtime.error_envelope", "--json"
+      )
+
+      assert status.success?, err
+      report = JSON.parse(out)
+      assert_equal [ "run_error_envelope" ],
+                   report.fetch("scenario_metadata").map { |row| row.fetch("name") }
+      run_dir = Dir[File.join(runs_dir, "*")].first
+      selection = JSON.parse(File.read(File.join(run_dir, "selection.json")))
+      assert_equal [ "runtime.error_envelope" ], selection.fetch("coverage_ids")
+      assert_equal [ "run_error_envelope" ], selection.fetch("scenarios")
+    end
+  end
+
+  def test_run_pending_or_planned_coverage_has_no_runnable_scenario
+    out, err, status = Open3.capture3(
+      hive_e2e, "run", "--coverage", "recovery.provider_limit", "--json"
+    )
+
+    assert_equal 64, status.exitstatus
+    assert_empty err
+    payload = JSON.parse(out)
+    assert_equal "no_scenarios", payload.fetch("error_kind")
+    assert_match(/no runnable scenario/, payload.fetch("message"))
+  end
+
+  def test_unknown_scenario_mapping_fails_before_run_creation
+    name = "unknown_coverage_mapping_#{Process.pid}"
+    with_temp_scenario(name, <<~YAML, catalog: false) do
+      name: #{name}
+      coverage:
+        primary: test.not_in_catalog
+        supporting: []
+      steps:
+        - kind: cli
+          args: [version]
+    YAML
+      Dir.mktmpdir("e2e-preflight-runs") do |runs_dir|
+        out, err, status = Open3.capture3(
+          { "HIVE_E2E_RUNS_DIR" => runs_dir },
+          hive_e2e, "run", name, "--json"
+        )
+
+        assert_equal 78, status.exitstatus
+        assert_empty err
+        assert_match(/unknown coverage ID/, JSON.parse(out).fetch("message"))
+        assert_empty Dir.children(runs_dir), "catalog preflight must not create a run directory"
+      end
+    end
   end
 
   def test_incident_inventory_reports_enabled_results_and_pending_metadata

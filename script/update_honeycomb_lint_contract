@@ -1,0 +1,62 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "digest"
+require "fileutils"
+require "json"
+require "open3"
+require "optparse"
+require "tmpdir"
+
+options = {}
+OptionParser.new do |parser|
+  parser.banner = "usage: update_honeycomb_lint_contract --checkout PATH --version vN --commit SHA --policy-sha256 SHA256"
+  parser.on("--checkout PATH") { |value| options[:checkout] = File.expand_path(value) }
+  parser.on("--version VERSION") { |value| options[:version] = value }
+  parser.on("--commit SHA") { |value| options[:commit] = value }
+  parser.on("--policy-sha256 SHA256") { |value| options[:policy_sha256] = value }
+end.parse!
+
+required = %i[checkout version commit policy_sha256]
+abort "all of #{required.join(', ')} are required" unless required.all? { |key| options[key] }
+abort "version must match vN" unless options[:version].match?(/\Av[1-9][0-9]*\z/)
+abort "commit must be a full lowercase Git SHA" unless options[:commit].match?(/\A[0-9a-f]{40}\z/)
+abort "policy checksum must be lowercase SHA-256" unless options[:policy_sha256].match?(/\A[0-9a-f]{64}\z/)
+
+checkout = options.fetch(:checkout)
+head, error, status = Open3.capture3("git", "-C", checkout, "rev-parse", "HEAD")
+abort "trusted checkout is unavailable: #{error.lines.first}" unless status.success?
+abort "checkout commit does not match --commit" unless head.strip == options.fetch(:commit)
+
+policy = File.join(checkout, "policy", "security-lint.yml")
+abort "trusted checkout has no security-lint policy" unless File.file?(policy)
+actual_policy_sha = Digest::SHA256.file(policy).hexdigest
+abort "trusted policy checksum does not match --policy-sha256" unless actual_policy_sha == options.fetch(:policy_sha256)
+
+root = File.expand_path("..", __dir__)
+contract = File.join(root, "config", "honeycomb-security-lint", "#{options.fetch(:version)}.yml")
+fixtures = File.join(
+  root, "config", "honeycomb-security-lint", options.fetch(:version), "fixtures"
+)
+abort "contract version already exists" if File.exist?(contract) || File.exist?(fixtures)
+
+Dir.mktmpdir("hive-honeycomb-lint-import-") do |stage|
+  staged_fixtures = File.join(stage, "fixtures")
+  FileUtils.mkdir_p(staged_fixtures)
+  source_fixture = File.join(checkout, "test", "fixtures", "packages", "valid", "example", "1.0.0")
+  abort "trusted checkout has no canonical package fixture" unless File.directory?(source_fixture)
+  FileUtils.cp_r(source_fixture, File.join(staged_fixtures, "package"), preserve: true)
+  FileUtils.cp(policy, File.join(staged_fixtures, "security-lint.yml"), preserve: true)
+  metadata = {
+    "schema" => "hive.honeycomb-security-lint-import/v1",
+    "version" => options.fetch(:version),
+    "upstream_commit" => options.fetch(:commit),
+    "upstream_policy_sha256" => actual_policy_sha
+  }
+  File.write(File.join(staged_fixtures, "import.json"), JSON.pretty_generate(metadata) + "\n")
+  FileUtils.mkdir_p(File.dirname(fixtures))
+  File.rename(staged_fixtures, fixtures)
+end
+
+warn "imported trusted upstream inputs to #{fixtures}"
+warn "review findings and add immutable #{contract} without replacing an existing version"

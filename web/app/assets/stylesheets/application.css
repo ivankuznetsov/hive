@@ -36,6 +36,7 @@
   --radius: 14px;
   --radius-sm: 9px;
   --shadow: 0 1px 2px rgba(40, 35, 25, 0.05), 0 4px 16px rgba(40, 35, 25, 0.04);
+  --page-gutter: clamp(16px, 2vw, 36px);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -75,9 +76,7 @@ body {
 }
 
 main {
-  max-width: 1040px;
-  margin: 0 auto;
-  padding: 28px 24px 64px;
+  padding: 28px var(--page-gutter) 64px;
 }
 
 h1, h2, h3, .brand {
@@ -104,9 +103,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 }
 
 .topbar-inner {
-  max-width: 1040px;
-  margin: 0 auto;
-  padding: 10px 24px;
+  padding: 10px var(--page-gutter);
   display: flex;
   align-items: center;
   gap: 26px;
@@ -276,7 +273,12 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .daemon-panel form { margin: 0; }
 
 /* Project filter rail (TUI left-pane parity). */
-.status-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 30px; align-items: start; }
+.status-layout {
+  display: grid;
+  grid-template-columns: clamp(170px, 12vw, 240px) minmax(0, 1fr);
+  gap: clamp(18px, 2vw, 34px);
+  align-items: start;
+}
 .status-main { min-width: 0; }
 .project-nav { position: sticky; top: 24px; display: flex; flex-direction: column; gap: 2px; }
 .project-nav-item {
@@ -378,7 +380,7 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .kanban-columns {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: minmax(260px, 310px);
+  grid-auto-columns: minmax(270px, 1fr);
   gap: 12px;
   max-width: 100%;
   overflow-x: auto;

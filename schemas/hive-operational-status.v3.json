@@ -52,11 +52,15 @@
     "summary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["overall_state", "active", "archived", "projects_total", "projects_healthy", "states"],
+      "required": [
+        "overall_state", "active", "archived", "hidden_archived_task_count",
+        "projects_total", "projects_healthy", "states"
+      ],
       "properties": {
         "overall_state": { "$ref": "#/$defs/State" },
         "active": { "type": "integer", "minimum": 0 },
         "archived": { "type": "integer", "minimum": 0 },
+        "hidden_archived_task_count": { "type": "integer", "minimum": 0 },
         "projects_total": { "type": "integer", "minimum": 0 },
         "projects_healthy": { "type": "integer", "minimum": 0 },
         "states": {
@@ -222,10 +226,14 @@
         "position": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["stage", "marker"],
+          "required": ["stage", "marker", "allowed_outcomes"],
           "properties": {
             "stage": { "type": "string" },
-            "marker": { "type": "string" }
+            "marker": { "type": "string" },
+            "allowed_outcomes": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/HumanOutcome" }
+            }
           }
         },
         "liveness": {
@@ -322,6 +330,17 @@
             { "$ref": "#/$defs/Action" }
           ]
         }
+      }
+    },
+    "HumanOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "complete", "artifact", "to"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "complete": { "type": "boolean" },
+        "artifact": { "type": ["string", "null"] },
+        "to": { "type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9-]*$" }
       }
     },
     "Reason": {

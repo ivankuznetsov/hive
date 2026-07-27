@@ -15,7 +15,6 @@ require "hive/daemon/operational_snapshot"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/daemon/patrol_scheduler"
-require "hive/daemon/digest_scheduler"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/logger"
 require "hive/daemon/dispatch_request_queue"
@@ -182,15 +181,10 @@ module Hive
         # etc.) actually take effect. PR-40 review P1 #2: this used to
         # call merge_defaults({}) which discarded the global config.
         daemon_cfg = Hive::Config.load_global_daemon
-        # Read the global digest block directly (mirrors the SIGHUP reload
-        # path in Dispatcher#reload_config!, which also calls the config
-        # method straight) so the two stay symmetric.
-        digest_cfg = Hive::Config.load_global_digest_block
         answer_digest_cfg = Hive::Config.load_global_answer_digest_block
         config = {
           "daemon" => daemon_cfg,
           "update" => Hive::Config.load_global_update,
-          "digest" => digest_cfg,
           "answer_digest" => answer_digest_cfg
         }
 
@@ -243,14 +237,6 @@ module Hive
           ordinary_scheduler: patrol_scheduler,
           architecture_scheduler: refactor_patrol_scheduler,
           dry_run: @dry_run
-        )
-        digest_scheduler = Hive::Daemon::DigestScheduler.new(
-          enabled: digest_cfg.fetch("enabled", false),
-          max_catchup_days: digest_cfg.fetch(
-            "max_catchup_days",
-            Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
-          ),
-          logger: logger
         )
         answer_digest_scheduler = Hive::Daemon::AnswerDigestScheduler.new(
           enabled: answer_digest_cfg.fetch("enabled", false),
@@ -305,7 +291,7 @@ module Hive
           patrol_scheduler: patrol_scheduler,
           refactor_patrol_scheduler: refactor_patrol_scheduler,
           patrol_arbiter: patrol_arbiter,
-          digest_scheduler: digest_scheduler, answer_digest_scheduler: answer_digest_scheduler,
+          answer_digest_scheduler: answer_digest_scheduler,
           dry_run: @dry_run,
           update_state: Hive::UpdateCheck::State.new,
           attempt_dispatcher: attempts_api,

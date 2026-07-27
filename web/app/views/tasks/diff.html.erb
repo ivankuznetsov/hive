@@ -12,7 +12,8 @@
   <%= stage_badge(@task["stage"]) %>
 </div>
 <p class="task-slug"><%= @project.name %> · <%= @task["slug"] %></p>
-<p><%= link_to "← Back to task", task_path(@project.name, @task["slug"]) %></p>
+<p><%= link_to "← Back to task",
+          task_path(@project.name, @task["slug"], source: @task_source) %></p>
 
 <section class="diff-result diff-result-<%= @diff_result.state %>"
          aria-labelledby="diff-state-heading"

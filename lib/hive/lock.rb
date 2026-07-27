@@ -8,8 +8,9 @@ module Hive
   module Lock
     module_function
 
-    def with_task_lock(task_folder, payload = {})
-      lock_data = acquire_task_lock(task_folder, payload)
+    def with_task_lock(task_folder, payload = nil, create: true, **payload_keywords)
+      payload = (payload || {}).merge(payload_keywords)
+      lock_data = acquire_task_lock(task_folder, payload, create: create)
       begin
         yield
       ensure
@@ -17,9 +18,14 @@ module Hive
       end
     end
 
-    def acquire_task_lock(task_folder, payload = {})
+    def acquire_task_lock(task_folder, payload = nil, create: true, **payload_keywords)
+      payload = (payload || {}).merge(payload_keywords)
       lock_path = File.join(task_folder, ".lock")
-      FileUtils.mkdir_p(task_folder)
+      if create
+        FileUtils.mkdir_p(task_folder)
+      elsif !File.directory?(task_folder)
+        raise Errno::ENOENT, task_folder
+      end
       data = base_payload
              .merge(payload.transform_keys(&:to_s))
              .merge(Hive::Attempts::Context.projection)
@@ -123,23 +129,27 @@ module Hive
 
     # Bounded acquire — flock(LOCK_EX) without timeout would hang forever if a
     # frozen 45-min agent holds the lock. Poll non-blocking with a deadline.
-    def with_commit_lock(project_hive_state_path)
+    def with_commit_lock(project_hive_state_path, timeout: COMMIT_LOCK_TIMEOUT_SEC)
       FileUtils.mkdir_p(project_hive_state_path)
       lock_path = File.join(project_hive_state_path, ".commit-lock")
       File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |f|
-        deadline = Time.now + COMMIT_LOCK_TIMEOUT_SEC
+        deadline = Time.now + timeout
         until f.flock(File::LOCK_EX | File::LOCK_NB)
           if Time.now >= deadline
             raise ConcurrentRunError.new(
-              "commit lock at #{lock_path} held longer than #{COMMIT_LOCK_TIMEOUT_SEC}s",
+              "commit lock at #{lock_path} held longer than #{timeout}s",
               lock_path: lock_path
             )
           end
 
-          sleep 0.2
+          sleep [ 0.2, deadline - Time.now ].min.clamp(0, 0.2)
         end
         return yield
       end
+    end
+
+    def monotonic_now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
 
     def base_payload

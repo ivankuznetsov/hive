@@ -12,8 +12,7 @@ class ComponentBoundariesTest < Minitest::Test
   def test_committed_catalog_describes_all_retained_components
     contract = ComponentBoundaryContract.new(@document, root: ROOT)
 
-    assert contract.validate_catalog!
-    assert contract.validate_static_boundaries!
+    assert contract.validate!
     assert_equal %w[
       agent-abi
       agent-artifact-firewall
@@ -28,16 +27,73 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "candidate", attempts.fetch("state")
     assert_equal "hive/attempts/api", attempts.dig("entrypoint", "require")
     assert_equal "Hive::Attempts::API", attempts.dig("entrypoint", "constant")
+    assert_empty attempts.fetch("component_dependencies")
+    assert_empty attempts.fetch("migration_exceptions")
     assert_equal %w[
       Hive::Attempts::ClientResult
       Hive::Attempts::DispatchResult
     ], attempts.dig("public_contract", "values")
-    assert_includes attempts.fetch("internal_collaborators"), "Hive::Attempts::Store"
-    assert_includes attempts.fetch("internal_collaborators"), "Hive::Attempts::Supervisor"
-    assert_includes attempts.fetch("internal_collaborators"), "Hive::Attempts::Reconciler"
-    refute_includes attempts.dig("public_contract", "values"), "Hive::Attempts::Store"
-    refute_includes attempts.dig("public_contract", "values"), "Hive::Attempts::Supervisor"
-    refute_includes attempts.dig("public_contract", "values"), "Hive::Attempts::Reconciler"
+    expected_internal_collaborators = %w[
+      Hive::Attempts::CapacitySnapshot
+      Hive::Attempts::Client
+      Hive::Attempts::ConfiguredDispatcher
+      Hive::Attempts::DetachedLauncher
+      Hive::Attempts::Dispatcher
+      Hive::Attempts::Entrypoint
+      Hive::Attempts::LostOutcomeProcessor
+      Hive::Attempts::LostOutcomeStore
+      Hive::Attempts::ProcessIdentity
+      Hive::Attempts::Reconciler
+      Hive::Attempts::Store
+      Hive::Attempts::Supervisor
+    ]
+    assert_equal expected_internal_collaborators,
+                 attempts.fetch("internal_collaborators").sort
+    assert_equal expected_internal_collaborators,
+                 attempts.fetch("forbidden_constructions").sort
+    assert_equal(
+      {
+        "Hive::Attempts::LostOutcomeProcessor" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::LostOutcomeStore" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::ProcessIdentity" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::Reconciler" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::Store" => [
+          "lib/hive/commands/attempt_supervise.rb",
+          "lib/hive/commands/daemon.rb",
+          "lib/hive/conditions/execute_boundary.rb",
+          "lib/hive/implementation_identity/store.rb",
+          "lib/hive/task_closure.rb",
+          "lib/hive/task_projection/store.rb"
+        ],
+        "Hive::Attempts::Supervisor" => [ "lib/hive/commands/attempt_supervise.rb" ]
+      },
+      attempts.fetch("authorized_internal_constructions").to_h do |entry|
+        [ entry.fetch("constant"), entry.fetch("files") ]
+      end
+    )
+    user_service = contract.component("user-service")
+    assert_equal "boundary-ready", user_service.fetch("state")
+    assert_equal "hive/user_service", user_service.dig("entrypoint", "require")
+    assert_equal "Hive::UserService", user_service.dig("entrypoint", "constant")
+    assert_equal(
+      %w[
+        Hive::UserService::Definition
+        Hive::UserService::Plan
+        Hive::UserService::Result
+        Hive::UserService::Status
+      ],
+      user_service.dig("public_contract", "values").sort
+    )
+    assert_equal [ "Hive::UserService::Manager" ],
+                 user_service.fetch("forbidden_constructions")
+    assert_empty user_service.fetch("migration_exceptions")
+
+    ready_components = [ user_service ]
+
+    clean_load = contract.validate_clean_load!("attempts")
+    assert_equal "Hive::Attempts::API", clean_load.fetch("constant")
+    assert_empty clean_load.fetch("forbidden_loaded_features")
+    assert_empty clean_load.fetch("forbidden_constants")
 
     agent_abi = contract.component("agent-abi")
     assert_equal "boundary-ready", agent_abi.fetch("state")
@@ -49,13 +105,227 @@ class ComponentBoundariesTest < Minitest::Test
                     "Hive::AgentRuntime::UnsupportedCapability"
     assert_empty agent_abi.fetch("migration_exceptions")
 
-    remaining_candidates = contract.components.reject { |component| component == agent_abi }
+    artifact_firewall = contract.component("agent-artifact-firewall")
+    assert_equal "boundary-ready", artifact_firewall.fetch("state")
+    assert_equal "hive/artifact_firewall",
+                 artifact_firewall.dig("entrypoint", "require")
+    assert_equal "Hive::ArtifactFirewall",
+                 artifact_firewall.dig("entrypoint", "constant")
+    assert_includes artifact_firewall.dig("public_contract", "values"),
+                    "Hive::ArtifactFirewall::Report"
+    assert_includes artifact_firewall.dig("public_contract", "errors"),
+                    "Hive::ArtifactFirewall::InvalidManifest"
+    assert_equal [ "Hive::ProtectedFiles" ],
+                 artifact_firewall.fetch("internal_collaborators")
+    assert_empty artifact_firewall.fetch("migration_exceptions")
+
+    skillpack = contract.component("skillpack")
+    assert_equal "boundary-ready", skillpack.fetch("state")
+    assert_equal "hive/agent_skills", skillpack.dig("entrypoint", "require")
+    assert_equal "Hive::AgentSkills", skillpack.dig("entrypoint", "constant")
+    assert_equal(
+      %w[
+        Hive::AgentSkills::Plan
+        Hive::AgentSkills::Projection
+        Hive::AgentSkills::ProjectionReport
+      ],
+      skillpack.dig("public_contract", "values").sort
+    )
+    assert_includes skillpack.dig("public_contract", "errors"),
+                    "Hive::AgentSkills::StalePlan"
+    assert_includes skillpack.fetch("forbidden_constructions"),
+                    "Hive::AgentSkills::DirectoryPublisher"
+    assert_empty skillpack.fetch("migration_exceptions")
+
+    git_gate = contract.component("safe-agent-git-gate")
+    assert_equal "boundary-ready", git_gate.fetch("state")
+    assert_equal "hive/agent_git_gate",
+                 git_gate.dig("entrypoint", "require")
+    assert_equal "Hive::AgentGitGate",
+                 git_gate.dig("entrypoint", "constant")
+    assert_equal(
+      %w[
+        Hive::AgentGitGate::MaterializationReceipt
+        Hive::AgentGitGate::PublicationReceipt
+        Hive::AgentGitGate::ReadResult
+        Hive::AgentGitGate::RemoteObservation
+      ],
+      git_gate.dig("public_contract", "values").sort
+    )
+    assert_includes git_gate.dig("public_contract", "errors"),
+                    "Hive::AgentGitGate::RemoteConflict"
+    assert_equal [ "Hive::ManagedGit" ],
+                 git_gate.fetch("internal_collaborators")
+    assert_empty git_gate.fetch("migration_exceptions")
+
+    work_ledger = contract.component("work-ledger")
+    assert_equal "boundary-ready", work_ledger.fetch("state")
+    assert_equal "hive/work_ledger",
+                 work_ledger.dig("entrypoint", "require")
+    assert_equal "Hive::WorkLedger",
+                 work_ledger.dig("entrypoint", "constant")
+    assert_equal(
+      %w[
+        Hive::WorkLedger::AppendReceipt
+        Hive::WorkLedger::DescriptorReceipt
+        Hive::WorkLedger::JournalHandle
+        Hive::WorkLedger::ReplayReceipt
+      ],
+      work_ledger.dig("public_contract", "values").sort
+    )
+    assert_includes work_ledger.dig("public_contract", "errors"),
+                    "Hive::WorkLedger::Conflict"
+    assert_equal(
+      %w[
+        Hive::WorkLedger::DescriptorValidator
+        Hive::WorkLedger::Journal
+        Hive::WorkLedger::Replay
+      ],
+      work_ledger.fetch("forbidden_constructions").sort
+    )
+    assert_empty work_ledger.fetch("migration_exceptions")
+
+    ready_components.push(
+      agent_abi, artifact_firewall, skillpack, git_gate, work_ledger
+    )
+    remaining_candidates = contract.components.reject do |component|
+      ready_components.include?(component)
+    end
+    assert_equal [ attempts ], remaining_candidates
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
-    agent_abi_load = contract.validate_clean_loads!.fetch("agent-abi")
+    ready_loads = contract.validate_clean_loads!
+    assert_equal %w[
+      agent-abi
+      agent-artifact-firewall
+      safe-agent-git-gate
+      skillpack
+      user-service
+      work-ledger
+    ], ready_loads.keys.sort
+    agent_abi_load = ready_loads.fetch("agent-abi")
     assert_equal "Hive::AgentRuntime", agent_abi_load.fetch("constant")
     assert_empty agent_abi_load.fetch("forbidden_loaded_features")
     assert_empty agent_abi_load.fetch("forbidden_constants")
+    user_service_load = ready_loads.fetch("user-service")
+    assert_equal "Hive::UserService", user_service_load.fetch("constant")
+    assert_empty user_service_load.fetch("forbidden_loaded_features")
+    assert_empty user_service_load.fetch("forbidden_constants")
+    artifact_firewall_load = ready_loads.fetch("agent-artifact-firewall")
+    assert_equal "Hive::ArtifactFirewall", artifact_firewall_load.fetch("constant")
+    assert_empty artifact_firewall_load.fetch("forbidden_loaded_features")
+    assert_empty artifact_firewall_load.fetch("forbidden_constants")
+    skillpack_load = ready_loads.fetch("skillpack")
+    assert_equal "Hive::AgentSkills", skillpack_load.fetch("constant")
+    assert_empty skillpack_load.fetch("forbidden_loaded_features")
+    assert_empty skillpack_load.fetch("forbidden_constants")
+    git_gate_load = ready_loads.fetch("safe-agent-git-gate")
+    assert_equal "Hive::AgentGitGate", git_gate_load.fetch("constant")
+    assert_empty git_gate_load.fetch("forbidden_loaded_features")
+    assert_empty git_gate_load.fetch("forbidden_constants")
+    work_ledger_load = ready_loads.fetch("work-ledger")
+    assert_equal "Hive::WorkLedger", work_ledger_load.fetch("constant")
+    assert_empty work_ledger_load.fetch("forbidden_loaded_features")
+    assert_empty work_ledger_load.fetch("forbidden_constants")
+  end
+
+  def test_final_graph_and_wiki_inventory_agree_with_the_catalog
+    contract = ComponentBoundaryContract.new(@document, root: ROOT)
+    assert contract.validate_catalog!
+
+    component_page = File.read(File.join(ROOT, "wiki", "component-boundaries.md"))
+    wiki_index = File.read(File.join(ROOT, "wiki", "index.md"))
+    dependencies = {}
+
+    contract.components.each do |component|
+      row = component_page.lines.find do |line|
+        line.start_with?("| #{component.fetch('name')} |")
+      end
+      refute_nil row, "wiki inventory is missing #{component.fetch('name')}"
+      assert_includes row, "`#{component.fetch('state')}`"
+      assert_includes row, "`require \"#{component.dig('entrypoint', 'require')}\"`"
+      assert_includes row, "`#{component.dig('entrypoint', 'constant')}`"
+
+      wiki_link = component.fetch("wiki_page").delete_prefix("wiki/").delete_suffix(".md")
+      assert_includes row, "[[#{wiki_link}]]"
+      assert_includes wiki_index, "[[#{wiki_link}]]"
+      assert_empty component.fetch("migration_exceptions"),
+                   "#{component.fetch('id')} retained an expired migration exception"
+
+      component_dependencies = component.fetch("component_dependencies")
+      dependencies[component.fetch("id")] = component_dependencies unless component_dependencies.empty?
+    end
+
+    assert_equal({ "skillpack" => [ "agent-abi" ] }, dependencies)
+  end
+
+  def test_production_consumers_do_not_bypass_artifact_firewall
+    allowed = %w[
+      lib/hive/artifact_firewall.rb
+      lib/hive/protected_files.rb
+    ]
+    offenders = Dir.glob(File.join(ROOT, "lib", "hive", "**", "*.rb")).filter_map do |path|
+      relative = path.delete_prefix("#{ROOT}/")
+      next if allowed.include?(relative)
+
+      source = File.read(path)
+      relative if source.include?("Hive::ProtectedFiles") ||
+                  source.match?(/require ["']hive\/protected_files["']/)
+    end
+
+    assert_empty offenders,
+                 "Hive production consumers must use Hive::ArtifactFirewall: #{offenders.join(', ')}"
+  end
+
+  def test_production_consumers_do_not_require_skillpack_internals
+    owned = contract_component_owned_files("skillpack")
+    internal_require = %r{
+      require\ ["']hive/agent_skills/
+      (?:adapters|canonical_skill|command_runner|directory_publisher|
+         errors|filesystem_inventory|inspector|manifest|provisioner|target_resolver)
+    }x
+    offenders = Dir.glob(File.join(ROOT, "lib", "hive", "**", "*.rb")).filter_map do |path|
+      relative = path.delete_prefix("#{ROOT}/")
+      next if owned.include?(relative)
+
+      relative if File.read(path).match?(internal_require)
+    end
+
+    assert_empty offenders,
+                 "Hive production consumers must require hive/agent_skills: #{offenders.join(', ')}"
+  end
+
+  def test_production_consumers_do_not_require_managed_git_directly
+    owned = contract_component_owned_files("safe-agent-git-gate")
+    offenders = Dir.glob(File.join(ROOT, "lib", "hive", "**", "*.rb")).filter_map do |path|
+      relative = path.delete_prefix("#{ROOT}/")
+      next if owned.include?(relative)
+
+      source = File.read(path)
+      relative if source.include?("Hive::ManagedGit") ||
+                  source.match?(/require ["']hive\/managed_git["']/)
+    end
+
+    assert_empty offenders,
+                 "Hive production consumers must use Hive::AgentGitGate: #{offenders.join(', ')}"
+  end
+
+  def test_production_consumers_do_not_require_work_ledger_internals
+    owned = contract_component_owned_files("work-ledger")
+    internal_require = %r{
+      require\ ["']hive/work_ledger/(?:descriptor_validator|journal|replay)["']
+    }x
+    internal_constant = /Hive::WorkLedger::(?:DescriptorValidator|Journal|Replay)/
+    offenders = Dir.glob(File.join(ROOT, "lib", "hive", "**", "*.rb")).filter_map do |path|
+      relative = path.delete_prefix("#{ROOT}/")
+      next if owned.include?(relative)
+
+      source = File.read(path)
+      relative if source.match?(internal_require) || source.match?(internal_constant)
+    end
+
+    assert_empty offenders,
+                 "Hive production consumers must use Hive::WorkLedger: #{offenders.join(', ')}"
   end
 
   def test_invalid_catalog_rows_name_the_component_and_field
@@ -124,6 +394,22 @@ class ComponentBoundariesTest < Minitest::Test
     ) do |contract|
       assert contract.validate_catalog!
     end
+  end
+
+  def test_boundary_ready_component_cannot_depend_on_a_candidate
+    document = Marshal.load(Marshal.dump(@document))
+    attempts = component(document, "attempts")
+    attempts["state"] = "boundary-ready"
+    attempts["migration_exceptions"] = []
+    attempts["component_dependencies"] = [ "work-ledger" ]
+    component(document, "work-ledger")["state"] = "candidate"
+
+    error = assert_raises(ComponentBoundaryContract::ValidationError) do
+      ComponentBoundaryContract.new(document, root: ROOT).validate_catalog!
+    end
+
+    assert_match(/attempts\.component_dependencies/, error.message)
+    assert_match(/cannot depend on candidate "work-ledger"/, error.message)
   end
 
   def test_migration_exception_requires_valid_removal_unit
@@ -307,7 +593,7 @@ class ComponentBoundariesTest < Minitest::Test
   end
 
   def test_declared_internal_component_require_passes_static_and_clean_load_checks
-    with_support_component do |fixture|
+    with_support_component(state: "boundary-ready") do |fixture|
       with_contract_fixture(
         entrypoint_source: <<~RUBY,
           require "support/internal"
@@ -318,7 +604,7 @@ class ComponentBoundariesTest < Minitest::Test
         extra_files: fixture.fetch(:files)
       ) do |contract|
         assert contract.validate_static_boundaries!
-        assert_equal [ "example" ], contract.validate_clean_loads!.keys
+        assert_equal "Example::API", contract.validate_clean_load!("example").fetch("constant")
       end
     end
   end
@@ -363,6 +649,27 @@ class ComponentBoundariesTest < Minitest::Test
     end
   end
 
+  def test_candidate_still_rejects_direct_internal_construction
+    with_contract_fixture(
+      entrypoint_source: <<~RUBY,
+        module Example
+          class API; end
+          class Internal; end
+        end
+      RUBY
+      consumer_source: "Example::Internal.new\n",
+      state: "candidate"
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_static_boundaries!
+      end
+
+      assert_match(/example\.forbidden_constructions/, error.message)
+      assert_match(/lib\/consumer\.rb/, error.message)
+      assert_match(/Example::Internal/, error.message)
+    end
+  end
+
   def test_unlisted_consumer_cannot_construct_internal_constant
     with_contract_fixture(
       entrypoint_source: <<~RUBY,
@@ -386,7 +693,172 @@ class ComponentBoundariesTest < Minitest::Test
     end
   end
 
+  def test_named_internal_construction_site_is_allowed
+    with_contract_fixture(
+      entrypoint_source: <<~RUBY,
+        module Example
+          class API; end
+          class Internal; end
+        end
+      RUBY
+      consumer_source: "Example::Internal.new\n",
+      authorized_internal_constructions: [
+        {
+          "constant" => "Example::Internal",
+          "files" => [ "lib/consumer.rb" ],
+          "reason" => "Application composition root"
+        }
+      ]
+    ) do |contract|
+      assert contract.validate_static_boundaries!
+    end
+  end
+
+  def test_named_internal_construction_site_does_not_allow_other_files
+    with_contract_fixture(
+      entrypoint_source: <<~RUBY,
+        module Example
+          class API; end
+          class Internal; end
+        end
+      RUBY
+      consumer_source: "Example::Internal.new\n",
+      authorized_internal_constructions: [
+        {
+          "constant" => "Example::Internal",
+          "files" => [ "lib/consumer.rb" ],
+          "reason" => "Application composition root"
+        }
+      ],
+      extra_files: {
+        "lib/unlisted_consumer.rb" => "Example::Internal.new\n"
+      }
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_static_boundaries!
+      end
+
+      assert_match(/example/, error.message)
+      assert_match(/lib\/unlisted_consumer\.rb/, error.message)
+      assert_match(/Example::Internal/, error.message)
+    end
+  end
+
+  def test_named_internal_construction_site_must_remain_in_use
+    with_contract_fixture(
+      entrypoint_source: <<~RUBY,
+        module Example
+          class API; end
+          class Internal; end
+        end
+      RUBY
+      consumer_source: "Example::API.new\n",
+      authorized_internal_constructions: [
+        {
+          "constant" => "Example::Internal",
+          "files" => [ "lib/consumer.rb" ],
+          "reason" => "Stale composition root"
+        }
+      ]
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_catalog!
+      end
+
+      assert_match(/example\.authorized_internal_constructions/, error.message)
+      assert_match(/lib\/consumer\.rb does not construct Example::Internal/, error.message)
+    end
+  end
+
+  def test_invalid_internal_construction_authorizations_name_the_exact_field
+    cases = {
+      "malformed constant" => {
+        mutate: ->(site, _sites) { site["constant"] = "not a constant" },
+        field: /authorized_internal_constructions\[0\]\.constant/,
+        message: /must be a constant path/
+      },
+      "undeclared and non-forbidden constant" => {
+        mutate: ->(site, _sites) { site["constant"] = "Example::Other" },
+        field: /authorized_internal_constructions\[0\]\.constant/,
+        message: /must name a declared internal collaborator/
+      },
+      "declared but non-forbidden constant" => {
+        mutate: ->(site, _sites) { site["constant"] = "Example::Other" },
+        internal_collaborators: %w[Example::Internal Example::Other],
+        field: /authorized_internal_constructions\[0\]\.constant/,
+        message: /must name a forbidden construction/
+      },
+      "duplicate constant entry" => {
+        mutate: ->(site, sites) { sites << Marshal.load(Marshal.dump(site)) },
+        field: /authorized_internal_constructions\[1\]\.constant/,
+        message: /duplicates "Example::Internal"/
+      },
+      "duplicate file" => {
+        mutate: ->(site, _sites) { site["files"] << site.fetch("files").first },
+        field: /authorized_internal_constructions\[0\]\.files/,
+        message: /must not contain duplicates/
+      },
+      "component-owned file" => {
+        mutate: ->(site, _sites) { site["files"] = [ "lib/owned_builder.rb" ] },
+        field: /authorized_internal_constructions\[0\]\.files\[0\]/,
+        message: /component-owned files do not need construction authorization/
+      },
+      "blank reason" => {
+        mutate: ->(site, _sites) { site["reason"] = " " },
+        field: /authorized_internal_constructions\[0\]\.reason/,
+        message: /must be a non-empty string/
+      }
+    }
+
+    cases.each do |label, expectation|
+      sites = [
+        {
+          "constant" => "Example::Internal",
+          "files" => [ "lib/consumer.rb" ],
+          "reason" => "Application composition root"
+        }
+      ]
+      expectation.fetch(:mutate).call(sites.first, sites)
+
+      with_contract_fixture(
+        entrypoint_source: <<~RUBY,
+          module Example
+            class API; end
+            class Internal; end
+          end
+        RUBY
+        consumer_source: "Example::Internal.new\n",
+        owned_paths: [ "lib/example.rb", "lib/owned_builder.rb" ],
+        internal_collaborators: expectation[:internal_collaborators],
+        authorized_internal_constructions: sites,
+        extra_files: {
+          "lib/owned_builder.rb" => "Example::Internal.new\n"
+        }
+      ) do |contract|
+        error = assert_raises(ComponentBoundaryContract::ValidationError, label) do
+          contract.validate_catalog!
+        end
+
+        assert_match expectation.fetch(:field), error.message, label
+        assert_match expectation.fetch(:message), error.message, label
+      end
+    end
+  end
+
   private
+
+  def contract_component_owned_files(id)
+    component(@document, id).fetch("owned_paths").flat_map do |relative|
+      absolute = File.join(ROOT, relative)
+      if File.directory?(absolute)
+        Dir.glob(File.join(absolute, "**", "*.rb")).map do |path|
+          path.delete_prefix("#{ROOT}/")
+        end
+      else
+        relative
+      end
+    end
+  end
 
   def component(document, id)
     document.fetch("components").find { |entry| entry.fetch("id") == id }
@@ -400,10 +872,10 @@ class ComponentBoundariesTest < Minitest::Test
     RUBY
   end
 
-  def with_support_component
+  def with_support_component(state: "candidate")
     component = fixture_component(
       id: "support",
-      state: "candidate",
+      state: state,
       entrypoint_file: "lib/support.rb",
       entrypoint_require: "support",
       entrypoint_constant: "Support::API",
@@ -420,7 +892,9 @@ class ComponentBoundariesTest < Minitest::Test
                             state: "boundary-ready", entrypoint_file: "lib/example.rb",
                             entrypoint_require: "example", owned_paths: nil,
                             component_dependencies: [], allowed_hive_dependencies: [],
-                            migration_exceptions: [], extra_components: [], extra_files: {})
+                            migration_exceptions: [], authorized_internal_constructions: [],
+                            internal_collaborators: nil,
+                            extra_components: [], extra_files: {})
     Dir.mktmpdir do |root|
       write_fixture(root, entrypoint_file, entrypoint_source)
       write_fixture(root, "lib/consumer.rb", consumer_source)
@@ -440,7 +914,9 @@ class ComponentBoundariesTest < Minitest::Test
             owned_paths: owned_paths || [ entrypoint_file ],
             component_dependencies: component_dependencies,
             allowed_hive_dependencies: allowed_hive_dependencies,
-            migration_exceptions: migration_exceptions
+            migration_exceptions: migration_exceptions,
+            authorized_internal_constructions: authorized_internal_constructions,
+            internal_collaborators: internal_collaborators
           ),
           *extra_components
         ]
@@ -452,8 +928,10 @@ class ComponentBoundariesTest < Minitest::Test
 
   def fixture_component(id:, state:, entrypoint_file:, entrypoint_require:, entrypoint_constant:,
                         owned_paths:, component_dependencies: [], allowed_hive_dependencies: [],
-                        migration_exceptions: [])
+                        migration_exceptions: [], authorized_internal_constructions: [],
+                        internal_collaborators: nil)
     namespace = entrypoint_constant.split("::").first
+    internal_collaborators ||= [ "#{namespace}::Internal" ]
     {
       "id" => id,
       "name" => id.split("-").map(&:capitalize).join(" "),
@@ -473,8 +951,9 @@ class ComponentBoundariesTest < Minitest::Test
       "lock_contracts" => [ "none" ],
       "component_dependencies" => component_dependencies,
       "allowed_hive_dependencies" => allowed_hive_dependencies,
-      "internal_collaborators" => [ "#{namespace}::Internal" ],
+      "internal_collaborators" => internal_collaborators,
       "forbidden_constructions" => [ "#{namespace}::Internal" ],
+      "authorized_internal_constructions" => authorized_internal_constructions,
       "hive_consumers" => [ "lib/consumer.rb" ],
       "mutation_authority" => "none",
       "recovery_surface" => "none",

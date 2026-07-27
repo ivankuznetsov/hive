@@ -5,6 +5,8 @@ require "yaml"
 
 class CiTestPartitionTest < Minitest::Test
   ROOT = File.expand_path("../..", __dir__)
+  UPLOAD_ARTIFACT_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+  DOWNLOAD_ARTIFACT_ACTION = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
   RAKEFILE_CONSTANTS = %i[
     HIVE_CI_GATE_TESTS
     HIVE_CI_GATE_TEST_OPTIONS
@@ -95,6 +97,19 @@ class CiTestPartitionTest < Minitest::Test
     end
   end
 
+  def test_brakeman_reads_the_web_gemfile_while_scanning_the_repository_root
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+    brakeman = workflow.fetch("jobs").fetch("brakeman")
+    command = brakeman.fetch("steps").filter_map { |step| step["run"] }.fetch(0)
+
+    assert_equal(
+      "bundle exec brakeman --gemfile web/Gemfile --force --no-pager --quiet --format github " \
+        "--ignore-config config/brakeman.ignore",
+      command
+    )
+    refute_includes command, "--path web"
+  end
+
   def test_incident_duration_budget_is_advisory_and_separate_from_functional_e2e
     workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
     jobs = workflow.fetch("jobs")
@@ -122,7 +137,7 @@ class CiTestPartitionTest < Minitest::Test
     refute advisory.fetch("steps").any? { |step| step.fetch("run", "").include?("bundle") }
 
     download = advisory.fetch("steps").find { |step| step["name"] == "Download e2e report" }
-    assert_equal "actions/download-artifact@v8", download.fetch("uses")
+    assert_equal DOWNLOAD_ARTIFACT_ACTION, download.fetch("uses")
     assert_equal "hive-e2e-report", download.fetch("with").fetch("name")
     assert_equal "${{ runner.temp }}/hive-e2e-runs", download.fetch("with").fetch("path")
 
@@ -142,7 +157,7 @@ class CiTestPartitionTest < Minitest::Test
     )
 
     scenario = e2e_steps.find { |step| step["name"] == "Run real-subprocess scenarios" }
-    upload = e2e_steps.find { |step| step["uses"] == "actions/upload-artifact@v7" }
+    upload = e2e_steps.find { |step| step["uses"] == UPLOAD_ARTIFACT_ACTION }
     assert_equal download.fetch("with").fetch("name"), upload.fetch("with").fetch("name")
     assert_equal(
       scenario.fetch("env").fetch("HIVE_E2E_RUNS_DIR"),

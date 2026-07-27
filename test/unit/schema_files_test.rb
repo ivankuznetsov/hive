@@ -6,9 +6,9 @@ require "hive/commands/answer_digest"
 require "hive/commands/approve"
 require "hive/commands/bot"
 require "hive/commands/daemon"
-require "hive/commands/digest"
 require "hive/commands/drop"
 require "hive/commands/doctor"
+require "hive/commands/decide"
 require "hive/commands/forget"
 require "hive/commands/init"
 require "hive/commands/patrol"
@@ -16,6 +16,8 @@ require "hive/commands/prune"
 require "hive/commands/run"
 require "hive/commands/stage_action"
 require "hive/commands/status"
+require "hive/agent_skills/inspector"
+require "hive/agent_skills/provisioner"
 require "hive/patrol/candidate_selector"
 require "hive/patrol/reviewer"
 require "hive/commands/setup_agents"
@@ -31,6 +33,15 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_hive_decide_schema_matches_success_payload_contract
+    path = Hive::Schemas.schema_path("hive-decide")
+    assert File.exist?(path)
+    doc = JSON.parse(File.read(path))
+    assert_equal Hive::Commands::Decide::SUCCESS_KEYS.sort,
+                 doc.dig("$defs", "SuccessPayload", "required").sort
+    assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
   def test_native_web_schema_files_accept_versioned_success_and_error_shapes
     service = {
       "platform" => "linux", "unit_path" => "/tmp/hive-web.service",
@@ -353,6 +364,24 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "Task", "properties", "marker", "enum").sort
     assert_equal Hive::Schemas::TaskActionKind::ALL.sort,
                  doc.dig("$defs", "Task", "properties", "action", "enum").sort
+  end
+
+  def test_archive_visibility_counts_are_additive_aggregate_schema_fields
+    status = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    project = status.dig("$defs", "Project")
+    count = project.dig("properties", "hidden_archived_task_count")
+    assert_equal "integer", count.fetch("type")
+    assert_equal 0, count.fetch("minimum")
+    refute_includes project.fetch("required"), "hidden_archived_task_count",
+                    "dedicated archive payloads intentionally omit the ordinary-view count"
+
+    operational = JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
+    summary = operational.dig("$defs", "SuccessPayload", "properties", "summary")
+    assert_includes summary.fetch("required"), "hidden_archived_task_count"
+    assert_equal(
+      { "type" => "integer", "minimum" => 0 },
+      summary.dig("properties", "hidden_archived_task_count")
+    )
   end
 
   def test_hive_status_admission_error_is_closed_and_matches_reason_codes

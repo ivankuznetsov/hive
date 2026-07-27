@@ -83,6 +83,12 @@ class WorkflowGoldenTest < Minitest::Test
     assert_equal EXPECTED_VERBS, derived_verbs_from(workflow)
   end
 
+  def test_builtin_workflows_declare_standard_archive_visibility_retention
+    builtins = %i[coding content bench].map { |id| Hive::Workflows::Registry.fetch(id) }
+
+    assert_equal [ 3, 3, 3 ], builtins.map(&:archive_visibility_retention_days)
+  end
+
   # v1 keeps every verb non-interactive by design (no descriptor sets
   # `interactive: true`), so the derived map must carry no `:interactive`
   # key. Locking this against the real VERBS guards the inert path the

@@ -5,6 +5,7 @@ require "hive/config"
 require "hive/git_ref"
 require "hive/git_ops"
 require "hive/atomic_file"
+require "hive/agent_git_gate"
 
 module Hive
   class Worktree
@@ -227,30 +228,15 @@ module Hive
     # detached, clean, and pinned to the same commit.
     def create_detached_exact!(base_sha:)
       FileUtils.mkdir_p(File.dirname(path))
-      expected = self.class.run_materialize_git!(
-        @project_root, "rev-parse", "--verify", "#{base_sha}^{commit}"
-      ).strip
-
-      if exists?
-        assert_detached_exact!(base_sha: expected)
-        return :existing
-      end
-
-      # A killed remove or an external directory cleanup can leave Git's
-      # administrative record behind after the worktree path disappears.
-      # The deterministic analysis slug would otherwise fail every retry with
-      # "already registered" until an operator pruned it manually.
-      if !File.directory?(path) && list_worktree_paths.include?(path)
-        self.class.run_materialize_git!(
-          @project_root, "worktree", "prune", "--expire", "now"
-        )
-      end
-
-      self.class.run_materialize_git!(
-        @project_root, "worktree", "add", "--detach", path, expected
+      receipt = Hive::AgentGitGate.materialize(
+        repository_path: @project_root,
+        oid: base_sha,
+        destination: path,
+        destination_root: File.dirname(path)
       )
-      assert_detached_exact!(base_sha: expected)
-      :created
+      receipt.disposition
+    rescue Hive::AgentGitGate::Error => e
+      raise WorktreeError, e.message
     end
 
     def assert_detached_exact!(base_sha:)

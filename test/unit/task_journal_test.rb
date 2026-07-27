@@ -290,7 +290,9 @@ class TaskJournalTest < Minitest::Test
 
   def test_idempotent_append_wraps_low_level_io_failures
     with_writer do |writer, _dir|
-      writer.define_singleton_method(:append_records) { |_records| raise Errno::ENOSPC }
+      ledger = writer.instance_variable_get(:@ledger)
+      journal = ledger.instance_variable_get(:@journal)
+      journal.define_singleton_method(:append_idempotent) { |*| raise Errno::ENOSPC }
 
       error = assert_raises(Hive::TaskJournal::Error) do
         writer.append_idempotent(
@@ -300,6 +302,48 @@ class TaskJournalTest < Minitest::Test
 
       assert_includes error.message, "authoritative journal append failed"
       assert_includes error.message, "ENOSPC"
+    end
+  end
+
+  def test_append_wraps_envelope_system_failures
+    with_writer do |writer, _dir|
+      writer.instance_variable_set(:@clock, -> { raise Errno::ENOSPC })
+
+      error = assert_raises(Hive::TaskJournal::Error) do
+        writer.append(event("condition_observed"))
+      end
+      assert_includes error.message, "authoritative journal append failed"
+      assert_includes error.message, "ENOSPC"
+    end
+  end
+
+  def test_idempotent_append_preserves_domain_errors
+    with_writer do |writer, _dir|
+      assert_raises(Hive::TaskJournal::InvalidRecord) do
+        writer.append_idempotent(
+          event("unknown_event"),
+          idempotency_key: "task/3/unknown"
+        )
+      end
+    end
+  end
+
+  def test_idempotent_append_translates_work_ledger_failures
+    with_writer do |writer, _dir|
+      ledger = writer.instance_variable_get(:@ledger)
+      journal = ledger.instance_variable_get(:@journal)
+      journal.define_singleton_method(:append_idempotent) do |*|
+        raise Hive::WorkLedger::AppendFailed, "ledger append failed: synthetic"
+      end
+
+      error = assert_raises(Hive::TaskJournal::Error) do
+        writer.append_idempotent(
+          event("condition_observed"),
+          idempotency_key: "task/3/condition"
+        )
+      end
+      assert_includes error.message, "authoritative journal append failed"
+      assert_includes error.message, "ledger append failed: synthetic"
     end
   end
 

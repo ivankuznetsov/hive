@@ -104,4 +104,9 @@ module ApplicationHelper
 
     "#{s / 86_400}d ago"
   end
+
+  def hidden_archive_summary(count)
+    noun = count == 1 ? "task" : "tasks"
+    "… and #{count} older archived #{noun} (hive archive to view)"
+  end
 end

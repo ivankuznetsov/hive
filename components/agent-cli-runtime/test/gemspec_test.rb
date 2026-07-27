@@ -26,4 +26,19 @@ class AgentCliRuntimeGemspecTest < Minitest::Test
 
     assert_equal %w[json open3 timeout], spec.runtime_dependencies.map(&:name).sort
   end
+
+  def test_public_links_use_the_distribution_mirror_and_canonical_issue_tracker
+    spec = Gem::Specification.load(GEMSPEC)
+
+    assert_equal "https://github.com/ivankuznetsov/agent-cli-runtime",
+                 spec.homepage
+    assert_equal spec.homepage, spec.metadata.fetch("homepage_uri")
+    assert_equal spec.homepage, spec.metadata.fetch("source_code_uri")
+    assert_equal "#{spec.homepage}/blob/main/CHANGELOG.md",
+                 spec.metadata.fetch("changelog_uri")
+    assert_equal "#{spec.homepage}/blob/main/README.md",
+                 spec.metadata.fetch("documentation_uri")
+    assert_equal "https://github.com/ivankuznetsov/hive/issues",
+                 spec.metadata.fetch("bug_tracker_uri")
+  end
 end

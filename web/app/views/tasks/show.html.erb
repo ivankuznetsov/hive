@@ -75,9 +75,12 @@
       window saturates, after which each reload rewrites the window. The
       poll follows tail -f semantics (see the poll controller): pinned to
       the bottom while following, paused while scrolled up to read. %>
-  <%= turbo_frame_tag "task-log", src: task_log_path(@project.name, @task["slug"]),
+  <%= turbo_frame_tag "task-log",
+        src: task_log_path(@project.name, @task["slug"], source: @task_source),
         refresh: "morph",
-        data: { controller: "poll", poll_interval_value: 3000, turbo_permanent: true } do %>
+        data: (@task_source ?
+          { turbo_permanent: true } :
+          { controller: "poll", poll_interval_value: 3000, turbo_permanent: true }) do %>
     <div class="log-pane"><pre>Loading log…</pre></div>
   <% end %>
 <% end %>
@@ -89,7 +92,8 @@
       <p class="advanced-title">Send back a stage</p>
       <p class="muted">Move this task to the previous gate. Artifacts are kept — the prior stage resumes where it left off.</p>
     </div>
-    <%= button_to "Reject", task_reject_path(@project.name, @task["slug"]),
+    <%= button_to "Reject",
+          task_reject_path(@project.name, @task["slug"], source: @task_source),
           params: { from: @task["stage"] }, class: "btn-danger",
           disabled: !@status_fresh, aria: { disabled: (!@status_fresh).to_s },
           data: { turbo_confirm: "Send #{@task["slug"]} back a stage?" } %>
@@ -100,7 +104,8 @@
         <p class="advanced-title">Force approve</p>
         <p class="muted">Advance to the next stage even though this one isn't marked complete — the next agent runs with whatever exists now (e.g. unanswered questions stay unanswered).</p>
       </div>
-      <%= button_to "Force approve", task_approve_path(@project.name, @task["slug"]),
+      <%= button_to "Force approve",
+            task_approve_path(@project.name, @task["slug"], source: @task_source),
             params: { from: @task["stage"], force: "1" }, class: "btn-secondary",
             disabled: !@status_fresh, aria: { disabled: (!@status_fresh).to_s },
             data: { turbo_confirm: "Advance #{@task["slug"]} even though the stage isn't marked complete?" } %>
@@ -111,7 +116,8 @@
       <p class="advanced-title">Drop task</p>
       <p class="muted">Permanently delete this idea — kills any running agent, removes the task folder, worktree, and branch, and closes a draft PR. The TUI's Shift+X. There is no undo.</p>
     </div>
-    <%= button_to "Drop", task_drop_path(@project.name, @task["slug"]),
+    <%= button_to "Drop",
+          task_drop_path(@project.name, @task["slug"], source: @task_source),
           params: { from: @task["stage"] }, class: "btn-danger",
           disabled: !@status_fresh, aria: { disabled: (!@status_fresh).to_s },
           data: { turbo_confirm: "Permanently delete #{@task["slug"]}? This cannot be undone." } %>

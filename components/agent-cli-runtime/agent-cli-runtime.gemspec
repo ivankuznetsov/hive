@@ -12,19 +12,18 @@ Gem::Specification.new do |spec|
     result normalization for Claude Code, Codex CLI, Pi, and Grok CLI. It does
     not spawn agents or claim live provider health, quota, or credential validity.
   DESC
-  spec.homepage = "https://github.com/ivankuznetsov/hive"
+  spec.homepage = "https://github.com/ivankuznetsov/agent-cli-runtime"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.4.0"
 
   spec.metadata = {
     "homepage_uri" => spec.homepage,
-    "source_code_uri" =>
-      "https://github.com/ivankuznetsov/hive/tree/main/components/agent-cli-runtime",
+    "source_code_uri" => spec.homepage,
     "changelog_uri" =>
-      "https://github.com/ivankuznetsov/hive/blob/main/components/agent-cli-runtime/CHANGELOG.md",
+      "#{spec.homepage}/blob/main/CHANGELOG.md",
     "bug_tracker_uri" => "https://github.com/ivankuznetsov/hive/issues",
     "documentation_uri" =>
-      "https://github.com/ivankuznetsov/hive/blob/main/components/agent-cli-runtime/README.md",
+      "#{spec.homepage}/blob/main/README.md",
     "rubygems_mfa_required" => "true"
   }
 

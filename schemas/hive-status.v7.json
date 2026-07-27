@@ -73,7 +73,8 @@
             }
           }
         },
-        "legacy_migrate_command": { "type": ["string", "null"] }
+        "legacy_migrate_command": { "type": ["string", "null"] },
+        "hidden_archived_task_count": { "type": "integer", "minimum": 0 }
       }
     },
     "AdmissionError": {
@@ -119,7 +120,7 @@
          "commit_generation", "current_attempt", "conditions", "condition_history",
          "evidence", "closure", "condition_overrides", "condition_gate", "condition_migration", "condition_provenance",
          "shadow_audit", "condition_warning", "unanswered_questions", "action",
-         "action_label", "suggested_command",
+         "action_label", "suggested_command", "outcomes",
         "next_action", "diagnostic"
       ],
       "properties": {
@@ -266,6 +267,10 @@
         },
         "action_label": { "type": "string" },
         "suggested_command": { "type": ["string", "null"] },
+        "outcomes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/HumanOutcome" }
+        },
         "next_action": {
           "type": ["object", "null"],
           "additionalProperties": true,
@@ -282,6 +287,17 @@
             { "type": "null" }
           ]
         }
+      }
+    },
+    "HumanOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "complete", "artifact", "to"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "complete": { "type": "boolean" },
+        "artifact": { "type": ["string", "null"] },
+        "to": { "type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9-]*$" }
       }
     },
     "ImplementationIdentity": {

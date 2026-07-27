@@ -91,6 +91,37 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_new_workflow_with_human_entry_seeds_identified_waiting_marker
+    descriptor = Hive::Workflow.new(
+      id: :human_entry,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 1, state_file: "approval.md", kind: :human,
+          outcomes: {
+            "approve" => Hive::Workflow::Outcome.new(
+              name: "approve", complete: true, artifact: "approval.md"
+            )
+          }.freeze
+        )
+      ]
+    )
+    with_registered_workflow(descriptor) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { Hive::Commands::Init.new(dir, agent_skill_preflight: false).call }
+          project = File.basename(dir)
+
+          capture_io { Hive::Commands::New.new(project, "human entry", workflow: "human_entry").call }
+
+          folder = Dir[File.join(dir, ".hive-state", "stages", "1-approval", "human-entry-*")].fetch(0)
+          marker = Hive::Markers.current(File.join(folder, "approval.md"))
+          assert_equal :waiting, marker.name
+          assert_match(/\A[0-9a-f]{16}\z/, marker.attrs.fetch("decision_id"))
+        end
+      end
+    end
+  end
+
   def test_new_single_stage_workflow_prints_run_hint_without_move
     with_registered_workflow(single_stage_workflow) do
       with_tmp_global_config do

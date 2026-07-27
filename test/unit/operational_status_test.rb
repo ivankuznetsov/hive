@@ -18,7 +18,8 @@ class OperationalStatusTest < Minitest::Test
       task(action: "error", slug: "repair", marker: "error", attrs: { "reason" => "agent_died" }),
       task(action: "ready_to_archive", slug: "complete", stage: "8-finalize", marker: "complete"),
       task(action: "ready_to_plan", slug: "idle", stage: "2-brainstorm", marker: "complete"),
-      task(action: "archived", slug: "archived", stage: "9-done", marker: "complete")
+      task(action: "archived", slug: "archived", stage: "9-done", marker: "complete"),
+      hidden_count: 4
     )
 
     result = project(payload)
@@ -29,6 +30,7 @@ class OperationalStatusTest < Minitest::Test
     assert_equal true, result.fetch("ok")
     assert_equal 6, result.dig("summary", "active")
     assert_equal 1, result.dig("archive", "count")
+    assert_equal 4, result.dig("summary", "hidden_archived_task_count")
     assert_equal STATES, result.dig("summary", "states").keys
     assert_equal %w[
       running waiting_on_you waiting_on_provider_or_scheduler needs_repair completion_ready idle
@@ -784,11 +786,50 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "unavailable", projected.dig("error", "recovery", "status")
   end
 
+  def test_human_outcomes_are_preserved_in_operational_position
+    human = task(action: "needs_input", slug: "approval", stage: "3-approval")
+    human["workflow"] = "editorial"
+    human["outcomes"] = [
+      { "name" => "approve", "complete" => true, "artifact" => "draft.md", "to" => nil },
+      { "name" => "reject", "complete" => false, "artifact" => nil, "to" => "draft" }
+    ]
+
+    projected = project(status_payload(human)).fetch("tasks").first
+
+    assert_equal human.fetch("outcomes"), projected.dig("position", "allowed_outcomes")
+    assert_equal "waiting_on_you", projected.fetch("state")
+    assert_nil projected.fetch("action")
+  end
+
+  def test_completed_human_stage_is_archived
+    human = task(
+      action: "archived", slug: "approved", stage: "3-approval", marker: "complete"
+    )
+    result = project(status_payload(human))
+
+    assert_equal 0, result.dig("summary", "active")
+    assert_equal 1, result.dig("summary", "archived")
+    assert_equal 1, result.dig("archive", "count")
+    assert_empty result.fetch("tasks")
+  end
+
   def test_payload_validates_against_published_schema
     result = project(status_payload(task(action: "ready_to_plan", slug: "valid")))
     schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
 
     assert schema.valid?(result), schema.validate(result).map { |error| error.fetch("error") }.inspect
+  end
+
+  def test_invalid_hidden_archive_count_is_rejected_at_the_projection_boundary
+    payload = status_payload(
+      task(action: "ready_to_plan", slug: "invalid-hidden"),
+      hidden_count: "not-an-integer"
+    )
+
+    error = assert_raises(ArgumentError) { project(payload) }
+
+    assert_includes error.message, "invalid hidden_archived_task_count"
+    assert_includes error.message, "not-an-integer"
   end
 
   private
@@ -845,13 +886,14 @@ class OperationalStatusTest < Minitest::Test
     }
   end
 
-  def status_payload(*tasks)
+  def status_payload(*tasks, hidden_count: 0)
     projects = if tasks.empty?
       []
     else
       [ {
         "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state",
-        "tasks" => tasks, "legacy_stage_dirs" => [], "legacy_migrate_command" => nil
+        "tasks" => tasks, "legacy_stage_dirs" => [], "legacy_migrate_command" => nil,
+        "hidden_archived_task_count" => hidden_count
       } ]
     end
     {

@@ -3,11 +3,24 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_runtime.rb, lib/hive/agent/message_extractor.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-07-25
+updated: 2026-07-27
 tags: [agent, claude, subprocess]
 ---
 
-**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for marker-owned spawns, optionally persists stdout/stderr to the per-stage log, always parses the stream for a bounded final-message summary and limits, enforces native budget-equivalent, streamed token, optional completed-turn, and wall-clock ceilings, kills the process group on exhaustion or completed output, classifies Claude's structured per-run budget outcome separately from provider account/rate/quota limits, and translates the exit into a status/marker according to the selected `AgentProfile` status mode. The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
+**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for
+marker-owned spawns, parses bounded results/limits, enforces resource and
+wall-clock ceilings, and translates exit through the selected AgentProfile
+status mode. `:output_file_exists` now admits only non-empty regular in-root
+artifacts through `Hive::ArtifactFirewall`; symlinks and directories cannot
+satisfy completion.
+
+For recognized built-in routing, `RoutingArguments.global_arguments` are
+inserted before the profile headless subcommand and
+`subcommand_arguments` after the common launch controls. Durable routed
+implementation identities are rendered at the launcher seam for execute,
+open-PR, review-fix, and review-CI, including Claude's headless/tmux adapter;
+their deliberately empty legacy `native_arguments` array is never treated as
+the complete routed command.
 
 ## Class shape
 
@@ -23,7 +36,7 @@ Hive::Agent.new(
   cwd: nil,             # defaults to task.folder
   log_label: nil,       # defaults to task.stage_name
   profile: nil,         # AgentProfile; defaults to claude profile
-  expected_output: nil, # used by :output_file_exists profiles
+  expected_output: nil, # required regular artifact for :output_file_exists
   status_mode: nil,     # per-spawn override
   permission_mode: nil, # profile-owned override; nil uses profile default/config caller
   allowed_tools: nil,   # Claude-only --allowedTools CSV source
@@ -84,7 +97,7 @@ There is **no inode-tracking concurrent-edit detection.** It was tried in early 
 selected `AgentProfile` remains the provider adapter:
 
 ```
-<profile.bin> <profile.headless_flag>
+<profile.bin> [<profile-routed global arguments>] <profile.headless_flag>
   <permission flags>
   [<profile.add_dir_flag> <dir> ...]
   [--allowedTools <csv>]
@@ -94,6 +107,15 @@ selected `AgentProfile` remains the provider adapter:
   <profile.output_format_flags...>
   <prompt>
 ```
+
+In actual argv the binary remains first: profile-routed global arguments are
+inserted immediately after it and before the headless subcommand. This is an
+opt-in path used only for an active recognized `ModelRouting` resolution.
+Codex therefore receives `codex --model ... -c
+model_reasoning_effort=... exec ...`; Claude, Grok, and Pi keep their
+profile-native routed arguments in the subcommand segment. Unscoped calls and
+inactive resolutions stay on the original assembly path, including the
+existing flat implementation-identity argument position.
 
 Prompt placement is profile data: Claude/Pi use a trailing positional prompt,
 Codex sends the prompt through stdin and places `-` in argv, and Grok places
@@ -182,12 +204,12 @@ launches send the prompt through stdin with `-` in argv.
    uses the PID for liveness, and drop cleanup uses the start time to reject a
    reused PID before signalling the recorded child.
 6. Trap `INT`/`TERM` to forward `kill -TERM -<pgid>`. Old handlers are restored in `ensure`.
-7. Reader thread: the shared stdout/stderr pipe is line-buffered before persistence, so credentials split across provider writes or the two streams are reassembled before `Hive::SecretPatterns.redact` runs. Structured message-bearing JSON events are stricter: their payload is omitted from the durable log and replaced with event-type metadata because one logical credential can span multiple newline-delimited events. Timestamped `[stream]` lines are retained only when `log_stream` is true, but raw in-memory lines always feed structured final-message parsing, structured Claude failure extraction, provider-limit detection, usage, turns, and expected-output completion. A shared `MessageExtractor::Accumulator` keeps both streaming structured messages and the plain fallback within 64 KiB; Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`, while non-JSON output uses the bounded plain tail with `:plain` source. Display-name generation uses the same protocol accumulator. When `max_tokens` is set, `StreamTokenMeter` also converts usage events into one monotonic count. Claude message-start/delta events sum completed turns while maxing cumulative current-turn fields; terminal run totals replace the aggregate only when they are not smaller than already observed usage. The digest generator sets `log_stream: false` because provider output may reflect confidential repository evidence; its spawn breadcrumb remains, while stream lines are not retained.
+7. Reader thread: the shared stdout/stderr pipe is line-buffered before persistence, so credentials split across provider writes or the two streams are reassembled before `Hive::SecretPatterns.redact` runs. Structured message-bearing JSON events are stricter: their payload is omitted from the durable log and replaced with event-type metadata because one logical credential can span multiple newline-delimited events. Timestamped `[stream]` lines are retained only when `log_stream` is true, but raw in-memory lines feed structured final-message parsing, structured Claude failure extraction, provider-limit detection, usage, turns, and expected-output completion after protocol-specific opacity filtering. A shared `MessageExtractor::Accumulator` keeps both streaming structured messages and the plain fallback within 64 KiB; byte-bounded plain-tail truncation drops any partial UTF-8 character at the cut so fallback messages remain valid text. Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`. A profile must explicitly declare `structured_output_protocol: :grok_end` before a Hash-valued Grok terminal `end.structuredOutput` payload gains the same authority; custom and non-Grok profiles ignore that event shape. A valid Grok terminal schema result replaces its preceding human-readable stream. In a managed host-output run, a non-Hash or conservatively recognized unparseable terminal payload sets `final_message_source = :structured_invalid`, clears preceding output, and makes publication fail closed; an ordinary unstructured Grok run preserves its preceding prose instead. Parsed and unparseable Grok terminal payloads are omitted from durable logs and plain fallback, and are excluded from raw quota scanning so private output cannot become `limit_text`. Display-name generation uses the same profile-declared protocol accumulator without managed strictness. When `max_tokens` is set, `StreamTokenMeter` also converts usage events into one monotonic count. Claude message-start/delta events sum completed turns while maxing cumulative current-turn fields; terminal run totals replace the aggregate only when they are not smaller than already observed usage. The digest generator sets `log_stream: false` because provider output may reflect confidential repository evidence; its spawn breadcrumb remains, while stream lines are not retained.
 8. Polling loop: `Process.wait(pid, WNOHANG)` every `[remaining, 0.2].min` seconds until the deadline. Reaching `max_tokens`, reaching the Claude `max_turns` ceiling, or observing a non-empty expected output begins termination. Claude can emit its local `Write` result before or after the same turn's usage-bearing `message_delta`, so Hive waits at most the completion-event grace for the missing half, captures the delta when available, and sends TERM before a next model turn. A process group still alive after the termination grace receives KILL independently of the longer wall-clock timeout.
 9. On timeout: `kill_group(pgid)` (TERM), then `sleep_grace_then_kill` (3s grace, then KILL).
 10. Reap with `Process.wait(pid)` (rescuing `Errno::ECHILD`).
 11. Join the reader thread (kill if still alive after 2s).
-12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, output_completed, status: nil}` plus `failure_origin` / `failure_details` only when a recognized structured failure was observed. Resource exhaustion carries `reason: "token_limit"` or `"turn_limit"`, the configured limit, and the observed count. A completed output is accepted only in `:output_file_exists` mode and remains subject to the caller's structured parser.
+12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, output_completed, status: nil}` plus `failure_origin` / `failure_details` only when a recognized structured failure was observed. Resource exhaustion carries `reason: "token_limit"` or `"turn_limit"`, the configured limit, and the observed count. A completed output is accepted only in `:output_file_exists` mode, must pass the Artifact Firewall's non-empty regular-file/root admission, and remains subject to the caller's structured parser.
 
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
 
@@ -196,7 +218,15 @@ Claude/tmux launches record the managed pane PID in the same per-task lock.
 `claude_pid` and its `claude_pid_start_time`; this gives tmux-backed cleanup the
 same PID-reuse identity guard as headless `Hive::Agent` spawns.
 
-Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers, triage/browser helpers) poll the expected artifact and the managed tmux session together. If the session disappears before the expected file exists and is non-empty, `Hive::ClaudeLauncher` returns `status: :error` with `tmux_session_terminated...` instead of waiting for the full reviewer timeout. If the expected artifact is non-empty and Claude's Stop hook already wrote `.done`, the result is accepted as `:ok`; a non-empty artifact without `.done` is treated as partial and retried rather than being promoted as a successful review. Claude/tmux pane tails are also scanned for provider-limit UI such as Claude's "Stop and wait for limit to reset" / "Add funds to continue with usage credits" menu. When that appears, marker-owned waits stamp `ERROR reason=limits_reached` and expected-output waits return an error message beginning `limits reached for claude:` instead of surfacing generic readiness, timeout, or tmux-session-death errors.
+Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers,
+triage/browser helpers) poll the expected artifact and managed tmux session
+together. Availability means a non-empty regular file accepted by
+`ArtifactFirewall.validate_required_outputs`; a symlink or directory remains
+unavailable even when its target has bytes. If the session disappears before
+acceptance, the launcher returns `tmux_session_terminated...`. An accepted
+artifact still needs Claude's Stop hook `.done` or a proven ready prompt;
+otherwise it remains partial. Provider-limit pane evidence continues to win
+over readiness, timeout, session-death, and missing-output fallbacks.
 
 `Hive::ClaudeLauncher.claude_ready_prompt?` treats Claude's TUI prompt as version-churny terminal chrome, not as a fixed last-line string. The detector keys on the idle `❯` caret only when it is the first or last glyph of its line, accepts Unicode separator spaces around it, and accepts the Claude Code 2.1.179 separator/caret/separator/footer shape as long as every line below the caret is prompt chrome or the real `bypass permissions` footer. It still rejects numbered menu options, current trust/permission prompts, stale carets with non-footer output below them, and `❯` glyphs embedded in Claude's own prose or shell snippets.
 
@@ -235,6 +265,6 @@ The default Claude permission path still uses `--dangerously-skip-permissions` (
 ## Backlinks
 
 - [[modules/task]] · [[modules/markers]] · [[modules/lock]]
-- [[modules/agent_profile]] · [[modules/config]]
+- [[modules/agent_profile]] · [[modules/protected_files]] · [[modules/config]]
 - [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/artifacts]] · [[stages/finalize]]
 - [[architecture]]

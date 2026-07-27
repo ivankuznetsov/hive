@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-new.v1.json",
+  "title": "hive new output (v1)",
+  "description": "Machine-readable task creation with optional state-wide idempotency.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "HumanOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "complete", "artifact", "to"],
+      "properties": {
+        "name": { "type": "string" },
+        "complete": { "type": "boolean" },
+        "artifact": { "type": ["string", "null"] },
+        "to": { "type": ["string", "null"] }
+      }
+    },
+    "NextAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "command", "outcomes"],
+      "properties": {
+        "kind": { "type": "string" },
+        "command": { "type": ["string", "null"] },
+        "outcomes": { "type": "array", "items": { "$ref": "#/$defs/HumanOutcome" } }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "created", "slug", "workflow",
+        "current_stage", "task_folder", "next_action"
+      ],
+      "properties": {
+        "schema": { "const": "hive-new" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "created": { "type": "boolean" },
+        "slug": { "type": "string" },
+        "workflow": { "type": "string" },
+        "current_stage": { "type": "string" },
+        "task_folder": { "type": "string" },
+        "next_action": { "$ref": "#/$defs/NextAction" }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind",
+        "exit_code", "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-new" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["usage", "config", "concurrent_run", "internal", "error"] },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" },
+        "value": { "type": ["string", "integer"] },
+        "idempotency_key": { "type": "string" },
+        "holder": { "type": "object", "additionalProperties": true },
+        "lock_path": { "type": "string" }
+      }
+    }
+  }
+}

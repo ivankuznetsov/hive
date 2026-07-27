@@ -66,12 +66,15 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
   end
 
-  def snapshot_with(rows)
+  def snapshot_with(rows, archive_rows: [])
     project = Hive::Tui::Snapshot::ProjectView.new(
       name: "demo", path: "/x", hive_state_path: "/x/.hive-state",
       error: nil, rows: rows.freeze
     ).freeze
-    Hive::Tui::Snapshot.new(generated_at: nil, projects: [ project ])
+    archive_project = project.with(rows: archive_rows.freeze).freeze
+    Hive::Tui::Snapshot.new(
+      generated_at: nil, projects: [ project ], archive_projects: [ archive_project ]
+    )
   end
 
   def with_editor_env(visual:, editor:)
@@ -362,19 +365,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal [ { project_slug: "demo" } ], scopes
   end
 
-  def test_current_row_uses_archive_filtered_grid_projection
-    hidden = make_task_row(
-      action_key: "archived",
-      action_label: "Archived",
-      slug: "old-archived",
-      stage: "9-done",
-      marker: "complete",
-      folder_mtime: (Time.now - (5 * 86_400)).utc.iso8601
-    )
+  def test_current_row_uses_producer_filtered_grid_projection
     visible = make_task_row(action_key: "ready_to_plan", action_label: "Ready to plan", slug: "visible-row")
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
-        snapshot: snapshot_with([ hidden, visible ]),
+        snapshot: snapshot_with([ visible ]),
         cursor: [ 0, 0 ]
       ),
       dispatch: @dispatch
@@ -859,7 +854,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
         mode: :archive,
-        snapshot: snapshot_with([ row ]),
+        snapshot: snapshot_with([], archive_rows: [ row ]),
         cols: 100,
         rows: 20
       ),

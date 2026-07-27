@@ -11,13 +11,26 @@ tags: [decisions, adr]
 
 ## ADR-038: Reusable components stay in the monorepo and earn packaging after Hive-first boundaries
 
-**Status:** Active (strategy recorded 2026-07-25; the component catalog and enforcement harness are implemented, with component refactors following incrementally).
+**Status:** Active (strategy recorded 2026-07-25; the internal-boundary graph was audited on 2026-07-26).
 
 **Context:** Repo-grounded extraction analysis found seven mechanisms with plausible standalone value: RunReceipt, UserService, Agent Artifact Firewall, Agent ABI, Skillpack, Safe Agent Git Gate, and WorkLedger. Splitting them into separate repositories would weaken Hive's most useful maintenance property for humans and agents: one checkout exposes the callers, durable state, compatibility fixtures, integration tests, release machinery, and implementation together. Packaging them immediately inside the monorepo would preserve navigation but still freeze accidental Hive dependencies and create version/release obligations before an external consumer exists.
 
 **Decision:** Hive remains the canonical monorepo and the first and primary consumer of every reusable component. Establish and enforce internal Ruby boundaries first: one supported entry point or facade, structured public values and errors, an acyclic dependency direction, explicit state/schema/lock ownership, clean-process loading, and all Hive production consumers routed through the boundary. Existing module wiki pages plus one component catalog are the canonical agent context; do not add a parallel `.context.md` hierarchy.
 
-Implementation readiness and standalone product value are different rankings. `Hive::Attempts::API` is the existing admission slice, but U1 records Attempts as a candidate while daemon lifecycle code still constructs durable internals directly; U2 owns reconciling that construction before promotion. UserService is the next low-coupling boundary; Agent ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger follow in readiness order and may each terminate as deferred when a policy-light seam cannot be proven. RunReceipt remains the strongest standalone opportunity without forcing the largest refactor first. Operational status/Statewatch, layout migration, standalone capability probes, separate lease/capsule products, generic status rendering, and a new local-agent framework remain rejected or folded ideas rather than package commitments.
+Implementation readiness and standalone product value are different rankings.
+The final audit retains six `boundary-ready` components: UserService, Agent ABI,
+Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger.
+`Hive::Attempts::API` remains the sole guarded `candidate`: its focused
+clean-load behavior, result contracts, and exact internal composition and
+compatibility sites are enforced without adding generic lifecycle,
+cancellation, export, or raw-store APIs. U8 removed the former reciprocal
+Attempts/WorkLedger catalog edge by keeping `TaskProjection::Store` as a
+Hive-owned adapter rather than WorkLedger-owned source, so the final catalog has
+no migration exceptions. RunReceipt remains the strongest standalone
+opportunity without forcing the largest refactor first. Operational
+status/Statewatch, layout migration, standalone capability probes, separate
+lease/capsule products, generic status rendering, and a new local-agent
+framework remain rejected or folded ideas rather than package commitments.
 
 A component becomes package-eligible only after its internal boundary is stable, a named non-Hive adopter or maintained integration proves demand, the component loads and tests independently without an upward Hive dependency, compatibility and maintenance ownership are explicit, and an exact built gem installs cleanly. A qualifying package stays in this repository under `components/<gem-name>/`, uses independent SemVer, and remains a path dependency for source development while released `hive-cli` declares a normal compatible dependency. Package publication is explicit and component-scoped; path changes may select tests but never publish.
 
@@ -576,17 +589,17 @@ Historical schemas (`schemas/hive-status.v1.json`, `schemas/hive-stage-action.v1
 
 ## ADR-030: Daily digest defaults ON when the Telegram bot is configured; drop the separate `bot.digest_chat_id`
 
-**Status:** Active
+**Status:** Superseded by ADR-040
 
 **Context:** The predecessor digest was opt-in (`digest.enabled` defaulted to `false`), so an operator who had already set up the Telegram bot with an allowlisted chat still received nothing until they discovered and set `digest.enabled: true` — the most common "why didn't I get a digest" case. The separate `bot.digest_chat_id` override added a second delivery-target knob that nobody needed: `Digest::Sender.resolve_chat_id` already fell back to `bot.chat_id_allowlist[0]`, which is where operators wanted the digest anyway.
 
 **Decision:** Make the digest opt-out instead of opt-in. `Config.load_global_digest_block` now derives `digest.enabled` from the bot config when the operator has not pinned it either way: it is `true` when `bot.enabled == true` and `bot.chat_id_allowlist` has at least one integer chat, else `false`. An explicit `digest.enabled` (true **or** false) is always honored — only the unset case is derived (`override.key?("enabled")` gate). Both scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher's SIGHUP reconfigure) go through `load_global_digest_block`, so the derived value flows everywhere with no second code path. Remove `bot.digest_chat_id` entirely — from `DEFAULTS`, its validator (`validate_bot_digest_chat_id!`), the config template, and the JSON schema description. The current shared `Config.telegram_chat_id!` helper resolves `bot.chat_id_allowlist[0]` for PRDigest delegation and the separate answer digest.
 
-**Consequences:** Anyone running the Telegram bot with an allowlisted chat starts getting the digest for each completed Europe/London day (the first enabled tick only initializes `digest_state.json`; it does not back-fill history). The auto-enable requires a deliverable chat so PRDigest is not launched without a recipient. Operators who deliberately want no digest set `digest.enabled: false`. Existing configs that still carry `bot.digest_chat_id` are silently ignored and route to the allowlist instead. See [[modules/digest]], [[commands/digest]], [[modules/config]].
+**Consequences:** Anyone running the Telegram bot with an allowlisted chat started getting the digest for each completed Europe/London day. ADR-040 later removed this behavior and its configuration from Hive.
 
 ## ADR-031: PRDigest is the sole merged-PR digest engine
 
-**Status:** Active
+**Status:** Superseded by ADR-040
 
 **Context:** Hive and standalone PRDigest both implemented GitHub collection,
 Telegram rendering/chunking, state, and retry policy. A production later-chunk
@@ -606,10 +619,9 @@ keeping compatibility aliases.
 **Consequences:** Delivery fixes have one owner and `hive digest --json` is the
 `prdigest-result` contract. Hive has a runtime dependency on PRDigest and its
 PR cannot become releasable until the matching PRDigest version is published.
-Legacy in-flight Hive delivery state is reconciled manually rather than guessed,
-because automatic conversion could duplicate a Telegram chunk whose response
-was lost. See [[commands/digest]], [[modules/digest]], [[dependencies]], and
-[[modules/daemon]].
+Legacy in-flight Hive delivery state was reconciled manually rather than
+guessed, because automatic conversion could duplicate a Telegram chunk whose
+response was lost. ADR-040 later removed the adapter and dependency.
 
 ## ADR-039: Pre-1.0 recovery/status migrations replace legacy contracts
 
@@ -633,6 +645,53 @@ explicit schema-skew failure and must upgrade. The current contracts stay
 smaller and closed, and tests assert that superseded versions do not reappear.
 This supersedes ADR-028's decision to retain historical `hive-status` files;
 that earlier decision remains useful history but is no longer current policy.
+
+## ADR-040: PR digests live outside Hive
+
+**Status:** Active
+
+**Context:** PRDigest now has two purposeful surfaces: canonical JSON facts for
+agents and provider-written prose for standalone delivery. Hive's adapter and
+catch-up scheduler depended on the removed deterministic `prdigest run` path.
+Mapping that scheduler to facts would stop delivery, while mapping it to prose
+would duplicate provider and Telegram configuration inside Hive.
+
+**Decision:** Remove `hive digest`, its PRDigest adapter, its daily scheduler,
+and the `prdigest` runtime dependency. Hive does not discover, configure,
+schedule, or deliver PR digests. Operators schedule `prdigest prose --deliver`
+directly; agents invoke `prdigest facts`. A stale top-level `digest:` block is
+rejected when the Hive daemon starts, with those migration commands.
+
+**Consequences:** Hive has no PR-digest command, cursor, catch-up policy, result
+envelope, or runtime coupling. The unrelated Hive answer digest remains. ADR-030
+and ADR-031 describe removed behavior and are superseded by this decision.
+
+## ADR-032: Per-stage controls overlay the current durable identity
+
+**Status:** Active
+
+**Context:** The closed PR #706 established the useful public idea of a
+provider-neutral `models:` map, but its renderer predated current
+`AgentProfile` capabilities and generation-scoped implementation ownership.
+Reusing that implementation would let retries observe config drift or put
+provider-specific flags in generic routing code.
+
+**Decision:** Keep one closed registry of built-in exact/coarse identities and
+resolve `model` and `effort` independently. Provider selection remains entirely
+owned by existing `agent:` configuration. Effective controls are validated and
+rendered by the already-selected profile. Execute, open-PR, review-fix, and
+review-CI freeze routing metadata in their durable generation identity and
+render it only at the trusted launcher seam; Codex global controls precede its
+subcommand. Arbitrary custom-workflow stages retain descriptor-level
+`model`/`effort` and cannot extend `models:`.
+
+**Consequences:** Retry argv cannot drift within a generation, unsupported
+reachable controls fail before effects, and no provider receives another
+provider's flags. Configs without `models:` and calls without recognized stage
+context keep the legacy path byte-for-byte. The architecture idea recovered
+from #706 survives, while its stale renderer and identity mechanics do not.
+See [[modules/model_routing]], [[modules/agent_profile]], [[modules/config]],
+and [[state-model]].
 
 ## Source
 

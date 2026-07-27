@@ -171,7 +171,7 @@ class TaskProjectionTest < Minitest::Test
     refute projection.send(:attempt_descends_from?, "attempt-a", "attempt-c")
   end
 
-  def test_implementation_identity_projection_retains_generations_and_latest_stage_launches
+  def test_implementation_identity_projection_retains_generations_and_first_stage_selection
     execute_one = event(
       event_type: "implementation_identity_captured", event_id: "identity-1",
       task_generation: 1, commit_generation: 0,
@@ -182,15 +182,27 @@ class TaskProjectionTest < Minitest::Test
       task_generation: 1, commit_generation: 0,
       payload: { "identity" => identity_payload("open_pr", "codex", "gpt-5.6-terra", 1) }
     )
+    open_pr_retry = event(
+      event_type: "implementation_stage_resolved", event_id: "open-pr-retry",
+      task_generation: 1, commit_generation: 0,
+      payload: { "identity" => identity_payload("open_pr", "codex", "gpt-5.6-drift", 1) }
+    )
     execute_two = event(
       event_type: "implementation_identity_captured", event_id: "identity-2",
       task_generation: 2, commit_generation: 0,
       payload: { "identity" => identity_payload("execute", "claude", "claude-fable-5", 2) }
     )
 
-    projection = Hive::TaskProjection.project(records: [ execute_one, open_pr_one, execute_two ])
+    generation_one = Hive::TaskProjection.project(
+      records: [ execute_one, open_pr_one, open_pr_retry ]
+    )
+    projection = Hive::TaskProjection.project(
+      records: [ execute_one, open_pr_one, open_pr_retry, execute_two ]
+    )
     identity = projection["implementation_identity"]
 
+    assert_equal "gpt-5.6-terra",
+                 generation_one["implementation_identity"].dig("stages", "open_pr", "model")
     assert_equal 2, identity.fetch("generation")
     assert_equal "claude", identity.dig("execute", "provider")
     assert_equal %w[codex claude], identity.fetch("history").map { |entry| entry["provider"] }

@@ -5,15 +5,59 @@ require "time"
 require "hive/commands/status"
 require "hive/config"
 require "hive/secret_patterns"
+require "hive/tui/state_source"
 
 module Hive
   module Web
-    # The process-wide owner of the expensive fleet status computation.
+    # Adapts the bounded status projection source to StatusFeed's existing
+    # command seam. Puma requests and the shared Cable poller can enter this
+    # object concurrently, while StateSource intentionally has one projection
+    # writer; serialize those synchronous refreshes here.
+    class CachedStatusCommand
+      ARCHIVE_REFRESH_FALLBACK_SECONDS = 300.0
+
+      def initialize(
+        source: Hive::Tui::StateSource.new(
+          poll_interval_seconds: 60,
+          archive_cache_mode: :visible,
+          archive_refresh_fallback_seconds: ARCHIVE_REFRESH_FALLBACK_SECONDS
+        ),
+        recovery_status_command: Hive::Commands::Status.new(json: true)
+      )
+        @source = source
+        @recovery_status_command = recovery_status_command
+        @mutex = Mutex.new
+      end
+
+      def json_payload(_projects)
+        @mutex.synchronize { @source.refresh_payload_now }
+      end
+
+      # Keep the daemon-owned recovery receipt overlay available without
+      # paying for another fleet scan. Commands::Status joins the supplied
+      # cached payload to the scheduler snapshot in memory.
+      def operational_recoveries(projects, status_payload:)
+        @recovery_status_command.operational_recoveries(
+          projects,
+          status_payload: status_payload
+        )
+      end
+    end
+
+    # The process-wide owner of the expensive fleet status computation. In
+    # Rails, StatusBroadcaster bridges each changed snapshot to Turbo Streams.
     #
     # HTTP status renders and the Cable poller both enter refresh_state, whose
     # single-flight gate guarantees that concurrent callers share one scan.
+    # The default command makes that scan a bounded active-task refresh:
+    # terminal membership/policy changes and a five-minute archive backstop
+    # refresh the ordinary archive projection, while complete archive reads
+    # remain on-demand. An idle server performs no scans.
+    #
     # Failures never manufacture a healthy empty fleet: they publish either a
-    # degraded latest-good snapshot or an explicit unavailable envelope.
+    # degraded latest-good snapshot or an explicit unavailable envelope. A new
+    # subscriber gets the current state immediately; unchanged semantic states
+    # are suppressed and instead fire the optional on_idle keep-alive seam.
     class StatusFeed
       DEFAULT_INTERVAL = 5.0
       VOLATILE_KEYS = %w[generated_at age_seconds].freeze
@@ -45,11 +89,15 @@ module Hive
         end
       end
 
-      def initialize(interval: DEFAULT_INTERVAL,
-                     status_command: Hive::Commands::Status.new(json: true),
-                     clock: -> { Time.now.utc })
+      def initialize(
+        interval: DEFAULT_INTERVAL,
+        status_command: CachedStatusCommand.new,
+        archive_status_command: Hive::Commands::Status.new(json: true, archive: true),
+        clock: -> { Time.now.utc }
+      )
         @interval = interval
         @status_command = status_command
+        @archive_status_command = archive_status_command
         @clock = clock
         @monitor = Monitor.new
         @tick = @monitor.new_cond
@@ -70,6 +118,12 @@ module Hive
       # mistaken for a real empty fleet.
       def snapshot
         snapshot_state.payload
+      end
+
+      # Dedicated archive reads are lossless and deliberately stay outside
+      # the ordinary feed's priming, availability, and dedup lifecycle.
+      def archive_snapshot
+        @archive_status_command.json_payload(Hive::Config.registered_projects)
       end
 
       # One fresh scan, coalesced across all callers already waiting for it.
@@ -231,13 +285,21 @@ module Hive
           identity = task["identity"] || {}
           [ [ identity["project"].to_s, identity["slug"].to_s ], task["recovery"] ]
         end
-        Array(payload["projects"]).each do |project|
-          Array(project["tasks"]).each do |task|
+        changed = false
+        projects_with_recoveries = Array(payload["projects"]).map do |project|
+          project_changed = false
+          tasks_with_recoveries = Array(project["tasks"]).map do |task|
             recovery = recoveries[[ project["name"].to_s, task["slug"].to_s ]]
-            task["recovery"] = recovery if recovery.is_a?(Hash)
+            next task unless recovery.is_a?(Hash)
+            next task if task["recovery"] == recovery
+
+            changed = true
+            project_changed = true
+            task.merge("recovery" => recovery)
           end
+          project_changed ? project.merge("tasks" => tasks_with_recoveries) : project
         end
-        payload
+        changed ? payload.merge("projects" => projects_with_recoveries) : payload
       rescue StandardError => e
         warn "hive web: operational recovery overlay failed (#{e.class}: #{e.message}); using base status"
         payload

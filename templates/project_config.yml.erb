@@ -33,6 +33,32 @@ claude:
 <% if claude_effort %>  effort: <%= claude_effort %>
 <% else %>  # effort: medium
 <% end %>
+# Optional built-in stage routing. `models:` changes only model and effort;
+# the existing stage/reviewer `agent:` still selects the provider. Exact keys
+# inherit an omitted field from their coarse family independently:
+#
+# models:
+#   plan:
+#     model: gpt-5.6-sol
+#     effort: xhigh
+#   execute:
+#     effort: high
+#   execute_implementation:
+#     model: gpt-5.6-sol       # inherits execute.effort
+#   review:
+#     effort: high
+#   review_fix:
+#     model: gpt-5.6-sol       # inherits review.effort
+#
+# Project-owned keys:
+# brainstorm, plan, execute, execute_implementation, rebase, diagnose,
+# babysitter, review, review_ci, review_reviewers, review_triage, review_fix,
+# review_browser, patrol, patrol_review, patrol_fix, open_pr, artifacts,
+# finalize. Hive's former in-process PR digest was removed; PRDigest is now a
+# standalone integration and is not a model-routing stage.
+# Arbitrary custom-workflow stage names are intentionally not valid here;
+# put `model:` / `effort:` on their workflow descriptor instead.
+
 # Optional per-stage agent tool scopes. Default is yolo, which preserves
 # today's stage behavior. Non-yolo scopes are Claude-only and are tool-level
 # controls, not an OS sandbox; see docs/permissions.md.
@@ -209,6 +235,9 @@ review:
   # here; disabled reviewers are omitted from the array entirely. The
   # deep-merge replaces `review.reviewers` wholesale, so editing this
   # list later replaces it (no per-element merge).
+<% if enabled_reviewers.empty? -%>
+  reviewers: []
+<% else -%>
   reviewers:
 <% if enabled_reviewers.include?("claude-ce-code-review") -%>
     - name: claude-ce-code-review
@@ -249,6 +278,7 @@ review:
       prompt_template: reviewer_grok_ce_code_review.md.erb
       budget_usd: 50
       timeout_sec: 7200
+<% end -%>
 <% end -%>
 
 # Hive daemon (ADR-024): auto-advances tasks through the pipeline up to
@@ -341,6 +371,9 @@ patrol:
   review:
     max_context_files: 4
     max_owned_files: 4
+<% if patrol_reviewers.empty? -%>
+    reviewers: []
+<% else -%>
     reviewers:
 <% if patrol_reviewers.include?("codex-native-review") -%>
       # Native `codex review` — one cheap, tuned, read-only pass whose
@@ -371,6 +404,7 @@ patrol:
         prompt_template: reviewer_claude_ce_code_review.md.erb
         budget_usd: 50
         timeout_sec: 5400
+<% end -%>
 <% end -%>
 
 # Architecture patrol is independent from ordinary patrol. Fresh init

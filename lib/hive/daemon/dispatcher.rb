@@ -20,7 +20,6 @@ require "hive/daemon/task_id_backfiller"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/daemon/logger"
-require "hive/daemon/digest_scheduler"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/refactor_patrol_scheduler"
@@ -72,8 +71,7 @@ module Hive
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
                      merge_watcher: nil, refactor_patrol_merge_reconciler: nil,
                      patrol_scheduler: nil, refactor_patrol_scheduler: nil,
-                     patrol_arbiter: nil, digest_scheduler: nil,
-                     answer_digest_scheduler: nil, dry_run: false,
+                     patrol_arbiter: nil, answer_digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                      attempt_dispatcher: nil, attempt_reconciler: nil,
@@ -91,7 +89,6 @@ module Hive
         @patrol_scheduler = patrol_scheduler
         @refactor_patrol_scheduler = refactor_patrol_scheduler
         @patrol_arbiter = patrol_arbiter
-        @digest_scheduler = digest_scheduler
         @answer_digest_scheduler = answer_digest_scheduler
         @dry_run = dry_run
         @attempt_dispatcher = attempt_dispatcher
@@ -290,7 +287,6 @@ module Hive
         # + catch-up-cap `write_state`), and an unguarded SystemCallError
         # (ENOSPC/EROFS/EACCES) would otherwise crash the whole tick and
         # trip the unit's restart-loop cap.
-        run_digest_scheduler_tick(@digest_scheduler, "digest_scheduler.tick", now: now)
         run_digest_scheduler_tick(@answer_digest_scheduler, "answer_digest_scheduler.tick", now: now)
 
         # 2. Fetch status
@@ -462,7 +458,11 @@ module Hive
         )
         refresh_tracked_state_file_mtimes(result.rows)
 
-        publish_complete_operational_snapshot(initial_rows: result.rows, now: now)
+        publish_complete_operational_snapshot(
+          initial_rows: result.rows,
+          initial_hidden_archived_task_count: result.hidden_archived_task_count,
+          now: now
+        )
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)
@@ -1428,7 +1428,7 @@ module Hive
         log_operational_snapshot_failure(phase: "observe", error: e)
       end
 
-      def publish_complete_operational_snapshot(initial_rows:, now:)
+      def publish_complete_operational_snapshot(initial_rows:, initial_hidden_archived_task_count: 0, now:)
         return unless @operational_snapshot
 
         verification = @status_consumer.fetch
@@ -1446,6 +1446,8 @@ module Hive
           phase: "complete",
           initial_rows: initial_rows,
           final_rows: verification.rows,
+          initial_hidden_archived_task_count: initial_hidden_archived_task_count,
+          final_hidden_archived_task_count: verification.hidden_archived_task_count,
           controller: @controller.operational_snapshot(now: completed_at),
           queue: operational_queue_snapshot(now: completed_at, queue_state: queue_state),
           recoveries: operational_recovery_snapshot(queue_state: queue_state),
@@ -1848,13 +1850,12 @@ module Hive
         @controller.can_dispatch_digest?(now: now)
       end
 
-      # The two global-digest pseudo-stages mapped to their action label. Both
+      # Global-digest pseudo-stages mapped to their action label. Both
       # `global_digest_stage?` and `global_digest_action` read this so the
       # stage↔label pairing lives in one place; `global_digest_scheduler` still
       # maps a stage to the per-instance scheduler ivar, which can't live in a
       # frozen constant.
       GLOBAL_DIGEST_ACTIONS = {
-        Hive::Daemon::DigestScheduler::DIGEST_STAGE => "digest",
         Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE => "answer_digest"
       }.freeze
 
@@ -1873,8 +1874,6 @@ module Hive
 
       def global_digest_scheduler(stage)
         case stage
-        when Hive::Daemon::DigestScheduler::DIGEST_STAGE
-          @digest_scheduler
         when Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE
           @answer_digest_scheduler
         end
@@ -2895,7 +2894,6 @@ module Hive
         # already-constructed healer.
         daemon_cfg = Hive::Config.load_global_daemon
         update_cfg = Hive::Config.load_global_update
-        digest_cfg = Hive::Config.load_global_digest_block
         answer_digest_cfg = Hive::Config.load_global_answer_digest_block
         stale_agent_healer = StaleAgentHealer.new(
           controller: @controller,
@@ -2915,12 +2913,10 @@ module Hive
 
         @daemon_cfg = daemon_cfg
         @update_cfg = update_cfg
-        @digest_cfg = digest_cfg
         @answer_digest_cfg = answer_digest_cfg
         @config = {
           "daemon" => @daemon_cfg,
           "update" => @update_cfg,
-          "digest" => @digest_cfg,
           "answer_digest" => @answer_digest_cfg
         }
         @update_check_enabled = @update_cfg.fetch("check", true)
@@ -2936,16 +2932,6 @@ module Hive
           ),
           max_concurrent_patrol_scans: @daemon_cfg.fetch(
             "max_concurrent_patrol_scans", @controller.max_concurrent_patrol_scans
-          )
-        )
-        # Reconfigure the digest scheduler in place so enabling the digest
-        # (or retuning max_catchup_days) via config + SIGHUP takes effect
-        # within one tick, consistent with the rest of the daemon's reload
-        # contract — without losing the scheduler's in-flight state.
-        @digest_scheduler&.reconfigure(
-          enabled: @digest_cfg.fetch("enabled", false),
-          max_catchup_days: @digest_cfg.fetch(
-            "max_catchup_days", Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
           )
         )
         @answer_digest_scheduler&.reconfigure(

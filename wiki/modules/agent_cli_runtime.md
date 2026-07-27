@@ -1,7 +1,7 @@
 ---
 title: Agent CLI Runtime component
 type: module
-source: components/agent-cli-runtime, .github/workflows/agent-cli-runtime-release.yml
+source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
 updated: 2026-07-26
 tags: [agent, runtime, component, gem, cli]
@@ -87,6 +87,25 @@ survive reviewer delay. Repository operators must separately enforce a
 component-tag ruleset, required reviewers on the release environment, and an
 environment deployment policy restricted to matching component tags. See
 `docs/RELEASING.md`.
+
+The public
+[`ivankuznetsov/agent-cli-runtime`](https://github.com/ivankuznetsov/agent-cli-runtime)
+repository is a read-only distribution projection, not a second development
+home. Its scheduled or manually dispatched sync copies this component to the
+mirror root and writes `.mirror-source.json` with the exact canonical component
+commit. The mirror invokes the projector from the canonical checkout and
+requires the complete canonical admin set before mutation. Mirror Git writes
+use a repository-scoped deploy key because GitHub's generated token cannot
+update workflow files; API reads and release creation retain the shorter-lived
+generated token. A separate manual mirror workflow projects an already
+approved, fully qualified component tag to an orphan `vX.Y.Z` source-snapshot
+tag. It reuses the component release preflight, verifies the exact version is
+already on RubyGems, compares the projected tree with an independently archived
+canonical tree, requires a live immutable `refs/tags/v*` ruleset, verifies the
+local tag as an installable gem, and only then pushes it and creates the focused
+GitHub release. Neither mirror workflow can modify Hive, publish RubyGems
+bytes, or choose a version; issues, pull requests, and release authority stay
+here.
 
 ## Compatibility
 

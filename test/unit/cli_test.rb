@@ -24,7 +24,6 @@ require "hive/commands/findings"
 require "hive/commands/finding_toggle"
 require "hive/commands/patrol"
 require "hive/commands/refactor_patrol"
-require "hive/commands/digest"
 require "hive/commands/pairing"
 require "hive/commands/answer_digest"
 require "hive/commands/markers"
@@ -36,6 +35,10 @@ require "hive/commands/setup_agents"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
+
+  def test_prdigest_delivery_command_is_absent
+    refute Hive::CLI.tasks.key?("digest")
+  end
 
   def test_setup_agents_help_exposes_consent_json_and_filters
     out, _err = capture_io { Hive::CLI.start([ "help", "setup-agents" ]) }
@@ -93,7 +96,7 @@ class HiveCliTest < Minitest::Test
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
       assert_equal({
                      force: true, json: true, workflow: "content_fixture",
-                     new_workflow: nil, refactor_patrol: nil
+                     new_workflow: nil, refactor_patrol: nil, minimal: false, preview: false
                    },
                    calls.first.fetch(:kwargs))
       assert_equal :call, calls.last
@@ -104,9 +107,19 @@ class HiveCliTest < Minitest::Test
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
       assert_equal({
                      force: false, json: false, workflow: nil,
-                     new_workflow: "writing", refactor_patrol: nil
+                     new_workflow: "writing", refactor_patrol: nil, minimal: false, preview: false
                    },
                    calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::Init) do |calls|
+      Hive::CLI.start([
+        "init", "/tmp/project", "--new-workflow", "writing", "--minimal", "--preview", "--json"
+      ])
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:minimal)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:preview)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:json)
       assert_equal :call, calls.last
     end
 
@@ -247,13 +260,25 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::New) do |calls|
       Hive::CLI.start([ "new", "proj", "build", "thing" ])
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
-      assert_equal({ base: nil, depends_on: nil, workflow: nil }, calls.first.fetch(:kwargs))
+      assert_equal(
+        { base: nil, depends_on: nil, workflow: nil, idempotency_key: nil, json: false },
+        calls.first.fetch(:kwargs)
+      )
     end
 
     with_command_new_stub(Hive::Commands::New) do |calls|
-      Hive::CLI.start([ "new", "proj", "--depends-on", "base-task", "--workflow", "content_fixture", "build", "thing" ])
+      Hive::CLI.start([
+        "new", "proj", "--depends-on", "base-task", "--workflow", "content_fixture",
+        "--idempotency-key", "creator:v1", "--json", "build", "thing"
+      ])
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
-      assert_equal({ base: nil, depends_on: "base-task", workflow: "content_fixture" }, calls.first.fetch(:kwargs))
+      assert_equal(
+        {
+          base: nil, depends_on: "base-task", workflow: "content_fixture",
+          idempotency_key: "creator:v1", json: true
+        },
+        calls.first.fetch(:kwargs)
+      )
     end
 
     _out, err, status = with_captured_exit { Hive::CLI.start([ "new", "proj" ]) }
@@ -281,15 +306,6 @@ class HiveCliTest < Minitest::Test
 
     assert_includes out, "hive-init.v#{current}",
                     "init help must derive its JSON contract version from SCHEMA_VERSIONS"
-  end
-
-  def test_digest_help_describes_the_pr_only_london_contract
-    out, _err = capture_io { Hive::CLI.start([ "help", "digest" ]) }
-
-    refute_includes out, "--source"
-    assert_includes out, "--repo"
-    assert_includes out, "Europe/London"
-    assert_includes out, "Hive tasks and stage folders never affect inclusion"
   end
 
   def test_workflow_option_help_does_not_enumerate_project_workflows
@@ -350,7 +366,8 @@ class HiveCliTest < Minitest::Test
       assert_equal [ "new", "my-flow" ], calls.first.fetch(:args)
       assert_equal(
         { project_root: Dir.pwd, json: true, template: nil, yes: false, dry_run: false,
-          allow_escalation: false, mapping_overrides: [], input_bindings: [], version: nil },
+          allow_escalation: false, mapping_overrides: [], input_bindings: [], version: nil,
+          expected_release_digest: nil },
         calls.first.fetch(:kwargs)
       )
       assert_equal :call, calls.last
@@ -777,33 +794,6 @@ class HiveCliTest < Minitest::Test
       assert_equal "cursor-1", calls.first.fetch(:kwargs).fetch(:cursor)
       assert_equal false, calls.first.fetch(:kwargs).fetch(:full)
       assert_equal true, calls.first.fetch(:kwargs).fetch(:json)
-    end
-
-    with_command_new_stub(Hive::Commands::Digest) do |calls|
-      Hive::CLI.start([ "digest", "--date", "2026-06-13", "--dry-run", "--json",
-                        "--repo", "owner/repo" ])
-      assert_equal [], calls.first.fetch(:args)
-      assert_equal({
-        date: "2026-06-13",
-        json: true,
-        dry_run: true,
-        repos: [ "owner/repo" ]
-      }, calls.first.fetch(:kwargs))
-    end
-
-    # Repeated `--repo` must accumulate, not silently keep only the last repo —
-    # the documented multi-repo form (`--repo a/b --repo c/d`).
-    with_command_new_stub(Hive::Commands::Digest) do |calls|
-      Hive::CLI.start([ "digest", "--repo", "owner/repo", "--repo", "other/repo" ])
-      assert_equal [ "owner/repo", "other/repo" ], calls.first.fetch(:kwargs).fetch(:repos),
-                   "repeated --repo flags must accumulate every repo, not overwrite"
-    end
-
-    # The undocumented space-listed form (`--repo a/b c/d`) must also flatten
-    # to the same list of slugs.
-    with_command_new_stub(Hive::Commands::Digest) do |calls|
-      Hive::CLI.start([ "digest", "--repo", "owner/repo", "other/repo" ])
-      assert_equal [ "owner/repo", "other/repo" ], calls.first.fetch(:kwargs).fetch(:repos)
     end
 
     with_command_new_stub(Hive::Commands::AnswerDigest) do |calls|

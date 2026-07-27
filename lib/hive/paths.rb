@@ -57,6 +57,26 @@ module Hive
       File.join(attempts_root, "generation-locks")
     end
 
+    def workflow_publish_root
+      File.join(state_home, "workflow-publish", "v1")
+    end
+
+    def workflow_publish_receipts_root
+      File.join(workflow_publish_root, "receipts")
+    end
+
+    def workflow_publish_bundles_root
+      File.join(workflow_publish_root, "bundles")
+    end
+
+    def workflow_publish_locks_root
+      File.join(workflow_publish_root, "locks")
+    end
+
+    def workflow_publish_objects_root
+      File.join(workflow_publish_root, "objects")
+    end
+
     def bin_home
       # bin_home intentionally ignores HIVE_HOME — install.sh places
       # the `hive`/`hv` symlinks under XDG_BIN_HOME (or ~/.local/bin),

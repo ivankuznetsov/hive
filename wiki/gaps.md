@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-26
+updated: 2026-07-27
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -68,6 +68,16 @@ tags: [gap, todo, release-proof, agent-skills]
   equivalent protected signing/storage authority), not another in-process
   Ruby guard.
 
+- `Hive::ArtifactFirewall` now proves before/after custody for declared anchors,
+  rejects non-regular or outside-root required outputs, and verifies
+  reconstructable restoration. Baseline identity comes from the same
+  descriptor as captured bytes, and restoration refuses a changed protected
+  parent. It still runs under the controller's OS user: it cannot prevent
+  concurrent same-UID writes, observe undeclared paths, or provide
+  process/mount/network isolation or an atomic multi-file rollback. Stronger
+  hostile-agent containment remains an OS/Hivebox or separate-identity
+  concern, not a future widening of the in-process report contract.
+
 - Hive now resolves and verifies the current `honeycomb-catalog/v2` and
   `packages/NAME/VERSION/manifest.yml` contract, but the manifest's coarse
   permission disclosure is not generally convertible to Hive's exact managed
@@ -76,11 +86,12 @@ tags: [gap, todo, release-proof, agent-skills]
   admission before any install/update write. Close this by adding exact v2
   runtime-policy data or an equally precise Hive enforcement path, then run a
   live install/run smoke. Do not advertise either seed install as working yet.
-- `hive workflow publish` still creates the legacy
-  `workflows/NAME/manifest.json` submission layout. It does not author the
-  current immutable version directory/canonical YAML contract and needs a
-  separate v2 publication migration before its pending-review output can feed
-  the deployed registry.
+- The v2-only `hive workflow publish` path is covered by hermetic package,
+  receipt, retry, lifecycle, schema, and local CLI tests, but this implementation
+  deliberately performs no live external publication. A separately authorized
+  smoke must still prove the configured GitHub permission mode and deployed
+  registry CI against a disposable package; that evidence must not merge,
+  approve, or list the package automatically.
 - The built-in `bench` descriptor, packaged stage instructions, self-contained
   runtime snapshot, and `hive init . --workflow bench` path are covered locally,
   but they have not yet shipped in a Hive release or completed a live
@@ -89,6 +100,26 @@ tags: [gap, todo, release-proof, agent-skills]
 - The packaged mixed Sol/Terra/Grok profiles, stage-specific Codex shim, sole
   Sol `ce-code-review` policy, and combined Sol-runner selection are locally
   test-pinned but still need their first paid end-to-end cell.
+
+## Internal component boundary gap
+
+- The final internal graph audit retains seven catalog rows: UserService, Agent
+  ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger
+  are `boundary-ready`; Attempts admission remains the sole `candidate`.
+  Skillpack to Agent ABI is the only component dependency, and no migration
+  exceptions remain. Attempts is not ready because Hive has no demonstrated
+  need for a supported reconciliation, supervision, capacity, loss-processing,
+  cancellation, export, or raw-store lifecycle API.
+- No ready component has yet earned standalone packaging. There is no named
+  non-Hive adopter, independently installed component artifact, separate
+  compatibility promise, or explicit release decision. Those proofs belong to
+  `docs/plans/2026-07-25-002-feat-standalone-component-gems-plan.md`; internal
+  readiness must not be reported as RubyGems publication eligibility.
+- The catalog guard parses literal `require`, `require_relative`, and
+  `Constant.new` edges. Dynamic loading, aliases, reflection, factories, and
+  same-user monkeypatching remain outside that test-only architecture check.
+  A future package candidate still needs an independent package harness and
+  security claims grounded in its own runtime tests.
 
 ## Source-file coverage (representative map)
 
@@ -115,7 +146,6 @@ tags: [gap, todo, release-proof, agent-skills]
 | `lib/hive/task_action.rb`, `lib/hive/diagnostic_evidence.rb`, status/recovery helpers | ✓ [[modules/task_action]], [[commands/status]], [[modules/execute_waiting_action]], [[modules/diagnosis_agent]] cover red-row diagnostics, read-only `--diagnose` evidence fallback, recovery hints, and the diagnosis-agent write path. |
 | `lib/hive/gh.rb` | ✓ [[modules/gh]] covers the shared GitHub CLI helper surface; [[dependencies]], stage pages, [[commands/stage_action]], and [[modules/babysitter]] cover its command-level consumers. |
 | `lib/hive/pr.rb` | ✓ [[modules/pr]] covers the local PR URL → `#number` formatter used by the TUI PR column. |
-| `lib/hive/prdigest.rb`, `lib/hive/commands/digest.rb`, `lib/hive/daemon/digest_scheduler.rb` | ✓ [[commands/digest]], [[modules/digest]], [[modules/config]], [[dependencies]], and [[testing]] cover the registered-project adapter, PRDigest result boundary, and Hive-owned scheduler cursor. |
 | Core task/state helpers: `task`, `markers`, `lock`, `worktree`, `git_ops`, `rebase`, `workflows`, `metrics`, `secret_patterns`, `protected_files`, `events` | ✓ `wiki/modules/*` pages exist for each named domain. |
 | `templates/*.erb` and prompt files | ✓ [[templates]] plus stage pages |
 | `openclaw/skills/hive/SKILL.md`, `openclaw/README.md` | ✓ [[commands]], [[operating]], and [[commands/wiki]] cover the single ClawHub `hive-cli` skill, `/hive` slash-command dispatch, guided setup, wiki changelog verification, and publish-shape constraints. |
@@ -238,7 +268,6 @@ completed real GitHub/Codex/Claude provider login plus a daemon-owned PR push.
 46. **`bin/hive-eval` CLI contract is source/test-pinned but not judge-smoked.** Commit `ffa51d56` hardens the checkout-only eval runner's usage surface: positional scenario names are rejected before report creation, `--scenario` is confined to safe basenames under `test/eval/scenarios/`, and path separators/traversal/dotted names exit 64. `test/eval/support/reporter_test.rb` pins those structural paths plus inherited `TEST` isolation and successful report writing; `bundle exec ruby -Itest test/eval/support/reporter_test.rb` passed locally during this refresh. Remaining uncertainty: no in-tree artifact shows a full judge-enabled `bin/hive-eval` run after the hardening; the pinned structural path can run with `--no-judge` without exercising Codex judge subprocesses.
 47. **`bin/hive-eval` usage/env contract is focused-test pinned but not full judged-eval smoked.** The eval-wrapper follow-up changes the checkout-local eval wrapper's usage text so one unexpected positional argument prints `unexpected argument: ...`, multiple positional arguments print `unexpected arguments: ...`, path separators report `scenario basename must not contain path separators`, and unsafe separator-free names report a generic safe-basename error without echoing the value. Commit `ed404213` then changes environment propagation so inherited `HIVE_EVAL_NO_JUDGE=1` is cleared unless `--no-judge` is passed, preventing caller environment from silently disabling Codex judge assertions. The patrol follow-up also rejects inherited `RAKEOPT=-n`/`--dry-run`, clears `RAKEOPT` before launching Rake, and refuses a zero child exit unless the report is parseable, identifies itself as `hive-eval-report` version 1, contains at least one scenario, and includes the requested scenario when filtered. The current focused tests pin the first positional scenario argument, a trailing extra argument, the stray positional scenario argument, path separators, unsafe names, invalid options, missing option values, ambient `TEST` isolation, all-scenario filtering, successful report writes, deliberate failing-scenario report shape, the judge-enabled env-clear fixture, inherited Rake dry-run rejection, child `RAKEOPT` scrubbing, missing reports after a successful child, malformed/wrong-schema reports, empty reports, and filtered reports naming the wrong scenario. This refresh did not find an in-tree artifact from a full `bin/hive-eval` run with real Codex judge/persona calls enabled after `ed404213`; the verified surface is the local structural wrapper/test path.
 46. **`hive new` capture commit serialization is pinned, but adjacent display-name commits remain best-effort.** Commit `bdd9a9fa` wraps the captured-task `Hive::GitOps#hive_commit(stage_name: "1-inbox", action: "captured")` in `Hive::Lock.with_commit_lock(hive_state)`, and `test/integration/new_test.rb` now asserts the wrapper path. The committed wiki fragment records a local direct multi-process repro, but this refresh did not find an in-tree artifact proving the original parallel hivebox Rails/system-worker failure no longer reproduces. Source inspection also shows `Hive::DisplayName::Generator#commit_name` still calls `Hive::GitOps#hive_commit` directly and swallows `Hive::GitError`; that best-effort path may recover naturally through daemon backfill, but it is not serialized by `Hive::Lock.with_commit_lock` today.
-46. **Hive-to-PRDigest delegation is source/test-pinned, but live Telegram proof remains external.** Hive resolves only registered `github.com/owner/name` identities, writes a private token-free config, invokes deterministic `prdigest run` with array argv, passes through `prdigest-result` v1, preserves exits, and parks the four non-replayable delivery kinds. PRDigest 0.2.0 is publicly installable, retains the 0.1.1 live Octokit `Time` fix, and adds facts/prose modes without changing Hive's adapter contract. Remaining uncertainty: no live post-delegation Telegram run is retained in-tree, and legacy `blocked_date` / `digest-deliveries` state still requires manual reconciliation because automatically converting an in-flight MarkdownV2 checkpoint could duplicate an accepted chunk.
 49. **Append-only log.d fragment carries a stale `:marker` kind reference (U11).** `wiki/log.d/20260620T120000Z-task-action-review-fixes.md:7` says the `:none` inert fall-through gate "excludes `:agent`, `:marker`, and `nil`". That was accurate at its 2026-06-20 timestamp, but U11 retired the `:marker` kind: `Hive::Workflow::KNOWN_KINDS` is now `[nil, :agent, :inert, :execute, :review_council, :finalize]` (`refute_includes ..., :marker` pins the absence in `test/unit/workflow_test.rb`), and the live code comment in `lib/hive/task_action.rb` was updated to "coding runtime kinds". Per the repo's append-only `log.d` convention the fragment is NOT rewritten; this note exists so an `rg :marker` reader treats that line as historical, not current. The only authoritative kind list lives in `lib/hive/workflow.rb`. See [[modules/task_action]].
 
 49. **Screenote live capture test-token endpoint is blocked on Screenote-side availability.** The OAuth/MCP implementation has opt-in live discovery, dynamic-registration, and preseeded auth-code exchange coverage in `test/integration/screenote_oauth_live_test.rb`. The live `create_screenshot_upload` round-trip is written in `test/integration/screenote_capture_live_test.rb`, but it skips until the Screenote non-interactive test-token endpoint URL, secret, and project id are provided. As of 2026-06-22 the upload tool's request/response contract is covered in CI by `test_call_tool_create_screenshot_upload_round_trips_through_http_seam` (`test/unit/screenote/mcp_client_test.rb`) through the FakeHttp seam; the remaining gap is narrowed to proving the *signed upload* against a real Screenote bearer, which still requires the blocked live endpoint.
@@ -305,9 +334,9 @@ evidence closing the following June 16 gaps.
 Latest refresh (2026-07-22): the source version and installer references are
 prepared as v0.6.9. This release-prep branch does not itself prove a public tag,
 signed assets, Homebrew/AUR updates, ClawHub publication, or
-multi-architecture hivebox images. The release boundary uses an exact-tag
-offline candidate gate and does not require provider credentials. The live
-post-release dogfood evidence
+multi-architecture hivebox images. The release boundary uses trusted pre-tag
+candidate evidence plus exact-byte tag selection and does not require provider
+credentials. The live post-release dogfood evidence
 tracked below remains intentionally open until a separately authorized release
 is published and installed.
 Historical commit `54fd3455` still provides commit-message evidence for the
@@ -735,6 +764,34 @@ read-through alias has not been selected. Remove it only after warned projects
 have had a migration window and release notes make the strict boundary
 explicit; no version or publication decision is implied by the source change.
 
+## Workflow-creator protected OpenClaw proof awaits a credentialed run (2026-07-24)
+
+The natural-language workflow creator is covered hermetically through AE1–AE5,
+including real descriptor loading, human approve/reject decisions, minimal-init
+preview, collision refusal, and state-wide task idempotency. The protected
+OpenClaw workflow and fail-closed attestor are source/unit tested, but this
+implementation session had no release-gate OpenAI credential and therefore did
+not produce a trusted live attestation. Keep this gap open until the dedicated
+`live-workflow-creator` job succeeds for an exact protected-main candidate and
+the resulting Check Run binds the prompt, candidate skill digest, ordered Hive
+commands, exact editorial graph, zero task count, secret scan, and cleanup.
+The same proof must also attest one explicitly authorized task, one first-stage
+run, a no-op retry with the same idempotency key, and matching operational
+status.
+
+## WorkLedger is an internal boundary, not a published format (2026-07-26)
+
+`Hive::WorkLedger` now has clean-load, structural descriptor, durable append,
+rollback, idempotency-conflict, replay, adapter-compatibility, historical
+fixture, and component-graph tests. This proves the internal mechanism seam; it
+does not establish external demand, a stable public journal/projection disk
+schema, cross-platform crash semantics beyond Hive's supported filesystem
+tests, or independent release/version ownership. The Hive task journal,
+projection snapshots, attempts, conditions, workflow overlays, and migrations
+remain Hive-owned compatibility contracts. Do not infer a gem or repository
+split from `boundary-ready`; future packaging still needs a real non-Hive
+consumer and explicit release direction.
+
 ## Typed budget and Brainstorm artifact repair need live dogfood (2026-07-25)
 
 Focused source tests pin Claude's structured `error_max_budget_usd` result as a
@@ -813,3 +870,38 @@ successful refresh. Focused tests cover those contracts. The remaining evidence
 is still the installed-main replay: use an explicit checkout bundle URL for
 unreleased dogfood, verify the unchanged-unit restart receipt, then confirm the
 managed lockfile and live service both identify the merged generation.
+
+## Pre-release upgrade-survivor contracts are implemented but real lanes are not yet run (2026-07-27)
+
+The reviewed catalog and installed-target layer now feed blocking
+latest-stable and historical upgrade gates. Fixed runner contracts pin the
+v0.4.1 producer, exact legacy bench descriptor/instructions, required v0.4.2
+collision observer, candidate migration, named semantic snapshots,
+idempotency, process/service teardown, and cloned-prefix Linux/macOS update
+oracles. Focused tests use an injected fixed executor with synthetic installed
+binaries and never count them as real producer evidence. The default local CLI
+keeps those gates unavailable as
+`compliant_local_upgrade_executor_unavailable`; it does not start a production
+historical container lane.
+
+The real authenticated v0.6.9 and v0.4.1/v0.4.2 packages have not yet run in a
+disposable OS sandbox on their required platform cells. The U5 hosted workflow
+now encodes staging, containment, freshness, ordinary-CI, closed aggregate, and
+checkout-free Check Run publication contracts, but it was not dispatched.
+Targeted retry preflight validates the exact source evidence and Check digest,
+resolves named/failed/missing gate display names, conditions every matrix
+operation on that closed selection, and composes immutable trusted-control
+receipts with provenance-preserving predecessor rows. Failed attempts retain
+`qa_blocked` evidence and a digest-bound failed Check. This closes the prior
+targeted-retry plumbing gap, but does not constitute hosted execution evidence.
+Do not treat U3 cache/target proof, U4 fixture proof, or U5 workflow contract
+tests as evidence that a historical upgrade or hosted candidate run completed.
+
+The reviewed offline-closure inventories are now checked in with exact
+filenames, sizes, and SHA-256 digests, and `plan` returns the explicit cache
+materializer argv when they are absent. That closes the manifest-definition
+gap, not the execution gap: no real hosted candidate, native-platform matrix,
+or historical package lane ran during this implementation. The current source
+version and latest-stable row are both 0.6.9, so `candidate_not_newer` must keep
+the candidate blocked. No version choice, tag, publication, deployment, or
+release was authorized.

@@ -95,6 +95,9 @@ module Hive
         Hive::ImplementationIdentity::NativeDefaults.resolve(:pi, **kwargs)
       },
       model_argument_builder: ->(model) { [ "--model", model ] },
+      routed_model_argument_builder: ->(model) {
+        %w[default inherit].include?(model) ? [] : [ "--model", model ]
+      },
       launcher_identity: "pi-coding-agent/v1"
     )
 

@@ -3,7 +3,7 @@ title: hive Wiki
 type: index
 source: wiki/**/*.md
 created: 2026-05-14
-updated: 2026-07-26
+updated: 2026-07-27
 tags: [index, wiki]
 ---
 
@@ -13,12 +13,29 @@ local-first workflow engine for AI agents; software delivery is its flagship
 proof, while built-in content/bench, installable Honeycomb, and owner-authored
 workflows use the same folder-backed execution model.
 
-Page count: 96
-Updated: 2026-07-26
+Page count: 97
+Updated: 2026-07-27
 
-Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents compile provider-neutral invocations through `Hive::AgentRuntime` and configurable AgentProfile adapters (`claude` default, `codex`, `pi`, `grok`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. Agent operation is centered on the additive operational status contract, coherent daemon scheduler snapshots, bounded semantic `hive watch`, and tokenized routine `hive act`; the legacy full JSON graph remains compatible. Hive packages one canonical operating skill projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, and Pi `/skill:hive`, with read-only `hive doctor`, consent-safe setup, and an exact-SHA four-agent pre-release proof.
+Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents compile provider-neutral invocations through `Hive::AgentRuntime` and configurable AgentProfile adapters (`claude` default, `codex`, `pi`, `grok`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. Agent operation is centered on the additive operational status contract, coherent daemon scheduler snapshots, bounded semantic `hive watch`, tokenized routine `hive act`, and stable-ID semantic E2E profiles; the legacy full JSON graph remains compatible. Hive packages one canonical operating skill projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, and Pi `/skill:hive`, with read-only `hive doctor`, consent-safe setup, deterministic trusted pre-release proof, and optional four-agent live diagnostics.
 
-The public native release surface is the `hive-cli` rubygem plus authenticated managed Hive web bundle installed through Homebrew, AUR, or `install.sh`, with `hive setup` installing the loopback service by default on Linux/macOS and `hv` as the Apache Hive collision fallback. Hivebox remains the Docker distribution through the GHCR image and `hivecli.sh/box` shell / PowerShell installers for isolation, multiple instances, untrusted-agent containment, and reproducible server/NAS deployments. Hive web, `hive init` workflow selection and normal-vs-patrol reviewer split, project-global Claude model/effort pins, `hive connect screenote`, ordinary and architecture patrol, `hive babysit`, `hive bench submit`, the `hive digest` adapter from registered repositories to standalone PRDigest, and the single ClawHub `hive-cli` listing are covered by dedicated command/module pages.
+Reusable mechanisms remain in this monorepo behind the canonical
+[[component-boundaries]] catalog. The final internal graph has six
+`boundary-ready` facades—UserService, Agent ABI, Agent Artifact Firewall,
+Skillpack, Safe Agent Git Gate, and WorkLedger—and one guarded `candidate`,
+Attempts admission. Skillpack's downward dependency on the Agent ABI is the
+only component-to-component edge; no migration exceptions remain. Hive is the
+first and primary consumer, and internal readiness does not imply a gem,
+version, repository, or release.
+
+Agent spawns that own controller artifacts use the boundary-ready
+`Hive::ArtifactFirewall` for same-user protected-anchor custody, required
+regular-output admission, bounded redacted reports, and verified safe restore;
+stage markers and success policy remain above that boundary.
+Post-agent Git and architecture-patrol publication use the boundary-ready
+`Hive::AgentGitGate`: a closed read vocabulary, exact detached materialization,
+and exact expected-OID publication with non-secret before/after receipts.
+
+The public native release surface is the `hive-cli` rubygem plus authenticated managed Hive web bundle installed through Homebrew, AUR, or `install.sh`, with `hive setup` installing the loopback service by default on Linux/macOS and `hv` as the Apache Hive collision fallback. Release bytes are built and proven once before a tag; the explicit tag workflow selects the exact trusted evidence and bytes without rebuilding. Hivebox remains the Docker distribution through the GHCR image and `hivecli.sh/box` shell / PowerShell installers for isolation, multiple instances, untrusted-agent containment, and reproducible server/NAS deployments. Hive web, `hive init` workflow selection and normal-vs-patrol reviewer split, project-global Claude model/effort pins, `hive connect screenote`, ordinary and architecture patrol, `hive babysit`, `hive bench submit`, and the single ClawHub `hive-cli` listing are covered by dedicated command/module pages.
 
 ## Pages
 
@@ -31,7 +48,6 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[commands/bench-submit]] — `wiki/commands/bench-submit.md`
 - [[commands/bot]] — `wiki/commands/bot.md`
 - [[commands/daemon]] — `wiki/commands/daemon.md`
-- [[commands/digest]] — `wiki/commands/digest.md`
 - [[commands/doctor]] — `wiki/commands/doctor.md`
 - [[commands/drop]] — `wiki/commands/drop.md`
 - [[commands/findings]] — `wiki/commands/findings.md`
@@ -70,6 +86,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[log]] — `wiki/log.md`
 - [[modules/agent]] — `wiki/modules/agent.md`
 - [[modules/agent_cli_runtime]] — `wiki/modules/agent_cli_runtime.md`
+- [[modules/agent_git_gate]] — `wiki/modules/agent_git_gate.md`
 - [[modules/agent_profile]] — `wiki/modules/agent_profile.md`
 - [[modules/attempts]] — `wiki/modules/attempts.md`
 - [[modules/atomic_file]] — `wiki/modules/atomic_file.md`
@@ -79,7 +96,6 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[modules/config]] — `wiki/modules/config.md`
 - [[modules/daemon]] — `wiki/modules/daemon.md`
 - [[modules/diagnosis_agent]] — `wiki/modules/diagnosis_agent.md`
-- [[modules/digest]] — `wiki/modules/digest.md`
 - [[modules/events]] — `wiki/modules/events.md`
 - [[modules/execute_waiting_action]] — `wiki/modules/execute_waiting_action.md`
 - [[modules/findings]] — `wiki/modules/findings.md`
@@ -88,6 +104,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[modules/lock]] — `wiki/modules/lock.md`
 - [[modules/markers]] — `wiki/modules/markers.md`
 - [[modules/metrics]] — `wiki/modules/metrics.md`
+- [[modules/model_routing]] — `wiki/modules/model_routing.md`
 - [[modules/patrol]] — `wiki/modules/patrol.md`
 - [[modules/pr]] — `wiki/modules/pr.md`
 - [[modules/protected_files]] — `wiki/modules/protected_files.md`
@@ -99,9 +116,11 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[modules/task_action]] — `wiki/modules/task_action.md`
 - [[modules/task_dependencies]] — `wiki/modules/task_dependencies.md`
 - [[modules/task_resolver]] — `wiki/modules/task_resolver.md`
+- [[modules/user_service]] — `wiki/modules/user_service.md`
 - [[modules/workflows]] — `wiki/modules/workflows.md`
 - [[modules/worktree]] — `wiki/modules/worktree.md`
 - [[operating]] — `wiki/operating.md`
+- [[release-candidate]] — `wiki/release-candidate.md`
 - [[stages/agent]] — `wiki/stages/agent.md`
 - [[stages/artifacts]] — `wiki/stages/artifacts.md`
 - [[stages/brainstorm]] — `wiki/stages/brainstorm.md`

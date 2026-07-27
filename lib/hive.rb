@@ -1,5 +1,7 @@
+require_relative "hive/version"
+require_relative "hive/errors"
+
 module Hive
-  VERSION = "0.6.9".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
   # Canonical GitHub org + repo. Referenced by the release probe
   # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.
@@ -18,6 +20,8 @@ module Hive
       "hive-watch-event" => 1,
       "hive-act" => 2,
       "hive-init" => 2,
+      "hive-init-preview" => 1,
+      "hive-new" => 1,
       "hive-setup-agents" => 1,
       "hive-setup" => 1,
       "hive-web-status" => 1,
@@ -29,6 +33,7 @@ module Hive
       "hive-status-diagnose" => 2,
       "hive-run" => 2,
       "hive-approve" => 2,
+      "hive-decide" => 1,
       "hive-findings" => 1,
       "hive-stage-action" => 2,
       "hive-metrics-rollback-rate" => 1,
@@ -56,13 +61,16 @@ module Hive
       # every other agent-callable command's error envelope; the success arm
       # builds its hash directly.
       "hive-workflow-new" => 1,
+      # Read-only production-resolution validation for owner-authored,
+      # managed, and built-in workflows (`hive workflow validate ID --json`).
+      "hive-workflow-validate" => 1,
       "hive-workflow-install" => 2,
       # v2 gives selected managed rows their active immutable configuration
       # digest plus redacted per-slot mapping and optional-input discovery.
       "hive-workflow-list" => 2,
       "hive-workflow-remove" => 1,
       "hive-workflow-update" => 2,
-      "hive-workflow-publish" => 1,
+      "hive-workflow-publish" => 2,
       "hive-module-lifecycle" => 1,
       "hive-module-list" => 1,
       "hive-module-event" => 1,
@@ -495,25 +503,6 @@ module Hive
   #
   # Subclasses below override `exit_code` so any `raise Hive::SomeError` ->
   # `bin/hive` rescue path produces the right code automatically.
-  module ExitCodes
-    SUCCESS = 0
-    GENERIC = 1
-    ALREADY_INITIALIZED = 2
-    TASK_IN_ERROR = 3
-    WRONG_STAGE = 4
-    USAGE = 64
-    UNAVAILABLE = 69
-    SOFTWARE = 70
-    TEMPFAIL = 75
-    CONFIG = 78
-  end
-
-  class Error < StandardError
-    def exit_code
-      ExitCodes::GENERIC
-    end
-  end
-
   class InvalidTaskPath < Error
     def exit_code
       ExitCodes::USAGE
@@ -589,12 +578,6 @@ module Hive
   end
 
   class TmuxError < AgentError
-  end
-
-  class ConfigError < Error
-    def exit_code
-      ExitCodes::CONFIG
-    end
   end
 
   # A project config reached the shared loader with unsupported root keys.

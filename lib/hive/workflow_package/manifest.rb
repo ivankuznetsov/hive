@@ -4,6 +4,7 @@ require "json"
 require "pathname"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/diagnostic"
+require "hive/workflow_package/safe_file"
 require "hive/workflows/descriptor_parser"
 
 module Hive
@@ -48,7 +49,13 @@ module Hive
       end
 
       def self.load(path)
-        bytes = File.binread(path)
+        bytes = SafeFile.read(
+          path, max_bytes: MAX_FILE_BYTES, error_class: PackageError,
+          message: Diagnostic.new(
+            rule_id: "manifest.unreadable", severity: :error, path: FILE_NAME,
+            message: "manifest is missing or unreadable"
+          )
+        ).first
         data = JSON.parse(bytes)
         validate_shape!(data)
         canonical = Hive::WorkflowPackage::CanonicalJSON.generate(data)
@@ -58,11 +65,9 @@ module Hive
         new(data)
       rescue JSON::ParserError, EncodingError
         fail!("manifest.invalid_json", FILE_NAME, "manifest is not valid UTF-8 JSON")
-      rescue Errno::ENOENT, Errno::EACCES, IOError
-        fail!("manifest.unreadable", FILE_NAME, "manifest is missing or unreadable")
       end
 
-      def self.inventory(root, exclude: [ FILE_NAME ])
+      def self.inventory(root, exclude: [ FILE_NAME ], require_utf8: true)
         root = File.realpath(root)
         entries = []
         seen_case = {}
@@ -93,9 +98,17 @@ module Hive
 
           fail!("package.hardlink", relative, "hard-linked files are not permitted in workflow packages") if stat.nlink > 1
           fail!("package.file_too_large", relative, "package file exceeds #{MAX_FILE_BYTES} bytes") if stat.size > MAX_FILE_BYTES
-          bytes = File.binread(absolute)
+          bytes = SafeFile.read(
+            absolute, max_bytes: MAX_FILE_BYTES, error_class: PackageError,
+            message: Diagnostic.new(
+              rule_id: "package.unreadable", severity: :error, path: relative,
+              message: "package payload is unreadable"
+            )
+          ).first
           utf8 = bytes.dup.force_encoding(Encoding::UTF_8)
-          fail!("package.invalid_encoding", relative, "package payload files must be valid UTF-8") unless utf8.valid_encoding?
+          if require_utf8 && !utf8.valid_encoding?
+            fail!("package.invalid_encoding", relative, "package payload files must be valid UTF-8")
+          end
 
           total += stat.size
           fail!("package.too_large", ".", "package exceeds #{MAX_PACKAGE_BYTES} bytes") if total > MAX_PACKAGE_BYTES

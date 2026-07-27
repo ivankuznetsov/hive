@@ -55,6 +55,33 @@ Only after the user approves that output, run the matching operation with
 approval before `--allow-escalation`; ordinary install/update consent does not
 authorize escalation.
 
+Publishing an authored workflow has a stronger digest-bound confirmation
+boundary. First run the complete local preflight with no remote or receipt
+effects:
+
+```bash
+hive workflow publish NAME --version VERSION --dry-run --json
+```
+
+Require `ok: true`, `state: validated`, `freshness: not_checked`, and retain the
+exact `name`, `version`, and `release_digest` fields. Explain that the confirmed
+operation may create a fork, an immutable deterministic branch, and a public
+non-draft review PR, but never merges or lists the package. Obtain explicit
+confirmation for that exact identity, then bind the real call to those bytes:
+
+```bash
+hive workflow publish NAME --version VERSION \
+  --expected-release-digest RELEASE_DIGEST --json
+```
+
+If local bytes change, stop and repeat preflight and confirmation. Parse only
+schema-v2 fields: lifecycle `state` is `pending_review`,
+`merged_pending_listing`, `listed`, or `closed_unmerged`; `freshness` is
+`current` or visibly `cached`, with the original `observed_at`. Retry only the
+same confirmed name/version/release digest after a retryable offline or
+remote-ambiguous result. Never infer success from prose, create a second branch,
+force-push, merge, approve, close, delete remote state, or edit the catalogue.
+
 Patrol is different: `hive patrol ... --dry-run` and
 `hive refactor-patrol ... --dry-run` still launch agents, consume provider
 subscription capacity, and may persist scan state. Show the project, configured

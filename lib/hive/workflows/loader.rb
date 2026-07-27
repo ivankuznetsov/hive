@@ -1,4 +1,5 @@
 require "hive/config"
+require "digest"
 require "hive/workflows/descriptor_parser"
 require "hive/workflow_package/managed_store"
 
@@ -50,6 +51,13 @@ module Hive
       def load_managed(workflows_dir)
         hive_state = File.dirname(workflows_dir)
         store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
+        # Avoid manufacturing the managed-workflow lock file on the overwhelmingly
+        # common authored/built-in read path. No selection exists when there is
+        # no lock manifest to load, so taking the mutation lock cannot improve
+        # consistency and would make read-only commands observable as writes.
+        locks = Dir.glob(File.join(workflows_dir, "*", Hive::WorkflowPackage::ManagedStore::LOCK_FILE))
+        return {} if store.is_a?(Hive::WorkflowPackage::ManagedStore) && locks.empty?
+
         store.selections.each_with_object({}) do |lock, workflows|
           name = lock.fetch("name")
           workflow = store.workflow(
@@ -69,9 +77,9 @@ module Hive
                 Dir.glob(File.join(workflows_dir, "*", Hive::WorkflowPackage::ManagedStore::LOCK_FILE))
         paths.sort.map do |path|
           stat = File.stat(path)
-          [ path, stat.mtime.to_f, stat.size ]
-        rescue SystemCallError
-          [ path, nil, nil ]
+          [ path, stat.mtime.to_f, stat.size, Digest::SHA256.file(path).hexdigest ]
+        rescue SystemCallError, IOError
+          [ path, nil, nil, nil ]
         end
       end
     end

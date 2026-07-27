@@ -17,11 +17,36 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_match(/\A[0-9a-f]{64}\z/, skill.canonical_digest)
     assert_equal %w[description name], skill.frontmatter.keys.sort
     assert_operator skill.body.lines.size, :<, 120
-    assert_equal 5, skill.reference_paths.size
+    assert_equal 14, skill.reference_paths.size
     assert skill.reference_paths.all? { |path| path.start_with?("references/") }
     refute_includes skill.rendered_canonical_files.values.join("\n"), "{{HIVE_VERSION}}"
     assert_includes skill.rendered_canonical_files.fetch("references/setup-and-platforms.md"),
                     "/v#{Hive::VERSION}/install.sh"
+  end
+
+  def test_workflow_creator_contract_gates_mutation_and_reports_every_side_effect
+    files = Hive::AgentSkills::CanonicalSkill.new.rendered_canonical_files
+    route = files.fetch("SKILL.md")
+    creator = files.fetch("references/workflow-creator.md")
+
+    assert_includes route, "hive-workflow-creator"
+    assert_includes creator, "minimum Hive version: #{Hive::VERSION}"
+    assert_operator creator.index("hive version"), :<, creator.index("hive workflow list --json")
+    assert_operator creator.index("hive workflow list --json"), :<, creator.index("hive workflow new")
+    assert_operator creator.index("hive workflow validate"), :<, creator.index("hive workflow commit")
+    assert_operator creator.index("hive workflow commit"), :<, creator.index("hive new")
+    assert_includes creator, "No task by default"
+    assert_includes creator, "created files"
+    assert_includes creator, "applied defaults"
+    assert_includes creator, "validation result"
+    assert_includes creator, "hive update"
+    assert_includes creator, "idempotency-key"
+    assert_includes creator, "workflow-creator:v1:<64 lowercase hex>"
+    assert_includes creator, "JSON.generate([project, workflow, request])"
+    assert_includes creator, "POSIX `Shellwords.escape` semantics"
+    assert_includes creator, %q(replace each embedded `'` with the exact shell sequence `'"'"'`)
+    assert_includes creator, "Never publish externally"
+    refute_match(/hive init[^\n]*--force/, creator)
   end
 
   def test_four_platform_projections_share_payload_but_keep_thin_wrappers
@@ -84,6 +109,9 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_includes text, "hive act ACTION_ID"
     assert_includes text, "Request another operational snapshot after any action"
     assert_includes text, "separate explicit release request"
+    assert_includes text, "bin/hive-release-candidate plan --sha FULL_SHA --json"
+    assert_includes text, "`dispatch` is the only release-candidate verb that writes to GitHub"
+    assert_includes text, "Never execute `next_action.argv`"
 
     %w[HIVE_WATCH_INTERVAL HIVE_WATCH_TIMEOUT mapfile].each do |legacy|
       refute_includes text, legacy

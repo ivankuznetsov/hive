@@ -171,6 +171,31 @@ class AgentProfileModesTest < Minitest::Test
     end
   end
 
+  def test_output_file_exists_rejects_nonempty_symlink
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      output_path = File.join(task.folder, "reviews", "symlink.md")
+      outside = File.join(task.folder, "outside.md")
+      FileUtils.mkdir_p(File.dirname(output_path))
+      File.write(outside, "outside\n")
+      File.symlink(outside, output_path)
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = output_path
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "agent output\n"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "test",
+        max_budget_usd: 1, timeout_sec: 5,
+        profile: make_profile(:output_file_exists),
+        expected_output: output_path
+      ).run!
+
+      assert_equal :error, result[:status]
+      assert_match(/missing or empty/, result[:error_message])
+      assert File.symlink?(output_path)
+    end
+  end
+
   def test_output_file_exists_error_when_no_path_given
     with_tmp_dir do |dir|
       task = make_task(dir)

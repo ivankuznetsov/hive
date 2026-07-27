@@ -3,11 +3,11 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-07-22
-tags: [command, workflow, authoring, honeycomb, registry]
+updated: 2026-07-27
+tags: [command, workflow, authoring, validation, human-stage, honeycomb, registry, archive, retention]
 ---
 
-**TLDR**: `hive workflow` manages two ownership domains: `new` scaffolds trusted project-authored descriptors, while `install`, `list`, `update`, and `remove` manage immutable reviewed Honeycomb generations; `publish` validates an authored descriptor and opens a registry PR whose status is only `pending_review`.
+**TLDR**: `hive workflow` manages two ownership domains: `new` scaffolds trusted project-authored descriptors, while `install`, `list`, `update`, and `remove` manage immutable reviewed Honeycomb generations. `publish` locally builds and validates immutable Honeycomb v1 package bytes, binds a confirmed release digest to one recoverable non-draft review PR, and reconciles its PR/catalogue lifecycle without adding a public status command.
 
 ## Usage
 
@@ -15,6 +15,8 @@ tags: [command, workflow, authoring, honeycomb, registry]
 hive workflow new my-flow
 hive workflow new my-flow --template research
 hive workflow new my-flow --json
+hive workflow validate my-flow --json
+hive workflow commit my-flow
 hive workflow install honeycomb/repo-brief --yes
 hive workflow install honeycomb/repo-brief --yes --allow-escalation \
   --mapping stages.research=codex,model=gpt-5.6-sol,effort=high \
@@ -25,7 +27,9 @@ hive workflow update repo-brief --dry-run --json
 hive workflow update repo-brief --yes --allow-escalation
 hive workflow remove repo-brief --yes
 hive workflow remove repo-brief --dry-run --json
-hive workflow publish my-flow --version 1.0.0
+hive workflow publish my-flow --version 1.0.0 --dry-run --json
+hive workflow publish my-flow --version 1.0.0 \
+  --expected-release-digest <confirmed-release-digest> --json
 ```
 
 ## Honeycomb Lifecycle
@@ -123,7 +127,9 @@ disclose those actors as high risk with the corresponding wildcard capability
 surface. Actor-level policy redistribution also escalates when the package
 union is unchanged. `--input-binding NAME=ENV_NAME`
 stores only an environment reference, and absent optional inputs do not block
-prompt-only execution. `publish` remains a legacy submission producer.
+prompt-only execution. `publish` projects every executable actor into the
+conservative registry permission union and retains exact actor semantics in
+`workflow.yml`.
 
 Consent is deliberately non-composable. JSON and non-TTY install/remove/update
 require `--yes` for mutation. `--dry-run --json` on all three commands returns
@@ -143,10 +149,81 @@ input's authorized slots, environment-variable binding, and availability.
 Environment values are never emitted. Task-retained rows expose their pinned
 configuration digest when present but omit active mapping/input details;
 built-in and authored rows keep their generation-free shape. Its offline
-visibility is `unknown_offline`. Publish copies only referenced instructions,
-README, and `honeycomb.yml`, generates the legacy canonical manifest, runs
-preflight before GitHub calls, and uses a deterministic fork branch/body file.
-A returned PR remains `pending_review` and `listed: false`.
+visibility is `unknown_offline`.
+
+## Publish authoring and recovery contract
+
+The CLI id must equal the descriptor `id`, and strict SemVer `--version` is
+required. Adjacent authored `honeycomb.yml` owns description, author name/URL,
+SPDX license, minimum Hive version, immutable source URL and 40/64-hex revision,
+and a sorted unique asset list. `README.md` must contain authored
+non-placeholder `Behavior`, `Prerequisites`, `Inputs`, `Outputs`, `Permissions
+and Risks`, and `Recovery` sections. Only referenced local instructions and
+declared regular assets are snapshotted; named `skill:` dependencies become
+`x-hive.external_skills` and are never copied.
+
+Optional top-level descriptor `x-hive` authoring metadata owns `tools`,
+`prompt_assets`, and `optional_inputs`. Tool and prompt-asset paths must also
+appear in `honeycomb.yml`'s closed asset list; only explicitly declared tools
+retain executable mode. Optional inputs carry sorted portable names and sorted
+authorized executable-slot IDs. Hive removes this authoring block from the
+packaged `workflow.yml` and projects its validated values into generated
+manifest `x-hive` metadata. Authoring-only `honeycomb.yml` and generated
+`manifest.yml`/`workflow.yml` paths cannot enter the package as assets.
+
+The canonical builder emits only `packages/NAME/VERSION/` with generated
+`manifest.yml`, packaged `workflow.yml`, authored `README.md`, referenced
+instructions, and declared assets. The manifest owns normalized permissions,
+the complete registry-relative hash map, and `release_sha256`; the final
+manifest byte hash is `package_digest`. The current consumer validator and
+pinned Honeycomb lint contract run before remote access. The installed gem
+ships the pinned Markdown corpus and upstream SafeYAML parity cases as runtime
+contract data, so packaged Hive does not depend on the source checkout's test
+tree. Bounded safe-file reads treat a zero-byte regular file as empty bytes;
+an empty YAML behavior asset is therefore reported as malformed YAML instead
+of escaping into the generic scanner-error boundary. The lint receipt
+identity binds the upstream policy, fixture corpus, expected output, and local
+contract checksums. Dry-run returns
+`state: validated`, both digests, and `freshness: not_checked` without durable
+publication state.
+
+The real invocation must pass the confirmed full digest through
+`--expected-release-digest`. Destination repository/base come only from trusted
+`honeycomb.repository`/`honeycomb.base_branch` configuration. Owner-private
+receipts and digest bundles under `Hive::Paths.state_home/workflow-publish/v1`
+journal fork, push, and PR intent before effects. Retry identity is registry,
+name, version, and full release digest; a different digest is an immutable
+conflict. The same digest verifies exact fork parent/owner, head
+repository/branch, commit parent/OID, package bytes, and non-draft PR head/base
+before reuse. An open PR still requires its live branch to resolve to the
+immutable recorded head. A merged or closed PR remains observable when GitHub
+has deleted that branch, because its immutable PR head and commit/package
+evidence remain independently verified; if a terminal PR's branch still
+exists, it must not have moved. A branch name is only a locator, so a matching
+external PR can be adopted after those authority checks. PR-body metadata is
+likewise only a locator: discovery paginates the complete PR set and derives
+same-version identity from exact remote package bytes and Git modes. Receipt
+steps and observations are monotonic under one per-version lock spanning
+discovery through PR verification. Expected-absent pushes use an atomic
+absent-ref lease; they never replace an existing branch. No merge,
+approval, close, branch/fork deletion, or catalogue edit path exists.
+
+Retained publication Git objects live only under an owner-private, non-symlink
+root. Reused and newly cloned checkouts must be real current-user directories
+with a real current-user `.git` directory, and checkout mode is narrowed to
+`0700` before Git reads. Once a PR has been verified, its disposable retained
+checkout is removed best-effort; cleanup failure becomes a warning without
+changing the lifecycle result. Exact `listed` observation marks the digest
+bundle GC-eligible while retaining the compact receipt indefinitely.
+
+Schema v2 reports `pending_review`, `merged_pending_listing`, `listed`, or
+`closed_unmerged`, separately from `freshness: current|cached`. Only a current
+exact catalogue name/version/release-digest entry yields `listed`; offline
+reconciliation may return a prior state as cached with its original
+`observed_at`. A newer blocking lint policy is reported during retained
+read-only reconciliation and stops only a still-required remote mutation.
+Publication ends at registry review. Hivebox has no publish or
+status route, and no legacy conversion/migration command is provided.
 
 For a fresh project that should default to the custom workflow immediately,
 prefer `hive init --new-workflow my-flow [PROJECT_PATH]`; it performs init,
@@ -196,6 +273,7 @@ token.
 
 ```yaml
 id: my-flow
+archive_visibility_retention_days: 3
 stages:
   - name: inbox
     kind: terminal
@@ -209,6 +287,13 @@ stages:
     kind: terminal
     state_file: done.md
 ```
+
+Every generated descriptor declares
+`archive_visibility_retention_days: 3`. Authors may replace `3` with another
+positive integer (full 24-hour periods) or exact lowercase `never`. Omitted
+legacy fields also resolve to `3`; explicit `null` and every other form are
+rejected. The setting changes ordinary visibility only and never removes a
+task from the dedicated archive.
 
 The placeholder `work.md` says:
 
@@ -256,6 +341,67 @@ A multi-stage template prints `edit: <id>/ (N stage instructions to fill in)`
 pointing at the directory of instructions to define (the single-stage blank
 still names its one `work.md`). An unknown `--template` is a USAGE error
 listing the available names; with `--json` they ride the `expected` array.
+
+## Read-only validation and human outcomes
+
+`hive workflow validate ID --json` resolves authored descriptors, built-ins,
+and the currently selected managed generation through direct read-only
+lookups. It does not acquire the managed mutation lock, reconcile a selected
+pointer, or replay/clear a transaction journal. It validates descriptor YAML,
+referenced instructions, stage inputs/state files, automatic edges, and
+descriptor-declared human outcomes without creating a task or writing project
+or Hive state. The `hive-workflow-validate.v1` result reports the descriptor
+origin/path, ordered stages, instruction paths, automatic edges, human
+outcomes, and `valid`. Invalid input uses the same command-specific envelope
+with diagnostics, including malformed `--json` invocations.
+
+Project-authored descriptors may declare a durable `kind: human` stage:
+
+```yaml
+- name: approval
+  kind: human
+  state_file: approval.md
+  input: draft.md
+  outcomes:
+    approve:
+      complete: true
+      artifact: draft.md
+    reject:
+      to: draft
+```
+
+Every outcome has exactly one action: `complete: true` with a required
+non-empty artifact basename, or `to: STAGE`. Human stages reject
+agent/model/permissions/instruction/runner settings and are never dispatched
+by the daemon. Apply a decision with
+`hive decide TASK OUTCOME --from STAGE --decision-id DECISION_ID [--note TEXT] [--json]`.
+The waiting `hive run --json` response supplies that visit-specific ID. The
+expected stage and decision identity make matching retries no-ops and reject
+stale or conflicting decisions. Matching concurrent retries are rechecked
+under the decision lock and return one apply plus idempotent no-ops. Completing
+outcomes accept only a no-follow regular file inside the task folder. A
+self-targeting outcome records the decision, leaves the task in place, and
+mints a fresh waiting identity instead of reporting a false move. Human state
+files are also read no-follow with inode verification. A completing outcome
+writes its decision record and `completed_at` from one clock, classifies as
+archived, and participates in the descriptor's archive visibility retention;
+commit failure or interruption rolls both files back.
+
+Create-only natural-language requests are handled by the canonical `/hive`
+skill's `hive-workflow-creator` route. It gates on the installed version,
+inventories IDs, scaffolds only through this command (or the minimal init path),
+edits only returned new paths, validates here, commits the populated descriptor
+and instruction directory with `hive workflow commit ID`, reports all defaults, and creates no
+task unless the original request explicitly asks for one. The populated-graph
+commit is required because `workflow new` commits only the initial scaffold.
+Both `workflow validate` and minimal-init preview bypass startup scheduler
+reconciliation, preserving their strict no-write contract. Scaffold collision
+checks treat dangling descriptor or instruction symlinks as occupied paths.
+Creation claims the instruction directory and descriptor with exclusive
+filesystem operations; rollback removes only paths claimed by that invocation,
+so a concurrent or raced scaffold is never overwritten or deleted.
+If a scaffold commit fails after staging, Hive resets those exact index
+pathspecs under the commit lock before removing the generated files.
 
 ## Backlinks
 

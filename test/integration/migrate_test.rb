@@ -564,9 +564,6 @@ class MigrateTest < Minitest::Test
               skill: ce-code-review
               output_basename: legacy
               prompt_template: reviewer_codex_ce_code_review.md.erb
-
-          digest:
-            enabled: false
         YAML
 
         out, _err = capture_io { migrate_command(dir).call }

@@ -249,40 +249,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
-  class FakeDigestScheduler
-    attr_accessor :next_dispatches
-    attr_reader :completed
-
-    def initialize
-      @next_dispatches = []
-      @completed = []
-    end
-
-    def tick(now:)
-      out = @next_dispatches
-      @next_dispatches = []
-      out
-    end
-
-    def complete(date:, exit_code:, envelope:, now:)
-      completion = { date: date, exit_code: exit_code, now: now }
-      completion[:envelope] = envelope if envelope
-      @completed << completion
-    end
-
-    def cancel(date:)
-      @cancelled ||= []
-      @cancelled << date
-    end
-
-    attr_reader :cancelled, :reconfigured
-
-    def reconfigure(enabled:, max_catchup_days:)
-      @reconfigured ||= []
-      @reconfigured << { enabled: enabled, max_catchup_days: max_catchup_days }
-    end
-  end
-
   class FakeAnswerDigestScheduler
     attr_accessor :next_dispatches
     attr_reader :completed
@@ -407,7 +373,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       with_patrol_scheduler: false, project_enabled: true,
                       dispatch_state: nil, status_result: nil,
                       dispatch_request_state_home: nil, dispatch_result_state_home: nil,
-                      with_digest_scheduler: false, with_answer_digest_scheduler: false,
+                      with_answer_digest_scheduler: false,
                       refactor_patrol_merge_reconciler: nil,
                       refactor_patrol_scheduler: nil, patrol_arbiter: nil,
                       attempt_dispatcher: nil, attempt_reconciler: nil,
@@ -443,7 +409,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
     logger = StubLogger.new
     merge_watcher = with_merge_watcher ? FakeMergeWatcher.new : nil
     patrol_scheduler = with_patrol_scheduler ? FakePatrolScheduler.new : nil
-    digest_scheduler = with_digest_scheduler ? FakeDigestScheduler.new : nil
     answer_digest_scheduler = with_answer_digest_scheduler ? FakeAnswerDigestScheduler.new : nil
 
     dispatcher = Hive::Daemon::Dispatcher.new(
@@ -457,7 +422,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
       patrol_scheduler: patrol_scheduler,
       refactor_patrol_scheduler: refactor_patrol_scheduler,
       patrol_arbiter: patrol_arbiter,
-      digest_scheduler: digest_scheduler,
       answer_digest_scheduler: answer_digest_scheduler,
       dry_run: dry_run,
       dispatch_request_state_home: dispatch_request_state_home,
@@ -481,7 +445,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher.define_singleton_method(:project_enabled?) { |_| project_enabled }
     [
       dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler,
-      digest_scheduler, answer_digest_scheduler
+      answer_digest_scheduler
     ]
   end
 
@@ -1723,218 +1687,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
                "the dispatcher must emit :blocked reason=dependency_unmet straight from the blocked flag"
   end
 
-  def test_digest_scheduler_dispatches_global_digest_without_project_gate
-    dispatcher, sup, _ctrl, logger, _mw, _patrol, digest = make_dispatcher(
-      rows: [],
-      project_enabled: false,
-      with_digest_scheduler: true
-    )
-    digest.next_dispatches = [
-      {
-        project: "digest",
-        slug: "2026-06-13",
-        stage: "digest",
-        command: "hive digest --date 2026-06-13 --json",
-        state_file_mtime: nil,
-        state_file_path: nil,
-        hive_state_path: nil
-      }
-    ]
-
-    dispatcher.tick(now: T0)
-
-    assert_equal 1, sup.spawned.size
-    assert_equal "hive digest --date 2026-06-13 --json", sup.spawned.first[:command]
-    assert_equal "digest", sup.spawned.first[:stage]
-    event = logger.events.find { |name, _attrs| name == :dispatched }
-    assert_equal "digest", event.last.fetch(:trigger)
-    # The per-project enable gate is OFF (project_enabled: false). A
-    # project-scoped dispatch would have been skipped; the digest must
-    # bypass it entirely, so there is no project-disabled skip for it.
-    refute logger.events.any? { |name, attrs| name == :skipped && attrs[:action] == "digest" },
-           "global digest must bypass the per-project enable gate, not be skipped by it"
-    refute logger.events.any? { |name, attrs| name == :blocked && attrs[:action] == "digest" },
-           "an idle controller must not block the global digest"
-  end
-
-  def test_digest_dispatch_blocked_when_one_already_in_flight
-    dispatcher, sup, ctrl, logger, _mw, _patrol, digest = make_dispatcher(
-      rows: [], with_digest_scheduler: true
-    )
-    # A digest child for the same date is already tracked by the
-    # controller (a prior tick's dispatch that hasn't completed). The
-    # backstop must refuse a second dispatch and release the pending marker.
-    ctrl.record_dispatch(
-      pid: 999, project: "digest", slug: "2026-06-13", stage: "digest",
-      command: "hive digest --date 2026-06-13 --json", started_at: T0 - 5,
-      state_file_mtime: nil, kind: :digest
-    )
-    digest.next_dispatches = [
-      {
-        project: "digest",
-        slug: "2026-06-13",
-        stage: "digest",
-        command: "hive digest --date 2026-06-13 --json",
-        state_file_mtime: nil,
-        state_file_path: nil,
-        hive_state_path: nil
-      }
-    ]
-
-    dispatcher.tick(now: T0)
-
-    assert_empty sup.spawned, "must not double-dispatch a digest already in flight"
-    assert_equal [ "2026-06-13" ], digest.cancelled
-    assert logger.events.any? { |name, attrs| name == :blocked && attrs[:action] == "digest" },
-           "a blocked digest dispatch must emit a :blocked event"
-  end
-
-  def test_digest_scheduler_completes_on_digest_child_exit
-    dispatcher, sup, = make_dispatcher(rows: [], with_digest_scheduler: true)
-    digest = dispatcher.instance_variable_get(:@digest_scheduler)
-    envelope = {
-      "schema" => "prdigest-result",
-      "schema_version" => 1,
-      "status" => "failure",
-      "error" => {
-        "kind" => "telegram_permanent",
-        "message" => "Telegram rejected the chunk"
-      }
-    }
-    sup.next_exits = [
-      ChildExit.new(
-        pid: 123,
-        exit_code: 4,
-        project: "digest",
-        slug: "2026-06-13",
-        stage: "digest",
-        command: "hive digest --date 2026-06-13 --json",
-        state_file_path: nil,
-        started_at: T0 - 5,
-        finished_at: T0,
-        json_envelope: envelope
-      )
-    ]
-
-    dispatcher.tick(now: T0)
-
-    assert_equal [
-      {
-        date: "2026-06-13",
-        exit_code: 4,
-        envelope: envelope,
-        now: T0
-      }
-    ], digest.completed
-  end
-
-  def test_digest_scheduler_tick_raise_is_isolated_as_a_fatal_event
-    dispatcher, sup, _ctrl, logger, = make_dispatcher(rows: [], with_digest_scheduler: true)
-    raising = Object.new
-    raising.define_singleton_method(:tick) { |now:| raise IOError, "ENOSPC on digest state" }
-    dispatcher.instance_variable_set(:@digest_scheduler, raising)
-
-    dispatcher.tick(now: T0)
-
-    assert_empty sup.spawned, "a scheduler tick crash must not spawn anything"
-    event = logger.events.find { |name, _| name == :fatal }
-    refute_nil event, "an unguarded scheduler.tick crash must be isolated as a :fatal event, not crash the tick"
-    assert_match(/digest_scheduler\.tick raised/, event.last.fetch(:message))
-  end
-
-  def test_digest_scheduler_complete_raise_is_isolated_as_a_fatal_event
-    dispatcher, sup, _ctrl, logger, = make_dispatcher(rows: [], with_digest_scheduler: true)
-    raising = Object.new
-    raising.define_singleton_method(:complete) do |date:, exit_code:, envelope:, now:|
-      raise IOError, "EROFS on cursor write"
-    end
-    dispatcher.instance_variable_set(:@digest_scheduler, raising)
-    sup.next_exits = [
-      ChildExit.new(
-        pid: 123, exit_code: 0,
-        project: "digest", slug: "2026-06-13", stage: "digest",
-        command: "hive digest --date 2026-06-13 --json",
-        state_file_path: nil, started_at: T0 - 5, finished_at: T0, json_envelope: nil
-      )
-    ]
-
-    dispatcher.tick(now: T0)
-
-    event = logger.events.find { |name, _| name == :fatal }
-    refute_nil event, "an unguarded scheduler.complete crash on reap must be isolated, not crash the poll loop"
-    assert_match(/digest_scheduler\.complete raised/, event.last.fetch(:message))
-  end
-
-  def test_digest_config_exit_does_not_drop_phantom_digest_project
-    dispatcher, _sup, ctrl, logger, _mw, _patrol, digest = make_dispatcher(
-      rows: [], with_digest_scheduler: true
-    )
-    sup = dispatcher.instance_variable_get(:@supervisor)
-    sup.next_exits = [
-      ChildExit.new(
-        pid: 123, exit_code: Hive::ExitCodes::CONFIG,
-        project: "digest", slug: "2026-06-13", stage: "digest",
-        command: "hive digest --date 2026-06-13 --json",
-        state_file_path: nil, started_at: T0 - 5, finished_at: T0, json_envelope: nil
-      )
-    ]
-
-    dispatcher.tick(now: T0)
-
-    refute ctrl.project_dropped?("digest"),
-           "a digest ConfigError must not drop a phantom 'digest' project"
-    refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "digest" },
-           "a digest ConfigError must not emit a misleading :project_dropped event"
-    # The scheduler still hears the failure so its own backoff applies.
-    assert_equal [ { date: "2026-06-13", exit_code: Hive::ExitCodes::CONFIG, now: T0 } ],
-                 digest.completed
-  end
-
-  def test_digest_dispatch_spawn_error_records_exactly_one_failed_completion
-    dispatcher, sup, _ctrl, logger, _mw, _patrol, digest = make_dispatcher(
-      rows: [], with_digest_scheduler: true
-    )
-    digest.next_dispatches = [
-      {
-        project: "digest", slug: "2026-06-13", stage: "digest",
-        command: "hive digest --date 2026-06-13 --json",
-        state_file_mtime: nil, state_file_path: nil, hive_state_path: nil
-      }
-    ]
-    # Spawn fails before the child is recorded (fork exhaustion, etc.).
-    sup.define_singleton_method(:spawn) { |**_| raise Errno::EAGAIN, "fork failed" }
-
-    dispatcher.tick(now: T0)
-
-    assert_equal [ { date: "2026-06-13", exit_code: 1, now: T0 } ], digest.completed,
-                 "a digest spawn failure must record exactly one failed completion (no double-count)"
-    assert logger.events.any? { |name, attrs| name == :fatal && attrs[:message].to_s.include?("digest dispatch error") },
-           "the spawn failure must be surfaced as a :fatal log event"
-  end
-
-  def test_reload_config_reconfigures_digest_scheduler
-    dispatcher, _sup, _ctrl, _logger, _mw, _patrol, digest = make_dispatcher(
-      rows: [], with_digest_scheduler: true
-    )
-    original = Hive::Config.method(:load_global_digest_block)
-    original_answer = Hive::Config.method(:load_global_answer_digest_block)
-    Hive::Config.define_singleton_method(:load_global_digest_block) do
-      { "enabled" => true, "max_catchup_days" => 3 }
-    end
-    Hive::Config.define_singleton_method(:load_global_answer_digest_block) do
-      { "enabled" => false, "hour" => 9 }
-    end
-    begin
-      dispatcher.send(:reload_config!)
-    ensure
-      Hive::Config.define_singleton_method(:load_global_digest_block, &original)
-      Hive::Config.define_singleton_method(:load_global_answer_digest_block, &original_answer)
-    end
-
-    assert_equal({ enabled: true, max_catchup_days: 3 }, digest.reconfigured&.last,
-                 "SIGHUP reload must push the reloaded digest config into the scheduler")
-  end
-
   def test_reload_config_reconfigures_concurrency_limits_in_place
     dispatcher, _sup, controller, logger, _mw = make_dispatcher
     controller.record_dispatch(
@@ -1994,7 +1746,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   def test_answer_digest_scheduler_dispatches_global_answer_digest_without_project_gate
-    dispatcher, sup, _ctrl, logger, _mw, _patrol, _digest, answer_digest = make_dispatcher(
+    dispatcher, sup, _ctrl, logger, _mw, _patrol, answer_digest = make_dispatcher(
       rows: [],
       project_enabled: false,
       with_answer_digest_scheduler: true
@@ -2022,13 +1774,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
            "global answer digest must bypass the per-project enable gate"
   end
 
-  def test_answer_digest_dispatch_blocked_when_digest_slot_is_in_flight
-    dispatcher, sup, ctrl, logger, _mw, _patrol, _digest, answer_digest = make_dispatcher(
+  def test_answer_digest_dispatch_blocked_when_one_is_in_flight
+    dispatcher, sup, ctrl, logger, _mw, _patrol, answer_digest = make_dispatcher(
       rows: [], with_answer_digest_scheduler: true
     )
     ctrl.record_dispatch(
-      pid: 999, project: "digest", slug: "2026-06-13", stage: "digest",
-      command: "hive digest --date 2026-06-13 --json", started_at: T0 - 5,
+      pid: 999, project: "answer_digest", slug: "2026-06-13", stage: "answer_digest",
+      command: "hive answer-digest --date 2026-06-13 --json", started_at: T0 - 5,
       state_file_mtime: nil, kind: :digest
     )
     answer_digest.next_dispatches = [
@@ -2046,36 +1798,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher.tick(now: T0)
 
     assert_empty sup.spawned
-    assert_equal [ "2026-06-13" ], answer_digest.cancelled
-    assert logger.events.any? { |name, attrs| name == :blocked && attrs[:action] == "answer_digest" }
-  end
-
-  def test_both_global_digests_contend_for_the_single_slot_in_one_tick
-    dispatcher, sup, _ctrl, logger, _mw, _patrol, digest, answer_digest = make_dispatcher(
-      rows: [], with_digest_scheduler: true, with_answer_digest_scheduler: true
-    )
-    digest.next_dispatches = [
-      {
-        project: "digest", slug: "2026-06-13", stage: "digest",
-        command: "hive digest --date 2026-06-13 --json",
-        state_file_mtime: nil, state_file_path: nil, hive_state_path: nil
-      }
-    ]
-    answer_digest.next_dispatches = [
-      {
-        project: "answer_digest", slug: "2026-06-13", stage: "answer_digest",
-        command: "hive answer-digest --date 2026-06-13 --json",
-        state_file_mtime: nil, state_file_path: nil, hive_state_path: nil
-      }
-    ]
-
-    dispatcher.tick(now: T0)
-
-    # The PR digest ticks first (dispatch ordering) and takes the single
-    # global digest slot; the answer-digest is blocked and cancelled the SAME
-    # tick. Pins the ordering so a silent flip is caught.
-    assert_equal 1, sup.spawned.size
-    assert_equal "hive digest --date 2026-06-13 --json", sup.spawned.first[:command]
     assert_equal [ "2026-06-13" ], answer_digest.cancelled
     assert logger.events.any? { |name, attrs| name == :blocked && attrs[:action] == "answer_digest" }
   end
@@ -2182,7 +1904,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   def test_answer_digest_config_exit_does_not_drop_phantom_project
-    dispatcher, _sup, ctrl, logger, _mw, _patrol, _digest, answer_digest = make_dispatcher(
+    dispatcher, _sup, ctrl, logger, _mw, _patrol, answer_digest = make_dispatcher(
       rows: [], with_answer_digest_scheduler: true
     )
     sup = dispatcher.instance_variable_get(:@supervisor)
@@ -2204,7 +1926,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   def test_answer_digest_dispatch_spawn_error_records_failed_completion
-    dispatcher, sup, _ctrl, logger, _mw, _patrol, _digest, answer_digest = make_dispatcher(
+    dispatcher, sup, _ctrl, logger, _mw, _patrol, answer_digest = make_dispatcher(
       rows: [], with_answer_digest_scheduler: true
     )
     answer_digest.next_dispatches = [
@@ -2225,21 +1947,16 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   def test_reload_config_reconfigures_answer_digest_scheduler
-    dispatcher, _sup, _ctrl, _logger, _mw, _patrol, _digest, answer_digest = make_dispatcher(
+    dispatcher, _sup, _ctrl, _logger, _mw, _patrol, answer_digest = make_dispatcher(
       rows: [], with_answer_digest_scheduler: true
     )
-    original_digest = Hive::Config.method(:load_global_digest_block)
     original_answer = Hive::Config.method(:load_global_answer_digest_block)
-    Hive::Config.define_singleton_method(:load_global_digest_block) do
-      { "enabled" => false, "max_catchup_days" => 7 }
-    end
     Hive::Config.define_singleton_method(:load_global_answer_digest_block) do
       { "enabled" => true, "hour" => 11 }
     end
     begin
       dispatcher.send(:reload_config!)
     ensure
-      Hive::Config.define_singleton_method(:load_global_digest_block, &original_digest)
       Hive::Config.define_singleton_method(:load_global_answer_digest_block, &original_answer)
     end
 
@@ -3860,26 +3577,8 @@ def test_dry_run_reaps_pseudo_children_and_logs_completion
   refute_nil event
 end
 
-def test_dry_run_reap_completes_digest_so_scheduler_unwedges
-  dispatcher, _sup, _ctrl, _logger, _mw, _patrol, digest = make_dispatcher(
-    rows: [], dry_run: true, with_digest_scheduler: true
-  )
-  child = ChildExit.new(
-    pid: -1, exit_code: 0, project: "digest", slug: "2026-06-13", stage: "digest",
-    command: "hive digest --date 2026-06-13 --json", state_file_path: nil,
-    started_at: T0, finished_at: T0, json_envelope: nil
-  )
-  dispatcher.supervisor.define_singleton_method(:reap_dry_run) { |now:| [ child ] }
-
-  dispatcher.tick(now: T0)
-
-  assert_equal [ { date: "2026-06-13", exit_code: 0, now: T0 } ], digest.completed,
-               "a dry-run digest reap must clear the scheduler's pending marker, " \
-               "or the dry-run daemon wedges after the first digest"
-end
-
 def test_dry_run_reap_completes_answer_digest_so_scheduler_unwedges
-  dispatcher, _sup, _ctrl, _logger, _mw, _patrol, _digest, answer_digest = make_dispatcher(
+  dispatcher, _sup, _ctrl, _logger, _mw, _patrol, answer_digest = make_dispatcher(
     rows: [], dry_run: true, with_answer_digest_scheduler: true
   )
   child = ChildExit.new(
@@ -3894,39 +3593,8 @@ def test_dry_run_reap_completes_answer_digest_so_scheduler_unwedges
   assert_equal [ { date: "2026-06-13", exit_code: 0, now: T0 } ], answer_digest.completed
 end
 
-def test_dry_run_digest_complete_raise_is_isolated_as_a_fatal_event
-  # reap_dry_run's `rescue StandardError` sibling of reap_completed's: when a
-  # dry-run digest pseudo-child is reaped and `@digest_scheduler.complete`
-  # raises (e.g. EROFS on the cursor write), the crash must be isolated as a
-  # :fatal event instead of crashing the dry-run poll loop.
-  dispatcher, _sup, ctrl, logger, _mw, _patrol, digest = make_dispatcher(
-    rows: [], dry_run: true, with_digest_scheduler: true
-  )
-  child = ChildExit.new(
-    pid: -1, exit_code: 1, project: "digest", slug: "2026-06-13", stage: "digest",
-    command: "hive digest --date 2026-06-13 --json", state_file_path: nil,
-    started_at: T0, finished_at: T0, json_envelope: nil
-  )
-  dispatcher.supervisor.define_singleton_method(:reap_dry_run) { |now:| [ child ] }
-  ctrl.record_dispatch(pid: -1, project: "digest", slug: "2026-06-13", stage: "digest",
-                       command: "hive digest --date 2026-06-13 --json",
-                       started_at: T0, state_file_mtime: T0 - 60)
-  digest.define_singleton_method(:complete) { |**| raise "disk full" }
-
-  dispatcher.tick(now: T0)
-
-  assert_equal 0, ctrl.in_flight_count
-  fatal = logger.events.find do |(name, attrs)|
-    name == :fatal && attrs[:message].include?("digest_scheduler.complete raised: RuntimeError: disk full")
-  end
-  refute_nil fatal,
-             "a dry-run digest_scheduler.complete crash must be isolated as a :fatal event"
-  refute_nil logger.events.find { |(name, attrs)| name == :child_exited && attrs[:dry_run] == true },
-             "the dry-run child_exited event must still be logged after an isolated complete crash"
-end
-
 def test_dry_run_answer_digest_complete_raise_is_isolated_as_a_fatal_event
-  dispatcher, _sup, ctrl, logger, _mw, _patrol, _digest, answer_digest = make_dispatcher(
+  dispatcher, _sup, ctrl, logger, _mw, _patrol, answer_digest = make_dispatcher(
     rows: [], dry_run: true, with_answer_digest_scheduler: true
   )
   child = ChildExit.new(
@@ -4110,14 +3778,10 @@ def test_late_reload_loader_failure_never_splits_auto_retry_policy
         Hive::Config, :load_global_update, -> { { "check" => false } }
       ) do
         with_replaced_singleton_method(
-          Hive::Config, :load_global_digest_block, -> { { "enabled" => true } }
+          Hive::Config, :load_global_answer_digest_block,
+          -> { raise Hive::ConfigError, "answer digest is invalid" }
         ) do
-          with_replaced_singleton_method(
-            Hive::Config, :load_global_answer_digest_block,
-            -> { raise Hive::ConfigError, "answer digest is invalid" }
-          ) do
-            dispatcher.send(:reload_config!)
-          end
+          dispatcher.send(:reload_config!)
         end
       end
     end

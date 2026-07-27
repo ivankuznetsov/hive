@@ -7,7 +7,7 @@ require "test_helper"
 # layer down.
 class StatusBroadcasterTest < ActiveSupport::TestCase
   class FakeFeed
-    attr_reader :primes, :snapshot_calls, :stops
+    attr_reader :primes, :snapshot_calls, :archive_snapshot_calls, :stops
 
     def initialize(initial: { "projects" => [] }, version: "test-token")
       @queue = Queue.new
@@ -16,6 +16,7 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
       @version = version
       @primes = []
       @snapshot_calls = 0
+      @archive_snapshot_calls = 0
       @stops = 0
     end
 
@@ -34,6 +35,11 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     def snapshot
       @snapshot_calls += 1
       @current
+    end
+
+    def archive_snapshot
+      @archive_snapshot_calls += 1
+      @current.merge("archive" => true)
     end
 
     def prime(payload)
@@ -80,6 +86,18 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     feed.wait_until_started
     assert_equal 1, feed.snapshot_calls,
                  "the first subscriber must reuse the request snapshot"
+  end
+
+  test "archive snapshots bypass ordinary feed priming" do
+    feed = FakeFeed.new
+    StatusBroadcaster.feed = feed
+
+    payload = StatusBroadcaster.archive_snapshot
+
+    assert_equal true, payload.fetch("archive")
+    assert_equal 1, feed.archive_snapshot_calls
+    assert_empty feed.primes
+    assert_equal 0, feed.snapshot_calls
   end
 
   test "one sorted snapshot is rendered before one live update is sent" do

@@ -1,5 +1,6 @@
 <%# Sample workflow: a gather -> synthesize -> report research pipeline. -%>
 id: "<%= id %>"
+archive_visibility_retention_days: 3
 stages:
   - name: inbox
     kind: terminal
@@ -8,16 +9,22 @@ stages:
     kind: agent
     state_file: gather.md
     instruction: ./<%= id %>/gather.md
+    mapping_role: planning
+    mapping_contract: <%= id %>-gather-v1
     permissions: read-only
   - name: synthesize
     kind: agent
     state_file: synthesize.md
     instruction: ./<%= id %>/synthesize.md
+    mapping_role: development
+    mapping_contract: <%= id %>-synthesize-v1
     permissions: read-only
   - name: report
     kind: agent
     state_file: report.md
     instruction: ./<%= id %>/report.md
+    mapping_role: development
+    mapping_contract: <%= id %>-report-v1
     permissions: read-only
   - name: done
     kind: terminal

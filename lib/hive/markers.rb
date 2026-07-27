@@ -49,9 +49,12 @@ module Hive
     def current(state_file_path)
       return State.new(name: :none, attrs: {}, raw: nil) unless File.exist?(state_file_path)
 
-      content = File.read(state_file_path, encoding: "UTF-8")
+      current_from_content(File.read(state_file_path, encoding: "UTF-8"))
+    end
+
+    def current_from_content(content)
       last = nil
-      content.scan(MARKER_RE) do
+      content.to_s.scan(MARKER_RE) do
         match = Regexp.last_match
         last = match
       end

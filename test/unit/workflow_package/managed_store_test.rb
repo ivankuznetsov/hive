@@ -319,6 +319,36 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
     end
   end
 
+  def test_read_only_selection_does_not_create_a_lock_or_reconcile_a_journal
+    with_tmp_dir do |dir|
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      package = File.join(dir, "package")
+      resolution = write_package(package, "a" * 40)
+      store.place_generation(package, resolution)
+      store.activate(resolution)
+
+      mutation_lock = File.join(store.workflows_dir, ".mutation.lock")
+      FileUtils.rm_f(mutation_lock)
+      lock_bytes = File.binread(store.lock_path("demo"))
+      journal = Hive::WorkflowPackage::TransactionJournal.new(store.workflows_dir)
+      journal.write(
+        "schema_version" => 1,
+        "phase" => "prepared",
+        "lock_path" => store.lock_path("demo"),
+        "old_lock" => nil,
+        "new_lock" => lock_bytes
+      )
+      journal_bytes = File.binread(journal.path)
+
+      selection = store.selected_read_only("demo")
+
+      assert_equal "demo", selection.fetch("name")
+      refute File.exist?(mutation_lock)
+      assert_equal lock_bytes, File.binread(store.lock_path("demo"))
+      assert_equal journal_bytes, File.binread(journal.path)
+    end
+  end
+
   def test_selection_enumeration_reports_missing_configuration_and_keeps_healthy_sibling
     assert_invalid_configuration_isolated("unavailable") do |_store, _digest, _path|
       nil

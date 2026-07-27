@@ -51,6 +51,30 @@ It creates an in-monorepo seam that Hive can exercise first; a separately
 published package remains a later response to demonstrated non-Hive demand,
 not a requirement of the module design.
 
+The component catalog keeps this admission slice as a guarded reference
+`candidate`. Its facade, result contracts, focused clean-process load, and
+exact internal-construction sites are enforced now. U8 removed the former
+Attempts/WorkLedger catalog dependency and reciprocal-source exception:
+task-journal generation reads and `TaskProjection::Store` are Hive adapters,
+not source owned by the policy-light WorkLedger component. Attempts remains a
+candidate because this guarded reference does not turn the full durable-attempt
+lifecycle into a supported component API:
+reconciliation, supervision, capacity, loss processing, cancellation, export,
+and raw store operations remain internal. The supported facade still has only
+`dispatch`, `dispatch_request`, and `dispatch_successor`; its clean-process
+load brings in the result contracts without commands, stages, web code, or
+other candidate entry points.
+
+Hive still has narrow, cataloged internal construction sites: the daemon
+composition root wires reconciliation and loss processing, the private
+supervisor argv adapter starts the owner wrapper, and read-only compatibility
+adapters plus `TaskClosure`'s active-attempt verification open the canonical
+store. These sites are not alternate admission producers. The
+component-boundary test pins each file/constant pair and rejects the same
+construction from any newly listed file even while Attempts remains a
+candidate. Authorization is file-granular, so it does not distinguish a second
+call site inside an already authorized composition root.
+
 ## Storage and identity
 
 Attempt schema v3 generalizes the execution subject. Existing task attempts

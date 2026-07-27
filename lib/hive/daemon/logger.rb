@@ -79,10 +79,6 @@ module Hive
         attempt_terminal_replay
         attempt_capacity_deferred
         attempt_legacy_backfilled
-        digest_catchup_skipped
-        digest_failure_backoff
-        digest_permanent_failure
-        digest_state_unreadable
         answer_digest_failure_backoff
         answer_digest_state_unreadable
         architecture_patrol_opened

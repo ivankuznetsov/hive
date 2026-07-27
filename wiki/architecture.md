@@ -259,6 +259,7 @@ bin/hive tui  →  Hive::Tui::App.run_charm
 - **`Hive::Tui::PasteAwareRunner`** (`lib/hive/tui/paste_aware_runner.rb`) — `Bubbletea::Runner` subclass overriding `run_loop` / `process_input` to drain every raw read through `InputDecoder`. Pinned to bubbletea 0.1.4 (boot-time `VERSION` check) because the override touches private superclass instance variables.
 - **`Hive::Tui::InputDecoder`** (`lib/hive/tui/input_decoder.rb`) — stateful byte-level decoder. Exists because the stock `Program#poll_event` parses one event per raw read and drops the rest of the bytes, breaking paste of more than ~16 bytes. The decoder buffers partial escape sequences across reads, brackets paste content with `\e[200~`/`\e[201~`, normalises paste content (CR/LF/TAB → space, C0/DEL stripped), caps `@pending` at 4 KiB and `@paste_buffer` at 1 MiB, and force-flushes a stalled paste after 5 seconds.
 - **`Hive::Tui::Views::Format`** (`lib/hive/tui/views/format.rb`) — shared view formatting helpers. Truncation and left/right padding measure terminal display cells via `unicode-display_width`, so wide glyphs in task names or status icons do not shift fixed TUI columns.
+- **`Hive::Tui::StateSource`** (`lib/hive/tui/state_source.rb`) — shared bounded projection cache. TUI mode keeps the complete archive for its in-process Archive pane; web mode keeps only visible terminal rows because `/archive` reads the unfiltered producer on demand. Idle ticks use fingerprints, liveness ticks parse active stages only, and policy/terminal/retention signals run one authoritative ordinary projection. Immutable cache replacement plus a generation-fenced writer prevents a stale background scan from winning a race.
 
 ### Key seams
 
@@ -342,7 +343,11 @@ Streams, with production Action Cable accepting same-origin-as-host and
 `StatusBroadcaster` (self-healing subscriber loop) bridges
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
 broadcast morph refresh plus a targeted composer-selector update over
-solid_cable. Each accepted channel acquires one poller lease and releases it
+solid_cable. `StatusFeed` serializes concurrent Puma callers through
+`CachedStatusCommand`, which reuses a visible-only `StateSource`: its
+five-second hot path is active-task proportional, its missed-signal backstop is
+five minutes, and the complete archive producer runs only for an explicit
+archive request. Each accepted channel acquires one poller lease and releases it
 exactly once; a per-channel synchronized pending/active/closed transition
 prevents socket teardown from racing stream verification into a leak or double
 release without serializing unrelated browser connections. A failed first

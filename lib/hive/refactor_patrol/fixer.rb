@@ -549,7 +549,7 @@ module Hive
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
             log_label: STAGE, profile: profile, status_mode: :exit_code_only,
             cli_flags: launch.fetch(:cli_flags),
-            identity_arguments: @fix_identity.native_arguments,
+            **Hive::Stages::Base.implementation_launch_arguments(@fix_identity, profile),
             permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE
           ).run!
         ensure

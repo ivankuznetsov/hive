@@ -41,6 +41,10 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "plan"),
           log_label: "plan",
           profile: profile,
+          routing_arguments: Hive::Stages::Base.model_routing_arguments(
+            cfg, "plan", profile,
+            current: Hive::Stages::Base.model_routing_current(cfg["plan"])
+          ),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }

@@ -3,6 +3,36 @@ require "hive/workflow"
 require "hive/workflows/registry"
 
 class WorkflowTest < Minitest::Test
+  def test_archive_visibility_retention_defaults_and_normalizes_never
+    stage = Hive::Workflow::Stage.new(name: "done", index: 1, state_file: "done.md", kind: :inert)
+
+    defaulted = Hive::Workflow.new(id: :defaulted, stages: [ stage ])
+    never = Hive::Workflow.new(
+      id: :forever, stages: [ stage ], archive_visibility_retention_days: "never"
+    )
+
+    assert_equal 3, Hive::Workflow::DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS
+    assert_equal 3, defaulted.archive_visibility_retention_days
+    assert_equal :never, never.archive_visibility_retention_days
+  end
+
+  def test_archive_visibility_retention_rejects_invalid_direct_values
+    stage = Hive::Workflow::Stage.new(name: "done", index: 1, state_file: "done.md", kind: :inert)
+
+    [ nil, 0, -1, 1.5, "3", "Never", true ].each do |value|
+      error = assert_raises(ArgumentError) do
+        Hive::Workflow.new(
+          id: :invalid, stages: [ stage ], archive_visibility_retention_days: value
+        )
+      end
+
+      assert_includes error.message, "workflow :invalid"
+      assert_includes error.message, "archive_visibility_retention_days"
+      assert_includes error.message, value.inspect
+      assert_includes error.message, "a positive integer or `never`"
+    end
+  end
+
   def test_stage_dir_joins_index_and_name
     stage = Hive::Workflow::Stage.new(name: "execute", index: 4, state_file: "task.md")
 
@@ -28,10 +58,12 @@ class WorkflowTest < Minitest::Test
     assert_nil stage.reviewers
     assert_nil stage.council
     assert_nil stage.deliverable
+    assert_nil stage.outcomes
   end
 
   def test_known_kinds_include_coding_runtime_primitives
     assert_includes Hive::Workflow::KNOWN_KINDS, :council
+    assert_includes Hive::Workflow::KNOWN_KINDS, :human
     assert_includes Hive::Workflow::KNOWN_KINDS, :execute
     assert_includes Hive::Workflow::KNOWN_KINDS, :review_council
     assert_includes Hive::Workflow::KNOWN_KINDS, :finalize
@@ -39,6 +71,118 @@ class WorkflowTest < Minitest::Test
     # workflow_helpers.rb / resolver_test.rb edits exist precisely because the
     # kind no longer exists). Pin its absence so a re-introduction is caught.
     refute_includes Hive::Workflow::KNOWN_KINDS, :marker
+  end
+
+  def test_human_stage_exposes_immutable_named_outcomes
+    approve = Hive::Workflow::Outcome.new(
+      name: "approve", complete: true, artifact: "draft.md"
+    )
+    reject = Hive::Workflow::Outcome.new(name: "reject", to: "draft")
+    outcomes = { "approve" => approve, "reject" => reject }.freeze
+    workflow = Hive::Workflow.new(
+      id: :editorial,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "draft", index: 1, state_file: "draft.md", kind: :agent
+        ),
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          input: "draft.md", outcomes: outcomes
+        )
+      ]
+    )
+
+    approval = workflow.stage_named("approval")
+    assert_same outcomes, approval.outcomes
+    assert approval.outcomes.frozen?
+    assert approval.outcomes.fetch("approve").frozen?
+    assert approval.outcomes.fetch("approve").terminal?
+    refute approval.outcomes.fetch("reject").terminal?
+    assert_equal "draft", approval.outcomes.fetch("reject").to
+  end
+
+  def test_workflow_rejects_human_outcome_target_outside_descriptor
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(
+        id: :editorial,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "approval", index: 1, state_file: "approval.md", kind: :human,
+            outcomes: {
+              "reject" => Hive::Workflow::Outcome.new(name: "reject", to: "draft")
+            }.freeze
+          )
+        ]
+      )
+    end
+
+    assert_includes error.message, 'stage "approval" outcome "reject" targets unknown stage "draft"'
+  end
+
+  def test_workflow_defensively_rejects_invalid_runtime_human_outcome_shapes
+    valid = Hive::Workflow::Stage.new(
+      name: "draft", index: 1, state_file: "draft.md", kind: :agent
+    )
+    cases = [
+      [
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human, outcomes: nil
+        ),
+        "must declare at least one outcome"
+      ],
+      [
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: { "approve" => Object.new }.freeze
+        ),
+        'outcome "approve" is invalid'
+      ],
+      [
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: {
+            "approve" => Hive::Workflow::Outcome.new(name: "approve", complete: true, to: "draft")
+          }.freeze
+        ),
+        "must declare exactly one of complete or to"
+      ],
+      [
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: {
+            "approve" => Hive::Workflow::Outcome.new(name: "approve", complete: true)
+          }.freeze
+        ),
+        "must declare an artifact when complete"
+      ],
+      [
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: {
+            "reject" => Hive::Workflow::Outcome.new(name: "reject", to: "draft", artifact: "draft.md")
+          }.freeze
+        ),
+        "artifact is only valid for a completing outcome"
+      ]
+    ]
+
+    cases.each do |stage, message|
+      error = assert_raises(ArgumentError) do
+        Hive::Workflow.new(id: :editorial, stages: [ valid, stage ])
+      end
+      assert_includes error.message, message
+    end
+
+    non_human = Hive::Workflow::Stage.new(
+      name: "draft", index: 1, state_file: "draft.md", kind: :agent,
+      outcomes: {
+        "approve" => Hive::Workflow::Outcome.new(name: "approve", complete: true, artifact: "draft.md")
+      }.freeze
+    )
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(id: :editorial, stages: [ non_human ])
+    end
+    assert_includes error.message, "non-human stage"
   end
 
   def test_stage_carries_user_descriptor_instruction_and_permissions

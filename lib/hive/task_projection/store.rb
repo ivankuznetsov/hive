@@ -84,14 +84,12 @@ module Hive
           }
         end
 
-        records = Hive::TaskProjection.parse_journal(
-          bytes.lines(chomp: true), attempt_store: @attempt_store
-        )
+        replay = Hive::TaskProjection.replay_journal(bytes, attempt_store: @attempt_store)
         {
-          "cursor" => bytes.bytesize,
-          "hash" => ::Digest::SHA256.hexdigest(bytes),
-          "event_id" => records.last&.fetch("event_id", nil),
-          "records" => records
+          "cursor" => replay.cursor,
+          "hash" => replay.ledger_hash,
+          "event_id" => replay.record_id,
+          "records" => replay.records
         }
       end
 

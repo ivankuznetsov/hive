@@ -51,10 +51,17 @@ class Project
     raise
   end
 
-  def active_tasks
-    @active_tasks ||= attributes.fetch("tasks", []).map do |task_attributes|
+  def tasks
+    @tasks ||= attributes.fetch("tasks", []).map do |task_attributes|
       Task.new(project: self, attributes: task_attributes)
     end
+  end
+
+  alias active_tasks tasks
+  alias archived_tasks tasks
+
+  def hidden_archived_task_count
+    attributes.fetch("hidden_archived_task_count", 0)
   end
 
   def default_workflow

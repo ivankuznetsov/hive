@@ -7,6 +7,7 @@ require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/agent_limit"
 require "hive/agent/message_extractor"
+require "hive/artifact_firewall"
 require "hive/events"
 require "hive/lock"
 require "hive/permission_scope"
@@ -140,7 +141,8 @@ module Hive
                    permission_mode: nil, allowed_tools: nil,
                    disallowed_tools: nil, cli_flags: [], max_tokens: nil,
                    max_turns: nil, identity_arguments: [], runtime_policy: nil,
-                   launch_arguments: nil, log_stream: true)
+                   launch_arguments: nil, routing_arguments: nil,
+                   log_stream: true)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -192,7 +194,13 @@ module Hive
         end
         supplied_identity_arguments = @launch_arguments.native_arguments
       end
+      if routing_arguments && (@launch_arguments || !supplied_identity_arguments.empty?)
+        raise ArgumentError,
+              "routing_arguments cannot be combined with legacy identity or launch arguments"
+      end
       @identity_arguments = supplied_identity_arguments.freeze
+      @routing_arguments =
+        routing_arguments && @profile.validate_routing_arguments!(routing_arguments)
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -264,7 +272,12 @@ module Hive
     def spawn_and_wait
       cmd = build_cmd
       log_file = log_path
-      messages = Hive::Agent::MessageExtractor::Accumulator.new(max_bytes: FINAL_MESSAGE_TAIL_BYTES)
+      structured_output_protocol = @profile.structured_output_protocol
+      messages = Hive::Agent::MessageExtractor::Accumulator.new(
+        max_bytes: FINAL_MESSAGE_TAIL_BYTES,
+        structured_output_protocol: structured_output_protocol,
+        require_terminal_structured_output: @runtime_policy&.host_outputs? == true
+      )
       limit_text = nil
       structured_failure = nil
       last_usage = nil
@@ -318,13 +331,19 @@ module Hive
             # logical message can span multiple newline-delimited JSON events,
             # so per-line regex redaction cannot safely retain their payloads.
             json = parse_json_line(line)
+            sensitive_payload = Hive::Agent::MessageExtractor.sensitive_payload?(
+              json,
+              raw_line: line,
+              structured_output_protocol: structured_output_protocol
+            )
             message = messages.observe(json, raw_line: line)
             if structured_failure.nil? && @profile.name == :claude
               structured_failure = Hive::Agent::MessageExtractor.extract_failure(json)
             end
             if @log_stream
-              safe_line = if message
-                "[structured message omitted type=#{json.fetch('type', 'unknown')}]\n"
+              safe_line = if message || sensitive_payload
+                event_type = json.is_a?(Hash) ? json.fetch("type", "unknown") : "end"
+                "[structured message omitted type=#{event_type}]\n"
               else
                 Hive::SecretPatterns.redact(line)
               end
@@ -338,7 +357,7 @@ module Hive
             # MessageExtractor does not surface as a final message — so without
             # scanning the raw line the limit text never reaches handle_exit and
             # the run is misreported as a generic failure (exit_code=1).
-            if limit_text.nil? && Hive::AgentLimit.limit_reached?(line)
+            if limit_text.nil? && !sensitive_payload && Hive::AgentLimit.limit_reached?(line)
               detail = json && (json["message"] || (json["error"].is_a?(Hash) ? json["error"]["message"] : nil))
               limit_text = (detail || line).to_s.strip
             end
@@ -544,6 +563,7 @@ module Hive
           disallowed_tools: @disallowed_tools,
           max_budget_usd: @max_budget_usd,
           identity_arguments: @identity_arguments,
+          routing_arguments: @routing_arguments,
           raw_cli_arguments: @cli_flags,
           trusted_cli_arguments: @runtime_cli_flags,
           executable: @runtime_policy&.executable,
@@ -778,9 +798,7 @@ module Hive
 
     def completed_output_file?
       effective_status_mode == :output_file_exists &&
-        !@expected_output.to_s.empty? &&
-        File.exist?(@expected_output) &&
-        File.size(@expected_output).positive?
+        expected_output_report&.valid?
     end
 
     def completed_state_file_artifact?
@@ -858,7 +876,7 @@ module Hive
         return
       end
 
-      unless File.exist?(path) && File.size(path) > 0
+      unless expected_output_report&.valid?
         result[:status] = :error
         result[:error_message] = "expected output file missing or empty: #{path}"
         return
@@ -867,8 +885,35 @@ module Hive
       result[:status] = :ok
     end
 
+    def expected_output_report
+      manifest = expected_output_manifest
+      return nil unless manifest
+
+      Hive::ArtifactFirewall.validate_required_outputs(manifest)
+    rescue Hive::ArtifactFirewall::Error
+      nil
+    end
+
+    def expected_output_manifest
+      return nil if @expected_output.nil? || @expected_output.to_s.empty?
+
+      @expected_output_manifest ||= begin
+        path = File.expand_path(@expected_output.to_s)
+        root = File.dirname(path)
+        Hive::ArtifactFirewall::Manifest.new(
+          root: root,
+          protected_anchors: {},
+          permitted_writable_roots: [ root ],
+          required_outputs: { File.basename(path) => path }
+        )
+      end
+    end
+
     def extract_final_message(data)
-      Hive::Agent::MessageExtractor.extract(data)
+      Hive::Agent::MessageExtractor.extract(
+        data,
+        structured_output_protocol: @profile.structured_output_protocol
+      )
     end
 
     def parse_json_line(line)

@@ -128,6 +128,19 @@ module Hive
       already-initialized project scaffolds the workflow and rebinds the
       default in one hive-state commit.
 
+      Workflow creators can inspect the neutral fresh-project plan without
+      writes, then execute that exact automation-disabled profile after an
+      explicit confirmation:
+
+        hive init --new-workflow editorial --minimal --preview --json
+        hive init --new-workflow editorial --minimal --json
+
+      Minimal init is fresh-target only, rejects --force, and disables patrol,
+      architecture patrol, ad-hoc auto-fix, daemon dispatch/autostart,
+      babysitting, optional reviewers, and service/timer installation. It
+      retains the core hive/state worktree, global project registration, and
+      required llm-wiki/context hooks.
+
       Headless callers can explicitly select architecture discovery before
       any state is written with --refactor-patrol or --no-refactor-patrol;
       omitting both keeps the fresh-project default enabled. Set other
@@ -151,6 +164,10 @@ module Hive
     option :workflow, type: :string, desc: workflow_option_desc
     option :new_workflow, type: :string,
                           desc: "scaffold custom workflow ID, bind it as this project's default, and print paths to edit"
+    option :minimal, type: :boolean, default: false,
+                     desc: "with --new-workflow on a fresh project: use the neutral automation-disabled profile"
+    option :preview, type: :boolean, default: false,
+                     desc: "with --minimal: report the resolved initialization plan without writing"
     option :refactor_patrol, type: :boolean, default: nil,
                              desc: "enable or disable post-merge architecture discovery before init writes state"
     def init(project_path = Dir.pwd)
@@ -161,7 +178,9 @@ module Hive
         json: options[:json],
         workflow: options[:workflow],
         new_workflow: options[:new_workflow],
-        refactor_patrol: options[:refactor_patrol]
+        refactor_patrol: options[:refactor_patrol],
+        minimal: options[:minimal],
+        preview: options[:preview]
       ).call
     end
 
@@ -454,6 +473,8 @@ module Hive
         new ID    Scaffold a per-project workflow descriptor under
                   <hive_state_path>/workflows/ID.yml plus its stage
                   instruction(s) under <hive_state_path>/workflows/ID/.
+        validate ID  Read and validate the normalized workflow graph without writes.
+        commit ID    Commit a validated owner-authored graph under Hive's state lock.
         install honeycomb/NAME[@VERSION]  Verify and install a reviewed package.
         list                              Inspect built-in, authored, and managed workflows.
         update NAME                       Diff and advance a managed package.
@@ -470,7 +491,7 @@ module Hive
     option :yes, type: :boolean, default: false,
                  desc: "confirm install/update/remove in JSON or non-interactive mode"
     option :dry_run, type: :boolean, default: false,
-                     desc: "for `install`, `update`, or `remove`: validate and report without changing project state"
+                     desc: "for workflow mutations: validate and report without changing project or remote state"
     option :allow_escalation, type: :boolean, default: false,
                               desc: "for `install`/`update`: separately allow unbounded or increased capabilities"
     option :mapping, type: :array, default: [],
@@ -479,6 +500,8 @@ module Hive
                            desc: "for `install`/`update`: optional input NAME=ENV_NAME bindings"
     option :version, type: :string,
                      desc: "for `publish`: semantic package version"
+    option :expected_release_digest, type: :string,
+                                         desc: "for `publish`: require the exact confirmed dry-run release digest"
     def workflow(subcommand = nil, id = nil)
       require "hive/commands/workflow"
       Hive::Commands::Workflow.new(
@@ -492,7 +515,8 @@ module Hive
         allow_escalation: options[:allow_escalation],
         mapping_overrides: options[:mapping],
         input_bindings: options[:input_binding],
-        version: options[:version]
+        version: options[:version],
+        expected_release_digest: options[:expected_release_digest]
       ).call
     end
 
@@ -585,6 +609,11 @@ module Hive
       uses the project's default workflow; pass --workflow to pin a registered
       workflow for this task. (Options may also follow the text.)
 
+      --idempotency-key makes retries state-wide and machine-safe. Hive stores
+      the opaque key with a fingerprint of the input and resolved workflow,
+      returns the original task after it moves stages, and rejects reuse for
+      different input. Pair it with --json for the hive-new.v1 result.
+
       --depends-on stacks this task on a prerequisite: the daemon holds
       auto-advance until the prerequisite reaches the project's dependency
       gate stage (8-finalize by default, configurable via
@@ -605,6 +634,8 @@ module Hive
         hive new myproj --depends-on add-export-endpoint-260618-ab12 "wire up export API"
 
         hive new myproj --depends-on api:add-export-endpoint-260618-ab12 "wire up export UI"
+
+        hive new myproj --workflow content --idempotency-key creator:launch:v1 --json "write the launch post"
     DESC
     option :depends_on, type: :string,
                         desc: "depend on a same-project id/slug or explicit project:slug; hold daemon " \
@@ -613,6 +644,8 @@ module Hive
     option :base, type: :string,
                   desc: "base branch for a worktree/draft-PR workflow"
     option :workflow, type: :string, desc: workflow_option_desc
+    option :idempotency_key, type: :string,
+                             desc: "return the original task on a retry with identical input; reject conflicting reuse"
     def new_task(project, *text_parts)
       require "hive/commands/new"
       text = text_parts.join(" ")
@@ -623,7 +656,9 @@ module Hive
         text,
         base: options[:base],
         depends_on: options[:depends_on],
-        workflow: options[:workflow]
+        workflow: options[:workflow],
+        idempotency_key: options[:idempotency_key],
+        json: options[:json]
       ).call
     end
     map "new" => :new_task
@@ -941,63 +976,6 @@ module Hive
       ).call
     end
 
-    desc "digest", "Run PRDigest for Hive's registered GitHub repositories"
-    # wrap: false so the Examples / Exit codes blocks keep their line breaks
-    # instead of being reflowed into one paragraph.
-    long_desc <<~DESC, wrap: false
-      Delegates the complete merged-PR digest to the standalone `prdigest` CLI.
-      Hive resolves its registered github.com repositories, Telegram destination,
-      and existing GitHub authentication, writes a private temporary config, and
-      invokes PRDigest. PRDigest alone fetches, renders, chunks, checkpoints, and
-      sends the digest. Hive tasks and stage folders never affect inclusion.
-
-      Without --date, Hive passes the Europe/London calendar day that just ended.
-      Repeat --repo owner/name to filter the registered repository set; unknown
-      or unregistered repositories fail instead of expanding scope. Use
-      --dry-run to print the exact composed message without Telegram credentials.
-
-      With --json, emits PRDigest's versioned `prdigest-result` document without
-      a Hive wrapper. Its delivery object carries accepted_chunks, total_chunks,
-      failed_chunk, and status. PRDigest exit codes are preserved.
-
-      Examples:
-        hive digest                          # yesterday, send to Telegram
-        hive digest --date 2026-06-13        # a specific London day
-        hive digest --dry-run                # print the composed message, send nothing
-        hive digest --date 2026-06-13 --json # machine-readable prdigest-result
-        hive digest --repo owner/name --repo other/repo --json
-
-      Exit codes:
-        0  completed or dry-run
-        1  unexpected/render failure
-        2  PRDigest CLI/configuration failure
-        3  GitHub failure
-        4  Telegram/delivery-checkpoint failure
-        5  PRDigest cursor-state failure
-        6  failure after earlier durable progress
-        78 Hive adapter configuration failure (unregistered repo/missing binary/auth)
-        64 bad flags / malformed --json (Thor usage error)
-        70 invalid PRDigest output or unexpected adapter error
-    DESC
-    option :date, type: :string, desc: "Europe/London calendar date to digest (YYYY-MM-DD)"
-    option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"
-    # repeatable: true so a repeated `--repo a/b --repo c/d` accumulates
-    # (Thor collects each occurrence into a nested array) instead of the last
-    # flag silently overwriting the earlier ones — the space-listed form
-    # `--repo a/b c/d` still works too. `.flatten` collapses both forms to a
-    # flat list of owner/name slugs for the command.
-    option :repo, type: :array, default: [], repeatable: true,
-                  desc: "filter registered GitHub repositories by owner/name (repeatable)"
-    def digest
-      require "hive/commands/digest"
-      Hive::Commands::Digest.new(
-        date: options[:date],
-        dry_run: options[:dry_run],
-        json: options[:json],
-        repos: options[:repo].flatten
-      ).call
-    end
-
     desc "answer-digest", "Send a daily digest of tasks waiting on human input"
     # wrap: false so the Examples / Exit codes blocks keep their line breaks.
     long_desc <<~DESC, wrap: false
@@ -1220,6 +1198,34 @@ module Hive
         from: options[:from],
         project: options[:project],
         force: options[:force],
+        json: options[:json]
+      ).call
+    end
+
+    desc "decide TARGET OUTCOME", "Apply a named outcome to a durable human workflow stage"
+    long_desc <<~DESC
+      TARGET is a task slug or folder currently waiting at a descriptor-declared
+      human stage. OUTCOME must be one of that stage's closed named outcomes.
+
+      --from and --decision-id are required and identify the expected human-stage
+      visit. Repeating the same decision is a no-op; a conflicting or stale
+      decision fails with WRONG_STAGE instead of changing the moved task.
+    DESC
+    option :from, type: :string, required: true,
+                  desc: "expected human stage, full or short form"
+    option :decision_id, type: :string,
+                         desc: "required decision identity reported by run/status for this visit"
+    option :note, type: :string, desc: "optional audit note recorded with the decision"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def decide(target, outcome)
+      require "hive/commands/decide"
+      Hive::Commands::Decide.new(
+        target,
+        outcome,
+        from: options[:from],
+        decision_id: options[:decision_id],
+        note: options[:note],
+        project: options[:project],
         json: options[:json]
       ).call
     end

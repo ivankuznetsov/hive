@@ -55,6 +55,7 @@ class CliUsageErrorJsonTest < Minitest::Test
     cases = [
       [ %w[run --json], "hive-run", {} ],
       [ %w[approve --json], "hive-approve", {} ],
+      [ %w[decide task approve --json], "hive-decide", {} ],
       [ %w[markers clear --json], "hive-markers-clear", {} ],
       [ %w[drop --json], "hive-drop", {} ],
       [ %w[findings --json], "hive-findings", {} ],
@@ -169,28 +170,6 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
-  def test_digest_thor_errors_use_the_prdigest_result_contract
-    cases = [
-      %w[digest --bad --json],
-      %w[digest extra --json]
-    ]
-
-    with_tmp_global_config do |home|
-      cases.each do |argv|
-        out, _err, status = run_hive(home, *argv)
-
-        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
-        payload = JSON.parse(out)
-        assert_equal "prdigest-result", payload.fetch("schema")
-        assert_equal 1, payload.fetch("schema_version")
-        assert_equal "failure", payload.fetch("status")
-        assert_equal "cli", payload.dig("error", "kind")
-        assert_nil payload.fetch("delivery")
-        refute payload.key?("ok")
-      end
-    end
-  end
-
   def test_setup_extra_positional_json_usage_error_uses_setup_envelope
     with_tmp_global_config do |home|
       out, err, status = run_hive(home, "setup", "extra", "--json")
@@ -233,8 +212,8 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "UsageError", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
-      assert_equal "missing SUBCOMMAND (expected: new, install, list, update, remove, publish)", payload["message"]
-      assert_equal %w[new install list update remove publish], payload["expected"]
+      assert_equal "missing SUBCOMMAND (expected: new, validate, commit, install, list, update, remove, publish)", payload["message"]
+      assert_equal %w[new validate commit install list update remove publish], payload["expected"]
     end
   end
 
@@ -245,7 +224,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       refute status.success?
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
       assert_empty out
-      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, install, list, update, remove, publish)\n", err
+      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, validate, commit, install, list, update, remove, publish)\n", err
     end
   end
 
@@ -277,6 +256,17 @@ class CliUsageErrorJsonTest < Minitest::Test
       # contract that wraps Thor's arity error.
       refute payload.key?("expected"), "Thor arity errors must not carry `expected`"
       refute payload.key?("value"), "Thor arity errors must not carry `value`"
+    end
+  end
+
+  def test_workflow_validate_arity_error_uses_validate_envelope
+    with_tmp_global_config do |home|
+      assert_pre_dispatch_error(
+        home,
+        %w[workflow validate editorial extra --json],
+        schema: "hive-workflow-validate",
+        error_kind: "usage"
+      )
     end
   end
 

@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-07-25
+updated: 2026-07-26
 tags: [command, bot, telegram, mobile, json, closure]
 ---
 
@@ -33,7 +33,7 @@ hive bot install [--force] [--json]
 | `status` | Reports running/not-running and exits `0` when running, `1` when not. With `--json`, emits `hive-bot-status.v1` with `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`, plus the autostart-service state `service_installed`, `service_enabled`, and `unit_path` (read-only probe — `systemctl --user is-enabled` / `launchctl list`) so an agent can tell whether `hive bot install` has run without a mutating call. |
 | `reload` | Sends `SIGHUP`; the supervisor reloads config at the next loop boundary while preserving in-flight children and conversations. With `--json`, emits `hive-bot-reload.v1`. |
 | `tail` | Streams `~/.local/state/hive/logs/bot.log`; exits 1 if the log does not exist. |
-| `install` | (Re)writes the platform-native unit (`~/.config/systemd/user/hive-bot.service` on Linux, `~/Library/LaunchAgents/local.hive-bot.plist` on macOS) and enables autostart. Mirrors `hive daemon install` via the shared `ServiceInstaller::Base` platform mechanics and `ServiceInstaller::ResultPresenter` command outcome handling: always installs with `autostart: true`. Without `--force`, refuses to overwrite a pre-existing unit that differs from the template (exit `64` USAGE, message pointing at `--force`). With `--force`, saves the previous content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` via atomic write, then — only when an existing unit was actually overwritten (the `upgraded` outcome) — restarts/reloads the service so new `Environment=` lines take effect (a first-time `--force` install with no prior unit just enables/loads, no restart). A service-manager failure exits `70` (SOFTWARE); a host with no systemd-user manager still gets the unit written but exits `0` with the `unsupported` outcome. Units point at the user-facing wrapper path when installers provide it, so `hv` invocations survive Apache Hive shadowing `hive`. `hive uninstall` tears this unit back down. With `--json`, every outcome (success and error) emits a `hive-bot-install.v1` envelope. |
+| `install` | (Re)writes the platform-native unit (`~/.config/systemd/user/hive-bot.service` on Linux, `~/Library/LaunchAgents/local.hive-bot.plist` on macOS) and enables autostart. Mirrors `hive daemon install` through `Hive::UserService` inspect/plan/apply mechanics, with `Bot::ServiceInstaller` retaining templates and command policy and `ServiceInstaller::ResultPresenter` retaining output handling; it always installs with `autostart: true`. Without `--force`, refuses to overwrite a pre-existing unit that differs from the template (exit `64` USAGE, message pointing at `--force`). With `--force`, saves the previous content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` via atomic write, then — only when an existing unit was actually overwritten (the `upgraded` outcome) — restarts/reloads the service so new `Environment=` lines take effect (a first-time `--force` install with no prior unit just enables/loads, no restart). A service-manager failure exits `70` (SOFTWARE); a host with no systemd-user manager still gets the unit written but exits `0` with the `unsupported` outcome. Units point at the user-facing wrapper path when installers provide it, so `hv` invocations survive Apache Hive shadowing `hive`. `hive uninstall` tears this unit back down. With `--json`, every outcome (success and error) emits a `hive-bot-install.v1` envelope. |
 
 ## Commands in Telegram
 
@@ -224,10 +224,7 @@ with `hive pairing approve telegram <CODE>` (see [[commands/pairing]]). Unknown
 non-`/start` chat IDs are still logged once per bot lifetime and ignored
 silently.
 
-The delegated PRDigest subprocess receives the same Telegram token and delivers
-the daily digest to `bot.chat_id_allowlist[0]`; there is no separate digest chat
-setting. It does not reuse Hive's bot client. See [[commands/digest]] and
-[[modules/digest]]. The allowlist remains the bot's chat-auth boundary.
+The allowlist remains the bot's chat-auth boundary.
 
 Voice transcription uses `bot.transcription.api_key_env` for the OpenAI
 audio API key (default `HIVE_WHISPER_API_KEY`); the key is not persisted.

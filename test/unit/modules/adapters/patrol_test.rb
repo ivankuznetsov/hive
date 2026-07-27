@@ -161,6 +161,10 @@ class ModulesAdaptersPatrolTest < Minitest::Test
         project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
       ))
       refute_empty shadow_files
+      record = JSON.parse(File.binread(shadow_files.fetch(0)))
+      refute record.fetch("comparable")
+      assert_nil record.fetch("evidence_source")
+      assert_empty record.fetch("legacy")
 
       assert_raises(Hive::ConfigError) do
         adapter.call(

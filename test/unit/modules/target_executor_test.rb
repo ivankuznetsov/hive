@@ -133,32 +133,17 @@ class ModulesTargetExecutorTest < Minitest::Test
       assert_equal :review, calls.fetch(0).fetch(:workflow).id
       assert calls.fetch(0).fetch(:descriptor_exists)
 
-      state = File.join(root, ".hive-state")
-      admitted = []
-      fake_command = Object.new
-      fake_command.define_singleton_method(:call!) { admitted << true }
-      replacement = lambda do |*args, **options|
-        admitted << [ args, options ]
-        fake_command
-      end
-      default_executor = Hive::Modules::TargetExecutor.new(first_party_loader: -> { true })
-      with_replaced_singleton_method(Hive::Commands::New, :new, replacement) do
-        assert_equal 0, default_executor.call(
+      blocked = Hive::Modules::TargetExecutor.new(first_party_loader: -> { true })
+      error = assert_raises(Hive::Modules::TargetExecutor::WorkflowAdmissionUnavailable) do
+        blocked.call(
           target: descriptor.hooks.first.fetch("target"), target_snapshot: snapshot,
-          project: { "name" => "demo", "path" => root, "hive_state_path" => state },
-          module_name: "demo", hook_id: "review",
-          event: { "event_id" => "evt-1", "event_name" => "task.completed" },
+          project: { "name" => "demo", "path" => root }, module_name: "demo",
+          hook_id: "review", event: { "event_id" => "evt-1" },
           configuration: configuration
         )
       end
-      assert_equal "demo", admitted.fetch(0).fetch(0).fetch(0)
-      assert_match(/\Amodule-demo-review-/, admitted.fetch(0).fetch(1).fetch(:workflow))
-      workflow_path = File.join(
-        state, "workflows", "#{admitted.fetch(0).fetch(1).fetch(:workflow)}.yml"
-      )
-      assert File.file?(workflow_path)
-      assert_equal admitted.fetch(0).fetch(1).fetch(:workflow),
-                   YAML.safe_load(File.read(workflow_path)).fetch("id")
+      assert_equal "workflow_admission_unavailable", error.reason
+      assert_match(/module-pinned workflow task admission is unavailable/, error.message)
     end
   end
 
@@ -214,12 +199,93 @@ class ModulesTargetExecutorTest < Minitest::Test
       assert_includes argv.each_cons(3).to_a, [ "--bind", writable, writable ]
       refute_includes argv, "--share-net"
 
-      Tempfile.create("redaction") do |file|
-        file.write("token=super-secret\n")
-        output = StringIO.new
-        runner.send(:emit_redacted, file, output, [ "super-secret" ])
-        assert_equal "token=[REDACTED]\n", output.string
+      capture = Hive::Modules::TargetExecutor::CommandRunner::CapturedOutput.new(
+        bytes: "token=super-secret\n".b, truncated: false
+      )
+      output = StringIO.new
+      runner.send(:emit_redacted, capture, output, [ "super-secret" ])
+      assert_equal "token=[REDACTED]\n", output.string
+    end
+  end
+
+  def test_command_output_capture_is_bounded_and_redacts_a_secret_crossing_the_limit
+    runner = Hive::Modules::TargetExecutor::CommandRunner.new
+    limit = Hive::Modules::TargetExecutor::CommandRunner::MAX_OUTPUT_BYTES
+    secret = "boundary-secret"
+    prefix = "x" * (limit - 5)
+    capture = runner.send(:capture_bounded, StringIO.new(prefix + secret + ("y" * 32_768)))
+
+    assert capture.truncated
+    assert_operator capture.bytes.bytesize, :<=, limit + 1
+    output = StringIO.new
+    runner.send(:emit_redacted, capture, output, [ secret ])
+    assert_operator output.string.bytesize, :<=,
+                    limit + "\n[hive: module command output truncated]\n".bytesize
+    assert_includes output.string, "[REDACTED]"
+    refute_includes output.string, secret
+    refute_includes output.string, secret.byteslice(0, 6)
+    assert_includes output.string, "[hive: module command output truncated]"
+  end
+
+  def test_command_runner_concurrently_captures_and_redacts_both_streams
+    runner = Hive::Modules::TargetExecutor::CommandRunner.new
+    runner.define_singleton_method(:preflight!) { |grants:| grants.fetch("external_commands") }
+    runner.define_singleton_method(:sandbox_argv) do |**|
+      [
+        RbConfig.ruby, "-e",
+        "STDOUT.write('out=stream-secret'); STDERR.write('err=stream-secret')"
+      ]
+    end
+    result = nil
+    stdout, stderr = capture_io do
+      result = runner.call(
+        argv: [ "ignored" ], chdir: Dir.pwd, grants: permissions(
+          "external_commands" => [ "ignored" ]
+        ), secret_values: [ "stream-secret" ]
+      )
+    end
+
+    assert_equal 0, result
+    assert_equal "out=[REDACTED]", stdout
+    assert_equal "err=[REDACTED]", stderr
+  end
+
+  def test_command_runner_maps_spawn_failures_to_a_closed_error
+    runner = Hive::Modules::TargetExecutor::CommandRunner.new
+    runner.define_singleton_method(:preflight!) { |grants:| grants }
+    runner.define_singleton_method(:sandbox_argv) { |**| [ "/definitely/missing/hive-module-command" ] }
+
+    error = assert_raises(Hive::ConfigError) do
+      runner.call(argv: [ "ignored" ], chdir: Dir.pwd, grants: permissions)
+    end
+    assert_match(/could not start/, error.message)
+  end
+
+  def test_command_filesystem_grants_reject_symlinks_outside_the_project
+    runner = Hive::Modules::TargetExecutor::CommandRunner.new
+    with_tmp_dir do |root|
+      project = File.join(root, "project")
+      outside = File.join(root, "outside")
+      FileUtils.mkdir_p([ project, outside ])
+      File.symlink(outside, File.join(project, "docs"))
+      grants = permissions("filesystem_read" => [ "docs/**" ])
+
+      error = assert_raises(Hive::ConfigError) do
+        runner.send(:sandbox_argv, argv: %w[git status], chdir: project, grants: grants)
       end
+      assert_match(/filesystem grant escapes project/, error.message)
+
+      logical = assert_raises(Hive::ConfigError) do
+        runner.send(:confined_project_path!, outside, project)
+      end
+      assert_match(/filesystem grant escapes project/, logical.message)
+
+      broken = File.join(project, "broken")
+      File.symlink(File.join(root, "missing"), broken)
+      unresolved = assert_raises(Hive::ConfigError) do
+        runner.send(:confined_project_path!, broken, project)
+      end
+      assert_match(/filesystem grant cannot be resolved/, unresolved.message)
     end
   end
 

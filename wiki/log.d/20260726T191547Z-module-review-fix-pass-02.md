@@ -10,11 +10,12 @@
 - Command targets validate bubblewrap during activation, expose reviewed
   filesystem grants instead of the host root, enforce closed or wildcard
   network modes, and redact granted secret values from bounded output.
-  Packaged workflow targets admit deterministic project workflow tasks.
+  Packaged workflow targets remain activation-validated but execution-disabled
+  until module-pinned admission and recovery are durable.
 - The event ledger now maintains a recoverable event/schedule index and the
   daemon persists its drain cursor, avoiding retained-history rescans on idle
-  ticks. Schedule and merged-PR producers supply comparable legacy shadow
-  captures.
+  ticks. The merged-PR producer supplies independent Architecture Patrol
+  capture evidence; schedule-only decisions remain non-comparable.
 - Module activation keeps recovery evidence through the fallible state commit;
   later cleanup is warning-only. Uninstalled tombstones may be reinstalled
   with a new watermark, and catalog rejection preserves caller-owned

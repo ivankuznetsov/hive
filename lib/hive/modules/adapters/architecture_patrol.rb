@@ -68,16 +68,7 @@ module Hive
           candidate = select_candidate(scheduler.candidates(now: event_time(event)), hook_id, event)
           rationale = candidate ? "due" : "not_due"
           if mode == :shadow
-            capture = {
-              "decision" => {
-                "rationale" => rationale, "job_id" => candidate && candidate[:job_id],
-                "phase" => candidate && candidate.fetch(:action_phase, :discovery).to_s
-              },
-              "effects" => []
-            }
-            return shadow(
-              project, configuration, event, rationale, candidate, produced_capture: capture
-            )
+            return shadow(project, configuration, event, rationale, candidate)
           end
           return 0 unless candidate
 
@@ -154,8 +145,7 @@ module Hive
           )
         end
 
-        def shadow(project, configuration, event, rationale, candidate = nil, comparable: true,
-                   produced_capture: nil)
+        def shadow(project, configuration, event, rationale, candidate = nil, comparable: true)
           record = {
             "module" => "architecture-patrol", "hook" => event.fetch("event_name"),
             "event_id" => event.fetch("event_id"), "rationale" => rationale,
@@ -166,7 +156,7 @@ module Hive
           if @shadow_sink
             @shadow_sink.call(record)
           else
-            capture = produced_capture || legacy_capture(event)
+            capture = legacy_capture(event)
             decision = {
               "rationale" => rationale, "job_id" => record["job_id"], "phase" => record["phase"]
             }

@@ -63,10 +63,7 @@ module Hive
           candidate = scheduler.candidates(now: Time.iso8601(event.fetch("occurred_at"))).first
           unless mode == :mutator
             rationale = candidate ? "due" : "not_due"
-            return shadow(
-              project, configuration, event, rationale,
-              produced_capture: { "decision" => { "rationale" => rationale }, "effects" => [] }
-            )
+            return shadow(project, configuration, event, rationale)
           end
           return 0 unless candidate
 
@@ -131,7 +128,7 @@ module Hive
           )
         end
 
-        def shadow(project, configuration, event, rationale, comparable: true, produced_capture: nil)
+        def shadow(project, configuration, event, rationale, comparable: true)
           record = {
             "module" => "patrol", "hook" => event.fetch("event_name"),
             "event_id" => event.fetch("event_id"), "rationale" => rationale,
@@ -140,7 +137,7 @@ module Hive
           if @shadow_sink
             @shadow_sink.call(record)
           else
-            capture = produced_capture || legacy_capture(event)
+            capture = legacy_capture(event)
             shadow_comparator(project).record!(
               module_name: "patrol", trigger: event,
               legacy_decision: capture ? capture.fetch("decision") : {},

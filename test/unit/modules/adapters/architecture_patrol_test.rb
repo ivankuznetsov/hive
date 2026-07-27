@@ -228,7 +228,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
     end
   end
 
-  def test_default_shadow_comparator_records_nonmatching_merged_job
+  def test_default_shadow_comparator_keeps_missing_legacy_capture_noncomparable
     with_project do |project|
       scheduler = FakeScheduler.new([ candidate.merge(job_id: "other") ])
       adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
@@ -242,6 +242,36 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
         project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
       ))
       refute_empty files
+      record = JSON.parse(File.binread(files.fetch(0)))
+      refute record.fetch("comparable")
+      assert_nil record.fetch("evidence_source")
+      assert_empty record.fetch("legacy")
+    end
+  end
+
+  def test_default_shadow_comparator_accepts_independent_merged_pr_capture
+    with_project do |project|
+      scheduler = FakeScheduler.new([ candidate ])
+      adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
+        scheduler_factory: ->(**) { scheduler }
+      )
+      event = merged_event
+      event["payload"]["legacy_mutator_capture"] = {
+        "decision" => { "rationale" => "due", "job_id" => "job-7", "phase" => "discovery" },
+        "effects" => [ { "kind" => "job", "id" => "job-7" } ]
+      }
+
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "merged-pr-discovery", event: event,
+        configuration: configuration(shadow: true)
+      )
+      file = Dir.glob(File.join(
+        project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
+      )).fetch(0)
+      record = JSON.parse(File.binread(file))
+      assert record.fetch("comparable")
+      assert_equal "legacy_mutator_capture", record.fetch("evidence_source")
+      assert_equal "job-7", record.dig("legacy", "job_id")
     end
   end
 

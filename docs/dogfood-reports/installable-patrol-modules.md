@@ -22,15 +22,16 @@ legacy cursors or budgets, spawn agents, or invoke side-effect gateways.
 Comparison is admitted only when the trigger carries a separately persisted
 `legacy_mutator_capture`; missing captures remain non-comparable.
 
-The production legacy schedulers do not yet publish an immutable
-`legacy_mutator_capture` snapshot into the comparator, so the observation
-counter remains zero. Capability checks around the adapters are also
-preflight-only until the legacy engines accept capability-bound gateways.
-That blocker, the missing production captures, the elapsed-time gate, the
-drills, and the hosted delivery gates mean this report must not be used to
-request cutover. Machine eligibility remains false until current evidence is
-rebuilt and re-reviewed; cutover re-evaluates the live shadow directory rather
-than trusting this document or a saved `eligible` bit.
+The ordinary Patrol scheduler does not yet publish an immutable
+`legacy_mutator_capture`. The merged-PR reconciler supplies one for
+Architecture Patrol, but this report contains no live occurrences, so both
+documented counters remain zero. Capability checks around the adapters are
+also preflight-only until the legacy engines accept capability-bound gateways.
+Those blockers, the elapsed-time gate, the drills, and the hosted delivery
+gates mean this report must not be used to request cutover. Machine eligibility
+remains false until current evidence is rebuilt and re-reviewed; cutover
+re-evaluates the live shadow directory rather than trusting this document or a
+saved `eligible` bit.
 
 Before a reviewer runs `hive module migration report --reviewer ID --yes`, the
 project must have all of the following:

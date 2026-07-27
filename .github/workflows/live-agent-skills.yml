@@ -244,7 +244,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: Create trusted candidate Check Run
-        uses: actions/github-script@v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CANDIDATE_SHA: ${{ needs.validate.outputs.candidate_sha }}
           WORKFLOW_REVISION: ${{ needs.validate.outputs.workflow_revision }}

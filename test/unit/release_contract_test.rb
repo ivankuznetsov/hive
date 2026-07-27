@@ -13,6 +13,7 @@ class ReleaseContractTest < Minitest::Test
   LIVE_AGENT_WORKFLOW = File.join(ROOT, ".github/workflows/live-agent-skills.yml")
   RELEASE_SELECTOR = File.join(ROOT, "packaging/live_agent_skills/select_release_proof.rb")
   SETUP_NODE_ACTION = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+  GITHUB_SCRIPT_ACTION = "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3"
   CANDIDATE_SHA = "a" * 40
   WORKFLOW_SHA = "b" * 40
   ATTESTATION_SHA256 = "c" * 64
@@ -103,6 +104,14 @@ class ReleaseContractTest < Minitest::Test
     assert_includes body, "checks: write"
     assert_includes body, "attestation_sha256"
     assert_includes body, "HIVE_RELEASE_GATE: \"1\""
+
+    github_script_steps = jobs.values.flat_map { |job| job.fetch("steps", []) }.select do |step|
+      step.fetch("uses", "").start_with?("actions/github-script@")
+    end
+    assert_equal [ GITHUB_SCRIPT_ACTION ], github_script_steps.map { |step| step.fetch("uses") }
+    github_script = github_script_steps.fetch(0).dig("with", "script")
+    refute_includes github_script, "require('@actions/github')"
+    refute_match(/\b(?:const|let|var)\s+getOctokit\b/, github_script)
 
     live_step = jobs.fetch("live-agent").fetch("steps").find do |step|
       step["name"] == "Run authenticated structural proof"

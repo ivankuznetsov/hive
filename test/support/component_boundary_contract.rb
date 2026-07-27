@@ -3,6 +3,7 @@ require "open3"
 require "pathname"
 require "rbconfig"
 require "ripper"
+require "set"
 require "yaml"
 
 # Test-only architecture contract for config/component-boundaries.yml.
@@ -29,6 +30,7 @@ class ComponentBoundaryContract
     allowed_hive_dependencies
     internal_collaborators
     forbidden_constructions
+    authorized_internal_constructions
     hive_consumers
     mutation_authority
     recovery_surface
@@ -110,10 +112,8 @@ class ComponentBoundaryContract
   def validate_static_boundaries!
     validate_catalog! if @components.empty?
 
-    boundary_ready_components.each do |entry|
-      validate_requires!(entry)
-      validate_constructions!(entry)
-    end
+    boundary_ready_components.each { |entry| validate_requires!(entry) }
+    @components.each { |entry| validate_constructions!(entry) }
     true
   end
 
@@ -121,8 +121,12 @@ class ComponentBoundaryContract
     validate_catalog! if @components.empty?
 
     boundary_ready_components.to_h do |entry|
-      [ entry.fetch("id"), clean_load!(entry) ]
+      [ entry.fetch("id"), clean_load_entry!(entry) ]
     end
+  end
+
+  def validate_clean_load!(id)
+    clean_load_entry!(component(id))
   end
 
   private
@@ -172,6 +176,7 @@ class ComponentBoundaryContract
     end
     repo_path!(row.fetch("wiki_page"), "#{component_path}.wiki_page")
     validate_migration_exceptions!(row, component_path)
+    validate_authorized_internal_constructions!(row, component_path)
     string!(row.fetch("mutation_authority"), "#{component_path}.mutation_authority")
     string!(row.fetch("recovery_surface"), "#{component_path}.recovery_surface")
     row
@@ -189,6 +194,49 @@ class ComponentBoundaryContract
     end
     if row.fetch("state") == "boundary-ready" && !exceptions.empty?
       invalid!("#{component_path}.migration_exceptions", "boundary-ready components cannot retain exceptions")
+    end
+  end
+
+  def validate_authorized_internal_constructions!(row, component_path)
+    sites = expect_array(
+      row.fetch("authorized_internal_constructions"),
+      "#{component_path}.authorized_internal_constructions"
+    )
+    return if sites.empty?
+
+    seen_constants = Set.new
+    owned_files = ruby_files(row.fetch("owned_paths"))
+
+    sites.each_with_index do |entry, index|
+      path = "#{component_path}.authorized_internal_constructions[#{index}]"
+      site = expect_hash(entry, path)
+      assert_keys!(site, %w[constant files reason], path)
+      constant = string!(site.fetch("constant"), "#{path}.constant")
+      invalid!("#{path}.constant", "must be a constant path") unless constant.match?(SAFE_CONSTANT)
+      unless row.fetch("internal_collaborators").include?(constant)
+        invalid!("#{path}.constant", "must name a declared internal collaborator")
+      end
+      unless row.fetch("forbidden_constructions").include?(constant)
+        invalid!("#{path}.constant", "must name a forbidden construction")
+      end
+      unless seen_constants.add?(constant)
+        invalid!("#{path}.constant", "duplicates #{constant.inspect}")
+      end
+
+      files = string_array!(site.fetch("files"), "#{path}.files")
+      invalid!("#{path}.files", "must not contain duplicates") unless files.uniq == files
+      files.each_with_index do |relative, file_index|
+        repo_path!(relative, "#{path}.files[#{file_index}]")
+        if owned_files.include?(relative)
+          invalid!("#{path}.files[#{file_index}]",
+                   "component-owned files do not need construction authorization")
+        end
+        unless ruby_syntax(relative).constructions.include?(constant)
+          invalid!("#{path}.files[#{file_index}]",
+                   "#{relative} does not construct #{constant}")
+        end
+      end
+      string!(site.fetch("reason"), "#{path}.reason")
     end
   end
 
@@ -224,6 +272,11 @@ class ComponentBoundaryContract
       entry.fetch("component_dependencies").each do |dependency|
         invalid!("component #{id}.component_dependencies", "unknown component #{dependency.inspect}") unless @component_index.key?(dependency)
         invalid!("component #{id}.component_dependencies", "cannot depend on itself") if dependency == id
+        if entry.fetch("state") == "boundary-ready" &&
+            @component_index.fetch(dependency).fetch("state") != "boundary-ready"
+          invalid!("component #{id}.component_dependencies",
+                   "boundary-ready component cannot depend on candidate #{dependency.inspect}")
+        end
       end
     end
 
@@ -271,10 +324,15 @@ class ComponentBoundaryContract
     forbidden = entry.fetch("forbidden_constructions")
     return if forbidden.empty?
 
+    authorized = entry.fetch("authorized_internal_constructions").each_with_object(Set.new) do |site, pairs|
+      site.fetch("files").each { |relative| pairs << [ relative, site.fetch("constant") ] }
+    end
     owned_files = ruby_files(entry.fetch("owned_paths"))
     (production_ruby_files - owned_files).each do |relative|
       constructions = ruby_syntax(relative).constructions
-      invalid_constants = constructions & forbidden
+      invalid_constants = (constructions & forbidden).reject do |constant|
+        authorized.include?([ relative, constant ])
+      end
       next if invalid_constants.empty?
 
       invalid!("component #{entry.fetch('id')}.forbidden_constructions",
@@ -282,7 +340,7 @@ class ComponentBoundaryContract
     end
   end
 
-  def clean_load!(entry)
+  def clean_load_entry!(entry)
     entrypoint = entry.fetch("entrypoint")
     allowed_components = entry.fetch("component_dependencies")
     unrelated_owned_features = component_require_owners.filter_map do |required, owner|

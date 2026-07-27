@@ -17,7 +17,7 @@ the first and primary consumer.
 
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
-| Attempts admission / future RunReceipt | `candidate` | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
+| Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | UserService | `candidate` | `require "hive/commands/service_installer/base"` → `Hive::Commands::ServiceInstaller::Base` | [[commands/daemon]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `candidate` | `require "hive/protected_files"` → `Hive::ProtectedFiles` | [[modules/protected_files]] |
@@ -31,10 +31,14 @@ means the entry point, allowed dependency direction, consumer construction
 rules, and clean-process load are enforced. It does not mean that a component
 has earned a gem, version, repository, or release.
 
-`Hive::Attempts::API` is an existing admission slice, but U1 records Attempts
-as a `candidate`: daemon lifecycle code still constructs its store and
-reconciler internals directly. U2 owns reconciling that construction and may
-promote Attempts only after the completed boundary proof passes.
+`Hive::Attempts::API` is the guarded reference admission slice. Its public
+result contracts, focused clean-load proof, and exact internal construction
+sites are enforced while it remains a `candidate`. Promotion is blocked because
+Attempts reads WorkLedger projections while WorkLedger-owned
+`lib/hive/task_projection/store.rb` still requires and constructs
+`Hive::Attempts::Store`; U8 owns removal of that reciprocal source edge. The
+reference slice does not publish raw storage, reconciliation, supervision,
+capacity, loss-policy, cancellation, export, or generic lifecycle operations.
 
 The `Agent ABI` is boundary-ready below orchestration. `AgentRuntime` exposes
 immutable request, compiled invocation, capability/probe evidence, and
@@ -74,6 +78,8 @@ Each row names:
 - owned source paths and explicit component dependencies;
 - state, schema, lock, mutation-authority, and recovery responsibilities;
 - known Hive consumers and internal collaborators;
+- exact existing Hive files allowed to construct a named internal collaborator,
+  with a non-blank architectural reason;
 - the narrative wiki page and focused tests; and
 - reviewed migration exceptions, if any.
 
@@ -81,7 +87,7 @@ Owned paths cannot overlap between components, component dependencies must form
 an acyclic graph, and every path in the catalog must resolve inside the
 repository. A temporary exception must include both a reason and the
 implementation unit that removes it. A `boundary-ready` component cannot keep
-an exception.
+an exception or depend on a `candidate` component.
 
 ## Enforcement
 
@@ -93,9 +99,13 @@ tooling. U1 establishes this catalog and promotion guard; for every
    dependencies on Hive commands, stages, web, release, or CLI code;
 2. maps every component-owned Ruby file to its require path and rejects
    undeclared direct component dependencies;
-3. scans production Ruby outside the component's owned paths and rejects
-   literal `Constant.new` construction of listed internals; and
-4. loads the entry point in a fresh Ruby process, verifies the documented
+3. for every row that declares forbidden constructions, scans production Ruby
+   outside the component's owned paths and rejects literal `Constant.new`
+   construction of listed internals except exact file/constant pairs recorded
+   as current composition or compatibility sites; stale or newly listed-file
+   authorizations fail validation; and
+4. loads each ready entry point—and any explicitly requested candidate entry
+   point—in a fresh Ruby process, verifies the documented
    constant, and rejects unrelated commands, stages, web code, or files owned
    by undeclared components.
 
@@ -107,9 +117,11 @@ bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
 
 The syntax scan is an architecture regression guard, not a Ruby sandbox. Its
 construction rule covers literal `Constant.new`, not aliases or factory
-methods. It does not claim to stop dynamic requires, reflection, monkeypatching,
-or arbitrary same-user code. Those limits must not be weakened into security
-claims.
+methods. Construction authorization is file-granular: it rejects a named
+internal from a newly listed file, but it does not distinguish multiple call
+sites for that internal inside an already authorized composition root. It does
+not claim to stop dynamic requires, reflection, monkeypatching, or arbitrary
+same-user code. Those limits must not be weakened into security claims.
 
 ## Changing a boundary
 

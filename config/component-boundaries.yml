@@ -20,12 +20,13 @@ components:
     owned_paths:
       - lib/hive/attempts
     state_contracts:
-      - "$HIVE_HOME/attempts/v2 records, logs, outputs, generation locks, leases, and receipts"
+      - "$HIVE_HOME/attempts/v2 records, framed logs, outputs, generation locks, leases, receipts, and lost-outcome evidence"
     schema_contracts:
       - "hive-attempt v2 is the only runtime reader/writer; Hive::Recovery::Migration owns the one-off cutover"
     lock_contracts:
       - "admission lock before generation lock; record transitions use guarded CAS"
-    component_dependencies: []
+    component_dependencies:
+      - work-ledger
     allowed_hive_dependencies:
       - hive/agent_limit
       - hive/atomic_file
@@ -37,9 +38,7 @@ components:
       - hive/paths
       - hive/stringify_keys
       - hive/task
-      - hive/task_projection
       - hive/task_resolver
-      - hive/workflows
     internal_collaborators:
       - Hive::Attempts::Entrypoint
       - Hive::Attempts::ConfiguredDispatcher
@@ -49,23 +48,66 @@ components:
       - Hive::Attempts::Store
       - Hive::Attempts::Supervisor
       - Hive::Attempts::Reconciler
+      - Hive::Attempts::ProcessIdentity
+      - Hive::Attempts::CapacitySnapshot
+      - Hive::Attempts::LostOutcomeStore
+      - Hive::Attempts::LostOutcomeProcessor
     forbidden_constructions:
       - Hive::Attempts::Entrypoint
       - Hive::Attempts::ConfiguredDispatcher
       - Hive::Attempts::Dispatcher
       - Hive::Attempts::DetachedLauncher
       - Hive::Attempts::Client
+      - Hive::Attempts::Store
+      - Hive::Attempts::Supervisor
+      - Hive::Attempts::Reconciler
+      - Hive::Attempts::ProcessIdentity
+      - Hive::Attempts::CapacitySnapshot
+      - Hive::Attempts::LostOutcomeStore
+      - Hive::Attempts::LostOutcomeProcessor
+    authorized_internal_constructions:
+      - constant: Hive::Attempts::Store
+        files:
+          - lib/hive/commands/attempt_supervise.rb
+          - lib/hive/commands/daemon.rb
+          - lib/hive/conditions/execute_boundary.rb
+          - lib/hive/implementation_identity/store.rb
+          - lib/hive/task_closure.rb
+          - lib/hive/task_projection/store.rb
+        reason: "Existing Hive composition, read-only consumers, execution-boundary checks, and closure verification share the canonical durable store; they are not alternate admission producers."
+      - constant: Hive::Attempts::Supervisor
+        files:
+          - lib/hive/commands/attempt_supervise.rb
+        reason: "The private supervisor argv adapter is the process handoff owned by DetachedLauncher."
+      - constant: Hive::Attempts::Reconciler
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The daemon composition root injects reconciliation into its scheduler without exposing lifecycle operations through the admission facade."
+      - constant: Hive::Attempts::ProcessIdentity
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The daemon composition root shares one process-identity verifier across reconciliation and loss handling."
+      - constant: Hive::Attempts::LostOutcomeStore
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The daemon composition root owns internal loss evidence persistence and injection."
+      - constant: Hive::Attempts::LostOutcomeProcessor
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The daemon composition root owns internal loss-policy wiring; it is not a public recovery operation."
     hive_consumers:
       - lib/hive/commands/run.rb
       - lib/hive/commands/stage_action.rb
       - lib/hive/commands/daemon.rb
       - lib/hive/bot/dispatch_request_writer.rb
-    mutation_authority: "Admission accepts an explicit request; internal stores and supervisors retain durable transition authority."
-    recovery_surface: "The facade admits successors; reconciliation, healing, cancellation, and lifecycle policy remain internal."
+    mutation_authority: "The facade accepts explicit admission requests; named Hive composition sites wire internal stores and supervisors that retain durable transition authority."
+    recovery_surface: "The facade admits successors; reconciliation, healing, cancellation, export, and generic lifecycle policy remain internal."
     wiki_page: wiki/modules/attempts.md
     focused_tests:
       - test/unit/attempts/api_test.rb
-    migration_exceptions: []
+    migration_exceptions:
+      - reason: "WorkLedger-owned lib/hive/task_projection/store.rb still requires and constructs Hive::Attempts::Store, creating a reciprocal Attempts/WorkLedger source edge that blocks an acyclic boundary-ready graph."
+        removal_unit: U8
 
   - id: user-service
     name: UserService
@@ -95,6 +137,7 @@ components:
     internal_collaborators:
       - Hive::Commands::ServiceInstaller::Base
     forbidden_constructions: []
+    authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/commands/daemon.rb
       - lib/hive/commands/bot.rb
@@ -150,6 +193,7 @@ components:
     internal_collaborators:
       - Hive::AgentProfiles::UsageExtractors
     forbidden_constructions: []
+    authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/agent.rb
       - lib/hive/claude_launcher.rb
@@ -196,6 +240,7 @@ components:
     internal_collaborators:
       - Hive::SecretPatterns
     forbidden_constructions: []
+    authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/stages/agent_worktree.rb
       - lib/hive/stages/agent_report.rb
@@ -235,6 +280,7 @@ components:
       - Hive::AgentSkills::DirectoryPublisher
       - Hive::AgentSkills::Provisioner
     forbidden_constructions: []
+    authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/commands/setup_agents.rb
     mutation_authority: "Hive setup policy chooses destinations; publisher applies a revalidated projection."
@@ -269,6 +315,7 @@ components:
     internal_collaborators:
       - Hive::Gh
     forbidden_constructions: []
+    authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/stages/draft_pr_handoff.rb
       - lib/hive/refactor_patrol/pr_opener.rb
@@ -311,6 +358,7 @@ components:
       - Hive::TaskProjection::Store
       - Hive::Workflows::DescriptorParser
     forbidden_constructions: []
+    authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/task_action.rb
       - lib/hive/conditions

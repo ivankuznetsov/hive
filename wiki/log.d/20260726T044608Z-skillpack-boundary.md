@@ -29,3 +29,8 @@ entry-point splits remain visible to the unchanged 100% executable-line gate.
 
 **Docs:** Updated [[commands/setup-agents]], [[component-boundaries]], and
 [[testing]]. Did not edit compiled [[log]].
+
+**Review hardening:** `Projection` now validates, copies, and deeply freezes
+its rendered path/content mapping and identity strings. A caller cannot mutate
+its own buffers after preview and make apply publish bytes the plan did not
+bind.

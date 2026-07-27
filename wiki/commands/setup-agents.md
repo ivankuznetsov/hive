@@ -130,6 +130,10 @@ The facade exposes four operations:
    complete directory, returns the unchanged healthy report, or raises a typed
    `StalePlan` / `ForeignContent` error without mutation.
 
+Projection construction copies and freezes every rendered path and byte
+string. Changing caller-owned buffers after preview therefore cannot alter the
+bytes that `apply` publishes.
+
 Hive remains the first consumer. `Inspector`, `Provisioner`, target resolution,
 the package manifest, native CLI adapters, consent, filtering, JSON envelopes,
 and command wording are Hive adapters loaded lazily through the facade; they

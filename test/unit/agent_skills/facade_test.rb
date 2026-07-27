@@ -123,6 +123,41 @@ class AgentSkillsFacadeTest < Minitest::Test
     end
   end
 
+  def test_projection_copies_and_freezes_the_bytes_bound_to_a_plan
+    with_tmp_dir do |trusted_root|
+      canonical = Hive::AgentSkills.render("claude")
+      source_files = canonical.files.to_h do |path, content|
+        [ path.dup, content.dup ]
+      end
+      projection = Hive::AgentSkills::Projection.new(
+        platform: canonical.platform.dup,
+        invocation: canonical.invocation.dup,
+        destination_relative: canonical.destination_relative.dup,
+        skill_version: canonical.skill_version.dup,
+        canonical_digest: canonical.canonical_digest.dup,
+        files: source_files
+      )
+      root = File.join(trusted_root, "agent-home")
+      plan = Hive::AgentSkills.plan(
+        root: root, trusted_root: trusted_root, projection: projection
+      )
+      expected_skill = projection.files.fetch("SKILL.md")
+
+      source_files["SKILL.md"].replace("changed after preview\n")
+      source_files["new.md"] = "not previewed\n"
+
+      assert_raises(FrozenError) { projection.files["new.md"] = "blocked\n" }
+      assert_raises(FrozenError) do
+        projection.files.fetch("SKILL.md").replace("blocked\n")
+      end
+
+      result = Hive::AgentSkills.apply(plan)
+      assert_equal expected_skill.b,
+                   File.binread(File.join(result.destination, "SKILL.md"))
+      refute File.exist?(File.join(result.destination, "new.md"))
+    end
+  end
+
   def test_foreign_destination_produces_a_refusal_plan
     with_tmp_dir do |trusted_root|
       root = File.join(trusted_root, "agent-home")

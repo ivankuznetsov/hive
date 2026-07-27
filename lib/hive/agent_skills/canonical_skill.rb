@@ -30,6 +30,30 @@ module Hive
         :platform, :invocation, :destination_relative, :skill_version,
         :canonical_digest, :files
       ) do
+        def initialize(platform:, invocation:, destination_relative:,
+                       skill_version:, canonical_digest:, files:)
+          unless files.is_a?(Hash) &&
+                 files.all? { |path, content| path.is_a?(String) && content.is_a?(String) }
+            raise ArgumentError, "projection files must be a String-to-String mapping"
+          end
+
+          immutable_files = files.to_h do |path, content|
+            [ path.dup.freeze, content.dup.freeze ]
+          end.freeze
+          super(
+            platform: immutable_string(platform, "platform"),
+            invocation: immutable_string(invocation, "invocation"),
+            destination_relative: immutable_string(
+              destination_relative, "destination_relative"
+            ),
+            skill_version: immutable_string(skill_version, "skill_version"),
+            canonical_digest: immutable_string(
+              canonical_digest, "canonical_digest"
+            ),
+            files: immutable_files
+          )
+        end
+
         def to_h
           {
             "platform" => platform,
@@ -39,6 +63,16 @@ module Hive
             "canonical_digest" => canonical_digest,
             "files" => files.keys.sort
           }
+        end
+
+        private
+
+        def immutable_string(value, field)
+          unless value.is_a?(String) && !value.empty?
+            raise ArgumentError, "projection #{field} must be a nonempty String"
+          end
+
+          value.dup.freeze
         end
       end
 
